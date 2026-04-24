@@ -125,7 +125,7 @@ Software environment and development tools:
       // ... other tools detected
     },
     "package_managers": [
-      "pip", "poetry", "npm", "cargo", "apt", "brew", "winget"
+      "pip", "uv", "npm", "cargo", "apt", "brew", "winget"
     ],
     "ai_models": [  // ⚠️ OPT-IN ONLY (collect_ai_models=true)
       {
@@ -354,12 +354,12 @@ Practical application guidelines for AI assistance.
 
 #### `dev_environment`
 
-**Rule:** `"When suggesting package installations, check software.package_managers and prioritize the user's available tools. Order of preference: poetry > pip for Python, npm > yarn for JavaScript, cargo for Rust. Provide fallback commands if the preferred manager isn't available."`
+**Rule:** `"When suggesting package installations, check software.package_managers and prioritize the user's available tools. Order of preference: uv > pip for Python, npm > yarn for JavaScript, cargo for Rust. Provide fallback commands if the preferred manager isn't available."`
 
 **Purpose:** Use the user's existing toolchain.
 
 **Examples:**
-- User has `["pip", "poetry"]` → Suggest `poetry add numpy`
+- User has `["pip", "uv"]` → Suggest `uv add numpy`
 - User has only `["pip"]` → Suggest `pip install numpy`
 - User has `["apt", "winget"]` → Windows/WSL hybrid, offer both
 

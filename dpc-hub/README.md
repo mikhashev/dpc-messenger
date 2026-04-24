@@ -2,7 +2,7 @@
 
 > **Server-side infrastructure for peer discovery and WebRTC signaling**
 > 
-> **Status:** PoC / Experimental | **License:** AGPL v3 | **Version:** 0.21.0
+> **Status:** PoC / Experimental | **License:** AGPL v3 | **Version:** 0.22.0
 
 The D-PC Federation Hub is a minimalistic server application that provides essential services for the D-PC network: user authentication, peer discovery, and WebRTC signaling. It acts as a "phone book and matchmaker" while never storing or accessing users' private conversations.
 
@@ -74,7 +74,7 @@ Internet Users
 
 ### Prerequisites
 
-- **Python 3.12+** with Poetry
+- **Python 3.12+** with uv
 - **Docker** (for PostgreSQL)
 - **Google OAuth Credentials** (from [Google Cloud Console](https://console.cloud.google.com/))
 
@@ -87,17 +87,17 @@ cd dpc-hub
 docker-compose up -d
 
 # 2. Install Python dependencies
-poetry install
+uv sync
 
 # 3. Configure environment variables
 cp .env.example .env
 nano .env  # Edit with your settings
 
 # 4. Run database migrations
-poetry run alembic upgrade head
+uv run alembic upgrade head
 
 # 5. Start the server
-poetry run uvicorn dpc_hub.main:app --reload
+uv run uvicorn dpc_hub.main:app --reload
 ```
 
 The Hub will be available at `http://127.0.0.1:8000`
@@ -363,7 +363,8 @@ cd dpc-hub
 
 # 1. Install dependencies
 sudo apt update
-sudo apt install docker.io docker-compose python3-poetry -y
+sudo apt install docker.io docker-compose -y
+pip install uv
 
 # 2. Configure environment
 cp .env.example .env
@@ -560,7 +561,7 @@ dpc-hub/
 ├── docker-compose.yml       # Development Docker setup
 ├── docker-compose.prod.yml  # Production Docker setup
 ├── Dockerfile
-├── poetry.lock
+├── uv.lock
 ├── pyproject.toml           # Dependencies
 └── README.md                # This file
 ```
@@ -571,19 +572,19 @@ dpc-hub/
 
 ```bash
 # Create a new migration after model changes
-poetry run alembic revision --autogenerate -m "description"
+uv run alembic revision --autogenerate -m "description"
 
 # Apply migrations
-poetry run alembic upgrade head
+uv run alembic upgrade head
 
 # Rollback last migration
-poetry run alembic downgrade -1
+uv run alembic downgrade -1
 
 # Check current version
-poetry run alembic current
+uv run alembic current
 
 # View migration history
-poetry run alembic history
+uv run alembic history
 ```
 
 ---

@@ -3830,7 +3830,7 @@ class CoreService:
                 logger.info("Notifying connected peers of provider changes")
                 await self._notify_peers_of_provider_changes()
 
-                # Sync agent evolution/consciousness settings without restart
+                # Sync agent settings without restart
                 try:
                     dpc_agent_provider = self.llm_manager.providers.get("dpc_agent")
                     if dpc_agent_provider and hasattr(dpc_agent_provider, '_managers'):
@@ -3914,13 +3914,14 @@ class CoreService:
             import json as _json
             from pathlib import Path
             archive_dir = Path.home() / ".dpc" / "conversations" / conversation_id / "archive"
-            # S25 Batch 1.1: honour per-agent profile override, not just global firewall setting
-            max_sessions = getattr(self.firewall, "history_max_archived_sessions", 40) if self.firewall else 40
+            # S25 Batch 1.1: honour per-agent profile override, not just global firewall setting.
+            # ARCH-19: max_sessions = 0 means unlimited (keep all archives).
+            max_sessions = getattr(self.firewall, "history_max_archived_sessions", 0) if self.firewall else 0
             if self.firewall:
                 profile = self.firewall.rules.get("agent_profiles", {}).get(conversation_id, {})
                 hist = profile.get("history", {}) if profile else {}
                 if "max_archived_sessions" in hist:
-                    max_sessions = max(1, min(200, int(hist["max_archived_sessions"])))
+                    max_sessions = max(0, int(hist["max_archived_sessions"]))
 
             if not archive_dir.exists():
                 return {
@@ -6884,11 +6885,11 @@ class CoreService:
                 logger.warning("Failed to send CC response to Telegram: %s", e)
 
             # If CC's response mentions @agent (by name or ID), trigger agent to respond (subject to chain depth)
-            import re
-            cc_mentions = {m.lower() for m in re.findall(r'@(\w+)\b', text or '', re.IGNORECASE)}
-            _chain_agent_id = self._get_default_agent_id()
-            agent_name = self._get_agent_display_name(_chain_agent_id).lower()
-            if agent_name in cc_mentions or _chain_agent_id in cc_mentions:
+            _chain_agent_id = conversation_id
+            agent_name = self._get_agent_display_name(_chain_agent_id)
+            text_lower = (text or '').lower()
+            agent_mentioned = (f"@{agent_name.lower()}" in text_lower) or (f"@{_chain_agent_id}" in text_lower)
+            if agent_mentioned:
                 chain_depth = getattr(self, '_cc_ark_chain_depth', 0)
                 if chain_depth < 5:
                     self._cc_ark_chain_depth = chain_depth + 1
@@ -7600,6 +7601,100 @@ class CoreService:
         if agent_id is None:
             agent_id = self._get_default_agent_id()
         return await self.agent_service.cancel_agent_task(agent_id, task_id)
+
+    # --- Sleep Consolidation (ADR-014) ---
+
+    @staticmethod
+    def _format_morning_brief(brief: dict) -> str:
+        parts = ["**Morning Brief (Sleep Consolidation)**\n"]
+        summary = brief.get("summary", "")
+        if summary:
+            parts.append(summary)
+        decisions = brief.get("key_decisions", [])
+        if decisions:
+            parts.append("\n**Key decisions:**")
+            for d in decisions[:5]:
+                parts.append(f"- {d.get('decision', d) if isinstance(d, dict) else d}")
+        unresolved = brief.get("unresolved", [])
+        if unresolved:
+            parts.append("\n**Unresolved:**")
+            for u in unresolved[:5]:
+                parts.append(f"- {u.get('topic', u) if isinstance(u, dict) else u}")
+        n = brief.get("sessions_analyzed", 0)
+        period = brief.get("period", "")
+        if n or period:
+            parts.append(f"\n*{n} sessions analyzed ({period})*")
+        return "\n".join(parts)
+
+    async def toggle_sleep(self, agent_id: str = None) -> Dict[str, Any]:
+        """Toggle sleep/wakeup for an agent. If awake, starts sleep pipeline. If sleeping, returns current state."""
+        if agent_id is None:
+            agent_id = self._get_default_agent_id()
+
+        conversation_dir = Path.home() / ".dpc" / "conversations" / agent_id
+        if not conversation_dir.exists():
+            return {"status": "error", "message": f"Agent {agent_id} not found"}
+
+        history_path = conversation_dir / "history.json"
+        if history_path.exists():
+            try:
+                data = json.loads(history_path.read_text(encoding="utf-8"))
+                if data.get("messages"):
+                    return {"status": "error", "message": "End session first — chat must be empty to sleep"}
+            except (json.JSONDecodeError, OSError):
+                pass
+
+        from dpc_client_core.dpc_agent.sleep_pipeline import run_sleep, _read_sleep_state
+
+        state = _read_sleep_state(conversation_dir)
+        if state.get("status") == "sleeping":
+            return {"status": "already_sleeping", "state": state}
+
+        sleep_data = {"agent_id": agent_id, "status": "sleeping"}
+        await self.local_api.broadcast_event("sleep_state_changed", sleep_data)
+        await self._emit_sleep_event(agent_id, sleep_data)
+
+        async def _run_sleep_background():
+            try:
+                result = await run_sleep(conversation_dir, self.llm_manager, agent_id=agent_id, force=True)
+                if result.get("status") == "completed":
+                    brief = result.get("morning_brief", {})
+                    chat_text = self._format_morning_brief(brief)
+                    dpc_agent_prov = self.llm_manager.providers.get("dpc_agent") if self.llm_manager else None
+                    mgr = dpc_agent_prov.get_manager(agent_id) if dpc_agent_prov else None
+                    monitor = mgr._get_or_create_agent_monitor(agent_id) if mgr else None
+                    if monitor:
+                        from datetime import datetime, timezone
+                        monitor.add_message("assistant", chat_text, sender_name=agent_id, timestamp=datetime.now(timezone.utc).isoformat())
+                        monitor.save_history()
+                        brief["consumed"] = True
+                        brief_path = Path.home() / ".dpc" / "conversations" / agent_id / "morning_brief.json"
+                        brief_path.write_text(json.dumps(brief, ensure_ascii=False, indent=2), encoding="utf-8")
+                    done_data = {"agent_id": agent_id, "status": "awake", "result": "completed", "sessions_analyzed": result.get("sessions_analyzed", 0)}
+                    await self.local_api.broadcast_event("sleep_state_changed", done_data)
+                    await self._emit_sleep_event(agent_id, done_data)
+                else:
+                    other_data = {"agent_id": agent_id, "status": "awake", "result": result.get("status")}
+                    await self.local_api.broadcast_event("sleep_state_changed", other_data)
+                    await self._emit_sleep_event(agent_id, other_data)
+            except Exception as e:
+                logger.error("Sleep pipeline background error: %s", e, exc_info=True)
+                err_data = {"agent_id": agent_id, "status": "awake", "result": "error", "error": str(e)}
+                await self.local_api.broadcast_event("sleep_state_changed", err_data)
+                await self._emit_sleep_event(agent_id, err_data)
+
+        import asyncio
+        asyncio.create_task(_run_sleep_background())
+
+        return {"status": "sleeping", "message": "Sleep pipeline started in background"}
+
+    async def _emit_sleep_event(self, agent_id: str, data: dict) -> None:
+        """Emit sleep event via agent event system so Telegram bridge picks it up."""
+        try:
+            from dpc_client_core.dpc_agent.events import EventType, get_event_emitter
+            await get_event_emitter().emit(EventType.SLEEP_STATE_CHANGED, data)
+        except Exception as e:
+            logger.debug("Failed to emit sleep event: %s", e)
 
     # --- Hub Methods ---
 

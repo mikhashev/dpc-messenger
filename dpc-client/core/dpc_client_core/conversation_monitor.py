@@ -1481,15 +1481,16 @@ PARTICIPANTS' CULTURAL CONTEXTS:
         old_hash = self.peer_context_hashes.get(node_id, "")
         return new_hash != old_hash
 
-    def _archive_current_session(self, reason: str = "reset", max_sessions: int = 10) -> int:
+    def _archive_current_session(self, reason: str = "reset", max_sessions: int = 0) -> int:
         """Archive the current history.json to archive/ before clearing.
 
         Writes to ~/.dpc/conversations/{conversation_id}/archive/{timestamp}_{reason}_session.json
-        Keeps the last max_sessions archives, pruning oldest when exceeded.
+        Keeps all archives by default; when max_sessions > 0, prunes oldest
+        beyond that cap.
 
         Args:
             reason: Label for why the session was archived (e.g. "reset", "new_session")
-            max_sessions: Maximum number of archived sessions to retain
+            max_sessions: Maximum archives to retain. 0 (default) = unlimited.
 
         Returns:
             Number of archives in the folder after archiving (0 if skipped or error).
@@ -1525,9 +1526,10 @@ PARTICIPANTS' CULTURAL CONTEXTS:
             # Generate incremental session digest (derived data — can be rebuilt from archives)
             self._generate_session_digest(data, archive_path)
 
-            # Prune oldest archives beyond max_sessions (rglob for YYYY/MM layout)
+            # Prune oldest archives beyond max_sessions (rglob for YYYY/MM layout).
+            # ARCH-19: max_sessions == 0 means unlimited retention — skip prune.
             archives = sorted(archive_base.rglob("*_session.json"))
-            if len(archives) > max_sessions:
+            if max_sessions > 0 and len(archives) > max_sessions:
                 for old in archives[: len(archives) - max_sessions]:
                     old.unlink()
                     logger.debug(f"Pruned old archive: {old.name}")
@@ -1632,12 +1634,12 @@ PARTICIPANTS' CULTURAL CONTEXTS:
             # Digest failure must not block archival
             logger.warning(f"Failed to generate session digest: {e}")
 
-    def reset_conversation(self, preserve: bool = True, max_sessions: int = 10) -> int:
+    def reset_conversation(self, preserve: bool = True, max_sessions: int = 0) -> int:
         """Reset conversation history and context tracking (for "New Chat" button).
 
         Args:
             preserve: If True, archive the current session before clearing.
-            max_sessions: Maximum archived sessions to keep (passed to _archive_current_session).
+            max_sessions: Max archives to keep. 0 (default) = unlimited.
 
         Returns:
             Archive count after reset (0 if preserve=False or nothing was archived).
@@ -2212,14 +2214,14 @@ PARTICIPANTS' CULTURAL CONTEXTS:
 
         return added
 
-    def clear_history(self, preserve: bool = True, max_sessions: int = 10) -> int:
+    def clear_history(self, preserve: bool = True, max_sessions: int = 0) -> int:
         """Clear all message history and delete persisted file.
 
         Called when a new session is approved.
 
         Args:
             preserve: If True, archive the current session before clearing.
-            max_sessions: Maximum archived sessions to keep.
+            max_sessions: Max archives to keep. 0 (default) = unlimited.
 
         Returns:
             Archive count after clearing (0 if preserve=False or nothing was archived).

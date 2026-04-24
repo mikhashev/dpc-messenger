@@ -6,10 +6,10 @@ This guide explains how to configure, test, and use the embedded autonomous AI a
 
 The embedded agent is a self-modifying AI agent adapted from the [Ouroboros project](https://github.com/razzant/ouroboros), integrated directly into DPC Messenger's codebase. It provides:
 
-- **Tools**: File operations, web search, memory management, git, task scheduling, evolution control, skill execution
-- **Background Consciousness**: Proactive thinking between tasks (optional)
+- **Tools**: File operations, web search, memory management, git, task scheduling, skill execution
+- **Sleep Consolidation**: Analyzes past sessions, prepares morning briefs (ADR-014)
 - **Persistent Memory**: Scratchpad, identity, and knowledge base
-- **Self-Modification**: Can modify files within its sandbox (`~/.dpc/agent/`)
+- **Self-Modification**: Can modify files within its sandbox (`~/.dpc/agents/{id}/`)
 - **DPC Integration**: Uses DPC's LLM providers and personal/device context
 
 ## Architecture
@@ -23,7 +23,7 @@ DPC Messenger
                             ├── ToolRegistry (sandboxed to ~/.dpc/agents/{agent_id}/)
                             ├── DpcLlmAdapter → DPC's LLMManager
                             ├── Memory (identity, scratchpad, knowledge)
-                            └── BackgroundConsciousness (proactive thinking)
+                            └── SleepConsolidation (session analysis + morning brief)
 ```
 
 ## Quick Start
@@ -37,7 +37,7 @@ Add a provider configuration to `~/.dpc/providers.json`:
   "alias": "dpc_agent",
   "type": "dpc_agent",
   "tools": ["repo_read", "repo_list", "update_scratchpad", "browse_page", "search_web"],
-  "background_consciousness": false,
+
   "budget_usd": 50,
   "max_rounds": 200,
   "context_window": 200000
@@ -52,7 +52,7 @@ Agent settings are configured in `~/.dpc/privacy_rules.json` under the `dpc_agen
 {
   "dpc_agent": {
     "enabled": true,
-    "background_consciousness": false,
+  
     "tools": {
       "repo_read": true,
       "repo_list": true,
@@ -62,7 +62,7 @@ Agent settings are configured in `~/.dpc/privacy_rules.json` under the `dpc_agen
     },
     "budget_usd": 50,
     "max_rounds": 200,
-    "evolution_enabled": false,
+
     "extended_sandbox_paths": {
       "read_only": [],
       "read_write": []
@@ -146,7 +146,7 @@ result = await service.list_agents()
 2. Click **Edit** in Agent Permissions panel
 
 
-3. Modify tools, evolution settings, context access
+3. Modify tools, context access
 
 
 4. Click **Save** (creates custom profile for agent)
@@ -202,10 +202,7 @@ result = await service.reset_agent_to_global(agent_id="agent_abc123")
 | `alias` | string | required | Provider alias name |
 | `type` | string | required | Must be `"dpc_agent"` |
 | `tools` | string[] | `[]` | Tool whitelist (empty = all core tools) |
-| `background_consciousness` | bool | `false` | Enable proactive thinking |
-| `budget_usd` | float | `5
-
-0.0` | Maximum budget per task |
+| `budget_usd` | float | `50.0` | Maximum budget per task |
 | `max_rounds` | int | `200` | Maximum LLM rounds |
 | `context_window` | int | `200000` | Agent context window |
 
@@ -218,7 +215,7 @@ Agent tool permissions and sandbox paths are configured in
 {
   "dpc_agent": {
     "enabled": true,
-    "background_consciousness": false,
+  
     "tools": {
       "repo_read": true,
       "repo_list": true,
@@ -228,9 +225,7 @@ Agent tool permissions and sandbox paths are configured in
     },
     "budget_usd": 50,
     "max_rounds": 200,
-    "evolution_enabled": false,
-    "evolution_interval_minutes": 60,
-    "evolution_auto_apply": false,
+
     "extended_sandbox_paths": {
       "read_only": ["~/Documents/projects"],
       "read_write": ["~/Documents/agent-workspace"]
@@ -242,15 +237,9 @@ Agent tool permissions and sandbox paths are configured in
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `enabled` | bool | `true` | Master toggle for agent |
-| `background_consciousness` | bool | `false` | Enable proactive thinking |
 | `tools` | object | `{}` | Tool enable/disable map (empty = all core tools) |
-| `budget_usd` | float | `5
-
-0.0` | Maximum budget per task |
+| `budget_usd` | float | `50.0` | Maximum budget per task |
 | `max_rounds` | int | `200` | Maximum LLM rounds |
-| `evolution_enabled` | bool | `false` | Enable self-modification |
-| `evolution_interval_minutes` | int | `60` | Evolution cycle interval |
-| `evolution_auto_apply` | bool | `false` | Auto-apply evolution changes |
 | `extended_sandbox_paths` | object | `{}` | Paths outside sandbox (read_only, read_write) |
 | `skills.self_modify` | bool | `true` | Allow agent to append improvements to skill files |
 | `skills.create_new` | bool | `true` | Allow agent to create new skill files |
@@ -276,11 +265,6 @@ Agent profiles define reusable permission templates in `~/.dpc/privacy_rules.jso
         "browse_page": true,
         "search_web": true
       },
-      "evolution": {
-        "enabled": false,
-        "interval_minutes": 60,
-        "auto_apply": false
-      }
     },
     "researcher": {
       "enabled": true,
@@ -309,7 +293,7 @@ Agent profiles define reusable permission templates in `~/.dpc/privacy_rules.jso
 
 **Profile Inheritance:**
 - Agents inherit from `dpc_agent` (global defaults) if no custom profile is specified
-- Custom profiles override specific settings (tools, evolution, context access)
+- Custom profiles override specific settings (tools, context access)
 - `inherit_from` field allows chaining profiles (planned feature)
 
 ### Agent Registry
@@ -359,11 +343,10 @@ The agent registry tracks all created agents in `~/.dpc/agents/_registry.json`:
 
 | Tool | Description |
 |------|-------------|
-| `browse_page` | Fetch and parse web page content |
+| `browse_page` | Fetch web page, extract as markdown (trafilatura) |
 | `fetch_json` | Fetch JSON from API endpoints |
-| `extract_links` | Extract links from web pages |
 | `check_url` | Check URL accessibility |
-| `search_web` | Search via DuckDuckGo (no API key) |
+| `search_web` | Multi-engine search via ddgs |
 
 ### Review Tools
 
@@ -403,11 +386,6 @@ The agent registry tracks all created agents in `~/.dpc/agents/_registry.json`:
 
 | Tool | Description | Safe |
 |------|-------------|------|
-| `pause_evolution` | Pause self-modification | ✅ |
-| `resume_evolution` | Resume self-modification | ✅ |
-| `get_evolution_stats` | View evolution statistics | ✅ |
-| `approve_evolution_change` | Approve pending change | ✅ |
-| `reject_evolution_change` | Reject pending change | ✅ |
 
 ### Extended Sandbox Tools
 
@@ -482,7 +460,7 @@ All agent data is stored in `~/.dpc/agents/{agent_id}/`:
 │   │   ├── events.jsonl          # Event log
 │   │   ├── tools.jsonl           # Tool execution log
 │   │   ├── progress.jsonl        # Progress messages
-│   │   └── consciousness.jsonl   # Background thoughts
+│   │   └── events.jsonl          # Agent events log
 │   ├── state/
 │   │   └── state.json            # Budget, status
 │   └── task_results/             # Subtask results
@@ -589,41 +567,11 @@ Use the **Firewall Editor** UI (click 🛡️ Firewall Rules in sidebar) to conf
 - Evolution settings
 - Budget controls
 
-## Background Consciousness
+## Sleep Consolidation (ADR-014)
 
-When enabled, the agent thinks proactively between tasks:
+When triggered (via UI button or `/sleep` Telegram command), the agent analyzes past session archives and produces a morning brief with key decisions, unresolved items, and session summaries.
 
-### Thought Types
-
-
-
-1. **Identity Reflection** (20%): Think about who it is becoming
-
-
-2. **Action Review** (25%): Analyze recent tool calls
-
-
-3. **Improvement Planning** (20%): Consider how to improve
-
-
-4. **Memory Consolidation** (20%): Summarize and organize
-
-
-5. **Curiosity Exploration** (15%): Learn something new
-
-### Configuration
-
-```ini
-[dpc_agent]
-background_consciousness = true
-```
-
-### Monitoring
-
-View consciousness logs:
-```bash
-tail -f ~/.dpc/agent/logs/consciousness.jsonl
-```
+Sleep requires an empty chat (no active messages). Notifications are sent to Telegram when sleep starts, completes, or encounters an error.
 
 ## Remote Peer Inference
 
@@ -665,7 +613,7 @@ Start the DPC backend and verify agent initialization:
 
 ```bash
 cd dpc-client/core
-poetry run python -c "
+uv run python -c "
 from dpc_client_core.dpc_agent import DpcAgent, AgentConfig
 from dpc_client_core.llm_manager import LLMManager
 
@@ -687,7 +635,7 @@ print('Agent initialized:', agent.get_status())
 Verify tools are loaded:
 
 ```bash
-poetry run python -c "
+uv run python -c "
 from dpc_client_core.dpc_agent.tools import ToolRegistry
 
 registry = ToolRegistry()
@@ -703,7 +651,7 @@ for t in sorted(tools):
 Test memory operations:
 
 ```bash
-poetry run python -c "
+uv run python -c "
 from dpc_client_core.dpc_agent import Memory
 
 memory = Memory()
@@ -717,42 +665,12 @@ print(f'Scratchpad content ({len(scratch)} chars)')
 "
 ```
 
-### 4. Consciousness Test
-
-Test background consciousness:
-
-```bash
-poetry run python -c "
-import asyncio
-from dpc_client_core.dpc_agent import DpcAgent, AgentConfig, BackgroundConsciousness
-from dpc_client_core.llm_manager import LLMManager
-
-async def test():
-    llm = LLMManager()
-    config = AgentConfig(background_consciousness=True)
-    agent = DpcAgent(llm_manager=llm, config=config)
-
-    # Start consciousness
-    agent.start_consciousness()
-    print('Consciousness running:', agent.is_consciousness_running())
-
-    # Let it think for a moment
-    await asyncio.sleep(2)
-
-    # Stop
-    agent.stop_consciousness()
-    print('Consciousness stopped')
-
-asyncio.run(test())
-"
-```
-
-### 5. Provider Integration Test
+### 4. Provider Integration Test
 
 Test via DpcAgentProvider:
 
 ```bash
-poetry run python -c "
+uv run python -c "
 import asyncio
 from dpc_client_core.llm_manager import LLMManager
 
@@ -962,14 +880,6 @@ Notification Bot: Sending update to Telegram...
 
 
 
-1. Verify `background_consciousness = true` in config
-
-
-2. Check consciousness is enabled in AgentConfig
-
-
-3. View consciousness logs: `~/.dpc/agent/logs/consciousness.jsonl`
-
 ## Security Considerations
 
 ### Sandbox Boundaries
@@ -1014,7 +924,7 @@ Quick example - restrict to safe tools only:
 
 - Per-task budget limit
 - Hard stop at 50% of remaining budget
-- Background consciousness capped at 10% of total
+- Sleep consolidation runs on-demand (not continuous)
 
 ## API Reference
 
@@ -1045,11 +955,8 @@ response = await provider.generate_response("Hello")
 from dpc_client_core.dpc_agent import DpcAgent, AgentConfig
 
 config = AgentConfig(
-    budget_usd=5
-
-0.0,
+    budget_usd=50.0,
     max_rounds=200,
-    background_consciousness=False,
 )
 agent = DpcAgent(llm_manager=llm, config=config)
 response = await agent.process("Hello", "conv-123")
@@ -1100,10 +1007,7 @@ await service.reset_agent_to_global(agent_id="agent_abc123")
 3. **Extend Memory**: Add new memory types or knowledge structures
 
 
-4. **Custom Consciousness**: Modify thought types in `consciousness.py`
-
-
-5. **UI Integration**: Add agent status/controls to DPC UI
+4. **UI Integration**: Agent status/controls in DPC UI
 
 ## Memento-Skills System
 
@@ -1112,7 +1016,7 @@ The agent implements a Memento-Skills style Read-Write Reflective Learning loop:
 - **Skills** are markdown strategy files that teach the agent *how to combine tools* for a class of tasks
 - **Read phase**: before each task, the agent sees all skill descriptions and calls `execute_skill()` to load the relevant strategy
 - **Write phase**: after tasks with ≥5 LLM rounds, the agent reflects on whether the skill had gaps and appends improvements
-- **Evolution integration**: `evolution.py` reads skill performance stats (`_stats.json`) and targets underperforming skills
+- **Skill reflection**: after tasks with ≥5 LLM rounds, the reflector reads `_stats.json` to identify improvement opportunities
 
 See **[DPC Agent Skills Guide](DPC_AGENT_SKILLS.md)** for full documentation including skill format, reflection loop, firewall permissions, and how to write custom skills.
 

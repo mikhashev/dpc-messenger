@@ -20,30 +20,17 @@ class DpcAgentProvider(AIProvider):
     enabling access to:
     - 40+ tools for file operations, web search, memory management
     - Persistent identity and scratchpad memory
-    - Background consciousness (optional)
-    - Evolution: autonomous self-modification within sandbox (~/.dpc/agent/)
-      (configured in privacy_rules.json under dpc_agent.evolution)
+    - Sleep Consolidation (session retrospective analysis)
+    - Active Recall (contextual memory retrieval)
 
     Configuration example (~/.dpc/providers.json):
     {
         "alias": "dpc_agent",
         "type": "dpc_agent",
         "tools": ["repo_read", "repo_list", "web_search", "update_scratchpad"],
-        "background_consciousness": false,
         "budget_usd": 50,
         "max_rounds": 200,
         "context_window": 200000
-    }
-
-    Note: Evolution settings are configured in ~/.dpc/privacy_rules.json:
-    {
-        "dpc_agent": {
-            "evolution": {
-                "enabled": true,
-                "interval_minutes": 60,
-                "auto_apply": false
-            }
-        }
     }
     """
 
@@ -52,7 +39,6 @@ class DpcAgentProvider(AIProvider):
 
         # Agent configuration
         self.enabled_tools = config.get("tools", [])  # Tool whitelist
-        self.background_consciousness = config.get("background_consciousness", False)
         self.budget_usd = config.get("budget_usd", 50.0)
         self.max_rounds = config.get("max_rounds", 200)
 
@@ -63,8 +49,6 @@ class DpcAgentProvider(AIProvider):
         self.remote_provider = config.get("remote_provider")  # Provider preference on remote peer
         self.timeout = config.get("timeout", 180)  # Timeout for remote inference (default 3 minutes)
 
-        # Note: Evolution settings are read from firewall (privacy_rules.json)
-        # not from provider config - see agent_manager.py
 
         # Set model name for token counting (uses underlying provider's model)
         self.model = "dpc_agent"  # Identifier for token counting
@@ -75,7 +59,7 @@ class DpcAgentProvider(AIProvider):
         self._service = None  # Injected by LLMManager during initialization
 
         logger.info(f"DpcAgentProvider '{alias}' initialized (tools={len(self.enabled_tools)}, "
-                   f"budget=${self.budget_usd}, consciousness={self.background_consciousness})")
+                   f"budget=${self.budget_usd})")
 
     def set_service(self, service: "CoreService") -> None:
         """
@@ -125,7 +109,6 @@ class DpcAgentProvider(AIProvider):
         logger.debug(f"DpcAgentProvider '{self.alias}': Creating new manager for agent '{agent_id}'")
         manager_config = {
             "tools": self.enabled_tools,
-            "background_consciousness": self.background_consciousness,
             "budget_usd": self.budget_usd,
             "max_rounds": self.max_rounds,
             "compute_host": compute_host,
@@ -177,10 +160,8 @@ class DpcAgentProvider(AIProvider):
         from dpc_client_core.managers.agent_manager import DpcAgentManager
 
         # Create manager with configuration
-        # Note: Evolution settings are read from firewall (privacy_rules.json)
         self._manager = DpcAgentManager(self._service, {
             "tools": self.enabled_tools,
-            "background_consciousness": self.background_consciousness,
             "budget_usd": self.budget_usd,
             "max_rounds": self.max_rounds,
         }, agent_id=None)  # No agent_id for singleton manager
@@ -340,25 +321,10 @@ class DpcAgentProvider(AIProvider):
         return await self.generate_response(enhanced_prompt)
 
     def supports_thinking(self) -> bool:
-        """
-        The agent supports extended thinking via background consciousness.
-
-        Returns:
-            True if background_consciousness is enabled
-        """
-        return self.background_consciousness
+        return False
 
     def get_thinking_params(self) -> Dict[str, Any]:
-        """
-        Return agent-specific thinking parameters.
-
-        Returns:
-            Dict with consciousness configuration
-        """
-        return {
-            "consciousness_mode": "background" if self.background_consciousness else "disabled",
-            "enabled": self.background_consciousness,
-        }
+        return {"enabled": False}
 
     def get_status(self) -> Dict[str, Any]:
         """

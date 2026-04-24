@@ -171,18 +171,18 @@ exit
 su - dpc
 ```
 
-### Step 5: Install Poetry (Python Package Manager)
+### Step 5: Install uv (Python Package Manager)
 
 ```bash
-# Install Poetry
-curl -sSL https://install.python-poetry.org | python3 -
+# Install uv
+curl -LsSf https://astral.sh/uv/install.sh | sh
 
 # Add to PATH
 echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc
 source ~/.bashrc
 
 # Verify installation
-poetry --version
+uv --version
 ```
 
 ---
@@ -348,25 +348,25 @@ RUN apt-get update && apt-get install -y \
     curl \
     && rm -rf /var/lib/apt/lists/*
 
-# Install Poetry
-RUN pip install poetry
+# Install uv
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
 
 # Copy project files
-COPY pyproject.toml poetry.lock ./
+COPY pyproject.toml uv.lock ./
 COPY dpc_hub ./dpc_hub
 COPY alembic.ini ./
 COPY dpc_hub/alembic ./dpc_hub/alembic
 
 # Install dependencies
-RUN poetry config virtualenvs.create false \
-    && poetry install --no-dev --no-interaction --no-ansi
+ENV UV_PROJECT_ENVIRONMENT=/usr/local
+RUN uv sync --no-dev
 
 # Health check
 HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
     CMD curl -f http://localhost:8000/health || exit 1
 
 # Run migrations and start server
-CMD poetry run alembic upgrade head && \
+CMD uv run alembic upgrade head && \
     uvicorn dpc_hub.main:app --host 0.0.0.0 --port 8000 --workers 4
 ```
 
@@ -685,7 +685,7 @@ wscat -c "wss://hub.example.com/ws/signal?token=YOUR_JWT_TOKEN"
 ```bash
 # Run connectivity test
 cd dpc-client/core
-poetry run python tests/test_turn_connectivity.py
+uv run python tests/test_turn_connectivity.py
 ```
 
 ---
@@ -932,7 +932,7 @@ docker-compose -f docker-compose.prod.yml down
 docker-compose -f docker-compose.prod.yml up -d --build
 
 # Run migrations
-docker-compose -f docker-compose.prod.yml exec hub poetry run alembic upgrade head
+docker-compose -f docker-compose.prod.yml exec hub uv run alembic upgrade head
 ```
 
 ---

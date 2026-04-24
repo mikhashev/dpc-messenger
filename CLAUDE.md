@@ -32,10 +32,10 @@ dpc-messenger/
 **Backend (Python):**
 ```bash
 cd dpc-client/core
-poetry install                    # Install dependencies (default)
-poetry run python run_service.py  # Run backend service (ports 8888, 9999)
-poetry run pytest                 # Run tests
-poetry run pytest --cov=dpc_client_core  # Run with coverage
+uv sync                           # Install dependencies (default)
+uv run python run_service.py      # Run backend service (ports 8888, 9999)
+uv run pytest                     # Run tests
+uv run pytest --cov=dpc_client_core  # Run with coverage
 ```
 
 **Platform-Specific Dependencies (macOS Apple Silicon):**
@@ -46,19 +46,19 @@ The client supports GPU-accelerated Whisper transcription on Apple Silicon (M1/M
 cd dpc-client/core
 
 # Install without MLX (default, lightweight)
-poetry install
+uv sync
 
 # Install with MLX support (enables GPU-accelerated offline transcription)
-poetry install -E mlx
+uv sync --extra mlx
 ```
 
 **Technical Details:**
 - **Dependencies**: `mlx>=0.4.0`, `mlx-whisper>=0.2.0`
 - **Platform Markers**: `sys_platform == 'darwin' and platform_machine == 'arm64'`
 - **Size Impact**: MLX packages add ~500MB to installation
-- **Defined In**: `[tool.poetry.extras] mlx = ["mlx", "mlx-whisper"]`
+- **Defined In**: `[project.optional-dependencies] mlx = ["mlx", "mlx-whisper"]`
 - **Graceful Fallback**: If MLX not installed, client uses OpenAI-compatible API or skips transcription
-- **Cross-Platform Safety**: `-E mlx` flag is safely ignored on Windows/Linux (platform markers prevent installation)
+- **Cross-Platform Safety**: `--extra mlx` flag is safely ignored on Windows/Linux (platform markers prevent installation)
 
 **Why Optional?**
 - Keeps default installation lightweight (~200MB vs ~700MB with MLX)
@@ -86,29 +86,29 @@ npm run check                     # TypeScript type checking
 cd dpc-hub
 docker-compose up -d              # Start PostgreSQL
 cp .env.example .env              # Configure environment
-poetry install                    # Install dependencies
-poetry run alembic upgrade head   # Run database migrations
-poetry run uvicorn dpc_hub.main:app --reload  # Start dev server
+uv sync                           # Install dependencies
+uv run alembic upgrade head       # Run database migrations
+uv run uvicorn dpc_hub.main:app --reload  # Start dev server
 
 # Database migrations
-poetry run alembic revision --autogenerate -m "description"  # Create migration
-poetry run alembic upgrade head   # Apply migrations
-poetry run alembic downgrade -1   # Rollback last migration
+uv run alembic revision --autogenerate -m "description"  # Create migration
+uv run alembic upgrade head       # Apply migrations
+uv run alembic downgrade -1       # Rollback last migration
 
 # Testing and linting
-poetry run pytest                 # Run tests
-poetry run pytest --cov=dpc_hub   # Run with coverage
-poetry run black dpc_hub/         # Format code
-poetry run flake8 dpc_hub/        # Lint
-poetry run mypy dpc_hub/          # Type checking
+uv run pytest                     # Run tests
+uv run pytest --cov=dpc_hub       # Run with coverage
+uv run black dpc_hub/             # Format code
+uv run flake8 dpc_hub/            # Lint
+uv run mypy dpc_hub/              # Type checking
 ```
 
 ### Protocol Library
 
 ```bash
 cd dpc-protocol
-poetry install                    # Install dependencies
-poetry run pytest                 # Run tests
+uv sync                           # Install dependencies
+uv run pytest                     # Run tests
 ```
 
 ### OAuth Configuration (Hub)
@@ -355,7 +355,7 @@ D-PC Messenger uses an intelligent 6-tier connection fallback hierarchy for near
 - `dpc_agent/loop.py` - Autonomous agent run loop
 - `dpc_agent/memory.py` - Per-agent persistent memory
 - `dpc_agent/evolution.py` - Agent skill evolution and self-improvement
-- `dpc_agent/consciousness.py` - Agent self-awareness and introspection
+- `dpc_agent/sleep_pipeline.py` - Sleep consolidation, morning brief generation
 - `dpc_agent/task_queue.py` - Async task queue with priority scheduling
 - `dpc_agent/budget.py` - Token/compute budget enforcement
 - `dpc_agent/skill_store.py` - Dynamic skill registry and versioning
@@ -522,7 +522,7 @@ Voice messages use the existing file transfer infrastructure (FILE_OFFER/FILE_CH
 **Transcription:**
 - **Local Whisper**: `LocalWhisperProvider` in `llm_manager.py`
 - **GPU Acceleration**:
-  - MLX (Apple Silicon M1/M2/M3/M4) - Optional via `poetry install -E mlx`
+  - MLX (Apple Silicon M1/M2/M3/M4) - Optional via `uv sync --extra mlx`
   - CUDA (NVIDIA GPUs) - Auto-detected
   - MPS (macOS Metal) - Fallback
   - CPU - Universal fallback
@@ -821,7 +821,7 @@ The client automatically collects device and system information on startup and s
       "docker": "28.4",
       "node": "22.14"
     },
-    "package_managers": ["pip", "poetry", "npm", "winget"]
+    "package_managers": ["pip", "uv", "npm", "winget"]
   }
 }
 ```
@@ -991,14 +991,14 @@ When adding new UI components that display data from `privacy_rules.json` (e.g.,
 ```bash
 cd dpc-hub
 docker-compose up -d
-poetry run alembic upgrade head
-poetry run uvicorn dpc_hub.main:app --reload
+uv run alembic upgrade head
+uv run uvicorn dpc_hub.main:app --reload
 ```
 
 **Terminal 2 - Client Backend:**
 ```bash
 cd dpc-client/core
-poetry run python run_service.py
+uv run python run_service.py
 ```
 
 **Terminal 3 - Client Frontend:**
@@ -1012,14 +1012,14 @@ npm run tauri dev
 **Client Core:**
 ```bash
 cd dpc-client/core
-poetry run pytest -v
-poetry run pytest tests/test_local_api.py  # Run specific test
+uv run pytest -v
+uv run pytest tests/test_local_api.py  # Run specific test
 ```
 
 **Hub:**
 ```bash
 cd dpc-hub
-poetry run pytest -v --cov=dpc_hub
+uv run pytest -v --cov=dpc_hub
 ```
 
 **Coverage Reports:**
@@ -1090,9 +1090,9 @@ UI connects via WebSocket (localhost:9999) for:
 - Alembic for schema versioning
 - Always test migrations before deployment:
   ```bash
-  poetry run alembic upgrade head    # Apply
-  poetry run alembic downgrade -1    # Test rollback
-  poetry run alembic upgrade head    # Reapply
+  uv run alembic upgrade head    # Apply
+  uv run alembic downgrade -1    # Test rollback
+  uv run alembic upgrade head    # Reapply
   ```
 
 ### Context Firewall Rules
@@ -1149,14 +1149,14 @@ Access control file format (`~/.dpc/privacy_rules.json`):
 ```bash
 # View real-time logs (console output in development)
 cd dpc-client/core
-poetry run python run_service.py
+uv run python run_service.py
 
 # View log file (production logs)
 tail -f ~/.dpc/logs/dpc-client.log
 
 # Enable DEBUG logging for specific modules
 export DPC_LOG_MODULE_LEVELS="dpc_client_core.p2p_manager:DEBUG,dpc_client_core.webrtc_peer:DEBUG"
-poetry run python run_service.py
+uv run python run_service.py
 ```
 
 **Logging System:**
@@ -1185,7 +1185,7 @@ poetry run python run_service.py
 **Check database connection:**
 ```bash
 docker-compose ps  # Ensure PostgreSQL is running
-poetry run alembic current  # Check migration status
+uv run alembic current  # Check migration status
 ```
 
 **Common issues:**
@@ -1198,7 +1198,7 @@ poetry run alembic current  # Check migration status
 **Test STUN/TURN connectivity:**
 ```bash
 cd dpc-client/core
-poetry run pytest tests/test_turn_connectivity.py
+uv run pytest tests/test_turn_connectivity.py
 ```
 
 **Check signaling:**
@@ -1272,7 +1272,7 @@ D-PC Messenger uses Z.AI's **Anthropic-compatible endpoint** (`https://api.z.ai/
 **Installation:**
 ```bash
 cd dpc-client/core
-poetry install  # anthropic package is already included
+uv sync  # anthropic package is already included
 ```
 
 **Configuration:**
@@ -1364,7 +1364,7 @@ AI: Analyzes code → Detects Tauri 2.x → Suggests @tauri-apps/plugin-screen-c
 ## Technology Stack
 
 ### Backend
-- Python 3.12+ with Poetry
+- Python 3.12+ with uv
 - FastAPI (Hub), WebSockets (Client)
 - aiortc (WebRTC implementation)
 - SQLAlchemy + asyncpg + Alembic (Hub database)

@@ -63,7 +63,7 @@ mechanical translation.
 enabled = true
 bot_token = YOUR_BOT_TOKEN_HERE
 allowed_chat_ids = ["123456789"]
-event_filter = task_completed,task_failed,evolution_cycle_completed,code_modified,agent_message
+event_filter = task_completed,task_failed,code_modified,agent_message,sleep_state_changed
 ```
 
 ### After (current)
@@ -177,7 +177,7 @@ Edit the agent's `config.json`:
 
 ```bash
 cd dpc-client/core
-poetry run python run_service.py
+uv run python run_service.py
 ```
 
 ### Configuration Options

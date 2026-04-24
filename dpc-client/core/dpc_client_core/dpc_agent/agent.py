@@ -27,7 +27,7 @@ from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional
 
 from .llm_adapter import DpcLlmAdapter
 from .tools.registry import ToolRegistry, ToolContext
-from .memory import Memory
+from .memory import Memory, generate_smart_index
 from .skill_store import SkillStore
 from .skill_reflection import SkillReflector, REFLECTION_ROUNDS_THRESHOLD
 from .context import build_llm_messages
@@ -42,8 +42,6 @@ from .budget import BillingModel, HybridBudget
 
 if TYPE_CHECKING:
     from ..llm_manager import LLMManager
-    from .consciousness import BackgroundConsciousness
-
 log = logging.getLogger(__name__)
 
 
@@ -53,18 +51,8 @@ class AgentConfig:
     budget_usd: float = 50.0
     max_rounds: int = 200
     # Tool control is via firewall (privacy_rules.json), not config
-    background_consciousness: bool = False
-    consciousness_think_interval_min: int = 60
-    consciousness_think_interval_max: int = 300
-    consciousness_budget_fraction: float = 0.1
-
     # Task queue settings
     enable_task_queue: bool = True
-
-    # Evolution settings
-    evolution_enabled: bool = False
-    evolution_interval_minutes: int = 60
-    evolution_auto_apply: bool = False  # Require approval
 
     # Budget settings
     billing_model: str = "subscription"  # or "pay_per_use"
@@ -106,14 +94,14 @@ class DpcAgent:
         self._firewall = firewall  # Firewall controls tool access
         self._provider_alias = provider_alias  # Store for LLM adapter
         self._firewall_profile = firewall_profile  # Store for tool permission lookups
-        self._service = service  # CoreService — used by tools that need it (e.g. knowledge_write firewall)
+        self._service = service  # CoreService — used by tools that need firewall access
         # Note: ensure_agent_dirs() is already called by DpcAgentManager, so we don't call it here
 
         # Initialize components
         self.llm = DpcLlmAdapter(llm_manager, provider_alias=provider_alias, compute_host=compute_host)
         self.tools = ToolRegistry(agent_root=self.agent_root)
         self.memory = Memory(agent_root=self.agent_root)
-        self.memory._update_knowledge_index()  # Regenerate _index.md on startup
+        generate_smart_index(self.agent_root / "knowledge")
         self.memory.cleanup_old_task_results(max_age_days=30)  # TTL cleanup
         self.skill_store = SkillStore(agent_root=self.agent_root)
         self.skill_store.ensure_starter_skills()  # bootstrap for existing agents on first run
@@ -123,6 +111,9 @@ class DpcAgent:
             firewall=firewall,
             firewall_profile=firewall_profile,
         )
+
+        from .memory import EmbeddingProvider
+        self._embedding_provider = EmbeddingProvider(local_files_only=True)
 
         # Task queue for background execution
         self.queue = TaskQueue(self.agent_root)
@@ -147,19 +138,8 @@ class DpcAgent:
             budget_usd=self.config.budget_usd,
         )
 
-        # Evolution manager (optional)
-        self._evolution: Optional[Any] = None  # EvolutionManager
-        self._evolution_enabled = self.config.evolution_enabled
-
         # Callback set by agent_manager to deliver scheduled task results to Telegram
         self._telegram_send_fn: Optional[Any] = None
-
-        # Flag: user interaction in progress — consciousness/evolution should yield
-        self._user_active = False
-
-        # Background consciousness (optional)
-        self._consciousness: Optional["BackgroundConsciousness"] = None
-        self._consciousness_enabled = self.config.background_consciousness
 
         # Track last usage for session state access by agent_manager
         self._last_usage: Optional[Dict[str, Any]] = None
@@ -251,6 +231,7 @@ class DpcAgent:
             all_tools=all_tools_map,
             sandbox_read_only=sandbox_ro,
             sandbox_read_write=sandbox_rw,
+            embedding_provider=self._embedding_provider,
         )
 
         # Store cap_info for agent_manager to include in next request's session_state
@@ -275,6 +256,20 @@ class DpcAgent:
                 "Context size: estimated %d / %d tokens (%.0f%%)",
                 _estimated, _ctx_window, _estimated / _ctx_window * 100,
             )
+
+        # Hard block: refuse to call LLM if context window is nearly full.
+        # Without this guard the LLM call hangs silently (AGENT-CTX-1).
+        if _estimated > _ctx_window * 0.95:
+            _pct = _estimated / _ctx_window * 100
+            log.error(
+                "Context window overflow blocked: %d / %d tokens (%.0f%%)",
+                _estimated, _ctx_window, _pct,
+            )
+            return (
+                f"⚠️ Context window full ({_estimated:,} / {_ctx_window:,} tokens, "
+                f"{_pct:.0f}%). End session to continue."
+            )
+
         ctx = ToolContext(
             agent_root=self.agent_root,
             current_task_id=conversation_id,
@@ -285,7 +280,7 @@ class DpcAgent:
             conversation_monitor=conversation_monitor,  # For knowledge extraction tool
             reply_telegram_chat_id=reply_telegram_chat_id,
             skill_store=self.skill_store,  # For execute_skill tool
-            dpc_service=self._service,  # For knowledge_write firewall checks
+            dpc_service=self._service,  # For firewall checks
         )
         # Store main event loop so sync tools running in executor threads can schedule
         # async calls back onto it via asyncio.run_coroutine_threadsafe.
@@ -435,44 +430,6 @@ class DpcAgent:
         self.memory.save_scratchpad(self.memory._default_scratchpad())
         self.memory.save_identity(self.memory._default_identity())
         log.info("Agent memory reset to defaults")
-
-    def start_consciousness(self, emit_progress: Optional[Callable[[str], None]] = None) -> None:
-        """
-        Start background consciousness if enabled.
-
-        Args:
-            emit_progress: Optional callback for consciousness events
-        """
-        if not self._consciousness_enabled:
-            log.debug("Background consciousness not enabled")
-            return
-
-        if self._consciousness is not None:
-            log.warning("Consciousness already running")
-            return
-
-        from .consciousness import BackgroundConsciousness
-
-        self._consciousness = BackgroundConsciousness(
-            agent=self,
-            think_interval_min=self.config.consciousness_think_interval_min,
-            think_interval_max=self.config.consciousness_think_interval_max,
-            budget_fraction=self.config.consciousness_budget_fraction,
-            emit_progress=emit_progress,
-        )
-        self._consciousness.start()
-        log.info("Background consciousness started")
-
-    def stop_consciousness(self) -> None:
-        """Stop background consciousness."""
-        if self._consciousness is not None:
-            self._consciousness.stop()
-            self._consciousness = None
-            log.info("Background consciousness stopped")
-
-    def is_consciousness_running(self) -> bool:
-        """Check if consciousness is running."""
-        return self._consciousness is not None and self._consciousness.is_running()
 
     def archive_old_task_results(self, max_age_hours: int = 24) -> int:
         """Archive task_results older than max_age_hours into daily JSONL files.
@@ -916,12 +873,6 @@ class DpcAgent:
 
             log.info("Reminder delivered for task %s: %s", task.id, message[:80])
             return f"Reminder sent: {message}"
-        elif task.task_type == "improvement":
-            # Execute planned improvement via evolution
-            if self._evolution:
-                cycle = await self._evolution.run_evolution_cycle()
-                return cycle.description
-            return "Evolution not enabled"
         elif task.task_type == "review":
             # Run code review
             return await self._execute_review(task.data)
@@ -1008,60 +959,6 @@ class DpcAgent:
 
         return task
 
-    # -------------------------------------------------------------------------
-    # Evolution Methods
-    # -------------------------------------------------------------------------
-
-    def start_evolution(self) -> None:
-        """Start automatic evolution cycles."""
-        if not self._evolution_enabled:
-            log.debug("Evolution not enabled")
-            return
-
-        if self._evolution is not None:
-            log.warning("Evolution already running")
-            return
-
-        from .evolution import EvolutionManager
-
-        self._evolution = EvolutionManager(
-            agent=self,
-            enabled=self._evolution_enabled,
-            interval_minutes=self.config.evolution_interval_minutes,
-            auto_apply=self.config.evolution_auto_apply,
-        )
-        self._evolution.start_automatic_evolution()
-        log.info("Evolution started")
-
-    def stop_evolution(self) -> None:
-        """Stop automatic evolution."""
-        if self._evolution is not None:
-            self._evolution.stop_automatic_evolution()
-            self._evolution = None
-            log.info("Evolution stopped")
-
-    def is_evolution_running(self) -> bool:
-        """Check if evolution is running."""
-        return self._evolution is not None and self._evolution.is_running()
-
-    def get_pending_evolution_changes(self) -> List[Dict[str, Any]]:
-        """Get pending evolution changes awaiting approval."""
-        if self._evolution:
-            return self._evolution.get_pending_changes()
-        return []
-
-    async def approve_evolution_change(self, change_id: str) -> bool:
-        """Approve a pending evolution change."""
-        if self._evolution:
-            return await self._evolution.approve_change(change_id)
-        return False
-
-    def reject_evolution_change(self, change_id: str) -> bool:
-        """Reject a pending evolution change."""
-        if self._evolution:
-            return self._evolution.reject_change(change_id)
-        return False
-
     def get_status(self) -> Dict[str, Any]:
         """Get agent status info."""
         state_path = self.agent_root / "state" / "state.json"
@@ -1089,16 +986,5 @@ class DpcAgent:
                 "enabled": self._queue_enabled,
                 "running": self.queue.is_running(),
                 "stats": self.queue.get_stats(),
-            },
-            "consciousness": {
-                "enabled": self._consciousness_enabled,
-                "running": self.is_consciousness_running(),
-                "status": self._consciousness.get_status() if self._consciousness else None,
-            },
-            "evolution": {
-                "enabled": self._evolution_enabled,
-                "running": self.is_evolution_running(),
-                "status": self._evolution.get_status() if self._evolution else None,
-                "pending_changes": len(self.get_pending_evolution_changes()),
             },
         }

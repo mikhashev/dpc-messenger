@@ -34,7 +34,7 @@
       enabled: boolean;
       personal_context_access: boolean;
       device_context_access: boolean;
-      knowledge_access: 'none' | 'read_only' | 'read_write';
+      human_knowledge_access: boolean;
       tools: {
         [key: string]: boolean | undefined;
       };
@@ -42,12 +42,6 @@
         _comment?: string;
         read_only?: string[];
         read_write?: string[];
-      };
-      evolution?: {
-        _comment?: string;
-        enabled: boolean;
-        interval_minutes: number;
-        auto_apply: boolean;
       };
       history?: {
         preserve_on_reset: boolean;
@@ -59,18 +53,13 @@
       enabled: boolean;
       personal_context_access: boolean;
       device_context_access: boolean;
-      knowledge_access: 'none' | 'read_only' | 'read_write';
+      human_knowledge_access: boolean;
       tools?: {
         [key: string]: boolean | undefined;
       };
       sandbox_extensions?: {
         read_only?: string[];
         read_write?: string[];
-      };
-      evolution?: {
-        enabled: boolean;
-        interval_minutes: number;
-        auto_apply: boolean;
       };
       history?: {
         preserve_on_reset: boolean;
@@ -124,7 +113,7 @@
       if (result.status === 'success') {
         archiveInfo = {
           count: result.count ?? 0,
-          max_sessions: result.max_sessions ?? 10,
+          max_sessions: result.max_sessions ?? 0,
           archive_path: result.archive_path ?? '',
           sessions: result.sessions ?? [],
         };
@@ -269,15 +258,6 @@
     // Deep copy the rules for editing
     editedRules = JSON.parse(JSON.stringify(rules));
 
-    // Initialize evolution settings if missing
-    if (editedRules && editedRules.dpc_agent && !editedRules.dpc_agent.evolution) {
-      editedRules.dpc_agent.evolution = {
-        enabled: false,
-        interval_minutes: 60,
-        auto_apply: false
-      };
-    }
-
     // Initialize agent_profiles if missing (Phase 4)
     if (editedRules && !editedRules.agent_profiles) {
       editedRules.agent_profiles = {
@@ -285,7 +265,7 @@
           enabled: true,
           personal_context_access: true,
           device_context_access: true,
-          knowledge_access: 'read_only',
+          human_knowledge_access: true,
           tools: {
             read_file: true,
             write_file: false,
@@ -293,11 +273,6 @@
             update_scratchpad: true,
             browse_page: true,
             search_web: true,
-          },
-          evolution: {
-            enabled: false,
-            interval_minutes: 60,
-            auto_apply: false,
           },
         },
       };
@@ -605,7 +580,7 @@
       enabled: true,
       personal_context_access: true,
       device_context_access: true,
-      knowledge_access: 'read_only',
+      human_knowledge_access: true,
       tools: {
         read_file: true,
         write_file: false,
@@ -618,16 +593,11 @@
       enabled: true,
       personal_context_access: defaultSettings.personal_context_access,
       device_context_access: defaultSettings.device_context_access,
-      knowledge_access: defaultSettings.knowledge_access || 'read_only',
+      human_knowledge_access: defaultSettings.human_knowledge_access ?? true,
       tools: { ...(defaultSettings.tools || {}) },
       sandbox_extensions: {
         read_only: [],
         read_write: [],
-      },
-      evolution: {
-        enabled: false,
-        interval_minutes: 60,
-        auto_apply: false,
       },
     };
 
@@ -704,7 +674,7 @@
         enabled: true,
         personal_context_access: true,
         device_context_access: true,
-        knowledge_access: 'read_only',
+        human_knowledge_access: true,
         tools: { read_file: true, write_file: false, repo_list: true, update_scratchpad: true, browse_page: true, search_web: true },
       })
     );

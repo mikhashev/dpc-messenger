@@ -19,16 +19,13 @@
     { key: 'tool_executed',             label: 'Tool Executed' },
     { key: 'budget_warning',            label: 'Budget Warning' },
     { key: 'rate_limit_hit',            label: 'Rate Limit Hit' },
-    { key: 'evolution_cycle_completed', label: 'Evolution Completed' },
     { key: 'code_modified',             label: 'Code Modified' },
-    { key: 'evolution_cycle_started',   label: 'Evolution Started' },
     { key: 'knowledge_updated',         label: 'Knowledge Updated' },
     { key: 'identity_updated',          label: 'Identity Updated' },
     { key: 'scratchpad_updated',        label: 'Scratchpad Updated' },
-    { key: 'thought_completed',         label: 'Thought Completed' },
-    { key: 'thought_started',           label: 'Thought Started' },
+    { key: 'sleep_state_changed',       label: 'Sleep Events' },
   ];
-  const DEFAULT_EVENT_FILTER = 'task_started,task_completed,task_failed,evolution_cycle_completed,code_modified,budget_warning,rate_limit_hit,agent_message';
+  const DEFAULT_EVENT_FILTER = 'task_started,task_completed,task_failed,code_modified,budget_warning,rate_limit_hit,agent_message';
 
   function isEventSelected(key: string): boolean {
     return telegramEventFilter.split(',').map((e: string) => e.trim()).includes(key);

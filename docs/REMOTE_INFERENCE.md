@@ -273,11 +273,11 @@ Remote inference uses a **request-response pattern** over DPTP and does not supp
 # Terminal 1: Start Host (powerful PC)
 cd dpc-client/core
 # Edit ~/.dpc/privacy_rules.json to enable compute sharing
-poetry run python run_service.py
+uv run python run_service.py
 
 # Terminal 2: Start Requestor (weak laptop)
 cd dpc-client/core
-poetry run python run_service.py
+uv run python run_service.py
 
 # UI:
 # 1. Connect both clients to each other (Direct TLS or WebRTC)
@@ -310,7 +310,7 @@ poetry run python run_service.py
 ```bash
 # Run remote inference tests
 cd dpc-client/core
-poetry run pytest tests/test_remote_inference.py -v
+uv run pytest tests/test_remote_inference.py -v
 ```
 
 ---

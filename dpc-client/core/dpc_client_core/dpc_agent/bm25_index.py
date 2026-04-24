@@ -1,0 +1,162 @@
+"""BM25 keyword index (ADR-010, MEM-3.5).
+
+Character bigram tokenization for CJK/Arabic/Thai per DDA #12.
+Whitespace tokenization for Latin/Cyrillic scripts.
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+import pathlib
+import re
+import unicodedata
+from typing import List, Optional, Tuple
+
+log = logging.getLogger(__name__)
+
+_CJK_RANGES = re.compile(
+    r"[\u2E80-\u9FFF\uF900-\uFAFF\U00020000-\U0002A6DF"
+    r"\u0600-\u06FF\u0750-\u077F"  # Arabic
+    r"\u0E00-\u0E7F]"  # Thai
+)
+
+
+def _detect_script(text: str) -> str:
+    sample = text[:500]
+    cjk_count = len(_CJK_RANGES.findall(sample))
+    return "bigram" if cjk_count > len(sample) * 0.15 else "whitespace"
+
+
+def _tokenize_whitespace(text: str) -> List[str]:
+    return [w.lower() for w in text.split() if len(w) > 1]
+
+
+def _tokenize_bigram(text: str) -> List[str]:
+    text = text.lower()
+    return [text[i:i+2] for i in range(len(text) - 1) if not text[i].isspace()]
+
+
+def tokenize(text: str) -> List[str]:
+    script = _detect_script(text)
+    if script == "bigram":
+        return _tokenize_bigram(text)
+    return _tokenize_whitespace(text)
+
+
+class BM25Index:
+    """BM25 keyword search index with disk persistence."""
+
+    def __init__(self, index_dir: Optional[pathlib.Path] = None):
+        self.index_dir = index_dir
+        self._retriever = None
+        self._chunk_metas: List[dict] = []
+        self._batching = False
+        self._pending_texts: List[str] = []
+        self._pending_metas: List[dict] = []
+
+    def build(self, texts: List[str], chunk_metas: List[dict]) -> None:
+        import bm25s
+        corpus_tokens = [tokenize(t) for t in texts]
+        self._retriever = bm25s.BM25()
+        self._retriever.index(corpus_tokens)
+        self._chunk_metas = chunk_metas
+
+    def add(self, texts: List[str], chunk_metas: List[dict]) -> None:
+        """Append new documents and rebuild the BM25 index.
+
+        In batch mode (between begin_batch/end_batch), defers the rebuild.
+        """
+        if self._batching:
+            self._pending_texts.extend(texts)
+            self._pending_metas.extend(chunk_metas)
+            return
+        existing_texts = [m.get("text", "") for m in self._chunk_metas]
+        all_texts = existing_texts + texts
+        all_metas = self._chunk_metas + chunk_metas
+        self.build(all_texts, all_metas)
+
+    def begin_batch(self) -> None:
+        """Start accumulating add() calls without rebuilding."""
+        self._batching = True
+        self._pending_texts: List[str] = []
+        self._pending_metas: List[dict] = []
+
+    def end_batch(self) -> None:
+        """Flush accumulated chunks and rebuild BM25 once."""
+        self._batching = False
+        if self._pending_texts:
+            existing_texts = [m.get("text", "") for m in self._chunk_metas]
+            all_texts = existing_texts + self._pending_texts
+            all_metas = self._chunk_metas + self._pending_metas
+            self.build(all_texts, all_metas)
+        self._pending_texts = []
+        self._pending_metas = []
+
+    def search(self, query: str, top_k: int = 5) -> List[Tuple[dict, float]]:
+        if self._retriever is None or not self._chunk_metas:
+            return []
+        import bm25s
+        query_tokens = tokenize(query)
+        results, scores = self._retriever.retrieve(
+            bm25s.tokenize([" ".join(query_tokens)]),
+            k=min(top_k, len(self._chunk_metas)),
+        )
+        out = []
+        for idx, score in zip(results[0], scores[0]):
+            if 0 <= idx < len(self._chunk_metas) and score > 0:
+                out.append((self._chunk_metas[idx], float(score)))
+        return out
+
+    def remove_by_source(self, source_file: str) -> int:
+        """Remove all documents from a specific source file and rebuild."""
+        if not self._chunk_metas:
+            return 0
+        keep_texts = []
+        keep_metas = []
+        removed = 0
+        for meta in self._chunk_metas:
+            if meta.get("source_file") == source_file:
+                removed += 1
+            else:
+                keep_texts.append(meta.get("text", ""))
+                keep_metas.append(meta)
+        if removed == 0:
+            return 0
+        if keep_texts:
+            self.build(keep_texts, keep_metas)
+        else:
+            self._retriever = None
+            self._chunk_metas = []
+        log.info("Removed %d BM25 docs for %s, %d remaining", removed, source_file, len(self._chunk_metas))
+        return removed
+
+    def save(self) -> None:
+        if self.index_dir is None or self._retriever is None:
+            return
+        self.index_dir.mkdir(parents=True, exist_ok=True)
+        self._retriever.save(str(self.index_dir / "bm25"))
+        (self.index_dir / "bm25_chunks.json").write_text(
+            json.dumps(self._chunk_metas, ensure_ascii=False), encoding="utf-8"
+        )
+        log.info("Saved BM25 index: %d documents", len(self._chunk_metas))
+
+    def load(self) -> bool:
+        if self.index_dir is None:
+            return False
+        bm25_dir = self.index_dir / "bm25"
+        chunks_path = self.index_dir / "bm25_chunks.json"
+        if not bm25_dir.exists() or not chunks_path.exists():
+            return False
+        try:
+            import bm25s
+            self._retriever = bm25s.BM25.load(str(bm25_dir))
+            self._chunk_metas = json.loads(chunks_path.read_text(encoding="utf-8"))
+            return True
+        except Exception as e:
+            log.warning("Failed to load BM25 index: %s", e)
+            return False
+
+    @property
+    def total_documents(self) -> int:
+        return len(self._chunk_metas)

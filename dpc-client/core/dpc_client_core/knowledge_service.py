@@ -779,10 +779,9 @@ Respond in JSON format:
         """Notify the UI that consensus was reached and the commit was approved."""
         try:
             # Store result for agent store-and-poll (get_proposal_result tool)
-            safe_topic = "".join(
-                c if c.isalnum() or c in "_-" else "_"
-                for c in (commit.topic or "knowledge")
-            )[:50].strip() or "knowledge"
+            from dpc_protocol.markdown_manager import MarkdownKnowledgeManager
+            _mkm = MarkdownKnowledgeManager()
+            safe_topic = _mkm.sanitize_filename(commit.topic or "knowledge")
             markdown_file = f"knowledge/{safe_topic}_{commit.commit_id}.md"
             self.pending_results[commit.proposal_id] = {
                 "status": "approved",
@@ -808,6 +807,36 @@ Respond in JSON format:
                 )
         except Exception as e:
             logger.error("Error in _on_commit_approved: %s", e, exc_info=True)
+
+        # MEM-3.7 trigger #2: incremental reindex for Active Recall (L6)
+        try:
+            firewall = getattr(self, '_firewall', None) or getattr(self.p2p_manager, '_service', None) and getattr(self.p2p_manager._service, 'firewall', None)
+            if firewall and not firewall.can_agent_access_context('knowledge'):
+                logger.info("MEM-3.7: L6 reindex skipped (human_knowledge_access disabled)")
+            else:
+                commit_path = self.dpc_home_dir / markdown_file
+                if commit_path.exists():
+                    dpc_agent_provider = self.llm_manager.providers.get("dpc_agent")
+                    if dpc_agent_provider and hasattr(dpc_agent_provider, '_managers'):
+                        for agent_mgr in dpc_agent_provider._managers.values():
+                            agent = agent_mgr._agent
+                            if agent and hasattr(agent, '_embedding_provider') and agent._embedding_provider:
+                                from .dpc_agent.indexing_pipeline import index_single_file
+                                from .dpc_agent.faiss_index import FaissIndex
+                                from .dpc_agent.bm25_index import BM25Index
+                                index_dir = agent_mgr.agent_root / "state" / "memory_index"
+                                if index_dir.exists():
+                                    faiss_idx = FaissIndex(index_dir)
+                                    bm25_idx = BM25Index(index_dir)
+                                    if faiss_idx.load():
+                                        bm25_idx.load()
+                                        index_single_file(commit_path, agent._embedding_provider, faiss_idx, bm25_idx, source_layer="L6")
+                                        faiss_idx.save()
+                                        bm25_idx.save()
+                                        logger.info("MEM-3.7: reindexed L6 commit %s for agent %s", commit_path.name, agent_mgr.agent_id)
+                                break
+        except Exception as e:
+            logger.warning("MEM-3.7 L6 reindex failed for commit %s: %s", commit.commit_id, e)
 
     async def _on_commit_rejected(self, proposal, votes: Dict[str, Any]) -> None:
         """Notify the UI that the proposal was rejected, including rejection reasons."""

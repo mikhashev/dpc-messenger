@@ -54,9 +54,8 @@
         { key: 'update_identity', label: 'Update Identity', desc: 'Update agent identity' },
         { key: 'deduplicate_identity', label: 'Deduplicate Identity', desc: 'Clean up duplicate sections in identity' },
         { key: 'chat_history', label: 'Chat History', desc: 'Access chat history' },
-        { key: 'knowledge_read', label: 'Read Knowledge', desc: 'Read knowledge base' },
-        { key: 'knowledge_write', label: 'Write Knowledge', desc: 'Write to knowledge base' },
         { key: 'knowledge_list', label: 'List Knowledge', desc: 'List knowledge topics' },
+        { key: 'memory_search', label: 'Memory Search', desc: 'Search knowledge using hybrid BM25 + semantic search' },
         { key: 'get_task_board', label: 'Progress Board', desc: 'Read task history and learning progress from the shared Agent Progress Board' },
         { key: 'execute_skill', label: 'Execute Skill', desc: 'Load and follow skill strategies (Memento-Skills router — Read phase)' },
         { key: 'list_local_agents', label: 'List Local Agents', desc: 'List all agents registered on this device (read-only)' },
@@ -114,16 +113,6 @@
       ]
     },
     {
-      name: 'Evolution Tools (agent self-modification)',
-      tools: [
-        { key: 'pause_evolution', label: 'Pause Evolution', desc: 'Pause automatic evolution cycles' },
-        { key: 'resume_evolution', label: 'Resume Evolution', desc: 'Resume paused evolution' },
-        { key: 'get_evolution_stats', label: 'Evolution Stats', desc: 'Get evolution statistics' },
-        { key: 'approve_evolution_change', label: 'Approve Change', desc: 'Approve pending self-modification (dangerous)', isDanger: true },
-        { key: 'reject_evolution_change', label: 'Reject Change', desc: 'Reject pending changes' },
-      ]
-    },
-    {
       name: 'Messaging Tools (user communication)',
       tools: [
         { key: 'send_user_message', label: 'Send User Message', desc: 'Send Telegram messages to user (agent-initiated)' },
@@ -157,7 +146,7 @@
   }
 
   // Ensure sandbox_extensions has extended access fields when entering edit mode
-  $: if (editMode && editSettings) { ensureSandboxExtensions(); }
+  $: if (editMode && editSettings) { ensureSandboxExtensions(); ensureMemorySettings(); }
 
   // Helper to remove a path
   function removePath(type: 'read_only' | 'read_write', index: number) {
@@ -166,33 +155,16 @@
     editSettings = editSettings;  // Trigger reactivity
   }
 
-  // Initialize evolution object if missing
-  function ensureEvolutionSettings() {
+  // Initialize memory object if missing
+  function ensureMemorySettings() {
     if (!editSettings) return;
-    if (!editSettings.evolution) {
-      editSettings.evolution = {
+    if (!editSettings.memory) {
+      editSettings.memory = {
         enabled: false,
-        interval_minutes: 60,
-        auto_apply: false
+        embedding_model: 'intfloat/multilingual-e5-small',
+        active_recall: true,
       };
     }
-  }
-
-  function ensureConsciousnessSettings() {
-    if (!editSettings) return;
-    if (!editSettings.consciousness) {
-      editSettings.consciousness = {
-        enabled: false,
-        think_interval_min: 60,
-        think_interval_max: 300,
-        budget_fraction: 0.1
-      };
-    }
-  }
-
-  // Auto-initialize consciousness settings when entering edit mode
-  $: if (editMode && editSettings && !editSettings.consciousness) {
-    ensureConsciousnessSettings();
   }
 
   // Auto-initialize skills when entering edit mode so bind:checked doesn't crash
@@ -219,13 +191,14 @@
     ensureHistorySettings();
   }
 
-  // Initialize history object if missing
+  // Initialize history object if missing.
+  // ARCH-19: max_archived_sessions = 0 means unlimited (keep all archives).
   function ensureHistorySettings() {
     if (!editSettings) return;
     if (!editSettings.history) {
       editSettings.history = {
         preserve_on_reset: true,
-        max_archived_sessions: 40,
+        max_archived_sessions: 0,
       };
     }
   }
@@ -290,11 +263,15 @@
     }
   }
 
-  // Derived: near-limit warning threshold
-  $: archiveNearLimit = archiveInfo ? archiveInfo.count >= Math.floor(archiveInfo.max_sessions * 0.8) : false;
+  // Derived: near-limit warning threshold.
+  // ARCH-19: max_sessions === 0 means unlimited — no limit to approach.
+  $: archiveNearLimit = archiveInfo && archiveInfo.max_sessions > 0
+    ? archiveInfo.count >= Math.floor(archiveInfo.max_sessions * 0.8)
+    : false;
   $: archivePercent = archiveInfo && archiveInfo.max_sessions > 0
     ? Math.round((archiveInfo.count / archiveInfo.max_sessions) * 100)
     : 0;
+  $: archiveUnlimited = archiveInfo ? archiveInfo.max_sessions === 0 : false;
 </script>
 
 {#if displaySettings}
@@ -423,168 +400,64 @@
         </div>
 
         <div class="setting-item">
-          <span><strong>Knowledge Access:</strong></span>
-          {#if editMode && editSettings}
-            <select bind:value={editSettings.knowledge_access}>
-              <option value="none">None</option>
-              <option value="read_only">Read Only</option>
-              <option value="read_write">Read & Write</option>
-            </select>
-          {:else}
-            <span class="value">{displaySettings.knowledge_access}</span>
-          {/if}
+          <label>
+            {#if editMode && editSettings}
+              <input type="checkbox" bind:checked={editSettings.human_knowledge_access} />
+            {:else}
+              <input type="checkbox" checked={displaySettings.human_knowledge_access} disabled />
+            {/if}
+            <span>Human Knowledge Access</span>
+          </label>
         </div>
       </div>
 
       {#if !isGlobal}
-        <!-- Evolution Settings Section (per-agent) -->
+        <!-- Memory Settings Section (ADR-010) -->
         <div class="subsection">
-          <h4>Evolution Settings</h4>
-          <p class="help-text-small">Configure autonomous self-modification behavior</p>
+          <h4>Memory Settings</h4>
+          <p class="help-text-small">Configure agent memory system (hybrid search, Active Recall)</p>
 
           <div class="setting-item">
             <label>
-              {#if editMode && editSettings?.evolution}
+              {#if editMode && editSettings?.memory}
                 <input
                   type="checkbox"
-                  id="agent-evolution-enabled"
-                  bind:checked={editSettings.evolution.enabled}
+                  id="agent-memory-enabled"
+                  bind:checked={editSettings.memory.enabled}
                 />
               {:else}
                 <input
                   type="checkbox"
-                  id="agent-evolution-enabled-display"
-                  checked={displaySettings.evolution?.enabled || false}
+                  id="agent-memory-enabled-display"
+                  checked={displaySettings.memory?.enabled || false}
                   disabled
                 />
               {/if}
-              <span>Enable Evolution</span>
+              <span>Enable Memory System</span>
             </label>
-            <p class="help-text-small">Allow agent to autonomously improve itself within sandbox</p>
+            <p class="help-text-small">Enables embedding-based knowledge search and Active Recall hints</p>
           </div>
-
-          {#if (editMode ? editSettings?.evolution?.enabled : displaySettings.evolution?.enabled)}
-            <div class="setting-item" style="margin-top: 0.75rem;">
-              <span><strong>Interval (minutes):</strong></span>
-              {#if editMode && editSettings?.evolution}
-                {#if !editSettings.evolution}
-                  {@html ''}
-                {/if}
-                <input
-                  type="number"
-                  id="agent-evolution-interval"
-                  min="1"
-                  max="1440"
-                  bind:value={editSettings.evolution.interval_minutes}
-                  style="width: 80px; padding: 0.25rem 0.5rem; border: 1px solid #ccc; border-radius: 4px;"
-                />
-              {:else}
-                <span class="value">{displaySettings.eolution?.interval_minutes || 60}</span>
-              {/if}
-              <span class="help-text-small" style="margin-left: 0.5rem;">Time between evolution cycles</span>
-            </div>
-
-            <div class="setting-item" style="margin-top: 0.5rem;">
-              <label>
-                {#if editMode && editSettings?.evolution}
-                  <input
-                    type="checkbox"
-                    id="agent-evolution-auto-apply"
-                    bind:checked={editSettings.evolution.auto_apply}
-                  />
-                {:else}
-                  <input
-                    type="checkbox"
-                    id="agent-evolution-auto-apply-display"
-                    checked={displaySettings.evolution?.auto_apply || false}
-                    disabled
-                  />
-                {/if}
-                <span>Auto-Apply Changes</span>
-              </label>
-              <p class="help-text-small">If disabled, changes require manual approval</p>
-            </div>
-          {:else if editMode && editSettings}
-            <!-- Initialize evolution object when user enables it -->
-            <button
-              type="button"
-              class="add-path-btn"
-              on:click={ensureEvolutionSettings}
-              style="display: none;"
-            >Initialize Evolution</button>
-          {/if}
-
-          {#if !editMode}
-            <div class="info-box" style="margin-top: 0.75rem; padding: 0.5rem;">
-              <strong>Evolution</strong> allows the agent to modify its own memory files
-              (identity.md, scratchpad.md, knowledge/*.md) within the ~/.dpc/agents/AGENT_ID/ sandbox.
-              When auto-apply is disabled, you must manually approve each change.
-            </div>
-          {/if}
-        </div>
-      {/if}
-
-      {#if !isGlobal}
-        <!-- Consciousness Settings Section (per-agent) -->
-        <div class="subsection">
-          <h4>Consciousness Settings</h4>
-          <p class="help-text-small">Background thinking between user messages</p>
 
           <div class="setting-item">
             <label>
-              {#if editMode && editSettings?.consciousness}
+              {#if editMode && editSettings?.memory}
                 <input
                   type="checkbox"
-                  id="agent-consciousness-enabled"
-                  bind:checked={editSettings.consciousness.enabled}
+                  id="agent-memory-active-recall"
+                  bind:checked={editSettings.memory.active_recall}
                 />
               {:else}
                 <input
                   type="checkbox"
-                  id="agent-consciousness-enabled-display"
-                  checked={displaySettings.consciousness?.enabled || false}
+                  id="agent-memory-active-recall-display"
+                  checked={displaySettings.memory?.active_recall || false}
                   disabled
                 />
               {/if}
-              <span>Enable Consciousness</span>
+              <span>Active Recall</span>
             </label>
-            <p class="help-text-small">Agent reflects and plans between conversations (uses up to 10% of budget)</p>
+            <p class="help-text-small">Inject relevant memory hints into agent context automatically</p>
           </div>
-
-          {#if (editMode ? editSettings?.consciousness?.enabled : displaySettings.consciousness?.enabled)}
-            <div class="setting-item" style="margin-top: 0.75rem;">
-              <span><strong>Think interval (sec):</strong></span>
-              {#if editMode && editSettings?.consciousness}
-                <input
-                  type="number"
-                  id="agent-consciousness-interval-min"
-                  min="10"
-                  max="600"
-                  bind:value={editSettings.consciousness.think_interval_min}
-                  style="width: 80px; padding: 0.25rem 0.5rem; border: 1px solid #ccc; border-radius: 4px;"
-                />
-                <span style="margin: 0 0.25rem;">to</span>
-                <input
-                  type="number"
-                  id="agent-consciousness-interval-max"
-                  min="10"
-                  max="600"
-                  bind:value={editSettings.consciousness.think_interval_max}
-                  style="width: 80px; padding: 0.25rem 0.5rem; border: 1px solid #ccc; border-radius: 4px;"
-                />
-              {:else}
-                <span class="value">{displaySettings.consciousness?.think_interval_min || 60} — {displaySettings.consciousness?.think_interval_max || 300}</span>
-              {/if}
-              <span class="help-text-small" style="margin-left: 0.5rem;">Random interval range between thoughts</span>
-            </div>
-          {/if}
-
-          {#if !editMode}
-            <div class="info-box" style="margin-top: 0.75rem; padding: 0.5rem;">
-              <strong>Consciousness</strong> enables the agent to think autonomously between user messages —
-              self-reflection, planning, memory consolidation. Budget-capped at 10% of agent budget.
-            </div>
-          {/if}
         </div>
       {/if}
 
@@ -665,15 +538,20 @@
                 <input
                   type="number"
                   id="agent-history-max"
-                  min="1"
-                  max="200"
+                  min="0"
                   bind:value={editSettings.history.max_archived_sessions}
                   style="width: 70px; padding: 0.25rem 0.5rem; border: 1px solid #ccc; border-radius: 4px;"
                 />
               {:else}
-                <span class="value">{displaySettings.history?.max_archived_sessions ?? 40}</span>
+                <span class="value">
+                  {#if (displaySettings.history?.max_archived_sessions ?? 0) === 0}
+                    Unlimited
+                  {:else}
+                    {displaySettings.history?.max_archived_sessions}
+                  {/if}
+                </span>
               {/if}
-              <span class="help-text-small" style="margin-left: 0.5rem;">Oldest archives are pruned automatically (1–200)</span>
+              <span class="help-text-small" style="margin-left: 0.5rem;">0 = unlimited (keep all archives); any positive value caps retention</span>
             </div>
 
             {#if archiveInfo && !editMode}
@@ -682,18 +560,24 @@
                 <div class="archive-count-row">
                   <span>Archived sessions:</span>
                   <strong style="color: {archiveNearLimit ? 'var(--warning, #f59e0b)' : 'var(--text-primary)'}">
-                    {archiveInfo.count}/{archiveInfo.max_sessions}
-                    {#if archiveNearLimit} &nbsp;⚠ approaching limit{/if}
+                    {#if archiveUnlimited}
+                      {archiveInfo.count} &nbsp;(unlimited retention)
+                    {:else}
+                      {archiveInfo.count}/{archiveInfo.max_sessions}
+                      {#if archiveNearLimit} &nbsp;⚠ approaching limit{/if}
+                    {/if}
                   </strong>
                 </div>
 
-                <!-- Progress bar -->
-                <div class="archive-progress-track" title="{archivePercent}% of limit used">
-                  <div
-                    class="archive-progress-fill"
-                    style="width: {Math.min(archivePercent, 100)}%; background: {archiveNearLimit ? 'var(--warning, #f59e0b)' : 'var(--primary, #2196F3)'};"
-                  ></div>
-                </div>
+                {#if !archiveUnlimited}
+                  <!-- Progress bar (hidden when retention is unlimited) -->
+                  <div class="archive-progress-track" title="{archivePercent}% of limit used">
+                    <div
+                      class="archive-progress-fill"
+                      style="width: {Math.min(archivePercent, 100)}%; background: {archiveNearLimit ? 'var(--warning, #f59e0b)' : 'var(--primary, #2196F3)'};"
+                    ></div>
+                  </div>
+                {/if}
 
                 {#if clearArchiveMessage}
                   <p class="help-text-small" style="margin-top: 0.25rem; color: var(--text-secondary);">{clearArchiveMessage}</p>
@@ -814,6 +698,23 @@
                         bind:value={editSettings.sandbox_extensions.read_only[i]}
                         placeholder="C:\Users\you\Documents\notes"
                       />
+                      <label class="index-toggle" title="Index this path for agent memory search">
+                        <input
+                          type="checkbox"
+                          checked={(editSettings.sandbox_extensions.indexed_paths || []).includes(editSettings.sandbox_extensions.read_only[i])}
+                          on:change={(e) => {
+                            if (!editSettings.sandbox_extensions.indexed_paths) editSettings.sandbox_extensions.indexed_paths = [];
+                            const p = editSettings.sandbox_extensions.read_only[i];
+                            const checked = (e.target as HTMLInputElement).checked;
+                            if (checked) {
+                              if (!editSettings.sandbox_extensions.indexed_paths.includes(p)) editSettings.sandbox_extensions.indexed_paths = [...editSettings.sandbox_extensions.indexed_paths, p];
+                            } else {
+                              editSettings.sandbox_extensions.indexed_paths = editSettings.sandbox_extensions.indexed_paths.filter((x: string) => x !== p);
+                            }
+                          }}
+                        />
+                        <span class="index-label">Index</span>
+                      </label>
                       <button
                         type="button"
                         class="btn-path-remove"
@@ -826,6 +727,27 @@
                   {/each}
                 </div>
               </div>
+
+              <!-- Excluded Directories for Indexing -->
+              {#if (editSettings.sandbox_extensions.indexed_paths || []).length > 0}
+              <div class="path-group-card">
+                <div class="path-group-header">
+                  <span class="path-label">🚫 Excluded Directories</span>
+                </div>
+                <p class="help-text-small">Directories skipped during indexing (one per line). Defaults: node_modules, .git, __pycache__, etc.</p>
+                <textarea
+                  class="excluded-dirs-input"
+                  placeholder="node_modules&#10;.git&#10;__pycache__&#10;dist&#10;build"
+                  value={(editSettings.sandbox_extensions.excluded_dirs || []).join('\n')}
+                  on:input={(e) => {
+                    const val = (e.target as HTMLTextAreaElement).value;
+                    editSettings.sandbox_extensions.excluded_dirs = val.trim() ? val.split('\n').map((s: string) => s.trim()).filter((s: string) => s) : undefined;
+                  }}
+                  rows="4"
+                ></textarea>
+                <p class="help-text-small" style="margin-top: 4px; opacity: 0.6;">Leave empty to use defaults. Custom list replaces defaults entirely.</p>
+              </div>
+              {/if}
 
               <!-- Read-Write Paths -->
               <div class="path-group-card">
@@ -868,7 +790,17 @@
                   <span class="path-label">📖 Read-Only Paths</span>
                   <ul class="path-list">
                     {#each displaySettings.sandbox_extensions.read_only || [] as path}
-                      <li>{path}</li>
+                      <li>{path} {#if (displaySettings.sandbox_extensions.indexed_paths || []).includes(path)}<span class="indexed-badge">📇 Indexed</span>{/if}</li>
+                    {/each}
+                  </ul>
+                </div>
+              {/if}
+              {#if (displaySettings.sandbox_extensions.excluded_dirs?.length ?? 0) > 0}
+                <div class="path-section">
+                  <span class="path-label">🚫 Excluded Directories</span>
+                  <ul class="path-list">
+                    {#each displaySettings.sandbox_extensions.excluded_dirs || [] as dir}
+                      <li>{dir}</li>
                     {/each}
                   </ul>
                 </div>
@@ -908,7 +840,7 @@
     {:else if hasCustomProfile}
       <strong>Info:</strong> These are <strong>custom settings</strong> for agent <strong>{agentName || 'this agent'}</strong>.
       This agent overrides the global defaults with its own profile.
-      Evolution and sandbox paths are configured individually for this agent.
+      Sandbox paths are configured individually for this agent.
       File operations are always sandboxed to ~/.dpc/agents/AGENT_ID/
     {:else}
       <strong>Info:</strong> Agent <strong>{agentName || 'this agent'}</strong> is <strong>inheriting global settings</strong>.
@@ -1109,6 +1041,18 @@
     min-width: 0;
   }
 
+  .excluded-dirs-input {
+    width: 100%;
+    background: var(--bg-secondary, #1e1e1e);
+    border: 1px solid var(--border-color, #333);
+    border-radius: 4px;
+    padding: 0.4rem;
+    font-family: monospace;
+    font-size: 0.82rem;
+    color: var(--text-primary);
+    resize: vertical;
+  }
+
   .btn-path-add {
     padding: 0.2rem 0.6rem;
     font-size: 0.82rem;
@@ -1173,14 +1117,6 @@
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
-  }
-
-  select {
-    padding: 0.25rem 0.5rem;
-    border: 1px solid var(--border-color);
-    border-radius: 4px;
-    background: var(--bg-secondary);
-    color: var(--text-primary);
   }
 
   /* Session History archive status */

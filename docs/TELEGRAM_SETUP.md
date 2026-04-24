@@ -81,7 +81,7 @@ bridge_to_p2p = false
 
 ```bash
 cd dpc-client/core
-poetry install
+uv sync
 ```
 
 This installs `python-telegram-bot` library (>=21.0,<22.0).
@@ -92,7 +92,7 @@ This installs `python-telegram-bot` library (>=21.0,<22.0).
 # Stop existing instance (if running)
 # Start new instance
 cd dpc-client/core
-poetry run python run_service.py
+uv run python run_service.py
 ```
 
 You should see logs indicating successful Telegram bot initialization:
@@ -225,7 +225,7 @@ drop_pending_updates = false      # Drop pending updates on startup
 **Solution:**
 ```bash
 cd dpc-client/core
-poetry install
+uv sync
 ```
 
 ### Permission Denied (Webhook Mode)

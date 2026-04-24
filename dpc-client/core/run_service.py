@@ -136,67 +136,36 @@ def setup_logging(settings):
         logging.getLogger(ws_logger).setLevel(logging.WARNING)
 
 
-def check_gpu_support():
-    """
-    Check GPU availability and PyTorch CUDA support.
-    Shows a one-time message if NVIDIA GPU is detected but PyTorch lacks CUDA.
-    """
-    # Flag file to prevent showing the message every startup
-    flag_file = Path.home() / ".dpc" / ".gpu_check_done"
-    if flag_file.exists():
-        return  # Already shown before
+def dependency_setup():
+    """Check GPU/torch status at startup (ADR-012).
 
+    CUDA/ROCm torch is configured via platform markers in pyproject.toml
+    [tool.uv.sources]. This function only verifies the result and warns
+    if there's a mismatch.
+    """
     try:
-        # Detect NVIDIA GPU
-        nvidia_gpu = None
+        import torch
+        if torch.cuda.is_available():
+            return
         try:
             result = subprocess.run(
                 ["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"],
-                capture_output=True,
-                text=True,
-                timeout=5
+                capture_output=True, text=True, timeout=5
             )
             if result.returncode == 0:
-                nvidia_gpu = result.stdout.strip()
+                gpu_name = result.stdout.strip()
+                print(f"\n[DPC] NVIDIA GPU detected ({gpu_name}) but torch lacks CUDA.")
+                print("[DPC] Try: rm -rf .venv && uv sync\n")
         except (FileNotFoundError, subprocess.TimeoutExpired):
             pass
-
-        # Check PyTorch CUDA support
-        pytorch_has_cuda = False
-        try:
-            import torch
-            pytorch_has_cuda = torch.cuda.is_available()
-        except ImportError:
-            pass
-
-        # Show message only if GPU detected but PyTorch lacks CUDA
-        if nvidia_gpu and not pytorch_has_cuda:
-            print("\n" + "=" * 70)
-            print("⚠️  NVIDIA GPU Detected - PyTorch CUDA Support Not Found")
-            print("=" * 70)
-            print(f"\n🎮 Detected GPU: {nvidia_gpu}")
-            print("\n💡 Your NVIDIA GPU can accelerate Whisper transcription by 10-20x!")
-            print("   However, PyTorch was installed without CUDA support.")
-            print("\n📋 To enable GPU acceleration, run:")
-            print("   poetry run python setup_gpu_support.py")
-            print("\n   Or manually install:")
-            print("   poetry run pip install --upgrade torch torchvision --index-url https://download.pytorch.org/whl/cu124")
-            print("\n   This is optional - CPU-only transcription will still work (slower).")
-            print("=" * 70 + "\n")
-
-            # Create flag file so we don't show this again
-            flag_file.parent.mkdir(parents=True, exist_ok=True)
-            flag_file.touch()
-
-    except Exception:
-        # Silently fail - don't break startup if GPU check fails
+    except ImportError:
         pass
 
 
 async def main():
     """Main entrypoint to start and run the Core Service."""
-    # Check GPU support before starting service (one-time warning)
-    check_gpu_support()
+    # GPU status check (ADR-012)
+    dependency_setup()
 
     service = CoreService()
 

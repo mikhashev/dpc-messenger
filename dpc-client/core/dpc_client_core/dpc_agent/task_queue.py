@@ -33,7 +33,7 @@ class TaskPriority(Enum):
     """Task priority levels."""
     CRITICAL = 0   # User-initiated, immediate
     HIGH = 1       # Scheduled tasks
-    NORMAL = 2     # Background consciousness
+    NORMAL = 2     # Background tasks
     LOW = 3        # Cleanup, maintenance
 
 
@@ -174,7 +174,7 @@ class TaskQueue:
         Schedule a new task.
 
         Args:
-            task_type: Type of task (e.g., 'chat', 'evolution', 'review')
+            task_type: Type of task (e.g., 'chat', 'review', 'reminder')
             data: Task payload
             priority: Task priority
             scheduled_at: When to execute (None = immediate)

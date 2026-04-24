@@ -12,6 +12,7 @@ to keep dependencies minimal. These tools use simple HTTP requests.
 
 from __future__ import annotations
 
+import asyncio
 import html as html_module
 import logging
 import re
@@ -19,7 +20,6 @@ import ssl
 from html.parser import HTMLParser
 from io import StringIO
 from typing import Any, Dict, List, Optional
-from urllib.parse import parse_qs, quote_plus, unquote, urlparse
 
 from .registry import ToolEntry, ToolContext
 
@@ -153,40 +153,123 @@ def _extract_text(html: str) -> str:
     return text
 
 
-def browse_page(ctx: ToolContext, url: str, extract_text: bool = True) -> str:
-    """
-    Fetch and optionally parse a web page.
+_SIZE_PRESETS = {
+    "s": 5000,
+    "m": 10000,
+    "l": 25000,
+    "f": None,
+}
 
-    Args:
-        ctx: Tool context (unused, but required for tool interface)
-        url: URL to fetch
-        extract_text: Whether to extract text from HTML
 
-    Returns:
-        Page content or extracted text
-    """
+def _browse_sync(url: str) -> Dict[str, Any]:
     result = _fetch_url(url)
-
     if not result["success"]:
-        return f"⚠️ Failed to fetch page: {result['error']}"
+        return result
 
     content = result["content"]
     content_type = result.get("content_type", "")
     is_clean_text = any(ct in content_type for ct in ("text/markdown", "text/plain"))
 
-    if extract_text and not is_clean_text:
-        # Server returned HTML — strip tags and extract readable text
-        text = _extract_text(content)
-        if len(text) > 10000:
-            text = text[:10000] + f"\n\n... (truncated, {len(text)} total chars)"
-        return f"Content from {url}:\n\n{text}"
+    if is_clean_text:
+        text = content
     else:
-        # Server returned markdown/plain (or raw HTML was requested) — use as-is
-        limit = 10000 if is_clean_text else 15000
-        label = "raw HTML" if not extract_text else "content"
-        if len(content) > limit:
-            content = content[:limit] + f"\n\n... (truncated, {len(content)} total chars)"
-        return f"{label.capitalize()} from {url}:\n\n{content}"
+        try:
+            import trafilatura
+            text = trafilatura.extract(
+                content,
+                output_format="markdown",
+                include_formatting=True,
+                include_links=True,
+                include_tables=True,
+                favor_recall=True,
+            )
+        except Exception:
+            text = None
+
+        if not text:
+            try:
+                from ddgs import DDGS
+                with DDGS() as ddgs:
+                    extracts = list(ddgs.extract([url]))
+                    if extracts and extracts[0].get("content"):
+                        text = extracts[0]["content"]
+            except Exception:
+                pass
+
+        if not text:
+            text = _extract_text(content)
+
+    result["text"] = text
+    result["needs_js"] = not is_clean_text and len(text or "") < 200
+    return result
+
+
+def _browse_with_camoufox(url: str) -> Optional[str]:
+    try:
+        from camoufox.sync_api import Camoufox
+    except ImportError:
+        return None
+
+    try:
+        with Camoufox(headless=True) as browser:
+            page = browser.new_page()
+            page.goto(url, wait_until="networkidle", timeout=30000)
+            html = page.content()
+
+        import trafilatura
+        text = trafilatura.extract(
+            html,
+            output_format="markdown",
+            include_formatting=True,
+            include_links=True,
+            include_tables=True,
+            favor_recall=True,
+        )
+        return text
+    except Exception as e:
+        log.warning(f"Camoufox fallback failed for {url}: {e}")
+        return None
+
+
+async def browse_page(ctx: ToolContext, url: str, size: str = "m") -> str:
+    """
+    Fetch a web page and extract content as structured markdown.
+
+    Uses trafilatura for high-quality extraction that preserves headings,
+    lists, tables, and links. Falls back to basic text extraction if
+    trafilatura fails.
+
+    Size presets control output length:
+      s = 5K chars (quick summary)
+      m = 10K chars (default)
+      l = 25K chars (deep reading)
+      f = full content (no truncation)
+
+    Args:
+        ctx: Tool context (unused, but required for tool interface)
+        url: URL to fetch
+        size: Size preset (s/m/l/f)
+
+    Returns:
+        Page content as markdown
+    """
+    result = await asyncio.to_thread(_browse_sync, url)
+
+    if not result.get("success", False) and "error" in result:
+        return f"⚠️ Failed to fetch page: {result['error']}"
+
+    text = result.get("text", "")
+
+    if result.get("needs_js"):
+        js_text = await asyncio.to_thread(_browse_with_camoufox, url)
+        if js_text and len(js_text) > len(text or ""):
+            text = js_text
+    max_chars = _SIZE_PRESETS.get(size, _SIZE_PRESETS["m"])
+    total = len(text)
+    if max_chars and total > max_chars:
+        text = text[:max_chars] + f"\n\n... (truncated, {total} total chars, use size='l' or 'f' for more)"
+
+    return f"Content from {url} (markdown, {total} chars):\n\n{text}"
 
 
 def fetch_json(ctx: ToolContext, url: str) -> str:
@@ -220,52 +303,6 @@ def fetch_json(ctx: ToolContext, url: str) -> str:
         return f"⚠️ Invalid JSON: {e}"
 
 
-def extract_links(ctx: ToolContext, url: str) -> str:
-    """
-    Extract all links from a web page.
-
-    Args:
-        ctx: Tool context (unused)
-        url: URL to fetch
-
-    Returns:
-        List of links found on the page
-    """
-    result = _fetch_url(url)
-
-    if not result["success"]:
-        return f"⚠️ Failed to fetch page: {result['error']}"
-
-    html = result["content"]
-
-    # Extract links
-    link_pattern = r'<a[^>]+href=["\']([^"\']+)["\']'
-    links = re.findall(link_pattern, html, re.IGNORECASE)
-
-    # Filter and deduplicate
-    seen = set()
-    unique_links = []
-    for link in links:
-        # Skip anchors and javascript
-        if link.startswith(("#", "javascript:", "mailto:")):
-            continue
-        if link not in seen:
-            seen.add(link)
-            unique_links.append(link)
-
-    if not unique_links:
-        return f"No links found on {url}"
-
-    # Format output
-    output_lines = [f"Links from {url} ({len(unique_links)} found):\n"]
-    for i, link in enumerate(unique_links[:50], 1):
-        output_lines.append(f"  {i}. {link}")
-
-    if len(unique_links) > 50:
-        output_lines.append(f"\n  ... and {len(unique_links) - 50} more")
-
-    return "\n".join(output_lines)
-
 
 def check_url(ctx: ToolContext, url: str) -> str:
     """
@@ -296,48 +333,48 @@ def check_url(ctx: ToolContext, url: str) -> str:
                f"  Time: {elapsed:.2f}s"
 
 
-def search_duckduckgo(ctx: ToolContext, query: str, max_results: int = 5) -> str:
+def _search_ddgs_sync(query: str, max_results: int, backend: str) -> list:
+    from ddgs import DDGS
+    with DDGS() as ddgs:
+        return list(ddgs.text(query, max_results=max_results, backend=backend))
+
+
+async def search_web_ddgs(ctx: ToolContext, query: str, max_results: int = 5, backend: str = "auto") -> str:
     """
-    Search the web using DuckDuckGo (no API key required).
+    Search the web using multiple engines via ddgs (no API key required).
+
+    Supports 8+ backends: duckduckgo, bing, brave, google, yandex, mojeek, yahoo, wikipedia.
+    Returns title + URL + snippet for each result, reducing need to browse each page.
 
     Args:
         ctx: Tool context (unused)
         query: Search query
-        max_results: Maximum number of results
+        max_results: Maximum number of results (1-20)
+        backend: Search backend ("auto", "duckduckgo", "bing", "brave", "google", "yandex", "mojeek", "yahoo", "wikipedia")
 
     Returns:
-        Search results
+        Search results with snippets
     """
-    # Use DuckDuckGo HTML version for scraping (query must be URL-encoded)
-    url = f"https://html.duckduckgo.com/html/?q={quote_plus(query)}"
+    max_results = max(1, min(max_results, 20))
 
-    result = _fetch_url(url)
-
-    if not result["success"]:
-        return f"⚠️ Search failed: {result['error']}"
-
-    html_content = result["content"]
-
-    # Extract search results from DDG HTML.
-    # DDG wraps destination URLs in redirect links: /l/?uddg=<percent-encoded-url>
-    # Use DOTALL so titles spanning multiple lines are captured correctly.
-    results = []
-    result_pattern = r'<a[^>]+class="result__a"[^>]*href="([^"]+)"[^>]*>(.*?)</a>'
-    matches = re.findall(result_pattern, html_content, re.IGNORECASE | re.DOTALL)
-
-    for raw_href, raw_title in matches[:max_results]:
-        # Decode DDG redirect to get the real destination URL
-        parsed = urlparse(raw_href)
-        qs = parse_qs(parsed.query)
-        real_url = unquote(qs["uddg"][0]) if "uddg" in qs else raw_href
-        # Strip any residual HTML tags and decode entities in the title
-        title = html_module.unescape(re.sub(r"<[^>]+>", "", raw_title).strip())
-        results.append(f"  • {title}\n    {real_url}")
+    try:
+        results = await asyncio.to_thread(_search_ddgs_sync, query, max_results, backend)
+    except ImportError:
+        return "⚠️ ddgs package not installed. Run: pip install ddgs"
+    except Exception as e:
+        return f"⚠️ Search failed: {e}"
 
     if not results:
         return f"No results found for: {query}"
 
-    return f"Search results for '{query}':\n\n" + "\n\n".join(results)
+    output_lines = [f"Search results for '{query}' ({len(results)} found, backend={backend}):\n"]
+    for i, r in enumerate(results, 1):
+        title = r.get("title", "")
+        url = r.get("href", "")
+        snippet = r.get("body", "")
+        output_lines.append(f"  {i}. {title}\n     {url}\n     {snippet}")
+
+    return "\n\n".join(output_lines)
 
 
 def get_tools() -> List[ToolEntry]:
@@ -347,7 +384,7 @@ def get_tools() -> List[ToolEntry]:
             name="browse_page",
             schema={
                 "name": "browse_page",
-                "description": "Fetch and parse a web page to extract text content",
+                "description": "Fetch a web page and extract content as structured markdown. Preserves headings, lists, tables, and links. Use size presets to control output length: s=5K, m=10K (default), l=25K, f=full.",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -355,10 +392,11 @@ def get_tools() -> List[ToolEntry]:
                             "type": "string",
                             "description": "URL to fetch"
                         },
-                        "extract_text": {
-                            "type": "boolean",
-                            "description": "Extract text from HTML (true) or return raw HTML (false)",
-                            "default": True
+                        "size": {
+                            "type": "string",
+                            "description": "Output size preset: s (5K summary), m (10K default), l (25K deep), f (full)",
+                            "default": "m",
+                            "enum": ["s", "m", "l", "f"]
                         }
                     },
                     "required": ["url"]
@@ -388,25 +426,6 @@ def get_tools() -> List[ToolEntry]:
             timeout_sec=30,
         ),
 
-        ToolEntry(
-            name="extract_links",
-            schema={
-                "name": "extract_links",
-                "description": "Extract all links from a web page",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "url": {
-                            "type": "string",
-                            "description": "URL to extract links from"
-                        }
-                    },
-                    "required": ["url"]
-                }
-            },
-            handler=extract_links,
-            timeout_sec=30,
-        ),
 
         ToolEntry(
             name="check_url",
@@ -432,7 +451,7 @@ def get_tools() -> List[ToolEntry]:
             name="search_web",
             schema={
                 "name": "search_web",
-                "description": "Search the web using DuckDuckGo (no API key required)",
+                "description": "Search the web using multiple engines (duckduckgo, bing, brave, google, yandex, mojeek, yahoo, wikipedia). Returns title + URL + snippet for each result. Use backend='auto' for automatic fallback across engines.",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -446,12 +465,17 @@ def get_tools() -> List[ToolEntry]:
                             "default": 5,
                             "minimum": 1,
                             "maximum": 20
+                        },
+                        "backend": {
+                            "type": "string",
+                            "description": "Search backend: auto, duckduckgo, bing, brave, google, yandex, mojeek, yahoo, wikipedia",
+                            "default": "auto"
                         }
                     },
                     "required": ["query"]
                 }
             },
-            handler=search_duckduckgo,
+            handler=search_web_ddgs,
             timeout_sec=30,
         ),
     ]

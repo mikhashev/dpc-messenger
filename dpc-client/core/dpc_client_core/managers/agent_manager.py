@@ -116,29 +116,11 @@ class DpcAgentManager:
         if llm_manager is None:
             raise RuntimeError("CoreService does not have llm_manager")
 
-        # Build agent config (same as default but with different provider)
-        # Evolution settings: per-agent profile overrides global dpc_agent settings
-        _evo_global_enabled = self.firewall.evolution_enabled if self.firewall else False
-        _evo_global_interval = self.firewall.evolution_interval_minutes if self.firewall else 60
-        _evo_global_auto = self.firewall.evolution_auto_apply if self.firewall else False
-        _per_agent_profile = (
-            self.firewall.get_agent_profile_settings(self.agent_id)
-            if (self.firewall and self.agent_id)
-            else None
-        )
-        _per_agent_evo = _per_agent_profile.get('evolution', {}) if _per_agent_profile else {}
-        evolution_enabled = _per_agent_evo.get('enabled', _evo_global_enabled)
-        evolution_interval = _per_agent_evo.get('interval_minutes', _evo_global_interval)
-        evolution_auto = _per_agent_evo.get('auto_apply', _evo_global_auto)
-
+        # Build agent config
         agent_config = AgentConfig(
             budget_usd=self.config.get("budget_usd", 50.0),
             max_rounds=self.config.get("max_rounds", 200),
-            background_consciousness=False,  # Per-provider agents don't run background tasks
-            enable_task_queue=False,  # Per-provider agents don't run task queue
-            evolution_enabled=evolution_enabled,
-            evolution_interval_minutes=evolution_interval,
-            evolution_auto_apply=evolution_auto,
+            enable_task_queue=False,
             billing_model=self.config.get("billing_model", "subscription"),
         )
 
@@ -187,42 +169,10 @@ class DpcAgentManager:
             else None
         )
 
-        # Evolution settings: firewall global → per-agent profile override
-        _evo_global_enabled = self.firewall.evolution_enabled if self.firewall else False
-        _evo_global_interval = self.firewall.evolution_interval_minutes if self.firewall else 60
-        _evo_global_auto = self.firewall.evolution_auto_apply if self.firewall else False
-        _per_agent_evo = _per_agent_profile.get('evolution', {}) if _per_agent_profile else {}
-        evolution_enabled = _per_agent_evo.get('enabled', _evo_global_enabled)
-        evolution_interval = _per_agent_evo.get('interval_minutes', _evo_global_interval)
-        evolution_auto = _per_agent_evo.get('auto_apply', _evo_global_auto)
-
-        # Consciousness settings: firewall global → per-agent profile override
-        _con_global_enabled = self.firewall.consciousness_enabled if self.firewall else False
-        _con_global_min = getattr(self.firewall, 'consciousness_think_interval_min', 60) if self.firewall else 60
-        _con_global_max = getattr(self.firewall, 'consciousness_think_interval_max', 300) if self.firewall else 300
-        _con_global_budget = getattr(self.firewall, 'consciousness_budget_fraction', 0.1) if self.firewall else 0.1
-        _per_agent_con = _per_agent_profile.get('consciousness', {}) if _per_agent_profile else {}
-        consciousness_enabled = _per_agent_con.get('enabled', _con_global_enabled)
-        consciousness_interval_min = _per_agent_con.get('think_interval_min', _con_global_min)
-        consciousness_interval_max = _per_agent_con.get('think_interval_max', _con_global_max)
-        consciousness_budget = _per_agent_con.get('budget_fraction', _con_global_budget)
-
-        if _per_agent_evo or _per_agent_con:
-            log.debug("Agent %s: per-agent overrides (evolution=%s, consciousness=%s, con_interval=%d-%ds)",
-                      self.agent_id, evolution_enabled, consciousness_enabled,
-                      consciousness_interval_min, consciousness_interval_max)
-
         agent_config = AgentConfig(
             budget_usd=self.config.get("budget_usd", 50.0),
             max_rounds=self.config.get("max_rounds", 200),
-            background_consciousness=consciousness_enabled,
-            consciousness_think_interval_min=consciousness_interval_min,
-            consciousness_think_interval_max=consciousness_interval_max,
-            consciousness_budget_fraction=consciousness_budget,
             enable_task_queue=self.config.get("enable_task_queue", True),
-            evolution_enabled=evolution_enabled,
-            evolution_interval_minutes=evolution_interval,
-            evolution_auto_apply=evolution_auto,
             billing_model=self.config.get("billing_model", "subscription"),
         )
 
@@ -238,24 +188,136 @@ class DpcAgentManager:
             agent_root=self.agent_root,
             firewall=self.firewall,           # Firewall controls tool access
             firewall_profile=self.agent_id,  # Per-agent profile key for per-agent permissions
-            service=self.service,             # For tools that need service access (e.g. knowledge_write firewall)
+            service=self.service,             # For tools that need firewall access
             compute_host=self.config.get("compute_host", ""),  # Remote peer for LLM inference
         )
-
-        # Start background consciousness if enabled
-        if agent_config.background_consciousness:
-            self._agent.start_consciousness(emit_progress=self._emit_progress)
-            log.info("Background consciousness started")
-
-        # Start evolution if enabled
-        if agent_config.evolution_enabled:
-            self._agent.start_evolution()
-            log.info(f"Evolution started (interval={agent_config.evolution_interval_minutes}min, auto_apply={agent_config.evolution_auto_apply})")
 
         # Start task processor if enabled
         if agent_config.enable_task_queue:
             await self._agent.start_task_processor()
             log.info("Task processor started")
+
+        # Initialize memory system (ADR-010)
+        try:
+            from dpc_client_core.dpc_agent.memory_config import get_memory_config
+            from dpc_client_core.dpc_agent.model_download import notify_download_needed
+            _profile = self.firewall.get_agent_profile_settings(self.agent_id) if (self.firewall and self.agent_id) else {}
+            mem_cfg = get_memory_config(_profile or self.config)
+            if mem_cfg.enabled:
+                notification = notify_download_needed(mem_cfg.embedding_model)
+                if notification.get("needed"):
+                    log.info("Memory: embedding model not yet downloaded (%s)", mem_cfg.embedding_model)
+                    # MEM-3.9: notify UI about pending model download
+                    if hasattr(self.service, 'broadcast_event'):
+                        self.service.broadcast_event("memory_model_download_needed", notification)
+                # First-use full rebuild (MEM-3.7 spec)
+                import asyncio
+                agent_root = self._agent.agent_root if self._agent else None
+                if agent_root:
+                    index_dir = agent_root / "state" / "memory_index"
+                    needs_full_rebuild = not (index_dir / "index_meta.json").exists()
+
+                    def _sync_index():
+                        """Runs in thread executor to avoid blocking the event loop."""
+                        try:
+                            import numpy as np
+                            from pathlib import Path
+                            import os
+                            from dpc_client_core.dpc_agent.memory import EmbeddingProvider
+                            from dpc_client_core.dpc_agent.faiss_index import FaissIndex
+                            from dpc_client_core.dpc_agent.bm25_index import BM25Index
+                            from dpc_client_core.dpc_agent.text_extract import extract_text
+                            from dpc_client_core.dpc_agent.chunking import chunk_text, batched_chunks
+                            provider = self._agent._embedding_provider if self._agent else EmbeddingProvider(model_name=mem_cfg.embedding_model)
+                            faiss_idx = FaissIndex(index_dir, model_name=mem_cfg.embedding_model, dimensions=provider.dimensions)
+                            bm25_idx = BM25Index(index_dir)
+
+                            count = 0
+                            l6_count = 0
+                            # Always rebuild L5 agent knowledge (not just on first init)
+                            from dpc_client_core.dpc_agent.indexing_pipeline import full_rebuild
+                            knowledge_dir = agent_root / "knowledge"
+                            count = full_rebuild(knowledge_dir, provider, faiss_idx, bm25_idx, batch_size=mem_cfg.batch_size)
+
+                            # Collect all extra chunks (L6 + EXT) then embed+index in bulk
+                            extra_chunks = []
+                            extra_metas = []
+
+                            # L6: human knowledge (always re-index, not just on full rebuild)
+                            if self.firewall and self.firewall.can_agent_access_context('knowledge'):
+                                l6_dir = Path(os.environ.get("DPC_HOME", Path.home() / ".dpc")) / "knowledge"
+                                if l6_dir.is_dir():
+                                    for f in sorted(l6_dir.iterdir()):
+                                        if f.suffix == ".md" and f.is_file():
+                                            text = extract_text(f)
+                                            if text:
+                                                chunks = chunk_text(text, source_file=f.name)
+                                                for c in chunks:
+                                                    extra_chunks.append(c)
+                                                    extra_metas.append({"source_file": c.source_file, "chunk_index": c.chunk_index,
+                                                                        "char_start": c.char_start, "char_end": c.char_end,
+                                                                        "source_layer": "L6", "text": c.text[:200]})
+                                                l6_count += len(chunks)
+                                    if l6_count:
+                                        log.info("L6 human knowledge collected: %d chunks from %s", l6_count, l6_dir)
+
+                            # MEM-3.10: always re-index extended paths on startup
+                            ext_count = 0
+                            if self.firewall:
+                                try:
+                                    from dpc_client_core.dpc_agent.extended_paths_index import collect_extended_files
+                                    ext_paths = self.firewall.get_extended_paths(profile_name=self.agent_id) if hasattr(self.firewall, 'get_extended_paths') else {}
+                                    indexed_list = self.firewall._get_profile_or_global(self.agent_id, 'sandbox_extensions', 'indexed_paths', default=[]) if self.agent_id else []
+                                    excluded_dirs = self.firewall._get_profile_or_global(self.agent_id, 'sandbox_extensions', 'excluded_dirs', default=None) if self.agent_id else None
+                                    ext_files = collect_extended_files(ext_paths, indexed_paths=indexed_list, excluded_dirs=excluded_dirs) if indexed_list else []
+                                    if ext_files:
+                                        for f in ext_files:
+                                            text = extract_text(f)
+                                            if text:
+                                                chunks = chunk_text(text, source_file=f.name)
+                                                for c in chunks:
+                                                    extra_chunks.append(c)
+                                                    extra_metas.append({"source_file": c.source_file, "chunk_index": c.chunk_index,
+                                                                        "char_start": c.char_start, "char_end": c.char_end,
+                                                                        "source_layer": "EXT", "text": c.text[:200]})
+                                                ext_count += len(chunks)
+                                    elif indexed_list:
+                                        log.info("Extended paths: %d paths configured but 0 text files found", len(indexed_list))
+                                except Exception as e:
+                                    log.debug("Extended paths indexing skipped: %s", e)
+
+                            # Bulk embed + index all extra chunks in one pass
+                            if extra_chunks:
+                                pos = 0
+                                for batch in batched_chunks(extra_chunks, mem_cfg.batch_size):
+                                    texts = [c.text for c in batch]
+                                    vectors = np.array(provider.embed_batch(texts), dtype=np.float32)
+                                    faiss_idx.add(vectors, extra_metas[pos:pos + len(batch)])
+                                    pos += len(batch)
+                                bm25_idx.add([c.text for c in extra_chunks], extra_metas)
+                                log.info("Bulk indexed %d extra chunks (L6: %d, EXT: %d)", len(extra_chunks), l6_count, ext_count)
+
+                            if needs_full_rebuild or extra_chunks:
+                                faiss_idx.save()
+                                bm25_idx.save()
+                            if needs_full_rebuild:
+                                total = count + l6_count + ext_count
+                                log.info("Memory index built: %d chunks (L5: %d, L6: %d, EXT: %d)", total, count, l6_count, ext_count)
+                            elif ext_count > 0:
+                                log.info("Extended paths re-indexed on startup: %d chunks", ext_count)
+                        except Exception as e:
+                            log.warning("Background memory indexing failed: %s", e)
+
+                    if needs_full_rebuild or (self.firewall and self.firewall._get_profile_or_global(self.agent_id, 'sandbox_extensions', 'indexed_paths', default=[])):
+                        loop = asyncio.get_event_loop()
+                        loop.run_in_executor(None, _sync_index)
+                        if needs_full_rebuild:
+                            log.info("Memory: first-use index rebuild started in thread")
+                        else:
+                            log.info("Memory: extended paths re-index started in thread")
+                log.info("Memory system initialized (model=%s, active_recall=%s)", mem_cfg.embedding_model, mem_cfg.active_recall)
+        except Exception as e:
+            log.warning("Memory system init skipped: %s", e)
 
         # Initialize Telegram bridge for agent notifications
         await self._start_telegram_bridge()
@@ -263,62 +325,32 @@ class DpcAgentManager:
         # Wire Telegram send-back so scheduled tasks can deliver their results
         self._agent._telegram_send_fn = self._deliver_telegram_result
 
+        # Check for unconsumed morning brief from sleep pipeline (ADR-014)
+        try:
+            import json as _json
+            _conv_dir = pathlib.Path.home() / ".dpc" / "conversations" / self.agent_id
+            _brief_path = _conv_dir / "morning_brief.json"
+            if _brief_path.exists():
+                _brief = _json.loads(_brief_path.read_text(encoding="utf-8"))
+                if not _brief.get("consumed", False):
+                    from dpc_client_core.service import CoreService
+                    chat_text = CoreService._format_morning_brief(_brief)
+                    monitor = self._get_or_create_agent_monitor(self.agent_id)
+                    if monitor:
+                        from datetime import datetime, timezone
+                        monitor.add_message("assistant", chat_text, sender_name=self.agent_id, timestamp=datetime.now(timezone.utc).isoformat())
+                        monitor.save_history()
+                        _brief["consumed"] = True
+                        _brief_path.write_text(_json.dumps(_brief, ensure_ascii=False, indent=2), encoding="utf-8")
+                        log.info("Morning brief posted to chat for %s", self.agent_id)
+        except Exception as e:
+            log.debug("Morning brief startup check skipped: %s", e)
+
         log.info("DpcAgent started successfully")
 
     def sync_firewall_settings(self) -> None:
-        """Re-read evolution/consciousness settings from firewall and start/stop accordingly.
-
-        Called after firewall rules are saved via UI to apply changes without restart.
-        """
-        if self._agent is None:
-            return
-
-        # Read current settings from firewall (same logic as start())
-        _per_agent_profile = (
-            self.firewall.get_agent_profile_settings(self.agent_id)
-            if (self.firewall and self.agent_id)
-            else None
-        )
-
-        # Evolution
-        _evo_global = self.firewall.evolution_enabled if self.firewall else False
-        _per_evo = (_per_agent_profile or {}).get('evolution', {})
-        evo_enabled = _per_evo.get('enabled', _evo_global)
-
-        if evo_enabled and not self._agent.is_evolution_running():
-            self._agent._evolution_enabled = True
-            self._agent.config.evolution_enabled = True
-            self._agent.config.evolution_interval_minutes = _per_evo.get(
-                'interval_minutes',
-                self.firewall.evolution_interval_minutes if self.firewall else 60,
-            )
-            self._agent.config.evolution_auto_apply = _per_evo.get(
-                'auto_apply',
-                self.firewall.evolution_auto_apply if self.firewall else False,
-            )
-            self._agent.start_evolution()
-            log.info("Evolution started via firewall sync")
-        elif not evo_enabled and self._agent.is_evolution_running():
-            self._agent.stop_evolution()
-            self._agent._evolution_enabled = False
-            self._agent.config.evolution_enabled = False
-            log.info("Evolution stopped via firewall sync")
-
-        # Consciousness
-        _con_global = self.firewall.consciousness_enabled if self.firewall else False
-        _per_con = (_per_agent_profile or {}).get('consciousness', {})
-        con_enabled = _per_con.get('enabled', _con_global)
-
-        if con_enabled and not self._agent.is_consciousness_running():
-            self._agent._consciousness_enabled = True
-            self._agent.config.background_consciousness = True
-            self._agent.start_consciousness(emit_progress=self._emit_progress)
-            log.info("Consciousness started via firewall sync")
-        elif not con_enabled and self._agent.is_consciousness_running():
-            self._agent.stop_consciousness()
-            self._agent._consciousness_enabled = False
-            self._agent.config.background_consciousness = False
-            log.info("Consciousness stopped via firewall sync")
+        """Re-read settings from firewall after UI save."""
+        pass
 
     async def ensure_started(self) -> "DpcAgentManager":
         """
@@ -505,10 +537,7 @@ class DpcAgentManager:
             self._telegram_bridge = None
 
         if self._agent is not None:
-            # Stop all background loops in proper order
-            self._agent.stop_consciousness()
             self._agent.stop_task_processor()
-            self._agent.stop_evolution()
             self._agent = None
         log.info("DpcAgent stopped")
 
@@ -624,8 +653,6 @@ class DpcAgentManager:
             # Phase 3: Get provider-specific agent if agent_llm_provider is specified
             agent = self._get_or_create_agent_for_provider(agent_llm_provider) if agent_llm_provider else self.agent
 
-            # Signal consciousness/evolution to yield while user interaction runs
-            agent._user_active = True
             try:
                 response = await agent.process(
                     message=message,
@@ -643,7 +670,7 @@ class DpcAgentManager:
                     reply_telegram_chat_id=telegram_chat_id,
                 )
             finally:
-                agent._user_active = False
+                pass
 
             # Track agent response in monitor.
             # Always save if there's content, thinking, or streaming_raw — the UI
@@ -655,8 +682,8 @@ class DpcAgentManager:
             _has_content = response and response.strip() != _THINKING_FALLBACK
             _has_extras = _thinking or _streaming_raw
 
-            # Skip saving LLM errors to history — they pollute context for future requests
-            _is_llm_error = response and response.startswith("⚠️ LLM error:")
+            # Skip saving agent errors to history — they pollute context for future requests
+            _is_llm_error = response and response.startswith("⚠️")
 
             if (_has_content or _has_extras) and not _is_llm_error:
                 monitor.add_message(
@@ -921,8 +948,9 @@ class DpcAgentManager:
             preserve, max_sessions = self._get_history_settings()
             archive_count = monitor.reset_conversation(preserve=preserve, max_sessions=max_sessions)
             log.info(f"Reset conversation: {conversation_id} (preserve={preserve}, archives={archive_count})")
-            # Broadcast warning if archive is approaching the retention limit (≥80%)
-            if preserve and archive_count >= int(max_sessions * 0.8):
+            # Broadcast warning if archive is approaching the retention limit (≥80%).
+            # When max_sessions is 0 (unlimited), no limit to approach — skip warning.
+            if preserve and max_sessions > 0 and archive_count >= int(max_sessions * 0.8):
                 import asyncio
                 local_api = getattr(self.service, "local_api", None)
                 if local_api:
@@ -936,11 +964,14 @@ class DpcAgentManager:
         return False
 
     def _get_history_settings(self) -> tuple:
-        """Return (preserve_on_reset, max_archived_sessions) from firewall config."""
+        """Return (preserve_on_reset, max_archived_sessions) from firewall config.
+
+        max_archived_sessions: 0 = unlimited (keep all archives), >0 = cap.
+        """
         if not self.firewall:
-            return True, 40
+            return True, 0
         preserve = getattr(self.firewall, "history_preserve_on_reset", True)
-        max_sessions = getattr(self.firewall, "history_max_archived_sessions", 40)
+        max_sessions = getattr(self.firewall, "history_max_archived_sessions", 0)
         # Per-agent profile override
         if self.agent_id:
             profile = self.firewall.rules.get("agent_profiles", {}).get(self.agent_id, {})
@@ -949,7 +980,7 @@ class DpcAgentManager:
                 if "preserve_on_reset" in hist:
                     preserve = hist["preserve_on_reset"]
                 if "max_archived_sessions" in hist:
-                    max_sessions = max(1, min(200, int(hist["max_archived_sessions"])))
+                    max_sessions = max(0, int(hist["max_archived_sessions"]))
         return preserve, max_sessions
 
     def _emit_progress(
@@ -1019,16 +1050,3 @@ class DpcAgentManager:
         """Check if agent is running."""
         return self._agent is not None
 
-    def is_consciousness_running(self) -> bool:
-        """Check if background consciousness is running."""
-        return self._agent is not None and self._agent.is_consciousness_running()
-
-    def start_consciousness(self) -> None:
-        """Start background consciousness manually."""
-        if self._agent is not None:
-            self._agent.start_consciousness(emit_progress=self._emit_progress)
-
-    def stop_consciousness(self) -> None:
-        """Stop background consciousness."""
-        if self._agent is not None:
-            self._agent.stop_consciousness()

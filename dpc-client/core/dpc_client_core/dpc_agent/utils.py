@@ -387,8 +387,6 @@ class AgentRegistry:
             "task_started",
             "task_completed",
             "task_failed",
-            # Evolution
-            "evolution_cycle_completed",
             "code_modified",
             # Budget warnings
             "budget_warning",

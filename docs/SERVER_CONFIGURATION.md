@@ -129,7 +129,7 @@ Run the diagnostic tool:
 
 ```bash
 cd dpc-client/core
-poetry run python tests/test_turn.py
+uv run python tests/test_turn.py
 ```
 
 This will test connectivity to all configured servers.

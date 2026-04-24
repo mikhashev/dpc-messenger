@@ -213,10 +213,11 @@ CORE_TOOL_NAMES = {
     "chat_history",
     # Knowledge
     "knowledge_read", "knowledge_write", "knowledge_list",
+    "memory_search",
     # DPC integration
     "get_dpc_context",
     # Browser tools (safe, read-only)
-    "browse_page", "fetch_json", "extract_links", "check_url", "search_web",
+    "browse_page", "fetch_json", "check_url", "search_web",
     # Review tools (safe, analysis only)
     "self_review", "request_critique", "compare_approaches", "quality_checklist", "consensus_check",
     # Messaging tools (agent-to-user communication)
@@ -365,12 +366,17 @@ class ToolRegistry:
         entry = self._entries.get(name)
         return entry.timeout_sec if entry is not None else 120
 
-    def execute(self, name: str, args: Dict[str, Any]) -> str:
+    def execute(self, name: str, args: Dict[str, Any], ctx: Optional[ToolContext] = None) -> str:
         """
         Execute a tool by name with the given arguments.
 
         Handles both sync and async handlers. Async handlers are awaited
         using a properly managed event loop to prevent memory leaks.
+
+        Args:
+            ctx: Explicit context for this call. When provided, avoids reading
+                 the shared self._ctx — prevents race conditions when multiple
+                 loops (sleep, scheduled tasks) run concurrently.
 
         Returns:
             Tool result as string (errors prefixed with ⚠️)
@@ -380,12 +386,21 @@ class ToolRegistry:
             available = ", ".join(sorted(self._entries.keys()))
             return f"⚠️ Unknown tool: {name}. Available: {available}"
 
+        _ctx = ctx or self._ctx
+
+        _ctx_id = id(_ctx)
+        _shared_id = id(self._ctx)
+        if _ctx_id != _shared_id:
+            log.debug("Tool %s: using isolated ctx %x (shared=%x)", name, _ctx_id, _shared_id)
+        elif ctx is None:
+            log.warning("Tool %s: using shared ctx %x (no isolation — potential race)", name, _ctx_id)
+
         # Check whitelist
-        if self._ctx.tool_whitelist and name not in self._ctx.tool_whitelist:
+        if _ctx.tool_whitelist and name not in _ctx.tool_whitelist:
             return f"⚠️ Tool '{name}' is not in the allowed tools list"
 
         try:
-            result = entry.handler(self._ctx, **args)
+            result = entry.handler(_ctx, **args)
             # Handle async handlers
             if asyncio.iscoroutine(result):
                 # Run the coroutine in a properly managed event loop

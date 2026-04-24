@@ -19,6 +19,8 @@ from __future__ import annotations
 import json
 import logging
 import pathlib
+import threading
+from dataclasses import dataclass, field, asdict
 from typing import Any, Dict, List, Optional
 
 from .utils import (
@@ -27,6 +29,216 @@ from .utils import (
 )
 
 log = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# _meta.json — Access Registry (ADR-010, Component 1)
+# ---------------------------------------------------------------------------
+
+@dataclass
+class FileMeta:
+    last_accessed: str = ""
+    access_count: int = 0
+    last_verified: str = ""
+    tags: List[str] = field(default_factory=list)
+    summary: str = ""
+    source_layer: str = "L5"
+    project: str = ""
+    stale: bool = False
+
+
+def _meta_path_for(knowledge_file: pathlib.Path) -> pathlib.Path:
+    return knowledge_file.parent / "_meta.json"
+
+
+_BACKFILL_SKIP = {"_meta.json", "_index.md"}
+
+
+def backfill_meta(knowledge_dir: pathlib.Path) -> Dict[str, dict]:
+    """Scan knowledge dir and create _meta.json entries for all files."""
+    data: Dict[str, dict] = {}
+    if not knowledge_dir.is_dir():
+        return data
+    for f in sorted(knowledge_dir.iterdir()):
+        if not f.is_file() or f.name in _BACKFILL_SKIP:
+            continue
+        try:
+            content = f.read_text(encoding="utf-8", errors="replace")[:200]
+        except OSError:
+            content = ""
+        tags = [t for t in f.stem.replace("_", "-").split("-") if len(t) > 2]
+        meta = FileMeta(summary=content.strip(), tags=tags, source_layer="L5")
+        data[f.name] = asdict(meta)
+    if data:
+        write_all_meta(knowledge_dir, data)
+        log.info("Backfilled _meta.json with %d entries", len(data))
+    return data
+
+
+def read_all_meta(knowledge_dir: pathlib.Path) -> Dict[str, dict]:
+    meta_path = knowledge_dir / "_meta.json"
+    if not meta_path.exists():
+        return backfill_meta(knowledge_dir)
+    try:
+        return json.loads(meta_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        log.warning("Corrupt _meta.json, returning empty")
+        return {}
+
+
+def write_all_meta(knowledge_dir: pathlib.Path, data: Dict[str, dict]) -> None:
+    meta_path = knowledge_dir / "_meta.json"
+    meta_path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+
+
+def read_file_meta(knowledge_dir: pathlib.Path, filename: str) -> FileMeta:
+    all_meta = read_all_meta(knowledge_dir)
+    entry = all_meta.get(filename, {})
+    return FileMeta(**{k: v for k, v in entry.items() if k in FileMeta.__dataclass_fields__})
+
+
+def write_file_meta(knowledge_dir: pathlib.Path, filename: str, meta: FileMeta) -> None:
+    all_meta = read_all_meta(knowledge_dir)
+    all_meta[filename] = asdict(meta)
+    write_all_meta(knowledge_dir, all_meta)
+
+
+def update_access(knowledge_dir: pathlib.Path, filename: str) -> None:
+    meta = read_file_meta(knowledge_dir, filename)
+    meta.last_accessed = utc_now_iso()
+    meta.access_count += 1
+    write_file_meta(knowledge_dir, filename, meta)
+    try:
+        generate_smart_index(knowledge_dir)
+    except Exception:
+        pass
+
+
+def generate_smart_index(knowledge_dir: pathlib.Path) -> str:
+    """Generate _index.md with Active/Recent/Reference/Stale sections from _meta.json."""
+    from datetime import datetime, timezone
+
+    all_meta = read_all_meta(knowledge_dir)
+    if not all_meta:
+        return ""
+
+    now = datetime.now(timezone.utc)
+    active, recent, reference, stale = [], [], [], []
+
+    for fname, entry in all_meta.items():
+        ts = entry.get("last_accessed", "")
+        summary = entry.get("summary", "")[:80]
+        title = fname.replace(".md", "").replace("_", " ").replace("-", " ").title()
+        if not ts:
+            reference.append((fname, title, summary, ""))
+            continue
+        try:
+            accessed = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+            days = (now - accessed).days
+        except (ValueError, TypeError):
+            reference.append((fname, title, summary, ""))
+            continue
+        line_data = (fname, title, summary, ts)
+        if days == 0:
+            active.append(line_data)
+        elif days <= 7:
+            recent.append(line_data)
+        elif days > 30:
+            stale.append(line_data)
+        else:
+            reference.append(line_data)
+
+    lines = ["# Knowledge Index", ""]
+    for section, items, show_summary in [
+        ("Active (today)", active, True),
+        ("Recent (7 days)", recent, True),
+        ("Reference", reference, True),
+        ("Stale (30+ days)", stale, False),
+    ]:
+        if not items:
+            continue
+        lines.append(f"## {section}")
+        for fname, title, summary, ts in items:
+            if show_summary and summary:
+                lines.append(f"- **{title}** — {summary}")
+            elif not show_summary and ts:
+                try:
+                    accessed = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+                    days = (now - accessed).days
+                    lines.append(f"- {title} (stale, last: {days} days)")
+                except (ValueError, TypeError):
+                    lines.append(f"- {title}")
+            else:
+                lines.append(f"- {title}")
+        lines.append("")
+
+    content = "\n".join(lines)
+    index_path = knowledge_dir / "_index.md"
+    index_path.write_text(content, encoding="utf-8")
+    return content
+
+
+# ---------------------------------------------------------------------------
+# Embedding Provider (ADR-010, MEM-3.1)
+# ---------------------------------------------------------------------------
+
+class EmbeddingProvider:
+    """Lazy-loading embedding provider using sentence-transformers."""
+
+    def __init__(self, model_name: str = "intfloat/multilingual-e5-small",
+                 device: Optional[str] = None, max_tokens: int = 512,
+                 local_files_only: bool = False):
+        self.model_name = model_name
+        self.max_tokens = max_tokens
+        self._device = device
+        self._local_files_only = local_files_only
+        self._model = None
+        self._load_lock = threading.Lock()
+
+    @property
+    def device(self) -> str:
+        if self._device:
+            return self._device
+        try:
+            import torch
+            if torch.cuda.is_available():
+                return "cuda"
+            if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+                return "mps"
+        except ImportError:
+            pass
+        return "cpu"
+
+    def _load_model(self):
+        if self._model is not None:
+            return
+        with self._load_lock:
+            if self._model is not None:
+                return
+            from sentence_transformers import SentenceTransformer
+            kwargs = {"device": self.device}
+            if self._local_files_only:
+                kwargs["local_files_only"] = True
+            self._model = SentenceTransformer(self.model_name, **kwargs)
+            log.info("Loaded embedding model %s on %s (local_only=%s)",
+                     self.model_name, self.device, self._local_files_only)
+
+    def embed(self, text: str) -> List[float]:
+        self._load_model()
+        return self._model.encode(text, normalize_embeddings=True).tolist()
+
+    def embed_batch(self, texts: List[str]) -> List[List[float]]:
+        self._load_model()
+        return self._model.encode(texts, normalize_embeddings=True).tolist()
+
+    @property
+    def dimensions(self) -> int:
+        self._load_model()
+        return self._model.get_sentence_embedding_dimension()
+
+    def unload(self):
+        self._model = None
+        log.info("Unloaded embedding model %s", self.model_name)
 
 
 class Memory:
@@ -205,7 +417,8 @@ class Memory:
     def save_knowledge(self, topic: str, content: str) -> None:
         """Save knowledge base content for a topic."""
         write_text(self.knowledge_path(topic), content)
-        self._update_knowledge_index()
+        kb_dir = self.agent_root / "knowledge"
+        generate_smart_index(kb_dir)
 
     def list_knowledge_topics(self) -> List[str]:
         """List all knowledge base topics."""

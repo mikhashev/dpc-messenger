@@ -4,7 +4,7 @@ import os
 import base64
 import asyncio
 import logging
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any, Optional, List, Union
 
 from anthropic import AsyncAnthropic
 
@@ -82,15 +82,15 @@ class ZaiProvider(AIProvider):
 
     @staticmethod
     def _is_retryable(error: Exception) -> bool:
-        """Check if error is transient and worth retrying.
-        Z.AI error codes: 1302 (high concurrency), 1303 (high frequency),
-        1305 (rate limit), 1312 (high traffic). HTTP: 429, 502, 503."""
+        """Check if error is transient and worth retrying."""
         err_str = str(error).lower()
         return any(indicator in err_str for indicator in [
-            "429", "502", "503", "bad gateway", "service unavailable",
+            "429", "500", "502", "503",
+            "bad gateway", "service unavailable", "internal server error",
             "timed out", "timeout", "connection reset", "connection error",
             "connect() failed", "interrupted",
-            "1302", "1303", "1305", "1312", "overloaded", "rate limit",
+            "1234", "1302", "1303", "1305", "1312",
+            "overloaded", "rate limit", "internal network failure",
             "high traffic", "high concurrency", "high frequency",
         ])
 
@@ -301,7 +301,7 @@ class ZaiProvider(AIProvider):
         self,
         messages: List[Dict[str, Any]],
         tools: List[Dict[str, Any]],
-        system: str = "",
+        system: Union[str, List[Dict[str, Any]]] = "",
         on_chunk: Optional[callable] = None,
         conversation_id: Optional[str] = None,
     ) -> Dict[str, Any]:
@@ -321,6 +321,10 @@ class ZaiProvider(AIProvider):
         }
         if system:
             api_params["system"] = system
+            if isinstance(system, list):
+                logger.info("Z.AI system param: list of %d blocks (cache_control present)", len(system))
+            else:
+                logger.info("Z.AI system param: plain str (%d chars, no cache_control)", len(system))
 
         # Enable extended thinking if configured (test: Z.AI may support interleaved thinking + tools)
         if self.thinking_enabled:
@@ -370,6 +374,11 @@ class ZaiProvider(AIProvider):
                 full_text, tool_calls_raw = _extract_blocks(final_message.content)
                 usage_obj = final_message.usage
 
+            _cache_create = getattr(usage_obj, "cache_creation_input_tokens", 0) or 0
+            _cache_read = getattr(usage_obj, "cache_read_input_tokens", 0) or 0
+            logger.info("Z.AI usage: prompt=%d, completion=%d, cache_create=%d, cache_read=%d",
+                        usage_obj.input_tokens, usage_obj.output_tokens, _cache_create, _cache_read)
+
             return {
                 "content": full_text,
                 "tool_calls_raw": tool_calls_raw,
@@ -378,6 +387,8 @@ class ZaiProvider(AIProvider):
                     "prompt_tokens": usage_obj.input_tokens,
                     "completion_tokens": usage_obj.output_tokens,
                     "total_tokens": usage_obj.input_tokens + usage_obj.output_tokens,
+                    "cache_creation_input_tokens": getattr(usage_obj, "cache_creation_input_tokens", 0) or 0,
+                    "cache_read_input_tokens": getattr(usage_obj, "cache_read_input_tokens", 0) or 0,
                 },
             }
 

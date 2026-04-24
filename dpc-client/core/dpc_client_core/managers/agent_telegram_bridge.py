@@ -54,11 +54,8 @@ EVENT_EMOJIS = {
     "task_started": "▶️",
     "task_completed": "✅",
     "task_failed": "❌",
-    "thought_started": "💭",
-    "thought_completed": "🧠",
+    "sleep_state_changed": "😴",
     "tool_executed": "🔧",
-    "evolution_cycle_started": "🔄",
-    "evolution_cycle_completed": "🧬",
     "code_modified": "📝",
     "identity_updated": "👤",
     "scratchpad_updated": "📝",
@@ -167,8 +164,6 @@ class AgentTelegramBridge:
             EventType.TASK_STARTED.value,
             EventType.TASK_COMPLETED.value,
             EventType.TASK_FAILED.value,
-            # Evolution
-            EventType.EVOLUTION_CYCLE_COMPLETED.value,
             EventType.CODE_MODIFIED.value,
             # Budget warnings
             EventType.BUDGET_WARNING.value,
@@ -232,7 +227,8 @@ class AgentTelegramBridge:
             self._application.add_handler(CommandHandler("status", self._handle_status_command))
             self._application.add_handler(CommandHandler("clear", self._handle_clear_command))
             self._application.add_handler(CommandHandler("newsession", self._handle_newsession_command))
-            self._application.add_handler(CommandHandler("endsession", self._handle_endsession_command))
+            self._application.add_handler(CommandHandler("extract_knowledge", self._handle_extract_knowledge_command))
+            self._application.add_handler(CommandHandler("sleep", self._handle_sleep_command))
 
             # Add handler for inline keyboard votes on knowledge commit proposals
             self._application.add_handler(CallbackQueryHandler(self._handle_vote_callback, pattern=r"^vote:"))
@@ -313,7 +309,8 @@ Welcome\\! You can send messages to the DPC Agent\\.
 /help \\- Show available commands
 /status \\- Check agent status
 /newsession \\- Start a new session
-/endsession \\- End session and save knowledge
+/extract\\_knowledge \\- Extract knowledge from conversation
+/sleep \\- Start sleep consolidation
 
 *Usage:*
 Just send any message and the agent will process it\\.
@@ -338,7 +335,8 @@ Configure event types in `~/.dpc/config.ini` \\[dpc\\_agent\\_telegram\\] sectio
 /status \\- Check agent status
 /clear \\- Clear conversation history and start fresh
 /newsession \\- Start a new session \\(clears history\\)
-/endsession \\- End session and extract knowledge to personal context
+/extract\\_knowledge \\- Extract knowledge from conversation
+/sleep \\- Start sleep consolidation
 
 *Sending Tasks:*
 Just type a message and the agent will process it\\.
@@ -356,7 +354,8 @@ Send a voice message and it will be transcribed and processed\\.
 *Session Management:*
 • /clear — instant history reset \\(no knowledge saved\\)
 • /newsession — same as /clear
-• /endsession — extracts knowledge, shows inline approve/reject buttons
+• /extract\\_knowledge — extracts knowledge, shows inline approve/reject buttons
+• /sleep — starts sleep consolidation \\(requires empty chat\\)
 • You can approve or reject the knowledge proposal directly here
 
 *Tips:*
@@ -382,7 +381,6 @@ Send a voice message and it will be transcribed and processed\\.
                 status_lines.append(f"📊 Initialized: `{status.get('initialized', False)}`")
                 if "agent" in status:
                     agent_status = status["agent"]
-                    status_lines.append(f"🧠 Consciousness: `{agent_status.get('consciousness_running', False)}`")
                     status_lines.append(f"📋 Task Queue: `{agent_status.get('queue_enabled', False)}`")
             except Exception as e:
                 status_lines.append(f"❌ Error getting status: {escape_markdown(str(e))}")
@@ -499,8 +497,8 @@ Send a voice message and it will be transcribed and processed\\.
         ])
         return text, keyboard
 
-    async def _handle_endsession_command(self, update, context):
-        """Handle /endsession command — end session and trigger knowledge extraction."""
+    async def _handle_extract_knowledge_command(self, update, context):
+        """Handle /extract_knowledge command — trigger knowledge extraction."""
         chat_id = str(update.effective_chat.id)
 
         if chat_id not in self.allowed_chat_ids:
@@ -514,7 +512,7 @@ Send a voice message and it will be transcribed and processed\\.
             return
 
         await update.message.reply_text(
-            "🧠 *Ending Session\\.\\.\\.*\n\nAnalyzing conversation for knowledge\\.\\.\\.",
+            "🧠 *Extracting Knowledge\\.\\.\\.*\n\nAnalyzing conversation\\.\\.\\.",
             parse_mode="MarkdownV2"
         )
 
@@ -549,19 +547,50 @@ Send a voice message and it will be transcribed and processed\\.
                         ]])
 
                     await update.message.reply_text(
-                        f"✅ *Session Ended*\n\n{text}",
+                        f"✅ *Knowledge Extracted*\n\n{text}",
                         parse_mode="MarkdownV2",
                         reply_markup=keyboard,
                     )
                 else:
                     await update.message.reply_text(
-                        "✅ *Session Ended*\n\n"
+                        "✅ *Knowledge Extraction Complete*\n\n"
                         "No new knowledge found in this conversation\\.",
                         parse_mode="MarkdownV2"
                     )
             else:
                 msg = escape_markdown(result.get("message", "Unknown error"))
-                await update.message.reply_text(f"❌ Failed to end session: {msg}", parse_mode="MarkdownV2")
+                await update.message.reply_text(f"❌ Failed to extract knowledge: {msg}", parse_mode="MarkdownV2")
+        except Exception as e:
+            await update.message.reply_text(f"❌ Error: {escape_markdown(str(e)[:200])}", parse_mode="MarkdownV2")
+
+    async def _handle_sleep_command(self, update, context):
+        """Handle /sleep command — trigger sleep consolidation."""
+        chat_id = str(update.effective_chat.id)
+
+        if chat_id not in self.allowed_chat_ids:
+            return
+
+        service = getattr(self._agent_manager, 'service', None) if self._agent_manager else None
+        if not service:
+            await update.message.reply_text("⚠️ Service not available\\.", parse_mode="MarkdownV2")
+            return
+
+        agent_id = self._agent_id or self._agent_manager.agent_id
+        try:
+            result = await service.toggle_sleep(agent_id)
+            status = result.get("status", "unknown")
+            if status == "sleeping":
+                await update.message.reply_text(
+                    "😴 *Sleep Consolidation Started*\n\n"
+                    "Analyzing session archives\\.\\.\\. "
+                    "You'll get a notification when it's done\\.",
+                    parse_mode="MarkdownV2"
+                )
+            elif status == "already_sleeping":
+                await update.message.reply_text("😴 Already sleeping\\.", parse_mode="MarkdownV2")
+            else:
+                msg = escape_markdown(result.get("message", status))
+                await update.message.reply_text(f"⚠️ {msg}", parse_mode="MarkdownV2")
         except Exception as e:
             await update.message.reply_text(f"❌ Error: {escape_markdown(str(e)[:200])}", parse_mode="MarkdownV2")
 
@@ -1356,49 +1385,6 @@ Send a voice message and it will be transcribed and processed\\.
                     log.error(f"[_send_message] Failed even without Markdown: {e2}", exc_info=True)
                     raise
 
-    def _format_evolution_cycle_completed(
-        self,
-        event: AgentEvent,
-        title: str,
-        timestamp: str,
-    ) -> str:
-        """
-        Format Evolution Cycle Completed notification.
-
-        Plain style (no emojis), and lists what was actually proposed
-        instead of just showing a count.
-        """
-        data = event.data
-        proposed = data.get("changes_proposed", 0)
-        applied = data.get("changes_applied", 0)
-        files = data.get("files_modified", 0)
-        cycle_id = str(data.get("cycle_id", "?"))
-
-        lines = [
-            f"*{title}*",
-            f"`{escape_markdown(timestamp)}`",
-            f"Cycle: `{escape_markdown(cycle_id)}`",
-            f"Files modified: {files}",
-            f"Proposed: {proposed}    Applied: {applied}",
-        ]
-
-        proposals_summary = data.get("proposals_summary") or []
-        if proposals_summary:
-            lines.append("")
-            lines.append("Proposed changes:")
-            for i, p in enumerate(proposals_summary, start=1):
-                path = escape_markdown(str(p.get("path", "?")))
-                change_type = str(p.get("change_type", "")).strip()
-                desc = escape_markdown(str(p.get("description", ""))[:300])
-                head = f"{i}\\. `{path}`"
-                if change_type:
-                    head += f" \\[{escape_markdown(change_type)}\\]"
-                lines.append(head)
-                if desc:
-                    lines.append(f"   {desc}")
-
-        return "\n".join(lines)
-
     def _format_event(self, event: AgentEvent) -> str:
         """
         Format event for Telegram message.
@@ -1414,10 +1400,6 @@ Send a voice message and it will be transcribed and processed\\.
 
         # Event type as title (escape for Markdown)
         title = escape_markdown(event.type.value.replace("_", " ").title())
-
-        # Special case: Evolution Cycle Completed — no emojis, list proposals
-        if event.type == EventType.EVOLUTION_CYCLE_COMPLETED:
-            return self._format_evolution_cycle_completed(event, title, timestamp)
 
         lines = [
             f"{emoji} *{title}*",
@@ -1442,17 +1424,22 @@ Send a voice message and it will be transcribed and processed\\.
         if "tool" in data:
             lines.append(f"🔧 Tool: `{escape_markdown(str(data['tool']))}`")
 
-        # Thought events
-        if "thought_type" in data:
-            lines.append(f"💭 Thought: {escape_markdown(str(data['thought_type']))}")
-        if "thought_number" in data:
-            lines.append(f"#️⃣ Number: {data['thought_number']}")
+        # Sleep events — custom formatting
+        if event.type == EventType.SLEEP_STATE_CHANGED:
+            status = data.get("status", "unknown")
+            agent_id = data.get("agent_id", "Agent")
+            if status == "sleeping":
+                lines = [f"😴 *{escape_markdown(agent_id)} went to sleep*"]
+            elif status == "awake" and data.get("result") == "completed":
+                n = data.get("sessions_analyzed", 0)
+                lines = [f"☀️ *{escape_markdown(agent_id)} woke up* — {n} sessions analyzed"]
+            elif status == "awake" and data.get("result") == "error":
+                err = escape_markdown(str(data.get("error", "unknown"))[:200])
+                lines = [f"❌ *{escape_markdown(agent_id)} sleep error:* {err}"]
+            else:
+                lines = [f"😴 *{escape_markdown(agent_id)}* — {escape_markdown(status)}"]
+            return "\n".join(lines)
 
-        # Evolution events
-        if "cycle_id" in data:
-            lines.append(f"🔄 Cycle: `{escape_markdown(str(data['cycle_id']))}`")
-        if "cycle_number" in data:
-            lines.append(f"#️⃣ Cycle #: {data['cycle_number']}")
         if "files_modified" in data:
             lines.append(f"📄 Files: {data['files_modified']}")
         if "changes_applied" in data:
@@ -1508,7 +1495,6 @@ Send a voice message and it will be transcribed and processed\\.
 
 You will receive notifications for agent events:
 • Task completions and failures
-• Evolution cycles
 • Code modifications
 • Budget warnings
 
@@ -1552,7 +1538,7 @@ def create_telegram_bridge_callback(bridge: AgentTelegramBridge, agent_id: Optio
     Args:
         bridge: The AgentTelegramBridge instance
         agent_id: If set, only handle events whose conversation_id matches this agent.
-                  Events without a conversation_id (e.g. evolution, lifecycle) are always handled.
+                  Events without a conversation_id (e.g. lifecycle) are always handled.
 
     Returns:
         Callback function suitable for add_listener()

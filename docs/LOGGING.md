@@ -141,7 +141,7 @@ console_output = false
 
 ```bash
 export DPC_LOG_MODULE_LEVELS="dpc_client_core.webrtc_peer:DEBUG,dpc_client_core.p2p_manager:DEBUG"
-poetry run python run_service.py
+uv run python run_service.py
 ```
 
 Look for:
@@ -153,7 +153,7 @@ Look for:
 
 ```bash
 export DPC_LOG_MODULE_LEVELS="dpc_client_core.hub_client:DEBUG"
-poetry run python run_service.py
+uv run python run_service.py
 ```
 
 Look for:
@@ -165,7 +165,7 @@ Look for:
 
 ```bash
 export DPC_LOG_MODULE_LEVELS="dpc_client_core.llm_manager:DEBUG,dpc_client_core.service:DEBUG"
-poetry run python run_service.py
+uv run python run_service.py
 ```
 
 Look for:
@@ -177,7 +177,7 @@ Look for:
 
 ```bash
 export DPC_LOG_MODULE_LEVELS="dpc_protocol.protocol:DEBUG"
-poetry run python run_service.py
+uv run python run_service.py
 ```
 
 Look for:

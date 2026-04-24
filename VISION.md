@@ -61,7 +61,7 @@ The project evolved from a personal tool into a protocol — and then into somet
 
 ## Agents as Partners
 
-DPC agents have identity, memory, and the ability to evolve. They maintain a consciousness system that reflects on their own behavior. They have skills, values, and relationships. This isn't anthropomorphism. It's architecture — the architecture of a system where trust requires consistency, and partnership requires memory.
+DPC agents have identity, memory, and the ability to evolve. They maintain a sleep consolidation system that analyzes their interactions between sessions. They have skills, values, and relationships. This isn't anthropomorphism. It's architecture — the architecture of a system where trust requires consistency, and partnership requires memory.
 
 Agents work alongside humans, not above them. [Protocol 13](./protocol-13-public.md) defines how: clear roles, explicit communication, shared backlog, human decision authority. The human doesn't delegate to AI — the human participates as an equal. The cognitive load of working alongside agents is not a burden but the mechanism of growth. Both evolve.
 

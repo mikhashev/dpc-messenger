@@ -39,11 +39,11 @@ Example: tool = `search_web`; skill = "when researching a technical topic: searc
 - If improvement identified: appends a `## Lessons Learned` section to `SKILL.md`
 - Gated by firewall: `dpc_agent.skills.self_modify` must be `true`
 
-### Phase 4 — Evolution integration ✅
-- `evolution.py` now reads `_stats.json` to identify underperforming skills
+### Phase 4 — Skill reflection ✅
+- SkillReflector reads `_stats.json` to identify underperforming skills
 - Targets skills with failure_rate > 30% OR avg_rounds > 10 (minimum 3 uses)
-- Generates targeted improvement proposals instead of generic state analysis
-- Skill appends auto-approve even when `evolution.auto_apply = false`
+- Appends improvements after tasks with ≥5 LLM rounds where `execute_skill()` was used
+- Gated by firewall: `dpc_agent.skills.self_modify` must be `true`
 
 ### Phase 5 — Peer skill sharing ⏳ (future sprint)
 - P2P skill discovery via `SKILL_SEARCH` / `SKILL_DATA` DPTP messages
@@ -267,20 +267,13 @@ Configurable in the UI: Firewall Rules → DPC Agent tab → **Skills Settings**
 
 ---
 
-## Evolution Integration
+## Skill Reflection
 
-`evolution.py` now reads `_stats.json` to find underperforming skills:
+SkillReflector reads `_stats.json` to find underperforming skills:
 
 **Threshold:** failure_rate > 30% OR avg_rounds > 10, minimum 3 uses
 
-The evolution LLM prompt now includes:
-```
-Underperforming skills (candidates for improvement):
-- code-analysis: 4 failures / 10 uses (40%), avg 8.2 rounds
-  → Improve strategy in: skills/code-analysis/SKILL.md
-```
-
-Evolution proposals targeting `skills/` paths **auto-approve** even when `auto_apply = false` — skill appends are low-risk and don't require manual review.
+After tasks with ≥5 LLM rounds where `execute_skill()` was used, the reflector analyzes performance and appends improvements directly to `SKILL.md` files. Gated by `skills.self_modify = true` in firewall.
 
 ---
 
@@ -313,7 +306,7 @@ repo_list("skills/")
 repo_read("skills/pending_improvements.jsonl")
 ```
 
-The system is designed so the agent understands and participates in its own evolution — not just as a passive subject but as an active contributor via `skill-creator`.
+The system is designed so the agent actively contributes to its own skill improvement via `skill-creator` and the reflection loop.
 
 ---
 

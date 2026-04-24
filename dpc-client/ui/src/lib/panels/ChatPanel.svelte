@@ -94,6 +94,7 @@
     chatPanelHeight = $bindable(600),
     showAgentBoard = $bindable(false),
     currentInput = $bindable(''),
+    isSleeping = false,
   }: {
     activeChatId: string;
     chatHistories: Writable<Map<string, Message[]>>;
@@ -118,6 +119,7 @@
     peerDisplayNames: Map<string, string>;
     autoTranscribeEnabled: boolean;
     whisperModelLoading: boolean;
+    isSleeping?: boolean;
     groupPanelRef?: any;
     chatPanelHeight?: number;
     showAgentBoard?: boolean;
@@ -1028,7 +1030,7 @@
         isContextWindowFull ? 'Context window full - Delete text or end session to continue' :
         ($connectionStatus === 'connected' ? (pendingImage ? 'Add a caption (optional)...' : 'Type a message or paste an image... (Enter to send, Shift+Enter for new line)') : 'Connect to Core Service first...')
       }
-      disabled={$connectionStatus !== 'connected' || isLoading}
+      disabled={$connectionStatus !== 'connected' || isLoading || isSleeping}
       oninput={(e) => { groupPanelRef?.handleMentionInput(e); }}
       onkeydown={(e) => {
         if (groupPanelRef?.getMentionVisible() && (e.key === 'ArrowUp' || e.key === 'ArrowDown' || e.key === 'Tab' || e.key === 'Enter' || e.key === 'Escape')) {

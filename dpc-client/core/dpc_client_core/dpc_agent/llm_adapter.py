@@ -89,7 +89,7 @@ class DpcLlmAdapter:
 
     def _get_background_provider_alias(self) -> Optional[str]:
         """
-        Get the provider alias for background tasks (consciousness, evolution).
+        Get the provider alias for background tasks (sleep consolidation).
 
         Falls back to agent provider if no background_provider configured.
         """
@@ -152,7 +152,7 @@ class DpcLlmAdapter:
             max_tokens: Max completion tokens
             on_stream_chunk: Optional async callback for streaming: await on_stream_chunk(chunk, conversation_id)
             conversation_id: Optional conversation ID for streaming callbacks
-            background: If True, use background_provider for consciousness/evolution tasks
+            background: If True, use background_provider for sleep consolidation tasks
 
         Returns:
             (response_message, usage_dict) tuple in Ouroboros format
@@ -215,7 +215,7 @@ class DpcLlmAdapter:
                     dpc_agent_provider, messages, tools, on_stream_chunk, conversation_id
                 )
 
-        # Get the agent's provider (or background provider for consciousness/evolution)
+        # Get the agent's provider (or background provider for sleep consolidation)
         alias = self._get_background_provider_alias() if background else self._get_agent_provider_alias()
         if not alias:
             raise RuntimeError("No AI provider configured in DPC Messenger (check agent_provider or default_provider)")
@@ -899,7 +899,19 @@ class DpcLlmAdapter:
             elif role == "user":
                 parts.append(f"[USER]\n{content}")
             elif role == "assistant":
-                parts.append(f"[ASSISTANT]\n{content}")
+                tool_calls = msg.get("tool_calls") or []
+                if tool_calls:
+                    tc_lines = []
+                    for tc in tool_calls:
+                        fn = tc.get("function", {})
+                        tc_lines.append(f'```tool_call\n{{"name": "{fn.get("name", "")}", "arguments": {fn.get("arguments", "{}")}}}\n```')
+                    tc_text = "\n".join(tc_lines)
+                    if content:
+                        parts.append(f"[ASSISTANT]\n{content}\n{tc_text}")
+                    else:
+                        parts.append(f"[ASSISTANT]\n{tc_text}")
+                elif content:
+                    parts.append(f"[ASSISTANT]\n{content}")
             elif role == "tool":
                 # Include tool results
                 tool_call_id = msg.get("tool_call_id", "unknown")

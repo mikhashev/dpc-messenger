@@ -1,50 +1,50 @@
-[tool.poetry]
+[project]
 name = "dpc-hub"
 version = "0.9.2"
 description = "D-PC Federation Hub - Discovery and signaling server"
-authors = ["DPC Team"]
-license = "AGPL-3.0"
+authors = [{name = "DPC Team"}]
+license = {text = "AGPL-3.0"}
 readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.104.1",
+    "uvicorn[standard]>=0.24.0",
+    "sqlalchemy>=2.0.23",
+    "asyncpg>=0.29.0",
+    "alembic>=1.12.1",
+    "python-jose[cryptography]>=3.3.0",
+    "passlib[bcrypt]>=1.7.4",
+    "python-multipart>=0.0.6",
+    "pydantic[email]>=2.5.0",
+    "pydantic-settings>=2.1.0",
+    "authlib>=1.2.1",
+    "httpx>=0.25.1",
+    "itsdangerous>=2.1.2",
+    "slowapi>=0.1.9",
+    "cryptography>=41.0.7",
+]
 
-[tool.poetry.dependencies]
-python = "^3.11"
-fastapi = "^0.104.1"
-uvicorn = {extras = ["standard"], version = "^0.24.0"}
-sqlalchemy = "^2.0.23"
-asyncpg = "^0.29.0"
-alembic = "^1.12.1"
-python-jose = {extras = ["cryptography"], version = "^3.3.0"}
-passlib = {extras = ["bcrypt"], version = "^1.7.4"}
-python-multipart = "^0.0.6"
-pydantic = {extras = ["email"], version = "^2.5.0"}
-pydantic-settings = "^2.1.0"
-authlib = "^1.2.1"
-httpx = "^0.25.1"
-itsdangerous = "^2.1.2"
-# NEW: Rate limiting
-slowapi = "^0.1.9"
-# NEW: Cryptography for certificate validation
-cryptography = "^41.0.7"
-
-[tool.poetry.group.dev.dependencies]
-pytest = "^7.4.3"
-pytest-asyncio = "^0.21.1"
-pytest-cov = "^4.1.0"
-black = "^23.11.0"
-flake8 = "^6.1.0"
-mypy = "^1.7.1"
-isort = "^5.12.0"
-httpx = "^0.25.1"
-
-[tool.poetry.group.test.dependencies]
-pytest = "^7.4.3"
-pytest-asyncio = "^0.21.1"
-pytest-cov = "^4.1.0"
-faker = "^20.1.0"
+[dependency-groups]
+dev = [
+    "pytest>=7.4.3",
+    "pytest-asyncio>=0.21.1",
+    "pytest-cov>=4.1.0",
+    "black>=23.11.0",
+    "flake8>=6.1.0",
+    "mypy>=1.7.1",
+    "isort>=5.12.0",
+    "httpx>=0.25.1",
+]
+test = [
+    "pytest>=7.4.3",
+    "pytest-asyncio>=0.21.1",
+    "pytest-cov>=4.1.0",
+    "faker>=20.1.0",
+]
 
 [build-system]
-requires = ["poetry-core"]
-build-backend = "poetry.core.masonry.api"
+requires = ["hatchling"]
+build-backend = "hatchling.build"
 
 [tool.black]
 line-length = 100

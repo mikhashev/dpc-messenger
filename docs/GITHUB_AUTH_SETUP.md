@@ -63,7 +63,7 @@ GitHub authentication is useful for developers who prefer to authenticate with t
 
 4. Restart the Hub server:
    ```bash
-   poetry run uvicorn dpc_hub.main:app --reload
+   uv run uvicorn dpc_hub.main:app --reload
    ```
 
 5. Check the logs to confirm GitHub OAuth is registered:
@@ -183,9 +183,9 @@ export DPC_OAUTH_DEFAULT_PROVIDER=github
 
 ### Prerequisites
 
-- Hub server running (`poetry run uvicorn dpc_hub.main:app --reload`)
+- Hub server running (`uv run uvicorn dpc_hub.main:app --reload`)
 - PostgreSQL database running (`docker-compose up -d`)
-- Database migrations applied (`poetry run alembic upgrade head`)
+- Database migrations applied (`uv run alembic upgrade head`)
 
 ### Test Flow
 
@@ -210,11 +210,11 @@ http://localhost:8000/login/github
 ```bash
 # Terminal 1: Start Hub
 cd dpc-hub
-poetry run uvicorn dpc_hub.main:app --reload
+uv run uvicorn dpc_hub.main:app --reload
 
 # Terminal 2: Start Client Backend
 cd dpc-client/core
-poetry run python run_service.py
+uv run python run_service.py
 
 # Terminal 3: Start Client Frontend
 cd dpc-client/ui
@@ -537,7 +537,7 @@ Multi-device support would require Hub database schema changes to support one-to
 ## Need Help?
 
 If you encounter issues:
-1. Check Hub logs: `poetry run uvicorn dpc_hub.main:app --reload` (shows detailed errors)
+1. Check Hub logs: `uv run uvicorn dpc_hub.main:app --reload` (shows detailed errors)
 2. Verify database state: Check `users` table for entries
 3. Test with browser first: `http://localhost:8000/login/github`
 4. Enable debug mode: Set `DEBUG=true` in `.env`

@@ -7,6 +7,7 @@ import json
 import logging
 import platform
 import socket as _socket_module
+import time
 from typing import Dict, Any, Callable, Tuple, Union, Optional
 
 from cryptography import x509
@@ -107,6 +108,11 @@ class P2PManager:
 
         # DHT (Distributed Hash Table) for decentralized peer discovery
         self.dht_manager: DHTManager | None = None  # Initialized in start_server()
+
+        # Rate limiting for failed connection attempts (ARCH-26 quick win)
+        self._failed_hello_counts: Dict[str, list] = {}  # ip -> [timestamps]
+        self._rate_limit_max_failures = 10
+        self._rate_limit_window_seconds = 300  # 5 minutes
 
         # Peer cache for faster reconnection (stores last known IP/port)
         cache_file = Path.home() / ".dpc" / "peer_cache.json"
@@ -459,12 +465,35 @@ class P2PManager:
         logger.error("Failed to connect to %s - All connection methods failed", target_node_id)
         return False
 
+    def _is_rate_limited(self, ip: str) -> bool:
+        """Check if an IP has exceeded the failed HELLO rate limit."""
+        now = time.monotonic()
+        if ip not in self._failed_hello_counts:
+            return False
+        self._failed_hello_counts[ip] = [
+            t for t in self._failed_hello_counts[ip]
+            if now - t < self._rate_limit_window_seconds
+        ]
+        return len(self._failed_hello_counts[ip]) >= self._rate_limit_max_failures
+
+    def _record_failed_hello(self, ip: str):
+        """Record a failed HELLO attempt from an IP."""
+        if ip not in self._failed_hello_counts:
+            self._failed_hello_counts[ip] = []
+        self._failed_hello_counts[ip].append(time.monotonic())
+
     async def _handle_direct_connection(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
         """Handles an incoming raw TLS connection (Server-side)."""
         peer_node_id = None
         peer_addr = writer.get_extra_info('peername')
         peer_addr_str = f"{peer_addr[0]}:{peer_addr[1]}" if peer_addr else "unknown"
+        peer_ip = peer_addr[0] if peer_addr else "unknown"
         try:
+            if self._is_rate_limited(peer_ip):
+                logger.debug("Rate-limited connection from %s, closing silently", peer_ip)
+                writer.close()
+                return
+
             logger.info("Received a direct TLS connection attempt from %s", peer_addr_str)
             await asyncio.sleep(0.01)
 
@@ -558,6 +587,7 @@ class P2PManager:
             self._peer_listener_tasks[peer_node_id] = task
 
         except Exception as e:
+            self._record_failed_hello(peer_ip)
             logger.error("Error handling direct connection from %s: %s", peer_addr_str, e, exc_info=True)
             if peer_node_id and peer_node_id in self.peers:
                 await self.shutdown_peer_connection(peer_node_id)

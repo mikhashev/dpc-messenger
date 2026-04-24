@@ -102,7 +102,7 @@ class ContextFirewall:
         self.dpc_agent_enabled = dpc_agent.get('enabled', True)
         self.dpc_agent_personal_context_access = dpc_agent.get('personal_context_access', True)
         self.dpc_agent_device_context_access = dpc_agent.get('device_context_access', True)
-        self.dpc_agent_knowledge_access = dpc_agent.get('knowledge_access', 'read_only')
+        self.dpc_agent_human_knowledge_access = dpc_agent.get('human_knowledge_access', True)
 
         # All available tools with their default values.
         # True = enabled by default, False = disabled by default (security).
@@ -125,8 +125,6 @@ class ContextFirewall:
             'chat_history': True,
             'deduplicate_identity': True,
             # Knowledge
-            'knowledge_read': True,
-            'knowledge_write': False,  # Controlled by knowledge_access
             'knowledge_list': True,
             'get_task_board': True,  # Read task history + learning progress
             # Memento-Skills tools (v0.20.0+)
@@ -143,7 +141,6 @@ class ContextFirewall:
             # Web tools
             'browse_page': True,
             'fetch_json': True,
-            'extract_links': True,
             'check_url': True,
             'search_web': True,
             # Review tools (safe, analysis only)
@@ -169,16 +166,9 @@ class ContextFirewall:
             'repo_commit_push': False,  # Can push to remote
             # Restricted tools (security sensitive)
             'run_shell': False,
-            'claude_code_edit': False,
             # Task queue tools (v0.16.0+)
             'schedule_task': True,  # Safe, just scheduling
             'get_task_status': True,  # Read-only
-            # Evolution tools (v0.16.0+)
-            'pause_evolution': True,  # Control, doesn't modify files
-            'resume_evolution': True,  # Control, doesn't modify files
-            'get_evolution_stats': True,  # Read-only
-            'approve_evolution_change': False,  # Modifies files
-            'reject_evolution_change': True,  # Safe, just removes pending change
             # Messaging tools (v0.18.0+)
             'send_user_message': True,  # Agent-initiated Telegram messages
             # Task type management tools (v0.18.0+)
@@ -188,6 +178,9 @@ class ContextFirewall:
             # Session archive tools (v0.22.0+ - read-only access to own history)
             'read_session_archive': True,  # Read session summaries
             'read_session_detail': True,  # Read session messages
+            'search_session_archives': True,  # Search across session archives
+            # Memory search (ADR-010)
+            'memory_search': True,  # Hybrid BM25 + semantic search across agent knowledge
         }
 
         # Parse tool permissions from config, using defaults for missing tools
@@ -224,33 +217,18 @@ class ContextFirewall:
         self.sandbox_read_only_paths = [self._normalize_path(p) for p in self.sandbox_read_only_paths if p]
         self.sandbox_read_write_paths = [self._normalize_path(p) for p in self.sandbox_read_write_paths if p]
 
-        # Parse evolution settings (v0.17.0+)
-        evolution = dpc_agent.get('evolution', {})
-        self.evolution_enabled = evolution.get('enabled', False)
-        self.evolution_interval_minutes = evolution.get('interval_minutes', 60)
-        self.evolution_auto_apply = evolution.get('auto_apply', False)
-
-        # Parse consciousness settings (v0.23.0+)
-        consciousness = dpc_agent.get('consciousness', {})
-        self.consciousness_enabled = consciousness.get('enabled', False)
-        self.consciousness_think_interval_min = consciousness.get('think_interval_min', 60)
-        self.consciousness_think_interval_max = consciousness.get('think_interval_max', 300)
-        self.consciousness_budget_fraction = consciousness.get('budget_fraction', 0.1)
-
         # Parse history settings (v0.22.0+)
         history = dpc_agent.get('history', {})
         self.history_preserve_on_reset = history.get('preserve_on_reset', True)
-        self.history_max_archived_sessions = max(1, min(200, int(history.get('max_archived_sessions', 40))))
+        self.history_max_archived_sessions = max(0, int(history.get('max_archived_sessions', 0)))
 
-        logger.debug("DPC Agent settings updated: enabled=%s, personal=%s, device=%s, knowledge=%s, tools_count=%d, sandbox_extensions=%d, evolution=%s, consciousness=%s",
+        logger.debug("DPC Agent settings updated: enabled=%s, personal=%s, device=%s, knowledge=%s, tools_count=%d, sandbox_extensions=%d",
                      self.dpc_agent_enabled,
                      self.dpc_agent_personal_context_access,
                      self.dpc_agent_device_context_access,
-                     self.dpc_agent_knowledge_access,
+                     self.dpc_agent_human_knowledge_access,
                      len([t for t in self.dpc_agent_tools.values() if t]),
-                     len(self.sandbox_read_only_paths) + len(self.sandbox_read_write_paths),
-                     self.evolution_enabled,
-                     self.consciousness_enabled)
+                     len(self.sandbox_read_only_paths) + len(self.sandbox_read_write_paths))
 
     def _normalize_path(self, path_str: str) -> str:
         """Normalize a path string for comparison."""
@@ -267,7 +245,7 @@ class ContextFirewall:
 
         Args:
             profile_name: Agent profile key (typically agent_id), or None for global-only
-            *keys: Sequence of dict keys to traverse (e.g. 'evolution', 'enabled')
+            *keys: Sequence of dict keys to traverse (e.g. 'history', 'preserve_on_reset')
             default: Value returned when key is absent everywhere
         """
         # Try per-agent profile first
@@ -383,21 +361,11 @@ class ContextFirewall:
                 profile_name, 'device_context_access',
                 default=self.dpc_agent_device_context_access))
         elif context_type == 'knowledge':
-            ka = self._get_profile_or_global(
-                profile_name, 'knowledge_access',
-                default=self.dpc_agent_knowledge_access)
-            return ka != 'none'
+            return bool(self._get_profile_or_global(
+                profile_name, 'human_knowledge_access',
+                default=self.dpc_agent_human_knowledge_access))
 
         return False
-
-    def can_agent_write_knowledge(self, profile_name: Optional[str] = None) -> bool:
-        """Check if the agent can write to knowledge base."""
-        if not self.dpc_agent_enabled:
-            return False
-        ka = self._get_profile_or_global(
-            profile_name, 'knowledge_access',
-            default=self.dpc_agent_knowledge_access)
-        return ka == 'read_write'
 
     def get_agent_skill_permission(self, operation: str,
                                     profile_name: Optional[str] = None) -> bool:
@@ -444,10 +412,6 @@ class ContextFirewall:
         # Override: get_dpc_context requires personal_context_access
         if not self.dpc_agent_personal_context_access:
             allowed.discard('get_dpc_context')
-
-        # Override: knowledge_write requires read_write access
-        if self.dpc_agent_knowledge_access != 'read_write':
-            allowed.discard('knowledge_write')
 
         # Override: import_skill_from_agent requires accept_peer_skills
         if not self.get_agent_skill_permission('accept_peer_skills'):
@@ -518,9 +482,7 @@ class ContextFirewall:
             "capabilities": {
                 "personal_context_access": self.dpc_agent_personal_context_access,
                 "device_context_access": self.dpc_agent_device_context_access,
-                "knowledge_access": self.dpc_agent_knowledge_access,
-                "evolution_enabled": self.evolution_enabled,
-                "consciousness_enabled": self.consciousness_enabled,
+                "human_knowledge_access": self.dpc_agent_human_knowledge_access,
             },
             "archive_access": True,  # read_session_archive is a core tool, always available
         }
@@ -530,7 +492,7 @@ class ContextFirewall:
         Get allowed tools for a specific agent profile.
 
         Uses global dpc_agent tools as the baseline, then applies per-profile overrides.
-        Also enforces per-profile knowledge_access, personal_context_access, and skills
+        Also enforces per-profile human_knowledge_access, personal_context_access, and skills
         overrides (same logic as get_allowed_agent_tools() but scoped to the profile).
 
         Args:
@@ -553,15 +515,14 @@ class ContextFirewall:
         for tool_name, global_enabled in self.dpc_agent_tools.items():
             if bool(profile_tools.get(tool_name, global_enabled)):
                 allowed.add(tool_name)
+        for tool_name, enabled in profile_tools.items():
+            if not tool_name.startswith('_') and bool(enabled):
+                allowed.add(tool_name)
 
         # Per-profile overrides mirroring get_allowed_agent_tools()
         personal_access = profile.get('personal_context_access', self.dpc_agent_personal_context_access)
         if not personal_access:
             allowed.discard('get_dpc_context')
-
-        knowledge_access = profile.get('knowledge_access', self.dpc_agent_knowledge_access)
-        if knowledge_access != 'read_write':
-            allowed.discard('knowledge_write')
 
         profile_skills = profile.get('skills', {})
         accept_peer = profile_skills.get(
@@ -602,7 +563,7 @@ class ContextFirewall:
                 'enabled': True,
                 'personal_context_access': True,
                 'device_context_access': True,
-                'knowledge_access': 'read_only',
+                'human_knowledge_access': True,
                 'tools': {
                     'read_file': True,
                     'write_file': False,
@@ -613,11 +574,6 @@ class ContextFirewall:
                     'search_web': True,
                     'search_files': True,
                     'search_in_file': True,
-                },
-                'evolution': {
-                    'enabled': False,
-                    'interval_minutes': 60,
-                    'auto_apply': False,
                 },
             }
 
@@ -751,13 +707,7 @@ class ContextFirewall:
                     "enabled": True,
                     "personal_context_access": True,
                     "device_context_access": True,
-                    "knowledge_access": "read_only",
-                    "evolution": {
-                        "_comment": "Evolution settings - autonomous self-modification within sandbox",
-                        "enabled": False,
-                        "interval_minutes": 60,
-                        "auto_apply": False
-                    },
+                    "human_knowledge_access": True,
                     "tools": {
                         "_comment": "Enable/disable individual tools. True=allowed, False=blocked",
                         "read_file": True,
@@ -768,14 +718,11 @@ class ContextFirewall:
                         "update_scratchpad": True,
                         "update_identity": True,
                         "chat_history": True,
-                        "knowledge_read": True,
-                        "knowledge_write": False,
                         "knowledge_list": True,
                         "get_task_board": True,
                         "get_dpc_context": True,
                         "browse_page": True,
                         "fetch_json": True,
-                        "extract_links": True,
                         "check_url": True,
                         "search_web": True,
                         "self_review": True,
@@ -797,16 +744,9 @@ class ContextFirewall:
                         "git_snapshot": False,
                         "repo_commit_push": False,
                         "run_shell": False,
-                        "claude_code_edit": False,
                         "_comment_task": "Task queue tools - safe scheduling and status checks",
                         "schedule_task": True,
                         "get_task_status": True,
-                        "_comment_evolution": "Evolution tools - control agent self-modification",
-                        "pause_evolution": True,
-                        "resume_evolution": True,
-                        "get_evolution_stats": True,
-                        "approve_evolution_change": False,
-                        "reject_evolution_change": True,
                         "_comment_skills": "Skill and introspection tools",
                         "execute_skill": True,
                         "list_local_agents": True,
@@ -1624,10 +1564,8 @@ class ContextFirewall:
                     if 'device_context_access' in dpc_agent and not isinstance(dpc_agent['device_context_access'], bool):
                         errors.append("'dpc_agent.device_context_access' must be a boolean")
 
-                    if 'knowledge_access' in dpc_agent:
-                        valid_access = ['none', 'read_only', 'read_write']
-                        if dpc_agent['knowledge_access'] not in valid_access:
-                            errors.append(f"'dpc_agent.knowledge_access' must be one of: {valid_access}")
+                    if 'human_knowledge_access' in dpc_agent and not isinstance(dpc_agent['human_knowledge_access'], bool):
+                        errors.append("'dpc_agent.human_knowledge_access' must be a boolean")
 
                     if 'tools' in dpc_agent:
                         tools = dpc_agent['tools']
@@ -1642,12 +1580,12 @@ class ContextFirewall:
                                 # Memory/identity
                                 'update_scratchpad', 'update_identity', 'chat_history',
                                 # Knowledge
-                                'knowledge_read', 'knowledge_write', 'knowledge_list',
+                                'knowledge_list',
                                 'get_task_board',
                                 # DPC integration
                                 'get_dpc_context',
                                 # Web tools
-                                'browse_page', 'fetch_json', 'extract_links', 'check_url', 'search_web',
+                                'browse_page', 'fetch_json', 'check_url', 'search_web',
                                 # Review tools
                                 'self_review', 'request_critique', 'compare_approaches', 'quality_checklist', 'consensus_check',
                                 # Git tools
@@ -1655,12 +1593,9 @@ class ContextFirewall:
                                 'git_checkout', 'git_merge', 'git_tag', 'git_reset', 'git_snapshot',
                                 'repo_commit_push',
                                 # Restricted tools
-                                'run_shell', 'claude_code_edit',
+                                'run_shell',
                                 # Task queue tools (v0.16.0+)
                                 'schedule_task', 'get_task_status',
-                                # Evolution tools (v0.16.0+)
-                                'pause_evolution', 'resume_evolution', 'get_evolution_stats',
-                                'approve_evolution_change', 'reject_evolution_change',
                                 # Search tools (v0.16.0+)
                                 'search_files', 'search_in_file',
                                 # Extended sandbox tools (v0.16.0+ — read/write merged into read_file/write_file S31)
@@ -1678,6 +1613,8 @@ class ContextFirewall:
                                 'list_local_agents', 'list_agent_skills', 'import_skill_from_agent',
                                 # Self-introspection tools
                                 'list_my_tools', 'list_my_skills',
+                                # Memory search (ADR-010)
+                                'memory_search',
                                 # Legacy aliases (S31 migration — accepted but mapped to read_file/write_file)
                                 'repo_read', 'repo_write_commit', 'drive_read', 'drive_write',
                                 'extended_path_read', 'extended_path_write',
@@ -1686,46 +1623,9 @@ class ContextFirewall:
                                 if tool_name.startswith('_'):
                                     continue  # Skip comments
                                 if tool_name not in valid_tools:
-                                    errors.append(f"Unknown tool in dpc_agent.tools: '{tool_name}'")
+                                    logger.warning("Unknown tool in dpc_agent.tools: '%s' (ignored — may be from older config)", tool_name)
                                 if not isinstance(tool_enabled, bool):
                                     errors.append(f"'dpc_agent.tools.{tool_name}' must be a boolean")
-
-                    # Validate evolution settings (v0.17.0+)
-                    if 'evolution' in dpc_agent:
-                        evolution = dpc_agent['evolution']
-                        if not isinstance(evolution, dict):
-                            errors.append("'dpc_agent.evolution' must be a dictionary")
-                        else:
-                            if 'enabled' in evolution and not isinstance(evolution['enabled'], bool):
-                                errors.append("'dpc_agent.evolution.enabled' must be a boolean")
-                            if 'interval_minutes' in evolution:
-                                if not isinstance(evolution['interval_minutes'], int):
-                                    errors.append("'dpc_agent.evolution.interval_minutes' must be an integer")
-                                elif evolution['interval_minutes'] < 1:
-                                    errors.append("'dpc_agent.evolution.interval_minutes' must be at least 1")
-                            if 'auto_apply' in evolution and not isinstance(evolution['auto_apply'], bool):
-                                errors.append("'dpc_agent.evolution.auto_apply' must be a boolean")
-
-                    # Validate consciousness settings (v0.23.0+)
-                    if 'consciousness' in dpc_agent:
-                        consciousness = dpc_agent['consciousness']
-                        if not isinstance(consciousness, dict):
-                            errors.append("'dpc_agent.consciousness' must be a dictionary")
-                        else:
-                            if 'enabled' in consciousness and not isinstance(consciousness['enabled'], bool):
-                                errors.append("'dpc_agent.consciousness.enabled' must be a boolean")
-                            if 'think_interval_min' in consciousness:
-                                if not isinstance(consciousness['think_interval_min'], int):
-                                    errors.append("'dpc_agent.consciousness.think_interval_min' must be an integer")
-                                elif consciousness['think_interval_min'] < 10:
-                                    errors.append("'dpc_agent.consciousness.think_interval_min' must be at least 10")
-                            if 'think_interval_max' in consciousness:
-                                if not isinstance(consciousness['think_interval_max'], int):
-                                    errors.append("'dpc_agent.consciousness.think_interval_max' must be an integer")
-                            if 'budget_fraction' in consciousness:
-                                val = consciousness['budget_fraction']
-                                if not isinstance(val, (int, float)) or val <= 0 or val > 1:
-                                    errors.append("'dpc_agent.consciousness.budget_fraction' must be a number between 0 and 1")
 
                     # Validate skills settings (v0.20.0+)
                     if 'skills' in dpc_agent:
@@ -1758,10 +1658,8 @@ class ContextFirewall:
                                 errors.append(f"'agent_profiles.{profile_name}.personal_context_access' must be a boolean")
                             if 'device_context_access' in profile_config and not isinstance(profile_config['device_context_access'], bool):
                                 errors.append(f"'agent_profiles.{profile_name}.device_context_access' must be a boolean")
-                            if 'knowledge_access' in profile_config:
-                                valid_access = ['none', 'read_only', 'read_write']
-                                if profile_config['knowledge_access'] not in valid_access:
-                                    errors.append(f"'agent_profiles.{profile_name}.knowledge_access' must be one of: {valid_access}")
+                            if 'human_knowledge_access' in profile_config and not isinstance(profile_config['human_knowledge_access'], bool):
+                                errors.append(f"'agent_profiles.{profile_name}.human_knowledge_access' must be a boolean")
                             # Validate tools
                             if 'tools' in profile_config:
                                 tools = profile_config['tools']
@@ -1773,18 +1671,16 @@ class ContextFirewall:
                                         'read_file', 'write_file', 'repo_list', 'repo_delete',
                                         'drive_list',
                                         'update_scratchpad', 'update_identity', 'chat_history',
-                                        'knowledge_read', 'knowledge_write', 'knowledge_list',
+                                        'knowledge_list',
                                         'get_task_board',
                                         'get_dpc_context',
-                                        'browse_page', 'fetch_json', 'extract_links', 'check_url', 'search_web',
+                                        'browse_page', 'fetch_json', 'check_url', 'search_web',
                                         'self_review', 'request_critique', 'compare_approaches', 'quality_checklist', 'consensus_check',
                                         'git_status', 'git_diff', 'git_log', 'git_add', 'git_commit', 'git_branch', 'git_init',
                                         'git_checkout', 'git_merge', 'git_tag', 'git_reset', 'git_snapshot',
                                         'repo_commit_push',
-                                        'run_shell', 'claude_code_edit',
+                                        'run_shell',
                                         'schedule_task', 'get_task_status',
-                                        'pause_evolution', 'resume_evolution', 'get_evolution_stats',
-                                        'approve_evolution_change', 'reject_evolution_change',
                                         'search_files', 'search_in_file',
                                         'extended_path_list',
                                         'list_extended_sandbox_paths',
@@ -1797,6 +1693,8 @@ class ContextFirewall:
                                         'list_local_agents', 'list_agent_skills', 'import_skill_from_agent',
                                         # Self-introspection tools
                                         'list_my_tools', 'list_my_skills',
+                                        # Memory search (ADR-010)
+                                        'memory_search',
                                         # Legacy aliases (S31 migration)
                                         'repo_read', 'repo_write_commit', 'drive_read', 'drive_write',
                                         'extended_path_read', 'extended_path_write',
@@ -1805,7 +1703,7 @@ class ContextFirewall:
                                         if tool_name.startswith('_'):
                                             continue  # Skip comments
                                         if tool_name not in valid_tools:
-                                            errors.append(f"Unknown tool in agent_profiles.{profile_name}.tools: '{tool_name}'")
+                                            logger.warning("Unknown tool in agent_profiles.%s.tools: '%s' (ignored)", profile_name, tool_name)
                                         if not isinstance(tool_enabled, bool):
                                             errors.append(f"'agent_profiles.{profile_name}.tools.{tool_name}' must be a boolean")
 

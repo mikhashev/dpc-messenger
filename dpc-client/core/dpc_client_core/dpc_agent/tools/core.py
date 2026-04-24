@@ -191,6 +191,26 @@ def write_file(ctx: ToolContext, path: str, content: str) -> str:
         # Regenerate _index.md if writing to knowledge/ dir (sandbox only)
         if not os.path.isabs(path) and path.startswith("knowledge/") and not path.endswith("_index.md"):
             _update_knowledge_index(ctx, Path(path).stem)
+            # Incremental reindex for Active Recall (MEM-3.7)
+            try:
+                agent = getattr(ctx, '_agent', None)
+                provider = getattr(agent, '_embedding_provider', None) if agent else None
+                if provider:
+                    from ..indexing_pipeline import index_single_file
+                    from ..faiss_index import FaissIndex
+                    from ..bm25_index import BM25Index
+                    index_dir = ctx.agent_root / "state" / "memory_index"
+                    if index_dir.exists():
+                        faiss_idx = FaissIndex(index_dir)
+                        bm25_idx = BM25Index(index_dir)
+                        if faiss_idx.load():
+                            bm25_idx.load()
+                            index_single_file(file_path, provider, faiss_idx, bm25_idx, source_layer="L5")
+                            faiss_idx.save()
+                            bm25_idx.save()
+                            log.info("Incremental reindex: added %s to FAISS+BM25", file_path.name)
+            except Exception as e:
+                log.warning("Incremental reindex failed for %s: %s", path, e)
 
         return f"✓ Wrote {len(content):,} chars to {path}"
 
@@ -238,6 +258,25 @@ def repo_delete(ctx: ToolContext, path: str, recursive: bool = False) -> str:
         else:
             size = target.stat().st_size
             target.unlink()
+            # Remove from FAISS/BM25 index if knowledge file
+            if path.startswith("knowledge/") and not path.endswith("_index.md"):
+                try:
+                    from ..faiss_index import FaissIndex
+                    from ..bm25_index import BM25Index
+                    index_dir = ctx.agent_root / "state" / "memory_index"
+                    if index_dir.exists():
+                        faiss_idx = FaissIndex(index_dir)
+                        bm25_idx = BM25Index(index_dir)
+                        source_file = Path(path).name
+                        if faiss_idx.load():
+                            faiss_idx.remove_by_source(source_file)
+                            faiss_idx.save()
+                        if bm25_idx.load():
+                            bm25_idx.remove_by_source(source_file)
+                            bm25_idx.save()
+                        log.info("Removed %s from FAISS+BM25 index", source_file)
+                except Exception as e:
+                    log.warning("Index cleanup failed for %s: %s", path, e)
             return f"✓ Deleted '{path}' ({size} bytes)"
 
     except PermissionError as e:
@@ -629,79 +668,46 @@ def chat_history(ctx: ToolContext, limit: int = 0, offset: int = -1, include_int
 # Knowledge Tools
 # ---------------------------------------------------------------------------
 
-def knowledge_read(ctx: ToolContext, topic: str) -> str:
-    """
-    Read a knowledge base topic.
-
-    Args:
-        ctx: Tool context
-        topic: Topic name
-
-    Returns:
-        Topic content
-    """
+def memory_search(ctx: ToolContext, query: str, top_k: int = 5) -> str:
+    """Search across knowledge base using hybrid BM25 + semantic search (ADR-010)."""
     try:
-        topic_path = ctx.knowledge_path(topic)
+        from ..hybrid_search import reciprocal_rank_fusion, SearchResult
+        from ..bm25_index import BM25Index
+        from ..faiss_index import FaissIndex
+        from ..memory import EmbeddingProvider
+        import numpy as np
 
-        if not topic_path.exists():
-            return f"⚠️ Topic not found: {topic}"
+        knowledge_dir = ctx.agent_root / "knowledge"
+        index_dir = ctx.agent_root / "state" / "memory_index"
 
-        return topic_path.read_text(encoding="utf-8")
+        faiss_idx = FaissIndex(index_dir)
+        bm25_idx = BM25Index(index_dir)
+
+        faiss_results = []
+        if faiss_idx.load():
+            try:
+                provider = EmbeddingProvider(local_files_only=True)
+                qvec = np.array(provider.embed(query), dtype=np.float32)
+                faiss_results = faiss_idx.search(qvec, top_k)
+            except Exception as e:
+                log.warning("FAISS search failed: %s", e)
+
+        bm25_results = []
+        if bm25_idx.load():
+            bm25_results = bm25_idx.search(query, top_k)
+
+        if not faiss_results and not bm25_results:
+            return "No memory index yet. Index builds automatically at startup when memory is enabled. Try again after restart."
+
+        merged = reciprocal_rank_fusion(faiss_results, bm25_results)
+        lines = [f"Found {len(merged)} results for '{query}':\n"]
+        for i, r in enumerate(merged[:top_k]):
+            meta = r.chunk_meta
+            lines.append(f"{i+1}. [{meta.get('source_layer','L5')}] {meta.get('source_file','?')} (score: {r.score:.4f})")
+        return "\n".join(lines)
 
     except Exception as e:
-        return f"⚠️ Error reading knowledge: {e}"
-
-
-def knowledge_write(
-    ctx: ToolContext,
-    topic: str,
-    content: str,
-    commit_message: Optional[str] = None,
-) -> str:
-    """
-    Write or update a knowledge base topic with firewall check.
-
-    Args:
-        ctx: Tool context
-        topic: Topic name
-        content: Topic content (markdown)
-        commit_message: Conventional commit message for this change
-            (e.g. 'docs(knowledge): add TurboQuant complexity analysis').
-            Defaults to 'docs(knowledge): update {topic}'.
-
-    Returns:
-        Result message
-    """
-    try:
-        # Check firewall for write access
-        if ctx.dpc_service and hasattr(ctx.dpc_service, 'firewall'):
-            firewall = ctx.dpc_service.firewall
-            if not getattr(firewall, 'can_agent_write_knowledge', lambda: True)():
-                return "⚠️ Knowledge write access is disabled via firewall rules (knowledge_access must be 'read_write')"
-
-        topic_path = ctx.knowledge_path(topic)
-        topic_path.parent.mkdir(parents=True, exist_ok=True)
-
-        # Add timestamp
-        full_content = f"""# {topic.title()}
-
-Last updated: {datetime.now(timezone.utc).isoformat()}
-
-{content}
-"""
-        topic_path.write_text(full_content, encoding="utf-8")
-
-        # Update index
-        _update_knowledge_index(ctx, topic)
-
-        # Auto-commit knowledge changes (best-effort)
-        msg = commit_message or f"docs(knowledge): update {topic}"
-        auto_commit_agent_change(ctx.agent_root, msg)
-
-        return f"✓ Wrote knowledge topic '{topic}' ({len(content)} chars)"
-
-    except Exception as e:
-        return f"⚠️ Error writing knowledge: {e}"
+        return f"⚠️ Memory search error: {e}"
 
 
 def knowledge_list(ctx: ToolContext) -> str:
@@ -1217,137 +1223,6 @@ def unregister_task_type(ctx: ToolContext, task_type: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Evolution Tools
-# ---------------------------------------------------------------------------
-
-def pause_evolution(ctx: ToolContext) -> str:
-    """
-    Pause automatic evolution cycles.
-
-    Args:
-        ctx: Tool context
-
-    Returns:
-        Confirmation message
-    """
-    try:
-        if not hasattr(ctx, '_agent') or not hasattr(ctx._agent, '_evolution'):
-            return "⚠️ Evolution not enabled"
-
-        if ctx._agent._evolution:
-            ctx._agent._evolution.pause()
-            return "✓ Evolution paused"
-        return "⚠️ Evolution not running"
-
-    except Exception as e:
-        return f"⚠️ Error pausing evolution: {e}"
-
-
-def resume_evolution(ctx: ToolContext) -> str:
-    """
-    Resume automatic evolution cycles.
-
-    Args:
-        ctx: Tool context
-
-    Returns:
-        Confirmation message
-    """
-    try:
-        if not hasattr(ctx, '_agent') or not hasattr(ctx._agent, '_evolution'):
-            return "⚠️ Evolution not enabled"
-
-        if ctx._agent._evolution:
-            ctx._agent._evolution.resume()
-            return "✓ Evolution resumed"
-        return "⚠️ Evolution not initialized"
-
-    except Exception as e:
-        return f"⚠️ Error resuming evolution: {e}"
-
-
-def get_evolution_stats(ctx: ToolContext) -> str:
-    """
-    Get evolution statistics and pending changes.
-
-    Args:
-        ctx: Tool context
-
-    Returns:
-        Evolution status information
-    """
-    try:
-        if not hasattr(ctx, '_agent'):
-            return "⚠️ Agent not available"
-
-        if ctx._agent._evolution:
-            status = ctx._agent._evolution.get_status()
-            pending = ctx._agent.get_pending_evolution_changes()
-            status["pending_changes_detail"] = pending
-            return json.dumps(status, indent=2)
-
-        return json.dumps({
-            "enabled": False,
-            "message": "Evolution not enabled. Enable in config with evolution_enabled=true"
-        }, indent=2)
-
-    except Exception as e:
-        return f"⚠️ Error getting evolution stats: {e}"
-
-
-async def approve_evolution_change(ctx: ToolContext, change_id: str) -> str:
-    """
-    Approve a pending evolution change.
-
-    Args:
-        ctx: Tool context
-        change_id: ID of the change to approve
-
-    Returns:
-        Confirmation message
-    """
-    try:
-        if not hasattr(ctx, '_agent'):
-            return "⚠️ Agent not available"
-
-        if ctx._agent._evolution:
-            success = await ctx._agent.approve_evolution_change(change_id)
-            if success:
-                return f"✓ Change {change_id} approved and applied"
-            return f"⚠️ Failed to approve change {change_id} — not found or already applied"
-        return "⚠️ Evolution not enabled"
-
-    except Exception as e:
-        return f"⚠️ Error approving change: {e}"
-
-
-def reject_evolution_change(ctx: ToolContext, change_id: str) -> str:
-    """
-    Reject a pending evolution change.
-
-    Args:
-        ctx: Tool context
-        change_id: ID of the change to reject
-
-    Returns:
-        Confirmation message
-    """
-    try:
-        if not hasattr(ctx, '_agent'):
-            return "⚠️ Agent not available"
-
-        if ctx._agent._evolution:
-            success = ctx._agent.reject_evolution_change(change_id)
-            if success:
-                return f"✓ Change {change_id} rejected"
-            return f"⚠️ Change {change_id} not found"
-        return "⚠️ Evolution not enabled"
-
-    except Exception as e:
-        return f"⚠️ Error rejecting change: {e}"
-
-
-# ---------------------------------------------------------------------------
 # Extended Sandbox Tools (v0.16.0+)
 # ---------------------------------------------------------------------------
 
@@ -1516,6 +1391,7 @@ def list_extended_sandbox_paths(ctx: ToolContext) -> str:
 # Search Tools (v0.16.0+)
 # ---------------------------------------------------------------------------
 
+import os
 import re
 import subprocess
 
@@ -1543,9 +1419,10 @@ def search_files(ctx: ToolContext, pattern: str, path: str = "", max_results: in
 
     try:
         # Determine search directory
-        if path and (path.startswith("/") or path.startswith("C:") or path.startswith("~")):
+        normalized = os.path.expanduser(path) if path.startswith("~") else path
+        if normalized and os.path.isabs(normalized):
             # Absolute path - check extended sandbox
-            search_dir = ctx.validate_extended_path(path, require_write=False)
+            search_dir = ctx.validate_extended_path(normalized, require_write=False)
         else:
             # Relative path - use sandbox
             search_dir = ctx.repo_path(path) if path else ctx.agent_root
@@ -1669,9 +1546,10 @@ def search_in_file(ctx: ToolContext, pattern: str, file_path: str, context_lines
     """
     try:
         # Determine file path
-        if file_path.startswith("/") or file_path.startswith("C:") or file_path.startswith("~"):
+        normalized = os.path.expanduser(file_path) if file_path.startswith("~") else file_path
+        if os.path.isabs(normalized):
             # Absolute path - check extended sandbox
-            full_path = ctx.validate_extended_path(file_path, require_write=False)
+            full_path = ctx.validate_extended_path(normalized, require_write=False)
         else:
             # Relative path - use sandbox
             full_path = ctx.repo_path(file_path)
@@ -1975,64 +1853,7 @@ def get_tools() -> List[ToolEntry]:
             timeout_sec=10,
         ),
 
-        # Knowledge tools
-        ToolEntry(
-            name="knowledge_read",
-            schema={
-                "name": "knowledge_read",
-                "description": "Read a knowledge base topic",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "topic": {
-                            "type": "string",
-                            "description": "Topic name"
-                        }
-                    },
-                    "required": ["topic"]
-                }
-            },
-            handler=knowledge_read,
-            timeout_sec=10,
-        ),
-
-        ToolEntry(
-            name="knowledge_write",
-            schema={
-                "name": "knowledge_write",
-                "description": (
-                    "Write or update a knowledge base topic. "
-                    "Provide commit_message in Conventional Commits format to describe what you learned "
-                    "(e.g. 'docs(knowledge): add TurboQuant complexity analysis with benchmarks'). "
-                    "You own this commit message — make it meaningful."
-                ),
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "topic": {
-                            "type": "string",
-                            "description": "Topic name"
-                        },
-                        "content": {
-                            "type": "string",
-                            "description": "Topic content (markdown)"
-                        },
-                        "commit_message": {
-                            "type": "string",
-                            "description": (
-                                "Conventional Commits message for this change: type(scope): description. "
-                                "E.g. 'docs(knowledge): add TurboQuant complexity analysis'. "
-                                "Omit to use the default."
-                            )
-                        }
-                    },
-                    "required": ["topic", "content"]
-                }
-            },
-            handler=knowledge_write,
-            timeout_sec=10,
-        ),
-
+        # Knowledge tools (knowledge_read/knowledge_write removed — use read_file/write_file)
         ToolEntry(
             name="knowledge_list",
             schema={
@@ -2221,93 +2042,6 @@ def get_tools() -> List[ToolEntry]:
             timeout_sec=5,
         ),
 
-        # Evolution tools
-        ToolEntry(
-            name="pause_evolution",
-            schema={
-                "name": "pause_evolution",
-                "description": "Pause automatic evolution cycles",
-                "parameters": {
-                    "type": "object",
-                    "properties": {},
-                    "required": []
-                }
-            },
-            handler=pause_evolution,
-            timeout_sec=5,
-        ),
-
-        ToolEntry(
-            name="resume_evolution",
-            schema={
-                "name": "resume_evolution",
-                "description": "Resume automatic evolution cycles",
-                "parameters": {
-                    "type": "object",
-                    "properties": {},
-                    "required": []
-                }
-            },
-            handler=resume_evolution,
-            timeout_sec=5,
-        ),
-
-        ToolEntry(
-            name="get_evolution_stats",
-            schema={
-                "name": "get_evolution_stats",
-                "description": "Get evolution statistics and pending changes",
-                "parameters": {
-                    "type": "object",
-                    "properties": {},
-                    "required": []
-                }
-            },
-            handler=get_evolution_stats,
-            timeout_sec=10,
-        ),
-
-        ToolEntry(
-            name="approve_evolution_change",
-            schema={
-                "name": "approve_evolution_change",
-                "description": "Approve a pending evolution change",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "change_id": {
-                            "type": "string",
-                            "description": "ID of the change to approve"
-                        }
-                    },
-                    "required": ["change_id"]
-                }
-            },
-            handler=approve_evolution_change,
-            timeout_sec=10,
-            is_code_tool=True,
-        ),
-
-        ToolEntry(
-            name="reject_evolution_change",
-            schema={
-                "name": "reject_evolution_change",
-                "description": "Reject a pending evolution change",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "change_id": {
-                            "type": "string",
-                            "description": "ID of the change to reject"
-                        }
-                    },
-                    "required": ["change_id"]
-                }
-            },
-            handler=reject_evolution_change,
-            timeout_sec=10,
-        ),
-
         # Extended sandbox tools (v0.16.0+ — read/write merged into read_file/write_file in S31)
         ToolEntry(
             name="extended_path_list",
@@ -2417,4 +2151,32 @@ def get_tools() -> List[ToolEntry]:
             handler=search_in_file,
             timeout_sec=30,
         ),
+
+        # Memory search (ADR-010)
+        ToolEntry(
+            name="memory_search",
+            schema={
+                "name": "memory_search",
+                "description": "Search across knowledge base and memory using hybrid BM25 + semantic search",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "query": {
+                            "type": "string",
+                            "description": "Search query"
+                        },
+                        "top_k": {
+                            "type": "integer",
+                            "description": "Max results to return",
+                            "default": 5,
+                            "maximum": 20
+                        }
+                    },
+                    "required": ["query"]
+                }
+            },
+            handler=memory_search,
+            timeout_sec=60,
+        ),
+
     ]

@@ -4,7 +4,7 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { writable } from "svelte/store";
-  import { connectionStatus, nodeStatus, sendCommand, resetReconnection, connectToCoreService, knowledgeCommitProposal, personalContext, tokenWarning, extractionFailure, availableProviders, peerProviders, unreadMessageCounts, resetUnreadCount, setActiveChat, newSessionProposal, proposeNewSession, voteNewSession, defaultProviders, providersList, groupChats, loadGroups, listAgents, agentsList } from "$lib/coreService";
+  import { connectionStatus, nodeStatus, sendCommand, resetReconnection, connectToCoreService, knowledgeCommitProposal, personalContext, tokenWarning, extractionFailure, availableProviders, peerProviders, unreadMessageCounts, resetUnreadCount, setActiveChat, newSessionProposal, proposeNewSession, voteNewSession, defaultProviders, providersList, groupChats, loadGroups, listAgents, agentsList, sleepStateChanged } from "$lib/coreService";
   import KnowledgeCommitDialog from "$lib/components/KnowledgeCommitDialog.svelte";
   import NewSessionDialog from "$lib/components/NewSessionDialog.svelte";
   import VoteResultDialog from "$lib/components/VoteResultDialog.svelte";
@@ -207,6 +207,50 @@
   // Save markdown preference to localStorage when changed
   $effect(() => {
     localStorage.setItem('enableMarkdown', enableMarkdown.toString());
+  });
+
+  // Sleep state (ADR-014)
+  let isSleeping = $state(false);
+
+  function handleToggleSleep() {
+    isSleeping = !isSleeping;
+    sendCommand('toggle_sleep', { agent_id: activeChatId });
+  }
+
+  // Update sleep state from backend events
+  $effect(() => {
+    const state = $sleepStateChanged;
+    if (state && state.agent_id === activeChatId) {
+      isSleeping = state.status === 'sleeping';
+      if (state.status === 'awake') {
+        const cmd = sendCommand('get_conversation_history', { conversation_id: state.agent_id });
+        if (cmd && typeof cmd === 'object' && 'then' in cmd) (cmd as Promise<any>).then((result: any) => {
+          if (result?.status === 'success' && result.messages?.length > 0) {
+            chatHistories.update(map => {
+              const newMap = new Map(map);
+              const agentName = $agentsList?.find((a: any) => a.agent_id === state.agent_id)?.name || state.agent_id;
+              const msgs = result.messages.map((msg: any, index: number) => {
+                const ts = msg.timestamp ? new Date(msg.timestamp).getTime() : Date.now() - (result.messages.length - index) * 1000;
+                const stableId = msg.id || `${state.agent_id}-${ts}`;
+                const isAgent = msg.role === 'assistant' || msg.sender_name === state.agent_id;
+                return {
+                  id: stableId,
+                  sender: isAgent ? state.agent_id : 'user',
+                  senderName: msg.sender_name || (isAgent ? agentName : 'You'),
+                  text: msg.content,
+                  timestamp: ts,
+                  attachments: msg.attachments || [],
+                  thinking: msg.thinking,
+                  streamingRaw: msg.streaming_raw,
+                };
+              });
+              newMap.set(state.agent_id, msgs);
+              return newMap;
+            });
+          }
+        });
+      }
+    }
   });
 
   // Save auto-knowledge detection preference to localStorage when changed
@@ -946,8 +990,10 @@
             messageCount={$chatHistories.get(activeChatId)?.length ?? 0}
             bind:enableMarkdown
             isExtracting={isExtractingKnowledge}
+            {isSleeping}
             onNewSession={handleNewChat}
             onEndSession={handleEndSession}
+            onToggleSleep={handleToggleSleep}
           />
         {/if}
       </div>
@@ -993,6 +1039,7 @@
         {autoTranscribeEnabled}
         {whisperModelLoading}
         {groupPanelRef}
+        {isSleeping}
         bind:chatPanelHeight
         bind:showAgentBoard
         bind:currentInput

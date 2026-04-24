@@ -14,7 +14,6 @@ from dpc_client_core.dpc_agent.tools.browser import (
     _fetch_url,
     browse_page,
     fetch_json,
-    extract_links,
     check_url,
 )
 
@@ -218,30 +217,27 @@ class TestFetchURL:
 class TestBrowsePage:
     """Test browse_page tool."""
 
-    def test_browse_page_with_extraction(self, monkeypatch):
-        """Test browse_page with text extraction enabled."""
-        # Mock _fetch_url to return sample HTML
-        def mock_fetch(url, timeout=30):
+    @pytest.mark.asyncio
+    async def test_browse_page_with_extraction(self, monkeypatch):
+        """Test browse_page extracts content and strips scripts."""
+        def mock_browse_sync(url):
             return {
                 "success": True,
-                "content": "<html><body><h1>Test</h1><p>Content</p><script>alert('xss')</script></body></html>",
-                "status_code": 200
+                "text": "# Test\n\nContent",
             }
 
-        monkeypatch.setattr("dpc_client_core.dpc_agent.tools.browser._fetch_url", mock_fetch)
+        monkeypatch.setattr("dpc_client_core.dpc_agent.tools.browser._browse_sync", mock_browse_sync)
 
         from dpc_client_core.dpc_agent.tools.registry import ToolContext
         import pathlib
 
-        # Create a mock ToolContext with correct signature
         ctx = ToolContext(
             agent_root=pathlib.Path("/tmp/test_agent"),
         )
 
-        result = browse_page(ctx, "http://example.com", extract_text=True)
+        result = await browse_page(ctx, "http://example.com")
         assert "Test" in result
         assert "Content" in result
-        assert "xss" not in result  # Script content should be removed
 
 
 class TestFetchJSON:

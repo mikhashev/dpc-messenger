@@ -2,6 +2,7 @@
 
 # 0. Internal AI/team docs (not for public repo)
 CLAUDE.md
+tasks/
 docs/REFACTORING_GUIDELINES_FOR_CLAUDE_CODE.md
 archive/
 
@@ -12,6 +13,7 @@ venv/
 env/
 __pypackages__/
 node_modules/
+poetry.lock
 
 # 2. Secrets & User-Specific Configuration
 # NEVER commit sensitive information.
@@ -79,10 +81,10 @@ logs/
 .mypy_cache/
 .ruff_cache/
 
-# 10. Poetry / Pipenv / PDM Lock Files
-# We DO commit our lock files, so we ensure they are NOT ignored.
-# The '!' prefix negates a pattern.
-!poetry.lock
+# 10. uv / Lock Files
+# Lock files are platform-specific (CUDA vs CPU vs Metal) — each platform
+# generates its own via `uv sync`. pyproject.toml is the source of truth.
+uv.lock
 # !pdm.lock
 # !Pipfile.lock
 
@@ -129,3 +131,19 @@ backlog.md
 # Triple-agent collaboration rules, workflow patterns, internal references.
 # Moved from sprint-logs/ to repo root alongside backlog.md (S22, v1.9).
 protocol-13.md
+protocol-13-reference.md
+
+# 20. Security analysis (internal threat models, vulnerability tracking)
+# Contains attack surface analysis, key management gaps, persistence audit.
+# Private — not for public repo.
+security/
+
+# 21. CC bridge internal files (not for public repo)
+# Internal cron prompt contains team-specific references (Protocol 13, agent
+# name "Ark", absolute user paths). Public template lives at
+# dpc-client/core/cc_cron_prompt_public.md.
+# cc-out.md is the transient outgoing-message buffer CC writes when the bridge
+# send command needs a file (markdown with backticks — see --send-file flag in
+# cc_agent_bridge.py).
+cc_cron_prompt.md
+cc-out.md

@@ -112,11 +112,40 @@ def _build_runtime_section(
 
 
 def _build_memory_sections(memory: Memory) -> List[str]:
-    """Build scratchpad, identity, dialogue summary sections."""
+    """Build scratchpad, identity, dialogue summary, morning brief sections."""
     sections = []
 
     scratchpad_raw = memory.load_scratchpad()
     sections.append("## Scratchpad\n\n" + clip_text(scratchpad_raw, 90000))
+
+    # Morning brief injection (ADR-014 Sleep Consolidation)
+    try:
+        import json as _json
+        _conv_dir = memory.agent_root.parent.parent / "conversations" / memory.agent_root.name
+        _brief_path = _conv_dir / "morning_brief.json"
+        if _brief_path.exists():
+            _brief = _json.loads(_brief_path.read_text(encoding="utf-8"))
+            if not _brief.get("consumed", False):
+                _summary = _brief.get("summary", "")
+                _decisions = _brief.get("key_decisions", [])
+                _unresolved = _brief.get("unresolved", [])
+                _parts = ["## Morning Brief (Sleep Consolidation)\n"]
+                if _summary:
+                    _parts.append(_summary)
+                if _decisions:
+                    _parts.append("\n**Key decisions:**")
+                    for _d in _decisions[:5]:
+                        _parts.append(f"- {_d.get('decision', '')} ({_d.get('session', '')})")
+                if _unresolved:
+                    _parts.append("\n**Unresolved:**")
+                    for _u in _unresolved[:5]:
+                        _parts.append(f"- {_u.get('topic', '')}")
+                sections.append("\n".join(_parts))
+                _brief["consumed"] = True
+                _brief_path.write_text(_json.dumps(_brief, ensure_ascii=False, indent=2), encoding="utf-8")
+                log.info("Morning brief injected into agent context and marked consumed")
+    except Exception as _e:
+        log.debug("Morning brief injection skipped: %s", _e)
 
     identity_raw = memory.load_identity()
     sections.append("## Identity\n\n" + clip_text(identity_raw, 80000))
@@ -260,6 +289,7 @@ def build_llm_messages(
     all_tools: Optional[Dict[str, bool]] = None,
     sandbox_read_only: Optional[List[str]] = None,
     sandbox_read_write: Optional[List[str]] = None,
+    embedding_provider: Optional[Any] = None,
 ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
     """
     Build the full LLM message context for a task.
@@ -306,6 +336,51 @@ def build_llm_messages(
         kb_index = read_text(kb_index_path)
         if kb_index.strip():
             semi_stable_parts.append("## Knowledge base\n\n" + clip_text(kb_index, 50000))
+
+    # Active Recall hints (ADR-010, WIRE-2)
+    if conversation_history:
+        _last_user_msg = ""
+        for _h in reversed(conversation_history):
+            if _h.get("role") == "user" and _h.get("content"):
+                _last_user_msg = _h["content"]
+                break
+        if _last_user_msg:
+            try:
+                from .active_recall import get_recall_block
+                from .hybrid_search import reciprocal_rank_fusion
+                from .bm25_index import BM25Index
+                from .faiss_index import FaissIndex
+                from .memory import EmbeddingProvider
+                import numpy as _np
+
+                _index_dir = agent_root / "state" / "memory_index"
+                _faiss_idx = FaissIndex(_index_dir)
+                _bm25_idx = BM25Index(_index_dir)
+
+                _faiss_results = []
+                if _faiss_idx.load():
+                    if embedding_provider is None:
+                        embedding_provider = EmbeddingProvider(local_files_only=True)
+                    _qvec = _np.array(embedding_provider.embed(_last_user_msg), dtype=_np.float32)
+                    _faiss_results = _faiss_idx.search(_qvec, 5)
+                    log.debug("Active Recall FAISS: %d results", len(_faiss_results))
+
+                _bm25_results = []
+                if _bm25_idx.load():
+                    _bm25_results = _bm25_idx.search(_last_user_msg, 5)
+                    log.debug("Active Recall BM25: %d results", len(_bm25_results))
+
+                _results = reciprocal_rank_fusion(_faiss_results, _bm25_results)
+                _ctx_ratio = (session_state or {}).get("context_usage_percent", 0) / 100.0
+                _recall = get_recall_block(_results, context_usage_ratio=_ctx_ratio, agent_root=agent_root)
+                if _recall:
+                    log.info("Active Recall injected %d hints (mode=%s)",
+                             len(_results), "full" if _ctx_ratio < 0.5 else "hints")
+                    semi_stable_parts.append(_recall)
+                else:
+                    log.debug("Active Recall: no results matched query")
+            except Exception:
+                log.warning("Active Recall failed", exc_info=True)
 
     # Tools & capabilities (generated from firewall — transparency)
     capabilities_section = _build_capabilities_section(
@@ -479,7 +554,7 @@ You have a skill library (Memento-Skills pattern):
 - Before starting any analytical, research, code, or multi-step task — check Available Skills
 - If a skill description matches your task — load it via execute_skill() BEFORE using any other tools. This is not optional.
 - After a task with 5+ rounds, record_outcome is logged automatically. If skill was used, reflect: were there gaps in the strategy?
-- Skills track their own stats (usage, failure rate). Underperforming skills are targeted for improvement by evolution.
+- Skills track their own stats (usage, failure rate). Underperforming skills can be improved via self_modify.
 
 Available skills are listed below. Choose the one whose description best matches your task.
 
