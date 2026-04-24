@@ -243,7 +243,7 @@ class SkillStore:
         Update _stats.json with a task outcome for a skill.
 
         Called after each task that used a skill (Phase 3 write phase).
-        Stats are kept separate from SKILL.md to avoid YAML corruption during evolution.
+        Stats are kept separate from SKILL.md to avoid YAML corruption during skill updates.
         """
         stats = self.get_stats()
         entry = stats.get(skill_name, {

@@ -108,7 +108,7 @@ BUILTIN_TASK_TYPES = {
     ),
     "improvement": TaskTypeDefinition(
         task_type="improvement",
-        description="Run an evolution/improvement cycle on the agent",
+        description="Run an improvement cycle on the agent",
         execution_prompt="Run a self-improvement cycle.",
         input_schema={"type": "object"},
     ),

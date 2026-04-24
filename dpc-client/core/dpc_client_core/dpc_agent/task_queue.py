@@ -174,7 +174,7 @@ class TaskQueue:
         Schedule a new task.
 
         Args:
-            task_type: Type of task (e.g., 'chat', 'evolution', 'review')
+            task_type: Type of task (e.g., 'chat', 'review', 'reminder')
             data: Task payload
             priority: Task priority
             scheduled_at: When to execute (None = immediate)

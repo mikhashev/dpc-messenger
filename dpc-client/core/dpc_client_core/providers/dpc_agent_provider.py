@@ -20,30 +20,17 @@ class DpcAgentProvider(AIProvider):
     enabling access to:
     - 40+ tools for file operations, web search, memory management
     - Persistent identity and scratchpad memory
-    - Background consciousness (optional)
-    - Evolution: autonomous self-modification within sandbox (~/.dpc/agent/)
-      (configured in privacy_rules.json under dpc_agent.evolution)
+    - Sleep Consolidation (session retrospective analysis)
+    - Active Recall (contextual memory retrieval)
 
     Configuration example (~/.dpc/providers.json):
     {
         "alias": "dpc_agent",
         "type": "dpc_agent",
         "tools": ["repo_read", "repo_list", "web_search", "update_scratchpad"],
-        "background_consciousness": false,
         "budget_usd": 50,
         "max_rounds": 200,
         "context_window": 200000
-    }
-
-    Note: Evolution settings are configured in ~/.dpc/privacy_rules.json:
-    {
-        "dpc_agent": {
-            "evolution": {
-                "enabled": true,
-                "interval_minutes": 60,
-                "auto_apply": false
-            }
-        }
     }
     """
 
@@ -63,8 +50,6 @@ class DpcAgentProvider(AIProvider):
         self.remote_provider = config.get("remote_provider")  # Provider preference on remote peer
         self.timeout = config.get("timeout", 180)  # Timeout for remote inference (default 3 minutes)
 
-        # Note: Evolution settings are read from firewall (privacy_rules.json)
-        # not from provider config - see agent_manager.py
 
         # Set model name for token counting (uses underlying provider's model)
         self.model = "dpc_agent"  # Identifier for token counting
@@ -177,7 +162,6 @@ class DpcAgentProvider(AIProvider):
         from dpc_client_core.managers.agent_manager import DpcAgentManager
 
         # Create manager with configuration
-        # Note: Evolution settings are read from firewall (privacy_rules.json)
         self._manager = DpcAgentManager(self._service, {
             "tools": self.enabled_tools,
             "background_consciousness": self.background_consciousness,

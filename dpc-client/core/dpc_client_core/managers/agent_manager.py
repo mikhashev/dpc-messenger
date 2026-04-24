@@ -349,7 +349,7 @@ class DpcAgentManager:
         log.info("DpcAgent started successfully")
 
     def sync_firewall_settings(self) -> None:
-        """Re-read settings from firewall after UI save. No-op after evolution removal."""
+        """Re-read settings from firewall after UI save."""
         pass
 
     async def ensure_started(self) -> "DpcAgentManager":

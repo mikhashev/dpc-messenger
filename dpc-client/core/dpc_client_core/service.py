@@ -3830,7 +3830,7 @@ class CoreService:
                 logger.info("Notifying connected peers of provider changes")
                 await self._notify_peers_of_provider_changes()
 
-                # Sync agent evolution/consciousness settings without restart
+                # Sync agent settings without restart
                 try:
                     dpc_agent_provider = self.llm_manager.providers.get("dpc_agent")
                     if dpc_agent_provider and hasattr(dpc_agent_provider, '_managers'):

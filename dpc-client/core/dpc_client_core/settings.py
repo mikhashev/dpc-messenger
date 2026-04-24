@@ -264,7 +264,7 @@ class Settings:
         # See telegram_coordinator.py:_forward_to_p2p_peers() for implementation details.
 
         # DPC Agent runtime settings (security/permission settings are in privacy_rules.json)
-        # Note: enabled, tools, and evolution_* settings are configured via Firewall Rules UI
+        # Note: enabled and tools settings are configured via Firewall Rules UI
         self._config['dpc_agent'] = {
             'background_consciousness': 'false',  # Enable background thinking between tasks (optional)
             'budget_usd': '50',  # Maximum budget per task in USD
@@ -274,7 +274,7 @@ class Settings:
             'billing_model': 'subscription',  # 'subscription' or 'pay_per_use'
         }
         # NOTE: The agent is sandboxed to ~/.dpc/agent/ directory.
-        # Security settings (enabled, tools, evolution) are configured via Firewall Rules UI
+        # Security settings (enabled, tools) are configured via Firewall Rules UI
         # which writes to ~/.dpc/privacy_rules.json.
 
         # NOTE: [dpc_agent_telegram] section removed in v0.15.0 — deprecated.
@@ -969,7 +969,7 @@ class Settings:
             logger.error(f"Failed to remove last_update_id for chat {chat_id}: {e}")
 
     # DPC Agent Runtime Settings
-    # Note: Security/permission settings (enabled, tools, evolution) are in privacy_rules.json
+    # Note: Security/permission settings (enabled, tools) are in privacy_rules.json
     # Configure via Firewall Rules UI in the desktop app.
 
     def get_dpc_agent_background_consciousness(self) -> bool:
@@ -996,9 +996,6 @@ class Settings:
         """Check if task queue (background scheduling) is enabled."""
         value = self.get('dpc_agent', 'enable_task_queue', 'true')
         return value.lower() in ('true', '1', 'yes')
-
-    # Note: Evolution settings are configured via Firewall Rules UI (privacy_rules.json)
-    # See: dpc_agent.evolution in ~/.dpc/privacy_rules.json
 
     def get_dpc_agent_billing_model(self) -> str:
         """Get billing model ('subscription' or 'pay_per_use')."""
@@ -1027,7 +1024,7 @@ class Settings:
     def get_dpc_agent_telegram_event_filter(self) -> list[str]:
         """Get list of event types to forward to Telegram."""
         filter_str = self.get('dpc_agent_telegram', 'event_filter',
-                              'task_completed,task_failed,evolution_cycle_completed,code_modified,agent_message')
+                              'task_completed,task_failed,code_modified,agent_message')
         return [e.strip() for e in filter_str.split(',') if e.strip()]
 
     def get_dpc_agent_telegram_transcription_enabled(self) -> bool:
@@ -1038,7 +1035,7 @@ class Settings:
     def get_dpc_agent_config(self) -> dict:
         """Get DPC agent runtime configuration as a dict.
 
-        Note: Security/permission settings (enabled, tools, evolution) are
+        Note: Security/permission settings (enabled, tools) are
         configured via the Firewall Rules UI (privacy_rules.json), not here.
         """
         return {
@@ -1050,7 +1047,7 @@ class Settings:
             'enable_task_queue': self.get_dpc_agent_enable_task_queue(),
             'billing_model': self.get_dpc_agent_billing_model(),
             # Security settings configured via Firewall Rules UI (privacy_rules.json):
-            # - enabled, tools, evolution_enabled, evolution_interval_minutes, evolution_auto_apply
+            # - enabled, tools
         }
 
     def get_dpc_agent_telegram_config(self) -> dict:

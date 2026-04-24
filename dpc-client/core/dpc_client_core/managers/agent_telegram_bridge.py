@@ -57,8 +57,6 @@ EVENT_EMOJIS = {
     "thought_started": "💭",
     "thought_completed": "🧠",
     "tool_executed": "🔧",
-    "evolution_cycle_started": "🔄",
-    "evolution_cycle_completed": "🧬",
     "code_modified": "📝",
     "identity_updated": "👤",
     "scratchpad_updated": "📝",
@@ -167,8 +165,6 @@ class AgentTelegramBridge:
             EventType.TASK_STARTED.value,
             EventType.TASK_COMPLETED.value,
             EventType.TASK_FAILED.value,
-            # Evolution
-            EventType.EVOLUTION_CYCLE_COMPLETED.value,
             EventType.CODE_MODIFIED.value,
             # Budget warnings
             EventType.BUDGET_WARNING.value,
@@ -1356,49 +1352,6 @@ Send a voice message and it will be transcribed and processed\\.
                     log.error(f"[_send_message] Failed even without Markdown: {e2}", exc_info=True)
                     raise
 
-    def _format_evolution_cycle_completed(
-        self,
-        event: AgentEvent,
-        title: str,
-        timestamp: str,
-    ) -> str:
-        """
-        Format Evolution Cycle Completed notification.
-
-        Plain style (no emojis), and lists what was actually proposed
-        instead of just showing a count.
-        """
-        data = event.data
-        proposed = data.get("changes_proposed", 0)
-        applied = data.get("changes_applied", 0)
-        files = data.get("files_modified", 0)
-        cycle_id = str(data.get("cycle_id", "?"))
-
-        lines = [
-            f"*{title}*",
-            f"`{escape_markdown(timestamp)}`",
-            f"Cycle: `{escape_markdown(cycle_id)}`",
-            f"Files modified: {files}",
-            f"Proposed: {proposed}    Applied: {applied}",
-        ]
-
-        proposals_summary = data.get("proposals_summary") or []
-        if proposals_summary:
-            lines.append("")
-            lines.append("Proposed changes:")
-            for i, p in enumerate(proposals_summary, start=1):
-                path = escape_markdown(str(p.get("path", "?")))
-                change_type = str(p.get("change_type", "")).strip()
-                desc = escape_markdown(str(p.get("description", ""))[:300])
-                head = f"{i}\\. `{path}`"
-                if change_type:
-                    head += f" \\[{escape_markdown(change_type)}\\]"
-                lines.append(head)
-                if desc:
-                    lines.append(f"   {desc}")
-
-        return "\n".join(lines)
-
     def _format_event(self, event: AgentEvent) -> str:
         """
         Format event for Telegram message.
@@ -1414,10 +1367,6 @@ Send a voice message and it will be transcribed and processed\\.
 
         # Event type as title (escape for Markdown)
         title = escape_markdown(event.type.value.replace("_", " ").title())
-
-        # Special case: Evolution Cycle Completed — no emojis, list proposals
-        if event.type == EventType.EVOLUTION_CYCLE_COMPLETED:
-            return self._format_evolution_cycle_completed(event, title, timestamp)
 
         lines = [
             f"{emoji} *{title}*",
@@ -1448,7 +1397,6 @@ Send a voice message and it will be transcribed and processed\\.
         if "thought_number" in data:
             lines.append(f"#️⃣ Number: {data['thought_number']}")
 
-        # Evolution events
         if "cycle_id" in data:
             lines.append(f"🔄 Cycle: `{escape_markdown(str(data['cycle_id']))}`")
         if "cycle_number" in data:
@@ -1508,7 +1456,6 @@ Send a voice message and it will be transcribed and processed\\.
 
 You will receive notifications for agent events:
 • Task completions and failures
-• Evolution cycles
 • Code modifications
 • Budget warnings
 
@@ -1552,7 +1499,7 @@ def create_telegram_bridge_callback(bridge: AgentTelegramBridge, agent_id: Optio
     Args:
         bridge: The AgentTelegramBridge instance
         agent_id: If set, only handle events whose conversation_id matches this agent.
-                  Events without a conversation_id (e.g. evolution, lifecycle) are always handled.
+                  Events without a conversation_id (e.g. lifecycle) are always handled.
 
     Returns:
         Callback function suitable for add_listener()

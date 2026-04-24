@@ -554,7 +554,7 @@ You have a skill library (Memento-Skills pattern):
 - Before starting any analytical, research, code, or multi-step task — check Available Skills
 - If a skill description matches your task — load it via execute_skill() BEFORE using any other tools. This is not optional.
 - After a task with 5+ rounds, record_outcome is logged automatically. If skill was used, reflect: were there gaps in the strategy?
-- Skills track their own stats (usage, failure rate). Underperforming skills are targeted for improvement by evolution.
+- Skills track their own stats (usage, failure rate). Underperforming skills can be improved via self_modify.
 
 Available skills are listed below. Choose the one whose description best matches your task.
 
