@@ -318,30 +318,6 @@ class DpcAgent:
         # Store last usage for session state access by agent_manager
         self._last_usage = usage
 
-        # Phase 4: Decision extraction (MEM-4.2) — async, non-blocking
-        trigger_events = trace.get("trigger_events", [])
-        if trigger_events:
-            from .decision_proposals import extract_decisions
-            # Use memory_provider if configured, else fall back to agent provider
-            extraction_llm = self.llm
-            from .memory_config import get_memory_config
-            mem_cfg = get_memory_config(
-                json.loads((self.agent_root / "config.json").read_text(encoding="utf-8"))
-                if (self.agent_root / "config.json").exists() else {}
-            )
-            if mem_cfg.memory_provider:
-                extraction_llm = DpcLlmAdapter(
-                    self.llm._llm_manager,
-                    provider_alias=mem_cfg.memory_provider,
-                )
-            asyncio.ensure_future(extract_decisions(
-                llm=extraction_llm,
-                conversation_messages=messages,
-                trigger_events=trigger_events,
-                agent_root=self.agent_root,
-                session_id=conversation_id or "",
-            ))
-
         # Phase 3: Skill Write phase — record outcomes, optionally reflect
         used_skills = self.skill_reflector.record_outcome(trace, usage)
         if used_skills and usage.get("rounds", 0) >= REFLECTION_ROUNDS_THRESHOLD:

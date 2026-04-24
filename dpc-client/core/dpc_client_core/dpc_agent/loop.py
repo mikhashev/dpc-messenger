@@ -471,7 +471,6 @@ async def run_llm_loop(
     llm_trace: Dict[str, Any] = {
         "assistant_notes": [],
         "tool_calls": [],
-        "trigger_events": [],
     }
     accumulated_usage: Dict[str, Any] = {
         "prompt_tokens": 0,        # cumulative across all rounds (for cost/billing)
@@ -498,16 +497,6 @@ async def run_llm_loop(
     hooks.register(ResearchLimitGuard())
     hooks.register(LoopGuard())
     hooks.register(BudgetLimitGuard(budget_remaining_usd=budget_remaining_usd))
-
-    extraction_observer = None
-    try:
-        from .memory_observer import ExtractionObserver
-        extraction_observer = ExtractionObserver()
-        hooks.register(extraction_observer)
-        # Share reference so trigger_events accumulate into llm_trace automatically
-        llm_trace["trigger_events"] = extraction_observer.trigger_events
-    except ImportError:
-        pass
 
     ctx = HookContext(
         agent_id="",

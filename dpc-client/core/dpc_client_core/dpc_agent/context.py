@@ -382,23 +382,6 @@ def build_llm_messages(
             except Exception:
                 log.warning("Active Recall failed", exc_info=True)
 
-    # Proposal review trigger (ADR-013 MEM-4.3)
-    try:
-        from .decision_proposals import load_proposals, MAX_PROPOSALS_PER_SESSION
-        _proposals_path = agent_root / "state" / "decision_proposals.jsonl"
-        if _proposals_path.exists():
-            _drafts = sum(1 for p in load_proposals(_proposals_path) if p.status == "DRAFT")
-            if _drafts >= MAX_PROPOSALS_PER_SESSION:
-                semi_stable_parts.append(
-                    f"\n--- PENDING REVIEW ---\n"
-                    f"You have {_drafts} DRAFT proposals awaiting review. "
-                    f"Use list_proposals to see them, then review_proposal to approve or reject each batch. "
-                    f"New extractions are blocked until DRAFTs are reviewed.\n"
-                    f"--- END PENDING REVIEW ---\n"
-                )
-    except Exception:
-        pass
-
     # Tools & capabilities (generated from firewall — transparency)
     capabilities_section = _build_capabilities_section(
         agent_root, allowed_tools, all_tools, sandbox_read_only, sandbox_read_write,
