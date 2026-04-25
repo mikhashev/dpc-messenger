@@ -1433,6 +1433,26 @@ Send a voice message and it will be transcribed and processed\\.
             elif status == "awake" and data.get("result") == "completed":
                 n = data.get("sessions_analyzed", 0)
                 lines = [f"☀️ *{escape_markdown(agent_id)} woke up* — {n} sessions analyzed"]
+                brief = data.get("morning_brief", {})
+                if brief:
+                    summary = brief.get("summary", "")
+                    if summary:
+                        lines.append("")
+                        lines.append(escape_markdown(summary))
+                    decisions = brief.get("key_decisions", [])
+                    if decisions:
+                        lines.append("")
+                        lines.append("*Key decisions:*")
+                        for d in decisions[:5]:
+                            text = d.get("decision", d) if isinstance(d, dict) else d
+                            lines.append(f"• {escape_markdown(str(text))}")
+                    unresolved = brief.get("unresolved", [])
+                    if unresolved:
+                        lines.append("")
+                        lines.append("*Unresolved:*")
+                        for u in unresolved[:5]:
+                            text = u.get("topic", u) if isinstance(u, dict) else u
+                            lines.append(f"• {escape_markdown(str(text))}")
             elif status == "awake" and data.get("result") == "error":
                 err = escape_markdown(str(data.get("error", "unknown"))[:200])
                 lines = [f"❌ *{escape_markdown(agent_id)} sleep error:* {err}"]

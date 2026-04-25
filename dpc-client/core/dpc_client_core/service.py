@@ -7670,7 +7670,7 @@ class CoreService:
                         brief["consumed"] = True
                         brief_path = Path.home() / ".dpc" / "conversations" / agent_id / "morning_brief.json"
                         brief_path.write_text(json.dumps(brief, ensure_ascii=False, indent=2), encoding="utf-8")
-                    done_data = {"agent_id": agent_id, "status": "awake", "result": "completed", "sessions_analyzed": result.get("sessions_analyzed", 0)}
+                    done_data = {"agent_id": agent_id, "status": "awake", "result": "completed", "sessions_analyzed": result.get("sessions_analyzed", 0), "morning_brief": brief}
                     await self.local_api.broadcast_event("sleep_state_changed", done_data)
                     await self._emit_sleep_event(agent_id, done_data)
                 else:
