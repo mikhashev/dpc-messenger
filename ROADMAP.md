@@ -1,6 +1,6 @@
 # D-PC Messenger Development Roadmap
 
-> **Status:** Alpha | **Last Updated:** April 2026 | **Current Version:** 0.22.0 | **Current Phase:** Phase 2 - Agent Evolution (Track 1 focus, Track 2 deferred)
+> **Status:** Alpha | **Last Updated:** April 2026 | **Current Version:** 0.22.0 | **Current Phase:** Phase 2 - Agent Maturity (Track 1 mostly complete, Track 2 planned)
 
 ---
 
@@ -10,7 +10,7 @@ D-PC Messenger development:
 
 1. **Phase 1: Federated MVP - COMPLETE (v0.8.0)** - Proven P2P messaging with AI collaboration
 2. **Phase 1.5: Extended Features - COMPLETE (v0.9.0 - v0.18.0)** - File transfer, voice, agent, resilient infrastructure
-3. **Phase 2: Team Collaboration + Agent Evolution - IN PROGRESS** - Small teams, embedded AI agent, group chat
+3. **Phase 2: Team Collaboration + Agent Evolution** - Track 1 (Agent Maturity) mostly complete, Track 2 (Team Collaboration) planned
 4. **Where This Leads** - Autonomous agents, network effects, local-first sovereignty
 
 ---
@@ -64,7 +64,7 @@ These features were developed organically as the product matured, significantly 
 
 | Feature | Version | Status | Description |
 |---------|---------|--------|-------------|
-| **Embedded AI Agent** | v0.18.0 | Complete | 40+ tools, sleep consolidation, evolution system |
+| **Embedded AI Agent** | v0.18.0 | Complete | 40+ tools, sleep consolidation, persistent memory |
 | **Agent Telegram Bridge** | v0.18.0 | Complete | Two-way messaging, voice transcription, event notifications |
 | **Reasoning Models** | v0.18.0 | Complete | DeepSeek R1, Claude Extended Thinking, OpenAI o1/o3 |
 | **Real-time Streaming** | v0.18.0 | Complete | Token-by-token AI response display |
@@ -73,48 +73,49 @@ These features were developed organically as the product matured, significantly 
 
 ---
 
-## Phase 2: Team Collaboration + Agent Evolution - IN PROGRESS
+## Phase 2: Team Collaboration + Agent Evolution
 
-**Status:** Agent evolution active, team features planned
+**Status:** Track 1 (Agent Maturity) mostly complete, Track 2 (Team Collaboration) planned
 **Timeline:** Q1-Q3 2026
 **Scope:** Small teams (2-20 members + AIs), embedded agent system
 
-### What's Done
+### Track 1: Agent Maturity
 
-| # | Feature | Version | Status | Description |
-|---|---------|---------|--------|-------------|
-| 1 | **Group Chat** | v0.19.0 | Complete | Multi-participant chat with text, files, voice, screenshots, transcription, knowledge commits, session management |
-| 2 | **DPC Agent** | v0.18.0 | Complete | Embedded autonomous AI with 40+ tools (now 59), persistent memory, task queue |
-| 3 | **Sleep Consolidation** | v0.20.0 | Complete | On-demand session analysis, morning brief, per-session findings |
-| 4 | **Agent Evolution** | v0.20.0 | Complete | Periodic self-improvement proposals (identity, skills, knowledge) |
-| 5 | **Agent Skills** | v0.20.0 | Complete | 10 skills (code-analysis, memory-hygiene, web-research, etc.), skill reflection |
-| 6 | **Agent Progress Board** | v0.20.0 | Complete | UI for evolution proposals, sleep state, task history |
-| 7 | **Protocol 13** | v0.21.0 | Complete | Human-AI team coordination protocol (Mike=approve, CC=execute, Ark=review) |
-| 8 | **Agent Telegram Bridge** | v0.18.0 | Complete | Two-way messaging with agent via Telegram |
-| 9 | **External Agent Bridge** | v0.20.0 | Complete | External AI integration pattern (CC ↔ DPC via cc_agent_bridge.py, cron monitoring, Protocol 13 coordination) |
+North Star: Sleep consolidates session learnings → Memory system enables recall → Skills improve through structured rewrite.
 
-### What's Next
+| Feature | Status | Description |
+|---------|--------|-------------|
+| **Hooks/Middleware** | **DONE** (S47) | HookRegistry + Event Bus in loop.py |
+| **Selection Layer (ADR-013)** | **DONE** (S58-S59) | Data collection, dedup, decay, rejection feedback |
+| **Sleep Consolidation (ADR-014)** | **VERIFIED** (S66) | Per-session archive analysis, morning brief pipeline, Telegram notifications |
+| **Active Recall** | **DONE** (ADR-010) | FAISS+BM25 hybrid search, budget-aware context injection |
+| **Extended Paths Indexing** | **DONE** (S59-S60) | Per-path opt-in, bulk embedding, excluded dirs, UI checkboxes |
+| **Decision Proposals Pipeline** | **DONE** (S57-S59) | Extraction triggers, JSONL storage, review_proposal + list_proposals tools |
+| **Morning Brief Pipeline** | **DONE** (S66-S69) | Startup posting, consumed tracking, UI reload on wakeup, Telegram delivery |
+| **Context Window Guard** | **DONE** (S69) | Blocks LLM call at 95% context, user-visible error |
+| **Agent Web Pipeline (ADR-016)** | **DONE** (S67) | ddgs multi-engine search + trafilatura extraction + Camoufox JS fallback |
+| **Per-Agent Permission Profiles** | **DONE** (S55-S60) | Inheritance model, per-agent firewall, UI panel |
+| **Agent Storage Isolation** | **DONE** | Per-conversation folders, per-agent managers |
+| **Agent Telegram Commands** | **DONE** (S69) | /sleep, /extract_knowledge, sleep notifications |
+| **Memory Upgrade (ADR-010)** | **PARTIAL** | Phase 1-3 DONE+WIRED (14/19 tasks). Phase 4 wiring incomplete |
+| **Skill Rewrite** | NOT STARTED | Break append-only limit. A/B testing with auto-rollback |
+| ~~Agent Evolution (ADR-015)~~ | REMOVED (S68) | Code deleted (-1723 lines). Replaced by Sleep + co-evolution |
+| ~~Consciousness~~ | REMOVED (S65-S68) | Background worker deleted. Extended thinking IS consciousness |
 
-Two parallel tracks. Agent Maturity is research-backed (9 independent sources converge). Team Collaboration builds on agent infrastructure.
+**Completed infrastructure and maintenance items:**
+- **Poetry → uv migration (ADR-011)** — 3 packages migrated, -6705 lines (S51)
+- **Device-Aware Deps (ADR-012)** — CUDA torch via platform markers, cross-platform (S51, S69-S70)
+- **Rate Limiting + Security (ARCH-26)** — security/ folder, THREAT-MODEL.md (S58)
+- **Protocol 13** (v1.12) — Human-AI team coordination (Mike=approve, CC=execute, Ark=review)
+- **External Agent Bridge** — CC ↔ DPC via cc_agent_bridge.py, cron monitoring, P13 coordination
+- **Group Chat** (v0.19.0) — Multi-participant with files, voice, knowledge commits
+- **Agent Skills** — 10 static SKILL.md files. Reflection removed (S68). Rewrite planned (Track 1)
+- **Agent Progress Board** — Sleep state works. Evolution panel needs rework (shows removed system data)
 
-#### Track 1: Agent Maturity (~1,990 lines)
+**Dependencies:** Phases 0-1 DONE → unblocked all. Memory + Skills independent. (Phases 2-3 removed per ADR-015/ADR-014)
+**Research basis:** See `ideas/cc-mike-research/README.md`.
 
-North Star: Sleep analyzes → Evolution proposes → Verification measures → Cycle repeats with real learning. Phase 0 (Hooks) unlocks the cycle.
-
-| Phase | Feature | Scope | Priority | Status | Description |
-|-------|---------|-------|----------|--------|-------------|
-| **0** | **Hooks/Middleware** | ~510 lines | ENABLER | **DONE** (S47) | HookRegistry + Event Bus in loop.py. 6 commits, 21 tests pass |
-| **0.5** | **Selection Layer (ADR-013)** | ~200 lines | HIGH | **DONE** (S58-S59) | S1-S9 data collection, dedup, decay, rejection feedback, robustness |
-| **1** | **Sleep Consolidation** | ~460 lines | HIGH | **VERIFIED** (S66) | On-demand session digests, morning brief pipeline. Supersedes P1 Consciousness |
-| **2** | ~~Evolution Verification~~ | — | — | **REMOVED** (ADR-015, S68) | Evolution system removed entirely. Code deleted in CLEAN-3 (`c033150`, -1723 lines) |
-| **3** | ~~Sleep Consolidation~~ | — | — | **DONE** (S66) | Merged into P1 above. Old L1/L2/L3 levels superseded by per-session pipeline |
-| **4** | **Memory Upgrade** | ~240 lines | MEDIUM | **PARTIAL** (ADR-010) | Phase 1-3 DONE+WIRED (14/19 tasks). Phase 4 wiring incomplete |
-| **5** | **Skill Rewrite** | ~260 lines | MEDIUM | NOT STARTED | Break append-only limit. A/B testing for skill rewrites with auto-rollback |
-
-**Dependencies:** Phase 0 DONE → unblocked all. Phase 1 VERIFIED. Phase 2 REMOVED (ADR-015). Phases 4+5 independent.
-**Research basis:** See `ideas/cc-mike-research/README.md` (consolidated from 9 sources) and `ideas/cc-mike-research/enumerated-strolling-seahorse.md` (detailed implementation plan).
-
-#### Track 2: Team Collaboration
+### Track 2: Team Collaboration
 
 External Agent Bridge (CC) validates that non-embedded AI can participate as a full team member — foundation for multi-AI teams. Current implementation is cron-based polling; future direction: webhook or event-driven.
 
@@ -128,9 +129,9 @@ External Agent Bridge (CC) validates that non-embedded AI can participate as a f
 | 6 | **Team AI Assistants** | Medium | AI queries with `team_id`, access to collective team knowledge |
 | 7 | **Team Compute Pools** | Medium | Auto-discovery, load balancing, "Team Compute" panel |
 | 8 | **DPC Agent Team Integration** | Medium | Agent tasks across team context, multi-peer coordination |
-| 9 | **Shared Knowledge Search** | Medium | P2P FAISS+BM25 query between trusted peers — stateless pull model reusing shared inference pattern. 2 DPTP message types, firewall-filtered results, E2E encrypted. Research: `ideas/dpc-research/p2p-knowledge-discovery/` |
+| 9 | **Shared Knowledge Search** | Medium | P2P knowledge query between trusted peers — stateless pull model reusing shared inference pattern. ADR-017 accepted, research complete. See `ideas/dpc-research/p2p-knowledge-discovery/` |
 
-**Cross-track dependencies:** Agent Isolation → A2A → Teams. Phase 0-2 → Team AI Assistants. Memory Upgrade → Team Knowledge Repo. Memory Upgrade (ADR-010 FAISS) → Shared Knowledge Search.
+**Cross-track dependencies:** Agent Isolation → Agent-to-Agent (A2A) → Teams. Memory Upgrade → Team Knowledge Repo. Memory Upgrade (ADR-010 FAISS) → Shared Knowledge Search.
 
 #### Smaller Improvements (not in tracks)
 
@@ -138,15 +139,13 @@ External Agent Bridge (CC) validates that non-embedded AI can participate as a f
 - **Schedule System** — daily autonomous Ark sessions with autonomy rules
 - **Agent Starter Pack** — skills bundle for open source first-run experience
 - **Tool registry ↔ Firewall sync** — legacy knowledge tools removed (S55), remaining: invisible/unclassified tools audit (ARCH-1 partial)
-- **Agent Web Pipeline (TOOL-1)** — ADR-016 accepted + implemented (S67): ddgs multi-engine search + trafilatura markdown extraction + Camoufox JS rendering. All 3 stages complete. 6 commits, runtime verified
 
 ### Success Metrics
 
 **Operational Metrics:**
 - All 6 connection tiers tested and operational
-- Agent sleep cycle stats (briefs per week, coverage)
-- Evolution proposal success rate (applied vs regressed)
-- Knowledge commits per session (extraction + voting pipeline)
+- Sleep consolidation coverage (sessions analyzed, brief quality)
+- Knowledge commits per session (manual extraction + voting pipeline, ADR-009)
 - P2P mesh stability over 24h (2+ nodes)
 - DHT lookup success rate >95% (peer discovery without Hub)
 
