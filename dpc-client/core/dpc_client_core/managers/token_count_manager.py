@@ -68,6 +68,11 @@ class TokenCountManager:
         "phi": "microsoft/phi-2",
     }
 
+    # Cache tokenizers by HF model name so different Ollama models that share
+    # the same underlying tokenizer (e.g. qwen3:4b and qwen3.5:9b both use
+    # Qwen/Qwen2.5-7B) load only once.
+    _hf_tokenizer_cache: dict = {}
+
     def __init__(self):
         """Initialize TokenCountManager.
 
@@ -213,28 +218,43 @@ class TokenCountManager:
         Returns:
             Tokenizer object or None if unavailable
         """
-        # Check cache first
+        # Check per-model cache first
         if model in self._tokenizer_cache:
             return self._tokenizer_cache[model]
 
         try:
             from transformers import AutoTokenizer
 
-            # Extract model family from "llama3.1:8b" -> "llama3.1"
             model_family = model.split(":")[0].lower()
 
-            # Find matching tokenizer
             for family, hf_model in self.OLLAMA_TOKENIZER_MAP.items():
                 if model_family.startswith(family):
-                    # Try local cache first — avoids 23s+ DNS retry loop when
-                    # huggingface.co is unreachable (blocks the asyncio event loop).
-                    # Falls back to network download only on a genuine cache miss.
+                    # Reuse already-loaded tokenizer for the same HF model
+                    if hf_model in self._hf_tokenizer_cache:
+                        tokenizer = self._hf_tokenizer_cache[hf_model]
+                        self._tokenizer_cache[model] = tokenizer
+                        logger.info("Reusing cached tokenizer for %s: %s", model, hf_model)
+                        return tokenizer
+
+                    # Try local cache only — never do a network download on
+                    # the event loop.  from_pretrained() is synchronous and
+                    # blocks the entire asyncio loop (Telegram, WebSocket,
+                    # P2P) until the HTTP request completes or times out.
                     try:
                         logger.info("Loading tokenizer for %s: %s (local cache)", model, hf_model)
                         tokenizer = AutoTokenizer.from_pretrained(hf_model, local_files_only=True)
                     except Exception:
-                        logger.info("Loading tokenizer for %s: %s (downloading)", model, hf_model)
-                        tokenizer = AutoTokenizer.from_pretrained(hf_model)
+                        logger.warning(
+                            "Tokenizer %s not in local cache — falling back to "
+                            "character estimation for %s. Run "
+                            "'python -c \"from transformers import AutoTokenizer; "
+                            "AutoTokenizer.from_pretrained(\\'%s\\')\"' "
+                            "to download it.",
+                            hf_model, model, hf_model,
+                        )
+                        return None
+
+                    self._hf_tokenizer_cache[hf_model] = tokenizer
                     self._tokenizer_cache[model] = tokenizer
                     return tokenizer
 
