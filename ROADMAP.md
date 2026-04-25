@@ -106,12 +106,12 @@ North Star: Sleep analyzes → Evolution proposes → Verification measures → 
 | **0** | **Hooks/Middleware** | ~510 lines | ENABLER | **DONE** (S47) | HookRegistry + Event Bus in loop.py. 6 commits, 21 tests pass |
 | **0.5** | **Selection Layer (ADR-013)** | ~200 lines | HIGH | **DONE** (S58-S59) | S1-S9 data collection, dedup, decay, rejection feedback, robustness |
 | **1** | **Sleep Consolidation** | ~460 lines | HIGH | **VERIFIED** (S66) | On-demand session digests, morning brief pipeline. Supersedes P1 Consciousness |
-| **2** | **Evolution Verification** | ~280 lines | CRITICAL | **PARTIAL** (S61) | Outcome tracking + rolling metrics (2A+2B). Remaining: rollback, metric gating |
+| **2** | ~~Evolution Verification~~ | — | — | **REMOVED** (ADR-015, S68) | Evolution system removed entirely. Code deleted in CLEAN-3 (`c033150`, -1723 lines) |
 | **3** | ~~Sleep Consolidation~~ | — | — | **DONE** (S66) | Merged into P1 above. Old L1/L2/L3 levels superseded by per-session pipeline |
 | **4** | **Memory Upgrade** | ~240 lines | MEDIUM | **PARTIAL** (ADR-010) | Phase 1-3 DONE+WIRED (14/19 tasks). Phase 4 wiring incomplete |
 | **5** | **Skill Rewrite** | ~260 lines | MEDIUM | NOT STARTED | Break append-only limit. A/B testing for skill rewrites with auto-rollback |
 
-**Dependencies:** Phase 0 DONE → unblocked all. Phases 1+2 in progress (parallel). Phase 3 needs 1+2 completion. Phases 4+5 parallel after Phase 3.
+**Dependencies:** Phase 0 DONE → unblocked all. Phase 1 VERIFIED. Phase 2 REMOVED (ADR-015). Phases 4+5 independent.
 **Research basis:** See `ideas/cc-mike-research/README.md` (consolidated from 9 sources) and `ideas/cc-mike-research/enumerated-strolling-seahorse.md` (detailed implementation plan).
 
 #### Track 2: Team Collaboration
@@ -128,8 +128,9 @@ External Agent Bridge (CC) validates that non-embedded AI can participate as a f
 | 6 | **Team AI Assistants** | Medium | AI queries with `team_id`, access to collective team knowledge |
 | 7 | **Team Compute Pools** | Medium | Auto-discovery, load balancing, "Team Compute" panel |
 | 8 | **DPC Agent Team Integration** | Medium | Agent tasks across team context, multi-peer coordination |
+| 9 | **Shared Knowledge Search** | Medium | P2P FAISS+BM25 query between trusted peers — stateless pull model reusing shared inference pattern. 2 DPTP message types, firewall-filtered results, E2E encrypted. Research: `ideas/dpc-research/p2p-knowledge-discovery/` |
 
-**Cross-track dependencies:** Agent Isolation → A2A → Teams. Phase 0-2 → Team AI Assistants. Memory Upgrade → Team Knowledge Repo.
+**Cross-track dependencies:** Agent Isolation → A2A → Teams. Phase 0-2 → Team AI Assistants. Memory Upgrade → Team Knowledge Repo. Memory Upgrade (ADR-010 FAISS) → Shared Knowledge Search.
 
 #### Smaller Improvements (not in tracks)
 
@@ -160,6 +161,8 @@ From triggered to proactive. Sleep consolidation, scheduled sessions, self-impro
 
 ### 2. Network Effects
 From 1:1 to team networks to ecosystem. Agent Isolation → A2A → Teams → Open Source starter packs. Skills sharing and inference sharing already work. Hub becomes optional bootstrap, not architecture center. Any two nodes can connect directly via `dpc://` URI exchange — no server required.
+
+**P2P Knowledge Discovery (researched S71):** Trust-routed multi-hop discovery through overlapping Dunbar circles. Each node indexes knowledge locally (FAISS+BM25), queries peers via stateless P2P search (same pattern as shared inference). Firewall controls visibility per Dunbar tier. At planetary scale (8B nodes), ~6 hops reach entire network via small-world property. Research: [`ideas/dpc-research/p2p-knowledge-discovery/`](ideas/dpc-research/p2p-knowledge-discovery/)
 
 ### 3. Local-First Sovereignty
 All LLMs run locally (Ollama, llama.cpp, etc). P2P network = mutual aid (share compute with peers), not dependency. Works fully offline. Your data never leaves your machine. Knowledge and skills portable across agents.
