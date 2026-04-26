@@ -225,7 +225,6 @@ class AgentTelegramBridge:
             self._application.add_handler(CommandHandler("start", self._handle_start_command))
             self._application.add_handler(CommandHandler("help", self._handle_help_command))
             self._application.add_handler(CommandHandler("status", self._handle_status_command))
-            self._application.add_handler(CommandHandler("clear", self._handle_clear_command))
             self._application.add_handler(CommandHandler("newsession", self._handle_newsession_command))
             self._application.add_handler(CommandHandler("extract_knowledge", self._handle_extract_knowledge_command))
             self._application.add_handler(CommandHandler("sleep", self._handle_sleep_command))
@@ -308,7 +307,7 @@ Welcome\\! You can send messages to the DPC Agent\\.
 *Commands:*
 /help \\- Show available commands
 /status \\- Check agent status
-/newsession \\- Start a new session
+/newsession \\- Start fresh conversation \\(current history archived\\)
 /extract\\_knowledge \\- Extract knowledge from conversation
 /sleep \\- Start sleep consolidation
 
@@ -333,8 +332,7 @@ Configure event types in `~/.dpc/config.ini` \\[dpc\\_agent\\_telegram\\] sectio
 /start \\- Initialize bot
 /help \\- Show this help
 /status \\- Check agent status
-/clear \\- Clear conversation history and start fresh
-/newsession \\- Start a new session \\(clears history\\)
+/newsession \\- Start fresh conversation \\(current history archived\\)
 /extract\\_knowledge \\- Extract knowledge from conversation
 /sleep \\- Start sleep consolidation
 
@@ -352,8 +350,7 @@ You can also send voice messages for transcription\\.
 Send a voice message and it will be transcribed and processed\\.
 
 *Session Management:*
-• /clear — instant history reset \\(no knowledge saved\\)
-• /newsession — same as /clear
+• /newsession — start fresh conversation \\(current history archived\\)
 • /extract\\_knowledge — extracts knowledge, shows inline approve/reject buttons
 • /sleep — starts sleep consolidation \\(requires empty chat\\)
 • You can approve or reject the knowledge proposal directly here
@@ -393,35 +390,6 @@ Send a voice message and it will be transcribed and processed\\.
 
         await update.message.reply_text("\n".join(status_lines), parse_mode="MarkdownV2")
 
-    async def _handle_clear_command(self, update, context):
-        """Handle /clear command - reset conversation context."""
-        chat_id = str(update.effective_chat.id)
-
-        if chat_id not in self.allowed_chat_ids:
-            return
-
-        conversation_id = self._agent_id if self._unified_conversation and self._agent_id else f"telegram-{chat_id}"
-
-        # Reset the conversation monitor
-        if self._agent_manager:
-            success = self._agent_manager.reset_conversation(conversation_id)
-            if success:
-                await update.message.reply_text(
-                    "✅ *Conversation Cleared*\n\n"
-                    "Context and history have been reset\\. "
-                    "You can start a fresh conversation now\\.",
-                    parse_mode="MarkdownV2"
-                )
-            else:
-                await update.message.reply_text(
-                    "ℹ️ *No Conversation Found*\n\n"
-                    "No existing conversation to clear\\. "
-                    "Start chatting with the agent first\\.",
-                    parse_mode="MarkdownV2"
-                )
-        else:
-            await update.message.reply_text("⚠️ Agent manager not available\\.")
-
     async def _handle_newsession_command(self, update, context):
         """Handle /newsession command — clear history and start a fresh session."""
         chat_id = str(update.effective_chat.id)
@@ -441,7 +409,7 @@ Send a voice message and it will be transcribed and processed\\.
             if result.get("status") == "success":
                 await update.message.reply_text(
                     "🔄 *New Session Started*\n\n"
-                    "Conversation history has been cleared\\. "
+                    "Current history archived\\. "
                     "Start fresh\\!",
                     parse_mode="MarkdownV2"
                 )
@@ -864,7 +832,7 @@ Send a voice message and it will be transcribed and processed\\.
                 await update.message.reply_text(
                     "⚠️ *Context Limit Reached*\n\n"
                     "The conversation has reached its token limit\\.\n\n"
-                    "Use `/clear` to start a fresh conversation\\.",
+                    "Use `/newsession` to start a fresh conversation\\.",
                     parse_mode="MarkdownV2"
                 )
             else:
