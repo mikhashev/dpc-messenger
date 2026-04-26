@@ -363,19 +363,26 @@ def build_llm_messages(
                         embedding_provider = EmbeddingProvider(local_files_only=True)
                     _qvec = _np.array(embedding_provider.embed(_last_user_msg), dtype=_np.float32)
                     _faiss_results = _faiss_idx.search(_qvec, 5)
-                    log.debug("Active Recall FAISS: %d results", len(_faiss_results))
+                    log.debug("Active Recall FAISS: %d results — %s", len(_faiss_results),
+                              [m.get("source_file", "?") for m, _ in _faiss_results])
 
                 _bm25_results = []
                 if _bm25_idx.load():
                     _bm25_results = _bm25_idx.search(_last_user_msg, 5)
-                    log.debug("Active Recall BM25: %d results", len(_bm25_results))
+                    log.debug("Active Recall BM25: %d results — %s", len(_bm25_results),
+                              [m.get("source_file", "?") for m, _ in _bm25_results])
 
                 _results = reciprocal_rank_fusion(_faiss_results, _bm25_results)
                 _ctx_ratio = (session_state or {}).get("context_usage_percent", 0) / 100.0
                 _recall = get_recall_block(_results, context_usage_ratio=_ctx_ratio, agent_root=agent_root)
                 if _recall:
-                    log.info("Active Recall injected %d hints (mode=%s)",
-                             len(_results), "full" if _ctx_ratio < 0.5 else "hints")
+                    _mode = "full" if _ctx_ratio < 0.5 else "hints"
+                    _summary = ", ".join(
+                        f"{r.chunk_meta.get('source_file', '?')}({r.score:.2f})"
+                        for r in _results
+                    )
+                    log.info("Active Recall injected %d hints (mode=%s): %s",
+                             len(_results), _mode, _summary)
                     semi_stable_parts.append(_recall)
                 else:
                     log.debug("Active Recall: no results matched query")
