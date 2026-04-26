@@ -7610,6 +7610,19 @@ class CoreService:
         summary = brief.get("summary", "")
         if summary:
             parts.append(summary)
+        last = brief.get("last_session")
+        if last:
+            parts.append("\n**Where we left off:**")
+            for item in last.get("what_was_done", [])[:5]:
+                parts.append(f"- {item}")
+            stopped = last.get("where_stopped", "")
+            if stopped:
+                parts.append(f"\n*Stopped:* {stopped}")
+            pending = last.get("pending_items", [])
+            if pending:
+                parts.append("\n**Pending:**")
+                for p in pending[:5]:
+                    parts.append(f"- {p}")
         decisions = brief.get("key_decisions", [])
         if decisions:
             parts.append("\n**Key decisions:**")

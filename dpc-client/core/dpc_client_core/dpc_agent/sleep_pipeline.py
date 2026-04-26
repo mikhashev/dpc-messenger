@@ -58,6 +58,12 @@ Respond with ONLY a JSON object with two keys:
 "morning_brief": {{
   "sessions_analyzed": {n},
   "period": "{period}",
+  "last_session": {{
+    "date": "...",
+    "what_was_done": ["item 1", "item 2"],
+    "where_stopped": "What was in progress when the session ended",
+    "pending_items": ["carryover task 1", "carryover task 2"]
+  }},
   "key_decisions": [{{"decision": "...", "session": "...", "rationale": "..."}}],
   "patterns_noticed": [{{"pattern": "...", "evidence": "..."}}],
   "unresolved": [{{"topic": "...", "context": "..."}}],
@@ -71,6 +77,9 @@ Respond with ONLY a JSON object with two keys:
 }}
 
 Guidelines:
+- **last_session**: Extract from the MOST RECENT session only. List concrete \
+carryover items — tasks mentioned but not completed, decisions deferred, \
+things explicitly "pending" or "carryover".
 - Focus on CROSS-SESSION patterns: what changed, what reversed, what repeated.
 - Be factual. If sessions were unproductive, say so.
 - Language: match the language of the sessions.

@@ -1407,6 +1407,21 @@ Send a voice message and it will be transcribed and processed\\.
                     if summary:
                         lines.append("")
                         lines.append(escape_markdown(summary))
+                    last = brief.get("last_session")
+                    if last:
+                        lines.append("")
+                        lines.append("*Where we left off:*")
+                        for item in last.get("what_was_done", [])[:5]:
+                            lines.append(f"• {escape_markdown(str(item))}")
+                        stopped = last.get("where_stopped", "")
+                        if stopped:
+                            lines.append(f"_Stopped:_ {escape_markdown(stopped)}")
+                        pending = last.get("pending_items", [])
+                        if pending:
+                            lines.append("")
+                            lines.append("*Pending:*")
+                            for p in pending[:5]:
+                                lines.append(f"• {escape_markdown(str(p))}")
                     decisions = brief.get("key_decisions", [])
                     if decisions:
                         lines.append("")
