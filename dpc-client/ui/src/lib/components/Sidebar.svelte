@@ -798,26 +798,32 @@
     <div class="telegram-link-dialog" role="dialog" aria-modal="true" aria-labelledby="model-config-title">
       <div class="dialog-header">
         <h3 id="model-config-title">Agent Models Configuration</h3>
-        <button type="button" class="dialog-close-btn" onclick={() => showModelConfigPopup = false}>&times;</button>
+        <button type="button" class="dialog-close-btn" onclick={() => showModelConfigPopup = false} aria-label="Close dialog">&times;</button>
       </div>
-      <div class="dialog-body">
-        <div class="form-group">
-          <label for="main-llm">Agent Main LLM</label>
-          <select id="main-llm" bind:value={modelConfigProviderAlias}>
-            {#each modelConfigProvidersList as p}
-              <option value={p.alias}>{p.alias} ({p.model})</option>
-            {/each}
-          </select>
+      <div class="dialog-content">
+        <div class="existing-link-info">
+          <p class="dialog-info">
+            Configure LLM providers for this agent. Each agent can use a different model for chat and sleep consolidation.
+          </p>
         </div>
-        <div class="form-group">
-          <label for="sleep-llm">Sleep feature LLM</label>
-          <select id="sleep-llm" bind:value={modelConfigSleepProvider}>
-            <option value="">Default (global)</option>
-            {#each modelConfigProvidersList as p}
-              <option value={p.alias}>{p.alias} ({p.model})</option>
-            {/each}
-          </select>
-        </div>
+        <hr class="dialog-divider">
+
+        <label for="main-llm" class="dialog-label">Agent Main LLM:</label>
+        <select id="main-llm" class="dialog-input" bind:value={modelConfigProviderAlias}>
+          {#each modelConfigProvidersList as p}
+            <option value={p.alias}>{p.alias} ({p.model})</option>
+          {/each}
+        </select>
+        <p class="dialog-hint">Primary language model used for agent conversations.</p>
+
+        <label for="sleep-llm" class="dialog-label">Sleep feature LLM:</label>
+        <select id="sleep-llm" class="dialog-input" bind:value={modelConfigSleepProvider}>
+          <option value="">Default (global)</option>
+          {#each modelConfigProvidersList as p}
+            <option value={p.alias}>{p.alias} ({p.model})</option>
+          {/each}
+        </select>
+        <p class="dialog-hint">Model used for sleep consolidation analysis. "Default" uses the global provider.</p>
       </div>
       <div class="dialog-actions">
         <button type="button" class="btn-cancel" onclick={() => showModelConfigPopup = false}>Cancel</button>
