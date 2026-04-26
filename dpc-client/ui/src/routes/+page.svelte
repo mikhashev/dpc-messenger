@@ -851,6 +851,8 @@
       onDeleteAgent={handleDeleteAgent}
       onLinkAgentTelegram={handleLinkAgentTelegram}
       onUnlinkAgentTelegram={handleUnlinkAgentTelegram}
+      onGetAgentModelConfig={async (agentId) => await sendCommand('get_agent_model_config', { agent_id: agentId })}
+      onSaveAgentModelConfig={async (agentId, config) => { await sendCommand('save_agent_model_config', { agent_id: agentId, ...config }); listAgents(); }}
     />
 
 

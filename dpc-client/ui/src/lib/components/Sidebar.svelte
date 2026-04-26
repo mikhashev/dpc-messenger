@@ -7,6 +7,14 @@
   let linkingAgentId = $state('');
   let linkErrorMessage = $state('');
 
+  // State for Agent Model Config popup
+  let showModelConfigPopup = $state(false);
+  let modelConfigAgentId = $state('');
+  let modelConfigProviderAlias = $state('');
+  let modelConfigSleepProvider = $state('');
+  let modelConfigProvidersList = $state<{alias: string, model: string, type: string}[]>([]);
+  let modelConfigSaving = $state(false);
+
   // All available agent event types (mirrors EVENT_EMOJIS in agent_telegram_bridge.py)
   const ALL_EVENT_TYPES: { key: string; label: string }[] = [
     { key: 'task_started',              label: 'Task Started' },
@@ -140,6 +148,36 @@
     linkingAgentId = '';
   }
 
+  // Handle model config badge click
+  async function handleModelConfig(agentId: string) {
+    modelConfigAgentId = agentId;
+    modelConfigSaving = false;
+    try {
+      const result = await onGetAgentModelConfig(agentId);
+      modelConfigProviderAlias = result.provider_alias || '';
+      modelConfigSleepProvider = result.sleep_provider_alias || '';
+      modelConfigProvidersList = result.providers || [];
+      showModelConfigPopup = true;
+    } catch (error) {
+      console.error('Failed to load agent model config:', error);
+    }
+  }
+
+  async function saveModelConfig() {
+    modelConfigSaving = true;
+    try {
+      await onSaveAgentModelConfig(modelConfigAgentId, {
+        provider_alias: modelConfigProviderAlias,
+        sleep_provider_alias: modelConfigSleepProvider || null,
+      });
+      showModelConfigPopup = false;
+    } catch (error) {
+      console.error('Failed to save agent model config:', error);
+    } finally {
+      modelConfigSaving = false;
+    }
+  }
+
   // Type definitions
   type NodeStatus = {
     node_id: string;
@@ -225,6 +263,8 @@
     onDeleteAgent,
     onLinkAgentTelegram,
     onUnlinkAgentTelegram,
+    onGetAgentModelConfig,
+    onSaveAgentModelConfig,
   }: {
     connectionStatus: string;
     nodeStatus: NodeStatus | null;
@@ -269,6 +309,8 @@
       unified_conversation?: boolean;
     }) => Promise<void>;
     onUnlinkAgentTelegram?: (agentId: string) => Promise<void>;
+    onGetAgentModelConfig: (agentId: string) => Promise<any>;
+    onSaveAgentModelConfig: (agentId: string, config: { provider_alias: string; sleep_provider_alias: string | null }) => Promise<void>;
   } = $props();
 </script>
 
@@ -575,7 +617,14 @@
                 title="{agent.name} (Profile: {agent.profile_name}, LLM: {agent.provider_alias})"
               >
                 <span class="agent-name">{agent.name}</span>
-                <span class="agent-provider">{agent.provider_alias}</span>
+                <span
+                  role="button"
+                  tabindex="0"
+                  class="agent-provider"
+                  title="Click to configure models"
+                  onclick={(e) => { e.stopPropagation(); handleModelConfig(agent.agent_id); }}
+                  onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.stopPropagation(); handleModelConfig(agent.agent_id); } }}
+                >{agent.provider_alias}</span>
                 {#if agent.telegram_enabled}
                   <span
                     role="button"
@@ -744,6 +793,42 @@
 </div>
 
 <!-- Telegram Link Dialog -->
+{#if showModelConfigPopup}
+  <div class="telegram-link-dialog-overlay" role="presentation" onkeydown={(e) => e.key === 'Escape' && (showModelConfigPopup = false)}>
+    <div class="telegram-link-dialog" role="dialog" aria-modal="true" aria-labelledby="model-config-title">
+      <div class="dialog-header">
+        <h3 id="model-config-title">Model Configuration</h3>
+        <button type="button" class="dialog-close-btn" onclick={() => showModelConfigPopup = false}>&times;</button>
+      </div>
+      <div class="dialog-body">
+        <div class="form-group">
+          <label for="main-llm">Main LLM</label>
+          <select id="main-llm" bind:value={modelConfigProviderAlias}>
+            {#each modelConfigProvidersList as p}
+              <option value={p.alias}>{p.alias} ({p.model})</option>
+            {/each}
+          </select>
+        </div>
+        <div class="form-group">
+          <label for="sleep-llm">Sleep LLM</label>
+          <select id="sleep-llm" bind:value={modelConfigSleepProvider}>
+            <option value="">Default (global)</option>
+            {#each modelConfigProvidersList as p}
+              <option value={p.alias}>{p.alias} ({p.model})</option>
+            {/each}
+          </select>
+        </div>
+      </div>
+      <div class="dialog-actions">
+        <button type="button" class="btn-cancel" onclick={() => showModelConfigPopup = false}>Cancel</button>
+        <button type="button" class="btn-save" onclick={saveModelConfig} disabled={modelConfigSaving}>
+          {modelConfigSaving ? 'Saving...' : 'Save'}
+        </button>
+      </div>
+    </div>
+  </div>
+{/if}
+
 {#if showTelegramLinkDialog}
   <div class="telegram-link-dialog-overlay" role="presentation" onkeydown={(e) => e.key === 'Escape' && cancelTelegramLink()}>
     <div class="telegram-link-dialog" role="dialog" aria-modal="true" aria-labelledby="telegram-dialog-title">
@@ -1325,6 +1410,13 @@
     padding: 0.1rem 0.3rem;
     border-radius: 3px;
     margin-left: 0.25rem;
+    cursor: pointer;
+    transition: background 0.2s;
+  }
+
+  .agent-button .agent-provider:hover {
+    background: #45475a;
+    color: #cdd6f4;
   }
 
   .no-peers {

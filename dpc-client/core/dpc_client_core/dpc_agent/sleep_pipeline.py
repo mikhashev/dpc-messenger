@@ -168,7 +168,8 @@ def _parse_llm_json(response: str) -> Dict[str, Any]:
 
 
 async def _analyze_single_session(
-    digest: Dict, conversation_dir: Path, llm_manager
+    digest: Dict, conversation_dir: Path, llm_manager,
+    provider_alias: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
     archive_file = digest.get("archive_file", "")
     archive = _load_archive(conversation_dir, archive_file) if archive_file else None
@@ -186,14 +187,17 @@ async def _analyze_single_session(
         messages=messages_text,
     )
 
-    response = await llm_manager.query(prompt)
+    response = await llm_manager.query(prompt, provider_alias=provider_alias)
     finding = _parse_llm_json(response)
     finding["archive_file"] = archive_file
     finding["digest_date"] = digest.get("date", "")
     return finding
 
 
-async def run_sleep(conversation_dir: Path, llm_manager, agent_id: str = "", force: bool = False) -> Dict[str, Any]:
+async def run_sleep(
+    conversation_dir: Path, llm_manager, agent_id: str = "",
+    force: bool = False, provider_alias: Optional[str] = None,
+) -> Dict[str, Any]:
     state = _read_sleep_state(conversation_dir)
     if state.get("status") == "sleeping":
         return {"status": "already_sleeping"}
@@ -220,7 +224,7 @@ async def run_sleep(conversation_dir: Path, llm_manager, agent_id: str = "", for
         for i, digest in enumerate(digests):
             log.info("Sleep: analyzing session %d/%d (%s)", i + 1, len(digests), digest.get("archive_file", ""))
             try:
-                finding = await _analyze_single_session(digest, conversation_dir, llm_manager)
+                finding = await _analyze_single_session(digest, conversation_dir, llm_manager, provider_alias=provider_alias)
                 if finding:
                     per_session_findings.append(finding)
                     result_path = results_dir / f"session_{i}.json"
@@ -247,7 +251,7 @@ async def run_sleep(conversation_dir: Path, llm_manager, agent_id: str = "", for
             findings=findings_text,
         )
 
-        response = await llm_manager.query(synthesis_prompt)
+        response = await llm_manager.query(synthesis_prompt, provider_alias=provider_alias)
         result = _parse_llm_json(response)
 
         morning_brief = result.get("morning_brief", {})
