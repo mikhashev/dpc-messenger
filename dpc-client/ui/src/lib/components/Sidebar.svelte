@@ -797,12 +797,12 @@
   <div class="telegram-link-dialog-overlay" role="presentation" onkeydown={(e) => e.key === 'Escape' && (showModelConfigPopup = false)}>
     <div class="telegram-link-dialog" role="dialog" aria-modal="true" aria-labelledby="model-config-title">
       <div class="dialog-header">
-        <h3 id="model-config-title">Model Configuration</h3>
+        <h3 id="model-config-title">Agent Models Configuration</h3>
         <button type="button" class="dialog-close-btn" onclick={() => showModelConfigPopup = false}>&times;</button>
       </div>
       <div class="dialog-body">
         <div class="form-group">
-          <label for="main-llm">Main LLM</label>
+          <label for="main-llm">Agent Main LLM</label>
           <select id="main-llm" bind:value={modelConfigProviderAlias}>
             {#each modelConfigProvidersList as p}
               <option value={p.alias}>{p.alias} ({p.model})</option>
@@ -810,7 +810,7 @@
           </select>
         </div>
         <div class="form-group">
-          <label for="sleep-llm">Sleep LLM</label>
+          <label for="sleep-llm">Sleep feature LLM</label>
           <select id="sleep-llm" bind:value={modelConfigSleepProvider}>
             <option value="">Default (global)</option>
             {#each modelConfigProvidersList as p}
