@@ -49,10 +49,14 @@ def reciprocal_rank_fusion(
         scores[key] = scores.get(key, 0) + weight / (k + rank + 1)
 
     ranked = sorted(scores.items(), key=lambda x: x[1], reverse=True)
-    return [
-        SearchResult(chunk_meta=meta_map[key], score=score, source="hybrid")
-        for key, score in ranked
-    ]
+    seen_files: set = set()
+    deduped: List[SearchResult] = []
+    for key, score in ranked:
+        fname = meta_map[key].get("source_file", "")
+        if fname not in seen_files:
+            seen_files.add(fname)
+            deduped.append(SearchResult(chunk_meta=meta_map[key], score=score, source="hybrid"))
+    return deduped
 
 
 def _chunk_key(meta: dict) -> str:

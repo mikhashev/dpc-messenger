@@ -103,9 +103,13 @@ class BM25Index:
             k=min(top_k, len(self._chunk_metas)),
         )
         out = []
+        seen_files: set = set()
         for idx, score in zip(results[0], scores[0]):
             if 0 <= idx < len(self._chunk_metas) and score > 0:
-                out.append((self._chunk_metas[idx], float(score)))
+                fname = self._chunk_metas[idx].get("source_file", "")
+                if fname not in seen_files:
+                    seen_files.add(fname)
+                    out.append((self._chunk_metas[idx], float(score)))
         return out
 
     def remove_by_source(self, source_file: str) -> int:

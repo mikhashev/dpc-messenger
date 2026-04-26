@@ -62,9 +62,13 @@ class FaissIndex:
         _faiss.normalize_L2(query_vector)
         scores, indices = self._index.search(query_vector, min(top_k, self._index.ntotal))
         results = []
+        seen_files: set = set()
         for score, idx in zip(scores[0], indices[0]):
             if idx >= 0 and idx < len(self._chunks):
-                results.append((self._chunks[idx], float(score)))
+                fname = self._chunks[idx].get("source_file", "")
+                if fname not in seen_files:
+                    seen_files.add(fname)
+                    results.append((self._chunks[idx], float(score)))
         return results
 
     def remove_by_source(self, source_file: str) -> int:
