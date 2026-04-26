@@ -102,45 +102,6 @@ class TestConversationMonitorInitialization:
         assert monitor1 is monitor2
 
 
-class TestAutoDetectionToggle:
-    """Test auto-detection enable/disable functionality"""
-
-    @pytest.mark.asyncio
-    async def test_toggle_default_enabled(self, core_service):
-        """Auto-detection should be disabled by default (matches UI default)"""
-        assert core_service.auto_knowledge_detection_enabled is False
-
-    @pytest.mark.asyncio
-    async def test_toggle_disable(self, core_service):
-        """Should be able to disable auto-detection"""
-        result = await core_service.toggle_auto_knowledge_detection(enabled=False)
-
-        assert result["status"] == "success"
-        assert result["enabled"] is False
-        assert core_service.auto_knowledge_detection_enabled is False
-
-    @pytest.mark.asyncio
-    async def test_toggle_enable(self, core_service):
-        """Should be able to enable auto-detection"""
-        core_service.auto_knowledge_detection_enabled = False
-
-        result = await core_service.toggle_auto_knowledge_detection(enabled=True)
-
-        assert result["status"] == "success"
-        assert result["enabled"] is True
-        assert core_service.auto_knowledge_detection_enabled is True
-
-    @pytest.mark.asyncio
-    async def test_toggle_flip(self, core_service):
-        """Calling with None should flip current state"""
-        original_state = core_service.auto_knowledge_detection_enabled
-
-        result = await core_service.toggle_auto_knowledge_detection(enabled=None)
-
-        assert result["status"] == "success"
-        assert core_service.auto_knowledge_detection_enabled == (not original_state)
-
-
 class TestP2PMessageMonitoring:
     """Test automatic monitoring of P2P messages"""
 
@@ -164,50 +125,6 @@ class TestP2PMessageMonitoring:
             # Verify monitor was called (would be called if monitor exists)
             # Note: Since we're using real monitor creation, check it was created
             assert "peer123" in core_service.conversation_monitors
-
-    @pytest.mark.asyncio
-    async def test_monitoring_respects_toggle(self, core_service):
-        """When auto-detection disabled, messages are buffered but auto-proposals not generated"""
-        core_service.auto_knowledge_detection_enabled = False
-
-        # Mock the consensus manager to track if proposals are broadcasted
-        with patch.object(core_service.consensus_manager, 'propose_commit') as mock_propose:
-            message = {
-                "command": "SEND_TEXT",
-                "payload": {
-                    "message_id": "msg123",
-                    "text": "This message should be buffered but not auto-analyzed"
-                }
-            }
-
-            await core_service.on_p2p_message_received("peer123", message)
-
-            # Monitor should be created (for manual extraction later)
-            assert "peer123" in core_service.conversation_monitors
-
-            # But automatic consensus proposals should NOT be created
-            mock_propose.assert_not_called()
-
-
-class TestLocalAIMonitoring:
-    """Test automatic monitoring of local AI conversations"""
-
-    @pytest.mark.asyncio
-    @pytest.mark.skip(reason="Complex mocking of LLM manager - tested in integration tests")
-    async def test_local_ai_query_feeds_monitor(self, core_service):
-        """Local AI queries should feed both prompt and response to monitor"""
-        # NOTE: This functionality is verified in real usage and integration tests
-        # Mocking the full AI query flow is complex due to async context managers
-        pass
-
-    @pytest.mark.asyncio
-    @pytest.mark.skip(reason="Complex mocking of LLM manager - tested in integration tests")
-    async def test_local_ai_respects_toggle(self, core_service):
-        """When auto-detection disabled, local AI should not be monitored"""
-        # NOTE: This functionality is verified in real usage and integration tests
-        # Mocking the full AI query flow is complex due to async context managers
-        pass
-
 
 class TestManualExtraction:
     """Test manual knowledge extraction via End Session"""
@@ -281,9 +198,6 @@ class TestIntegrationScenarios:
     @pytest.mark.asyncio
     async def test_complete_peer_conversation_flow(self, core_service):
         """Simulate a complete peer conversation with monitoring"""
-        # Enable auto-detection
-        core_service.auto_knowledge_detection_enabled = True
-
         # Simulate 5 messages
         for i in range(5):
             message = {
@@ -300,41 +214,6 @@ class TestIntegrationScenarios:
         assert monitor is not None
         assert monitor.conversation_id == "peer123"
         assert len(monitor.participants) == 2
-
-    @pytest.mark.asyncio
-    async def test_toggle_during_conversation(self, core_service):
-        """Toggling auto-detection mid-conversation should work"""
-        # Start with auto-detection on
-        core_service.auto_knowledge_detection_enabled = True
-
-        # Send first message
-        message1 = {
-            "command": "SEND_TEXT",
-            "payload": {"message_id": "msg1", "text": "First message"}
-        }
-        await core_service.on_p2p_message_received("peer123", message1)
-
-        # Verify monitor created
-        assert "peer123" in core_service.conversation_monitors
-
-        # Toggle off
-        await core_service.toggle_auto_knowledge_detection(enabled=False)
-        assert core_service.auto_knowledge_detection_enabled is False
-
-        # Send second message (should not create new monitor or error)
-        message2 = {
-            "command": "SEND_TEXT",
-            "payload": {"message_id": "msg2", "text": "Second message"}
-        }
-        await core_service.on_p2p_message_received("peer123", message2)
-
-        # Monitor still exists (not deleted)
-        assert "peer123" in core_service.conversation_monitors
-
-        # But can still manually extract
-        result = await core_service.end_conversation_session("peer123")
-        assert result["status"] == "success"
-
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

@@ -155,11 +155,6 @@
   let showNewGroupDialog = $state(false);  // v0.19.0: group chat creation
   // showGroupInviteDialog + pendingGroupInvite moved to GroupPanel.svelte (Step 7)
   let showGroupSettingsDialog = $state(false);  // v0.19.0: group settings/members panel
-  // Initialize from localStorage (browser-safe)
-  let autoKnowledgeDetection = $state(
-    typeof window !== 'undefined' && localStorage.getItem('autoKnowledgeDetection') === 'true'
-  );
-
   // Token tracking state (Phase 2)
   let tokenUsageMap = $state(new Map<string, {used: number, limit: number, historyTokens?: number, contextEstimated?: number}>());
   let showTokenWarning = $state(false);
@@ -250,13 +245,6 @@
           }
         });
       }
-    }
-  });
-
-  // Save auto-knowledge detection preference to localStorage when changed
-  $effect(() => {
-    if (typeof window !== 'undefined') {
-      localStorage.setItem('autoKnowledgeDetection', autoKnowledgeDetection.toString());
     }
   });
 
@@ -768,30 +756,6 @@
     });
   }
 
-  async function toggleAutoKnowledgeDetection() {
-    // bind:checked already updates the variable, now sync to backend and wait for confirmation
-    const previousState = !autoKnowledgeDetection; // Store previous state in case we need to revert
-
-    try {
-      const result = await sendCommand("toggle_auto_knowledge_detection", {
-        enabled: autoKnowledgeDetection
-      });
-
-      // Check if backend confirmed the change
-      if (result.status === "success") {
-        console.log(`✓ Auto-detection ${result.enabled ? 'enabled' : 'disabled'}`);
-      } else {
-        // Backend failed, revert checkbox
-        console.error("Failed to toggle auto-detection:", result.message);
-        autoKnowledgeDetection = previousState;
-      }
-    } catch (error) {
-      // Network/timeout error, revert checkbox
-      console.error("Error toggling auto-detection:", error);
-      autoKnowledgeDetection = previousState;
-    }
-  }
-
   function handleNewChat(chatId: string) {
     // #7 fix: Show confirmation dialog BEFORE sending reset to backend.
     // Previously, proposeNewSession() was called immediately, archiving history
@@ -859,7 +823,6 @@
       unreadMessageCounts={$unreadMessageCounts}
       bind:activeChatId
       peerDisplayNames={peerDisplayNames}
-      bind:autoKnowledgeDetection
       bind:peerInput
       isConnecting={isConnecting}
       peersByStrategy={peersByStrategy}
@@ -871,7 +834,6 @@
       onOpenFirewallEditor={openFirewallEditor}
       onOpenProvidersEditor={openProvidersEditor}
       onOpenAgentBoard={openAgentBoard}
-      onToggleAutoKnowledgeDetection={toggleAutoKnowledgeDetection}
       onConnectPeer={handleConnectPeer}
       onResetUnreadCount={resetUnreadCount}
       onGetPeerDisplayName={getPeerDisplayName}

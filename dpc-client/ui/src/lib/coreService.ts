@@ -1098,7 +1098,6 @@ export function sendCommand(command: string, payload: any = {}, commandId?: stri
             'get_default_providers',  // Dual provider system
             'get_providers_list',     // Dual provider system
             'query_ollama_model_info',
-            'toggle_auto_knowledge_detection',
             'send_file',
             'send_p2p_image',  // Screenshot sending
             'send_image',  // Vision analysis (clipboard paste)

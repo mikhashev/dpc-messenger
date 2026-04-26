@@ -73,35 +73,9 @@ class SendTextHandler(MessageHandler):
                 timestamp=datetime.now(timezone.utc).isoformat()
             )
 
-            # Buffer message (always) and optionally auto-detect
-            proposal = await monitor.on_message(conv_message)
-
-            # Only handle automatic proposals if auto-detection is enabled
-            if self.service.auto_knowledge_detection_enabled:
-                # If proposal generated, broadcast to UI and start voting
-                if proposal:
-                    self.logger.info("Knowledge proposal generated for %s", sender_node_id)
-                    await self.service.local_api.broadcast_event(
-                        "knowledge_commit_proposed",
-                        proposal.to_dict()
-                    )
-                    # Peer chat - broadcast for collaborative knowledge building
-                    self.logger.info("Broadcasting knowledge proposal to peers for consensus")
-                    await self.service.consensus_manager.propose_commit(
-                        proposal=proposal,
-                        broadcast_func=self.service._broadcast_to_peers
-                    )
+            # Buffer message for manual extraction
+            await monitor.on_message(conv_message)
         except Exception as e:
             self.logger.error("Error in conversation monitoring: %s", e, exc_info=True)
-            # Only broadcast extraction failure if auto-detection was enabled
-            if self.service.auto_knowledge_detection_enabled:
-                await self.service.local_api.broadcast_event(
-                    "knowledge_extraction_failed",
-                    {
-                        "conversation_id": sender_node_id,
-                        "error": str(e),
-                        "reason": "JSON parsing failed or LLM extraction error"
-                    }
-                )
 
         return None

@@ -374,7 +374,7 @@ class TelegramBridge:
                     knowledge_threshold=0.7,
                     settings=self.service.settings,
                     ai_query_func=self.service.send_ai_query,
-                    auto_detect=self.service.auto_knowledge_detection_enabled,
+                    auto_detect=False,
                     instruction_set_name=self.service.instruction_set.default,
                     display_name=sender_name,
                 )
@@ -606,7 +606,7 @@ class TelegramBridge:
                     knowledge_threshold=0.7,
                     settings=self.service.settings,
                     ai_query_func=self.service.send_ai_query,
-                    auto_detect=self.service.auto_knowledge_detection_enabled,
+                    auto_detect=False,
                     instruction_set_name=self.service.instruction_set.default,
                     display_name=sender_name,
                 )
@@ -713,7 +713,7 @@ class TelegramBridge:
                     knowledge_threshold=0.7,
                     settings=self.service.settings,
                     ai_query_func=self.service.send_ai_query,
-                    auto_detect=self.service.auto_knowledge_detection_enabled,
+                    auto_detect=False,
                     instruction_set_name=self.service.instruction_set.default,
                     display_name=sender_name,
                 )
@@ -819,7 +819,7 @@ class TelegramBridge:
                     knowledge_threshold=0.7,
                     settings=self.service.settings,
                     ai_query_func=self.service.send_ai_query,
-                    auto_detect=self.service.auto_knowledge_detection_enabled,
+                    auto_detect=False,
                     instruction_set_name=self.service.instruction_set.default,
                     display_name=sender_name,
                 )
@@ -926,7 +926,7 @@ class TelegramBridge:
                     knowledge_threshold=0.7,
                     settings=self.service.settings,
                     ai_query_func=self.service.send_ai_query,
-                    auto_detect=self.service.auto_knowledge_detection_enabled,
+                    auto_detect=False,
                     instruction_set_name=self.service.instruction_set.default,
                     display_name=sender_name,
                 )

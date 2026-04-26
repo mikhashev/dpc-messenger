@@ -78,7 +78,6 @@ ALLOWED_COMMANDS: frozenset = frozenset({
     "end_conversation_session",
     "get_conversation_settings",
     "set_conversation_persist_history",
-    "toggle_auto_knowledge_detection",
     # File transfer
     "send_file",
     "accept_file_transfer",

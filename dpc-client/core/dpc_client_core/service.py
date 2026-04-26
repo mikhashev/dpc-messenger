@@ -1591,18 +1591,6 @@ class CoreService:
 
         return status_result
 
-    @property
-    def auto_knowledge_detection_enabled(self) -> bool:
-        """Delegates to KnowledgeService (Phase 1b)."""
-        if self.knowledge_service:
-            return self.knowledge_service.auto_knowledge_detection_enabled
-        return False
-
-    @auto_knowledge_detection_enabled.setter
-    def auto_knowledge_detection_enabled(self, value: bool) -> None:
-        if self.knowledge_service:
-            self.knowledge_service.auto_knowledge_detection_enabled = value
-
     def get_state(self) -> dict:
         """
         Agent-readable synchronous snapshot of current CoreService state.
@@ -4112,10 +4100,6 @@ class CoreService:
     ) -> Dict[str, Any]:
         """Delegated to KnowledgeService."""
         return await self.knowledge_service.end_conversation_session(conversation_id, initiated_by)
-
-    async def toggle_auto_knowledge_detection(self, enabled: bool = None) -> Dict[str, Any]:
-        """Delegated to KnowledgeService."""
-        return await self.knowledge_service.toggle_auto_knowledge_detection(enabled)
 
     def _resolve_agent_token_limit(self, agent_id: str) -> int:
         """Delegates to AgentService."""
@@ -7341,40 +7325,9 @@ class CoreService:
                 logger.debug("Monitor - buffer size after: %d, Score: %.2f",
                            len(monitor.message_buffer), monitor.knowledge_score)
 
-                # Only handle automatic proposals if auto-detection is enabled
-                if self.knowledge_service.auto_knowledge_detection_enabled:
-                    # If proposal generated, broadcast to UI
-                    if proposal:
-                        logger.info("Auto-detect - knowledge proposal generated for %s chat", conversation_id)
-                        await self.local_api.broadcast_event(
-                            "knowledge_commit_proposed",
-                            proposal.to_dict()
-                        )
-                        # Local AI - private conversation, don't broadcast to peers
-                        logger.info("%s - private conversation, knowledge will not be shared with peers", conversation_id)
-                        async def _no_op_broadcast(message: Dict[str, Any]) -> None:
-                            pass  # Don't send to peers for private conversations
-
-                        await self.consensus_manager.propose_commit(
-                            proposal=proposal,
-                            broadcast_func=_no_op_broadcast
-                        )
-                    else:
-                        logger.debug("Monitor - no proposal yet (need 5 messages for auto-detect)")
-                else:
-                    logger.debug("Monitor - auto-detection is OFF, messages buffered for manual extraction")
+                logger.debug("Monitor - messages buffered for manual extraction")
             except Exception as e:
                 logger.error("Error in local AI conversation monitoring: %s", e, exc_info=True)
-                # Only broadcast extraction failure if auto-detection was enabled
-                if self.knowledge_service.auto_knowledge_detection_enabled:
-                    await self.local_api.broadcast_event(
-                        "knowledge_extraction_failed",
-                        {
-                            "conversation_id": "local_ai",
-                            "error": str(e),
-                            "reason": "JSON parsing failed or LLM extraction error"
-                        }
-                    )
         else:
             logger.debug("Monitor - query failed (status=%s), not buffering messages", status)
 

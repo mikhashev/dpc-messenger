@@ -194,7 +194,6 @@
     unreadMessageCounts,
     activeChatId = $bindable(),
     peerDisplayNames,
-    autoKnowledgeDetection = $bindable(false),
     peerInput = $bindable(""),
     isConnecting,
     peersByStrategy,
@@ -208,7 +207,6 @@
     onOpenFirewallEditor,
     onOpenProvidersEditor,
     onOpenAgentBoard,
-    onToggleAutoKnowledgeDetection,
     onConnectPeer,
     onResetUnreadCount,
     onGetPeerDisplayName,
@@ -234,7 +232,6 @@
     unreadMessageCounts: Map<string, number>;
     activeChatId?: string;
     peerDisplayNames: Map<string, string>;
-    autoKnowledgeDetection?: boolean;
     peerInput?: string;
     isConnecting: boolean;
     peersByStrategy: Record<string, any[]>;
@@ -246,7 +243,6 @@
     onOpenFirewallEditor: () => void;
     onOpenProvidersEditor: () => void;
     onOpenAgentBoard?: () => void;
-    onToggleAutoKnowledgeDetection: () => void;
     onConnectPeer: () => void;
     onResetUnreadCount: (peerId: string) => void;
     onGetPeerDisplayName: (peerId: string) => string;
@@ -464,27 +460,6 @@
         </button>
       {/if}
 
-      <!-- Auto Knowledge Detection Toggle -->
-      <div class="knowledge-toggle">
-        <label class="toggle-container">
-          <input
-            id="auto-knowledge-detection"
-            name="auto-knowledge-detection"
-            type="checkbox"
-            bind:checked={autoKnowledgeDetection}
-            onchange={onToggleAutoKnowledgeDetection}
-          />
-          <span class="toggle-slider"></span>
-          <span class="toggle-label">
-            Auto-detect knowledge in conversations
-          </span>
-        </label>
-        <p class="toggle-hint">
-          {autoKnowledgeDetection
-            ? "✓ AI is monitoring conversations for knowledge"
-            : "✗ Manual knowledge extraction only"}
-        </p>
-      </div>
     </div>
 
     <!-- Connect to Peer -->
@@ -1177,72 +1152,6 @@
   .btn-context:active {
     transform: translateY(0);
     box-shadow: 0 1px 4px rgba(90, 103, 216, 0.2);
-  }
-
-  /* Knowledge Architecture - Auto-Detection Toggle */
-  .knowledge-toggle {
-    margin-top: 1rem;
-    padding-top: 1rem;
-    border-top: 1px solid #e0e0e0;
-  }
-
-  .toggle-container {
-    display: flex;
-    align-items: center;
-    gap: 0.75rem;
-    cursor: pointer;
-    user-select: none;
-  }
-
-  .toggle-container input[type="checkbox"] {
-    position: absolute;
-    opacity: 0;
-    width: 0;
-    height: 0;
-  }
-
-  .toggle-slider {
-    position: relative;
-    width: 44px;
-    height: 24px;
-    background: #ccc;
-    border-radius: 24px;
-    transition: background 0.3s;
-    flex-shrink: 0;
-  }
-
-  .toggle-slider::before {
-    content: '';
-    position: absolute;
-    width: 18px;
-    height: 18px;
-    left: 3px;
-    top: 3px;
-    background: white;
-    border-radius: 50%;
-    transition: transform 0.3s;
-  }
-
-  .toggle-container input[type="checkbox"]:checked + .toggle-slider {
-    background: #667eea;
-  }
-
-  .toggle-container input[type="checkbox"]:checked + .toggle-slider::before {
-    transform: translateX(20px);
-  }
-
-  .toggle-label {
-    font-size: 0.9rem;
-    color: #333;
-    line-height: 1.4;
-  }
-
-  .toggle-hint {
-    font-size: 0.8rem;
-    color: #666;
-    margin: 0.5rem 0 0 0;
-    padding-left: 3.5rem;
-    line-height: 1.3;
   }
 
   .chat-list-header {

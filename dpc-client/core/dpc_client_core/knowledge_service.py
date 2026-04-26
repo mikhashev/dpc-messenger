@@ -44,7 +44,7 @@ class KnowledgeService:
     - pcm_core (PCMCore) — personal context model access
     - consensus_manager (ConsensusManager) — multi-party knowledge voting
     - conversation_monitors (shared dict ref) — per-conversation monitor registry
-    - auto_knowledge_detection_enabled (bool) — global toggle
+
 
     Injected dependencies:
     - llm_manager, local_api, p2p_manager, settings — shared service references
@@ -78,8 +78,6 @@ class KnowledgeService:
             pcm_core=self.pcm_core,
             vote_timeout_minutes=10,
         )
-        self.auto_knowledge_detection_enabled: bool = False
-
         # Shared references (same dict objects as CoreService)
         self.conversation_monitors = conversation_monitors
         self.peer_metadata = peer_metadata
@@ -120,7 +118,6 @@ class KnowledgeService:
         """Agent-readable snapshot of current knowledge service state."""
         active_sessions = len(getattr(self.consensus_manager, 'sessions', {}))
         return {
-            "auto_knowledge_detection": self.auto_knowledge_detection_enabled,
             "active_consensus_sessions": active_sessions,
             "conversation_monitors": len(self.conversation_monitors),
         }
@@ -240,7 +237,7 @@ class KnowledgeService:
                 knowledge_threshold=0.7,
                 settings=self.settings,
                 ai_query_func=self._send_ai_query,
-                auto_detect=self.auto_knowledge_detection_enabled,
+                auto_detect=False,
                 instruction_set_name=instruction_set_name or self.instruction_set.default,
                 display_name=display_name,
             )
@@ -256,50 +253,13 @@ class KnowledgeService:
 
             logger.info(
                 "Created conversation monitor for %s with %d participant(s) "
-                "(auto_detect=%s, instruction_set=%s)",
+                "(instruction_set=%s)",
                 conversation_id,
                 len(participants),
-                self.auto_knowledge_detection_enabled,
                 instruction_set_name or self.instruction_set.default,
             )
 
         return self.conversation_monitors[conversation_id]
-
-    # ─────────────────────────────────────────────────────────────
-    # Knowledge detection toggle
-    # ─────────────────────────────────────────────────────────────
-
-    async def toggle_auto_knowledge_detection(self, enabled: bool = None) -> Dict[str, Any]:
-        """Toggle automatic knowledge detection on/off.
-
-        UI Integration: Called when user toggles the auto-detection switch.
-
-        Args:
-            enabled: True to enable, False to disable, None to toggle current state
-
-        Returns:
-            Dict with status and current state
-        """
-        try:
-            if enabled is None:
-                self.auto_knowledge_detection_enabled = not self.auto_knowledge_detection_enabled
-            else:
-                self.auto_knowledge_detection_enabled = enabled
-
-            state_text = "enabled" if self.auto_knowledge_detection_enabled else "disabled"
-            logger.info("Auto knowledge detection %s", state_text)
-
-            for monitor in self.conversation_monitors.values():
-                monitor.auto_detect = self.auto_knowledge_detection_enabled
-
-            return {
-                "status": "success",
-                "enabled": self.auto_knowledge_detection_enabled,
-                "message": f"Automatic knowledge detection {state_text}",
-            }
-        except Exception as e:
-            logger.error("Error toggling auto knowledge detection: %s", e, exc_info=True)
-            return {"status": "error", "message": str(e)}
 
     # ─────────────────────────────────────────────────────────────
     # Knowledge commit voting flow
