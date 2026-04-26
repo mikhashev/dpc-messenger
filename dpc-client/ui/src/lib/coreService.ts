@@ -1145,6 +1145,9 @@ export function sendCommand(command: string, payload: any = {}, commandId?: stri
             // Session archive (S25 Batch 1.1 fix)
             'get_session_archive_info',
             'clear_session_archives',
+            // Per-agent model config (AGENT-MODEL)
+            'get_agent_model_config',
+            'save_agent_model_config',
         ].includes(command);
 
         if (expectsResponse) {
