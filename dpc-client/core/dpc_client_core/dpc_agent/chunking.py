@@ -1,3 +1,5 @@
+# Deprecated: see ADR-018. Whole-document indexing replaced chunking.
+# Kept for backward compatibility with any external callers.
 """Text chunking for embedding pipeline (ADR-010, MEM-3.3).
 
 Splits text into overlapping chunks sized for the embedding model's

@@ -227,7 +227,7 @@ class DpcAgentManager:
                             from dpc_client_core.dpc_agent.faiss_index import FaissIndex
                             from dpc_client_core.dpc_agent.bm25_index import BM25Index
                             from dpc_client_core.dpc_agent.text_extract import extract_text
-                            from dpc_client_core.dpc_agent.chunking import chunk_text, batched_chunks
+                            from dpc_client_core.dpc_agent.indexing_pipeline import _extract_heading, _build_doc_text, DEFAULT_BATCH_SIZE
                             provider = self._agent._embedding_provider if self._agent else EmbeddingProvider(model_name=mem_cfg.embedding_model)
                             faiss_idx = FaissIndex(index_dir, model_name=mem_cfg.embedding_model, dimensions=provider.dimensions)
                             bm25_idx = BM25Index(index_dir)
@@ -239,8 +239,8 @@ class DpcAgentManager:
                             knowledge_dir = agent_root / "knowledge"
                             count = full_rebuild(knowledge_dir, provider, faiss_idx, bm25_idx, batch_size=mem_cfg.batch_size)
 
-                            # Collect all extra chunks (L6 + EXT) then embed+index in bulk
-                            extra_chunks = []
+                            # Collect all extra documents (L6 + EXT) then embed+index in bulk
+                            extra_texts = []
                             extra_metas = []
 
                             # L6: human knowledge (always re-index, not just on full rebuild)
@@ -251,15 +251,15 @@ class DpcAgentManager:
                                         if f.suffix == ".md" and f.is_file():
                                             text = extract_text(f)
                                             if text:
-                                                chunks = chunk_text(text, source_file=f.name)
-                                                for c in chunks:
-                                                    extra_chunks.append(c)
-                                                    extra_metas.append({"source_file": c.source_file, "chunk_index": c.chunk_index,
-                                                                        "char_start": c.char_start, "char_end": c.char_end,
-                                                                        "source_layer": "L6", "text": c.text[:200]})
-                                                l6_count += len(chunks)
+                                                heading = _extract_heading(text)
+                                                doc_text = _build_doc_text(f.name, heading, text)
+                                                extra_texts.append(doc_text)
+                                                extra_metas.append({"source_file": f.name, "heading": heading,
+                                                                    "source_layer": "L6", "char_count": len(text),
+                                                                    "text": text[:500]})
+                                                l6_count += 1
                                     if l6_count:
-                                        log.info("L6 human knowledge collected: %d chunks from %s", l6_count, l6_dir)
+                                        log.info("L6 human knowledge collected: %d documents from %s", l6_count, l6_dir)
 
                             # MEM-3.10: always re-index extended paths on startup
                             ext_count = 0
@@ -274,37 +274,37 @@ class DpcAgentManager:
                                         for f in ext_files:
                                             text = extract_text(f)
                                             if text:
-                                                chunks = chunk_text(text, source_file=f.name)
-                                                for c in chunks:
-                                                    extra_chunks.append(c)
-                                                    extra_metas.append({"source_file": c.source_file, "chunk_index": c.chunk_index,
-                                                                        "char_start": c.char_start, "char_end": c.char_end,
-                                                                        "source_layer": "EXT", "text": c.text[:200]})
-                                                ext_count += len(chunks)
+                                                heading = _extract_heading(text)
+                                                doc_text = _build_doc_text(f.name, heading, text)
+                                                extra_texts.append(doc_text)
+                                                extra_metas.append({"source_file": f.name, "heading": heading,
+                                                                    "source_layer": "EXT", "char_count": len(text),
+                                                                    "text": text[:500]})
+                                                ext_count += 1
                                     elif indexed_list:
                                         log.info("Extended paths: %d paths configured but 0 text files found", len(indexed_list))
                                 except Exception as e:
                                     log.debug("Extended paths indexing skipped: %s", e)
 
-                            # Bulk embed + index all extra chunks in one pass
-                            if extra_chunks:
-                                pos = 0
-                                for batch in batched_chunks(extra_chunks, mem_cfg.batch_size):
-                                    texts = [c.text for c in batch]
-                                    vectors = np.array(provider.embed_batch(texts), dtype=np.float32)
-                                    faiss_idx.add(vectors, extra_metas[pos:pos + len(batch)])
-                                    pos += len(batch)
-                                bm25_idx.add([c.text for c in extra_chunks], extra_metas)
-                                log.info("Bulk indexed %d extra chunks (L6: %d, EXT: %d)", len(extra_chunks), l6_count, ext_count)
+                            # Bulk embed + index all extra documents in one pass
+                            if extra_texts:
+                                bs = mem_cfg.batch_size or DEFAULT_BATCH_SIZE
+                                for i in range(0, len(extra_texts), bs):
+                                    batch_texts = extra_texts[i:i + bs]
+                                    batch_metas = extra_metas[i:i + bs]
+                                    vectors = np.array(provider.embed_batch(batch_texts), dtype=np.float32)
+                                    faiss_idx.add(vectors, batch_metas)
+                                bm25_idx.add(extra_texts, extra_metas)
+                                log.info("Bulk indexed %d extra documents (L6: %d, EXT: %d)", len(extra_texts), l6_count, ext_count)
 
-                            if needs_full_rebuild or extra_chunks:
+                            if needs_full_rebuild or extra_texts:
                                 faiss_idx.save()
                                 bm25_idx.save()
                             if needs_full_rebuild:
                                 total = count + l6_count + ext_count
-                                log.info("Memory index built: %d chunks (L5: %d, L6: %d, EXT: %d)", total, count, l6_count, ext_count)
+                                log.info("Memory index built: %d documents (L5: %d, L6: %d, EXT: %d)", total, count, l6_count, ext_count)
                             elif ext_count > 0:
-                                log.info("Extended paths re-indexed on startup: %d chunks", ext_count)
+                                log.info("Extended paths re-indexed on startup: %d documents", ext_count)
                         except Exception as e:
                             log.warning("Background memory indexing failed: %s", e)
 
