@@ -363,7 +363,6 @@ def build_llm_messages(
                     if embedding_provider is None:
                         embedding_provider = EmbeddingProvider(local_files_only=True)
                         log.info("Active Recall: created fallback EmbeddingProvider (local_files_only)")
-                    log.debug("DEBUG AR: provider.model_name=%s, faiss_header=%s", embedding_provider.model_name, _faiss_idx._header.model_name)
                     if _faiss_idx.needs_rebuild(embedding_provider.model_name):
                         log.info("Active Recall: FAISS index needs rebuild (model changed), skipping search")
                     else:

@@ -214,17 +214,19 @@ class DpcAgentManager:
                 import asyncio
                 agent_root = self._agent.agent_root if self._agent else None
                 if agent_root:
+                    from dpc_client_core.dpc_agent.memory import EmbeddingProvider
+                    _provider_ref = self._agent._embedding_provider if self._agent else None
+                    _actual_model = _provider_ref.model_name if _provider_ref else mem_cfg.embedding_model
+
                     index_dir = agent_root / "state" / "memory_index"
                     needs_full_rebuild = not (index_dir / "index_meta.json").exists()
-                    log.debug("DEBUG mem_cfg.embedding_model=%s (from MemoryConfig default)", mem_cfg.embedding_model)
                     if not needs_full_rebuild:
                         try:
                             import json as _json
                             _meta = _json.loads((index_dir / "index_meta.json").read_text(encoding="utf-8"))
                             _stored_model = _meta.get("header", {}).get("model_name", "")
-                            log.debug("DEBUG model_name check: stored=%s, config=%s, match=%s", _stored_model, mem_cfg.embedding_model, _stored_model == mem_cfg.embedding_model)
-                            if _stored_model != mem_cfg.embedding_model:
-                                log.info("Memory index model changed (%s → %s), forcing rebuild", _stored_model, mem_cfg.embedding_model)
+                            if _stored_model != _actual_model:
+                                log.info("Memory index model changed (%s -> %s), forcing rebuild", _stored_model, _actual_model)
                                 needs_full_rebuild = True
                         except Exception:
                             needs_full_rebuild = True
@@ -240,8 +242,8 @@ class DpcAgentManager:
                             from dpc_client_core.dpc_agent.bm25_index import BM25Index
                             from dpc_client_core.dpc_agent.text_extract import extract_text
                             from dpc_client_core.dpc_agent.indexing_pipeline import _extract_heading, _build_doc_text
-                            provider = self._agent._embedding_provider if self._agent else EmbeddingProvider(model_name=mem_cfg.embedding_model)
-                            faiss_idx = FaissIndex(index_dir, model_name=mem_cfg.embedding_model, dimensions=provider.dimensions)
+                            provider = _provider_ref or EmbeddingProvider(model_name=_actual_model)
+                            faiss_idx = FaissIndex(index_dir, model_name=_actual_model, dimensions=provider.dimensions)
                             bm25_idx = BM25Index(index_dir)
 
                             count = 0
@@ -333,7 +335,7 @@ class DpcAgentManager:
                             log.info("Memory: first-use index rebuild started in thread")
                         else:
                             log.info("Memory: extended paths re-index started in thread")
-                log.info("Memory system initialized (model=%s, active_recall=%s)", mem_cfg.embedding_model, mem_cfg.active_recall)
+                log.info("Memory system initialized (model=%s, active_recall=%s)", _actual_model, mem_cfg.active_recall)
         except Exception as e:
             log.warning("Memory system init skipped: %s", e)
 
