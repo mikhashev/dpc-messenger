@@ -183,17 +183,24 @@ def generate_smart_index(knowledge_dir: pathlib.Path) -> str:
 # ---------------------------------------------------------------------------
 
 class EmbeddingProvider:
-    """Lazy-loading embedding provider using sentence-transformers."""
+    """Lazy-loading embedding provider. BGE-M3 via ONNX Runtime (primary),
+    sentence-transformers fallback for legacy e5-small."""
 
-    def __init__(self, model_name: str = "intfloat/multilingual-e5-small",
-                 device: Optional[str] = None, max_tokens: int = 512,
+    ONNX_MODEL = "aapot/bge-m3-onnx"
+    ONNX_DIMENSIONS = 1024
+
+    def __init__(self, model_name: str = "aapot/bge-m3-onnx",
+                 device: Optional[str] = None, max_tokens: int = 8192,
                  local_files_only: bool = False):
         self.model_name = model_name
         self.max_tokens = max_tokens
         self._device = device
         self._local_files_only = local_files_only
-        self._model = None
+        self._session = None
+        self._tokenizer = None
+        self._model = None  # sentence-transformers fallback
         self._load_lock = threading.Lock()
+        self._use_onnx = "onnx" in model_name.lower() or model_name == self.ONNX_MODEL
 
     @property
     def device(self) -> str:
@@ -209,34 +216,94 @@ class EmbeddingProvider:
             pass
         return "cpu"
 
+    def _onnx_providers(self) -> list:
+        import onnxruntime as ort
+        available = ort.get_available_providers()
+        if "CUDAExecutionProvider" in available:
+            return ["CUDAExecutionProvider", "CPUExecutionProvider"]
+        return ["CPUExecutionProvider"]
+
     def _load_model(self):
-        if self._model is not None:
+        if self._session is not None or self._model is not None:
             return
         with self._load_lock:
-            if self._model is not None:
+            if self._session is not None or self._model is not None:
                 return
-            from sentence_transformers import SentenceTransformer
-            kwargs = {"device": self.device}
-            if self._local_files_only:
-                kwargs["local_files_only"] = True
-            self._model = SentenceTransformer(self.model_name, **kwargs)
-            log.info("Loaded embedding model %s on %s (local_only=%s)",
-                     self.model_name, self.device, self._local_files_only)
+            if self._use_onnx:
+                self._load_onnx()
+            else:
+                self._load_sentence_transformers()
+
+    def _load_onnx(self):
+        import onnxruntime as ort
+        from huggingface_hub import hf_hub_download
+        from transformers import AutoTokenizer
+        kwargs = {}
+        if self._local_files_only:
+            kwargs["local_files_only"] = True
+        model_path = hf_hub_download(self.model_name, "model.onnx", **kwargs)
+        data_path_name = "model.onnx.data"
+        try:
+            hf_hub_download(self.model_name, data_path_name, **kwargs)
+        except Exception:
+            pass
+        providers = self._onnx_providers()
+        self._session = ort.InferenceSession(model_path, providers=providers)
+        self._tokenizer = AutoTokenizer.from_pretrained(self.model_name, **kwargs)
+        actual_provider = self._session.get_providers()[0]
+        log.info("Loaded ONNX embedding model %s on %s (local_only=%s)",
+                 self.model_name, actual_provider, self._local_files_only)
+
+    def _load_sentence_transformers(self):
+        from sentence_transformers import SentenceTransformer
+        kwargs = {"device": self.device}
+        if self._local_files_only:
+            kwargs["local_files_only"] = True
+        self._model = SentenceTransformer(self.model_name, **kwargs)
+        log.info("Loaded embedding model %s on %s (local_only=%s)",
+                 self.model_name, self.device, self._local_files_only)
+
+    def _onnx_embed(self, texts: List[str]) -> List[List[float]]:
+        import numpy as np
+        encoded = self._tokenizer(
+            texts, padding=True, truncation=True,
+            max_length=self.max_tokens, return_tensors="np",
+        )
+        inputs = {k: v for k, v in encoded.items() if k in ("input_ids", "attention_mask", "token_type_ids")}
+        input_names = {i.name for i in self._session.get_inputs()}
+        inputs = {k: v for k, v in inputs.items() if k in input_names}
+        outputs = self._session.run(None, inputs)
+        # BGE-M3 ONNX: output[0] is token embeddings [batch, seq, dim]
+        # Mean pooling with attention mask
+        token_embs = outputs[0]
+        mask = encoded["attention_mask"][..., np.newaxis].astype(np.float32)
+        pooled = (token_embs * mask).sum(axis=1) / mask.sum(axis=1).clip(min=1e-9)
+        norms = np.linalg.norm(pooled, axis=1, keepdims=True).clip(min=1e-9)
+        normalized = pooled / norms
+        return normalized.tolist()
 
     def embed(self, text: str) -> List[float]:
         self._load_model()
+        if self._session is not None:
+            return self._onnx_embed([text])[0]
         return self._model.encode(text, normalize_embeddings=True).tolist()
 
     def embed_batch(self, texts: List[str]) -> List[List[float]]:
         self._load_model()
+        if self._session is not None:
+            return self._onnx_embed(texts)
         return self._model.encode(texts, normalize_embeddings=True).tolist()
 
     @property
     def dimensions(self) -> int:
+        if self._use_onnx:
+            return self.ONNX_DIMENSIONS
         self._load_model()
         return self._model.get_sentence_embedding_dimension()
 
     def unload(self):
+        self._session = None
+        self._tokenizer = None
         self._model = None
         log.info("Unloaded embedding model %s", self.model_name)
 
