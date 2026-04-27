@@ -363,8 +363,11 @@ def build_llm_messages(
                     if embedding_provider is None:
                         embedding_provider = EmbeddingProvider(local_files_only=True)
                         log.info("Active Recall: created fallback EmbeddingProvider (local_files_only)")
-                    _qvec = _np.array(embedding_provider.embed(_last_user_msg), dtype=_np.float32)
-                    _faiss_results = _faiss_idx.search(_qvec, 5)
+                    if _faiss_idx.needs_rebuild(embedding_provider.model_name):
+                        log.info("Active Recall: FAISS index needs rebuild (model changed), skipping search")
+                    else:
+                        _qvec = _np.array(embedding_provider.embed(_last_user_msg), dtype=_np.float32)
+                        _faiss_results = _faiss_idx.search(_qvec, 5)
                     log.debug("Active Recall FAISS: %d results — %s", len(_faiss_results),
                               [m.get("source_file", "?") for m, _ in _faiss_results])
 
