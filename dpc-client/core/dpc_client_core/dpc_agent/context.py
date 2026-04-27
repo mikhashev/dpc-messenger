@@ -339,17 +339,14 @@ def build_llm_messages(
 
     # Active Recall hints (ADR-010, WIRE-2)
     if conversation_history:
-        _user_msgs = []
-        for _h in reversed(conversation_history):
-            if _h.get("role") == "user" and _h.get("content"):
-                _user_msgs.append(_h["content"])
-                if len(_user_msgs) >= 7:
-                    break
-        _last_user_msg = " ".join(reversed(_user_msgs))[:500]
+        _dialog_parts = [_h["content"] for _h in conversation_history
+                         if _h.get("role") in ("user", "assistant") and _h.get("content")]
+        _last_user_msg = " ".join(_dialog_parts)
         if _last_user_msg:
             try:
                 from .active_recall import get_recall_block
-                from .hybrid_search import reciprocal_rank_fusion
+                from .hybrid_search import reciprocal_rank_fusion, sparse_search
+                from .indexing_pipeline import load_sparse_index
                 from .bm25_index import BM25Index
                 from .faiss_index import FaissIndex
                 from .memory import EmbeddingProvider
@@ -368,13 +365,20 @@ def build_llm_messages(
                     log.debug("Active Recall FAISS: %d results — %s", len(_faiss_results),
                               [m.get("source_file", "?") for m, _ in _faiss_results])
 
-                _bm25_results = []
-                if _bm25_idx.load():
-                    _bm25_results = _bm25_idx.search(_last_user_msg, 5)
-                    log.debug("Active Recall BM25: %d results — %s", len(_bm25_results),
-                              [m.get("source_file", "?") for m, _ in _bm25_results])
+                _keyword_results = []
+                _sparse_entries = load_sparse_index(_index_dir)
+                if _sparse_entries and embedding_provider and hasattr(embedding_provider, 'embed_sparse'):
+                    _q_sparse = embedding_provider.embed_sparse([_last_user_msg])[0]
+                    _idx_sparse = [({int(k): v for k, v in e["sparse"].items()}, e["meta"]) for e in _sparse_entries]
+                    _keyword_results = sparse_search(_q_sparse, _idx_sparse, top_k=5)
+                    log.debug("Active Recall sparse: %d results — %s", len(_keyword_results),
+                              [m.get("source_file", "?") for m, _ in _keyword_results])
+                elif _bm25_idx.load():
+                    _keyword_results = _bm25_idx.search(_last_user_msg, 5)
+                    log.debug("Active Recall BM25 fallback: %d results — %s", len(_keyword_results),
+                              [m.get("source_file", "?") for m, _ in _keyword_results])
 
-                _results = reciprocal_rank_fusion(_faiss_results, _bm25_results)
+                _results = reciprocal_rank_fusion(_faiss_results, _keyword_results)
                 _ctx_ratio = (session_state or {}).get("context_usage_percent", 0) / 100.0
                 _recall = get_recall_block(_results, context_usage_ratio=_ctx_ratio, agent_root=agent_root)
                 if _recall:

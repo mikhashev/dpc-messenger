@@ -275,26 +275,42 @@ class EmbeddingProvider:
         log.info("Loaded embedding model %s on %s (local_only=%s)",
                  self.model_name, self.device, self._local_files_only)
 
-    def _onnx_embed(self, texts: List[str]) -> List[List[float]]:
-        if not texts:
-            return []
-        import numpy as np
+    def _onnx_run(self, texts: List[str]):
+        """Run ONNX inference, return raw outputs + encoded input."""
         encoded = self._tokenizer(
             texts, padding=True, truncation=True,
             max_length=self.max_tokens, return_tensors="np",
         )
-        inputs = {k: v for k, v in encoded.items() if k in ("input_ids", "attention_mask", "token_type_ids")}
         input_names = {i.name for i in self._session.get_inputs()}
-        inputs = {k: v for k, v in inputs.items() if k in input_names}
+        inputs = {k: v for k, v in encoded.items() if k in input_names}
         outputs = self._session.run(None, inputs)
-        # BGE-M3 ONNX: output[0] is token embeddings [batch, seq, dim]
-        # Mean pooling with attention mask
-        token_embs = outputs[0]
-        mask = encoded["attention_mask"][..., np.newaxis].astype(np.float32)
-        pooled = (token_embs * mask).sum(axis=1) / mask.sum(axis=1).clip(min=1e-9)
-        norms = np.linalg.norm(pooled, axis=1, keepdims=True).clip(min=1e-9)
-        normalized = pooled / norms
-        return normalized.tolist()
+        return outputs, encoded
+
+    def _onnx_embed(self, texts: List[str]) -> List[List[float]]:
+        if not texts:
+            return []
+        outputs, _ = self._onnx_run(texts)
+        # dense_vecs: [batch, 1024] — already pooled and L2-normalized
+        return outputs[0].tolist()
+
+    def embed_sparse(self, texts: List[str]) -> List[Dict[int, float]]:
+        """Extract sparse vectors from BGE-M3 ONNX. Returns list of {token_id: weight} dicts."""
+        if not texts:
+            return []
+        self._load_model()
+        if self._session is None:
+            return [{} for _ in texts]
+        outputs, encoded = self._onnx_run(texts)
+        # sparse_vecs: [batch, token, 1]
+        sparse = outputs[1]
+        token_ids = encoded["input_ids"]
+        result = []
+        for i in range(len(texts)):
+            weights = sparse[i, :, 0]
+            ids = token_ids[i]
+            sparse_dict = {int(tid): float(w) for tid, w in zip(ids, weights) if w > 0}
+            result.append(sparse_dict)
+        return result
 
     def embed(self, text: str) -> List[float]:
         self._load_model()

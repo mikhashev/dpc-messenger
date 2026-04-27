@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import logging
 import pathlib
+import json
 import re
 import time
 from typing import Dict, List, Optional
@@ -26,6 +27,35 @@ _DEBOUNCE_WINDOW = 0.1
 _last_index_time: Dict[str, float] = {}
 
 DEFAULT_BATCH_SIZE = 32
+
+
+SPARSE_INDEX_FILE = "sparse_index.json"
+
+
+def _save_sparse_index(index_dir: pathlib.Path, entries: List[dict]):
+    """Save sparse index to JSON file."""
+    if index_dir:
+        path = index_dir / SPARSE_INDEX_FILE
+        path.write_text(json.dumps(entries, ensure_ascii=False), encoding="utf-8")
+
+
+def _save_sparse_entry(index_dir: pathlib.Path, filename: str, sparse_dict: Dict[int, float], meta: dict):
+    """Append a single sparse entry to the index."""
+    entries = load_sparse_index(index_dir)
+    entries = [e for e in entries if e.get("source_file") != filename]
+    entries.append({"source_file": filename, "sparse": {str(k): v for k, v in sparse_dict.items()}, "meta": meta})
+    _save_sparse_index(index_dir, entries)
+
+
+def load_sparse_index(index_dir: pathlib.Path) -> List[dict]:
+    """Load sparse index from JSON file."""
+    path = index_dir / SPARSE_INDEX_FILE
+    if not path.exists():
+        return []
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return []
 
 
 def should_index(filepath: str) -> bool:
@@ -80,6 +110,11 @@ def index_single_file(
     faiss_index.add(vector, [meta])
     bm25_index.add([doc_text], [meta])
 
+    if hasattr(embedding_provider, 'embed_sparse'):
+        sparse_vecs = embedding_provider.embed_sparse([doc_text])
+        if sparse_vecs:
+            _save_sparse_entry(faiss_index._index_dir, path.name, sparse_vecs[0], meta)
+
     return 1
 
 
@@ -126,6 +161,21 @@ def full_rebuild(
         faiss_index.add(vectors, batch_metas)
 
     bm25_index.build(all_doc_texts, all_metas)
+
+    if hasattr(embedding_provider, 'embed_sparse'):
+        sparse_entries = []
+        for i in range(0, len(all_doc_texts), batch_size):
+            batch = all_doc_texts[i:i + batch_size]
+            batch_metas = all_metas[i:i + batch_size]
+            sparse_vecs = embedding_provider.embed_sparse(batch)
+            for sv, meta in zip(sparse_vecs, batch_metas):
+                sparse_entries.append({
+                    "source_file": meta["source_file"],
+                    "sparse": {str(k): v for k, v in sv.items()},
+                    "meta": meta,
+                })
+        _save_sparse_index(faiss_index._index_dir, sparse_entries)
+        log.info("Sparse index built: %d documents", len(sparse_entries))
 
     log.info("Full rebuild: %d documents indexed (whole-document, ADR-018)",
              len(all_doc_texts))
