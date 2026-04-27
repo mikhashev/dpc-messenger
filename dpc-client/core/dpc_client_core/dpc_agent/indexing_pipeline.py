@@ -114,7 +114,7 @@ def index_single_file(
     if getattr(embedding_provider, '_use_onnx', False):
         sparse_vecs = embedding_provider.embed_sparse([doc_text])
         if sparse_vecs:
-            _save_sparse_entry(faiss_index._index_dir, path.name, sparse_vecs[0], meta)
+            _save_sparse_entry(faiss_index.index_dir, path.name, sparse_vecs[0], meta)
 
     return 1
 
@@ -170,7 +170,7 @@ def full_rebuild(
                     "sparse": {str(k): v for k, v in sv.items()},
                     "meta": meta,
                 })
-        _save_sparse_index(faiss_index._index_dir, sparse_entries)
+        _save_sparse_index(faiss_index.index_dir, sparse_entries)
         log.info("Sparse index built: %d documents", len(sparse_entries))
 
     log.info("Full rebuild: %d documents indexed (whole-document, ADR-018)",
