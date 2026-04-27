@@ -227,7 +227,7 @@ class DpcAgentManager:
                             from dpc_client_core.dpc_agent.faiss_index import FaissIndex
                             from dpc_client_core.dpc_agent.bm25_index import BM25Index
                             from dpc_client_core.dpc_agent.text_extract import extract_text
-                            from dpc_client_core.dpc_agent.indexing_pipeline import _extract_heading, _build_doc_text, DEFAULT_BATCH_SIZE
+                            from dpc_client_core.dpc_agent.indexing_pipeline import _extract_heading, _build_doc_text
                             provider = self._agent._embedding_provider if self._agent else EmbeddingProvider(model_name=mem_cfg.embedding_model)
                             faiss_idx = FaissIndex(index_dir, model_name=mem_cfg.embedding_model, dimensions=provider.dimensions)
                             bm25_idx = BM25Index(index_dir)
@@ -237,7 +237,7 @@ class DpcAgentManager:
                             # Always rebuild L5 agent knowledge (not just on first init)
                             from dpc_client_core.dpc_agent.indexing_pipeline import full_rebuild
                             knowledge_dir = agent_root / "knowledge"
-                            count = full_rebuild(knowledge_dir, provider, faiss_idx, bm25_idx, batch_size=mem_cfg.batch_size)
+                            count = full_rebuild(knowledge_dir, provider, faiss_idx, bm25_idx)
 
                             # Collect all extra documents (L6 + EXT) then embed+index in bulk
                             extra_texts = []
@@ -286,14 +286,11 @@ class DpcAgentManager:
                                 except Exception as e:
                                     log.debug("Extended paths indexing skipped: %s", e)
 
-                            # Bulk embed + index all extra documents in one pass
+                            # Embed + index extra documents one at a time (whole-doc, no batching)
                             if extra_texts:
-                                bs = mem_cfg.batch_size or DEFAULT_BATCH_SIZE
-                                for i in range(0, len(extra_texts), bs):
-                                    batch_texts = extra_texts[i:i + bs]
-                                    batch_metas = extra_metas[i:i + bs]
-                                    vectors = np.array(provider.embed_batch(batch_texts), dtype=np.float32)
-                                    faiss_idx.add(vectors, batch_metas)
+                                for doc_text, meta in zip(extra_texts, extra_metas):
+                                    vector = np.array(provider.embed(doc_text), dtype=np.float32).reshape(1, -1)
+                                    faiss_idx.add(vector, [meta])
                                 bm25_idx.add(extra_texts, extra_metas)
                                 log.info("Bulk indexed %d extra documents (L6: %d, EXT: %d)", len(extra_texts), l6_count, ext_count)
 

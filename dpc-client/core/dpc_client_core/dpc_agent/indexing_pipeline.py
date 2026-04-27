@@ -26,7 +26,6 @@ log = logging.getLogger(__name__)
 _DEBOUNCE_WINDOW = 0.1
 _last_index_time: Dict[str, float] = {}
 
-DEFAULT_BATCH_SIZE = 1
 
 
 SPARSE_INDEX_FILE = "sparse_index.json"
@@ -91,7 +90,6 @@ def index_single_file(
     faiss_index,
     bm25_index,
     source_layer: str = "L5",
-    batch_size: int = DEFAULT_BATCH_SIZE,
 ) -> int:
     """Extract, embed, and index a single file as one document. Returns 1 if indexed, 0 if skipped."""
     text = extract_text(path)
@@ -126,7 +124,6 @@ def full_rebuild(
     embedding_provider,
     faiss_index,
     bm25_index,
-    batch_size: int = DEFAULT_BATCH_SIZE,
 ) -> int:
     """Full rebuild of both indexes from all files in knowledge_dir. One vector per file."""
     faiss_index.clear()
@@ -157,21 +154,17 @@ def full_rebuild(
     if not all_doc_texts:
         return 0
 
-    for i in range(0, len(all_doc_texts), batch_size):
-        batch_texts = all_doc_texts[i:i + batch_size]
-        batch_metas = all_metas[i:i + batch_size]
-        vectors = np.array(embedding_provider.embed_batch(batch_texts), dtype=np.float32)
-        faiss_index.add(vectors, batch_metas)
+    for i, (doc_text, meta) in enumerate(zip(all_doc_texts, all_metas)):
+        vector = np.array(embedding_provider.embed(doc_text), dtype=np.float32).reshape(1, -1)
+        faiss_index.add(vector, [meta])
 
     bm25_index.build(all_doc_texts, all_metas)
 
     if getattr(embedding_provider, '_use_onnx', False):
         sparse_entries = []
-        for i in range(0, len(all_doc_texts), batch_size):
-            batch = all_doc_texts[i:i + batch_size]
-            batch_metas = all_metas[i:i + batch_size]
-            sparse_vecs = embedding_provider.embed_sparse(batch)
-            for sv, meta in zip(sparse_vecs, batch_metas):
+        for doc_text, meta in zip(all_doc_texts, all_metas):
+            sparse_vecs = embedding_provider.embed_sparse([doc_text])
+            for sv in sparse_vecs:
                 sparse_entries.append({
                     "source_file": meta["source_file"],
                     "sparse": {str(k): v for k, v in sv.items()},
