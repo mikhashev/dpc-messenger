@@ -339,11 +339,13 @@ def build_llm_messages(
 
     # Active Recall hints (ADR-010, WIRE-2)
     if conversation_history:
-        _last_user_msg = ""
+        _user_msgs = []
         for _h in reversed(conversation_history):
             if _h.get("role") == "user" and _h.get("content"):
-                _last_user_msg = _h["content"]
-                break
+                _user_msgs.append(_h["content"])
+                if len(_user_msgs) >= 7:
+                    break
+        _last_user_msg = " ".join(reversed(_user_msgs))[:500]
         if _last_user_msg:
             try:
                 from .active_recall import get_recall_block
