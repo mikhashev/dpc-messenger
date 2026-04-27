@@ -216,11 +216,13 @@ class DpcAgentManager:
                 if agent_root:
                     index_dir = agent_root / "state" / "memory_index"
                     needs_full_rebuild = not (index_dir / "index_meta.json").exists()
+                    log.debug("DEBUG mem_cfg.embedding_model=%s (from MemoryConfig default)", mem_cfg.embedding_model)
                     if not needs_full_rebuild:
                         try:
                             import json as _json
                             _meta = _json.loads((index_dir / "index_meta.json").read_text(encoding="utf-8"))
                             _stored_model = _meta.get("header", {}).get("model_name", "")
+                            log.debug("DEBUG model_name check: stored=%s, config=%s, match=%s", _stored_model, mem_cfg.embedding_model, _stored_model == mem_cfg.embedding_model)
                             if _stored_model != mem_cfg.embedding_model:
                                 log.info("Memory index model changed (%s → %s), forcing rebuild", _stored_model, mem_cfg.embedding_model)
                                 needs_full_rebuild = True
