@@ -264,6 +264,8 @@ class EmbeddingProvider:
                  self.model_name, self.device, self._local_files_only)
 
     def _onnx_embed(self, texts: List[str]) -> List[List[float]]:
+        if not texts:
+            return []
         import numpy as np
         encoded = self._tokenizer(
             texts, padding=True, truncation=True,
