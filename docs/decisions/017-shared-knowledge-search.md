@@ -110,7 +110,8 @@ Track 2: Team Collaboration #9. Multi-hop relay = "Where This Leads → Network 
 
 ## Dependencies
 
-- ADR-010 (Agent Memory Architecture) — FAISS+BM25 index must be operational on receiver
+- ADR-010 (Agent Memory Architecture) — FAISS index must be operational on receiver
+- ADR-018 (Retrieval Infrastructure Upgrade) — BGE-M3 recommended embedding model with whole-document indexing; BM25 retained as CPU-only fallback
 - Existing P2P TLS connections — transport layer
 - Existing firewall rules — access control
 
