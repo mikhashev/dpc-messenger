@@ -12,8 +12,8 @@ from typing import Optional
 
 log = logging.getLogger(__name__)
 
-DEFAULT_MODEL = "intfloat/multilingual-e5-small"
-ESTIMATED_SIZE_MB = 470
+DEFAULT_MODEL = "aapot/bge-m3-onnx"
+ESTIMATED_SIZE_MB = 1100
 
 
 def is_model_downloaded(model_name: str = DEFAULT_MODEL) -> bool:
