@@ -4123,9 +4123,10 @@ class CoreService:
 
             # Agent conversations: always read from disk file (source of truth)
             # The in-memory monitor can be stale after session resets, knowledge commits,
-            # or when messages arrive via different paths (Telegram, MCP, chain triggers).
-            # history.json is written on every save_history() call, so it's always current.
-            if not monitor and conversation_id.startswith("agent_"):
+            # or when messages arrive via different paths (Telegram, MCP, chain triggers,
+            # sleep pipeline). Multiple monitor instances exist (service.conversation_monitors
+            # vs agent_manager._get_or_create_agent_monitor) — disk is the only consistent source.
+            if conversation_id.startswith("agent_"):
                 history_path = DPC_HOME_DIR / "conversations" / conversation_id / "history.json"
                 if history_path.exists():
                     try:
