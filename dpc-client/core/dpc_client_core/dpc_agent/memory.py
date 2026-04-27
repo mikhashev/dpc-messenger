@@ -190,7 +190,7 @@ class EmbeddingProvider:
     ONNX_DIMENSIONS = 1024
 
     def __init__(self, model_name: str = "aapot/bge-m3-onnx",
-                 device: Optional[str] = None, max_tokens: int = 8192,
+                 device: Optional[str] = None, max_tokens: int = 4096,
                  local_files_only: bool = False):
         self.model_name = model_name
         self.max_tokens = max_tokens
