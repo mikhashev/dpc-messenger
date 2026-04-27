@@ -206,12 +206,24 @@ class EmbeddingProvider:
     def device(self) -> str:
         if self._device:
             return self._device
+        if self._use_onnx:
+            return self._onnx_device()
         try:
             import torch
             if torch.cuda.is_available():
                 return "cuda"
             if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
                 return "mps"
+        except ImportError:
+            pass
+        return "cpu"
+
+    def _onnx_device(self) -> str:
+        try:
+            import onnxruntime as ort
+            available = ort.get_available_providers()
+            if "CUDAExecutionProvider" in available:
+                return "cuda"
         except ImportError:
             pass
         return "cpu"
