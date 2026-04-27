@@ -161,7 +161,7 @@
     if (!editSettings.memory) {
       editSettings.memory = {
         enabled: false,
-        embedding_model: 'intfloat/multilingual-e5-small',
+        embedding_model: 'aapot/bge-m3-onnx',
         active_recall: true,
       };
     }
