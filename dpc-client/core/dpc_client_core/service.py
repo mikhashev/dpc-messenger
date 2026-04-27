@@ -7691,8 +7691,14 @@ class CoreService:
         await self._emit_sleep_event(agent_id, sleep_data)
 
         async def _run_sleep_background():
+            async def _sleep_progress(current, total, phase, archive_file):
+                await self.local_api.broadcast_event("sleep_progress", {
+                    "agent_id": agent_id, "current": current, "total": total,
+                    "phase": phase, "archive_file": archive_file,
+                })
+
             try:
-                result = await run_sleep(conversation_dir, self.llm_manager, agent_id=agent_id, force=True, provider_alias=sleep_provider)
+                result = await run_sleep(conversation_dir, self.llm_manager, agent_id=agent_id, force=True, provider_alias=sleep_provider, progress_callback=_sleep_progress)
                 if result.get("status") == "completed":
                     brief = result.get("morning_brief", {})
                     chat_text = self._format_morning_brief(brief)

@@ -197,6 +197,7 @@ async def _analyze_single_session(
 async def run_sleep(
     conversation_dir: Path, llm_manager, agent_id: str = "",
     force: bool = False, provider_alias: Optional[str] = None,
+    progress_callback=None,
 ) -> Dict[str, Any]:
     state = _read_sleep_state(conversation_dir)
     if state.get("status") == "sleeping":
@@ -221,8 +222,11 @@ async def run_sleep(
         results_dir.mkdir(exist_ok=True)
 
         per_session_findings = []
+        total = len(digests)
         for i, digest in enumerate(digests):
-            log.info("Sleep: analyzing session %d/%d (%s)", i + 1, len(digests), digest.get("archive_file", ""))
+            log.info("Sleep: analyzing session %d/%d (%s)", i + 1, total, digest.get("archive_file", ""))
+            if progress_callback:
+                await progress_callback(i, total, "analyzing", digest.get("archive_file", ""))
             try:
                 finding = await _analyze_single_session(digest, conversation_dir, llm_manager, provider_alias=provider_alias)
                 if finding:
@@ -244,6 +248,9 @@ async def run_sleep(
             f"Session {i+1} ({f.get('digest_date', '')[:10]}):\n{json.dumps(f, ensure_ascii=False, indent=2)}"
             for i, f in enumerate(per_session_findings) if "error" not in f
         )
+
+        if progress_callback:
+            await progress_callback(total, total, "synthesizing", "")
 
         synthesis_prompt = SYNTHESIS_PROMPT.format(
             n=len(per_session_findings),

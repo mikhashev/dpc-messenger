@@ -4,7 +4,7 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { writable } from "svelte/store";
-  import { connectionStatus, nodeStatus, sendCommand, resetReconnection, connectToCoreService, knowledgeCommitProposal, personalContext, tokenWarning, extractionFailure, availableProviders, peerProviders, unreadMessageCounts, resetUnreadCount, setActiveChat, newSessionProposal, proposeNewSession, voteNewSession, defaultProviders, providersList, groupChats, loadGroups, listAgents, agentsList, sleepStateChanged } from "$lib/coreService";
+  import { connectionStatus, nodeStatus, sendCommand, resetReconnection, connectToCoreService, knowledgeCommitProposal, personalContext, tokenWarning, extractionFailure, availableProviders, peerProviders, unreadMessageCounts, resetUnreadCount, setActiveChat, newSessionProposal, proposeNewSession, voteNewSession, defaultProviders, providersList, groupChats, loadGroups, listAgents, agentsList, sleepStateChanged, sleepProgress } from "$lib/coreService";
   import KnowledgeCommitDialog from "$lib/components/KnowledgeCommitDialog.svelte";
   import NewSessionDialog from "$lib/components/NewSessionDialog.svelte";
   import VoteResultDialog from "$lib/components/VoteResultDialog.svelte";
@@ -955,6 +955,9 @@
             bind:enableMarkdown
             isExtracting={isExtractingKnowledge}
             {isSleeping}
+            sleepCurrent={$sleepProgress?.agent_id === activeChatId ? $sleepProgress?.current ?? 0 : 0}
+            sleepTotal={$sleepProgress?.agent_id === activeChatId ? $sleepProgress?.total ?? 0 : 0}
+            sleepPhase={$sleepProgress?.agent_id === activeChatId ? $sleepProgress?.phase ?? '' : ''}
             onNewSession={handleNewChat}
             onEndSession={handleEndSession}
             onToggleSleep={handleToggleSleep}
