@@ -59,11 +59,13 @@ Full conversation history (user + assistant) concatenated as query. BGE-M3's 819
 
 Source: mtRAG benchmark (TACL 2025), ConvGQR (ACL 2023), EMNLP Industry 2025.
 
-### 4. ONNX Runtime for cross-platform CPU support
+### 4. ONNX Runtime with GPU acceleration
 
-BGE-M3 available as ONNX model (aapot/bge-m3-onnx, yuniko-software/bge-m3-onnx). Runs on Windows/Linux/macOS, CPU/CUDA/CoreML. No PyTorch required for inference — ONNX Runtime ~50MB vs PyTorch ~2GB.
+BGE-M3 available as ONNX model (aapot/bge-m3-onnx, yuniko-software/bge-m3-onnx). Runs on Windows/Linux/macOS, CPU/CUDA/CoreML.
 
-DPC must work on machines without GPU (C5: consumer hardware, shared inference model). ONNX ensures this.
+Dependency: `onnxruntime-gpu` (superset of `onnxruntime`, includes CUDAExecutionProvider + CPUExecutionProvider). Runtime provider selection via `ort.get_available_providers()` — CUDA when available, CPU fallback otherwise. Follows ADR-012 pattern (platform markers at install time, device detection at runtime).
+
+DPC must work on machines without GPU (C5: consumer hardware). ONNX Runtime CPUExecutionProvider ensures this; CUDAExecutionProvider accelerates on NVIDIA hardware.
 
 ### 5. BM25 retained as fallback
 
