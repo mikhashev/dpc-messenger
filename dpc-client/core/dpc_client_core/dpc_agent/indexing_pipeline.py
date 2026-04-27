@@ -33,14 +33,17 @@ SPARSE_INDEX_FILE = "sparse_index.json"
 
 
 def _save_sparse_index(index_dir: pathlib.Path, entries: List[dict]):
-    """Save sparse index to JSON file."""
-    if index_dir:
-        path = index_dir / SPARSE_INDEX_FILE
-        path.write_text(json.dumps(entries, ensure_ascii=False), encoding="utf-8")
+    """Save sparse index to JSON file atomically (write-to-tmp then rename)."""
+    if not index_dir:
+        return
+    path = index_dir / SPARSE_INDEX_FILE
+    tmp_path = path.with_suffix(".json.tmp")
+    tmp_path.write_text(json.dumps(entries, ensure_ascii=False), encoding="utf-8")
+    tmp_path.replace(path)
 
 
 def _save_sparse_entry(index_dir: pathlib.Path, filename: str, sparse_dict: Dict[int, float], meta: dict):
-    """Append a single sparse entry to the index."""
+    """Update a single sparse entry atomically."""
     entries = load_sparse_index(index_dir)
     entries = [e for e in entries if e.get("source_file") != filename]
     entries.append({"source_file": filename, "sparse": {str(k): v for k, v in sparse_dict.items()}, "meta": meta})
@@ -110,7 +113,7 @@ def index_single_file(
     faiss_index.add(vector, [meta])
     bm25_index.add([doc_text], [meta])
 
-    if hasattr(embedding_provider, 'embed_sparse'):
+    if getattr(embedding_provider, '_use_onnx', False):
         sparse_vecs = embedding_provider.embed_sparse([doc_text])
         if sparse_vecs:
             _save_sparse_entry(faiss_index._index_dir, path.name, sparse_vecs[0], meta)
@@ -162,7 +165,7 @@ def full_rebuild(
 
     bm25_index.build(all_doc_texts, all_metas)
 
-    if hasattr(embedding_provider, 'embed_sparse'):
+    if getattr(embedding_provider, '_use_onnx', False):
         sparse_entries = []
         for i in range(0, len(all_doc_texts), batch_size):
             batch = all_doc_texts[i:i + batch_size]

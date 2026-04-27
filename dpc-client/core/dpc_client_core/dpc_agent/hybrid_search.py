@@ -66,14 +66,19 @@ def sparse_search(
     index_sparse: List[Tuple[Dict[int, float], dict]],
     top_k: int = 5,
 ) -> List[Tuple[dict, float]]:
-    """Search using sparse vector dot product. Returns [(meta, score), ...]."""
-    results = []
-    for doc_sparse, meta in index_sparse:
-        score = sum(query_sparse.get(tid, 0) * w for tid, w in doc_sparse.items())
-        if score > 0:
-            results.append((meta, score))
-    results.sort(key=lambda x: x[1], reverse=True)
-    return results[:top_k]
+    """Search using sparse vector dot product with inverted index. Returns [(meta, score), ...]."""
+    inverted: Dict[int, List[Tuple[int, float]]] = {}
+    for doc_idx, (doc_sparse, _meta) in enumerate(index_sparse):
+        for tid, w in doc_sparse.items():
+            inverted.setdefault(tid, []).append((doc_idx, w))
+
+    scores: Dict[int, float] = {}
+    for tid, qw in query_sparse.items():
+        for doc_idx, dw in inverted.get(tid, []):
+            scores[doc_idx] = scores.get(doc_idx, 0) + qw * dw
+
+    ranked = sorted(scores.items(), key=lambda x: x[1], reverse=True)[:top_k]
+    return [(index_sparse[idx][1], score) for idx, score in ranked]
 
 
 def _file_key(meta: dict) -> str:
