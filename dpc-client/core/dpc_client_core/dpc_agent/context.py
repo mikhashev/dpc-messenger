@@ -338,8 +338,10 @@ def build_llm_messages(
             semi_stable_parts.append("## Knowledge base\n\n" + clip_text(kb_index, 50000))
 
     # Active Recall hints (ADR-010, WIRE-2)
+    _MAX_RECALL_MSGS = 30
     if conversation_history:
-        _dialog_parts = [_h["content"] for _h in conversation_history
+        _recent = conversation_history[-_MAX_RECALL_MSGS:]
+        _dialog_parts = [_h["content"] for _h in _recent
                          if _h.get("role") in ("user", "assistant") and _h.get("content")]
         _last_user_msg = " ".join(_dialog_parts)
         if _last_user_msg:
@@ -360,6 +362,7 @@ def build_llm_messages(
                 if _faiss_idx.load():
                     if embedding_provider is None:
                         embedding_provider = EmbeddingProvider(local_files_only=True)
+                        log.info("Active Recall: created fallback EmbeddingProvider (local_files_only)")
                     _qvec = _np.array(embedding_provider.embed(_last_user_msg), dtype=_np.float32)
                     _faiss_results = _faiss_idx.search(_qvec, 5)
                     log.debug("Active Recall FAISS: %d results — %s", len(_faiss_results),
