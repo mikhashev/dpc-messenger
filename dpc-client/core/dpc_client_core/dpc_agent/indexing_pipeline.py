@@ -26,7 +26,7 @@ log = logging.getLogger(__name__)
 _DEBOUNCE_WINDOW = 0.1
 _last_index_time: Dict[str, float] = {}
 
-DEFAULT_BATCH_SIZE = 32
+DEFAULT_BATCH_SIZE = 1
 
 
 SPARSE_INDEX_FILE = "sparse_index.json"
