@@ -371,6 +371,8 @@ def build_llm_messages(
                 _bm25_idx = BM25Index(_index_dir)
 
                 _faiss_results = []
+                _q1_results = []
+                _q2_results = []
                 if _faiss_idx.load():
                     if embedding_provider is None:
                         embedding_provider = EmbeddingProvider(local_files_only=True)
@@ -378,15 +380,15 @@ def build_llm_messages(
                     if _faiss_idx.needs_rebuild(embedding_provider.model_name):
                         log.info("Active Recall: FAISS index needs rebuild (model changed), skipping search")
                     else:
-                        _q1_vec = _np.array(embedding_provider.embed(_human_text), dtype=_np.float32) if _human_text else None
-                        _q2_vec = _np.array(embedding_provider.embed(_context_text), dtype=_np.float32) if _context_text else None
-                        _q1_results = _faiss_idx.search(_q1_vec, 5) if _q1_vec is not None else []
-                        _q2_results = _faiss_idx.search(_q2_vec, 5) if _q2_vec is not None else []
+                        if _human_text:
+                            _q1_vec = _np.array(embedding_provider.embed(_human_text), dtype=_np.float32)
+                            _q1_results = _faiss_idx.search(_q1_vec, 5)
+                        if _context_text:
+                            _q2_vec = _np.array(embedding_provider.embed(_context_text), dtype=_np.float32)
+                            _q2_results = _faiss_idx.search(_q2_vec, 5)
                         _faiss_results = _q1_results + _q2_results
                     log.debug("Active Recall FAISS: %d results (Q1=%d + Q2=%d) — %s",
-                              len(_faiss_results),
-                              len(_q1_results) if '_q1_results' in dir() else 0,
-                              len(_q2_results) if '_q2_results' in dir() else 0,
+                              len(_faiss_results), len(_q1_results), len(_q2_results),
                               [m.get("source_file", "?") for m, _ in _faiss_results])
 
                 _keyword_results = []
