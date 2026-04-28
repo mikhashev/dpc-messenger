@@ -400,10 +400,11 @@ def build_llm_messages(
                     _keyword_results = sparse_search(_q_sparse, _idx_sparse, top_k=5)
                     log.debug("Active Recall sparse: %d results — %s", len(_keyword_results),
                               [m.get("source_file", "?") for m, _ in _keyword_results])
-                elif _bm25_idx.load():
-                    _keyword_results = _bm25_idx.search(_sparse_query, 5)
-                    log.debug("Active Recall BM25 fallback: %d results — %s", len(_keyword_results),
-                              [m.get("source_file", "?") for m, _ in _keyword_results])
+                if _bm25_idx.load():
+                    _bm25_results = _bm25_idx.search(_sparse_query, 5)
+                    _keyword_results.extend(_bm25_results)
+                    log.debug("Active Recall BM25: %d results — %s", len(_bm25_results),
+                              [m.get("source_file", "?") for m, _ in _bm25_results])
 
                 _results = reciprocal_rank_fusion(_faiss_results, _keyword_results)
                 _ctx_ratio = (session_state or {}).get("context_usage_percent", 0) / 100.0
