@@ -28,8 +28,35 @@ def _detect_script(text: str) -> str:
     return "bigram" if cjk_count > len(sample) * 0.15 else "whitespace"
 
 
+_STOP_WORDS = frozenset({
+    # Russian
+    "а", "без", "более", "бы", "был", "была", "были", "было", "быть",
+    "в", "вам", "вас", "весь", "вот", "все", "всего", "всех", "вы",
+    "где", "да", "давай", "давайте", "даже", "для", "до", "еще", "ещё",
+    "же", "за", "здесь", "и", "из", "или", "им", "их",
+    "к", "как", "когда", "кто", "ли", "либо", "мне", "может", "мы",
+    "на", "над", "нам", "нас", "не", "нет", "ни", "них", "но", "ну",
+    "о", "об", "один", "он", "она", "они", "оно", "от",
+    "по", "под", "при", "про",
+    "с", "свой", "свою", "себе", "себя", "так", "также", "такой", "там",
+    "те", "тебе", "тем", "то", "того", "тоже", "той", "только", "том",
+    "ты", "у", "уже", "хотя", "чего", "чем", "что", "чтобы",
+    "эта", "эти", "этим", "это", "этого", "этой", "этом", "этот", "эту",
+    "я",
+    # English
+    "a", "an", "and", "are", "as", "at", "be", "been", "but", "by",
+    "can", "do", "for", "from", "had", "has", "have", "he", "her", "his",
+    "how", "if", "in", "into", "is", "it", "its",
+    "just", "let", "me", "my", "no", "not", "of", "on", "or", "our",
+    "she", "so", "some", "than", "that", "the", "their", "them", "then",
+    "there", "these", "they", "this", "to", "too",
+    "us", "was", "we", "were", "what", "when", "which", "who", "will",
+    "with", "would", "you", "your",
+})
+
+
 def _tokenize_whitespace(text: str) -> List[str]:
-    return [w.lower() for w in text.split() if len(w) > 1]
+    return [w.lower() for w in text.split() if len(w) > 1 and w.lower() not in _STOP_WORDS]
 
 
 def _tokenize_bigram(text: str) -> List[str]:
