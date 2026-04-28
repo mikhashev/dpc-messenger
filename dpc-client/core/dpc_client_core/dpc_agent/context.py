@@ -32,6 +32,10 @@ from .memory import Memory
 
 log = logging.getLogger(__name__)
 
+FAISS_TOP_K = 10
+SPARSE_TOP_K = 10
+BM25_TOP_K = 10
+
 
 def _build_user_content(task: Dict[str, Any]) -> Any:
     """Build user message content. Supports text + optional image."""
@@ -382,10 +386,10 @@ def build_llm_messages(
                     else:
                         if _human_text:
                             _q1_vec = _np.array(embedding_provider.embed(_human_text), dtype=_np.float32)
-                            _q1_results = _faiss_idx.search(_q1_vec, 15)
+                            _q1_results = _faiss_idx.search(_q1_vec, FAISS_TOP_K)
                         if _context_text:
                             _q2_vec = _np.array(embedding_provider.embed(_context_text), dtype=_np.float32)
-                            _q2_results = _faiss_idx.search(_q2_vec, 15)
+                            _q2_results = _faiss_idx.search(_q2_vec, FAISS_TOP_K)
                         _faiss_results = _q1_results + _q2_results
                     log.debug("Active Recall FAISS: %d results (Q1=%d + Q2=%d) — %s",
                               len(_faiss_results), len(_q1_results), len(_q2_results),
@@ -397,11 +401,11 @@ def build_llm_messages(
                 if _sparse_entries and embedding_provider and hasattr(embedding_provider, 'embed_sparse'):
                     _q_sparse = embedding_provider.embed_sparse([_sparse_query])[0]
                     _idx_sparse = [({int(k): v for k, v in e["sparse"].items()}, e["meta"]) for e in _sparse_entries]
-                    _keyword_results = sparse_search(_q_sparse, _idx_sparse, top_k=5)
+                    _keyword_results = sparse_search(_q_sparse, _idx_sparse, top_k=SPARSE_TOP_K)
                     log.debug("Active Recall sparse: %d results — %s", len(_keyword_results),
                               [m.get("source_file", "?") for m, _ in _keyword_results])
                 if _bm25_idx.load():
-                    _bm25_results = _bm25_idx.search(_sparse_query, 5)
+                    _bm25_results = _bm25_idx.search(_sparse_query, BM25_TOP_K)
                     _keyword_results.extend(_bm25_results)
                     log.debug("Active Recall BM25: %d results — %s", len(_bm25_results),
                               [m.get("source_file", "?") for m, _ in _bm25_results])
