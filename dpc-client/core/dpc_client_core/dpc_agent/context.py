@@ -382,10 +382,10 @@ def build_llm_messages(
                     else:
                         if _human_text:
                             _q1_vec = _np.array(embedding_provider.embed(_human_text), dtype=_np.float32)
-                            _q1_results = _faiss_idx.search(_q1_vec, 5)
+                            _q1_results = _faiss_idx.search(_q1_vec, 10)
                         if _context_text:
                             _q2_vec = _np.array(embedding_provider.embed(_context_text), dtype=_np.float32)
-                            _q2_results = _faiss_idx.search(_q2_vec, 5)
+                            _q2_results = _faiss_idx.search(_q2_vec, 10)
                         _faiss_results = _q1_results + _q2_results
                     log.debug("Active Recall FAISS: %d results (Q1=%d + Q2=%d) — %s",
                               len(_faiss_results), len(_q1_results), len(_q2_results),
