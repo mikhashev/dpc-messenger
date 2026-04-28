@@ -338,13 +338,25 @@ def build_llm_messages(
             semi_stable_parts.append("## Knowledge base\n\n" + clip_text(kb_index, 50000))
 
     # Active Recall hints (ADR-010, WIRE-2)
-    _MAX_RECALL_MSGS = 30
+    # Dual-query: Q1 = last human message (topic detection), Q2 = context window.
+    # Workaround for 3-participant agent chat (human + CC + agent in 2-party chat).
+    # Human nodes have sender_node_id starting with "dpc-node-" (crypto identity).
+    # TODO: replace with ADR-006 participant_type filter when Track 2 lands
+    _CONTEXT_MSGS = 10
     if conversation_history:
-        _recent = conversation_history[-_MAX_RECALL_MSGS:]
-        _dialog_parts = [_h["content"] for _h in _recent
-                         if _h.get("role") in ("user", "assistant") and _h.get("content")]
-        _last_user_msg = " ".join(_dialog_parts)
-        if _last_user_msg:
+        _recent = conversation_history[-_CONTEXT_MSGS:]
+        _context_parts = [_h["content"] for _h in _recent
+                          if _h.get("role") in ("user", "assistant") and _h.get("content")]
+        _context_text = " ".join(_context_parts)
+
+        _human_msgs = [_h["content"] for _h in reversed(conversation_history)
+                       if _h.get("role") == "user"
+                       and _h.get("content")
+                       and _h.get("sender_node_id", "").startswith("dpc-node-")]
+        _human_text = _human_msgs[0] if _human_msgs else ""
+
+        _query_text = _human_text or _context_text
+        if _query_text:
             try:
                 from .active_recall import get_recall_block
                 from .hybrid_search import reciprocal_rank_fusion, sparse_search
@@ -366,21 +378,28 @@ def build_llm_messages(
                     if _faiss_idx.needs_rebuild(embedding_provider.model_name):
                         log.info("Active Recall: FAISS index needs rebuild (model changed), skipping search")
                     else:
-                        _qvec = _np.array(embedding_provider.embed(_last_user_msg), dtype=_np.float32)
-                        _faiss_results = _faiss_idx.search(_qvec, 5)
-                    log.debug("Active Recall FAISS: %d results — %s", len(_faiss_results),
+                        _q1_vec = _np.array(embedding_provider.embed(_human_text), dtype=_np.float32) if _human_text else None
+                        _q2_vec = _np.array(embedding_provider.embed(_context_text), dtype=_np.float32) if _context_text else None
+                        _q1_results = _faiss_idx.search(_q1_vec, 5) if _q1_vec is not None else []
+                        _q2_results = _faiss_idx.search(_q2_vec, 5) if _q2_vec is not None else []
+                        _faiss_results = _q1_results + _q2_results
+                    log.debug("Active Recall FAISS: %d results (Q1=%d + Q2=%d) — %s",
+                              len(_faiss_results),
+                              len(_q1_results) if '_q1_results' in dir() else 0,
+                              len(_q2_results) if '_q2_results' in dir() else 0,
                               [m.get("source_file", "?") for m, _ in _faiss_results])
 
                 _keyword_results = []
+                _sparse_query = _human_text or _context_text
                 _sparse_entries = load_sparse_index(_index_dir)
                 if _sparse_entries and embedding_provider and hasattr(embedding_provider, 'embed_sparse'):
-                    _q_sparse = embedding_provider.embed_sparse([_last_user_msg])[0]
+                    _q_sparse = embedding_provider.embed_sparse([_sparse_query])[0]
                     _idx_sparse = [({int(k): v for k, v in e["sparse"].items()}, e["meta"]) for e in _sparse_entries]
                     _keyword_results = sparse_search(_q_sparse, _idx_sparse, top_k=5)
                     log.debug("Active Recall sparse: %d results — %s", len(_keyword_results),
                               [m.get("source_file", "?") for m, _ in _keyword_results])
                 elif _bm25_idx.load():
-                    _keyword_results = _bm25_idx.search(_last_user_msg, 5)
+                    _keyword_results = _bm25_idx.search(_sparse_query, 5)
                     log.debug("Active Recall BM25 fallback: %d results — %s", len(_keyword_results),
                               [m.get("source_file", "?") for m, _ in _keyword_results])
 
