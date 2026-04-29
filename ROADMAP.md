@@ -1,6 +1,6 @@
 # D-PC Messenger Development Roadmap
 
-> **Status:** Alpha | **Last Updated:** April 2026 | **Current Version:** 0.22.0 | **Current Phase:** Phase 2 - Agent Maturity (Track 1 mostly complete, Track 2 planned)
+> **Status:** Alpha | **Last Updated:** April 2026 | **Current Version:** 0.23.0 | **Current Phase:** Phase 2 - Agent Maturity (Track 1 mostly complete, Track 2 planned)
 
 ---
 
