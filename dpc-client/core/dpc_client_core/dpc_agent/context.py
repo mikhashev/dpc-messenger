@@ -342,22 +342,17 @@ def build_llm_messages(
             semi_stable_parts.append("## Knowledge base\n\n" + clip_text(kb_index, 50000))
 
     # Active Recall hints (ADR-010, WIRE-2)
-    # Dual-query: Q1 = last human message (topic detection), Q2 = context window.
-    # Workaround for 3-participant agent chat (human + CC + agent in 2-party chat).
-    # Human nodes have sender_node_id starting with "dpc-node-" (crypto identity).
-    # TODO: replace with ADR-006 participant_type filter when Track 2 lands
+    # Q1 = current user message (from task), Q2 = recent context window.
+    # conversation_history excludes current message (see agent.py:207 prior_history),
+    # so we use task["content"] as the primary query — fixes off-by-one (S79).
     _CONTEXT_MSGS = 10
-    if conversation_history:
-        _recent = conversation_history[-_CONTEXT_MSGS:]
+    if conversation_history or task.get("content"):
+        _recent = (conversation_history or [])[-_CONTEXT_MSGS:]
         _context_parts = [_h["content"] for _h in _recent
                           if _h.get("role") in ("user", "assistant") and _h.get("content")]
         _context_text = " ".join(_context_parts)
 
-        _human_msgs = [_h["content"] for _h in reversed(conversation_history)
-                       if _h.get("role") == "user"
-                       and _h.get("content")
-                       and _h.get("sender_node_id", "").startswith("dpc-node-")]
-        _human_text = _human_msgs[0] if _human_msgs else ""
+        _human_text = task.get("text", "") or task.get("content", "")
 
         _query_text = _human_text or _context_text
         if _query_text:
