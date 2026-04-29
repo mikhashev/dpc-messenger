@@ -97,7 +97,7 @@ North Star: Sleep consolidates session learnings → Memory system enables recal
 | **Per-Agent Permission Profiles** | **DONE** (S55-S60) | Inheritance model, per-agent firewall, UI panel |
 | **Agent Storage Isolation** | **DONE** | Per-conversation folders, per-agent managers |
 | **Agent Telegram Commands** | **DONE** (S69) | /sleep, /extract_knowledge, sleep notifications |
-| **Memory Upgrade (ADR-010)** | **PARTIAL** | Phase 1-3 DONE+WIRED (14/19 tasks). Phase 4 wiring incomplete |
+| **Memory Upgrade (ADR-010)** | **DONE** (S81) | 19/19 tasks. Consolidation wired to sleep pipeline. model_swap superseded by ADR-018 |
 | **Skill Rewrite** | NOT STARTED | Break append-only limit. A/B testing with auto-rollback |
 | ~~Agent Evolution (ADR-015)~~ | REMOVED (S68) | Code deleted (-1723 lines). Replaced by Sleep + co-evolution |
 | ~~Consciousness~~ | REMOVED (S65-S68) | Background worker deleted. Extended thinking IS consciousness |
@@ -106,7 +106,7 @@ North Star: Sleep consolidates session learnings → Memory system enables recal
 - **Poetry → uv migration (ADR-011)** — 3 packages migrated, -6705 lines (S51)
 - **Device-Aware Deps (ADR-012)** — CUDA torch via platform markers, cross-platform (S51, S69-S70)
 - **Rate Limiting + Security (ARCH-26)** — security/ folder, THREAT-MODEL.md (S58)
-- **Protocol 13** (v1.12) — Human-AI team coordination (Mike=approve, CC=execute, Ark=review)
+- **Protocol 13** (v1.13) — Human-AI team coordination (Mike=approve, CC=execute, Ark=review)
 - **External Agent Bridge** — CC ↔ DPC via cc_agent_bridge.py, cron monitoring, P13 coordination
 - **Group Chat** (v0.19.0) — Multi-participant with files, voice, knowledge commits
 - **Agent Skills** — 10 static SKILL.md files. Reflection removed (S68). Rewrite planned (Track 1)
