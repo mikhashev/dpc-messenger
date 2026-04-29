@@ -35,6 +35,7 @@ dependencies = [
     "bm25s>=0.3.3",
     "ddgs>=9.14",
     "trafilatura>=1.12,<3.0",
+    "stopwordsiso>=0.6",
 ]
 
 [project.optional-dependencies]

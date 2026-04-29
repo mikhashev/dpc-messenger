@@ -141,3 +141,17 @@ Full research: `ideas/dpc-research/search-infrastructure-quality/` (3 files, S75
 - CPU inference slower: ~50ms → ~200-500ms per embed
 - First index rebuild: ~30-60 seconds
 - New dependency: onnxruntime (~50MB pip install)
+
+## Query Preprocessing Insight (S78)
+
+**Fundamental finding:** retrieval quality is bounded by query quality, not model sophistication. All three channels (FAISS dense, BGE-M3 sparse, BM25) failed to find "EEG" content because query dilution affected all of them simultaneously:
+- Dense: rare keyword "EEG" averaged out by common conversation words in embedding
+- Sparse: learned sparse features diluted by noise tokens
+- BM25: common words ("ну", "давайте") outscored rare term in TF-IDF sum
+
+**Fixes applied (S78):**
+1. BM25 enabled as third channel alongside sparse (was dead code via elif)
+2. Stop words (Russian + English, ~130 words) added to BM25 tokenizer — filters both index build and query
+3. Top_k constants: FAISS_TOP_K=10, SPARSE_TOP_K=10, BM25_TOP_K=10
+
+**Open question:** query preprocessing for dense/sparse channels (upstream stop word filtering before embedding) — query-side only, cannot filter document embeddings post-hoc.
