@@ -285,6 +285,16 @@ async def run_sleep(
             "sessions_analyzed": len(digests),
         })
 
+        try:
+            from .consolidation import tier1_consolidate
+            agent_name = agent_id or conversation_dir.name
+            knowledge_dir = conversation_dir.parent.parent / "agents" / agent_name / "knowledge"
+            if knowledge_dir.is_dir():
+                consolidation_result = tier1_consolidate(knowledge_dir)
+                log.info("Sleep: tier1 consolidation — %d stale of %d files", consolidation_result.get("stale_marked", 0), consolidation_result.get("total", 0))
+        except Exception as e:
+            log.warning("Sleep: tier1 consolidation failed (non-fatal): %s", e)
+
         log.info("Sleep pipeline complete: %d sessions analyzed, morning_brief.json written", len(digests))
 
         return {
