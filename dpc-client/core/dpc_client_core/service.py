@@ -1591,18 +1591,6 @@ class CoreService:
 
         return status_result
 
-    @property
-    def auto_knowledge_detection_enabled(self) -> bool:
-        """Delegates to KnowledgeService (Phase 1b)."""
-        if self.knowledge_service:
-            return self.knowledge_service.auto_knowledge_detection_enabled
-        return False
-
-    @auto_knowledge_detection_enabled.setter
-    def auto_knowledge_detection_enabled(self, value: bool) -> None:
-        if self.knowledge_service:
-            self.knowledge_service.auto_knowledge_detection_enabled = value
-
     def get_state(self) -> dict:
         """
         Agent-readable synchronous snapshot of current CoreService state.
@@ -4113,10 +4101,6 @@ class CoreService:
         """Delegated to KnowledgeService."""
         return await self.knowledge_service.end_conversation_session(conversation_id, initiated_by)
 
-    async def toggle_auto_knowledge_detection(self, enabled: bool = None) -> Dict[str, Any]:
-        """Delegated to KnowledgeService."""
-        return await self.knowledge_service.toggle_auto_knowledge_detection(enabled)
-
     def _resolve_agent_token_limit(self, agent_id: str) -> int:
         """Delegates to AgentService."""
         if not self.agent_service:
@@ -4139,9 +4123,10 @@ class CoreService:
 
             # Agent conversations: always read from disk file (source of truth)
             # The in-memory monitor can be stale after session resets, knowledge commits,
-            # or when messages arrive via different paths (Telegram, MCP, chain triggers).
-            # history.json is written on every save_history() call, so it's always current.
-            if not monitor and conversation_id.startswith("agent_"):
+            # or when messages arrive via different paths (Telegram, MCP, chain triggers,
+            # sleep pipeline). Multiple monitor instances exist (service.conversation_monitors
+            # vs agent_manager._get_or_create_agent_monitor) — disk is the only consistent source.
+            if conversation_id.startswith("agent_"):
                 history_path = DPC_HOME_DIR / "conversations" / conversation_id / "history.json"
                 if history_path.exists():
                     try:
@@ -7341,40 +7326,9 @@ class CoreService:
                 logger.debug("Monitor - buffer size after: %d, Score: %.2f",
                            len(monitor.message_buffer), monitor.knowledge_score)
 
-                # Only handle automatic proposals if auto-detection is enabled
-                if self.knowledge_service.auto_knowledge_detection_enabled:
-                    # If proposal generated, broadcast to UI
-                    if proposal:
-                        logger.info("Auto-detect - knowledge proposal generated for %s chat", conversation_id)
-                        await self.local_api.broadcast_event(
-                            "knowledge_commit_proposed",
-                            proposal.to_dict()
-                        )
-                        # Local AI - private conversation, don't broadcast to peers
-                        logger.info("%s - private conversation, knowledge will not be shared with peers", conversation_id)
-                        async def _no_op_broadcast(message: Dict[str, Any]) -> None:
-                            pass  # Don't send to peers for private conversations
-
-                        await self.consensus_manager.propose_commit(
-                            proposal=proposal,
-                            broadcast_func=_no_op_broadcast
-                        )
-                    else:
-                        logger.debug("Monitor - no proposal yet (need 5 messages for auto-detect)")
-                else:
-                    logger.debug("Monitor - auto-detection is OFF, messages buffered for manual extraction")
+                logger.debug("Monitor - messages buffered for manual extraction")
             except Exception as e:
                 logger.error("Error in local AI conversation monitoring: %s", e, exc_info=True)
-                # Only broadcast extraction failure if auto-detection was enabled
-                if self.knowledge_service.auto_knowledge_detection_enabled:
-                    await self.local_api.broadcast_event(
-                        "knowledge_extraction_failed",
-                        {
-                            "conversation_id": "local_ai",
-                            "error": str(e),
-                            "reason": "JSON parsing failed or LLM extraction error"
-                        }
-                    )
         else:
             logger.debug("Monitor - query failed (status=%s), not buffering messages", status)
 
@@ -7547,6 +7501,70 @@ class CoreService:
         except Exception as e:
             return {"status": "error", "message": str(e)}
 
+    async def get_agent_model_config(self, agent_id: str = None) -> Dict[str, Any]:
+        """Get per-agent model configuration (Main LLM + Sleep LLM) along with available providers."""
+        if agent_id is None:
+            agent_id = self._get_default_agent_id()
+        try:
+            from dpc_client_core.dpc_agent.utils import load_agent_config, AgentRegistry
+            registry = AgentRegistry()
+            if not registry.get_agent(agent_id):
+                return {"status": "error", "message": f"Agent not found: {agent_id}"}
+
+            config = load_agent_config(agent_id)
+            providers_data = await self.get_providers_list()
+
+            return {
+                "status": "ok",
+                "agent_id": agent_id,
+                "provider_alias": config.get("provider_alias"),
+                "sleep_provider_alias": config.get("sleep_provider_alias"),
+                "providers": providers_data.get("providers", []),
+                "default_provider": providers_data.get("default_provider", ""),
+            }
+        except Exception as e:
+            logger.error("get_agent_model_config failed: %s", e, exc_info=True)
+            return {"status": "error", "message": str(e)}
+
+    async def save_agent_model_config(
+        self, agent_id: str = None,
+        provider_alias: str = None,
+        sleep_provider_alias: str = None,
+    ) -> Dict[str, Any]:
+        """Save per-agent model configuration (Main LLM + Sleep LLM)."""
+        if agent_id is None:
+            agent_id = self._get_default_agent_id()
+        try:
+            from dpc_client_core.dpc_agent.utils import load_agent_config, save_agent_config, AgentRegistry
+            registry = AgentRegistry()
+            if not registry.get_agent(agent_id):
+                return {"status": "error", "message": f"Agent not found: {agent_id}"}
+
+            config = load_agent_config(agent_id)
+            if provider_alias is not None:
+                config["provider_alias"] = provider_alias
+                agent_entry = registry.get_agent(agent_id)
+                if agent_entry:
+                    agent_entry["provider_alias"] = provider_alias
+                    registry._save_registry()
+            if sleep_provider_alias is not None:
+                config["sleep_provider_alias"] = sleep_provider_alias
+            save_agent_config(agent_id, config)
+
+            providers_data = await self.get_providers_list()
+
+            return {
+                "status": "ok",
+                "agent_id": agent_id,
+                "provider_alias": config.get("provider_alias"),
+                "sleep_provider_alias": config.get("sleep_provider_alias"),
+                "providers": providers_data.get("providers", []),
+                "default_provider": providers_data.get("default_provider", ""),
+            }
+        except Exception as e:
+            logger.error("save_agent_model_config failed: %s", e, exc_info=True)
+            return {"status": "error", "message": str(e)}
+
     # --- Agent Task Board Methods (v0.20.0) ---
 
     async def get_agent_tasks(self, agent_id: str = None) -> Dict[str, Any]:
@@ -7610,6 +7628,19 @@ class CoreService:
         summary = brief.get("summary", "")
         if summary:
             parts.append(summary)
+        last = brief.get("last_session")
+        if last:
+            parts.append("\n**Where we left off:**")
+            for item in last.get("what_was_done", [])[:5]:
+                parts.append(f"- {item}")
+            stopped = last.get("where_stopped", "")
+            if stopped:
+                parts.append(f"\n*Stopped:* {stopped}")
+            pending = last.get("pending_items", [])
+            if pending:
+                parts.append("\n**Pending:**")
+                for p in pending[:5]:
+                    parts.append(f"- {p}")
         decisions = brief.get("key_decisions", [])
         if decisions:
             parts.append("\n**Key decisions:**")
@@ -7645,18 +7676,29 @@ class CoreService:
                 pass
 
         from dpc_client_core.dpc_agent.sleep_pipeline import run_sleep, _read_sleep_state
+        from dpc_client_core.dpc_agent.utils import load_agent_config
 
         state = _read_sleep_state(conversation_dir)
         if state.get("status") == "sleeping":
             return {"status": "already_sleeping", "state": state}
+
+        # Read per-agent sleep LLM override
+        agent_config = load_agent_config(agent_id)
+        sleep_provider = agent_config.get("sleep_provider_alias") or None
 
         sleep_data = {"agent_id": agent_id, "status": "sleeping"}
         await self.local_api.broadcast_event("sleep_state_changed", sleep_data)
         await self._emit_sleep_event(agent_id, sleep_data)
 
         async def _run_sleep_background():
+            async def _sleep_progress(current, total, phase, archive_file):
+                await self.local_api.broadcast_event("sleep_progress", {
+                    "agent_id": agent_id, "current": current, "total": total,
+                    "phase": phase, "archive_file": archive_file,
+                })
+
             try:
-                result = await run_sleep(conversation_dir, self.llm_manager, agent_id=agent_id, force=True)
+                result = await run_sleep(conversation_dir, self.llm_manager, agent_id=agent_id, force=True, provider_alias=sleep_provider, progress_callback=_sleep_progress)
                 if result.get("status") == "completed":
                     brief = result.get("morning_brief", {})
                     chat_text = self._format_morning_brief(brief)
@@ -7670,7 +7712,7 @@ class CoreService:
                         brief["consumed"] = True
                         brief_path = Path.home() / ".dpc" / "conversations" / agent_id / "morning_brief.json"
                         brief_path.write_text(json.dumps(brief, ensure_ascii=False, indent=2), encoding="utf-8")
-                    done_data = {"agent_id": agent_id, "status": "awake", "result": "completed", "sessions_analyzed": result.get("sessions_analyzed", 0)}
+                    done_data = {"agent_id": agent_id, "status": "awake", "result": "completed", "sessions_analyzed": result.get("sessions_analyzed", 0), "morning_brief": brief}
                     await self.local_api.broadcast_event("sleep_state_changed", done_data)
                     await self._emit_sleep_event(agent_id, done_data)
                 else:

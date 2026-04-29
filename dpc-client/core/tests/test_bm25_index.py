@@ -4,9 +4,9 @@ from dpc_client_core.dpc_agent.bm25_index import BM25Index, tokenize, _detect_sc
 
 
 def test_whitespace_tokenizer():
-    tokens = tokenize("Hello world test")
-    assert "hello" in tokens
-    assert "world" in tokens
+    tokens = tokenize("Python algorithm optimization")
+    assert "python" in tokens
+    assert "algorithm" in tokens
 
 
 def test_bigram_tokenizer_cjk():

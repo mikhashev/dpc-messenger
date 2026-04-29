@@ -588,12 +588,18 @@ class P2PManager:
 
         except Exception as e:
             self._record_failed_hello(peer_ip)
-            logger.error("Error handling direct connection from %s: %s", peer_addr_str, e, exc_info=True)
+            if peer_node_id:
+                logger.error("Error handling direct connection from %s: %s", peer_addr_str, e, exc_info=True)
+            else:
+                logger.warning("Rejected non-DPTP connection from %s: %s", peer_addr_str, e)
             if peer_node_id and peer_node_id in self.peers:
                 await self.shutdown_peer_connection(peer_node_id)
             else:
-                writer.close()
-                await writer.wait_closed()
+                try:
+                    writer.close()
+                    await writer.wait_closed()
+                except (ConnectionResetError, BrokenPipeError, OSError):
+                    pass
 
     async def test_port_connectivity(self, host: str, port: int, timeout: float = 10.0) -> tuple[bool, str]:
         """

@@ -78,7 +78,6 @@ ALLOWED_COMMANDS: frozenset = frozenset({
     "end_conversation_session",
     "get_conversation_settings",
     "set_conversation_persist_history",
-    "toggle_auto_knowledge_detection",
     # File transfer
     "send_file",
     "accept_file_transfer",
@@ -133,6 +132,8 @@ ALLOWED_COMMANDS: frozenset = frozenset({
     "delete_agent",
     "list_agent_profiles",
     "get_agent_permissions",  # Agent permissions transparency (v0.22.0)
+    "get_agent_model_config",
+    "save_agent_model_config",
     # Agent Task Board (v0.20.0)
     "get_agent_tasks",
     "get_agent_learning",

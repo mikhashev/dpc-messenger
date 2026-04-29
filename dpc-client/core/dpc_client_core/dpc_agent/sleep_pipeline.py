@@ -58,6 +58,12 @@ Respond with ONLY a JSON object with two keys:
 "morning_brief": {{
   "sessions_analyzed": {n},
   "period": "{period}",
+  "last_session": {{
+    "date": "...",
+    "what_was_done": ["item 1", "item 2"],
+    "where_stopped": "What was in progress when the session ended",
+    "pending_items": ["carryover task 1", "carryover task 2"]
+  }},
   "key_decisions": [{{"decision": "...", "session": "...", "rationale": "..."}}],
   "patterns_noticed": [{{"pattern": "...", "evidence": "..."}}],
   "unresolved": [{{"topic": "...", "context": "..."}}],
@@ -71,6 +77,9 @@ Respond with ONLY a JSON object with two keys:
 }}
 
 Guidelines:
+- **last_session**: Extract from the MOST RECENT session only. List concrete \
+carryover items — tasks mentioned but not completed, decisions deferred, \
+things explicitly "pending" or "carryover".
 - Focus on CROSS-SESSION patterns: what changed, what reversed, what repeated.
 - Be factual. If sessions were unproductive, say so.
 - Language: match the language of the sessions.
@@ -159,7 +168,8 @@ def _parse_llm_json(response: str) -> Dict[str, Any]:
 
 
 async def _analyze_single_session(
-    digest: Dict, conversation_dir: Path, llm_manager
+    digest: Dict, conversation_dir: Path, llm_manager,
+    provider_alias: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
     archive_file = digest.get("archive_file", "")
     archive = _load_archive(conversation_dir, archive_file) if archive_file else None
@@ -177,14 +187,18 @@ async def _analyze_single_session(
         messages=messages_text,
     )
 
-    response = await llm_manager.query(prompt)
+    response = await llm_manager.query(prompt, provider_alias=provider_alias)
     finding = _parse_llm_json(response)
     finding["archive_file"] = archive_file
     finding["digest_date"] = digest.get("date", "")
     return finding
 
 
-async def run_sleep(conversation_dir: Path, llm_manager, agent_id: str = "", force: bool = False) -> Dict[str, Any]:
+async def run_sleep(
+    conversation_dir: Path, llm_manager, agent_id: str = "",
+    force: bool = False, provider_alias: Optional[str] = None,
+    progress_callback=None,
+) -> Dict[str, Any]:
     state = _read_sleep_state(conversation_dir)
     if state.get("status") == "sleeping":
         return {"status": "already_sleeping"}
@@ -208,10 +222,13 @@ async def run_sleep(conversation_dir: Path, llm_manager, agent_id: str = "", for
         results_dir.mkdir(exist_ok=True)
 
         per_session_findings = []
+        total = len(digests)
         for i, digest in enumerate(digests):
-            log.info("Sleep: analyzing session %d/%d (%s)", i + 1, len(digests), digest.get("archive_file", ""))
+            log.info("Sleep: analyzing session %d/%d (%s)", i + 1, total, digest.get("archive_file", ""))
+            if progress_callback:
+                await progress_callback(i, total, "analyzing", digest.get("archive_file", ""))
             try:
-                finding = await _analyze_single_session(digest, conversation_dir, llm_manager)
+                finding = await _analyze_single_session(digest, conversation_dir, llm_manager, provider_alias=provider_alias)
                 if finding:
                     per_session_findings.append(finding)
                     result_path = results_dir / f"session_{i}.json"
@@ -232,13 +249,16 @@ async def run_sleep(conversation_dir: Path, llm_manager, agent_id: str = "", for
             for i, f in enumerate(per_session_findings) if "error" not in f
         )
 
+        if progress_callback:
+            await progress_callback(total, total, "synthesizing", "")
+
         synthesis_prompt = SYNTHESIS_PROMPT.format(
             n=len(per_session_findings),
             period=period,
             findings=findings_text,
         )
 
-        response = await llm_manager.query(synthesis_prompt)
+        response = await llm_manager.query(synthesis_prompt, provider_alias=provider_alias)
         result = _parse_llm_json(response)
 
         morning_brief = result.get("morning_brief", {})
@@ -264,6 +284,16 @@ async def run_sleep(conversation_dir: Path, llm_manager, agent_id: str = "", for
             "last_completed": datetime.now(timezone.utc).isoformat(),
             "sessions_analyzed": len(digests),
         })
+
+        try:
+            from .consolidation import tier1_consolidate
+            agent_name = agent_id or conversation_dir.name
+            knowledge_dir = conversation_dir.parent.parent / "agents" / agent_name / "knowledge"
+            if knowledge_dir.is_dir():
+                consolidation_result = tier1_consolidate(knowledge_dir)
+                log.info("Sleep: tier1 consolidation — %d stale of %d files", consolidation_result.get("stale_marked", 0), consolidation_result.get("total", 0))
+        except Exception as e:
+            log.warning("Sleep: tier1 consolidation failed (non-fatal): %s", e)
 
         log.info("Sleep pipeline complete: %d sessions analyzed, morning_brief.json written", len(digests))
 

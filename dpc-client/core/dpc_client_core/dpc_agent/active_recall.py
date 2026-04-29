@@ -32,12 +32,18 @@ def format_recall_hints(results: List[SearchResult], max_results: int = 3) -> st
         return ""
 
     hints = results[:max_results]
-    lines = ["", "--- ACTIVE RECALL ---"]
+    lines = [
+        "",
+        "--- ACTIVE RECALL ---",
+        "If a recalled file looks relevant to the current discussion, call read_file() to get full content.",
+    ]
     for r in hints:
         meta = r.chunk_meta
         source = meta.get("source_layer", "L5")
         filename = meta.get("source_file", "unknown")
-        lines.append(f"[{source}] {filename}: {_excerpt(meta, 200)}")
+        heading = meta.get("heading", "")
+        label = f"{heading}" if heading else filename
+        lines.append(f"[{source}] {filename}: {label} — call read_file(\"{filename}\") for details")
     lines.append("--- END RECALL ---")
     lines.append("")
     return "\n".join(lines)

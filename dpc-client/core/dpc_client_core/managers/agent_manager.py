@@ -214,8 +214,22 @@ class DpcAgentManager:
                 import asyncio
                 agent_root = self._agent.agent_root if self._agent else None
                 if agent_root:
+                    from dpc_client_core.dpc_agent.memory import EmbeddingProvider
+                    _provider_ref = self._agent._embedding_provider if self._agent else None
+                    _actual_model = _provider_ref.model_name if _provider_ref else mem_cfg.embedding_model
+
                     index_dir = agent_root / "state" / "memory_index"
                     needs_full_rebuild = not (index_dir / "index_meta.json").exists()
+                    if not needs_full_rebuild:
+                        try:
+                            import json as _json
+                            _meta = _json.loads((index_dir / "index_meta.json").read_text(encoding="utf-8"))
+                            _stored_model = _meta.get("header", {}).get("model_name", "")
+                            if _stored_model != _actual_model:
+                                log.info("Memory index model changed (%s -> %s), forcing rebuild", _stored_model, _actual_model)
+                                needs_full_rebuild = True
+                        except Exception:
+                            needs_full_rebuild = True
 
                     def _sync_index():
                         """Runs in thread executor to avoid blocking the event loop."""
@@ -227,9 +241,9 @@ class DpcAgentManager:
                             from dpc_client_core.dpc_agent.faiss_index import FaissIndex
                             from dpc_client_core.dpc_agent.bm25_index import BM25Index
                             from dpc_client_core.dpc_agent.text_extract import extract_text
-                            from dpc_client_core.dpc_agent.chunking import chunk_text, batched_chunks
-                            provider = self._agent._embedding_provider if self._agent else EmbeddingProvider(model_name=mem_cfg.embedding_model)
-                            faiss_idx = FaissIndex(index_dir, model_name=mem_cfg.embedding_model, dimensions=provider.dimensions)
+                            from dpc_client_core.dpc_agent.indexing_pipeline import _extract_heading, _build_doc_text
+                            provider = _provider_ref or EmbeddingProvider(model_name=_actual_model)
+                            faiss_idx = FaissIndex(index_dir, model_name=_actual_model, dimensions=provider.dimensions)
                             bm25_idx = BM25Index(index_dir)
 
                             count = 0
@@ -237,10 +251,10 @@ class DpcAgentManager:
                             # Always rebuild L5 agent knowledge (not just on first init)
                             from dpc_client_core.dpc_agent.indexing_pipeline import full_rebuild
                             knowledge_dir = agent_root / "knowledge"
-                            count = full_rebuild(knowledge_dir, provider, faiss_idx, bm25_idx, batch_size=mem_cfg.batch_size)
+                            count = full_rebuild(knowledge_dir, provider, faiss_idx, bm25_idx)
 
-                            # Collect all extra chunks (L6 + EXT) then embed+index in bulk
-                            extra_chunks = []
+                            # Collect all extra documents (L6 + EXT) then embed+index in bulk
+                            extra_texts = []
                             extra_metas = []
 
                             # L6: human knowledge (always re-index, not just on full rebuild)
@@ -251,60 +265,66 @@ class DpcAgentManager:
                                         if f.suffix == ".md" and f.is_file():
                                             text = extract_text(f)
                                             if text:
-                                                chunks = chunk_text(text, source_file=f.name)
-                                                for c in chunks:
-                                                    extra_chunks.append(c)
-                                                    extra_metas.append({"source_file": c.source_file, "chunk_index": c.chunk_index,
-                                                                        "char_start": c.char_start, "char_end": c.char_end,
-                                                                        "source_layer": "L6", "text": c.text[:200]})
-                                                l6_count += len(chunks)
+                                                heading = _extract_heading(text)
+                                                doc_text = _build_doc_text(f.name, heading, text)
+                                                extra_texts.append(doc_text)
+                                                extra_metas.append({"source_file": f.name, "heading": heading,
+                                                                    "source_layer": "L6", "char_count": len(text),
+                                                                    "text": text[:500]})
+                                                l6_count += 1
                                     if l6_count:
-                                        log.info("L6 human knowledge collected: %d chunks from %s", l6_count, l6_dir)
+                                        log.info("L6 human knowledge collected: %d documents from %s", l6_count, l6_dir)
 
                             # MEM-3.10: always re-index extended paths on startup
                             ext_count = 0
                             if self.firewall:
                                 try:
-                                    from dpc_client_core.dpc_agent.extended_paths_index import collect_extended_files
+                                    from dpc_client_core.dpc_agent.extended_paths_index import collect_extended_files, RECALL_EXTENSIONS
                                     ext_paths = self.firewall.get_extended_paths(profile_name=self.agent_id) if hasattr(self.firewall, 'get_extended_paths') else {}
                                     indexed_list = self.firewall._get_profile_or_global(self.agent_id, 'sandbox_extensions', 'indexed_paths', default=[]) if self.agent_id else []
                                     excluded_dirs = self.firewall._get_profile_or_global(self.agent_id, 'sandbox_extensions', 'excluded_dirs', default=None) if self.agent_id else None
-                                    ext_files = collect_extended_files(ext_paths, indexed_paths=indexed_list, excluded_dirs=excluded_dirs) if indexed_list else []
+                                    ext_files = collect_extended_files(ext_paths, indexed_paths=indexed_list, excluded_dirs=excluded_dirs, allowed_extensions=RECALL_EXTENSIONS) if indexed_list else []
                                     if ext_files:
                                         for f in ext_files:
                                             text = extract_text(f)
                                             if text:
-                                                chunks = chunk_text(text, source_file=f.name)
-                                                for c in chunks:
-                                                    extra_chunks.append(c)
-                                                    extra_metas.append({"source_file": c.source_file, "chunk_index": c.chunk_index,
-                                                                        "char_start": c.char_start, "char_end": c.char_end,
-                                                                        "source_layer": "EXT", "text": c.text[:200]})
-                                                ext_count += len(chunks)
+                                                heading = _extract_heading(text)
+                                                doc_text = _build_doc_text(f.name, heading, text)
+                                                extra_texts.append(doc_text)
+                                                extra_metas.append({"source_file": f.name, "heading": heading,
+                                                                    "source_layer": "EXT", "char_count": len(text),
+                                                                    "text": text[:500]})
+                                                ext_count += 1
                                     elif indexed_list:
                                         log.info("Extended paths: %d paths configured but 0 text files found", len(indexed_list))
                                 except Exception as e:
                                     log.debug("Extended paths indexing skipped: %s", e)
 
-                            # Bulk embed + index all extra chunks in one pass
-                            if extra_chunks:
-                                pos = 0
-                                for batch in batched_chunks(extra_chunks, mem_cfg.batch_size):
-                                    texts = [c.text for c in batch]
-                                    vectors = np.array(provider.embed_batch(texts), dtype=np.float32)
-                                    faiss_idx.add(vectors, extra_metas[pos:pos + len(batch)])
-                                    pos += len(batch)
-                                bm25_idx.add([c.text for c in extra_chunks], extra_metas)
-                                log.info("Bulk indexed %d extra chunks (L6: %d, EXT: %d)", len(extra_chunks), l6_count, ext_count)
+                            # Embed + index extra documents one at a time (whole-doc, no batching)
+                            if extra_texts:
+                                from dpc_client_core.dpc_agent.indexing_pipeline import _save_sparse_index, load_sparse_index
+                                _extra_sparse = load_sparse_index(index_dir)
+                                for doc_text, meta in zip(extra_texts, extra_metas):
+                                    vector = np.array(provider.embed(doc_text), dtype=np.float32).reshape(1, -1)
+                                    faiss_idx.add(vector, [meta])
+                                    if getattr(provider, '_use_onnx', False):
+                                        sv = provider.embed_sparse([doc_text])
+                                        if sv:
+                                            _extra_sparse = [e for e in _extra_sparse if e.get("source_file") != meta["source_file"]]
+                                            _extra_sparse.append({"source_file": meta["source_file"], "sparse": {str(k): v for k, v in sv[0].items()}, "meta": meta})
+                                bm25_idx.add(extra_texts, extra_metas)
+                                if getattr(provider, '_use_onnx', False):
+                                    _save_sparse_index(index_dir, _extra_sparse)
+                                log.info("Bulk indexed %d extra documents (L6: %d, EXT: %d)", len(extra_texts), l6_count, ext_count)
 
-                            if needs_full_rebuild or extra_chunks:
+                            if needs_full_rebuild or extra_texts:
                                 faiss_idx.save()
                                 bm25_idx.save()
                             if needs_full_rebuild:
                                 total = count + l6_count + ext_count
-                                log.info("Memory index built: %d chunks (L5: %d, L6: %d, EXT: %d)", total, count, l6_count, ext_count)
+                                log.info("Memory index built: %d documents (L5: %d, L6: %d, EXT: %d)", total, count, l6_count, ext_count)
                             elif ext_count > 0:
-                                log.info("Extended paths re-indexed on startup: %d chunks", ext_count)
+                                log.info("Extended paths re-indexed on startup: %d documents", ext_count)
                         except Exception as e:
                             log.warning("Background memory indexing failed: %s", e)
 
@@ -315,7 +335,7 @@ class DpcAgentManager:
                             log.info("Memory: first-use index rebuild started in thread")
                         else:
                             log.info("Memory: extended paths re-index started in thread")
-                log.info("Memory system initialized (model=%s, active_recall=%s)", mem_cfg.embedding_model, mem_cfg.active_recall)
+                log.info("Memory system initialized (model=%s, active_recall=%s)", _actual_model, mem_cfg.active_recall)
         except Exception as e:
             log.warning("Memory system init skipped: %s", e)
 

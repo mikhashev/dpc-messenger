@@ -146,18 +146,8 @@ class GroupTextHandler(MessageHandler):
                 timestamp=timestamp,  # v0.20.0: Use sender-provided timestamp
             )
 
-            proposal = await monitor.on_message(conv_message)
-
-            if self.service.auto_knowledge_detection_enabled and proposal:
-                self.logger.info("Knowledge proposal generated for group %s", group_id)
-                await self.service.local_api.broadcast_event(
-                    "knowledge_commit_proposed",
-                    proposal.to_dict()
-                )
-                await self.service.consensus_manager.propose_commit(
-                    proposal=proposal,
-                    broadcast_func=self.service._broadcast_to_peers,
-                )
+            # Buffer message for manual extraction
+            await monitor.on_message(conv_message)
         except Exception as e:
             self.logger.error("Error in group conversation monitoring: %s", e, exc_info=True)
 

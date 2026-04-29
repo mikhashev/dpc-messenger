@@ -26,6 +26,7 @@ export const agentChatMessage = writable<any>(null);
 
 // Sleep state (ADR-014)
 export const sleepStateChanged = writable<{ agent_id: string; status: string; result?: string } | null>(null);
+export const sleepProgress = writable<{ agent_id: string; current: number; total: number; phase: string } | null>(null);
 
 // --- Command functions ---
 type SendCommandFn = (command: string, payload?: any) => Promise<any> | boolean;

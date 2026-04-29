@@ -18,6 +18,9 @@
     enableMarkdown = $bindable(true),
     isExtracting = false,
     isSleeping = false,
+    sleepCurrent = 0,
+    sleepTotal = 0,
+    sleepPhase = '',
     onNewSession,
     onEndSession,
     onToggleSleep
@@ -36,6 +39,9 @@
     enableMarkdown?: boolean;
     isExtracting?: boolean;
     isSleeping?: boolean;
+    sleepCurrent?: number;
+    sleepTotal?: number;
+    sleepPhase?: string;
     onNewSession: (chatId: string) => void;
     onEndSession: (chatId: string) => void;
     onToggleSleep?: () => void;
@@ -175,7 +181,13 @@
       disabled={messageCount > 0 && !isSleeping}
       title={isSleeping ? 'Wake up agent' : messageCount > 0 ? 'End session first' : 'Analyze past sessions, prepare morning brief'}
     >
-      {isSleeping ? '☀️ Wakeup' : '🌙 Sleep'}
+      {#if isSleeping && sleepTotal > 0}
+        ☀️ {sleepCurrent}/{sleepTotal} {sleepPhase === 'synthesizing' ? 'Synthesis' : 'Wakeup'}
+      {:else if isSleeping}
+        ☀️ Wakeup
+      {:else}
+        🌙 Sleep
+      {/if}
     </button>
   {/if}
 </div>

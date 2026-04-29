@@ -1,7 +1,8 @@
-"""BM25 keyword index (ADR-010, MEM-3.5).
+"""BM25 keyword index (ADR-010, MEM-3.5, ADR-020 Layer 1).
 
 Character bigram tokenization for CJK/Arabic/Thai per DDA #12.
 Whitespace tokenization for Latin/Cyrillic scripts.
+Stop words via stopwordsiso (57 languages, Rule 14 Solution Check).
 """
 
 from __future__ import annotations
@@ -28,8 +29,29 @@ def _detect_script(text: str) -> str:
     return "bigram" if cjk_count > len(sample) * 0.15 else "whitespace"
 
 
-def _tokenize_whitespace(text: str) -> List[str]:
-    return [w.lower() for w in text.split() if len(w) > 1]
+def _load_stopwords(langs: list[str] = ("ru", "en")) -> frozenset:
+    """Load stop words from stopwordsiso JSON (bypasses pkg_resources)."""
+    import importlib.util
+    spec = importlib.util.find_spec("stopwordsiso")
+    if spec and spec.submodule_search_locations:
+        data_path = pathlib.Path(spec.submodule_search_locations[0]) / "stopwords-iso.json"
+        if data_path.exists():
+            data = json.loads(data_path.read_text(encoding="utf-8"))
+            combined: set = set()
+            for lang in langs:
+                combined.update(data.get(lang, []))
+            log.info("Loaded %d stop words for %s from stopwordsiso", len(combined), "+".join(langs))
+            return frozenset(combined)
+    log.warning("stopwordsiso not available, using empty stop words")
+    return frozenset()
+
+
+_STOP_WORDS: frozenset = _load_stopwords(["ru", "en"])
+
+
+def _tokenize_whitespace(text: str, extra_stops: frozenset = frozenset()) -> List[str]:
+    stops = _STOP_WORDS | extra_stops if extra_stops else _STOP_WORDS
+    return [w.lower() for w in text.split() if len(w) > 1 and w.lower() not in stops]
 
 
 def _tokenize_bigram(text: str) -> List[str]:
@@ -37,27 +59,49 @@ def _tokenize_bigram(text: str) -> List[str]:
     return [text[i:i+2] for i in range(len(text) - 1) if not text[i].isspace()]
 
 
-def tokenize(text: str) -> List[str]:
+def tokenize(text: str, extra_stops: frozenset = frozenset()) -> List[str]:
     script = _detect_script(text)
     if script == "bigram":
         return _tokenize_bigram(text)
-    return _tokenize_whitespace(text)
+    return _tokenize_whitespace(text, extra_stops)
 
 
 class BM25Index:
     """BM25 keyword search index with disk persistence."""
 
+    CORPUS_MAX_DF = 0.8
+
     def __init__(self, index_dir: Optional[pathlib.Path] = None):
         self.index_dir = index_dir
         self._retriever = None
         self._chunk_metas: List[dict] = []
+        self._corpus_stop_words: frozenset = frozenset()
         self._batching = False
         self._pending_texts: List[str] = []
         self._pending_metas: List[dict] = []
 
+    def _compute_corpus_stops(self, texts: List[str]) -> frozenset:
+        """Layer 2: words appearing in >80% of documents are corpus-specific noise."""
+        from collections import Counter
+        if len(texts) < 5:
+            return frozenset()
+        doc_freq: Counter = Counter()
+        for text in texts:
+            tokens = set(tokenize(text))
+            doc_freq.update(tokens)
+        n_docs = len(texts)
+        stops = frozenset(
+            tok for tok, freq in doc_freq.items()
+            if freq / n_docs > self.CORPUS_MAX_DF
+        )
+        if stops:
+            log.info("Layer 2: %d corpus-adaptive stop words (max_df=%.1f, %d docs)", len(stops), self.CORPUS_MAX_DF, n_docs)
+        return stops
+
     def build(self, texts: List[str], chunk_metas: List[dict]) -> None:
         import bm25s
-        corpus_tokens = [tokenize(t) for t in texts]
+        self._corpus_stop_words = self._compute_corpus_stops(texts)
+        corpus_tokens = [tokenize(t, self._corpus_stop_words) for t in texts]
         self._retriever = bm25s.BM25()
         self._retriever.index(corpus_tokens)
         self._chunk_metas = chunk_metas
@@ -97,15 +141,19 @@ class BM25Index:
         if self._retriever is None or not self._chunk_metas:
             return []
         import bm25s
-        query_tokens = tokenize(query)
+        query_tokens = tokenize(query, self._corpus_stop_words)
         results, scores = self._retriever.retrieve(
             bm25s.tokenize([" ".join(query_tokens)]),
             k=min(top_k, len(self._chunk_metas)),
         )
         out = []
+        seen_files: set = set()
         for idx, score in zip(results[0], scores[0]):
             if 0 <= idx < len(self._chunk_metas) and score > 0:
-                out.append((self._chunk_metas[idx], float(score)))
+                fname = self._chunk_metas[idx].get("source_file", "")
+                if fname not in seen_files:
+                    seen_files.add(fname)
+                    out.append((self._chunk_metas[idx], float(score)))
         return out
 
     def remove_by_source(self, source_file: str) -> int:
@@ -139,7 +187,11 @@ class BM25Index:
         (self.index_dir / "bm25_chunks.json").write_text(
             json.dumps(self._chunk_metas, ensure_ascii=False), encoding="utf-8"
         )
-        log.info("Saved BM25 index: %d documents", len(self._chunk_metas))
+        if self._corpus_stop_words:
+            (self.index_dir / "bm25_corpus_stops.json").write_text(
+                json.dumps(sorted(self._corpus_stop_words), ensure_ascii=False), encoding="utf-8"
+            )
+        log.info("Saved BM25 index: %d documents, %d corpus stops", len(self._chunk_metas), len(self._corpus_stop_words))
 
     def load(self) -> bool:
         if self.index_dir is None:
@@ -152,6 +204,9 @@ class BM25Index:
             import bm25s
             self._retriever = bm25s.BM25.load(str(bm25_dir))
             self._chunk_metas = json.loads(chunks_path.read_text(encoding="utf-8"))
+            stops_path = self.index_dir / "bm25_corpus_stops.json"
+            if stops_path.exists():
+                self._corpus_stop_words = frozenset(json.loads(stops_path.read_text(encoding="utf-8")))
             return True
         except Exception as e:
             log.warning("Failed to load BM25 index: %s", e)

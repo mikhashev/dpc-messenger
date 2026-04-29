@@ -13,11 +13,10 @@ from typing import Optional
 @dataclass
 class MemoryConfig:
     enabled: bool = False
-    embedding_model: str = "intfloat/multilingual-e5-small"
+    embedding_model: str = "aapot/bge-m3-onnx"
     active_recall: bool = True
     max_recall_results: int = 3
     memory_provider: Optional[str] = None
-    batch_size: int = 32
     auto_index: bool = True
 
     @classmethod

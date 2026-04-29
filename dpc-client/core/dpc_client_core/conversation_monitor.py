@@ -53,7 +53,7 @@ class ConversationMonitor:
         knowledge_threshold: float = 0.7,  # Minimum score to propose commit
         settings = None,  # Settings instance (optional, for config like cultural_perspectives_enabled)
         ai_query_func = None,  # Callable for AI queries (supports both local and remote inference)
-        auto_detect: bool = True,  # Enable/disable automatic detection
+        auto_detect: bool = False,  # Legacy parameter, always False (CLEAN-4: auto-detection removed)
         instruction_set_name: str = "general",  # NEW: Which instruction set to use for this conversation
         display_name: str = None,  # Human-readable name appended to folder (e.g. "Work", "Mike MacOS")
     ):
@@ -67,7 +67,7 @@ class ConversationMonitor:
             settings: Settings instance for configuration (optional)
             ai_query_func: Optional callable for AI queries. Signature: async (prompt, compute_host, model, provider) -> dict
                           If provided, enables remote inference for knowledge detection.
-            auto_detect: If True, automatically detect and propose commits. If False, only buffer messages for manual extraction.
+            auto_detect: Legacy parameter, always False. Messages are buffered for manual extraction only (CLEAN-4).
             instruction_set_name: Key of the instruction set to use for AI queries in this conversation (default: "general")
             display_name: Optional human-readable label appended to the conversation folder name for easy navigation
         """

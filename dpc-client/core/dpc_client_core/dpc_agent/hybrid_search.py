@@ -1,6 +1,7 @@
-"""Hybrid search with Reciprocal Rank Fusion (ADR-010, MEM-3.6).
+"""Hybrid search with Reciprocal Rank Fusion (ADR-010 + ADR-018).
 
-Merges FAISS cosine similarity and BM25 keyword results using RRF.
+Merges FAISS dense and BGE-M3 sparse results using RRF.
+BM25 fallback when BGE-M3 sparse not available.
 Priority weights by source layer: L6 > L1 > L5 > L2-docs.
 """
 
@@ -14,6 +15,7 @@ LAYER_WEIGHTS: Dict[str, float] = {
     "L1": 1.3,
     "L5": 1.0,
     "L2": 0.8,
+    "EXT": 0.9,
 }
 
 DEFAULT_RRF_K = 60
@@ -28,32 +30,56 @@ class SearchResult:
 
 def reciprocal_rank_fusion(
     faiss_results: List[Tuple[dict, float]],
-    bm25_results: List[Tuple[dict, float]],
+    sparse_or_bm25_results: List[Tuple[dict, float]],
     k: int = DEFAULT_RRF_K,
     layer_weights: Dict[str, float] = LAYER_WEIGHTS,
 ) -> List[SearchResult]:
-    """Merge FAISS and BM25 results using RRF with layer priority weights."""
+    """Merge FAISS dense and sparse/BM25 results using RRF with layer priority weights."""
     scores: Dict[str, float] = {}
     meta_map: Dict[str, dict] = {}
 
     for rank, (meta, _score) in enumerate(faiss_results):
-        key = _chunk_key(meta)
+        key = _file_key(meta)
         meta_map[key] = meta
         weight = layer_weights.get(meta.get("source_layer", "L5"), 1.0)
         scores[key] = scores.get(key, 0) + weight / (k + rank + 1)
 
-    for rank, (meta, _score) in enumerate(bm25_results):
-        key = _chunk_key(meta)
+    for rank, (meta, _score) in enumerate(sparse_or_bm25_results):
+        key = _file_key(meta)
         meta_map[key] = meta
         weight = layer_weights.get(meta.get("source_layer", "L5"), 1.0)
         scores[key] = scores.get(key, 0) + weight / (k + rank + 1)
 
     ranked = sorted(scores.items(), key=lambda x: x[1], reverse=True)
-    return [
-        SearchResult(chunk_meta=meta_map[key], score=score, source="hybrid")
-        for key, score in ranked
-    ]
+    seen_files: set = set()
+    deduped: List[SearchResult] = []
+    for key, score in ranked:
+        fname = meta_map[key].get("source_file", "")
+        if fname not in seen_files:
+            seen_files.add(fname)
+            deduped.append(SearchResult(chunk_meta=meta_map[key], score=score, source="hybrid"))
+    return deduped
 
 
-def _chunk_key(meta: dict) -> str:
-    return f"{meta.get('source_file', '')}:{meta.get('chunk_index', 0)}"
+def sparse_search(
+    query_sparse: Dict[int, float],
+    index_sparse: List[Tuple[Dict[int, float], dict]],
+    top_k: int = 5,
+) -> List[Tuple[dict, float]]:
+    """Search using sparse vector dot product with inverted index. Returns [(meta, score), ...]."""
+    inverted: Dict[int, List[Tuple[int, float]]] = {}
+    for doc_idx, (doc_sparse, _meta) in enumerate(index_sparse):
+        for tid, w in doc_sparse.items():
+            inverted.setdefault(tid, []).append((doc_idx, w))
+
+    scores: Dict[int, float] = {}
+    for tid, qw in query_sparse.items():
+        for doc_idx, dw in inverted.get(tid, []):
+            scores[doc_idx] = scores.get(doc_idx, 0) + qw * dw
+
+    ranked = sorted(scores.items(), key=lambda x: x[1], reverse=True)[:top_k]
+    return [(index_sparse[idx][1], score) for idx, score in ranked]
+
+
+def _file_key(meta: dict) -> str:
+    return meta.get("source_file", "")

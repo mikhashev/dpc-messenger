@@ -1,6 +1,6 @@
 """Tests for hybrid RRF search (ADR-010, MEM-3.6)."""
 
-from dpc_client_core.dpc_agent.hybrid_search import reciprocal_rank_fusion, SearchResult, _chunk_key
+from dpc_client_core.dpc_agent.hybrid_search import reciprocal_rank_fusion, SearchResult, _file_key
 
 
 def test_rrf_merges_both_sources():
@@ -33,5 +33,5 @@ def test_empty_inputs():
     assert reciprocal_rank_fusion([], []) == []
 
 
-def test_chunk_key():
-    assert _chunk_key({"source_file": "a.md", "chunk_index": 3}) == "a.md:3"
+def test_file_key():
+    assert _file_key({"source_file": "a.md"}) == "a.md"

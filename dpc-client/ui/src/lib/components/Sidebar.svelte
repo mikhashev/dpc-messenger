@@ -7,6 +7,14 @@
   let linkingAgentId = $state('');
   let linkErrorMessage = $state('');
 
+  // State for Agent Model Config popup
+  let showModelConfigPopup = $state(false);
+  let modelConfigAgentId = $state('');
+  let modelConfigProviderAlias = $state('');
+  let modelConfigSleepProvider = $state('');
+  let modelConfigProvidersList = $state<{alias: string, model: string, type: string}[]>([]);
+  let modelConfigSaving = $state(false);
+
   // All available agent event types (mirrors EVENT_EMOJIS in agent_telegram_bridge.py)
   const ALL_EVENT_TYPES: { key: string; label: string }[] = [
     { key: 'task_started',              label: 'Task Started' },
@@ -140,6 +148,36 @@
     linkingAgentId = '';
   }
 
+  // Handle model config badge click
+  async function handleModelConfig(agentId: string) {
+    modelConfigAgentId = agentId;
+    modelConfigSaving = false;
+    try {
+      const result = await onGetAgentModelConfig(agentId);
+      modelConfigProviderAlias = result.provider_alias || '';
+      modelConfigSleepProvider = result.sleep_provider_alias || '';
+      modelConfigProvidersList = result.providers || [];
+      showModelConfigPopup = true;
+    } catch (error) {
+      console.error('Failed to load agent model config:', error);
+    }
+  }
+
+  async function saveModelConfig() {
+    modelConfigSaving = true;
+    try {
+      await onSaveAgentModelConfig(modelConfigAgentId, {
+        provider_alias: modelConfigProviderAlias,
+        sleep_provider_alias: modelConfigSleepProvider || null,
+      });
+      showModelConfigPopup = false;
+    } catch (error) {
+      console.error('Failed to save agent model config:', error);
+    } finally {
+      modelConfigSaving = false;
+    }
+  }
+
   // Type definitions
   type NodeStatus = {
     node_id: string;
@@ -194,7 +232,6 @@
     unreadMessageCounts,
     activeChatId = $bindable(),
     peerDisplayNames,
-    autoKnowledgeDetection = $bindable(false),
     peerInput = $bindable(""),
     isConnecting,
     peersByStrategy,
@@ -208,7 +245,6 @@
     onOpenFirewallEditor,
     onOpenProvidersEditor,
     onOpenAgentBoard,
-    onToggleAutoKnowledgeDetection,
     onConnectPeer,
     onResetUnreadCount,
     onGetPeerDisplayName,
@@ -227,6 +263,8 @@
     onDeleteAgent,
     onLinkAgentTelegram,
     onUnlinkAgentTelegram,
+    onGetAgentModelConfig,
+    onSaveAgentModelConfig,
   }: {
     connectionStatus: string;
     nodeStatus: NodeStatus | null;
@@ -234,7 +272,6 @@
     unreadMessageCounts: Map<string, number>;
     activeChatId?: string;
     peerDisplayNames: Map<string, string>;
-    autoKnowledgeDetection?: boolean;
     peerInput?: string;
     isConnecting: boolean;
     peersByStrategy: Record<string, any[]>;
@@ -246,7 +283,6 @@
     onOpenFirewallEditor: () => void;
     onOpenProvidersEditor: () => void;
     onOpenAgentBoard?: () => void;
-    onToggleAutoKnowledgeDetection: () => void;
     onConnectPeer: () => void;
     onResetUnreadCount: (peerId: string) => void;
     onGetPeerDisplayName: (peerId: string) => string;
@@ -273,6 +309,8 @@
       unified_conversation?: boolean;
     }) => Promise<void>;
     onUnlinkAgentTelegram?: (agentId: string) => Promise<void>;
+    onGetAgentModelConfig: (agentId: string) => Promise<any>;
+    onSaveAgentModelConfig: (agentId: string, config: { provider_alias: string; sleep_provider_alias: string | null }) => Promise<void>;
   } = $props();
 </script>
 
@@ -464,27 +502,6 @@
         </button>
       {/if}
 
-      <!-- Auto Knowledge Detection Toggle -->
-      <div class="knowledge-toggle">
-        <label class="toggle-container">
-          <input
-            id="auto-knowledge-detection"
-            name="auto-knowledge-detection"
-            type="checkbox"
-            bind:checked={autoKnowledgeDetection}
-            onchange={onToggleAutoKnowledgeDetection}
-          />
-          <span class="toggle-slider"></span>
-          <span class="toggle-label">
-            Auto-detect knowledge in conversations
-          </span>
-        </label>
-        <p class="toggle-hint">
-          {autoKnowledgeDetection
-            ? "✓ AI is monitoring conversations for knowledge"
-            : "✗ Manual knowledge extraction only"}
-        </p>
-      </div>
     </div>
 
     <!-- Connect to Peer -->
@@ -600,7 +617,14 @@
                 title="{agent.name} (Profile: {agent.profile_name}, LLM: {agent.provider_alias})"
               >
                 <span class="agent-name">{agent.name}</span>
-                <span class="agent-provider">{agent.provider_alias}</span>
+                <span
+                  role="button"
+                  tabindex="0"
+                  class="agent-provider"
+                  title="Click to configure models"
+                  onclick={(e) => { e.stopPropagation(); handleModelConfig(agent.agent_id); }}
+                  onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.stopPropagation(); handleModelConfig(agent.agent_id); } }}
+                >{agent.provider_alias}</span>
                 {#if agent.telegram_enabled}
                   <span
                     role="button"
@@ -769,6 +793,48 @@
 </div>
 
 <!-- Telegram Link Dialog -->
+{#if showModelConfigPopup}
+  <div class="telegram-link-dialog-overlay" role="presentation" onkeydown={(e) => e.key === 'Escape' && (showModelConfigPopup = false)}>
+    <div class="telegram-link-dialog" role="dialog" aria-modal="true" aria-labelledby="model-config-title">
+      <div class="dialog-header">
+        <h3 id="model-config-title">Agent Models Configuration</h3>
+        <button type="button" class="dialog-close-btn" onclick={() => showModelConfigPopup = false} aria-label="Close dialog">&times;</button>
+      </div>
+      <div class="dialog-content">
+        <div class="existing-link-info">
+          <p class="dialog-info">
+            Configure LLM providers for this agent. Each agent can use a different model for chat and sleep consolidation.
+          </p>
+        </div>
+        <hr class="dialog-divider">
+
+        <label for="main-llm" class="dialog-label">Agent Main LLM:</label>
+        <select id="main-llm" class="dialog-input" bind:value={modelConfigProviderAlias}>
+          {#each modelConfigProvidersList as p}
+            <option value={p.alias}>{p.alias} ({p.model})</option>
+          {/each}
+        </select>
+        <p class="dialog-hint">Primary language model used for agent conversations.</p>
+
+        <label for="sleep-llm" class="dialog-label">Sleep feature LLM:</label>
+        <select id="sleep-llm" class="dialog-input" bind:value={modelConfigSleepProvider}>
+          <option value="">Default (global)</option>
+          {#each modelConfigProvidersList as p}
+            <option value={p.alias}>{p.alias} ({p.model})</option>
+          {/each}
+        </select>
+        <p class="dialog-hint">Model used for sleep consolidation analysis. "Default" uses the global provider.</p>
+      </div>
+      <div class="dialog-actions">
+        <button type="button" class="btn-cancel" onclick={() => showModelConfigPopup = false}>Cancel</button>
+        <button type="button" class="btn-save" onclick={saveModelConfig} disabled={modelConfigSaving}>
+          {modelConfigSaving ? 'Saving...' : 'Save'}
+        </button>
+      </div>
+    </div>
+  </div>
+{/if}
+
 {#if showTelegramLinkDialog}
   <div class="telegram-link-dialog-overlay" role="presentation" onkeydown={(e) => e.key === 'Escape' && cancelTelegramLink()}>
     <div class="telegram-link-dialog" role="dialog" aria-modal="true" aria-labelledby="telegram-dialog-title">
@@ -1179,72 +1245,6 @@
     box-shadow: 0 1px 4px rgba(90, 103, 216, 0.2);
   }
 
-  /* Knowledge Architecture - Auto-Detection Toggle */
-  .knowledge-toggle {
-    margin-top: 1rem;
-    padding-top: 1rem;
-    border-top: 1px solid #e0e0e0;
-  }
-
-  .toggle-container {
-    display: flex;
-    align-items: center;
-    gap: 0.75rem;
-    cursor: pointer;
-    user-select: none;
-  }
-
-  .toggle-container input[type="checkbox"] {
-    position: absolute;
-    opacity: 0;
-    width: 0;
-    height: 0;
-  }
-
-  .toggle-slider {
-    position: relative;
-    width: 44px;
-    height: 24px;
-    background: #ccc;
-    border-radius: 24px;
-    transition: background 0.3s;
-    flex-shrink: 0;
-  }
-
-  .toggle-slider::before {
-    content: '';
-    position: absolute;
-    width: 18px;
-    height: 18px;
-    left: 3px;
-    top: 3px;
-    background: white;
-    border-radius: 50%;
-    transition: transform 0.3s;
-  }
-
-  .toggle-container input[type="checkbox"]:checked + .toggle-slider {
-    background: #667eea;
-  }
-
-  .toggle-container input[type="checkbox"]:checked + .toggle-slider::before {
-    transform: translateX(20px);
-  }
-
-  .toggle-label {
-    font-size: 0.9rem;
-    color: #333;
-    line-height: 1.4;
-  }
-
-  .toggle-hint {
-    font-size: 0.8rem;
-    color: #666;
-    margin: 0.5rem 0 0 0;
-    padding-left: 3.5rem;
-    line-height: 1.3;
-  }
-
   .chat-list-header {
     display: flex;
     justify-content: space-between;
@@ -1416,6 +1416,13 @@
     padding: 0.1rem 0.3rem;
     border-radius: 3px;
     margin-left: 0.25rem;
+    cursor: pointer;
+    transition: background 0.2s;
+  }
+
+  .agent-button .agent-provider:hover {
+    background: #45475a;
+    color: #cdd6f4;
   }
 
   .no-peers {
