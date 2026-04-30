@@ -1,5 +1,19 @@
 # dpc-client/core/run_service.py
 
+# Add NVIDIA DLL directories to PATH before any onnxruntime imports.
+# Required after torch removal — nvidia-cudnn-cu12 installs DLLs in
+# separate directories that aren't in the default search path.
+import os, glob, sys
+_venv_sp = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".venv", "Lib", "site-packages")
+for _d in glob.glob(os.path.join(_venv_sp, "nvidia", "*", "bin")):
+    if os.path.isdir(_d):
+        os.environ["PATH"] = _d + os.pathsep + os.environ.get("PATH", "")
+        if sys.version_info >= (3, 8) and hasattr(os, "add_dll_directory"):
+            try:
+                os.add_dll_directory(_d)
+            except OSError:
+                pass
+
 import asyncio
 import logging
 from logging.handlers import RotatingFileHandler
