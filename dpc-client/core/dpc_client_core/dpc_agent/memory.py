@@ -266,10 +266,12 @@ class EmbeddingProvider:
             hf_hub_download(self.model_name, data_path_name, **kwargs)
         except Exception:
             pass
-        fp16_path = str(pathlib.Path(model_path).parent / "model_fp16.onnx")
-        if pathlib.Path(fp16_path).exists():
-            model_path = fp16_path
-            log.info("Using FP16 quantized model: %s", fp16_path)
+        for variant in ("model_fp16.onnx", "model_int8.onnx"):
+            alt = str(pathlib.Path(model_path).parent / variant)
+            if pathlib.Path(alt).exists():
+                model_path = alt
+                log.info("Using quantized model: %s", alt)
+                break
         providers = self._onnx_providers()
         self._session = ort.InferenceSession(model_path, providers=providers)
         self._tokenizer = AutoTokenizer.from_pretrained(self.model_name, **kwargs)
