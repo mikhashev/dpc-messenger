@@ -183,16 +183,13 @@ class LLMManager:
                     {
                         "alias": "local_whisper_large",
                         "type": "local_whisper",
-                        "model": "openai/whisper-large-v3",
-                        "device": "auto",
-                        "compile_model": False,
-                        "use_flash_attention": False,
-                        "chunk_length_s": 30,
-                        "batch_size": 16,
+                        "model": "onnx-community/whisper-large-v3-turbo",
+                        "quantization": "q4f16",
                         "language": "auto",
                         "task": "transcribe",
+                        "use_vad": True,
                         "lazy_loading": True,
-                        "_note": "Local Whisper transcription - GPU accelerated (CUDA, MLX)"
+                        "_note": "Local Whisper ONNX transcription - GPU via onnxruntime CUDA EP"
                     },
                     {
                         "alias": "dpc_agent",
