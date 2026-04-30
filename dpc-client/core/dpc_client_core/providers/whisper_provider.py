@@ -15,10 +15,7 @@ QUANTIZATION_DEFAULT = "q4f16"
 
 _ONNX_MODEL_MAP = {
     "openai/whisper-large-v3-turbo": "onnx-community/whisper-large-v3-turbo",
-    "openai/whisper-large-v3": "onnx-community/whisper-large-v3",
-    "openai/whisper-large-v2": "onnx-community/whisper-large-v2",
-    "openai/whisper-medium": "onnx-community/whisper-medium",
-    "openai/whisper-small": "onnx-community/whisper-small",
+    "openai/whisper-large-v3": "onnx-community/whisper-large-v3-turbo",
     "openai/whisper-base": "onnx-community/whisper-base",
     "openai/whisper-tiny": "onnx-community/whisper-tiny",
 }

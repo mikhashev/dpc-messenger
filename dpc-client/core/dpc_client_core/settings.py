@@ -211,7 +211,7 @@ class Settings:
             'timeout_seconds': '240',  # Max wait time for peer's transcription before trying locally (increased to 240s for cold model loads that take 180+s)
             # NOTE: provider_priority overrides voice_provider from providers.json
             # Provider aliases match HuggingFace model names for clarity (e.g., whisper-large-v3)
-            'provider_priority': 'whisper-large-v3,whisper-large-v3-turbo,whisper-medium,whisper-small,openai',  # Comma-separated provider priority (aliases from providers.json)
+            'provider_priority': 'whisper-large-v3-turbo,whisper-medium,whisper-small,openai',  # Comma-separated provider priority (aliases from providers.json)
             'show_transcriber_name': 'false',  # Show who transcribed the message in UI
             'cache_transcriptions': 'true',  # Cache transcriptions in memory
             'fallback_to_openai': 'true'  # Fallback to OpenAI API if local Whisper unavailable
@@ -219,7 +219,7 @@ class Settings:
 
         self._config['local_transcription'] = {
             'enabled': 'true',  # Enable local Whisper transcription (v0.13.1+)
-            'model': 'openai/whisper-large-v3',  # Model name (HuggingFace)
+            'model': 'openai/whisper-large-v3-turbo',  # Model name (HuggingFace)
             'device': 'auto',  # Device: 'cuda', 'cpu', or 'auto' (auto-detects CUDA)
             'compile_model': 'true',  # Use torch.compile for 4.5x speedup (PyTorch 2.4+)
             'use_flash_attention': 'false',  # Use Flash Attention 2 (requires flash-attn package)
@@ -790,7 +790,7 @@ class Settings:
 
     def get_local_transcription_model(self) -> str:
         """Get the Whisper model name for local transcription."""
-        return self.get('local_transcription', 'model', 'openai/whisper-large-v3')
+        return self.get('local_transcription', 'model', 'openai/whisper-large-v3-turbo')
 
     def get_local_transcription_device(self) -> str:
         """Get the device for local transcription ('cuda', 'cpu', or 'auto')."""
