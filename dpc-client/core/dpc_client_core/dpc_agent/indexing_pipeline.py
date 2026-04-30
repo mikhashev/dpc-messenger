@@ -124,6 +124,7 @@ def full_rebuild(
     embedding_provider,
     faiss_index,
     bm25_index,
+    stop_event: "threading.Event | None" = None,
 ) -> int:
     """Full rebuild of both indexes from all files in knowledge_dir. One vector per file."""
     faiss_index.clear()
@@ -134,6 +135,9 @@ def full_rebuild(
         return 0
 
     for f in sorted(knowledge_dir.iterdir()):
+        if stop_event and stop_event.is_set():
+            log.info("Indexing interrupted by shutdown during file scan")
+            return 0
         if not f.is_file() or f.name in _BACKFILL_SKIP or is_binary(f):
             continue
         text = extract_text(f)
@@ -155,6 +159,9 @@ def full_rebuild(
         return 0
 
     for i, (doc_text, meta) in enumerate(zip(all_doc_texts, all_metas)):
+        if stop_event and stop_event.is_set():
+            log.info("Indexing interrupted by shutdown at FAISS embed %d/%d", i, len(all_doc_texts))
+            return i
         vector = np.array(embedding_provider.embed(doc_text), dtype=np.float32).reshape(1, -1)
         faiss_index.add(vector, [meta])
 
@@ -163,6 +170,9 @@ def full_rebuild(
     if getattr(embedding_provider, '_use_onnx', False):
         sparse_entries = []
         for doc_text, meta in zip(all_doc_texts, all_metas):
+            if stop_event and stop_event.is_set():
+                log.info("Indexing interrupted by shutdown during sparse indexing")
+                break
             sparse_vecs = embedding_provider.embed_sparse([doc_text])
             for sv in sparse_vecs:
                 sparse_entries.append({
@@ -170,8 +180,9 @@ def full_rebuild(
                     "sparse": {str(k): v for k, v in sv.items()},
                     "meta": meta,
                 })
-        _save_sparse_index(faiss_index.index_dir, sparse_entries)
-        log.info("Sparse index built: %d documents", len(sparse_entries))
+        if sparse_entries:
+            _save_sparse_index(faiss_index.index_dir, sparse_entries)
+            log.info("Sparse index built: %d documents", len(sparse_entries))
 
     log.info("Full rebuild: %d documents indexed (whole-document, ADR-018)",
              len(all_doc_texts))
