@@ -232,7 +232,13 @@ class EmbeddingProvider:
         import onnxruntime as ort
         available = ort.get_available_providers()
         if "CUDAExecutionProvider" in available:
-            return ["CUDAExecutionProvider", "CPUExecutionProvider"]
+            return [
+                ("CUDAExecutionProvider", {
+                    "arena_extend_strategy": "kSameAsRequested",
+                    "cudnn_conv_algo_search": "DEFAULT",
+                }),
+                "CPUExecutionProvider",
+            ]
         return ["CPUExecutionProvider"]
 
     def _load_model(self):
