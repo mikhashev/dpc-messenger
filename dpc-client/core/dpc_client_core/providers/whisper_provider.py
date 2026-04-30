@@ -1,7 +1,9 @@
 # dpc_client_core/providers/whisper_provider.py
 
-import os
+import asyncio
+import gc
 import logging
+import os
 from typing import Dict, Any, Optional, List
 
 from .base import AIProvider, ModelNotCachedError
@@ -49,7 +51,7 @@ class LocalWhisperProvider(AIProvider):
         self._asr_model = None
         self._vad = None
         self.model_loaded = False
-        self._load_lock = None
+        self._load_lock = asyncio.Lock()
         self._detected_device = None
 
         logger.info(
@@ -120,15 +122,9 @@ class LocalWhisperProvider(AIProvider):
     async def ensure_model_loaded(self) -> None:
         if self.model_loaded:
             return
-
-        if self._load_lock is None:
-            import asyncio
-            self._load_lock = asyncio.Lock()
-
         async with self._load_lock:
             if self.model_loaded:
                 return
-            import asyncio
             await asyncio.to_thread(self._load_model)
 
     def _unload_model(self) -> None:
@@ -147,26 +143,17 @@ class LocalWhisperProvider(AIProvider):
         self._asr_model = None
         self._vad = None
         self.model_loaded = False
-
-        import gc
         gc.collect()
 
         logger.info("Whisper ONNX model unloaded")
 
     async def unload_model_async(self) -> None:
-        if self._load_lock is None:
-            import asyncio
-            self._load_lock = asyncio.Lock()
-
         async with self._load_lock:
             if not self.model_loaded:
                 return
-            import asyncio
             await asyncio.to_thread(self._unload_model)
 
     async def download_model_async(self, progress_callback=None) -> Dict[str, Any]:
-        import asyncio
-
         logger.info("Downloading Whisper ONNX model '%s' (~1GB)...", self.model_name)
 
         if progress_callback:
@@ -182,7 +169,6 @@ class LocalWhisperProvider(AIProvider):
                     providers=providers,
                 )
                 del model
-                import gc
                 gc.collect()
 
                 return {
@@ -212,18 +198,22 @@ class LocalWhisperProvider(AIProvider):
 
         return result
 
+    def _get_audio_duration(self, audio_path: str) -> float:
+        try:
+            import soundfile as sf
+            info = sf.info(audio_path)
+            return info.duration
+        except Exception:
+            return 0.0
+
     async def transcribe(self, audio_path: str) -> Dict[str, Any]:
-        import asyncio
-
-        if self._load_lock is None:
-            self._load_lock = asyncio.Lock()
-
         if not self.model_loaded:
             async with self._load_lock:
                 if not self.model_loaded:
                     await asyncio.to_thread(self._load_model)
 
-        logger.info("Transcribing audio with Whisper ONNX: %s", audio_path)
+        duration_seconds = self._get_audio_duration(audio_path)
+        logger.info("Transcribing audio with Whisper ONNX: %s (%.1fs)", audio_path, duration_seconds)
         start_time = asyncio.get_event_loop().time()
 
         try:
@@ -238,7 +228,7 @@ class LocalWhisperProvider(AIProvider):
             return {
                 "text": text,
                 "language": self.language if self.language != "auto" else "auto",
-                "duration": 0.0,
+                "duration": duration_seconds,
                 "provider": "local_whisper_onnx",
             }
 
