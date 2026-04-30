@@ -27,7 +27,7 @@ S82 attempted ARCH-29 (Whisper ONNX migration) and uncovered fundamental problem
 
 - BGE-M3 as the embedding model
 - Whole-document indexing (no chunking)
-- Hybrid search (dense + sparse + BM25 via RRF)
+- Hybrid search (dense FAISS + BM25 via RRF)
 - FAISS-cpu for vector search
 - ADR-020 stop words
 
@@ -38,6 +38,8 @@ S82 attempted ARCH-29 (Whisper ONNX migration) and uncovered fundamental problem
 - nvidia-cudnn-cu12, nvidia-cublas-cu12 → bundled in torch
 - CUDA EP arena configuration → PyTorch caching allocator (automatic)
 - run_service.py NVIDIA DLL PATH hack → not needed with torch
+- onnxruntime-gpu dependency → removed entirely
+- Sparse vector indexing (ONNX-only, write-only) → removed
 
 ## Rationale
 
@@ -56,10 +58,31 @@ S82 attempted ARCH-29 (Whisper ONNX migration) and uncovered fundamental problem
 
 PyTorch covers 10/10 current and planned tasks. ONNX Runtime covers 2/10 (with operational pain).
 
+## BGE-M3 Without ONNX
+
+ONNX Runtime is fully removed — including sparse vector code that was ONNX-only. BGE-M3 stays as the embedding model, loaded via sentence-transformers (PyTorch).
+
+**Why BGE-M3 is still justified for dense-only:**
+- 1024-dimensional embeddings (vs 384 for e5-small/MiniLM)
+- Multilingual: 100+ languages, RU+EN equally strong (critical for bilingual knowledge base)
+- 8192 token context window (vs 512 for e5-small)
+- Top MTEB scores for dense retrieval alone
+
+**What was removed with ONNX:**
+- Sparse vector indexing/search (was write-only — indexed but never used in retrieval)
+- BM25 (ADR-020) already covers keyword search
+- If sparse needed later: add FlagEmbedding library (PyTorch-native BGE-M3 sparse support)
+
+**Alternatives considered and rejected:**
+- `BAAI/bge-small-en-v1.5` (130MB, 384d) — English-only, doesn't work for Russian
+- `all-MiniLM-L6-v2` (80MB, 384d) — English-only
+- Smaller multilingual models exist but none match BGE-M3 quality at this scale
+
 ## Consequences
 
 - torch + torchvision return as dependencies (~2.5GB)
 - nvidia-cudnn-cu12 + nvidia-cublas-cu12 removed (bundled in torch)
+- onnxruntime-gpu removed entirely
 - Net dependency increase: ~1.3GB (from ~1.2GB ONNX stack to ~2.5GB torch)
 - VRAM management: automatic via PyTorch caching allocator (no gpu_mem_limit tuning)
 - FP16: `model.half()` — one line, native Tensor Core support
@@ -71,3 +94,5 @@ PyTorch covers 10/10 current and planned tasks. ONNX Runtime covers 2/10 (with o
 2. **Scope verification**: architectural decisions must be validated against full roadmap, not current-sprint assumptions
 3. **Operational complexity** matters more than dependency size for desktop applications
 4. **cuDNN/cuBLAS as transitive dependencies**: removing a framework that bundles GPU libraries requires explicit replacement
+5. **Write-only subsystems are dead weight**: sparse vectors were indexed but never queried — remove, don't maintain
+6. **Heavy model must be justified by active features**: BGE-M3 (2.3GB) justified by multilingual dense, not by unused sparse capability

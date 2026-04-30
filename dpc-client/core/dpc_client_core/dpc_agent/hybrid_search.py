@@ -61,25 +61,6 @@ def reciprocal_rank_fusion(
     return deduped
 
 
-def sparse_search(
-    query_sparse: Dict[int, float],
-    index_sparse: List[Tuple[Dict[int, float], dict]],
-    top_k: int = 5,
-) -> List[Tuple[dict, float]]:
-    """Search using sparse vector dot product with inverted index. Returns [(meta, score), ...]."""
-    inverted: Dict[int, List[Tuple[int, float]]] = {}
-    for doc_idx, (doc_sparse, _meta) in enumerate(index_sparse):
-        for tid, w in doc_sparse.items():
-            inverted.setdefault(tid, []).append((doc_idx, w))
-
-    scores: Dict[int, float] = {}
-    for tid, qw in query_sparse.items():
-        for doc_idx, dw in inverted.get(tid, []):
-            scores[doc_idx] = scores.get(doc_idx, 0) + qw * dw
-
-    ranked = sorted(scores.items(), key=lambda x: x[1], reverse=True)[:top_k]
-    return [(index_sparse[idx][1], score) for idx, score in ranked]
-
 
 def _file_key(meta: dict) -> str:
     return meta.get("source_file", "")
