@@ -78,6 +78,13 @@ class LocalWhisperProvider(AIProvider):
         import time
         import onnx_asr
 
+        if os.environ.get("HF_HUB_ENABLE_HF_TRANSFER") == "1":
+            try:
+                import hf_transfer  # noqa: F401
+            except ImportError:
+                os.environ["HF_HUB_ENABLE_HF_TRANSFER"] = "0"
+                logger.info("Disabled HF_HUB_ENABLE_HF_TRANSFER (hf_transfer not installed)")
+
         logger.info("Loading Whisper ONNX model '%s' (quantization=%s)...",
                      self.model_name, self.quantization)
         start_time = time.time()
