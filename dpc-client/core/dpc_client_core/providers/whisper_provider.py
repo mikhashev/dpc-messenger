@@ -64,7 +64,9 @@ class LocalWhisperProvider(AIProvider):
             return [
                 ("CUDAExecutionProvider", {
                     "arena_extend_strategy": "kSameAsRequested",
+                    "gpu_mem_limit": 2 * 1024 * 1024 * 1024,
                     "cudnn_conv_algo_search": "DEFAULT",
+                    "cudnn_conv_use_max_workspace": "0",
                 }),
                 "CPUExecutionProvider",
             ]
