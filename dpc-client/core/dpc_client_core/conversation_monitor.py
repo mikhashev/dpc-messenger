@@ -893,6 +893,11 @@ DO NOT include any text before or after the JSON. DO NOT use markdown code block
         json_str = re.sub(r'```(?:json)?\s*', '', json_str)
         json_str = json_str.strip()
 
+        # Fix invalid JSON escape sequences (e.g. \U, \e from Windows paths)
+        def _fix_escape(m):
+            return '\\\\' + m.group(1)
+        json_str = re.sub(r'\\([^"\\/bfnrtu])', _fix_escape, json_str)
+
         # Remove trailing commas before closing brackets/braces
         json_str = re.sub(r',\s*([}\]])', r'\1', json_str)
 
