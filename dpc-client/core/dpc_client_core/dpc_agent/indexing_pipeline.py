@@ -123,7 +123,7 @@ def full_rebuild(
     if not all_doc_texts:
         return 0
 
-    BATCH_SIZE = 32
+    BATCH_SIZE = 4
     for batch_start in range(0, len(all_doc_texts), BATCH_SIZE):
         if stop_event and stop_event.is_set():
             log.info("Indexing interrupted by shutdown at batch %d/%d", batch_start, len(all_doc_texts))
