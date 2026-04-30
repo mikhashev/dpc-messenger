@@ -235,6 +235,7 @@ class EmbeddingProvider:
             return [
                 ("CUDAExecutionProvider", {
                     "arena_extend_strategy": "kSameAsRequested",
+                    "gpu_mem_limit": 3 * 1024 * 1024 * 1024,
                     "cudnn_conv_algo_search": "DEFAULT",
                 }),
                 "CPUExecutionProvider",
