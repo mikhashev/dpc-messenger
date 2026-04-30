@@ -13,7 +13,7 @@ from typing import Optional
 @dataclass
 class MemoryConfig:
     enabled: bool = False
-    embedding_model: str = "aapot/bge-m3-onnx"
+    embedding_model: str = "BAAI/bge-m3"
     active_recall: bool = True
     max_recall_results: int = 3
     memory_provider: Optional[str] = None

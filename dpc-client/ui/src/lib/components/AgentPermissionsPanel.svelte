@@ -161,7 +161,7 @@
     if (!editSettings.memory) {
       editSettings.memory = {
         enabled: false,
-        embedding_model: 'aapot/bge-m3-onnx',
+        embedding_model: 'BAAI/bge-m3',
         active_recall: true,
       };
     }

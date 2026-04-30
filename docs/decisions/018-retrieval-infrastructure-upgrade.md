@@ -1,6 +1,6 @@
 # ADR-018: Retrieval Infrastructure Upgrade (BGE-M3 + Whole-Document Indexing)
 
-**Status:** Proposed
+**Status:** Partially Superseded by ADR-021 (execution layer reverted to PyTorch; model choices and search architecture remain)
 **Date:** 2026-04-27
 **Session:** S75
 **Authors:** CC (research, synthesis, code analysis), Ark (embedding model research, chunking analysis), Mike (direction, fundamental questions, decision)

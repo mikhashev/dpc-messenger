@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import pathlib
 import threading
 from dataclasses import dataclass, field, asdict
@@ -183,31 +184,22 @@ def generate_smart_index(knowledge_dir: pathlib.Path) -> str:
 # ---------------------------------------------------------------------------
 
 class EmbeddingProvider:
-    """Lazy-loading embedding provider. BGE-M3 via ONNX Runtime (primary),
-    sentence-transformers fallback for legacy e5-small."""
+    """Lazy-loading embedding provider. BGE-M3 via sentence-transformers + PyTorch."""
 
-    ONNX_MODEL = "aapot/bge-m3-onnx"
-    ONNX_DIMENSIONS = 1024
-
-    def __init__(self, model_name: str = "aapot/bge-m3-onnx",
+    def __init__(self, model_name: str = "BAAI/bge-m3",
                  device: Optional[str] = None, max_tokens: int = 4096,
                  local_files_only: bool = False):
         self.model_name = model_name
         self.max_tokens = max_tokens
         self._device = device
         self._local_files_only = local_files_only
-        self._session = None
-        self._tokenizer = None
-        self._model = None  # sentence-transformers fallback
+        self._model = None
         self._load_lock = threading.Lock()
-        self._use_onnx = "onnx" in model_name.lower() or model_name == self.ONNX_MODEL
 
     @property
     def device(self) -> str:
         if self._device:
             return self._device
-        if self._use_onnx:
-            return self._onnx_device()
         try:
             import torch
             if torch.cuda.is_available():
@@ -218,122 +210,50 @@ class EmbeddingProvider:
             pass
         return "cpu"
 
-    def _onnx_device(self) -> str:
-        try:
-            import onnxruntime as ort
-            available = ort.get_available_providers()
-            if "CUDAExecutionProvider" in available:
-                return "cuda"
-        except ImportError:
-            pass
-        return "cpu"
-
-    def _onnx_providers(self) -> list:
-        import onnxruntime as ort
-        available = ort.get_available_providers()
-        if "CUDAExecutionProvider" in available:
-            return ["CUDAExecutionProvider", "CPUExecutionProvider"]
-        return ["CPUExecutionProvider"]
-
     def _load_model(self):
-        if self._session is not None or self._model is not None:
+        if self._model is not None:
             return
         with self._load_lock:
-            if self._session is not None or self._model is not None:
+            if self._model is not None:
                 return
-            if self._use_onnx:
-                self._load_onnx()
+            if os.environ.get("HF_HUB_ENABLE_HF_TRANSFER") == "1":
+                try:
+                    import hf_transfer  # noqa: F401
+                except ImportError:
+                    os.environ["HF_HUB_ENABLE_HF_TRANSFER"] = "0"
+                    log.info("Disabled HF_HUB_ENABLE_HF_TRANSFER (hf_transfer not installed)")
+            from sentence_transformers import SentenceTransformer
+            import torch
+            kwargs = {"device": self.device}
+            if self.device == "cuda":
+                kwargs["model_kwargs"] = {"torch_dtype": torch.float16}
+            if self._local_files_only:
+                kwargs["local_files_only"] = True
+                try:
+                    self._model = SentenceTransformer(self.model_name, **kwargs)
+                except Exception:
+                    log.info("Model %s not in cache, downloading...", self.model_name)
+                    kwargs.pop("local_files_only")
+                    self._model = SentenceTransformer(self.model_name, **kwargs)
             else:
-                self._load_sentence_transformers()
-
-    def _load_onnx(self):
-        import onnxruntime as ort
-        from huggingface_hub import hf_hub_download
-        from transformers import AutoTokenizer
-        kwargs = {}
-        if self._local_files_only:
-            kwargs["local_files_only"] = True
-        model_path = hf_hub_download(self.model_name, "model.onnx", **kwargs)
-        data_path_name = "model.onnx.data"
-        try:
-            hf_hub_download(self.model_name, data_path_name, **kwargs)
-        except Exception:
-            pass
-        providers = self._onnx_providers()
-        self._session = ort.InferenceSession(model_path, providers=providers)
-        self._tokenizer = AutoTokenizer.from_pretrained(self.model_name, **kwargs)
-        actual_provider = self._session.get_providers()[0]
-        log.info("Loaded ONNX embedding model %s on %s (local_only=%s)",
-                 self.model_name, actual_provider, self._local_files_only)
-
-    def _load_sentence_transformers(self):
-        from sentence_transformers import SentenceTransformer
-        kwargs = {"device": self.device}
-        if self._local_files_only:
-            kwargs["local_files_only"] = True
-        self._model = SentenceTransformer(self.model_name, **kwargs)
-        log.info("Loaded embedding model %s on %s (local_only=%s)",
-                 self.model_name, self.device, self._local_files_only)
-
-    def _onnx_run(self, texts: List[str]):
-        """Run ONNX inference, return raw outputs + encoded input."""
-        encoded = self._tokenizer(
-            texts, padding=True, truncation=True,
-            max_length=self.max_tokens, return_tensors="np",
-        )
-        input_names = {i.name for i in self._session.get_inputs()}
-        inputs = {k: v for k, v in encoded.items() if k in input_names}
-        outputs = self._session.run(None, inputs)
-        return outputs, encoded
-
-    def _onnx_embed(self, texts: List[str]) -> List[List[float]]:
-        if not texts:
-            return []
-        outputs, _ = self._onnx_run(texts)
-        # dense_vecs: [batch, 1024] — already pooled and L2-normalized
-        return outputs[0].tolist()
-
-    def embed_sparse(self, texts: List[str]) -> List[Dict[int, float]]:
-        """Extract sparse vectors from BGE-M3 ONNX. Returns list of {token_id: weight} dicts."""
-        if not texts:
-            return []
-        self._load_model()
-        if self._session is None:
-            return [{} for _ in texts]
-        outputs, encoded = self._onnx_run(texts)
-        # sparse_vecs: [batch, token, 1]
-        sparse = outputs[1]
-        token_ids = encoded["input_ids"]
-        result = []
-        for i in range(len(texts)):
-            weights = sparse[i, :, 0]
-            ids = token_ids[i]
-            sparse_dict = {int(tid): float(w) for tid, w in zip(ids, weights) if w > 0}
-            result.append(sparse_dict)
-        return result
+                self._model = SentenceTransformer(self.model_name, **kwargs)
+            precision = "FP16" if self.device == "cuda" else "FP32"
+            log.info("Loaded embedding model %s on %s (%s)", self.model_name, self.device, precision)
 
     def embed(self, text: str) -> List[float]:
         self._load_model()
-        if self._session is not None:
-            return self._onnx_embed([text])[0]
         return self._model.encode(text, normalize_embeddings=True).tolist()
 
     def embed_batch(self, texts: List[str]) -> List[List[float]]:
         self._load_model()
-        if self._session is not None:
-            return self._onnx_embed(texts)
         return self._model.encode(texts, normalize_embeddings=True).tolist()
 
     @property
     def dimensions(self) -> int:
-        if self._use_onnx:
-            return self.ONNX_DIMENSIONS
         self._load_model()
         return self._model.get_sentence_embedding_dimension()
 
     def unload(self):
-        self._session = None
-        self._tokenizer = None
         self._model = None
         log.info("Unloaded embedding model %s", self.model_name)
 

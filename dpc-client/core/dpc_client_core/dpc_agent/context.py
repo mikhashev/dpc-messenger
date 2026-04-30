@@ -33,7 +33,6 @@ from .memory import Memory
 log = logging.getLogger(__name__)
 
 FAISS_TOP_K = 10
-SPARSE_TOP_K = 10
 BM25_TOP_K = 10
 
 
@@ -358,8 +357,7 @@ def build_llm_messages(
         if _query_text:
             try:
                 from .active_recall import get_recall_block
-                from .hybrid_search import reciprocal_rank_fusion, sparse_search
-                from .indexing_pipeline import load_sparse_index
+                from .hybrid_search import reciprocal_rank_fusion
                 from .bm25_index import BM25Index
                 from .faiss_index import FaissIndex
                 from .memory import EmbeddingProvider
@@ -392,13 +390,6 @@ def build_llm_messages(
 
                 _keyword_results = []
                 _sparse_query = _human_text or _context_text
-                _sparse_entries = load_sparse_index(_index_dir)
-                if _sparse_entries and embedding_provider and hasattr(embedding_provider, 'embed_sparse'):
-                    _q_sparse = embedding_provider.embed_sparse([_sparse_query])[0]
-                    _idx_sparse = [({int(k): v for k, v in e["sparse"].items()}, e["meta"]) for e in _sparse_entries]
-                    _keyword_results = sparse_search(_q_sparse, _idx_sparse, top_k=SPARSE_TOP_K)
-                    log.debug("Active Recall sparse: %d results — %s", len(_keyword_results),
-                              [m.get("source_file", "?") for m, _ in _keyword_results])
                 if _bm25_idx.load():
                     _bm25_results = _bm25_idx.search(_sparse_query, BM25_TOP_K)
                     _keyword_results.extend(_bm25_results)

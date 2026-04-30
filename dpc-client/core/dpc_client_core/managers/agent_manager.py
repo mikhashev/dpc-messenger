@@ -52,9 +52,11 @@ class DpcAgentManager:
             config: Agent configuration from settings
             agent_id: Optional agent ID for this manager (used for per-agent Telegram config)
         """
+        import threading
         self.service = service
         self.config = config
         self.agent_id = agent_id  # Store agent_id for per-agent configuration
+        self._stop_event = threading.Event()
 
         # Get firewall reference from CoreService
         self.firewall = getattr(service, "firewall", None)
@@ -251,7 +253,7 @@ class DpcAgentManager:
                             # Always rebuild L5 agent knowledge (not just on first init)
                             from dpc_client_core.dpc_agent.indexing_pipeline import full_rebuild
                             knowledge_dir = agent_root / "knowledge"
-                            count = full_rebuild(knowledge_dir, provider, faiss_idx, bm25_idx)
+                            count = full_rebuild(knowledge_dir, provider, faiss_idx, bm25_idx, stop_event=self._stop_event)
 
                             # Collect all extra documents (L6 + EXT) then embed+index in bulk
                             extra_texts = []
@@ -302,19 +304,13 @@ class DpcAgentManager:
 
                             # Embed + index extra documents one at a time (whole-doc, no batching)
                             if extra_texts:
-                                from dpc_client_core.dpc_agent.indexing_pipeline import _save_sparse_index, load_sparse_index
-                                _extra_sparse = load_sparse_index(index_dir)
                                 for doc_text, meta in zip(extra_texts, extra_metas):
+                                    if self._stop_event.is_set():
+                                        log.info("Extra indexing interrupted by shutdown")
+                                        break
                                     vector = np.array(provider.embed(doc_text), dtype=np.float32).reshape(1, -1)
                                     faiss_idx.add(vector, [meta])
-                                    if getattr(provider, '_use_onnx', False):
-                                        sv = provider.embed_sparse([doc_text])
-                                        if sv:
-                                            _extra_sparse = [e for e in _extra_sparse if e.get("source_file") != meta["source_file"]]
-                                            _extra_sparse.append({"source_file": meta["source_file"], "sparse": {str(k): v for k, v in sv[0].items()}, "meta": meta})
                                 bm25_idx.add(extra_texts, extra_metas)
-                                if getattr(provider, '_use_onnx', False):
-                                    _save_sparse_index(index_dir, _extra_sparse)
                                 log.info("Bulk indexed %d extra documents (L6: %d, EXT: %d)", len(extra_texts), l6_count, ext_count)
 
                             if needs_full_rebuild or extra_texts:
@@ -551,6 +547,7 @@ class DpcAgentManager:
 
     async def stop(self) -> None:
         """Shutdown the agent and Telegram bridge."""
+        self._stop_event.set()
         # Stop Telegram bridge first
         if self._telegram_bridge is not None:
             await self._telegram_bridge.stop()

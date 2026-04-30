@@ -183,16 +183,13 @@ class LLMManager:
                     {
                         "alias": "local_whisper_large",
                         "type": "local_whisper",
-                        "model": "openai/whisper-large-v3",
+                        "model": "openai/whisper-large-v3-turbo",
                         "device": "auto",
-                        "compile_model": False,
-                        "use_flash_attention": False,
-                        "chunk_length_s": 30,
-                        "batch_size": 16,
+                        "compile_model": True,
                         "language": "auto",
                         "task": "transcribe",
                         "lazy_loading": True,
-                        "_note": "Local Whisper transcription - GPU accelerated (CUDA, MLX)"
+                        "_note": "Local Whisper transcription via PyTorch (CUDA/MPS/CPU auto-detect)"
                     },
                     {
                         "alias": "dpc_agent",

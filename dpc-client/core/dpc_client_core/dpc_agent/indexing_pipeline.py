@@ -28,36 +28,6 @@ _last_index_time: Dict[str, float] = {}
 
 
 
-SPARSE_INDEX_FILE = "sparse_index.json"
-
-
-def _save_sparse_index(index_dir: pathlib.Path, entries: List[dict]):
-    """Save sparse index to JSON file atomically (write-to-tmp then rename)."""
-    if not index_dir:
-        return
-    path = index_dir / SPARSE_INDEX_FILE
-    tmp_path = path.with_suffix(".json.tmp")
-    tmp_path.write_text(json.dumps(entries, ensure_ascii=False), encoding="utf-8")
-    tmp_path.replace(path)
-
-
-def _save_sparse_entry(index_dir: pathlib.Path, filename: str, sparse_dict: Dict[int, float], meta: dict):
-    """Update a single sparse entry atomically."""
-    entries = load_sparse_index(index_dir)
-    entries = [e for e in entries if e.get("source_file") != filename]
-    entries.append({"source_file": filename, "sparse": {str(k): v for k, v in sparse_dict.items()}, "meta": meta})
-    _save_sparse_index(index_dir, entries)
-
-
-def load_sparse_index(index_dir: pathlib.Path) -> List[dict]:
-    """Load sparse index from JSON file."""
-    path = index_dir / SPARSE_INDEX_FILE
-    if not path.exists():
-        return []
-    try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError):
-        return []
 
 
 def should_index(filepath: str) -> bool:
@@ -111,11 +81,6 @@ def index_single_file(
     faiss_index.add(vector, [meta])
     bm25_index.add([doc_text], [meta])
 
-    if getattr(embedding_provider, '_use_onnx', False):
-        sparse_vecs = embedding_provider.embed_sparse([doc_text])
-        if sparse_vecs:
-            _save_sparse_entry(faiss_index.index_dir, path.name, sparse_vecs[0], meta)
-
     return 1
 
 
@@ -124,6 +89,7 @@ def full_rebuild(
     embedding_provider,
     faiss_index,
     bm25_index,
+    stop_event: "threading.Event | None" = None,
 ) -> int:
     """Full rebuild of both indexes from all files in knowledge_dir. One vector per file."""
     faiss_index.clear()
@@ -134,6 +100,9 @@ def full_rebuild(
         return 0
 
     for f in sorted(knowledge_dir.iterdir()):
+        if stop_event and stop_event.is_set():
+            log.info("Indexing interrupted by shutdown during file scan")
+            return 0
         if not f.is_file() or f.name in _BACKFILL_SKIP or is_binary(f):
             continue
         text = extract_text(f)
@@ -154,24 +123,18 @@ def full_rebuild(
     if not all_doc_texts:
         return 0
 
-    for i, (doc_text, meta) in enumerate(zip(all_doc_texts, all_metas)):
-        vector = np.array(embedding_provider.embed(doc_text), dtype=np.float32).reshape(1, -1)
-        faiss_index.add(vector, [meta])
+    BATCH_SIZE = 4
+    for batch_start in range(0, len(all_doc_texts), BATCH_SIZE):
+        if stop_event and stop_event.is_set():
+            log.info("Indexing interrupted by shutdown at batch %d/%d", batch_start, len(all_doc_texts))
+            return batch_start
+        batch_texts = all_doc_texts[batch_start:batch_start + BATCH_SIZE]
+        batch_metas = all_metas[batch_start:batch_start + BATCH_SIZE]
+        vectors = np.array(embedding_provider.embed_batch(batch_texts), dtype=np.float32)
+        for vec, meta in zip(vectors, batch_metas):
+            faiss_index.add(vec.reshape(1, -1), [meta])
 
     bm25_index.build(all_doc_texts, all_metas)
-
-    if getattr(embedding_provider, '_use_onnx', False):
-        sparse_entries = []
-        for doc_text, meta in zip(all_doc_texts, all_metas):
-            sparse_vecs = embedding_provider.embed_sparse([doc_text])
-            for sv in sparse_vecs:
-                sparse_entries.append({
-                    "source_file": meta["source_file"],
-                    "sparse": {str(k): v for k, v in sv.items()},
-                    "meta": meta,
-                })
-        _save_sparse_index(faiss_index.index_dir, sparse_entries)
-        log.info("Sparse index built: %d documents", len(sparse_entries))
 
     log.info("Full rebuild: %d documents indexed (whole-document, ADR-018)",
              len(all_doc_texts))
