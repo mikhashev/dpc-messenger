@@ -253,6 +253,7 @@ class EmbeddingProvider:
                 self._load_sentence_transformers()
 
     def _load_onnx(self):
+        import pathlib
         import onnxruntime as ort
         from huggingface_hub import hf_hub_download
         from transformers import AutoTokenizer
@@ -265,6 +266,10 @@ class EmbeddingProvider:
             hf_hub_download(self.model_name, data_path_name, **kwargs)
         except Exception:
             pass
+        int8_path = str(pathlib.Path(model_path).parent / "model_int8.onnx")
+        if pathlib.Path(int8_path).exists():
+            model_path = int8_path
+            log.info("Using INT8 quantized model: %s", int8_path)
         providers = self._onnx_providers()
         self._session = ort.InferenceSession(model_path, providers=providers)
         self._tokenizer = AutoTokenizer.from_pretrained(self.model_name, **kwargs)
