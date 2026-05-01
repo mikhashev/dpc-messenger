@@ -1129,3 +1129,78 @@ Respond in JSON format:
                 )
 
         await self.local_api.broadcast_event("knowledge_commit_result", result_payload)
+
+    # --- Session / Conversation Management ---
+
+    async def reset_conversation(self, conversation_id: str) -> Dict[str, Any]:
+        """Reset conversation history (internal, called after approval)."""
+        try:
+            monitor = self._get_or_create_conversation_monitor(conversation_id)
+            monitor.reset_conversation()
+            logger.info("Reset Conversation - cleared history for %s", conversation_id)
+            await self.local_api.broadcast_event(
+                "conversation_reset", {"conversation_id": conversation_id}
+            )
+            return {"status": "success", "message": "Conversation reset successfully"}
+        except Exception as e:
+            logger.error("Error resetting conversation: %s", e, exc_info=True)
+            return {"status": "error", "message": str(e)}
+
+    async def get_conversation_settings(self, conversation_id: str) -> Dict[str, Any]:
+        """Get per-conversation settings including history persistence."""
+        try:
+            monitor = self._get_or_create_conversation_monitor(conversation_id)
+            settings = monitor._load_conversation_settings()
+            return {"status": "success", "settings": settings}
+        except Exception as e:
+            logger.error("Error getting conversation settings: %s", e, exc_info=True)
+            return {"status": "error", "message": str(e)}
+
+    async def set_conversation_persist_history(self, conversation_id: str, persist: bool) -> Dict[str, Any]:
+        """Set whether to persist history for a conversation."""
+        try:
+            monitor = self._get_or_create_conversation_monitor(conversation_id)
+            success = monitor.set_persist_history(persist)
+            if not success:
+                return {"status": "error", "message": "Failed to save settings"}
+
+            if persist and monitor.message_history:
+                monitor.save_history()
+            elif not persist:
+                monitor.clear_history()
+
+            await self.local_api.broadcast_event(
+                "conversation_settings_changed",
+                {"conversation_id": conversation_id, "persist_history": persist}
+            )
+            return {"status": "success", "persist_history": persist}
+        except Exception as e:
+            logger.error("Error setting conversation persistence: %s", e, exc_info=True)
+            return {"status": "error", "message": str(e)}
+
+    async def delete_conversation(self, conversation_id: str) -> Dict[str, Any]:
+        """Delete an entire conversation including history, settings, and files."""
+        try:
+            if conversation_id.startswith("group-"):
+                success = self.group_manager.leave_group(conversation_id)
+                if not success:
+                    return {"status": "error", "message": "Group not found or could not be deleted"}
+            else:
+                if conversation_id in self.conversation_monitors:
+                    monitor = self.conversation_monitors[conversation_id]
+                    monitor.delete_conversation_folder()
+                    del self.conversation_monitors[conversation_id]
+                else:
+                    import shutil
+                    conv_dir = Path.home() / ".dpc" / "conversations" / conversation_id
+                    if conv_dir.exists():
+                        shutil.rmtree(conv_dir)
+
+            logger.info("Deleted conversation: %s", conversation_id)
+            await self.local_api.broadcast_event(
+                "conversation_deleted", {"conversation_id": conversation_id}
+            )
+            return {"status": "success", "message": "Conversation deleted successfully"}
+        except Exception as e:
+            logger.error("Error deleting conversation: %s", e, exc_info=True)
+            return {"status": "error", "message": str(e)}

@@ -4071,162 +4071,20 @@ class CoreService:
             }
 
     async def reset_conversation(self, conversation_id: str) -> Dict[str, Any]:
-        """Reset conversation history and context tracking (internal method).
-
-        NOTE: This is now an internal method called after proposal approval.
-        UI should call propose_new_session() instead for mutual approval.
-
-        Args:
-            conversation_id: The conversation/chat ID to reset
-
-        Returns:
-            Dict with status
-        """
-        try:
-            monitor = self._get_or_create_conversation_monitor(conversation_id)
-            monitor.reset_conversation()
-            logger.info("Reset Conversation - cleared history for %s", conversation_id)
-
-            # Broadcast to UI
-            await self.local_api.broadcast_event(
-                "conversation_reset",
-                {"conversation_id": conversation_id}
-            )
-
-            return {
-                "status": "success",
-                "message": "Conversation reset successfully"
-            }
-
-        except Exception as e:
-            logger.error("Error resetting conversation: %s", e, exc_info=True)
-            return {
-                "status": "error",
-                "message": str(e)
-            }
+        """Delegated to KnowledgeService."""
+        return await self.knowledge_service.reset_conversation(conversation_id)
 
     async def get_conversation_settings(self, conversation_id: str) -> Dict[str, Any]:
-        """Get per-conversation settings including history persistence.
-
-        Args:
-            conversation_id: The conversation/chat ID
-
-        Returns:
-            Dict with conversation settings
-        """
-        try:
-            monitor = self._get_or_create_conversation_monitor(conversation_id)
-            settings = monitor._load_conversation_settings()
-            return {
-                "status": "success",
-                "settings": settings
-            }
-        except Exception as e:
-            logger.error("Error getting conversation settings: %s", e, exc_info=True)
-            return {
-                "status": "error",
-                "message": str(e)
-            }
+        """Delegated to KnowledgeService."""
+        return await self.knowledge_service.get_conversation_settings(conversation_id)
 
     async def set_conversation_persist_history(self, conversation_id: str, persist: bool) -> Dict[str, Any]:
-        """Set whether to persist history for a conversation.
-
-        Args:
-            conversation_id: The conversation/chat ID
-            persist: True to persist history, False for ephemeral
-
-        Returns:
-            Dict with status
-        """
-        try:
-            monitor = self._get_or_create_conversation_monitor(conversation_id)
-            success = monitor.set_persist_history(persist)
-
-            if success:
-                # If enabling persistence and there's existing history, save it
-                if persist and monitor.message_history:
-                    monitor.save_history()
-                    logger.info("Enabled history persistence for %s and saved %d messages",
-                               conversation_id, len(monitor.message_history))
-                elif not persist:
-                    # If disabling persistence, delete any existing history file
-                    monitor.clear_history()
-                    logger.info("Disabled history persistence for %s and cleared history", conversation_id)
-
-                # Broadcast to UI
-                await self.local_api.broadcast_event(
-                    "conversation_settings_changed",
-                    {"conversation_id": conversation_id, "persist_history": persist}
-                )
-
-                return {
-                    "status": "success",
-                    "persist_history": persist
-                }
-            else:
-                return {
-                    "status": "error",
-                    "message": "Failed to save settings"
-                }
-        except Exception as e:
-            logger.error("Error setting conversation persistence: %s", e, exc_info=True)
-            return {
-                "status": "error",
-                "message": str(e)
-            }
+        """Delegated to KnowledgeService."""
+        return await self.knowledge_service.set_conversation_persist_history(conversation_id, persist)
 
     async def delete_conversation(self, conversation_id: str) -> Dict[str, Any]:
-        """Delete an entire conversation including history, settings, and files.
-
-        This is a complete deletion - removes the conversation folder.
-
-        Args:
-            conversation_id: The conversation/chat ID to delete
-
-        Returns:
-            Dict with status
-        """
-        try:
-            # For groups, use the group manager
-            if conversation_id.startswith("group-"):
-                success = self.group_manager.leave_group(conversation_id)
-                if not success:
-                    return {
-                        "status": "error",
-                        "message": "Group not found or could not be deleted"
-                    }
-            else:
-                # For P2P conversations, delete via conversation monitor
-                if conversation_id in self.conversation_monitors:
-                    monitor = self.conversation_monitors[conversation_id]
-                    monitor.delete_conversation_folder()
-                    del self.conversation_monitors[conversation_id]
-                else:
-                    # Even if no monitor exists, try to delete the folder
-                    from pathlib import Path
-                    import shutil
-                    conv_dir = Path.home() / ".dpc" / "conversations" / conversation_id
-                    if conv_dir.exists():
-                        shutil.rmtree(conv_dir)
-
-            logger.info("Deleted conversation: %s", conversation_id)
-
-            # Broadcast to UI
-            await self.local_api.broadcast_event(
-                "conversation_deleted",
-                {"conversation_id": conversation_id}
-            )
-
-            return {
-                "status": "success",
-                "message": "Conversation deleted successfully"
-            }
-        except Exception as e:
-            logger.error("Error deleting conversation: %s", e, exc_info=True)
-            return {
-                "status": "error",
-                "message": str(e)
-            }
+        """Delegated to KnowledgeService."""
+        return await self.knowledge_service.delete_conversation(conversation_id)
 
     # =========================================================================
     # Group Chat Commands (v0.19.0)
