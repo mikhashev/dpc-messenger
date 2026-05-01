@@ -5248,182 +5248,20 @@ class CoreService:
             return {"status": "error", "message": str(e)}
 
     async def _request_inference_from_peer(self, peer_id: str, prompt: str, model: str = None, provider: str = None, images: list = None, timeout: float = 240.0) -> str:
-        """
-        Request remote inference from a specific peer.
-        Uses async request-response pattern with Future.
-
-        Args:
-            peer_id: The node_id of the peer to request inference from
-            prompt: The prompt to send for inference
-            model: Optional model name to use
-            provider: Optional provider alias to use
-            images: Optional list of image dicts for vision queries (Phase 2: Remote Vision)
-            timeout: Timeout in seconds (default 240s for inference)
-
-        Returns:
-            The inference result as a string
-
-        Raises:
-            ConnectionError: If peer is not connected
-            TimeoutError: If request times out
-            RuntimeError: If inference fails on remote peer
-        """
-        from dpc_protocol.protocol import create_remote_inference_request
-
-        logger.debug("Requesting inference from peer: %s (images: %s)", peer_id, 'yes' if images else 'no')
-
-        if peer_id not in self.p2p_manager.peers:
-            raise ConnectionError(f"Peer {peer_id} is not connected")
-
-        try:
-            # Generate unique request ID
-            request_id = str(uuid.uuid4())
-
-            # Create Future to wait for response
-            response_future = asyncio.Future()
-            self._pending_inference_requests[request_id] = response_future
-
-            # Create inference request message (Phase 2: includes images)
-            request_message = create_remote_inference_request(
-                request_id=request_id,
-                prompt=prompt,
-                model=model,
-                provider=provider,
-                images=images
-            )
-
-            # Send request
-            await self.p2p_manager.send_message_to_peer(peer_id, request_message)
-
-            # Wait for response with timeout
-            try:
-                result = await asyncio.wait_for(response_future, timeout=timeout)
-                logger.info("Received inference result from %s", peer_id)
-                return result
-
-            except asyncio.TimeoutError:
-                logger.warning("Timeout waiting for inference from %s", peer_id)
-                raise TimeoutError(f"Inference request to {peer_id} timed out after {timeout}s")
-            finally:
-                # Clean up pending request
-                self._pending_inference_requests.pop(request_id, None)
-
-        except Exception as e:
-            logger.error("Error requesting inference from %s: %s", peer_id, e, exc_info=True)
-            raise
+        """Delegated to P2PCoordinator."""
+        return await self.p2p_coordinator.request_inference_from_peer(peer_id, prompt, model, provider, images, timeout)
 
     async def _request_transcription_from_peer(
         self, peer_id: str, audio_base64: str, mime_type: str,
         model: str = None, provider: str = None, language: str = "auto",
         task: str = "transcribe", timeout: float = 120.0
     ) -> Dict[str, Any]:
-        """
-        Request remote transcription from a specific peer.
-        Uses async request-response pattern with Future.
-
-        Args:
-            peer_id: The node_id of the peer to request transcription from
-            audio_base64: Base64-encoded audio data
-            mime_type: Audio MIME type (e.g., audio/webm)
-            model: Optional model name to use
-            provider: Optional provider alias to use
-            language: Language code or "auto" for detection
-            task: "transcribe" (default) or "translate" (to English)
-            timeout: Timeout in seconds (default 120s for transcription)
-
-        Returns:
-            Dict containing transcription result with keys:
-                - text: Transcribed text
-                - language: Detected language
-                - duration_seconds: Audio duration
-                - provider: Provider used
-
-        Raises:
-            ConnectionError: If peer is not connected
-            TimeoutError: If request times out
-            RuntimeError: If transcription fails on remote peer
-        """
-        from dpc_protocol.protocol import create_remote_transcription_request
-
-        logger.debug("Requesting transcription from peer: %s (mime_type: %s, language: %s)",
-                    peer_id, mime_type, language)
-
-        if peer_id not in self.p2p_manager.peers:
-            raise ConnectionError(f"Peer {peer_id} is not connected")
-
-        try:
-            # Generate unique request ID
-            request_id = str(uuid.uuid4())
-
-            # Create Future to wait for response
-            response_future = asyncio.Future()
-            self._pending_transcription_requests[request_id] = response_future
-
-            # Create transcription request message
-            request_message = create_remote_transcription_request(
-                request_id=request_id,
-                audio_base64=audio_base64,
-                mime_type=mime_type,
-                model=model,
-                provider=provider,
-                language=language,
-                task=task
-            )
-
-            # Send request
-            await self.p2p_manager.send_message_to_peer(peer_id, request_message)
-
-            # Wait for response with timeout
-            try:
-                result = await asyncio.wait_for(response_future, timeout=timeout)
-                logger.info("Received transcription result from %s: %d chars",
-                           peer_id, len(result.get("text", "")))
-                return result
-
-            except asyncio.TimeoutError:
-                logger.warning("Timeout waiting for transcription from %s", peer_id)
-                raise TimeoutError(f"Transcription request to {peer_id} timed out after {timeout}s")
-            finally:
-                # Clean up pending request
-                self._pending_transcription_requests.pop(request_id, None)
-
-        except Exception as e:
-            logger.error("Error requesting transcription from %s: %s", peer_id, e, exc_info=True)
-            raise
+        """Delegated to P2PCoordinator."""
+        return await self.p2p_coordinator.request_transcription_from_peer(peer_id, audio_base64, mime_type, model, provider, language, task, timeout)
 
     async def _aggregate_contexts(self, query: str, peer_ids: List[str] = None) -> Dict[str, PersonalContext]:
-        """
-        Aggregate contexts from local user and connected peers.
-        
-        Args:
-            query: The user's query (used for context relevance)
-            peer_ids: Optional list of specific peer IDs to request from.
-                     If None, requests from all connected peers.
-        
-        Returns:
-            Dictionary mapping node_id to PersonalContext
-        """
-        contexts = {}
-        
-        # Always include local context
-        contexts[self.p2p_manager.node_id] = self.p2p_manager.local_context
-        
-        # Determine which peers to query
-        if peer_ids is None:
-            peer_ids = list(self.p2p_manager.peers.keys())
-        
-        # Request context from each peer in parallel
-        if peer_ids:
-            tasks = [self._request_context_from_peer(peer_id, query) for peer_id in peer_ids]
-            results = await asyncio.gather(*tasks, return_exceptions=True)
-
-            for peer_id, result in zip(peer_ids, results):
-                if isinstance(result, PersonalContext):
-                    contexts[peer_id] = result
-                elif result is not None:
-                    logger.error("Error getting context from %s: %s", peer_id, result)
-
-        return contexts
+        """Delegated to P2PCoordinator."""
+        return await self.p2p_coordinator.aggregate_contexts(query, peer_ids)
 
     # --- AI Query Methods ---
 

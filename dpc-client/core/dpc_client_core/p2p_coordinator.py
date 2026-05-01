@@ -418,3 +418,101 @@ class P2PCoordinator:
                 "status": "cancelled"
             })
         return {"transfer_id": transfer_id, "status": "cancelled", "reason": reason}
+
+    # ─────────────────────────────────────────────────────────────
+    # Outgoing P2P requests (Phase C Step 5 Batch 3)
+    # ─────────────────────────────────────────────────────────────
+
+    async def request_inference_from_peer(self, peer_id: str, prompt: str, model: str = None, provider: str = None, images: list = None, timeout: float = 240.0) -> str:
+        """Request remote inference from a specific peer."""
+        import uuid
+        from dpc_protocol.protocol import create_remote_inference_request
+
+        logger.debug("Requesting inference from peer: %s (images: %s)", peer_id, 'yes' if images else 'no')
+
+        if peer_id not in self.p2p_manager.peers:
+            raise ConnectionError(f"Peer {peer_id} is not connected")
+
+        try:
+            request_id = str(uuid.uuid4())
+            response_future = asyncio.Future()
+            self.service._pending_inference_requests[request_id] = response_future
+
+            request_message = create_remote_inference_request(
+                request_id=request_id, prompt=prompt,
+                model=model, provider=provider, images=images
+            )
+            await self.p2p_manager.send_message_to_peer(peer_id, request_message)
+
+            try:
+                result = await asyncio.wait_for(response_future, timeout=timeout)
+                logger.info("Received inference result from %s", peer_id)
+                return result
+            except asyncio.TimeoutError:
+                logger.warning("Timeout waiting for inference from %s", peer_id)
+                raise TimeoutError(f"Inference request to {peer_id} timed out after {timeout}s")
+            finally:
+                self.service._pending_inference_requests.pop(request_id, None)
+        except Exception as e:
+            logger.error("Error requesting inference from %s: %s", peer_id, e, exc_info=True)
+            raise
+
+    async def request_transcription_from_peer(
+        self, peer_id: str, audio_base64: str, mime_type: str,
+        model: str = None, provider: str = None, language: str = "auto",
+        task: str = "transcribe", timeout: float = 120.0
+    ) -> Dict[str, any]:
+        """Request remote transcription from a specific peer."""
+        import uuid
+        from dpc_protocol.protocol import create_remote_transcription_request
+
+        logger.debug("Requesting transcription from peer: %s (mime_type: %s, language: %s)", peer_id, mime_type, language)
+
+        if peer_id not in self.p2p_manager.peers:
+            raise ConnectionError(f"Peer {peer_id} is not connected")
+
+        try:
+            request_id = str(uuid.uuid4())
+            response_future = asyncio.Future()
+            self.service._pending_transcription_requests[request_id] = response_future
+
+            request_message = create_remote_transcription_request(
+                request_id=request_id, audio_base64=audio_base64,
+                mime_type=mime_type, model=model, provider=provider,
+                language=language, task=task
+            )
+            await self.p2p_manager.send_message_to_peer(peer_id, request_message)
+
+            try:
+                result = await asyncio.wait_for(response_future, timeout=timeout)
+                logger.info("Received transcription result from %s: %d chars", peer_id, len(result.get("text", "")))
+                return result
+            except asyncio.TimeoutError:
+                logger.warning("Timeout waiting for transcription from %s", peer_id)
+                raise TimeoutError(f"Transcription request to {peer_id} timed out after {timeout}s")
+            finally:
+                self.service._pending_transcription_requests.pop(request_id, None)
+        except Exception as e:
+            logger.error("Error requesting transcription from %s: %s", peer_id, e, exc_info=True)
+            raise
+
+    async def aggregate_contexts(self, query: str, peer_ids: list = None) -> dict:
+        """Aggregate contexts from local user and connected peers."""
+        from dpc_protocol.pcm_core import PersonalContext
+
+        contexts = {}
+        contexts[self.p2p_manager.node_id] = self.p2p_manager.local_context
+
+        if peer_ids is None:
+            peer_ids = list(self.p2p_manager.peers.keys())
+
+        if peer_ids:
+            tasks = [self.service._request_context_from_peer(peer_id, query) for peer_id in peer_ids]
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+            for peer_id, result in zip(peer_ids, results):
+                if isinstance(result, PersonalContext):
+                    contexts[peer_id] = result
+                elif result is not None:
+                    logger.error("Error getting context from %s: %s", peer_id, result)
+
+        return contexts
