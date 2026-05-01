@@ -2480,100 +2480,24 @@ class CoreService:
             }
 
     async def get_available_templates(self) -> Dict[str, Any]:
-        """Get list of available instruction set templates.
-
-        UI Integration: Called to populate template picker dialog.
-
-        Returns:
-            Dict with status and list of templates with metadata
-        """
+        """Get list of available instruction set templates."""
         try:
-            from pathlib import Path
-            import json
-
-            # Get templates directory (go up to dpc-client/core/)
-            templates_dir = Path(__file__).parent.parent / "templates" / "instructions"
-
-            if not templates_dir.exists():
-                logger.warning("Templates directory not found: %s", templates_dir)
-                return {
-                    "status": "success",
-                    "templates": []
-                }
-
-            templates = []
-
-            # Scan for JSON template files (exclude README.md)
-            for template_file in templates_dir.glob("*.json"):
-                try:
-                    with open(template_file, 'r', encoding='utf-8') as f:
-                        template_data = json.load(f)
-
-                    templates.append({
-                        "file": str(template_file),
-                        "filename": template_file.name,
-                        "key": template_file.stem,  # filename without extension
-                        "name": template_data.get("name", template_file.stem),
-                        "description": template_data.get("description", ""),
-                    })
-
-                except Exception as e:
-                    logger.warning("Error reading template %s: %s", template_file, e)
-                    continue
-
-            # Sort templates by name
-            templates.sort(key=lambda t: t["name"])
-
-            return {
-                "status": "success",
-                "templates": templates
-            }
-
+            templates = self.instruction_manager.get_available_templates()
+            return {"status": "success", "templates": templates}
         except Exception as e:
             logger.error("Error listing templates: %s", e, exc_info=True)
-            return {
-                "status": "error",
-                "message": str(e),
-                "templates": []
-            }
+            return {"status": "error", "message": str(e), "templates": []}
 
     async def get_wizard_template(self) -> Dict[str, Any]:
-        """Get wizard template configuration for AI-assisted instruction creation.
-
-        UI Integration: Called when user starts the AI wizard to get question sequence
-        and system instructions.
-
-        Returns:
-            Dict with wizard configuration (system_instruction, question_sequence, etc.)
-        """
+        """Get wizard template configuration for AI-assisted instruction creation."""
         try:
-            from pathlib import Path
-            import json
-
-            # Load wizard template (go up to dpc-client/core/)
-            wizard_file = Path(__file__).parent.parent / "templates" / "wizard_template.json"
-
-            if not wizard_file.exists():
-                logger.error("Wizard template not found: %s", wizard_file)
-                return {
-                    "status": "error",
-                    "message": "Wizard template configuration not found"
-                }
-
-            with open(wizard_file, 'r', encoding='utf-8') as f:
-                wizard_config = json.load(f)
-
-            return {
-                "status": "success",
-                "wizard": wizard_config
-            }
-
+            wizard_config = self.instruction_manager.get_wizard_config()
+            if wizard_config is None:
+                return {"status": "error", "message": "Wizard template configuration not found"}
+            return {"status": "success", "wizard": wizard_config}
         except Exception as e:
             logger.error("Error loading wizard template: %s", e, exc_info=True)
-            return {
-                "status": "error",
-                "message": str(e)
-            }
+            return {"status": "error", "message": str(e)}
 
     async def ai_assisted_instruction_creation(
         self,
@@ -2581,29 +2505,12 @@ class CoreService:
         provider: str = "ollama",
         model: str = None
     ) -> Dict[str, Any]:
-        """Generate instruction set using AI based on user responses.
-
-        UI Integration: Called after wizard collects user's answers to questions.
-        Uses AI to generate a custom instruction set tailored to user's needs.
-
-        Args:
-            user_responses: Dict mapping question IDs to user's answers
-            provider: AI provider to use (ollama, openai, anthropic)
-            model: Model name (optional, uses provider default if not specified)
-
-        Returns:
-            Dict with generated instruction set data or error
-        """
+        """Generate instruction set using AI based on user responses."""
         try:
-            from pathlib import Path
-            import json
+            wizard_config = self.instruction_manager.get_wizard_config()
+            if not wizard_config:
+                return {"status": "error", "message": "Wizard template not found"}
 
-            # Load wizard template for generation prompt (go up to dpc-client/core/)
-            wizard_file = Path(__file__).parent.parent / "templates" / "wizard_template.json"
-            with open(wizard_file, 'r', encoding='utf-8') as f:
-                wizard_config = json.load(f)
-
-            # Build prompt using template
             generation_prompt = wizard_config["generation_prompt_template"].format(
                 use_case=user_responses.get("use_case", "general conversation"),
                 learning_style=user_responses.get("learning_style", "adaptive"),
@@ -2611,102 +2518,35 @@ class CoreService:
                 challenges=user_responses.get("challenges", "none specified"),
                 verification=user_responses.get("verification", "provide reasoning")
             )
-
-            # Add system instruction
-            system_instruction = wizard_config["system_instruction"]
-            full_prompt = f"{system_instruction}\n\n{generation_prompt}"
-
-            # Execute AI query to generate instruction set
-            logger.info("Generating instruction set via AI wizard (provider=%s, model=%s)", provider, model)
+            full_prompt = f"{wizard_config['system_instruction']}\n\n{generation_prompt}"
 
             result = await self.llm_manager.query(
-                prompt=full_prompt,
-                provider_alias=provider,
-                return_metadata=True,
-                model=model,
-                temperature=0.7
+                prompt=full_prompt, provider_alias=provider,
+                return_metadata=True, model=model, temperature=0.7
             )
 
-            # Parse AI response (should be JSON)
             response_text = result.get("response", "")
-
-            # Extract JSON from response (handle markdown code blocks)
-            if "```json" in response_text:
-                # Extract from markdown code block
-                start = response_text.find("```json") + 7
-                end = response_text.find("```", start)
-                json_text = response_text[start:end].strip()
-            elif "```" in response_text:
-                # Generic code block
-                start = response_text.find("```") + 3
-                end = response_text.find("```", start)
-                json_text = response_text[start:end].strip()
-            else:
-                # Assume entire response is JSON
-                json_text = response_text.strip()
-
-            # Parse JSON
             try:
-                instruction_data = json.loads(json_text)
-            except json.JSONDecodeError as e:
-                logger.error("Failed to parse AI response as JSON: %s", e)
-                logger.debug("AI response: %s", response_text[:500])
-                return {
-                    "status": "error",
-                    "message": f"Failed to parse AI response: {e}",
-                    "raw_response": response_text
-                }
+                instruction_data = InstructionManager.extract_instruction_json(response_text)
+            except (json.JSONDecodeError, ValueError) as e:
+                return {"status": "error", "message": str(e), "raw_response": response_text}
 
-            # Validate required fields
-            required_fields = ["name", "description", "primary"]
-            missing_fields = [f for f in required_fields if f not in instruction_data]
-            if missing_fields:
-                return {
-                    "status": "error",
-                    "message": f"Generated instruction set missing required fields: {missing_fields}",
-                    "instruction_data": instruction_data
-                }
-
-            return {
-                "status": "success",
-                "instruction_data": instruction_data,
-                "message": "Instruction set generated successfully"
-            }
-
+            return {"status": "success", "instruction_data": instruction_data, "message": "Instruction set generated successfully"}
         except Exception as e:
             logger.error("Error in AI-assisted instruction creation: %s", e, exc_info=True)
-            return {
-                "status": "error",
-                "message": str(e)
-            }
+            return {"status": "error", "message": str(e)}
 
     async def ai_assisted_instruction_creation_remote(
         self,
         user_responses: Dict[str, str],
         peer_node_id: str
     ) -> Dict[str, Any]:
-        """Generate instruction set using AI via remote inference.
-
-        UI Integration: Called when user selects "Remote Inference" in wizard.
-        Uses a peer's AI to generate the instruction set.
-
-        Args:
-            user_responses: Dict mapping question IDs to user's answers
-            peer_node_id: Node ID of peer to use for remote inference
-
-        Returns:
-            Dict with generated instruction set data or error
-        """
+        """Generate instruction set using AI via remote inference."""
         try:
-            from pathlib import Path
-            import json
+            wizard_config = self.instruction_manager.get_wizard_config()
+            if not wizard_config:
+                return {"status": "error", "message": "Wizard template not found"}
 
-            # Load wizard template for generation prompt
-            wizard_file = Path(__file__).parent.parent / "templates" / "wizard_template.json"
-            with open(wizard_file, 'r', encoding='utf-8') as f:
-                wizard_config = json.load(f)
-
-            # Build prompt using template
             generation_prompt = wizard_config["generation_prompt_template"].format(
                 use_case=user_responses.get("use_case", "general conversation"),
                 learning_style=user_responses.get("learning_style", "adaptive"),
@@ -2714,71 +2554,22 @@ class CoreService:
                 challenges=user_responses.get("challenges", "none specified"),
                 verification=user_responses.get("verification", "provide reasoning")
             )
-
-            # Add system instruction
-            system_instruction = wizard_config["system_instruction"]
-            full_prompt = f"{system_instruction}\n\n{generation_prompt}"
-
-            # Execute AI query via remote inference
-            logger.info("Generating instruction set via remote AI wizard (peer=%s)", peer_node_id)
+            full_prompt = f"{wizard_config['system_instruction']}\n\n{generation_prompt}"
 
             result = await self.inference_orchestrator.execute_inference(
-                prompt=full_prompt,
-                compute_host=peer_node_id
+                prompt=full_prompt, compute_host=peer_node_id
             )
 
-            # Parse AI response (should be JSON)
             response_text = result.get("response", "")
-
-            # Extract JSON from response (handle markdown code blocks)
-            if "```json" in response_text:
-                # Extract from markdown code block
-                start = response_text.find("```json") + 7
-                end = response_text.find("```", start)
-                json_text = response_text[start:end].strip()
-            elif "```" in response_text:
-                # Generic code block
-                start = response_text.find("```") + 3
-                end = response_text.find("```", start)
-                json_text = response_text[start:end].strip()
-            else:
-                # Assume entire response is JSON
-                json_text = response_text.strip()
-
-            # Parse JSON
             try:
-                instruction_data = json.loads(json_text)
-            except json.JSONDecodeError as e:
-                logger.error("Failed to parse AI response as JSON: %s", e)
-                logger.debug("AI response: %s", response_text[:500])
-                return {
-                    "status": "error",
-                    "message": f"Failed to parse AI response: {e}",
-                    "raw_response": response_text
-                }
+                instruction_data = InstructionManager.extract_instruction_json(response_text)
+            except (json.JSONDecodeError, ValueError) as e:
+                return {"status": "error", "message": str(e), "raw_response": response_text}
 
-            # Validate required fields
-            required_fields = ["name", "description", "primary"]
-            missing_fields = [f for f in required_fields if f not in instruction_data]
-            if missing_fields:
-                return {
-                    "status": "error",
-                    "message": f"Generated instruction set missing required fields: {missing_fields}",
-                    "instruction_data": instruction_data
-                }
-
-            return {
-                "status": "success",
-                "instruction_data": instruction_data,
-                "message": "Instruction set generated successfully via remote inference"
-            }
-
+            return {"status": "success", "instruction_data": instruction_data, "message": "Instruction set generated successfully via remote inference"}
         except Exception as e:
             logger.error("Error in AI-assisted instruction creation (remote): %s", e, exc_info=True)
-            return {
-                "status": "error",
-                "message": str(e)
-            }
+            return {"status": "error", "message": str(e)}
 
     async def send_p2p_image(self, node_id: str, image_base64: str, filename: str = None, text: str = "") -> dict:
         """
