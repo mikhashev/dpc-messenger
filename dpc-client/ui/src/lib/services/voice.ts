@@ -10,8 +10,8 @@ export const voiceOfferReceived = writable<FileTransferOfferEvent | null>(null);
 // Transcription events
 export const voiceTranscriptionReceived = writable<VoiceTranscription | null>(null);
 export const voiceTranscriptionComplete = writable<VoiceTranscription | null>(null);
-// Voice transcription config — free-form config object, intentionally untyped
-export const voiceTranscriptionConfig = writable<any>(null);
+// Voice transcription config — free-form config object
+export const voiceTranscriptionConfig = writable<Record<string, any> | null>(null);
 
 // Whisper model lifecycle
 export const whisperModelLoadingStarted = writable<WhisperModelEvent | null>(null);

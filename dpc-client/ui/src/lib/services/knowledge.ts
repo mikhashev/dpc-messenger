@@ -11,7 +11,7 @@ import type {
     ExtractionFailureEvent,
 } from '$lib/types';
 
-// Personal context (loaded on connect) — free-form JSON from personal.json
+// Personal context (loaded on connect) — bound to ContextViewer's local PersonalContext type
 export const personalContext = writable<any>(null);
 
 // Context update indicators (for "UPDATED" badge in UI)
