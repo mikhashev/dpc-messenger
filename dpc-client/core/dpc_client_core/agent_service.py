@@ -764,3 +764,59 @@ class AgentService:
     def _get_iso_timestamp(self) -> str:
         """Get current timestamp in ISO format."""
         return datetime.now(timezone.utc).isoformat()
+
+    async def get_agent_model_config(self, agent_id: str, providers_getter) -> Dict[str, Any]:
+        """Get per-agent model configuration (Main LLM + Sleep LLM)."""
+        try:
+            from dpc_client_core.dpc_agent.utils import load_agent_config, AgentRegistry
+            registry = AgentRegistry()
+            if not registry.get_agent(agent_id):
+                return {"status": "error", "message": f"Agent not found: {agent_id}"}
+            config = load_agent_config(agent_id)
+            providers_data = await providers_getter()
+            return {
+                "status": "ok",
+                "agent_id": agent_id,
+                "provider_alias": config.get("provider_alias"),
+                "sleep_provider_alias": config.get("sleep_provider_alias"),
+                "providers": providers_data.get("providers", []),
+                "default_provider": providers_data.get("default_provider", ""),
+            }
+        except Exception as e:
+            logger.error("get_agent_model_config failed: %s", e, exc_info=True)
+            return {"status": "error", "message": str(e)}
+
+    async def save_agent_model_config(
+        self, agent_id: str,
+        provider_alias: str = None,
+        sleep_provider_alias: str = None,
+        providers_getter=None,
+    ) -> Dict[str, Any]:
+        """Save per-agent model configuration (Main LLM + Sleep LLM)."""
+        try:
+            from dpc_client_core.dpc_agent.utils import load_agent_config, save_agent_config, AgentRegistry
+            registry = AgentRegistry()
+            if not registry.get_agent(agent_id):
+                return {"status": "error", "message": f"Agent not found: {agent_id}"}
+            config = load_agent_config(agent_id)
+            if provider_alias is not None:
+                config["provider_alias"] = provider_alias
+                agent_entry = registry.get_agent(agent_id)
+                if agent_entry:
+                    agent_entry["provider_alias"] = provider_alias
+                    registry._save_registry()
+            if sleep_provider_alias is not None:
+                config["sleep_provider_alias"] = sleep_provider_alias
+            save_agent_config(agent_id, config)
+            providers_data = await providers_getter() if providers_getter else {"providers": [], "default_provider": ""}
+            return {
+                "status": "ok",
+                "agent_id": agent_id,
+                "provider_alias": config.get("provider_alias"),
+                "sleep_provider_alias": config.get("sleep_provider_alias"),
+                "providers": providers_data.get("providers", []),
+                "default_provider": providers_data.get("default_provider", ""),
+            }
+        except Exception as e:
+            logger.error("save_agent_model_config failed: %s", e, exc_info=True)
+            return {"status": "error", "message": str(e)}

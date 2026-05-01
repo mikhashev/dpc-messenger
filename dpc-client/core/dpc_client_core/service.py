@@ -7053,68 +7053,26 @@ class CoreService:
             return {"status": "error", "message": str(e)}
 
     async def get_agent_model_config(self, agent_id: str = None) -> Dict[str, Any]:
-        """Get per-agent model configuration (Main LLM + Sleep LLM) along with available providers."""
+        """Delegated to AgentService."""
+        if not self.agent_service:
+            return {"status": "error", "message": "Agent service not available"}
         if agent_id is None:
             agent_id = self._get_default_agent_id()
-        try:
-            from dpc_client_core.dpc_agent.utils import load_agent_config, AgentRegistry
-            registry = AgentRegistry()
-            if not registry.get_agent(agent_id):
-                return {"status": "error", "message": f"Agent not found: {agent_id}"}
-
-            config = load_agent_config(agent_id)
-            providers_data = await self.get_providers_list()
-
-            return {
-                "status": "ok",
-                "agent_id": agent_id,
-                "provider_alias": config.get("provider_alias"),
-                "sleep_provider_alias": config.get("sleep_provider_alias"),
-                "providers": providers_data.get("providers", []),
-                "default_provider": providers_data.get("default_provider", ""),
-            }
-        except Exception as e:
-            logger.error("get_agent_model_config failed: %s", e, exc_info=True)
-            return {"status": "error", "message": str(e)}
+        return await self.agent_service.get_agent_model_config(agent_id, self.get_providers_list)
 
     async def save_agent_model_config(
         self, agent_id: str = None,
         provider_alias: str = None,
         sleep_provider_alias: str = None,
     ) -> Dict[str, Any]:
-        """Save per-agent model configuration (Main LLM + Sleep LLM)."""
+        """Delegated to AgentService."""
+        if not self.agent_service:
+            return {"status": "error", "message": "Agent service not available"}
         if agent_id is None:
             agent_id = self._get_default_agent_id()
-        try:
-            from dpc_client_core.dpc_agent.utils import load_agent_config, save_agent_config, AgentRegistry
-            registry = AgentRegistry()
-            if not registry.get_agent(agent_id):
-                return {"status": "error", "message": f"Agent not found: {agent_id}"}
-
-            config = load_agent_config(agent_id)
-            if provider_alias is not None:
-                config["provider_alias"] = provider_alias
-                agent_entry = registry.get_agent(agent_id)
-                if agent_entry:
-                    agent_entry["provider_alias"] = provider_alias
-                    registry._save_registry()
-            if sleep_provider_alias is not None:
-                config["sleep_provider_alias"] = sleep_provider_alias
-            save_agent_config(agent_id, config)
-
-            providers_data = await self.get_providers_list()
-
-            return {
-                "status": "ok",
-                "agent_id": agent_id,
-                "provider_alias": config.get("provider_alias"),
-                "sleep_provider_alias": config.get("sleep_provider_alias"),
-                "providers": providers_data.get("providers", []),
-                "default_provider": providers_data.get("default_provider", ""),
-            }
-        except Exception as e:
-            logger.error("save_agent_model_config failed: %s", e, exc_info=True)
-            return {"status": "error", "message": str(e)}
+        return await self.agent_service.save_agent_model_config(
+            agent_id, provider_alias, sleep_provider_alias, self.get_providers_list
+        )
 
     # --- Agent Task Board Methods (v0.20.0) ---
 
