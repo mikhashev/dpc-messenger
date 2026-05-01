@@ -1790,6 +1790,8 @@ class ContextFirewall:
     def save_rules_from_dict(self, rules_dict: Dict[str, Any]) -> Tuple[bool, str, List[str]]:
         """Validate, write, and reload rules from a dict.
 
+        Rolls back file on failed reload so disk and runtime stay consistent.
+
         Returns:
             (success, message, errors)
         """
@@ -1797,10 +1799,16 @@ class ContextFirewall:
         if not is_valid:
             return (False, "Validation failed", errors)
 
+        backup = self.access_file_path.read_text() if self.access_file_path.exists() else None
+
         rules_text = json.dumps(rules_dict, indent=2)
         self.access_file_path.write_text(rules_text)
 
         success, message = self.reload()
+        if not success and backup is not None:
+            self.access_file_path.write_text(backup)
+            logger.warning("Rolled back firewall rules after failed reload")
+
         return (success, message, [])
 
 
