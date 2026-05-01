@@ -801,10 +801,7 @@ class AgentService:
             config = load_agent_config(agent_id)
             if provider_alias is not None:
                 config["provider_alias"] = provider_alias
-                agent_entry = registry.get_agent(agent_id)
-                if agent_entry:
-                    agent_entry["provider_alias"] = provider_alias
-                    registry._save_registry()
+                registry.update_agent(agent_id, {"provider_alias": provider_alias})
             if sleep_provider_alias is not None:
                 config["sleep_provider_alias"] = sleep_provider_alias
             save_agent_config(agent_id, config)
