@@ -3443,109 +3443,12 @@ class CoreService:
             return {"status": "error", "message": str(e)}
 
     async def get_session_archive_info(self, conversation_id: str) -> Dict[str, Any]:
-        """Return archive metadata for a conversation's session archive folder.
-
-        UI Integration: Called when the Agent Permissions panel opens for a specific agent.
-
-        Args:
-            conversation_id: The conversation/agent ID (e.g. "agent_001")
-
-        Returns:
-            Dict with count, max_sessions, archive_path, and session list.
-        """
-        try:
-            import json as _json
-            from pathlib import Path
-            archive_dir = Path.home() / ".dpc" / "conversations" / conversation_id / "archive"
-            # S25 Batch 1.1: honour per-agent profile override, not just global firewall setting.
-            # ARCH-19: max_sessions = 0 means unlimited (keep all archives).
-            max_sessions = getattr(self.firewall, "history_max_archived_sessions", 0) if self.firewall else 0
-            if self.firewall:
-                profile = self.firewall.rules.get("agent_profiles", {}).get(conversation_id, {})
-                hist = profile.get("history", {}) if profile else {}
-                if "max_archived_sessions" in hist:
-                    max_sessions = max(0, int(hist["max_archived_sessions"]))
-
-            if not archive_dir.exists():
-                return {
-                    "status": "success",
-                    "conversation_id": conversation_id,
-                    "count": 0,
-                    "max_sessions": max_sessions,
-                    "archive_path": str(archive_dir),
-                    "sessions": [],
-                }
-
-            # ADR-008: rglob to find sessions in YYYY/MM subdirs + flat (backward compat)
-            archives = sorted(archive_dir.rglob("*_session.json"))
-            sessions = []
-            for p in archives:
-                try:
-                    data = _json.loads(p.read_text(encoding="utf-8"))
-                    sessions.append({
-                        "filename": p.name,
-                        "archived_at": data.get("archived_at", ""),
-                        "reason": data.get("session_reason", ""),
-                        "message_count": data.get("message_count", 0),
-                    })
-                except Exception:
-                    sessions.append({"filename": p.name, "archived_at": "", "reason": "", "message_count": 0})
-
-            return {
-                "status": "success",
-                "conversation_id": conversation_id,
-                "count": len(archives),
-                "max_sessions": max_sessions,
-                "archive_path": str(archive_dir),
-                "sessions": sessions,
-            }
-        except Exception as e:
-            logger.error("Error getting session archive info: %s", e, exc_info=True)
-            return {"status": "error", "message": str(e)}
+        """Delegated to AgentService."""
+        return await self.agent_service.get_session_archive_info(conversation_id)
 
     async def clear_session_archives(self, conversation_id: str, keep_latest: int = 0) -> Dict[str, Any]:
-        """Delete archived sessions for a conversation, optionally keeping the most recent N.
-
-        UI Integration: Called when user clicks 'Clear old archives' in Agent Permissions panel.
-
-        Args:
-            conversation_id: The conversation/agent ID (e.g. "agent_001")
-            keep_latest: Number of most recent archives to keep (0 = delete all)
-
-        Returns:
-            Dict with deleted_count and remaining count.
-        """
-        try:
-            from pathlib import Path
-            archive_dir = Path.home() / ".dpc" / "conversations" / conversation_id / "archive"
-
-            if not archive_dir.exists():
-                return {"status": "success", "deleted_count": 0, "remaining": 0}
-
-            # ADR-008: rglob to find sessions in YYYY/MM subdirs + flat (backward compat)
-            archives = sorted(archive_dir.rglob("*_session.json"))
-            keep_latest = max(0, int(keep_latest))
-            to_delete = archives[: max(0, len(archives) - keep_latest)]
-
-            deleted = 0
-            for p in to_delete:
-                try:
-                    p.unlink()
-                    deleted += 1
-                    # Clean up empty YYYY/MM dirs after deletion
-                    try:
-                        p.parent.rmdir()  # only removes if empty
-                    except OSError:
-                        pass
-                except Exception as e:
-                    logger.warning("Failed to delete archive %s: %s", p.name, e)
-
-            remaining = len(archives) - deleted
-            logger.info("Cleared %d archives for %s (%d remaining)", deleted, conversation_id, remaining)
-            return {"status": "success", "deleted_count": deleted, "remaining": remaining}
-        except Exception as e:
-            logger.error("Error clearing session archives: %s", e, exc_info=True)
-            return {"status": "error", "message": str(e)}
+        """Delegated to AgentService."""
+        return await self.agent_service.clear_session_archives(conversation_id, keep_latest)
 
     async def validate_firewall_rules(self, rules_text: str) -> Dict[str, Any]:
         """Validate firewall rules without saving."""

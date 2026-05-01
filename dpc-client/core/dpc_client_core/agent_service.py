@@ -817,3 +817,85 @@ class AgentService:
         except Exception as e:
             logger.error("save_agent_model_config failed: %s", e, exc_info=True)
             return {"status": "error", "message": str(e)}
+
+    # ─────────────────────────────────────────────────────────────
+    # Session archive management
+    # ─────────────────────────────────────────────────────────────
+
+    async def get_session_archive_info(self, conversation_id: str) -> Dict[str, Any]:
+        """Return archive metadata for a conversation's session archive folder."""
+        try:
+            archive_dir = Path.home() / ".dpc" / "conversations" / conversation_id / "archive"
+            max_sessions = getattr(self.firewall, "history_max_archived_sessions", 0) if self.firewall else 0
+            if self.firewall:
+                profile = self.firewall.rules.get("agent_profiles", {}).get(conversation_id, {})
+                hist = profile.get("history", {}) if profile else {}
+                if "max_archived_sessions" in hist:
+                    max_sessions = max(0, int(hist["max_archived_sessions"]))
+
+            if not archive_dir.exists():
+                return {
+                    "status": "success",
+                    "conversation_id": conversation_id,
+                    "count": 0,
+                    "max_sessions": max_sessions,
+                    "archive_path": str(archive_dir),
+                    "sessions": [],
+                }
+
+            archives = sorted(archive_dir.rglob("*_session.json"))
+            sessions = []
+            for p in archives:
+                try:
+                    data = json.loads(p.read_text(encoding="utf-8"))
+                    sessions.append({
+                        "filename": p.name,
+                        "archived_at": data.get("archived_at", ""),
+                        "reason": data.get("session_reason", ""),
+                        "message_count": data.get("message_count", 0),
+                    })
+                except Exception:
+                    sessions.append({"filename": p.name, "archived_at": "", "reason": "", "message_count": 0})
+
+            return {
+                "status": "success",
+                "conversation_id": conversation_id,
+                "count": len(archives),
+                "max_sessions": max_sessions,
+                "archive_path": str(archive_dir),
+                "sessions": sessions,
+            }
+        except Exception as e:
+            logger.error("Error getting session archive info: %s", e, exc_info=True)
+            return {"status": "error", "message": str(e)}
+
+    async def clear_session_archives(self, conversation_id: str, keep_latest: int = 0) -> Dict[str, Any]:
+        """Delete archived sessions, optionally keeping the most recent N."""
+        try:
+            archive_dir = Path.home() / ".dpc" / "conversations" / conversation_id / "archive"
+
+            if not archive_dir.exists():
+                return {"status": "success", "deleted_count": 0, "remaining": 0}
+
+            archives = sorted(archive_dir.rglob("*_session.json"))
+            keep_latest = max(0, int(keep_latest))
+            to_delete = archives[: max(0, len(archives) - keep_latest)]
+
+            deleted = 0
+            for p in to_delete:
+                try:
+                    p.unlink()
+                    deleted += 1
+                    try:
+                        p.parent.rmdir()
+                    except OSError:
+                        pass
+                except Exception as e:
+                    logger.warning("Failed to delete archive %s: %s", p.name, e)
+
+            remaining = len(archives) - deleted
+            logger.info("Cleared %d archives for %s (%d remaining)", deleted, conversation_id, remaining)
+            return {"status": "success", "deleted_count": deleted, "remaining": remaining}
+        except Exception as e:
+            logger.error("Error clearing session archives: %s", e, exc_info=True)
+            return {"status": "error", "message": str(e)}
