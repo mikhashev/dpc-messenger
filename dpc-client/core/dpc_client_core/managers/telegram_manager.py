@@ -365,6 +365,7 @@ class TelegramBotManager:
                     for _lg in self._filtered_loggers:
                         _lg.addFilter(self._network_filter)
 
+                    self._running = True
                     await self.application.updater.start_polling(drop_pending_updates=drop_updates)
                     logger.info(f"Telegram bot started (polling mode, drop_updates={drop_updates})")
 
@@ -372,7 +373,6 @@ class TelegramBotManager:
                 self._sender_task = asyncio.create_task(self._message_sender_loop())
                 self._sender_task.set_name("telegram_sender")
 
-                self._running = True
                 logger.info("Telegram bot started successfully")
 
                 # Broadcast connection event to UI
@@ -388,25 +388,25 @@ class TelegramBotManager:
                 raise
 
             except InvalidToken as e:
+                self._running = False
                 logger.error(f"Invalid Telegram bot token: {e}", exc_info=True)
                 error_msg = (
                     "Your Telegram bot token is invalid or expired. "
                     "Please regenerate it in BotFather and update config.ini."
                 )
                 await self._broadcast_error_event("Invalid Bot Token", error_msg)
-                # Don't re-raise - allow service to continue without Telegram
 
             except NetworkError as e:
+                self._running = False
                 logger.error(f"Telegram network error: {e}", exc_info=True)
                 error_msg = "Cannot connect to Telegram servers. Check your internet connection."
                 await self._broadcast_error_event("Network Error", error_msg)
-                # Don't re-raise - allow service to continue without Telegram
 
             except Exception as e:
+                self._running = False
                 logger.error(f"Failed to start Telegram bot: {e}", exc_info=True)
-                error_msg = f"Telegram bot error: {str(e)}"
+                error_msg = f"Telegram bot error: {type(e).__name__}: {e}"
                 await self._broadcast_error_event("Telegram Bot Error", error_msg)
-                # Don't re-raise - allow service to continue without Telegram
 
     async def stop(self):
         """
