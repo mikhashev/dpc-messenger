@@ -92,7 +92,7 @@ class ZaiProvider(AIProvider):
             "1234", "1302", "1303", "1305", "1312",
             "overloaded", "rate limit", "internal network failure",
             "high traffic", "high concurrency", "high frequency",
-        ])
+        ]) or isinstance(error, (ConnectionError, OSError)) or type(error).__name__ in ("ReadError", "WriteError", "ConnectError")
 
     async def _retry_with_backoff(self, fn, last_error: Exception):
         """Exponential backoff retry with time budget. First attempt already failed."""
@@ -189,7 +189,7 @@ class ZaiProvider(AIProvider):
                             retry_text += text
                     return retry_text or ""
                 return await self._retry_with_backoff(_retry_generate, e)
-            raise RuntimeError(f"Z.AI provider '{self.alias}' failed: {e}") from e
+            raise RuntimeError(f"Z.AI provider '{self.alias}' failed: {type(e).__name__}: {e}") from e
 
     async def generate_response_stream(
         self,
@@ -295,7 +295,7 @@ class ZaiProvider(AIProvider):
                     await on_chunk(result, conversation_id)
                 return result
             logger.error(f"Z.AI streaming failed: {e}", exc_info=True)
-            raise RuntimeError(f"Z.AI streaming provider '{self.alias}' failed: {e}") from e
+            raise RuntimeError(f"Z.AI streaming provider '{self.alias}' failed: {type(e).__name__}: {e}") from e
 
     async def generate_with_tools(
         self,
@@ -410,7 +410,7 @@ class ZaiProvider(AIProvider):
                         },
                     }
                 return await self._retry_with_backoff(_retry_tools, e)
-            raise RuntimeError(f"Z.AI native tool calling failed for '{self.alias}': {e}") from e
+            raise RuntimeError(f"Z.AI native tool calling failed for '{self.alias}': {type(e).__name__}: {e}") from e
 
     async def generate_with_vision(self, prompt: str, images: List[Dict[str, Any]], **kwargs) -> str:
         """
@@ -449,7 +449,7 @@ class ZaiProvider(AIProvider):
                 final_message = await stream.get_final_message()
             return final_message.content[0].text
         except Exception as e:
-            raise RuntimeError(f"Z.AI vision API failed for '{self.alias}': {e}") from e
+            raise RuntimeError(f"Z.AI vision API failed for '{self.alias}': {type(e).__name__}: {e}") from e
 
     async def close(self) -> None:
         """Close the AsyncAnthropic client connection."""

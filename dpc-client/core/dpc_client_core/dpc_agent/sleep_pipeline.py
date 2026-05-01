@@ -234,8 +234,9 @@ async def run_sleep(
                     result_path = results_dir / f"session_{i}.json"
                     result_path.write_text(json.dumps(finding, ensure_ascii=False, indent=2), encoding="utf-8")
             except Exception as e:
-                log.warning("Sleep: failed to analyze session %d: %s", i + 1, e)
-                per_session_findings.append({"error": str(e), "archive_file": digest.get("archive_file", "")})
+                err_desc = f"{type(e).__name__}: {e}" if str(e) else type(e).__name__
+                log.warning("Sleep: failed to analyze session %d: %s", i + 1, err_desc)
+                per_session_findings.append({"error": err_desc, "archive_file": digest.get("archive_file", "")})
 
         if not per_session_findings:
             _write_sleep_state(conversation_dir, {"status": "awake"})
@@ -304,10 +305,11 @@ async def run_sleep(
         }
 
     except Exception as e:
-        log.error("Sleep pipeline failed: %s", e, exc_info=True)
+        err_desc = f"{type(e).__name__}: {e}" if str(e) else type(e).__name__
+        log.error("Sleep pipeline failed: %s", err_desc, exc_info=True)
         _write_sleep_state(conversation_dir, {
             "status": "awake",
-            "last_error": str(e),
+            "last_error": err_desc,
             "error_at": datetime.now(timezone.utc).isoformat(),
         })
-        return {"status": "error", "error": str(e)}
+        return {"status": "error", "error": err_desc}
