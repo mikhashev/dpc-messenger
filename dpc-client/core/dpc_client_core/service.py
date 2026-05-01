@@ -4735,50 +4735,8 @@ class CoreService:
             logger.error("Error tracking outgoing message in conversation monitor: %s", e, exc_info=True)
 
     async def send_file(self, node_id: str, file_path: str, file_size_bytes: int = None):
-        """
-        Send a file to a peer via P2P file transfer.
-
-        Args:
-            node_id: Target peer's node ID
-            file_path: Absolute path to file to send
-            file_size_bytes: Optional file size (used by frontend for timeout calculation, ignored by backend)
-
-        Returns:
-            Dict with transfer_id and status
-        """
-        from pathlib import Path
-
-        file = Path(file_path)
-        if not file.exists():
-            raise FileNotFoundError(f"File not found: {file_path}")
-
-        # Initiate file transfer (sends FILE_OFFER to peer)
-        transfer_id = await self.file_transfer_manager.send_file(node_id, file)
-
-        # Prepare file metadata
-        size_bytes = file.stat().st_size
-        size_mb = round(size_bytes / (1024 * 1024), 2)
-        message_content = f"Sent file: {file.name} ({size_mb} MB)"
-
-        attachments = [{
-            "type": "file",
-            "filename": file.name,
-            "size_bytes": size_bytes,
-            "size_mb": size_mb,
-            "transfer_id": transfer_id,
-            "status": "sending"
-        }]
-
-        # Note: Don't add to conversation history or broadcast message yet
-        # We'll do that when FILE_COMPLETE is received (in file_complete_handler.py)
-        # This prevents phantom messages if the receiver rejects the transfer
-
-        return {
-            "transfer_id": transfer_id,
-            "status": "pending",
-            "filename": file.name,
-            "size_bytes": file.stat().st_size
-        }
+        """Delegated to P2PCoordinator."""
+        return await self.p2p_coordinator.send_file(node_id, file_path, file_size_bytes)
 
     async def send_image(self, conversation_id: str, image_base64: str, filename: str, caption: str = "", provider_alias: str = None, compute_host: str = None, chat_provider: str = None):
         """
@@ -4974,66 +4932,12 @@ class CoreService:
                 tmp_path.unlink()
 
     async def accept_file_transfer(self, transfer_id: str):
-        """
-        Accept an incoming file transfer offer.
-
-        Args:
-            transfer_id: Transfer ID from FILE_OFFER
-
-        Returns:
-            Dict with transfer_id and status
-        """
-        transfer = self.file_transfer_manager.active_transfers.get(transfer_id)
-        if not transfer:
-            raise ValueError(f"Unknown transfer: {transfer_id}")
-
-        if transfer.direction != "download":
-            raise ValueError(f"Transfer {transfer_id} is not a download")
-
-        # Send FILE_ACCEPT to peer
-        await self.p2p_manager.send_message_to_peer(transfer.node_id, {
-            "command": "FILE_ACCEPT",
-            "payload": {"transfer_id": transfer_id}
-        })
-
-        return {
-            "transfer_id": transfer_id,
-            "status": "accepted"
-        }
+        """Delegated to P2PCoordinator."""
+        return await self.p2p_coordinator.accept_file_transfer(transfer_id)
 
     async def cancel_file_transfer(self, transfer_id: str, reason: str = "user_cancelled"):
-        """
-        Cancel an active file transfer.
-
-        Args:
-            transfer_id: Transfer ID to cancel
-            reason: Cancellation reason
-
-        Returns:
-            Dict with transfer_id and status
-        """
-        # Get transfer info BEFORE deletion (for UI notification)
-        transfer = self.file_transfer_manager.active_transfers.get(transfer_id)
-
-        # Cancel the transfer (sends FILE_CANCEL to peer and deletes locally)
-        await self.file_transfer_manager.cancel_transfer(transfer_id, reason)
-
-        # Broadcast cancellation event to local UI (so Active Transfers panel updates)
-        if transfer:
-            await self.local_api.broadcast_event("file_transfer_cancelled", {
-                "transfer_id": transfer_id,
-                "node_id": transfer.node_id,
-                "filename": transfer.filename,
-                "direction": transfer.direction,
-                "reason": reason,
-                "status": "cancelled"
-            })
-
-        return {
-            "transfer_id": transfer_id,
-            "status": "cancelled",
-            "reason": reason
-        }
+        """Delegated to P2PCoordinator."""
+        return await self.p2p_coordinator.cancel_file_transfer(transfer_id, reason)
 
     async def send_ai_query(self, prompt: str, compute_host: str = None, model: str = None, provider: str = None, conversation_id: str = None, agent_llm_provider: str = None):
         """

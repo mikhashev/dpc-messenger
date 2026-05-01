@@ -366,3 +366,55 @@ class P2PCoordinator:
             "node_id": peer_id,
             "providers": providers
         })
+
+    # ─────────────────────────────────────────────────────────────
+    # File transfer coordination (Phase C Step 5 Batch 2)
+    # ─────────────────────────────────────────────────────────────
+
+    async def send_file(self, node_id: str, file_path: str, file_size_bytes: int = None):
+        """Send a file to a peer via P2P file transfer."""
+        from pathlib import Path
+
+        file = Path(file_path)
+        if not file.exists():
+            raise FileNotFoundError(f"File not found: {file_path}")
+
+        transfer_id = await self.service.file_transfer_manager.send_file(node_id, file)
+
+        size_bytes = file.stat().st_size
+        return {
+            "transfer_id": transfer_id,
+            "status": "pending",
+            "filename": file.name,
+            "size_bytes": size_bytes
+        }
+
+    async def accept_file_transfer(self, transfer_id: str):
+        """Accept an incoming file transfer offer."""
+        transfer = self.service.file_transfer_manager.active_transfers.get(transfer_id)
+        if not transfer:
+            raise ValueError(f"Unknown transfer: {transfer_id}")
+        if transfer.direction != "download":
+            raise ValueError(f"Transfer {transfer_id} is not a download")
+
+        await self.p2p_manager.send_message_to_peer(transfer.node_id, {
+            "command": "FILE_ACCEPT",
+            "payload": {"transfer_id": transfer_id}
+        })
+        return {"transfer_id": transfer_id, "status": "accepted"}
+
+    async def cancel_file_transfer(self, transfer_id: str, reason: str = "user_cancelled"):
+        """Cancel an active file transfer."""
+        transfer = self.service.file_transfer_manager.active_transfers.get(transfer_id)
+        await self.service.file_transfer_manager.cancel_transfer(transfer_id, reason)
+
+        if transfer:
+            await self.service.local_api.broadcast_event("file_transfer_cancelled", {
+                "transfer_id": transfer_id,
+                "node_id": transfer.node_id,
+                "filename": transfer.filename,
+                "direction": transfer.direction,
+                "reason": reason,
+                "status": "cancelled"
+            })
+        return {"transfer_id": transfer_id, "status": "cancelled", "reason": reason}
