@@ -1782,6 +1782,27 @@ class ContextFirewall:
         except Exception as e:
             return (False, f"Firewall reload failed: {str(e)}")
 
+    def get_rules_as_dict(self) -> Dict[str, Any]:
+        """Read raw rules from disk as a JSON dict."""
+        config_text = self.access_file_path.read_text()
+        return json.loads(config_text)
+
+    def save_rules_from_dict(self, rules_dict: Dict[str, Any]) -> Tuple[bool, str, List[str]]:
+        """Validate, write, and reload rules from a dict.
+
+        Returns:
+            (success, message, errors)
+        """
+        is_valid, errors = self.validate_config(rules_dict)
+        if not is_valid:
+            return (False, "Validation failed", errors)
+
+        rules_text = json.dumps(rules_dict, indent=2)
+        self.access_file_path.write_text(rules_text)
+
+        success, message = self.reload()
+        return (success, message, [])
+
 
 # --- Self-testing block ---
 if __name__ == '__main__':

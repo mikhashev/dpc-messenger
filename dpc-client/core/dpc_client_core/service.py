@@ -3758,17 +3758,9 @@ class CoreService:
                 logger.error(f"Failed to broadcast transcription to {node_id}: {e}")
 
     async def get_firewall_rules(self) -> Dict[str, Any]:
-        """Get current firewall rules as JSON dict for editor.
-
-        UI Integration: Called when user opens Firewall Editor.
-
-        Returns:
-            Dict with status and rules as JSON object
-        """
+        """Get current firewall rules as JSON dict for editor."""
         try:
-            import json
-            rules_text = self.firewall.access_file_path.read_text()
-            rules_dict = json.loads(rules_text)
+            rules_dict = self.firewall.get_rules_as_dict()
             return {
                 "status": "success",
                 "rules": rules_dict,
@@ -3776,116 +3768,46 @@ class CoreService:
             }
         except Exception as e:
             logger.error("Error reading firewall rules: %s", e, exc_info=True)
-            return {
-                "status": "error",
-                "message": str(e)
-            }
+            return {"status": "error", "message": str(e)}
 
     async def save_firewall_rules(self, rules_dict: Dict[str, Any]) -> Dict[str, Any]:
-        """Save updated firewall rules from UI editor.
-
-        UI Integration: Called when user clicks 'Save' in Firewall Editor.
-
-        Args:
-            rules_dict: New firewall rules as JSON dict
-
-        Returns:
-            Dict with status and message
-        """
+        """Save updated firewall rules from UI editor."""
         try:
-            import json
-            from dpc_client_core.firewall import ContextFirewall
+            success, message, errors = self.firewall.save_rules_from_dict(rules_dict)
 
-            # Validate before saving
-            is_valid, errors = ContextFirewall.validate_config(rules_dict)
+            if not success:
+                return {"status": "error", "message": message, "errors": errors}
 
-            if not is_valid:
-                return {
-                    "status": "error",
-                    "message": "Validation failed",
-                    "errors": errors
-                }
+            await self._notify_peers_of_provider_changes()
 
-            # Save to file
-            rules_text = json.dumps(rules_dict, indent=2)
-            self.firewall.access_file_path.write_text(rules_text)
+            try:
+                dpc_agent_provider = self.llm_manager.providers.get("dpc_agent")
+                if dpc_agent_provider and hasattr(dpc_agent_provider, '_managers'):
+                    for mgr in dpc_agent_provider._managers.values():
+                        mgr.sync_firewall_settings()
+            except Exception as e:
+                logger.warning("Failed to sync agent firewall settings: %s", e)
 
-            # Reload the firewall
-            success, message = self.firewall.reload()
-
-            if success:
-                # Notify all connected peers of updated providers (compute sharing settings may have changed)
-                logger.info("Notifying connected peers of provider changes")
-                await self._notify_peers_of_provider_changes()
-
-                # Sync agent settings without restart
-                try:
-                    dpc_agent_provider = self.llm_manager.providers.get("dpc_agent")
-                    if dpc_agent_provider and hasattr(dpc_agent_provider, '_managers'):
-                        for mgr in dpc_agent_provider._managers.values():
-                            mgr.sync_firewall_settings()
-                except Exception as e:
-                    logger.warning("Failed to sync agent firewall settings: %s", e)
-
-                # Emit event to UI
-                await self.local_api.broadcast_event("firewall_rules_updated", {
-                    "message": message
-                })
-
-                return {
-                    "status": "success",
-                    "message": message
-                }
-            else:
-                return {
-                    "status": "error",
-                    "message": message
-                }
+            await self.local_api.broadcast_event("firewall_rules_updated", {"message": message})
+            return {"status": "success", "message": message}
 
         except Exception as e:
             logger.error("Error saving firewall rules: %s", e, exc_info=True)
-            return {
-                "status": "error",
-                "message": str(e)
-            }
+            return {"status": "error", "message": str(e)}
 
     async def reload_firewall(self) -> Dict[str, Any]:
-        """Reload firewall rules from disk.
-
-        UI Integration: Called when user clicks 'Reload' or when external changes detected.
-
-        Returns:
-            Dict with status and message
-        """
+        """Reload firewall rules from disk."""
         try:
             success, message = self.firewall.reload()
+            if not success:
+                return {"status": "error", "message": message}
 
-            if success:
-                # Notify all connected peers of updated providers
-                logger.info("Notifying connected peers of provider changes")
-                await self._notify_peers_of_provider_changes()
-
-                # Emit event to UI
-                await self.local_api.broadcast_event("firewall_reloaded", {
-                    "message": message
-                })
-
-                return {
-                    "status": "success",
-                    "message": message
-                }
-            else:
-                return {
-                    "status": "error",
-                    "message": message
-                }
-
+            await self._notify_peers_of_provider_changes()
+            await self.local_api.broadcast_event("firewall_reloaded", {"message": message})
+            return {"status": "success", "message": message}
         except Exception as e:
             logger.error("Error reloading firewall: %s", e, exc_info=True)
-            return {
-                "status": "error",
-                "message": str(e)
-            }
+            return {"status": "error", "message": str(e)}
 
     async def get_session_archive_info(self, conversation_id: str) -> Dict[str, Any]:
         """Return archive metadata for a conversation's session archive folder.
@@ -3993,33 +3915,13 @@ class CoreService:
             return {"status": "error", "message": str(e)}
 
     async def validate_firewall_rules(self, rules_text: str) -> Dict[str, Any]:
-        """Validate firewall rules without saving.
-
-        UI Integration: Called on-the-fly while user edits rules.
-
-        Args:
-            rules_text: Firewall rules text to validate
-
-        Returns:
-            Dict with validation status and errors if any
-        """
+        """Validate firewall rules without saving."""
         try:
-            from dpc_client_core.firewall import ContextFirewall
-
-            is_valid, errors = ContextFirewall.validate_config(rules_text)
-
-            return {
-                "status": "success",
-                "is_valid": is_valid,
-                "errors": errors
-            }
-
+            is_valid, errors = self.firewall.validate_config(rules_text)
+            return {"status": "success", "is_valid": is_valid, "errors": errors}
         except Exception as e:
             logger.error("Error validating firewall rules: %s", e, exc_info=True)
-            return {
-                "status": "error",
-                "message": str(e)
-            }
+            return {"status": "error", "message": str(e)}
 
     async def get_voice_transcription_config(self) -> dict:
         """Delegated to VoiceService."""
