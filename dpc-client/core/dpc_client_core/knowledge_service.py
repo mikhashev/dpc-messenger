@@ -154,6 +154,123 @@ class KnowledgeService:
                 logger.error("Error notifying %s of context update: %s", peer_id[:20], e, exc_info=True)
 
     # ─────────────────────────────────────────────────────────────
+    # Personal context CRUD
+    # ─────────────────────────────────────────────────────────────
+
+    async def get_personal_context(self) -> Dict[str, Any]:
+        """Load and return personal context for UI display."""
+        try:
+            import hashlib
+            from dataclasses import asdict
+            from dpc_protocol.markdown_manager import MarkdownKnowledgeManager
+
+            context = self.pcm_core.load_context()
+            markdown_manager = MarkdownKnowledgeManager()
+
+            for topic_name, topic in context.knowledge.items():
+                if topic.markdown_file:
+                    filepath = self.dpc_home_dir / topic.markdown_file
+                    if filepath.exists():
+                        frontmatter, content = markdown_manager.parse_markdown_with_frontmatter(filepath)
+                        if 'content_hash' in frontmatter:
+                            actual_hash = hashlib.sha256(content.encode('utf-8')).hexdigest()[:16]
+                            if actual_hash != frontmatter['content_hash']:
+                                logger.warning("Content hash mismatch for %s: %s", topic_name, frontmatter['commit_id'])
+                        entries = markdown_manager.markdown_to_entries(content)
+                        topic.entries = entries
+                    else:
+                        logger.warning("Markdown file not found: %s", topic.markdown_file)
+
+            return {"status": "success", "context": asdict(context)}
+        except Exception as e:
+            logger.error("Error loading personal context: %s", e, exc_info=True)
+            return {"status": "error", "message": str(e)}
+
+    async def save_personal_context(self, context_dict: Dict[str, Any]) -> Dict[str, Any]:
+        """Save updated personal context from UI editor."""
+        try:
+            from dpc_protocol.pcm_core import PersonalContext
+            from datetime import datetime, timezone
+
+            current = self.pcm_core.load_context()
+            if isinstance(current, dict):
+                current = PersonalContext.from_dict(current)
+
+            if "profile" in context_dict:
+                current.profile.__dict__.update(context_dict["profile"])
+
+            if isinstance(current.metadata, dict):
+                current.metadata['last_updated'] = datetime.now(timezone.utc).isoformat()
+            else:
+                current.metadata.last_updated = datetime.now(timezone.utc).isoformat()
+
+            self.pcm_core.save_context(current)
+
+            if hasattr(self, 'p2p_manager') and self.p2p_manager:
+                self.p2p_manager.local_context = current
+                if current.profile and current.profile.name:
+                    self.p2p_manager.set_display_name(current.profile.name)
+                    logger.info("Notifying connected peers of name change")
+                    await self._notify_peers_of_name_change(current.profile.name)
+
+            new_context_hash = self._compute_context_hash()
+            await self.local_api.broadcast_event("personal_context_updated", {
+                "message": "Personal context saved successfully",
+                "context_hash": new_context_hash
+            })
+
+            if hasattr(self, 'p2p_manager') and self.p2p_manager:
+                await self._broadcast_context_updated_to_peers(new_context_hash)
+
+            return {"status": "success", "message": "Personal context saved successfully"}
+        except Exception as e:
+            logger.error("Error saving personal context: %s", e, exc_info=True)
+            return {"status": "error", "message": str(e)}
+
+    async def reload_personal_context(self) -> Dict[str, Any]:
+        """Reload personal context from disk."""
+        try:
+            from dataclasses import asdict
+
+            context = self.pcm_core.load_context()
+
+            if hasattr(self, 'p2p_manager') and self.p2p_manager:
+                self.p2p_manager.local_context = context
+                if context.profile and context.profile.name:
+                    self.p2p_manager.set_display_name(context.profile.name)
+                    logger.info("Notifying connected peers of name change")
+                    await self._notify_peers_of_name_change(context.profile.name)
+
+            await self.local_api.broadcast_event("personal_context_reloaded", {
+                "context": asdict(context)
+            })
+
+            return {
+                "status": "success",
+                "message": "Personal context reloaded from disk",
+                "context": asdict(context)
+            }
+        except Exception as e:
+            logger.error("Error reloading personal context: %s", e, exc_info=True)
+            return {"status": "error", "message": str(e)}
+
+    async def _notify_peers_of_name_change(self, new_name: str):
+        """Notify all connected peers of name change via HELLO message."""
+        from dpc_protocol.protocol import create_hello_message
+
+        connected_peers = list(self.p2p_manager.peers.keys())
+        if not connected_peers:
+            logger.debug("No connected peers to notify")
+            return
+        for peer_id in connected_peers:
+            try:
+                hello_msg = create_hello_message(self.p2p_manager.node_id, new_name)
+                await self.p2p_manager.send_message_to_peer(peer_id, hello_msg)
+                logger.debug("Notified %s of name change: %s", peer_id, new_name)
+            except Exception as e:
+                logger.error("Error notifying %s of name change: %s", peer_id, e, exc_info=True)
+
+    # ─────────────────────────────────────────────────────────────
     # Telegram bridge helper
     # ─────────────────────────────────────────────────────────────
 
