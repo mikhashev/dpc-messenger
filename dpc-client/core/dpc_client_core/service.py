@@ -870,6 +870,14 @@ class CoreService:
         if saved_count > 0:
             logger.info("Saved %d group chat histories to disk", saved_count)
 
+        # Stop agent manager early (sets _stop_event to interrupt indexing threads)
+        dpc_provider = self.llm_manager.providers.get("dpc_agent")
+        if dpc_provider:
+            for mgr in dpc_provider._managers.values() if hasattr(dpc_provider, '_managers') else []:
+                if hasattr(mgr, 'stop'):
+                    await mgr.stop()
+                    logger.info("Agent manager stopped (indexing interrupted)")
+
         # Shutdown Phase 6 managers
         if hasattr(self, 'dht_manager'):
             logger.info("Stopping DHT Manager...")
