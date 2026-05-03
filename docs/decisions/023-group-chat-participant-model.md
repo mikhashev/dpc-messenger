@@ -90,6 +90,17 @@ Group Settings dialog (existing modal) extended with "Agents" section below Memb
 | Phase 2 | `sender_type` in messages, agent badge in UI, metadata `agents` field | NEXT |
 | Phase 3 | Multi-node, explicit participant model, cross-node agent visibility | FUTURE |
 
+## Sleep Consolidation Integration
+
+Group chat sessions where agent participates feed into Sleep Consolidation pipeline.
+
+- Sleep pipeline reads `conversations/group-*/history.json` as additional source (alongside `session_archives/`)
+- Filter: only groups where `metadata.agents` contains agent_id
+- Session boundaries: gap >1h between messages = new session segment
+- Content tagged `source: "group"` to distinguish from 1:1 sessions in morning brief
+
+**Dependency:** Requires Phase 2 (`agents` field in metadata).
+
 ## Relationship to Other ADRs
 
 - **ADR-022** (Safety Governance): ADR-023 provides the participant identity layer that ADR-022's per-agent quotas and governance log reference. ADR-022 Layer 1 (per-node permission) maps to the `agents` field in metadata.
