@@ -1,6 +1,6 @@
 # D-PC Messenger Development Roadmap
 
-> **Status:** Alpha | **Last Updated:** April 2026 | **Current Version:** 0.24.0 | **Current Phase:** Phase 2 - Agent Maturity (Track 1 mostly complete, Track 2 planned)
+> **Status:** Alpha | **Last Updated:** May 2026 | **Current Version:** 0.24.0 | **Current Phase:** Phase 2 - Agent Maturity (Track 1 mostly complete, Track 2 in progress)
 
 ---
 
@@ -93,22 +93,26 @@ North Star: Sleep consolidates session learnings → Memory system enables recal
 | **Decision Proposals Pipeline** | **DONE** (S57-S59) | Extraction triggers, JSONL storage, review_proposal + list_proposals tools |
 | **Morning Brief Pipeline** | **DONE** (S66-S69) | Startup posting, consumed tracking, UI reload on wakeup, Telegram delivery |
 | **Context Window Guard** | **DONE** (S69) | Blocks LLM call at 95% context, user-visible error |
-| **Agent Web Pipeline (ADR-016)** | **DONE** (S67) | ddgs multi-engine search + trafilatura extraction + Camoufox JS fallback |
+| **Agent Web Pipeline (ADR-016)** | **ADR Accepted** (S67) | ddgs multi-engine search + trafilatura extraction. Implementation pending |
 | **Per-Agent Permission Profiles** | **DONE** (S55-S60) | Inheritance model, per-agent firewall, UI panel |
 | **Agent Storage Isolation** | **DONE** | Per-conversation folders, per-agent managers |
 | **Agent Telegram Commands** | **DONE** (S69) | /sleep, /extract_knowledge, sleep notifications |
 | **Memory Upgrade (ADR-010)** | **DONE** (S81) | 19/19 tasks. Consolidation wired to sleep pipeline. model_swap superseded by ADR-018 |
-| **Skill Rewrite** | NOT STARTED | Break append-only limit. A/B testing with auto-rollback |
+| **Skill Rewrite** | DEFERRED | Break append-only limit. A/B testing with auto-rollback. Needs investigation why agent doesn't use skills |
 | ~~Agent Evolution (ADR-015)~~ | REMOVED (S68) | Code deleted (-1723 lines). Replaced by Sleep + co-evolution |
 | ~~Consciousness~~ | REMOVED (S65-S68) | Background worker deleted. Extended thinking IS consciousness |
 
 **Completed infrastructure and maintenance items:**
 - **Poetry → uv migration (ADR-011)** — 3 packages migrated, -6705 lines (S51)
 - **Device-Aware Deps (ADR-012)** — CUDA torch via platform markers, cross-platform (S51, S69-S70)
+- **Retrieval Upgrade (ADR-018)** — BGE-M3 embeddings, whole-document indexing, sparse+dense RRF fusion (S76)
+- **PyTorch Unified ML (ADR-021)** — ONNX fully removed, PyTorch as single ML framework (S83)
+- **Multi-Agent Safety (ADR-022)** — Three-layer defense framework, 10 risks (C1-C10). ADR accepted (S87)
+- **Phase C Decomposition** — service.py 7799→6484 lines (-1315, -16.9%). Pragmatic ceiling reached (S85-S86)
 - **Rate Limiting + Security (ARCH-26)** — security/ folder, THREAT-MODEL.md (S58)
 - **Protocol 13** (v1.13) — Human-AI team coordination (Mike=approve, CC=execute, Ark=review)
-- **External Agent Bridge** — CC ↔ DPC via cc_agent_bridge.py, cron monitoring, P13 coordination
-- **Group Chat** (v0.19.0) — Multi-participant with files, voice, knowledge commits
+- **External Agent Bridge** — CC ↔ DPC via cc_agent_bridge.py + cc_group_chat_bridge.py, cron monitoring, P13 coordination
+- **Group Chat** (v0.19.0) — Multi-participant with files, voice, knowledge commits. Agent identity display fixed (S88)
 - **Agent Skills** — 10 static SKILL.md files. Reflection removed (S68). Rewrite planned (Track 1)
 - **Agent Progress Board** — Sleep state works. Evolution panel needs rework (shows removed system data)
 
@@ -117,7 +121,17 @@ North Star: Sleep consolidates session learnings → Memory system enables recal
 
 ### Track 2: Team Collaboration
 
-External Agent Bridge (CC) validates that non-embedded AI can participate as a full team member — foundation for multi-AI teams. Current implementation is cron-based polling; future direction: webhook or event-driven.
+**Status:** Phase 1 dogfooding in progress (S88). Group chat "DPC Project" created for Mike + Ark + CC.
+
+**Design decisions (S88):**
+- Trust boundary = node level (node = human + agents). No separate agent crypto identity needed.
+- Per-agent permissions via firewall agent_profiles (already implemented).
+- Agents off by default in multi-node groups — humans invited, agents need explicit permission.
+- Three communication modes: H↔H (slow), H↔A (@mention), A↔A (supervised).
+
+**Migration plan:** Phase 1 (single-node group chat) → Phase 2 (Ubuntu second node, multi-node P2P) → Phase 3 (scale).
+
+External Agent Bridge (CC) validates that non-embedded AI can participate as a full team member — foundation for multi-AI teams. CC operates via cc_agent_bridge.py (agent chat) + cc_group_chat_bridge.py (group chat), cron monitoring.
 
 | # | Feature | Complexity | Description |
 |---|---------|------------|-------------|
@@ -130,6 +144,8 @@ External Agent Bridge (CC) validates that non-embedded AI can participate as a f
 | 7 | **Team Compute Pools** | Medium | Auto-discovery, load balancing, "Team Compute" panel |
 | 8 | **DPC Agent Team Integration** | Medium | Agent tasks across team context, multi-peer coordination |
 | 9 | **Shared Knowledge Search** | Medium | P2P knowledge query between trusted peers — stateless pull model reusing shared inference pattern. ADR-017 accepted, research complete. See `ideas/dpc-research/p2p-knowledge-discovery/` |
+
+> **Note:** This feature table predates the S32 full-picture analysis. Node trust model, agent participation rules, and priorities will be revised based on Phase 1-2 dogfooding results.
 
 **Cross-track dependencies:** Agent Isolation → Agent-to-Agent (A2A) → Teams. Memory Upgrade → Team Knowledge Repo. Memory Upgrade (ADR-010 FAISS) → Shared Knowledge Search.
 
@@ -180,6 +196,6 @@ See `git log` for complete version history.
 
 ---
 
-**Last Updated:** April 2026
+**Last Updated:** May 2026
 **Maintained By:** D-PC Messenger Core Team
 **License:** See [LICENSE.md](./LICENSE.md)
