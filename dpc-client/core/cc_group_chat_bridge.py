@@ -171,13 +171,14 @@ def send_group_message_sync(group_id: str, text: str) -> dict:
 
 
 def format_message(i: int, msg: dict) -> str:
-    """Format a message for display."""
+    """Format a message for display. Full content, no truncation."""
     sender = msg.get("sender_name", msg.get("sender", "?"))
     content = msg.get("content", "") or msg.get("text", "")
     ts = msg.get("timestamp", "")
     if ts and "T" in ts:
         ts = ts.split("T")[1][:8]
-    return f"  [{i}] {ts} {sender}: {content[:200]}"
+    preview = content.replace("\n", "\n       ")
+    return f"  [{i}] {ts} {sender}: {preview}"
 
 
 if __name__ == "__main__":
@@ -187,6 +188,8 @@ if __name__ == "__main__":
     parser.add_argument("--last", type=int, default=10, help="Last N messages")
     parser.add_argument("--mentions", action="store_true", help="Show @CC mentions")
     parser.add_argument("--send", type=str, help="Send CC response text")
+    parser.add_argument("--send-file", type=str, dest="send_file",
+                        help="Send CC response from file (backtick-safe)")
     args = parser.parse_args()
 
     if args.list:
@@ -205,6 +208,15 @@ if __name__ == "__main__":
 
     if args.send:
         send_group_message_sync(args.group, args.send)
+        sys.exit(0)
+
+    if args.send_file:
+        try:
+            text = Path(args.send_file).read_text(encoding="utf-8")
+        except OSError as e:
+            print(f"[ERROR] Cannot read --send-file: {e}", file=sys.stderr)
+            sys.exit(1)
+        send_group_message_sync(args.group, text)
         sys.exit(0)
 
     messages = read_history(args.group, last_n=args.last)

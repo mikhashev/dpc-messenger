@@ -111,9 +111,25 @@ not through a different tool. One allowlist entry covers both.
 - `cc_cron_prompt.md` (at repo root, gitignored) — internal variant
   with Protocol 13 references and team-specific hard-coded paths
 
+## Group chat variant
+
+For monitoring a group chat instead of an agent 1:1 chat, use
+`cc_group_chat_bridge.py` with `--group <group-id>`:
+
+```
+Check DPC group chat. Run: cd <path-to-dpc-client-core> && python cc_group_chat_bridge.py --group <group-id> --last 10. Scan output for @CC or @СС mentions from non-CC senders. If unanswered @CC mentions with direct questions are found, read context and respond via the bridge. For plain text without backticks use: python cc_group_chat_bridge.py --group <group-id> --send "response text". For markdown responses with backticks, code blocks, or any shell-special characters, write the response to <path-to-temp-file> and send it via: python cc_group_chat_bridge.py --group <group-id> --send-file <path-to-temp-file>. Keep responses in markdown formatting. Distinguish: @CC as direct question (needs response) vs @CC mentioned in passing (no response needed). If no actionable mentions, do nothing and don't report.
+```
+
+Find your `<group-id>` by running `python cc_group_chat_bridge.py --list`.
+
+Add the matching permission pattern:
+```json
+"Bash(python cc_group_chat_bridge.py*)"
+```
+
 ## Version notes
 
-This template tracks the bridge CLI as of v4.2 of the internal prompt.
+This template tracks the bridge CLI as of v5.0 of the internal prompt.
 Changes from v4.1:
 
 - Added `--send-file <path>` instruction for markdown responses that
