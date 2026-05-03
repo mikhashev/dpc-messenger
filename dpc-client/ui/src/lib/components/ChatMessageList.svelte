@@ -40,7 +40,7 @@
   // A sender counts as "AI" if it's the canonical 'ai' string (direct DPC queries),
   // starts with 'agent_' (Telegram-bridged, history-loaded, or proactively-fetched agent messages),
   // or is 'cc' (Claude Code responses injected via @CC mentions).
-  const isAiSender = (sender: string) => sender === 'ai' || sender === 'cc' || sender?.startsWith('agent_');
+  const isAiSender = (sender: string, msg?: any) => sender === 'ai' || sender === 'cc' || sender?.startsWith('agent_') || msg?.isAgent;
 
   // Debug: Log when progress props change
   $effect(() => {
@@ -133,13 +133,13 @@
           <span class="timestamp"><span class="msg-index">#{i}</span> {new Date(msg.timestamp).toLocaleTimeString()}</span>
         </div>
         <!-- Thinking block (v1.4+): Display AI reasoning before main response -->
-        {#if isAiSender(msg.sender) && msg.thinking}
+        {#if isAiSender(msg.sender, msg) && msg.thinking}
           <ThinkingBlock thinking={msg.thinking} tokenCount={msg.thinkingTokens} />
         {/if}
 
         <!-- Message text (hidden for voice attachments with transcription to avoid duplication, v0.15.1+) -->
         {#if msg.text && msg.text !== '[Image]' && !msg.attachments?.some(a => a.type === 'voice' && a.transcription)}
-          {#if isAiSender(msg.sender) && enableMarkdown}
+          {#if isAiSender(msg.sender, msg) && enableMarkdown}
             <MarkdownMessage content={msg.text} />
           {:else if msg.mentions && msg.mentions.length > 0}
             <!-- Group chat message with @-mentions -->
@@ -150,7 +150,7 @@
         {/if}
 
         <!-- Raw streaming output (v0.16.0+): Collapsible section showing incremental text -->
-        {#if isAiSender(msg.sender) && msg.streamingRaw && msg.streamingRaw.length > 50}
+        {#if isAiSender(msg.sender, msg) && msg.streamingRaw && msg.streamingRaw.length > 50}
           <details class="streaming-raw-details">
             <summary class="streaming-raw-summary">
               <span class="streaming-raw-icon">📝</span>
