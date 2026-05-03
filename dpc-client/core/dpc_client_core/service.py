@@ -4031,12 +4031,11 @@ class CoreService:
             agent_id = self._get_default_agent_id()
             manager = dpc_provider.get_manager(agent_id)
 
-            # Build prompt with recent group history for context
+            # Build prompt with full group history for context
             history_lines = []
             monitor = self.conversation_monitors.get(group_id)
             if monitor:
-                recent = monitor.get_message_history()[-20:]
-                for msg in recent:
+                for msg in monitor.get_message_history():
                     name = msg.get("sender_name", msg.get("role", "?"))
                     content = msg.get("content", "")
                     if content:
