@@ -85,13 +85,16 @@
                 const newMap = new Map(map);
                 const syncedMessages = response.messages.map((msg: any, index: number) => {
                   const stableId = msg.message_id || msg.id || `synced-${index}-${Date.now()}`;
+                  const isUser = msg.role === 'user';
+                  const isAgent = msg.sender_name && (msg.sender_name.startsWith('agent_') || msg.sender_name === 'CC' || msg.sender_name === 'Ark');
                   return {
                     id: stableId,
-                    sender: msg.sender_node_id || msg.node_id || (msg.role === 'user' ? 'user' : syncedGroupId),
-                    senderName: msg.sender_name || msg.display_name || (msg.role === 'user' ? 'You' : getPeerDisplayName(msg.sender_node_id || msg.node_id || syncedGroupId)),
+                    sender: isUser ? 'user' : (msg.sender_node_id || msg.node_id || syncedGroupId),
+                    senderName: isUser ? 'You' : (msg.sender_name || getPeerDisplayName(msg.sender_node_id || msg.node_id || syncedGroupId)),
                     text: msg.content || msg.text,
                     timestamp: new Date(msg.timestamp).getTime() || Date.now() - (response.messages.length - index) * 1000,
-                    attachments: msg.attachments || []
+                    attachments: msg.attachments || [],
+                    isAgent: isAgent,
                   };
                 });
 
