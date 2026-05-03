@@ -68,9 +68,25 @@ def list_groups() -> list:
     return groups
 
 
+def _find_group_dir(group_id: str) -> Path:
+    """Find the conversation directory for a group, with or without slug suffix.
+
+    The backend may store group history in either:
+      ~/.dpc/conversations/{group_id}/history.json           (no display name)
+      ~/.dpc/conversations/{group_id}-{slug}/history.json    (with display name)
+
+    Prefer the slugged directory (backend's active write target).
+    """
+    base = DPC_HOME / "conversations"
+    for d in sorted(base.iterdir()):
+        if d.is_dir() and d.name.startswith(group_id + "-") and (d / "history.json").exists():
+            return d
+    return base / group_id
+
+
 def read_history(group_id: str, last_n: int = None) -> list:
     """Read group chat history from disk."""
-    history_path = DPC_HOME / "conversations" / group_id / "history.json"
+    history_path = _find_group_dir(group_id) / "history.json"
     if not history_path.exists():
         return []
     try:

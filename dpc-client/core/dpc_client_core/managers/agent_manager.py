@@ -310,8 +310,11 @@ class DpcAgentManager:
                                         break
                                     vector = np.array(provider.embed(doc_text), dtype=np.float32).reshape(1, -1)
                                     faiss_idx.add(vector, [meta])
-                                bm25_idx.add(extra_texts, extra_metas)
-                                log.info("Bulk indexed %d extra documents (L6: %d, EXT: %d)", len(extra_texts), l6_count, ext_count)
+                                if not self._stop_event.is_set():
+                                    bm25_idx.add(extra_texts, extra_metas)
+                                    log.info("Bulk indexed %d extra documents (L6: %d, EXT: %d)", len(extra_texts), l6_count, ext_count)
+                                else:
+                                    log.info("Extra indexing interrupted by shutdown before BM25")
 
                             if needs_full_rebuild or extra_texts:
                                 faiss_idx.save()

@@ -3592,6 +3592,24 @@ class CoreService:
                     logger.debug("No history file found for %s", conversation_id)
 
             if not monitor:
+                # Try loading from disk for group conversations (same pattern as agent_)
+                if conversation_id.startswith("group-"):
+                    history_path = DPC_HOME_DIR / "conversations" / conversation_id / "history.json"
+                    if history_path.exists():
+                        try:
+                            import json as _json
+                            with open(history_path, encoding="utf-8") as f:
+                                data = _json.load(f)
+                            messages = data.get("messages", [])
+                            logger.info("Loaded %d messages from disk for %s", len(messages), conversation_id)
+                            return {
+                                "status": "success",
+                                "messages": messages,
+                                "message_count": len(messages),
+                            }
+                        except Exception as e:
+                            logger.error("Failed to load group history from disk: %s", e)
+
                 logger.debug("No conversation monitor found for %s, returning empty history", conversation_id)
                 return {
                     "status": "success",
@@ -3947,6 +3965,7 @@ class CoreService:
                 timestamp=timestamp,
             )
             await monitor.on_message(conv_message)
+            monitor.save_history()
 
             # Detect @agent mentions and route to Ark / CC
             await self._handle_group_agent_mentions(group_id, text, sender_name)
@@ -3993,7 +4012,27 @@ class CoreService:
                 return
             agent_id = self._get_default_agent_id()
             manager = dpc_provider.get_manager(agent_id)
-            prompt = f"[Group chat — {sender_name} says]: {text}"
+
+            # Build prompt with recent group history for context
+            history_lines = []
+            monitor = self.conversation_monitors.get(group_id)
+            if monitor:
+                recent = monitor.get_message_history()[-20:]
+                for msg in recent:
+                    name = msg.get("sender_name", msg.get("role", "?"))
+                    content = msg.get("content", "")
+                    if content:
+                        history_lines.append(f"{name}: {content}")
+            if history_lines:
+                history_block = "\n".join(history_lines)
+                prompt = (
+                    f"[Group chat context — last {len(history_lines)} messages]\n"
+                    f"{history_block}\n\n"
+                    f"[New message from {sender_name}]: {text}"
+                )
+            else:
+                prompt = f"[Group chat — {sender_name} says]: {text}"
+
             response = await manager.process_message(
                 message=prompt,
                 conversation_id=group_id,
@@ -4064,6 +4103,7 @@ class CoreService:
             text=text,
             timestamp=timestamp,
         ))
+        monitor.save_history()
 
     async def add_group_member(self, group_id: str, node_id: str) -> Dict[str, Any]:
         """Add a member to a group and notify all members.

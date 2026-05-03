@@ -163,7 +163,7 @@
       Extract Knowledge
     {/if}
   </button>
-  {#if isAIChat}
+  {#if isAIChat || showForChatId?.startsWith('group-')}
     <button
       class="btn-markdown-toggle"
       class:active={enableMarkdown}

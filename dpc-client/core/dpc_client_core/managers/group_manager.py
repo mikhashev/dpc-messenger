@@ -65,15 +65,33 @@ class GroupManager:
         self._deleted_groups: Dict[str, Dict[str, str]] = {}  # group_id -> {deleted_at, deleted_by}
         self._deleted_registry_path = self.groups_dir / "deleted_registry.json"
 
+    @staticmethod
+    def _slugify(name: str) -> str:
+        """Convert a display name to a filesystem-safe slug (matches conversation_monitor)."""
+        import re
+        slug = name.lower()
+        slug = re.sub(r'[^a-z0-9\s-]', '', slug)
+        slug = re.sub(r'\s+', '-', slug)
+        slug = re.sub(r'-+', '-', slug).strip('-')
+        return slug[:20]
+
     def _get_conversation_dir(self, group_id: str) -> Path:
         """Get the conversation folder path for a group.
+
+        Uses {group_id}-{slug} format when group has a name,
+        matching conversation_monitor._get_conversation_dir().
 
         Args:
             group_id: Group ID
 
         Returns:
-            Path to ~/.dpc/conversations/{group_id}/
+            Path to ~/.dpc/conversations/{group_id}-{slug}/ or ~/.dpc/conversations/{group_id}/
         """
+        group = self._groups.get(group_id)
+        if group and group.name:
+            slug = self._slugify(group.name)
+            if slug:
+                return self.conversations_dir / f"{group_id}-{slug}"
         return self.conversations_dir / group_id
 
     def _get_group_metadata_path(self, group_id: str) -> Path:
