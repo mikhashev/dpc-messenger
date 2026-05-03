@@ -3775,10 +3775,17 @@ class CoreService:
                 if not group:
                     return {"status": "error", "message": f"Group {conversation_id} not found"}
 
+                other_members = [m for m in group.members if m != self.p2p_manager.node_id]
+                if not other_members:
+                    # Single-node group (human + agents): direct reset, no voting needed
+                    logger.info("Resetting single-node group conversation: %s", conversation_id)
+                    result = await self.reset_conversation(conversation_id)
+                    return result
+
                 participants = set(group.members)
                 # Check at least one other member is online
                 connected = self.p2p_coordinator.get_connected_peers()
-                online_members = [m for m in group.members if m != self.p2p_manager.node_id and m in connected]
+                online_members = [m for m in other_members if m in connected]
                 if not online_members:
                     return {"status": "error", "message": "No group members are online"}
             else:
