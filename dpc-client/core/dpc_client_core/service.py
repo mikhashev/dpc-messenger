@@ -4053,10 +4053,10 @@ class CoreService:
         # Relay to P2P peers so remote members see the agent response
         await self._broadcast_to_group(group_id, {"command": "GROUP_TEXT", "payload": payload})
 
-        # Feed to ConversationMonitor so knowledge extraction captures agent responses
+        # Feed to ConversationMonitor (persistence + knowledge extraction)
         monitor = self._get_or_create_conversation_monitor(group_id)
         from .conversation_monitor import Message as ConvMessage
-        monitor.message_buffer.append(ConvMessage(
+        await monitor.on_message(ConvMessage(
             message_id=message_id,
             conversation_id=group_id,
             sender_node_id=self.p2p_manager.node_id,
