@@ -119,8 +119,12 @@
               {msg.senderName || (msg.model ? `AI (${msg.model})` : 'AI Assistant')}
             {:else}
               {#if conversationId.startsWith('group-')}
-                <!-- Group chat: Use peerDisplayNames or senderName (no truncation) -->
-                {peerDisplayNames.get(msg.sender)?.split(' | ')[0] || msg.senderName || msg.sender} | {msg.sender}
+                <!-- Group chat: Agent messages show agent name; human messages use peerDisplayNames -->
+                {#if msg.isAgent && msg.senderName}
+                  {msg.senderName} (agent)
+                {:else}
+                  {peerDisplayNames.get(msg.sender)?.split(' | ')[0] || msg.senderName || msg.sender} | {msg.sender}
+                {/if}
               {:else}
                 {msg.senderName ? `${msg.senderName} | ${msg.sender}` : msg.sender}
               {/if}

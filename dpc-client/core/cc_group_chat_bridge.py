@@ -124,17 +124,42 @@ async def send_group_message(group_id: str, text: str) -> dict:
         }
     }
 
+    ws_token_path = DPC_HOME / ".ws_token"
+    try:
+        auth_token = ws_token_path.read_text(encoding="utf-8").strip()
+    except OSError as e:
+        print(f"[ERROR] Cannot read auth token at {ws_token_path}: {e}")
+        return {"status": "error", "message": "no auth token"}
+
     try:
         async with websockets.connect(_get_ws_url()) as ws:
+            await ws.send(json.dumps({
+                "id": "group-bridge-auth",
+                "command": "auth",
+                "token": auth_token,
+            }))
+            try:
+                auth_resp = await asyncio.wait_for(ws.recv(), timeout=5)
+                auth_result = json.loads(auth_resp)
+                if auth_result.get("status") != "OK":
+                    print(f"[ERROR] Auth rejected: {auth_result}")
+                    return {"status": "error", "message": "auth rejected"}
+            except asyncio.TimeoutError:
+                print("[ERROR] Auth response timeout")
+                return {"status": "error", "message": "auth timeout"}
+
             await ws.send(json.dumps(command))
             try:
-                raw = await asyncio.wait_for(ws.recv(), timeout=5)
+                raw = await asyncio.wait_for(ws.recv(), timeout=10)
                 result = json.loads(raw)
                 print(f"[SENT] {len(text)} chars → group {group_id}: {result.get('status', '?')}")
                 return result
             except asyncio.TimeoutError:
                 print(f"[SENT] {len(text)} chars → group {group_id} (no response, timeout)")
                 return {"status": "sent"}
+    except ConnectionRefusedError:
+        print("[ERROR] Cannot connect to backend. Is it running?")
+        return {"status": "error", "message": "connection refused"}
     except Exception as e:
         print(f"[ERROR] {e}")
         return {"status": "error", "message": str(e)}

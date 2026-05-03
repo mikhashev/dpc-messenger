@@ -63,6 +63,7 @@ export type Message = {
   mentions?: Mention[];        // @-mentions in group chat messages
   attachments?: MessageAttachment[];
   isError?: boolean;           // Error message styling (v0.19.2+)
+  isAgent?: boolean;           // Agent message in group chat (v0.25.0+)
 };
 
 // --- Provider System ---
@@ -361,6 +362,7 @@ export interface GroupMessageEvent {
     timestamp?: number;
     attachments?: MessageAttachment[];
     mentions?: Mention[];
+    is_agent?: boolean;
 }
 
 export interface GroupFileEvent {

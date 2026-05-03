@@ -145,7 +145,8 @@
             senderName: msg.sender_name,
             text: msg.text,
             timestamp: Date.now(),
-            mentions: msg.mentions || []
+            mentions: msg.mentions || [],
+            isAgent: msg.is_agent || false
           }]);
           return newMap;
         });
