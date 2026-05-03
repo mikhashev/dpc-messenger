@@ -4123,6 +4123,9 @@ class CoreService:
         ))
         monitor.save_history()
 
+        # Route @mentions from agent messages (enables CC→Ark and Ark→CC communication)
+        await self._handle_group_agent_mentions(group_id, text, agent_name)
+
     async def add_group_member(self, group_id: str, node_id: str) -> Dict[str, Any]:
         """Add a member to a group and notify all members.
 
