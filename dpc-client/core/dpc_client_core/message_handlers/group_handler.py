@@ -127,6 +127,8 @@ class GroupTextHandler(MessageHandler):
             "group_id": group_id,
             "sender_node_id": sender_node_id,
             "sender_name": sender_name,
+            "sender_type": payload.get("sender_type", "human"),
+            "agent_owner": payload.get("agent_owner"),
             "text": text,
             "message_id": message_id,
             "timestamp": timestamp,

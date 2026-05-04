@@ -3950,6 +3950,8 @@ class CoreService:
             message_id = str(uuid.uuid4())
             timestamp = datetime.now(timezone.utc).isoformat()
 
+            node_id = self.p2p_manager.node_id
+
             # Fan-out GROUP_TEXT to all connected members
             await self._broadcast_to_group(group_id, {
                 "command": "GROUP_TEXT",
@@ -3957,6 +3959,9 @@ class CoreService:
                     "group_id": group_id,
                     "text": text,
                     "sender_name": sender_name,
+                    "sender_type": "human",
+                    "sender_node_id": node_id,
+                    "agent_owner": None,
                     "mentions": mentions,
                     "message_id": message_id,  # v0.20.0: Include sender-generated ID
                     "timestamp": timestamp,
@@ -4075,11 +4080,14 @@ class CoreService:
         message_id = uuid.uuid4().hex[:16]
         timestamp = datetime.now(timezone.utc).isoformat()
 
+        node_id = self.p2p_manager.node_id
         payload = {
             "group_id": group_id,
             "text": text,
-            "sender_node_id": self.p2p_manager.node_id,
+            "sender_node_id": node_id,
             "sender_name": agent_name,
+            "sender_type": "agent",
+            "agent_owner": node_id,
             "message_id": message_id,
             "timestamp": timestamp,
             "mentions": [],
