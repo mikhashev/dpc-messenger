@@ -146,7 +146,7 @@
             text: msg.text,
             timestamp: Date.now(),
             mentions: msg.mentions || [],
-            isAgent: msg.is_agent || false
+            isAgent: msg.sender_type === 'agent' || msg.is_agent || false
           }]);
           return newMap;
         });

@@ -121,7 +121,7 @@
               {#if conversationId.startsWith('group-')}
                 <!-- Group chat: Agent messages show agent name; human messages use peerDisplayNames -->
                 {#if msg.isAgent && msg.senderName}
-                  {msg.senderName} (agent)
+                  {msg.senderName} <span class="agent-badge">(agent)</span>
                 {:else}
                   {peerDisplayNames.get(msg.sender)?.split(' | ')[0] || msg.senderName || msg.sender} | {msg.sender}
                 {/if}
@@ -575,5 +575,10 @@
     max-height: 300px;
     overflow-y: auto;
     color: #555;
+  }
+  .agent-badge {
+    font-size: 0.75em;
+    color: #888;
+    font-weight: normal;
   }
 </style>

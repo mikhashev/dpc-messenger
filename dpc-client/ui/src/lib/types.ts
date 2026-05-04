@@ -363,6 +363,8 @@ export interface GroupMessageEvent {
     attachments?: MessageAttachment[];
     mentions?: Mention[];
     is_agent?: boolean;
+    sender_type?: string;
+    agent_owner?: string | null;
 }
 
 export interface GroupFileEvent {

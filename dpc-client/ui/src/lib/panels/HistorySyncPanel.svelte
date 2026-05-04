@@ -86,7 +86,7 @@
                 const syncedMessages = response.messages.map((msg: any, index: number) => {
                   const stableId = msg.message_id || msg.id || `synced-${index}-${Date.now()}`;
                   const senderName = msg.sender_name || '';
-                  const isAgent = senderName !== 'User' && senderName !== '' && senderName !== 'You';
+                  const isAgent = msg.sender_type === 'agent' || msg.is_agent || (senderName !== 'User' && senderName !== '' && senderName !== 'You');
                   const isUser = !isAgent;
                   return {
                     id: stableId,
