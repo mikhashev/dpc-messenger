@@ -3882,6 +3882,18 @@ class CoreService:
             members = member_node_ids or []
             group = self.group_manager.create_group(name, topic, members)
 
+            # Auto-populate agents from this node's registry
+            if self.agent_service:
+                try:
+                    result = await self.agent_service.list_agents()
+                    agent_ids = [a["agent_id"] for a in result.get("agents", [])]
+                    if agent_ids:
+                        self.group_manager.set_node_agents(
+                            group.group_id, self.p2p_manager.node_id, agent_ids
+                        )
+                except Exception:
+                    pass
+
             # Send GROUP_CREATE to all members
             await self._broadcast_to_group(group.group_id, {
                 "command": "GROUP_CREATE",

@@ -27,6 +27,7 @@ class GroupMetadata:
     created_by: str = ""
     created_at: str = ""
     members: List[str] = field(default_factory=list)
+    agents: Dict[str, List[str]] = field(default_factory=dict)
     version: int = 1
 
     def to_dict(self) -> Dict[str, Any]:
@@ -41,6 +42,7 @@ class GroupMetadata:
             created_by=data.get("created_by", ""),
             created_at=data.get("created_at", ""),
             members=data.get("members", []),
+            agents=data.get("agents", {}),
             version=data.get("version", 1),
         )
 
@@ -336,6 +338,14 @@ class GroupManager:
         self._save_group(group_id)
         logger.info("Created group '%s' (%s) with %d members", name, group_id, len(members))
         return group
+
+    def set_node_agents(self, group_id: str, node_id: str, agent_ids: List[str]):
+        """Set the list of agents a node has in this group."""
+        group = self._groups.get(group_id)
+        if not group:
+            return
+        group.agents[node_id] = agent_ids
+        self._save_group(group_id)
 
     def get_group(self, group_id: str) -> Optional[GroupMetadata]:
         """Get group metadata by ID."""
