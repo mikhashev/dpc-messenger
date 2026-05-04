@@ -3614,11 +3614,19 @@ class CoreService:
                             for msg in messages:
                                 msg.setdefault("sender_type", "human")
                                 msg.setdefault("agent_owner", None)
+                            history_tokens = sum(len(msg.get("content", "") or "") for msg in messages) // 4
+                            token_limit = 0
+                            if hasattr(self, 'llm_manager') and self.llm_manager:
+                                model = self.llm_manager.get_active_model_name()
+                                token_limit = self.llm_manager.get_context_window(model) or 0
                             logger.info("Loaded %d messages from disk for %s (%s)", len(messages), conversation_id, conv_dir.name)
                             return {
                                 "status": "success",
                                 "messages": messages,
                                 "message_count": len(messages),
+                                "tokens_used": history_tokens,
+                                "token_limit": token_limit,
+                                "history_tokens": history_tokens,
                             }
                         except Exception as e:
                             logger.error("Failed to load group history from disk: %s", e)
