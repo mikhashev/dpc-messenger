@@ -47,39 +47,23 @@ class ProviderLimits:
     current_concurrent: int = 0
 
 
-# Known subscription provider limits
+# Z.AI concurrency limits from https://docs.z.ai (2026-05-04)
+# Z.AI only enforces concurrency, not RPM/RPD — those are conservative defaults.
+# Update when provider changes limits on their site.
 PROVIDER_LIMITS: Dict[str, ProviderLimits] = {
-    "zai_glm47": ProviderLimits(
-        provider="zai_glm47",
-        max_concurrent=2,
-        requests_per_minute=60,
-        requests_per_day=10000,
-    ),
-    "zai_glm46": ProviderLimits(
-        provider="zai_glm46",
-        max_concurrent=3,
-        requests_per_minute=60,
-        requests_per_day=10000,
-    ),
-    "zai_glm45": ProviderLimits(
-        provider="zai_glm45",
-        max_concurrent=10,
-        requests_per_minute=100,
-        requests_per_day=50000,
-    ),
-    "zai_glm45_flash": ProviderLimits(
-        provider="zai_glm45_flash",
-        max_concurrent=10,
-        requests_per_minute=100,
-        requests_per_day=50000,
-    ),
-    # Default for unknown providers
-    "default": ProviderLimits(
-        provider="default",
-        max_concurrent=2,
-        requests_per_minute=60,
-        requests_per_day=10000,
-    ),
+    "zai_glm51": ProviderLimits(provider="zai_glm51", max_concurrent=10),
+    "zai_glm5": ProviderLimits(provider="zai_glm5", max_concurrent=2),
+    "zai_glm5_turbo": ProviderLimits(provider="zai_glm5_turbo", max_concurrent=1),
+    "zai_glm47": ProviderLimits(provider="zai_glm47", max_concurrent=2),
+    "zai_glm47_flash": ProviderLimits(provider="zai_glm47_flash", max_concurrent=1),
+    "zai_glm47_flashx": ProviderLimits(provider="zai_glm47_flashx", max_concurrent=3),
+    "zai_glm46": ProviderLimits(provider="zai_glm46", max_concurrent=3),
+    "zai_glm45": ProviderLimits(provider="zai_glm45", max_concurrent=10),
+    "zai_glm45_flash": ProviderLimits(provider="zai_glm45_flash", max_concurrent=2),
+    "zai_glm45_air": ProviderLimits(provider="zai_glm45_air", max_concurrent=5),
+    "zai_glm45_airx": ProviderLimits(provider="zai_glm45_airx", max_concurrent=5),
+    "zai_glm4_plus": ProviderLimits(provider="zai_glm4_plus", max_concurrent=20),
+    "default": ProviderLimits(provider="default", max_concurrent=2),
 }
 
 
@@ -109,7 +93,7 @@ class SubscriptionBudget:
         """
         self.provider = provider
         self.billing_model = billing_model
-        self.limits = PROVIDER_LIMITS.get(provider, PROVIDER_LIMITS["default"])
+        self.limits = get_provider_limits(provider)
 
         self._lock = asyncio.Lock()
         self._semaphore = asyncio.Semaphore(self.limits.max_concurrent)
@@ -374,14 +358,31 @@ def check_budget_simple(budget_used: float, budget_limit: float) -> bool:
     return True
 
 
+def _normalize_provider_key(provider: str) -> str:
+    """Normalize provider alias to match PROVIDER_LIMITS keys.
+
+    Handles aliases like 'GLM-5.1' → 'zai_glm51', 'zai_glm47' → 'zai_glm47'.
+    """
+    import re
+    key = provider.lower().replace(".", "").replace("-", "_")
+    if not key.startswith("zai_"):
+        key = f"zai_{key}"
+    key = re.sub(r"_+", "_", key)
+    return key
+
+
 def get_provider_limits(provider: str) -> ProviderLimits:
     """
     Get limits for a known provider.
 
     Args:
-        provider: Provider identifier
+        provider: Provider identifier or alias (e.g., 'zai_glm47', 'GLM-5.1')
 
     Returns:
         ProviderLimits instance
     """
-    return PROVIDER_LIMITS.get(provider, PROVIDER_LIMITS["default"])
+    result = PROVIDER_LIMITS.get(provider)
+    if result:
+        return result
+    normalized = _normalize_provider_key(provider)
+    return PROVIDER_LIMITS.get(normalized, PROVIDER_LIMITS["default"])

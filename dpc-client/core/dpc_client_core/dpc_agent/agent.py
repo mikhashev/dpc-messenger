@@ -133,7 +133,7 @@ class DpcAgent:
         # Budget tracker
         billing_model = BillingModel.SUBSCRIPTION if self.config.billing_model == "subscription" else BillingModel.PAY_PER_USE
         self.budget = HybridBudget(
-            provider="dpc_agent",
+            provider=provider_alias or "default",
             billing_model=self.config.billing_model,
             budget_usd=self.config.budget_usd,
         )
