@@ -1171,8 +1171,10 @@
   selfNodeId={$nodeStatus?.node_id || ''}
   connectedPeers={($nodeStatus?.peer_info || []).map((p: any) => ({ node_id: p.node_id, name: p.name || p.node_id }))}
   peerDisplayNames={peerDisplayNames}
+  nodeAgents={$agentsList.map((a: any) => ({ agent_id: a.agent_id, name: a.name, provider_alias: a.provider_alias }))}
   on:addMember={handleGroupAddMember}
   on:removeMember={handleGroupRemoveMember}
+  on:updateAgents={async (e) => { await sendCommand('set_group_agents', { group_id: e.detail.group_id, agent_ids: e.detail.agent_ids }); }}
 />
 
 <ContextViewer

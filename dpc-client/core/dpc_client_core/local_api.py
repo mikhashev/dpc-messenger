@@ -101,6 +101,7 @@ ALLOWED_COMMANDS: frozenset = frozenset({
     "vote_new_session",
     # Group chat
     "create_group_chat",
+    "set_group_agents",
     "send_group_message",
     "send_group_agent_message",
     "send_cc_agent_response",

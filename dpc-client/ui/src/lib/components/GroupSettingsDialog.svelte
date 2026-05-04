@@ -11,10 +11,12 @@
     topic?: string;
     created_by: string;
     members: string[];
+    agents?: Record<string, string[]>;
   } | null = null;
   export let selfNodeId: string = '';
   export let connectedPeers: Array<{ node_id: string; name: string }> = [];
   export let peerDisplayNames: Map<string, string> = new Map();
+  export let nodeAgents: Array<{ agent_id: string; name: string; provider_alias: string }> = [];
 
   const dispatch = createEventDispatcher();
 
@@ -73,6 +75,20 @@
 
   function handleRemoveMember(nodeId: string) {
     dispatch('removeMember', { group_id: group?.group_id, node_id: nodeId });
+  }
+
+  function isAgentEnabled(agentId: string): boolean {
+    const nodeList = group?.agents?.[selfNodeId] || [];
+    return nodeList.includes(agentId);
+  }
+
+  function toggleAgent(agentId: string) {
+    if (!group) return;
+    const current = group.agents?.[selfNodeId] || [];
+    const updated = current.includes(agentId)
+      ? current.filter(id => id !== agentId)
+      : [...current, agentId];
+    dispatch('updateAgents', { group_id: group.group_id, agent_ids: updated });
   }
 
   function handleClose() {
@@ -179,6 +195,32 @@
             {/each}
           </div>
         </div>
+
+        <!-- Agents (ADR-023 Task 08) -->
+        {#if nodeAgents.length > 0}
+          <div class="section">
+            <div class="section-header">
+              <h3>Agents</h3>
+            </div>
+            <div class="member-list">
+              {#each nodeAgents as agent}
+                <div class="member-row">
+                  <label class="toggle-label" style="flex: 1;">
+                    <input
+                      type="checkbox"
+                      checked={isAgentEnabled(agent.agent_id)}
+                      on:change={() => toggleAgent(agent.agent_id)}
+                    />
+                    <span class="toggle-text">
+                      {agent.name}
+                      <span class="agent-provider-hint">{agent.provider_alias}</span>
+                    </span>
+                  </label>
+                </div>
+              {/each}
+            </div>
+          </div>
+        {/if}
       </div>
     </div>
   </div>
@@ -414,5 +456,10 @@
     font-size: 0.75rem;
     color: #6c7086;
     font-style: italic;
+  }
+  .agent-provider-hint {
+    font-size: 0.8em;
+    color: #888;
+    margin-left: 0.5em;
   }
 </style>

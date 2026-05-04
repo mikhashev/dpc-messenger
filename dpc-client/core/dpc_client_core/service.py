@@ -3913,6 +3913,16 @@ class CoreService:
         groups = [g.to_dict() for g in self.group_manager.get_all_groups()]
         return {"status": "success", "groups": groups}
 
+    async def set_group_agents(self, group_id: str, agent_ids: list = None) -> Dict[str, Any]:
+        """Set which agents from this node participate in a group."""
+        try:
+            self.group_manager.set_node_agents(
+                group_id, self.p2p_manager.node_id, agent_ids or []
+            )
+            return {"status": "success"}
+        except Exception as e:
+            return {"status": "error", "message": str(e)}
+
     def parse_mentions(self, text: str, group_members: List[str]) -> List[Dict[str, Any]]:
         """Parse @mentions in text and return list of mention objects.
 
