@@ -78,6 +78,10 @@ class DpcAgentManager:
         # Key: conversation_id, Value: ConversationMonitor instance
         self._agent_monitors: Dict[str, ConversationMonitor] = {}
 
+        # Per-agent daily quota (ADR-022 Task 07)
+        self._daily_tokens_used: int = 0
+        self._daily_tokens_date: str = ""
+
         log.info(f"DpcAgentManager initialized (agent_id={agent_id or 'singleton'}) with storage at {self.agent_root}")
 
     @property
@@ -677,6 +681,17 @@ class DpcAgentManager:
             # Phase 3: Get provider-specific agent if agent_llm_provider is specified
             agent = self._get_or_create_agent_for_provider(agent_llm_provider) if agent_llm_provider else self.agent
 
+            # ADR-022 Task 07: per-agent daily quota check
+            quota_limit = self.config.get("quota_tokens_per_day", 0)
+            if quota_limit > 0:
+                from datetime import datetime, timezone
+                today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+                if self._daily_tokens_date != today:
+                    self._daily_tokens_used = 0
+                    self._daily_tokens_date = today
+                if self._daily_tokens_used >= quota_limit:
+                    return f"⚠️ Agent quota exceeded ({self._daily_tokens_used:,}/{quota_limit:,} tokens today). Reset at midnight UTC."
+
             try:
                 response = await agent.process(
                     message=message,
@@ -694,7 +709,10 @@ class DpcAgentManager:
                     reply_telegram_chat_id=telegram_chat_id,
                 )
             finally:
-                pass
+                # ADR-022 Task 07: update daily token counter
+                last_usage = getattr(agent, '_last_usage', None)
+                if last_usage and quota_limit:
+                    self._daily_tokens_used += last_usage.get("total_tokens", 0)
 
             # Track agent response in monitor.
             # Always save if there's content, thinking, or streaming_raw — the UI
