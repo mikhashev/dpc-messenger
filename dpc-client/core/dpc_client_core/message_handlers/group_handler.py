@@ -177,11 +177,19 @@ class GroupTextHandler(MessageHandler):
         mentions = re.findall(r'@(\w+)\b', text, re.IGNORECASE)
         mention_names = {m.lower() for m in mentions}
 
+        # Get allowed agents for this group from metadata
+        group = self.service.group_manager.get_group(group_id) if self.service.group_manager else None
+        node_id = self.service.p2p_manager.node_id
+        allowed_agents = set(group.agents.get(node_id, [])) if group else set()
+
         # Check if any mention matches agent name or agent_id
         agent_id = self.service._get_default_agent_id()
         agent_name = self.service._get_agent_display_name(agent_id).lower()
         if agent_name in mention_names or agent_id in mention_names:
-            await self._invoke_agent(group_id, text, sender_name)
+            if not allowed_agents or agent_id in allowed_agents:
+                await self._invoke_agent(group_id, text, sender_name)
+            else:
+                self.logger.debug("Skipping @%s — agent %s not in metadata.agents for %s", agent_name, agent_id, group_id)
 
         cc_name = self.service.get_cc_display_name().lower()
         if cc_name in mention_names:

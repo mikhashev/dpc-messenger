@@ -4013,13 +4013,21 @@ class CoreService:
         mentions = {m.lower() for m in re.findall(r'@(\w+)\b', text, re.IGNORECASE)}
         logger.debug("_handle_group_agent_mentions: mentions=%s in group %s", mentions, group_id)
 
+        # Get allowed agents for this group from metadata
+        group = self.group_manager.get_group(group_id) if self.group_manager else None
+        node_id = self.p2p_manager.node_id
+        allowed_agents = set(group.agents.get(node_id, [])) if group else set()
+
         # Check if any mention matches agent name or agent_id
         agent_id = self._get_default_agent_id()
         agent_name = self._get_agent_display_name(agent_id).lower()
         if agent_name in mentions or agent_id in mentions:
-            matched = agent_name if agent_name in mentions else agent_id
-            logger.info("Group @%s mention detected — invoking agent in group %s", matched, group_id)
-            asyncio.ensure_future(self._invoke_agent_in_group(group_id, text, sender_name))
+            if not allowed_agents or agent_id in allowed_agents:
+                matched = agent_name if agent_name in mentions else agent_id
+                logger.info("Group @%s mention detected — invoking agent in group %s", matched, group_id)
+                asyncio.ensure_future(self._invoke_agent_in_group(group_id, text, sender_name))
+            else:
+                logger.debug("Group @%s mention skipped — agent %s not in metadata.agents for %s", agent_name, agent_id, group_id)
 
         cc_name = self.get_cc_display_name().lower()
         if cc_name in mentions:
