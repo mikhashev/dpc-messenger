@@ -3602,17 +3602,9 @@ class CoreService:
             if not monitor:
                 # Try loading from disk for group conversations (same pattern as agent_)
                 if conversation_id.startswith("group-"):
-                    # Resolve slugged folder: group_manager uses {group_id}-{slug}
                     conv_dir = None
                     if hasattr(self, 'group_manager') and self.group_manager:
                         conv_dir = self.group_manager._get_conversation_dir(conversation_id)
-                    if not conv_dir or not (conv_dir / "history.json").exists():
-                        # Fallback: scan for {conversation_id}-* prefix
-                        base = DPC_HOME_DIR / "conversations"
-                        for d in sorted(base.iterdir()) if base.exists() else []:
-                            if d.is_dir() and d.name.startswith(conversation_id) and (d / "history.json").exists():
-                                conv_dir = d
-                                break
                     if conv_dir and (conv_dir / "history.json").exists():
                         try:
                             import json as _json
