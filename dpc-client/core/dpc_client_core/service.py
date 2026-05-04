@@ -3611,6 +3611,9 @@ class CoreService:
                             with open(conv_dir / "history.json", encoding="utf-8") as f:
                                 data = _json.load(f)
                             messages = data.get("messages", [])
+                            for msg in messages:
+                                msg.setdefault("sender_type", "human")
+                                msg.setdefault("agent_owner", None)
                             logger.info("Loaded %d messages from disk for %s (%s)", len(messages), conversation_id, conv_dir.name)
                             return {
                                 "status": "success",
