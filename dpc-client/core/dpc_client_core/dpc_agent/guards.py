@@ -197,19 +197,19 @@ class BudgetLimitGuard(GuardMiddleware):
         threshold = self._budget * self._max_fraction
         if ctx.accumulated_cost_usd > threshold:
             log.warning(
-                "BudgetLimitGuard: cost $%.4f exceeded %.0f%% of budget $%.2f",
-                ctx.accumulated_cost_usd,
+                "BudgetLimitGuard: %d tokens exceeded %.0f%% of budget %d tokens",
+                int(ctx.accumulated_cost_usd),
                 self._max_fraction * 100,
-                self._budget,
+                int(self._budget),
             )
             return HookAction.STOP_LOOP
         return None
 
     def stop_message(self) -> str:
         return (
-            f"[BUDGET_LIMIT] Task spent ${self._last_cost:.3f} (>"
+            f"[BUDGET_LIMIT] Task consumed {int(self._last_cost)} tokens (>"
             f"{self._max_fraction * 100:.0f}% of budget "
-            f"${self._budget:.2f}). Give your final response now."
+            f"{int(self._budget)} tokens). Give your final response now."
         )
 
 

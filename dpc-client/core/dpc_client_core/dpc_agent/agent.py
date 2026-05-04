@@ -48,7 +48,7 @@ log = logging.getLogger(__name__)
 @dataclass
 class AgentConfig:
     """Configuration for the DPC agent."""
-    budget_usd: float = 50.0
+    budget_usd: float = 500_000
     max_rounds: int = 200
     # Tool control is via firewall (privacy_rules.json), not config
     # Task queue settings

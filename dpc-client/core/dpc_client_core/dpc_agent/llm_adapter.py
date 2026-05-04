@@ -294,7 +294,7 @@ class DpcLlmAdapter:
                 "prompt_tokens": prompt_tokens,
                 "completion_tokens": completion_tokens,
                 "total_tokens": prompt_tokens + completion_tokens,
-                "cost": 0.0,  # DPC tracks cost separately in its own system
+                "cost": prompt_tokens + completion_tokens,
             }
 
             return response_msg, usage
@@ -417,7 +417,7 @@ class DpcLlmAdapter:
                 "prompt_tokens": prompt_tokens,
                 "completion_tokens": completion_tokens,
                 "total_tokens": prompt_tokens + completion_tokens,
-                "cost": 0.0,
+                "cost": prompt_tokens + completion_tokens,
             }
 
             return response_msg, usage
@@ -495,10 +495,10 @@ class DpcLlmAdapter:
                 "prompt_tokens": prompt_tokens,
                 "completion_tokens": completion_tokens,
                 "total_tokens": prompt_tokens + completion_tokens,
-                "cost": 0.0,
+                "cost": prompt_tokens + completion_tokens,
             }
         else:
-            usage.setdefault("cost", 0.0)
+            usage.setdefault("cost", usage.get("total_tokens", 0))
 
         return response_msg, usage
 
@@ -678,7 +678,7 @@ class DpcLlmAdapter:
                     "prompt_tokens": remote_prompt_tokens,
                     "completion_tokens": remote_response_tokens,
                     "total_tokens": remote_tokens or (remote_prompt_tokens + remote_response_tokens),
-                    "cost": 0.0,
+                    "cost": remote_tokens or (remote_prompt_tokens + remote_response_tokens),
                 }
             elif self._token_counter:
                 # Count locally using TokenCountManager
@@ -689,7 +689,7 @@ class DpcLlmAdapter:
                     "prompt_tokens": prompt_tokens,
                     "completion_tokens": completion_tokens,
                     "total_tokens": prompt_tokens + completion_tokens,
-                    "cost": 0.0,
+                    "cost": prompt_tokens + completion_tokens,
                 }
             else:
                 # Final fallback to character estimation
@@ -697,7 +697,7 @@ class DpcLlmAdapter:
                     "prompt_tokens": len(prompt) // 4,
                     "completion_tokens": len(response_text) // 4,
                     "total_tokens": (len(prompt) + len(response_text)) // 4,
-                    "cost": 0.0,
+                    "cost": (len(prompt) + len(response_text)) // 4,
                 }
 
             return response_msg, usage

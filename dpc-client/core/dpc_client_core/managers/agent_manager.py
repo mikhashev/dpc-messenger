@@ -119,8 +119,10 @@ class DpcAgentManager:
             raise RuntimeError("CoreService does not have llm_manager")
 
         # Build agent config
+        raw_budget = self.config.get("budget_usd", 500_000)
+        budget = raw_budget if raw_budget >= 1000 else 500_000
         agent_config = AgentConfig(
-            budget_usd=self.config.get("budget_usd", 50.0),
+            budget_usd=budget,
             max_rounds=self.config.get("max_rounds", 200),
             enable_task_queue=False,
             billing_model=self.config.get("billing_model", "subscription"),
@@ -171,8 +173,10 @@ class DpcAgentManager:
             else None
         )
 
+        raw_budget = self.config.get("budget_usd", 500_000)
+        budget = raw_budget if raw_budget >= 1000 else 500_000
         agent_config = AgentConfig(
-            budget_usd=self.config.get("budget_usd", 50.0),
+            budget_usd=budget,
             max_rounds=self.config.get("max_rounds", 200),
             enable_task_queue=self.config.get("enable_task_queue", True),
             billing_model=self.config.get("billing_model", "subscription"),
@@ -1044,7 +1048,7 @@ class DpcAgentManager:
             "initialized": self._agent is not None,
             "agent_root": str(self.agent_root),
             "config": {
-                "budget_usd": self.config.get("budget_usd", 50.0),
+                "budget_usd": self.config.get("budget_usd", 500_000),
                 "max_rounds": self.config.get("max_rounds", 200),
                 "tools": self.config.get("tools", []),
             },
