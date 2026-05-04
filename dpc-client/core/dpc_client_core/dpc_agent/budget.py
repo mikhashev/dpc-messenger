@@ -36,8 +36,8 @@ class ProviderLimits:
     """Rate limits for a subscription provider."""
     provider: str
     max_concurrent: int = 2
-    requests_per_minute: int = 60
-    requests_per_day: int = 10000
+    requests_per_minute: Optional[int] = None
+    requests_per_day: Optional[int] = None
 
     # Tracking (timestamps of requests)
     minute_requests: List[float] = field(default_factory=list)
@@ -112,34 +112,35 @@ class SubscriptionBudget:
         async with self._lock:
             now = time.time()
 
-            # Clean old requests (older than tracking window)
-            minute_ago = now - 60
-            day_ago = now - 86400
+            # RPM/RPD checks — only if provider declares these limits
+            if self.limits.requests_per_minute is not None:
+                minute_ago = now - 60
+                self.limits.minute_requests = [
+                    t for t in self.limits.minute_requests if t > minute_ago
+                ]
+                if len(self.limits.minute_requests) >= self.limits.requests_per_minute:
+                    log.warning(f"Rate limit reached: {self.limits.requests_per_minute}/min for {self.provider}")
+                    return False
 
-            self.limits.minute_requests = [
-                t for t in self.limits.minute_requests if t > minute_ago
-            ]
-            self.limits.day_requests = [
-                t for t in self.limits.day_requests if t > day_ago
-            ]
+            if self.limits.requests_per_day is not None:
+                day_ago = now - 86400
+                self.limits.day_requests = [
+                    t for t in self.limits.day_requests if t > day_ago
+                ]
+                if len(self.limits.day_requests) >= self.limits.requests_per_day:
+                    log.warning(f"Daily limit reached: {self.limits.requests_per_day}/day for {self.provider}")
+                    return False
 
-            # Check rate limits
-            if len(self.limits.minute_requests) >= self.limits.requests_per_minute:
-                log.warning(f"Rate limit reached: {self.limits.requests_per_minute}/min for {self.provider}")
-                return False
-
-            if len(self.limits.day_requests) >= self.limits.requests_per_day:
-                log.warning(f"Daily limit reached: {self.limits.requests_per_day}/day for {self.provider}")
-                return False
-
-            # Try to acquire semaphore for concurrent limit
+            # Concurrent limit
             if self._semaphore.locked() and self.limits.current_concurrent >= self.limits.max_concurrent:
                 log.warning(f"Concurrent limit reached: {self.limits.max_concurrent} for {self.provider}")
                 return False
 
             # Record request
-            self.limits.minute_requests.append(now)
-            self.limits.day_requests.append(now)
+            if self.limits.requests_per_minute is not None:
+                self.limits.minute_requests.append(now)
+            if self.limits.requests_per_day is not None:
+                self.limits.day_requests.append(now)
             self.limits.current_concurrent += 1
 
             return True
