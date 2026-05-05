@@ -896,8 +896,8 @@
             <div class="group-topic">{$groupChats.get(activeChatId)?.topic}</div>
           {/if}
 
-          <!-- Auto Transcribe toggle (P2P and Telegram chats, NOT AI chats) -->
-          {#if !$aiChats.has(activeChatId) && activeChatId !== 'local_ai'}
+          <!-- Auto Transcribe toggle (P2P and Telegram chats, NOT AI or group chats — groups have it in Settings) -->
+          {#if !$aiChats.has(activeChatId) && activeChatId !== 'local_ai' && !activeChatId.startsWith('group-')}
             <label class="auto-transcribe-toggle" title="Automatically transcribe received voice messages">
               <input
                 type="checkbox"
