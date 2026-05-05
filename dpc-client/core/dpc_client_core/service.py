@@ -4011,6 +4011,7 @@ class CoreService:
                 sender_name=sender_name,
                 text=text,
                 timestamp=timestamp,
+                sender_type="human",
             )
             await monitor.on_message(conv_message)
             monitor.save_history()
@@ -4161,6 +4162,8 @@ class CoreService:
             sender_name=agent_name,
             text=text,
             timestamp=timestamp,
+            sender_type="agent",
+            agent_owner=self.p2p_manager.node_id,
         ))
         monitor.save_history()
 

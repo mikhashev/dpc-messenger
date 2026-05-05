@@ -17,6 +17,8 @@
   export let connectedPeers: Array<{ node_id: string; name: string }> = [];
   export let peerDisplayNames: Map<string, string> = new Map();
   export let nodeAgents: Array<{ agent_id: string; name: string; provider_alias: string }> = [];
+  export let autoTranscribeEnabled: boolean = true;
+  export let whisperModelLoading: boolean = false;
 
   const dispatch = createEventDispatcher();
 
@@ -136,6 +138,29 @@
                 Save conversation history
                 {#if !persistHistory}
                   <span class="toggle-hint">(ephemeral - cleared on restart)</span>
+                {/if}
+              </span>
+            </label>
+          </div>
+        </div>
+
+        <!-- Voice Transcription -->
+        <div class="section">
+          <div class="section-header">
+            <h3>Voice</h3>
+          </div>
+          <div class="toggle-row">
+            <label class="toggle-label">
+              <input
+                type="checkbox"
+                checked={autoTranscribeEnabled}
+                on:change={() => dispatch('toggleAutoTranscribe')}
+                disabled={whisperModelLoading}
+              />
+              <span class="toggle-text">
+                Auto Transcribe
+                {#if whisperModelLoading}
+                  <span class="toggle-hint">(loading model...)</span>
                 {/if}
               </span>
             </label>

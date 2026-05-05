@@ -107,10 +107,8 @@
           <strong>
             {#if msg.sender === 'user'}
               {#if conversationId.startsWith('group-') && selfName}
-                <!-- Group chat: Show own name instead of "You" -->
-                {selfName} | {selfNodeId}
+                {selfName}
               {:else if conversationId.startsWith('agent_') || conversationId.startsWith('agent-')}
-                <!-- Agent chat: always "You" for user messages, backend may set senderName -->
                 You
               {:else}
                 {msg.senderName || 'You'}
@@ -119,14 +117,13 @@
               {msg.senderName || (msg.model ? `AI (${msg.model})` : 'AI Assistant')}
             {:else}
               {#if conversationId.startsWith('group-')}
-                <!-- Group chat: Agent messages show agent name; human messages use peerDisplayNames -->
                 {#if msg.isAgent && msg.senderName}
                   {msg.senderName} <span class="agent-badge">(agent)</span>
                 {:else}
-                  {peerDisplayNames.get(msg.sender)?.split(' | ')[0] || msg.senderName || msg.sender} | {msg.sender}
+                  {peerDisplayNames.get(msg.sender)?.split(' | ')[0] || msg.senderName || msg.sender}
                 {/if}
               {:else}
-                {msg.senderName ? `${msg.senderName} | ${msg.sender}` : msg.sender}
+                {msg.senderName || msg.sender}
               {/if}
             {/if}
           </strong>

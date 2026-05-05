@@ -190,7 +190,7 @@
     const currentInput = getCurrentInput();
     const before = currentInput.slice(0, mentionStartPosition);
     const after = currentInput.slice(mentionStartPosition + mentionQuery.length + 1);
-    onSetCurrentInput(`${before}@${member.name} | ${member.node_id} ${after}`);
+    onSetCurrentInput(`${before}@${member.name} ${after}`);
     mentionAutocompleteVisible = false;
     mentionSelectedIndex = 0;
   }

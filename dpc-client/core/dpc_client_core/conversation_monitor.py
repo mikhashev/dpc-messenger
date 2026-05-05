@@ -31,6 +31,8 @@ class Message:
     text: str
     timestamp: str
     attachment_transfer_id: Optional[str] = None  # Link to attachment transfer (v0.14.0)
+    sender_type: Optional[str] = None  # "human" or "agent"
+    agent_owner: Optional[str] = None  # node_id of agent's owner
 
 
 class ConversationMonitor:
@@ -166,9 +168,12 @@ class ConversationMonitor:
         # Extract attachments if present (dynamic attribute for Telegram messages)
         attachments = getattr(message, 'attachments', None)
 
+        sender_type = getattr(message, 'sender_type', None)
+        agent_owner = getattr(message, 'agent_owner', None)
         self.add_message(role, message.text, attachments=attachments,
                         timestamp=timestamp, sender_node_id=sender_node_id,
-                        sender_name=sender_name)
+                        sender_name=sender_name, sender_type=sender_type,
+                        agent_owner=agent_owner)
         logger.debug(f"Added message to history: role={role}, text_len={len(message.text)}")
 
         # Only run automatic detection if enabled
@@ -1384,7 +1389,8 @@ PARTICIPANTS' CULTURAL CONTEXTS:
                     timestamp: Optional[str] = None, sender_node_id: Optional[str] = None,
                     sender_name: Optional[str] = None, message_id: Optional[str] = None,
                     thinking: Optional[str] = None, streaming_raw: Optional[str] = None,
-                    source: Optional[str] = None):
+                    source: Optional[str] = None, sender_type: Optional[str] = None,
+                    agent_owner: Optional[str] = None):
         """Add a message to the conversation history
 
         Args:
@@ -1424,6 +1430,10 @@ PARTICIPANTS' CULTURAL CONTEXTS:
             message_dict["streaming_raw"] = streaming_raw
         if source:
             message_dict["source"] = source
+        if sender_type:
+            message_dict["sender_type"] = sender_type
+        if agent_owner:
+            message_dict["agent_owner"] = agent_owner
 
         # Track message ID for deduplication (v0.20.0)
         self.message_ids.add(message_id)
