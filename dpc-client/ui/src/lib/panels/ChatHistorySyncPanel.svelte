@@ -84,13 +84,15 @@
                   }
 
                   const stableId = msg.message_id || `backend-${index}-${Date.now()}`;
+                  const isAgent = msg.sender_type === 'agent' || msg.is_agent || false;
                   return {
                     id: stableId,
-                    sender: sender,
-                    senderName: senderName,
+                    sender: msg.sender_type === 'human' ? 'user' : sender,
+                    senderName: msg.sender_type === 'human' ? 'You' : senderName,
                     text: msg.content,
                     timestamp: timestamp,
-                    attachments: msg.attachments || []
+                    attachments: msg.attachments || [],
+                    isAgent: isAgent,
                   };
                 });
                 // Populate processedMessageIds so real-time events for these messages are deduped
