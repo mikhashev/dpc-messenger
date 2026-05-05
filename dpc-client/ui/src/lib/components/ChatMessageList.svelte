@@ -136,7 +136,7 @@
 
         <!-- Message text (hidden for voice attachments with transcription to avoid duplication, v0.15.1+) -->
         {#if msg.text && msg.text !== '[Image]' && !msg.attachments?.some(a => a.type === 'voice' && a.transcription)}
-          {#if isAiSender(msg.sender, msg) && enableMarkdown}
+          {#if enableMarkdown}
             <MarkdownMessage content={msg.text} />
           {:else if msg.mentions && msg.mentions.length > 0}
             <!-- Group chat message with @-mentions -->
