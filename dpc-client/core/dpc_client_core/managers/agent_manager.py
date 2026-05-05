@@ -56,6 +56,7 @@ class DpcAgentManager:
         self.service = service
         self.config = config
         self.agent_id = agent_id  # Store agent_id for per-agent configuration
+        self._agent_display_name: str | None = None  # Cached display name from config.json
         self._stop_event = threading.Event()
 
         # Get firewall reference from CoreService
@@ -74,6 +75,9 @@ class DpcAgentManager:
         # Telegram bridge for notifications
         self._telegram_bridge = None
 
+        # Eagerly load display name from config.json
+        self._agent_display_name = self._load_display_name()
+
         # Conversation monitors for agent sessions (reuse existing ConversationMonitor)
         # Key: conversation_id, Value: ConversationMonitor instance
         self._agent_monitors: Dict[str, ConversationMonitor] = {}
@@ -83,6 +87,19 @@ class DpcAgentManager:
         self._daily_tokens_date: str = ""
 
         log.info(f"DpcAgentManager initialized (agent_id={agent_id or 'singleton'}) with storage at {self.agent_root}")
+
+    def _load_display_name(self) -> str:
+        """Read agent display name from config.json, fall back to agent_id."""
+        if not self.agent_id:
+            return "DPC Agent"
+        try:
+            from dpc_client_core.dpc_agent.utils import load_agent_config
+            cfg = load_agent_config(self.agent_id)
+            if cfg and cfg.get("name"):
+                return cfg["name"]
+        except Exception:
+            pass
+        return self.agent_id
 
     @property
     def agent(self) -> DpcAgent:
@@ -365,7 +382,7 @@ class DpcAgentManager:
                     monitor = self._get_or_create_agent_monitor(self.agent_id)
                     if monitor:
                         from datetime import datetime, timezone
-                        monitor.add_message("assistant", chat_text, sender_name=self.agent_id, timestamp=datetime.now(timezone.utc).isoformat())
+                        monitor.add_message("assistant", chat_text, sender_name=self._agent_display_name or self.agent_id, timestamp=datetime.now(timezone.utc).isoformat())
                         monitor.save_history()
                         _brief["consumed"] = True
                         _brief_path.write_text(_json.dumps(_brief, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -641,8 +658,7 @@ class DpcAgentManager:
             if old_estimate:
                 monitor._last_context_estimated = old_estimate + user_tokens
 
-        # Use agent_id as sender name for better identification in chat UI
-        agent_display_name = self.agent_id or "DPC Agent"
+        agent_display_name = self._agent_display_name or self.agent_id or "DPC Agent"
 
         # Get DPC context if requested
         dpc_context = None
@@ -895,7 +911,7 @@ class DpcAgentManager:
                 },
                 {
                     "node_id": self.agent_id or "dpc-agent",
-                    "name": self.agent_id or "DPC Agent",
+                    "name": self._agent_display_name or self.agent_id or "DPC Agent",
                     "context": "agent"
                 }
             ]
