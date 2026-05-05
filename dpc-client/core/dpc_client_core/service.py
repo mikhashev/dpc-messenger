@@ -4073,11 +4073,11 @@ class CoreService:
             history_lines = []
             monitor = self.conversation_monitors.get(group_id)
             if monitor:
-                for msg in monitor.get_message_history():
+                for i, msg in enumerate(monitor.get_message_history()):
                     name = msg.get("sender_name", msg.get("role", "?"))
                     content = msg.get("content", "")
                     if content:
-                        history_lines.append(f"{name}: {content}")
+                        history_lines.append(f"[{i}] {name}: {content}")
             if history_lines:
                 history_block = "\n".join(history_lines)
                 prompt = (
