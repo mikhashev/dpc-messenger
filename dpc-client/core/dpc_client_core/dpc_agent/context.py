@@ -466,24 +466,29 @@ def build_llm_messages(
 
     # Insert previous conversation turns so the agent has continuity
     if conversation_history:
-        for hist_msg in conversation_history:
+        for msg_idx, hist_msg in enumerate(conversation_history):
             role = hist_msg.get("role", "")
             content = hist_msg.get("content", "")
             if role in ("user", "assistant") and content:
                 if role == "user":
                     timestamp = hist_msg.get("timestamp", "")
                     sender = hist_msg.get("sender_name", "")
-                    prefix_parts = []
+                    prefix_parts = [str(msg_idx)]
                     if timestamp:
                         ts_display = timestamp.split('T')[1][:8] if 'T' in timestamp else timestamp
                         prefix_parts.append(ts_display)
                     if sender:
                         prefix_parts.append(sender)
-                    if prefix_parts:
-                        content = f"[{' | '.join(prefix_parts)}] {content}"
+                    content = f"[{' | '.join(prefix_parts)}] {content}"
+                else:
+                    content = f"[{msg_idx}] {content}"
                 messages.append({"role": role, "content": content})
 
-    messages.append({"role": "user", "content": _build_user_content(task)})
+    current_idx = len(conversation_history) if conversation_history else 0
+    user_content = _build_user_content(task)
+    if isinstance(user_content, str):
+        user_content = f"[{current_idx}] {user_content}"
+    messages.append({"role": "user", "content": user_content})
 
     # --- Soft-cap token trimming ---
     messages, cap_info = apply_message_token_soft_cap(messages, 200000)
