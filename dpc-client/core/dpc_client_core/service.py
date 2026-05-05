@@ -4040,7 +4040,7 @@ class CoreService:
         agent_id = self._get_default_agent_id()
         agent_name = self._get_agent_display_name(agent_id).lower()
         if agent_name in mentions or agent_id in mentions:
-            if not allowed_agents or agent_id in allowed_agents:
+            if agent_id in allowed_agents:
                 matched = agent_name if agent_name in mentions else agent_id
                 logger.info("Group @%s mention detected — invoking agent in group %s", matched, group_id)
                 asyncio.ensure_future(self._invoke_agent_in_group(group_id, text, sender_name))

@@ -186,7 +186,7 @@ class GroupTextHandler(MessageHandler):
         agent_id = self.service._get_default_agent_id()
         agent_name = self.service._get_agent_display_name(agent_id).lower()
         if agent_name in mention_names or agent_id in mention_names:
-            if not allowed_agents or agent_id in allowed_agents:
+            if agent_id in allowed_agents:
                 await self._invoke_agent(group_id, text, sender_name)
             else:
                 self.logger.debug("Skipping @%s — agent %s not in metadata.agents for %s", agent_name, agent_id, group_id)
