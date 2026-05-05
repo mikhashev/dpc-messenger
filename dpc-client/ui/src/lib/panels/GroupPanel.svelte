@@ -15,6 +15,7 @@
     groupMemberLeft,
     nodeStatus,
     leaveGroup,
+    agentsList,
   } from '$lib/coreService';
 
   // ---------------------------------------------------------------------------
@@ -139,14 +140,23 @@
   function getMentionableMembers(): Array<{ node_id: string; name: string }> {
     if (!activeChatId.startsWith('group-')) return [];
     const group = $groupChats.get(activeChatId);
-    if (!group?.members) return [];
+    if (!group) return [];
     const selfId = $nodeStatus?.node_id || '';
-    return group.members
-      .filter((nodeId: string) => nodeId !== selfId)
-      .map((nodeId: string) => ({
-        node_id: nodeId,
-        name: peerDisplayNames.get(nodeId)?.split(' | ')[0] || nodeId,
-      }));
+    const result: Array<{ node_id: string; name: string }> = [];
+    if (group.members) {
+      for (const nodeId of group.members) {
+        if (nodeId !== selfId) {
+          result.push({ node_id: nodeId, name: peerDisplayNames.get(nodeId)?.split(' | ')[0] || nodeId });
+        }
+      }
+    }
+    const allowedAgents = group.agents?.[selfId] || [];
+    for (const agent of $agentsList) {
+      if (allowedAgents.includes(agent.agent_id)) {
+        result.push({ node_id: agent.agent_id, name: agent.name });
+      }
+    }
+    return result;
   }
 
   export function handleMentionInput(event: Event) {

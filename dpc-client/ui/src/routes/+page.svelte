@@ -1174,7 +1174,21 @@
   nodeAgents={$agentsList.map((a: any) => ({ agent_id: a.agent_id, name: a.name, provider_alias: a.provider_alias }))}
   on:addMember={handleGroupAddMember}
   on:removeMember={handleGroupRemoveMember}
-  on:updateAgents={async (e) => { await sendCommand('set_group_agents', { group_id: e.detail.group_id, agent_ids: e.detail.agent_ids }); }}
+  on:updateAgents={async (e) => {
+    const result = await sendCommand('set_group_agents', { group_id: e.detail.group_id, agent_ids: e.detail.agent_ids });
+    if (result?.status === 'success') {
+      groupChats.update(map => {
+        const newMap = new Map(map);
+        const grp = newMap.get(e.detail.group_id);
+        if (grp) {
+          const agents = { ...(grp.agents || {}) };
+          agents[$nodeStatus?.node_id || ''] = e.detail.agent_ids;
+          newMap.set(e.detail.group_id, { ...grp, agents });
+        }
+        return newMap;
+      });
+    }
+  }}
 />
 
 <ContextViewer

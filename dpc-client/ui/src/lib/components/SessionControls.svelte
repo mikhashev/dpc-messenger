@@ -98,7 +98,7 @@
   );
 </script>
 
-{#if isAIChat}
+{#if isAIChat || showForChatId.startsWith('group-')}
   <div class="token-counter" class:token-counter--detailed={showThreeMetrics}>
     {#if showThreeMetrics}
       <div class="token-row">
