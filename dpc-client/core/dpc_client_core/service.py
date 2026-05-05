@@ -4039,7 +4039,8 @@ class CoreService:
         # Check if any mention matches agent name or agent_id
         agent_id = self._get_default_agent_id()
         agent_name = self._get_agent_display_name(agent_id).lower()
-        if agent_name in mentions or agent_id in mentions:
+        sender_lower = sender_name.lower() if sender_name else ""
+        if (agent_name in mentions or agent_id in mentions) and agent_name != sender_lower:
             if agent_id in allowed_agents:
                 matched = agent_name if agent_name in mentions else agent_id
                 logger.info("Group @%s mention detected — invoking agent in group %s", matched, group_id)
@@ -4048,7 +4049,7 @@ class CoreService:
                 logger.debug("Group @%s mention skipped — agent %s not in metadata.agents for %s", agent_name, agent_id, group_id)
 
         cc_name = self.get_cc_display_name().lower()
-        if cc_name in mentions:
+        if cc_name in mentions and cc_name != sender_lower:
             logger.info("Group @cc mention detected — broadcasting cc_group_mention in group %s", group_id)
             await self.local_api.broadcast_event("cc_group_mention", {
                 "group_id": group_id,
