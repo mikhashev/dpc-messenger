@@ -4019,7 +4019,16 @@ class CoreService:
             # Detect @agent mentions and route to Ark / CC
             await self._handle_group_agent_mentions(group_id, text, sender_name)
 
-            return {"status": "success", "message_id": message_id}
+            token_usage = monitor.get_token_usage()
+            history_tokens = sum(len(m.get("content", "") or "") for m in monitor.get_message_history()) // 4
+            return {
+                "status": "success",
+                "message_id": message_id,
+                "tokens_used": token_usage.get("tokens_used", 0),
+                "token_limit": token_usage.get("token_limit", 0) or 128000,
+                "history_tokens": history_tokens,
+                "context_estimated": 0,
+            }
         except Exception as e:
             logger.error("Error sending group message: %s", e, exc_info=True)
             return {"status": "error", "message": str(e)}

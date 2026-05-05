@@ -185,6 +185,8 @@ class AgentService:
                 agent_id = agent.get("agent_id", "")
                 if agent_id:
                     cfg = load_agent_config(agent_id) or {}
+                    if cfg.get("name"):
+                        agent["name"] = cfg["name"]
                     if cfg.get("compute_host"):
                         agent["compute_host"] = cfg["compute_host"]
 
