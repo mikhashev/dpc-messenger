@@ -884,7 +884,7 @@
                   </span>
                 </span>
               {:else if isActuallyAIChat}
-                {$aiChats.get(activeChatId)?.name || 'AI Assistant'}
+                {$agentsList.find((a: any) => a.agent_id === activeChatId)?.name || $aiChats.get(activeChatId)?.name || 'AI Assistant'}
               {:else}
                 Chat with {getPeerDisplayName(activeChatId)}
               {/if}
