@@ -362,8 +362,9 @@ class KnowledgeService:
             # Load persisted history from disk — only for group chats
             if conversation_id.startswith("group-"):
                 if self.conversation_monitors[conversation_id].load_history():
+                    self.conversation_monitors[conversation_id].rebuild_extraction_buffers_from_history()
                     logger.info(
-                        "Loaded persisted history for group %s (%d messages)",
+                        "Loaded persisted history for group %s (%d messages, extraction buffers rebuilt)",
                         conversation_id,
                         len(self.conversation_monitors[conversation_id].message_history),
                     )
