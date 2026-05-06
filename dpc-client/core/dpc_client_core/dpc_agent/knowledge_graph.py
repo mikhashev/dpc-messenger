@@ -48,6 +48,11 @@ class EdgeType(str, Enum):
 
 ALWAYS_EXEMPT = {NodeType.DECISION, NodeType.SESSION_ARCHIVE}
 
+DEFAULT_ENTITY_TYPES = ["person", "organization", "technology", "concept", "location"]
+GLINER_MODEL_NAME = "urchade/gliner_multi-v2.1"
+GLINER_THRESHOLD = 0.5
+GLINER_MAX_TEXT_LEN = 5000
+
 
 @dataclass
 class GraphNode:
@@ -462,11 +467,11 @@ class KnowledgeGraph:
             return []
 
         if entity_types is None:
-            entity_types = ["person", "organization", "technology", "concept", "location"]
+            entity_types = DEFAULT_ENTITY_TYPES
 
         if not hasattr(self, "_gliner_model"):
-            log.info("Loading GLiNER model (first use)...")
-            self._gliner_model = GLiNER.from_pretrained("urchade/gliner_multi-v2.1")
+            log.info("Loading GLiNER model %s (first use)...", GLINER_MODEL_NAME)
+            self._gliner_model = GLiNER.from_pretrained(GLINER_MODEL_NAME)
             log.info("GLiNER model loaded")
 
         now = _utc_now()
@@ -477,7 +482,7 @@ class KnowledgeGraph:
             if not text or len(text) < 20:
                 continue
             try:
-                entities = self._gliner_model.predict_entities(text[:5000], entity_types, threshold=0.5)
+                entities = self._gliner_model.predict_entities(text[:GLINER_MAX_TEXT_LEN], entity_types, threshold=GLINER_THRESHOLD)
             except Exception as e:
                 log.debug("GLiNER extraction failed for %s: %s", source_id, e)
                 continue
