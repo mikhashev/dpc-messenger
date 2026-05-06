@@ -265,6 +265,17 @@ class CoreService:
         self.telegram_manager = self.telegram_service.telegram_manager if self.telegram_service else None
         self.telegram_bridge = self.telegram_service.telegram_bridge if self.telegram_service else None
 
+        # Discord bot integration (ADR-025)
+        try:
+            from .discord_service import DiscordService
+            self.discord_service = DiscordService(
+                core_service_ref=self,
+                settings=self.settings,
+            )
+        except Exception as e:
+            logger.error("DiscordService init failed, continuing without Discord: %s", e)
+            self.discord_service = None
+
         # Group chat manager (v0.19.0)
         self.group_manager = GroupManager(Path.home() / ".dpc", self.p2p_manager.node_id)
         self.group_manager.load_from_disk()
@@ -767,6 +778,13 @@ class CoreService:
             if telegram_task:
                 self._background_tasks.add(telegram_task)
 
+        # Start Discord bot integration (ADR-025)
+        if self.discord_service:
+            logger.info("Starting Discord bot integration...")
+            discord_task = await self.discord_service.start()
+            if discord_task:
+                self._background_tasks.add(discord_task)
+
         # Try to connect to Hub for WebRTC signaling (with graceful degradation)
         hub_connected = False
 
@@ -895,6 +913,11 @@ class CoreService:
         if hasattr(self, 'telegram_service') and self.telegram_service:
             logger.info("Stopping Telegram bot...")
             await self.telegram_service.stop()
+
+        # Shutdown Discord bot integration (ADR-025)
+        if hasattr(self, 'discord_service') and self.discord_service:
+            logger.info("Stopping Discord bot...")
+            await self.discord_service.stop()
 
         # Unload Whisper model if loaded (free VRAM before shutdown)
         try:
