@@ -86,6 +86,26 @@ things explicitly "pending" or "carryover".
 
 --- PER-SESSION FINDINGS ---
 {findings}
+{entity_section}"""
+
+ENTITY_RELATION_SECTION = """
+--- ENTITY RELATION EXTRACTION ---
+The following named entities were extracted from session texts by NER:
+{entity_list}
+
+For each PAIR of entities that are meaningfully related, add an entry to \
+"extracted_relations" in the JSON response:
+
+"extracted_relations": [
+  {{"source": "entity_name_1", "target": "entity_name_2", "relation_type": "DEPENDS_ON|SUPPORTS|CONTRADICTS|RESPONDS_TO", "confidence": 0.0-1.0, "justification": "min 20 chars explaining WHY this relation exists"}}
+]
+
+Rules:
+- Only use entities from the list above (do NOT invent new ones)
+- Only add relations with confidence >= 0.7
+- justification MUST be at least 20 characters
+- If a relation involves a Decision (ADR, protocol rule), add "needs_review": true
+- If no meaningful relations found, return empty list
 """
 
 
@@ -329,10 +349,18 @@ async def run_sleep(
         if progress_callback:
             await progress_callback(total, total, "synthesizing", "")
 
+        entity_section = ""
+        if gliner_entities:
+            unique_entities = sorted({e["entity"] for e in gliner_entities})
+            entity_section = ENTITY_RELATION_SECTION.format(
+                entity_list=", ".join(unique_entities)
+            )
+
         synthesis_prompt = SYNTHESIS_PROMPT.format(
             n=len(per_session_findings),
             period=period,
             findings=findings_text,
+            entity_section=entity_section,
         )
 
         response = await llm_manager.query(synthesis_prompt, provider_alias=provider_alias)
@@ -340,6 +368,41 @@ async def run_sleep(
 
         morning_brief = result.get("morning_brief", {})
         sleep_findings = result.get("sleep_findings", {})
+
+        extracted_relations = result.get("extracted_relations", [])
+        if extracted_relations and gliner_entities:
+            try:
+                from .knowledge_graph import KnowledgeGraph, GraphEdge, EdgeType, NodeType, _utc_now
+                from .utils import get_agent_root
+                _agent_root = get_agent_root(agent_id) if agent_id else conversation_dir.parent.parent / "agents" / conversation_dir.name
+                _kg = KnowledgeGraph(_agent_root)
+                now = _utc_now()
+                added = 0
+                for rel in extracted_relations:
+                    conf = rel.get("confidence", 0)
+                    justification = rel.get("justification", "")
+                    if conf < 0.7 or len(justification) < 20:
+                        continue
+                    source = rel.get("source", "").lower().replace(" ", "_")
+                    target = rel.get("target", "").lower().replace(" ", "_")
+                    rel_type = rel.get("relation_type", "SUPPORTS")
+                    try:
+                        edge_type = EdgeType(rel_type)
+                    except ValueError:
+                        edge_type = EdgeType.SUPPORTS
+                    src_id = f"e:{source}"
+                    tgt_id = f"e:{target}"
+                    _kg._ensure_node(src_id, NodeType.ENTITY, rel.get("source", source))
+                    _kg._ensure_node(tgt_id, NodeType.ENTITY, rel.get("target", target))
+                    props = {"auto": True, "llm_extracted": True}
+                    if rel.get("needs_review"):
+                        props["needs_review"] = True
+                    _kg._add_edge_safe(src_id, tgt_id, edge_type, justification, now)
+                    added += 1
+                if added:
+                    log.info("Sleep pipeline: LLM extracted %d relations (from %d candidates)", added, len(extracted_relations))
+            except Exception as e:
+                log.debug("Sleep pipeline: LLM relation extraction failed: %s", e)
 
         morning_brief["generated_at"] = datetime.now(timezone.utc).isoformat()
         morning_brief["consumed"] = False
