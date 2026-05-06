@@ -361,7 +361,7 @@ class KnowledgeGraph:
         return count
 
     def _clear_structural_edges(self) -> None:
-        self._backend._conn.execute("DELETE FROM edges WHERE confidence = 1.0 AND edge_weight = 'medium'")
+        self._backend._conn.execute("DELETE FROM edges WHERE properties LIKE '%\"auto\": true%' OR properties LIKE '%\"auto\":true%'")
         self._backend._conn.commit()
 
     def _load_meta(self, knowledge_dir: Path) -> dict:
@@ -382,6 +382,7 @@ class KnowledgeGraph:
             self._backend.add_edge(GraphEdge(
                 source_id=src, target_id=tgt, edge_type=etype,
                 t_created=t_created, justification=justification,
+                properties={"auto": True},
             ))
 
     def _edge_exists(self, src: str, tgt: str, etype: EdgeType) -> bool:
@@ -394,7 +395,7 @@ class KnowledgeGraph:
     def _extract_archive_edges(self, archive_dir: Path, known_files: dict, now: str) -> int:
         import re
         count = 0
-        for json_file in sorted(archive_dir.rglob("*_reset_session.json")):
+        for json_file in sorted(archive_dir.rglob("*_reset_session.json"), key=lambda f: f.name):
             try:
                 data = json.loads(json_file.read_text(encoding="utf-8"))
             except (json.JSONDecodeError, OSError):
