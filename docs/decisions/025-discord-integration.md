@@ -98,20 +98,34 @@ Voice channels deferred to v2 — fundamentally different from Telegram voice me
 - Add Discord badge to README.md
 - Create channels: #general, #bugs, #ark, #announcements
 
-### Phase 1: Bot + Agent Bridge (~400 lines)
-- `discord_service.py` — lifecycle, CoreService injection
-- `managers/discord_manager.py` — bot init, whitelist, message sending
-- `managers/agent_discord_bridge.py` — agent events → Discord, Discord → agent tasks
-- Slash commands: /ask, /status, /sleep, /help
-- @mention routing for Ark (whitelisted channels only)
+### Phase 1: Bot + Agent Bridge — DONE (S97)
+- `discord_service.py` — lifecycle, CoreService injection, @mention → agent routing
+- `managers/discord_manager.py` — bot init, whitelist, message sending, message splitting
+- Wired into CoreService init/start/stop
 - `discord.py>=2.7.0` dependency in pyproject.toml
 - **Prerequisite:** message_content privileged intent enabled in Discord Developer Portal
+- **Commits:** `1b0d66a` (initial), `30aeea9` (agent routing fix)
+- **Verified:** Bot online, @mention routing to Ark confirmed
+
+**S97 decisions (slash commands, agent_007):**
+- ~~Slash commands~~ — **cancelled**. `/ask`, `/status`, `/help` redundant with @mention. `/endsession` deferred to session lifecycle design
+- **agent_007** — new dedicated community manager agent (not Ark) for Discord. Separate system prompt, knowledge scope = public docs only
+- **System prompt refactor** — move from hardcoded `context.py:539` to `~/.dpc/agents/{id}/memory/system_prompt.md` (~10 lines fallback). Existing agents without file continue on default
+- **Discord routing** — `discord.agent_id` in config to route Discord messages to agent_007 instead of auto-detect
+- **Group chat bridge** — new DPC group chat "dpc_discord" for mirroring Discord messages to team
+
+### Phase 1.5: agent_007 Setup (new, S97)
+- System prompt refactor: `memory/system_prompt.md` per-agent override
+- Create agent_007 with community manager system prompt
+- Knowledge scope: indexed_paths = ["docs/", "README.md", "ROADMAP.md", "CHANGELOG.md"] (public only)
+- Discord routing: config.ini `discord.agent_id = agent_007`
+- Multi-language: system prompt instruction "respond in user's language"
 
 ### Phase 2: Full Bridge (~200 lines)
 - `coordinators/discord_coordinator.py` — bidirectional DPC ↔ Discord routing
-- Conversation linking (channel_id ↔ conversation_id)
+- Group chat "dpc_discord" — mirror Discord messages for team discussion
 - File/image forwarding
-- **Thread-per-conversation:** Discord thread created per conversation session. Thread title = session topic (first 100 chars). Thread auto-archives after 1 hour of inactivity (Discord default). New `/ask` in archived thread creates new thread.
+- **Thread-per-conversation:** Discord thread created per conversation session. Thread title = session topic (first 100 chars). Thread auto-archives after 1 hour of inactivity (Discord default)
 
 ### Phase 3: Rich Features (future)
 - Discord embeds for structured messages (knowledge commits, morning briefs)
