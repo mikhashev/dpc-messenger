@@ -1,6 +1,6 @@
 # ADR-025: Discord Integration
 
-**Status:** Proposed
+**Status:** Accepted
 **Date:** 2026-05-06
 **Session:** S97
 **Authors:** Ark (research, architecture analysis), CC (research, implementation plan), Mike (direction, decision)
@@ -48,6 +48,7 @@ enabled = false
 bot_token_env = DISCORD_BOT_TOKEN
 allowed_guild_ids = []
 allowed_channel_ids = []
+morning_brief_channel_id =
 ```
 
 ### 4. Gateway Intents
@@ -57,13 +58,19 @@ Required privileged intents:
 - `guilds` — server awareness
 - `dm_messages` — direct messages
 
+**Important:** `message_content` is a privileged intent — without it the bot cannot read message text at all. Privileged intents are auto-approved for bots in <100 servers. DPC is personal-scale, no Discord verification needed. This is a Phase 1 prerequisite, not optional.
+
 ### 5. Agent interaction model
 
 - Dedicated `#ark` channel for agent conversations
-- @mention routing: Ark responds when @mentioned in allowed channels
+- **Whitelist enforcement:** Agent responds only in explicitly whitelisted channels (`allowed_channel_ids`) + DMs. @mention in non-whitelisted channels is silently ignored (same as Telegram `allowed_chat_ids` pattern)
 - Slash commands: `/ask`, `/status`, `/sleep`, `/extract_knowledge`, `/help`
-- Morning brief posted to channel on wakeup
+- Morning brief posted to configured `morning_brief_channel_id` (default: `#ark`) on wakeup, triggered by sleep consolidation pipeline
 - Sleep/event notifications via Discord embeds
+
+### 5a. Rate limit strategy
+
+discord.py handles rate limits automatically via exponential backoff. Agent long messages (morning briefs, knowledge extraction) split into multiple messages with discord.py's built-in queue. No manual throttling needed for <5 msg/5sec typical agent output.
 
 ### 6. Key differences from Telegram
 
@@ -96,14 +103,15 @@ Voice channels deferred to v2 — fundamentally different from Telegram voice me
 - `managers/discord_manager.py` — bot init, whitelist, message sending
 - `managers/agent_discord_bridge.py` — agent events → Discord, Discord → agent tasks
 - Slash commands: /ask, /status, /sleep, /help
-- @mention routing for Ark
-- `discord.py` dependency in pyproject.toml
+- @mention routing for Ark (whitelisted channels only)
+- `discord.py>=2.7.0` dependency in pyproject.toml
+- **Prerequisite:** message_content privileged intent enabled in Discord Developer Portal
 
 ### Phase 2: Full Bridge (~200 lines)
 - `coordinators/discord_coordinator.py` — bidirectional DPC ↔ Discord routing
 - Conversation linking (channel_id ↔ conversation_id)
 - File/image forwarding
-- Thread creation for sessions
+- **Thread-per-conversation:** Discord thread created per conversation session. Thread title = session topic (first 100 chars). Thread auto-archives after 1 hour of inactivity (Discord default). New `/ask` in archived thread creates new thread.
 
 ### Phase 3: Rich Features (future)
 - Discord embeds for structured messages (knowledge commits, morning briefs)
