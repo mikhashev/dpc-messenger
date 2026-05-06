@@ -35,6 +35,20 @@ log = logging.getLogger(__name__)
 FAISS_TOP_K = 10
 BM25_TOP_K = 10
 
+_kg_cache: dict = {}
+
+
+def _get_knowledge_graph(agent_root: pathlib.Path):
+    """Cached KnowledgeGraph singleton per agent_root."""
+    key = str(agent_root)
+    if key not in _kg_cache:
+        try:
+            from .knowledge_graph import KnowledgeGraph
+            _kg_cache[key] = KnowledgeGraph(agent_root)
+        except Exception:
+            return None
+    return _kg_cache[key]
+
 
 def _build_user_content(task: Dict[str, Any]) -> Any:
     """Build user message content. Supports text + optional image."""
@@ -399,13 +413,12 @@ def build_llm_messages(
                 _graph_results = []
                 try:
                     from .knowledge_graph import KnowledgeGraph
-                    _kg = KnowledgeGraph(agent_root)
+                    _kg = _get_knowledge_graph(agent_root)
                     _seed_files = list({m.get("source_file", "") for m, _ in _faiss_results + _keyword_results if m.get("source_file")})
-                    if _seed_files:
+                    if _seed_files and _kg:
                         _graph_results = _kg.graph_expand(_seed_files, max_hops=1)
                         if _graph_results:
                             log.debug("Active Recall Graph L7: %d results from %d seeds", len(_graph_results), len(_seed_files))
-                    _kg.close()
                 except Exception:
                     log.debug("Active Recall Graph L7: unavailable (cold start or no graph DB)")
 
