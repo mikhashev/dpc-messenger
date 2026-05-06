@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import logging
 import sqlite3
+from datetime import datetime, timezone
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field, asdict
 from enum import Enum
@@ -22,7 +23,6 @@ log = logging.getLogger(__name__)
 
 
 def _utc_now() -> str:
-    from datetime import datetime, timezone
     return datetime.now(timezone.utc).isoformat()
 
 
@@ -257,12 +257,13 @@ class KnowledgeGraph:
             if md_file.name.startswith("_"):
                 continue
             node_id = f"kf:{md_file.stem}"
+            mtime = datetime.fromtimestamp(md_file.stat().st_mtime, tz=timezone.utc).isoformat()
             node = GraphNode(
                 node_id=node_id,
                 node_type=NodeType.KNOWLEDGE_FILE,
                 label=md_file.stem.replace("_", " ").title(),
                 source_layer="L5",
-                properties={"path": str(md_file.name), "size_bytes": md_file.stat().st_size},
+                properties={"path": str(md_file.name), "size_bytes": md_file.stat().st_size, "file_mtime": mtime},
             )
             self._backend.add_node(node)
             count += 1
@@ -500,6 +501,39 @@ class KnowledgeGraph:
 
         log.info("GLiNER extracted %d entities from %d texts", len(all_entities), len(texts))
         return all_entities
+
+    def invalidate_edges(self, node_id: str) -> int:
+        """Mark all active edges touching node_id as invalidated (bi-temporal)."""
+        now = _utc_now()
+        cursor = self._backend._conn.execute(
+            "UPDATE edges SET t_invalidated = ? WHERE (source_id = ? OR target_id = ?) AND t_invalidated IS NULL",
+            (now, node_id, node_id),
+        )
+        self._backend._conn.commit()
+        count = cursor.rowcount
+        if count:
+            log.info("Invalidated %d edges for node %s", count, node_id)
+        return count
+
+    def backfill_edge_timestamps(self, knowledge_dir: Path) -> int:
+        """Backfill t_created on edges from source file mtime."""
+        count = 0
+        if not knowledge_dir.exists():
+            return count
+        for md_file in sorted(knowledge_dir.glob("*.md")):
+            if md_file.name.startswith("_"):
+                continue
+            node_id = f"kf:{md_file.stem}"
+            mtime = datetime.fromtimestamp(md_file.stat().st_mtime, tz=timezone.utc).isoformat()
+            cursor = self._backend._conn.execute(
+                "UPDATE edges SET t_created = ? WHERE (source_id = ? OR target_id = ?) AND (t_created = '' OR t_created IS NULL)",
+                (mtime, node_id, node_id),
+            )
+            count += cursor.rowcount
+        self._backend._conn.commit()
+        if count:
+            log.info("Backfilled t_created on %d edges from file timestamps", count)
+        return count
 
     def close(self) -> None:
         self._backend.close()
