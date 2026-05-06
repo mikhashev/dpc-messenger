@@ -13,6 +13,7 @@ from typing import Dict, List, Tuple
 LAYER_WEIGHTS: Dict[str, float] = {
     "L6": 1.5,
     "L1": 1.3,
+    "L7": 0.6,
     "L5": 1.0,
     "L2": 0.8,
     "EXT": 0.9,
