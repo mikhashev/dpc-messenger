@@ -21,6 +21,11 @@ from typing import Any, Dict, List, Optional
 log = logging.getLogger(__name__)
 
 
+def _utc_now() -> str:
+    from datetime import datetime, timezone
+    return datetime.now(timezone.utc).isoformat()
+
+
 class NodeType(str, Enum):
     KNOWLEDGE_FILE = "KnowledgeFile"
     SESSION_ARCHIVE = "SessionArchive"
@@ -278,6 +283,134 @@ class KnowledgeGraph:
                     "graph_node_type": neighbor.node_type.value,
                 })
         return results
+
+    def extract_structural_edges(self, knowledge_dir: Path, archive_dir: Optional[Path] = None) -> int:
+        """Extract deterministic edges from existing files (Task 002).
+
+        Parses markdown links, _meta.json tags, session references,
+        and ADR references. Idempotent: clears existing structural edges
+        before re-extracting.
+        """
+        import re
+        self._clear_structural_edges()
+        count = 0
+        meta = self._load_meta(knowledge_dir)
+        md_link_re = re.compile(r'\[([^\]]+)\]\(([^)]+)\)')
+        session_re = re.compile(r'\bS(\d{2,3})\b')
+        adr_re = re.compile(r'\bADR-(\d{3})\b')
+        file_ref_re = re.compile(r'\b([\w_-]+\.md)\b')
+        now = _utc_now()
+
+        known_files = {f.stem: f.name for f in knowledge_dir.glob("*.md") if not f.name.startswith("_")}
+
+        for stem, fname in known_files.items():
+            src_id = f"kf:{stem}"
+            text = (knowledge_dir / fname).read_text(encoding="utf-8", errors="replace")
+
+            for match in md_link_re.finditer(text):
+                target_path = match.group(2)
+                target_stem = Path(target_path).stem
+                if target_stem in known_files and target_stem != stem:
+                    self._add_edge_safe(src_id, f"kf:{target_stem}", EdgeType.DEPENDS_ON,
+                                        f"markdown link [{match.group(1)}]", now)
+                    count += 1
+
+            for match in file_ref_re.finditer(text):
+                ref_stem = Path(match.group(1)).stem
+                if ref_stem in known_files and ref_stem != stem:
+                    if not self._edge_exists(src_id, f"kf:{ref_stem}", EdgeType.DEPENDS_ON):
+                        self._add_edge_safe(src_id, f"kf:{ref_stem}", EdgeType.DEPENDS_ON,
+                                            f"file reference {match.group(1)}", now)
+                        count += 1
+
+            for match in session_re.finditer(text):
+                session_num = match.group(1)
+                session_id = f"sa:S{session_num}"
+                self._ensure_node(session_id, NodeType.SESSION_ARCHIVE, f"Session {session_num}")
+                self._add_edge_safe(src_id, session_id, EdgeType.DERIVED_FROM,
+                                    f"references session S{session_num}", now)
+                count += 1
+
+            for match in adr_re.finditer(text):
+                adr_num = match.group(1)
+                adr_id = f"d:adr-{adr_num}"
+                self._ensure_node(adr_id, NodeType.DECISION, f"ADR-{adr_num}")
+                self._add_edge_safe(src_id, adr_id, EdgeType.DECIDED_BY,
+                                    f"references ADR-{adr_num}", now)
+                count += 1
+
+        for fname, file_meta in meta.items():
+            stem = Path(fname).stem
+            src_id = f"kf:{stem}"
+            if self._backend.get_node(src_id) is None:
+                continue
+            for tag in file_meta.get("tags", []):
+                tag_clean = tag.strip().lower().replace(" ", "_")
+                if not tag_clean:
+                    continue
+                entity_id = f"e:{tag_clean}"
+                self._ensure_node(entity_id, NodeType.ENTITY, tag)
+                self._add_edge_safe(src_id, entity_id, EdgeType.MENTIONS,
+                                    f"tagged with '{tag}'", now)
+                count += 1
+
+        if archive_dir and archive_dir.exists():
+            count += self._extract_archive_edges(archive_dir, known_files, now)
+
+        log.info("Extracted %d structural edges from %d knowledge files", count, len(known_files))
+        return count
+
+    def _clear_structural_edges(self) -> None:
+        self._backend._conn.execute("DELETE FROM edges WHERE confidence = 1.0 AND edge_weight = 'medium'")
+        self._backend._conn.commit()
+
+    def _load_meta(self, knowledge_dir: Path) -> dict:
+        meta_path = knowledge_dir / "_meta.json"
+        if not meta_path.exists():
+            return {}
+        try:
+            return json.loads(meta_path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            return {}
+
+    def _ensure_node(self, node_id: str, node_type: NodeType, label: str) -> None:
+        if self._backend.get_node(node_id) is None:
+            self._backend.add_node(GraphNode(node_id=node_id, node_type=node_type, label=label))
+
+    def _add_edge_safe(self, src: str, tgt: str, etype: EdgeType, justification: str, t_created: str) -> None:
+        if not self._edge_exists(src, tgt, etype):
+            self._backend.add_edge(GraphEdge(
+                source_id=src, target_id=tgt, edge_type=etype,
+                t_created=t_created, justification=justification,
+            ))
+
+    def _edge_exists(self, src: str, tgt: str, etype: EdgeType) -> bool:
+        row = self._backend._conn.execute(
+            "SELECT 1 FROM edges WHERE source_id=? AND target_id=? AND edge_type=? LIMIT 1",
+            (src, tgt, etype.value),
+        ).fetchone()
+        return row is not None
+
+    def _extract_archive_edges(self, archive_dir: Path, known_files: dict, now: str) -> int:
+        import re
+        count = 0
+        for json_file in sorted(archive_dir.rglob("*_reset_session.json")):
+            try:
+                data = json.loads(json_file.read_text(encoding="utf-8"))
+            except (json.JSONDecodeError, OSError):
+                continue
+            session_id_str = json_file.stem.split("_")[0]
+            archive_id = f"sa:{session_id_str}"
+            self._ensure_node(archive_id, NodeType.SESSION_ARCHIVE, session_id_str)
+            senders = {m.get("sender_name", "") for m in data.get("messages", [])}
+            for sender in senders:
+                if sender and sender not in ("", "system"):
+                    agent_id = f"ag:{sender.lower().replace(' ', '_')}"
+                    self._ensure_node(agent_id, NodeType.AGENT, sender)
+                    self._add_edge_safe(archive_id, agent_id, EdgeType.DERIVED_FROM,
+                                        f"participant in session", now)
+                    count += 1
+        return count
 
     def close(self) -> None:
         self._backend.close()
