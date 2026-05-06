@@ -81,6 +81,10 @@
     return { sender: msg.sender_node_id, senderName: msg.sender_name || msg.sender_node_id };
   }
 
+  function getAgentName(conversationId: string): string {
+    return $agentsList?.find((a: any) => a.agent_id === conversationId)?.name || getPeerDisplayName(conversationId);
+  }
+
   /** Clear all streaming state (buffer + state). Called by chat-switch and response handler. */
   function clearAgentStreaming() {
     if (streamingFlushTimeout) {
@@ -320,7 +324,7 @@
 
           // B2 Fix 1: Use backend msg.id for stable IDs (prevents dedup collisions on same-timestamp msgs)
           const mappedMessages = (messages || []).map((msg: any, index: number) => {
-            const { sender, senderName } = mapMessageSender(msg, conversation_id, getPeerDisplayName(conversation_id));
+            const { sender, senderName } = mapMessageSender(msg, conversation_id, getAgentName(conversation_id));
             const stableId = msg.id || `${conversation_id}-${msg.timestamp ? new Date(msg.timestamp).getTime() : index}`;
             return {
               id: stableId,
@@ -375,7 +379,7 @@
         chatHistories.update(map => {
           const newMap = new Map(map);
           const existing = newMap.get(conversation_id) || [];
-          const { sender, senderName } = mapMessageSender({ role, sender_node_id, sender_name }, conversation_id, getPeerDisplayName(conversation_id));
+          const { sender, senderName } = mapMessageSender({ role, sender_node_id, sender_name }, conversation_id, getAgentName(conversation_id));
           const stableId = message_id || `${sender}-${timestamp ? new Date(timestamp).getTime() : Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
           const newMsg: Message = {
             id: stableId,
