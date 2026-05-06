@@ -49,6 +49,33 @@ S93 discussion: a-a-k criticism on Karpathy gist identified two gaps in DPC — 
 - Entity extraction: structural (headings, wikilinks, tags) + GLiNER NER (zero-shot)
 - Reference implementation closest to DPC's architecture
 
+**Keppi** (github.com/jgoldfed/keppi, Python, 12 stars):
+- Weighted directed graph over Obsidian vault — closest architectural analog to ADR-024
+- 5 edge types with explicit weights: wikilink(1.0), embed(1.5), related_to(2.0), tag_overlap(0–0.5 Jaccard), folder_proximity(0.3)
+- SQLite + sqlite-vec, BFS with relevance decay (`relevance = parent_relevance × edge_weight`)
+- blast-radius (impact analysis), context-pack (token-budgeted assembly for AI), gaps (missing connections), communities (Louvain)
+- Production validated: 1,471 notes, 267,581 edges
+- MCP server (19 tools)
+- Source: Karpathy gist comment by author (jgoldfed), README verified S97
+
+**Lore** (re-cinq.com/blog/lore-recinqs-sw-agent-factory):
+- Org-scale shared context MCP server for Claude Code (15+ developers, GKE)
+- PostgreSQL + pgvector, HNSW + BM25 + RRF fusion (same pattern as ADR-018)
+- Temporal fact invalidation via embedding similarity (0.92 threshold) — new facts auto-invalidate contradicting old facts
+- Episode ingestion: enforced workflow (assemble_context → search_memory → write_episode), passive extraction from PR reviews
+- Importance decay (0–10 score), consolidation job (group facts by repo, synthesize patterns)
+- LoreTask CRD for autonomous K8s agents, 11 scheduled jobs (gap detection, autoresearch, spec drift)
+- Key lesson: wrapping black-box agents failed after 4 attempts; direct Anthropic API calls + structured outputs succeeded
+- Source: re-cinq blog post, verified S97
+
+**obra/knowledge-graph** (github.com/obra/knowledge-graph, Jesse Vincent):
+- TypeScript + better-sqlite3 + sqlite-vec (384-dim, MiniLM-L6-v2, 22MB quantized)
+- Unweighted edges (wiki links only), FTS5 full-text search
+- graphology: Louvain communities, betweenness centrality, PageRank, BFS
+- MCP server for Claude Code (10 tools), incremental indexing by mtime
+- 76 tests (vitest)
+- Source: GitHub, verified S97
+
 **All-Mem** (arxiv:2603.19595):
 - Visible surface + hop-bounded expansion model
 - DPC knowledge = visible surface, archives = deep evidence
