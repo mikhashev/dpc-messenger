@@ -47,16 +47,35 @@ class DiscordService:
                 return
             await self._route_to_agent(text, message)
 
+    def _get_agent_provider(self):
+        llm_manager = getattr(self._core, 'llm_manager', None)
+        if not llm_manager:
+            return None
+        return llm_manager.providers.get("dpc_agent")
+
     async def _route_to_agent(self, text: str, message):
         try:
-            agent_manager = getattr(self._core, 'agent_manager', None)
-            if not agent_manager:
+            provider = self._get_agent_provider()
+            if not provider or not hasattr(provider, '_managers'):
                 await self.discord_manager.send_message(
                     str(message.channel.id), "Agent not available."
                 )
                 return
-            agent_id = agent_manager._get_default_agent_id()
-            result = await agent_manager.process_message(agent_id, text)
+            agents_dir = getattr(self._core, 'settings', None)
+            from pathlib import Path
+            dpc_home = Path.home() / ".dpc"
+            agent_dirs = sorted((dpc_home / "agents").iterdir()) if (dpc_home / "agents").exists() else []
+            agent_id = agent_dirs[0].name if agent_dirs else None
+            if not agent_id:
+                await self.discord_manager.send_message(str(message.channel.id), "No agents configured.")
+                return
+            if agent_id not in provider._managers:
+                await provider._ensure_manager(agent_id=agent_id)
+            manager = provider._managers.get(agent_id)
+            if not manager:
+                await self.discord_manager.send_message(str(message.channel.id), "Agent manager not ready.")
+                return
+            result = await manager.process_message(agent_id, text)
             response = result.get('response', '') if isinstance(result, dict) else str(result)
             if response:
                 await self.discord_manager.send_message(str(message.channel.id), response)
