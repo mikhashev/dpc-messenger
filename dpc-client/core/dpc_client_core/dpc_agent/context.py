@@ -34,6 +34,7 @@ log = logging.getLogger(__name__)
 
 FAISS_TOP_K = 10
 BM25_TOP_K = 10
+GRAPH_MAX_HOPS = 1
 
 _kg_cache: dict = {}
 
@@ -416,7 +417,7 @@ def build_llm_messages(
                     _kg = _get_knowledge_graph(agent_root)
                     _seed_files = list({m.get("source_file", "") for m, _ in _faiss_results + _keyword_results if m.get("source_file")})
                     if _seed_files and _kg:
-                        _graph_results = _kg.graph_expand(_seed_files, max_hops=1)
+                        _graph_results = _kg.graph_expand(_seed_files, max_hops=GRAPH_MAX_HOPS)
                         if _graph_results:
                             log.debug("Active Recall Graph L7: %d results from %d seeds", len(_graph_results), len(_seed_files))
                 except Exception:
