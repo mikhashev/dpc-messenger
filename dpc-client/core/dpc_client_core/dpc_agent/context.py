@@ -507,8 +507,6 @@ def build_llm_messages(
                     if sender:
                         prefix_parts.append(sender)
                     content = f"[{' | '.join(prefix_parts)}] {content}"
-                else:
-                    content = f"[{msg_idx}] {content}"
                 messages.append({"role": role, "content": content})
 
     current_idx = len(conversation_history) if conversation_history else 0
