@@ -298,6 +298,26 @@ async def run_sleep(
             _write_sleep_state(conversation_dir, {"status": "awake"})
             return {"status": "no_analyzable_sessions", "sessions_analyzed": 0}
 
+        # ADR-024 Phase 2: GLiNER entity extraction (before LLM synthesis)
+        gliner_entities: list = []
+        try:
+            from .knowledge_graph import KnowledgeGraph
+            from .utils import get_agent_root
+            _agent_root = get_agent_root(agent_id) if agent_id else conversation_dir.parent.parent / "agents" / conversation_dir.name
+            _kg = KnowledgeGraph(_agent_root)
+            _ner_texts = []
+            for f in per_session_findings:
+                if "error" not in f:
+                    summary = f.get("summary", "") or json.dumps(f, ensure_ascii=False)[:3000]
+                    archive = f.get("archive_file", "")
+                    _ner_texts.append({"source_id": f"sa:{Path(archive).stem.split('_')[0]}" if archive else "", "text": summary})
+            if _ner_texts:
+                gliner_entities = _kg.extract_entities_gliner(_ner_texts)
+                if gliner_entities:
+                    log.info("Sleep pipeline: GLiNER extracted %d entities from %d sessions", len(gliner_entities), len(_ner_texts))
+        except Exception as e:
+            log.debug("Sleep pipeline: GLiNER entity extraction skipped: %s", e)
+
         dates = [d.get("date", "") for d in digests if d.get("date")]
         period = f"{dates[0][:10]} to {dates[-1][:10]}" if len(dates) >= 2 else dates[0][:10] if dates else "unknown"
 

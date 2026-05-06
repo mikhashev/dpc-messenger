@@ -46,6 +46,9 @@ mlx = [
 browser = [
     "camoufox>=0.4.11",
 ]
+graph-ner = [
+    "gliner>=0.2.20",
+]
 
 [dependency-groups]
 dev = [

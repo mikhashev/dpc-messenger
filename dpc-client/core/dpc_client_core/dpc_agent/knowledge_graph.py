@@ -441,5 +441,60 @@ class KnowledgeGraph:
                     count += 1
         return count
 
+    def extract_entities_gliner(self, texts: List[dict], entity_types: Optional[List[str]] = None) -> List[dict]:
+        """Extract named entities from texts using GLiNER (zero-shot NER).
+
+        Args:
+            texts: list of {"source_id": str, "text": str} dicts
+            entity_types: NER labels to extract (default: person, organization, technology, concept)
+
+        Returns:
+            list of {"entity": str, "type": str, "source_id": str} for Task 004 scaffolding.
+            Also creates Entity nodes + MENTIONS edges in graph.
+        """
+        try:
+            from gliner import GLiNER
+        except ImportError:
+            log.debug("GLiNER not installed — skip entity extraction (install with: uv sync --extra graph-ner)")
+            return []
+
+        if not texts:
+            return []
+
+        if entity_types is None:
+            entity_types = ["person", "organization", "technology", "concept", "location"]
+
+        if not hasattr(self, "_gliner_model"):
+            log.info("Loading GLiNER model (first use)...")
+            self._gliner_model = GLiNER.from_pretrained("urchade/gliner_multi-v2.1")
+            log.info("GLiNER model loaded")
+
+        now = _utc_now()
+        all_entities = []
+        for item in texts:
+            source_id = item.get("source_id", "")
+            text = item.get("text", "")
+            if not text or len(text) < 20:
+                continue
+            try:
+                entities = self._gliner_model.predict_entities(text[:5000], entity_types, threshold=0.5)
+            except Exception as e:
+                log.debug("GLiNER extraction failed for %s: %s", source_id, e)
+                continue
+            for ent in entities:
+                label = ent.get("text", "").strip()
+                ent_type = ent.get("label", "concept")
+                if not label or len(label) < 2:
+                    continue
+                entity_id = f"e:{label.lower().replace(' ', '_')}"
+                self._ensure_node(entity_id, NodeType.ENTITY, label)
+                if source_id:
+                    self._add_edge_safe(source_id, entity_id, EdgeType.MENTIONS,
+                                        f"GLiNER extracted ({ent_type}, score={ent.get('score', 0):.2f})", now)
+                all_entities.append({"entity": label, "type": ent_type, "source_id": source_id})
+
+        log.info("GLiNER extracted %d entities from %d texts", len(all_entities), len(texts))
+        return all_entities
+
     def close(self) -> None:
         self._backend.close()
