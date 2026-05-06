@@ -396,7 +396,20 @@ def build_llm_messages(
                     log.debug("Active Recall BM25: %d results — %s", len(_bm25_results),
                               [m.get("source_file", "?") for m, _ in _bm25_results])
 
-                _results = reciprocal_rank_fusion(_faiss_results, _keyword_results)
+                _graph_results = []
+                try:
+                    from .knowledge_graph import KnowledgeGraph
+                    _kg = KnowledgeGraph(agent_root)
+                    _seed_files = list({m.get("source_file", "") for m, _ in _faiss_results + _keyword_results if m.get("source_file")})
+                    if _seed_files:
+                        _graph_results = _kg.graph_expand(_seed_files, max_hops=1)
+                        if _graph_results:
+                            log.debug("Active Recall Graph L7: %d results from %d seeds", len(_graph_results), len(_seed_files))
+                    _kg.close()
+                except Exception:
+                    log.debug("Active Recall Graph L7: unavailable (cold start or no graph DB)")
+
+                _results = reciprocal_rank_fusion(_faiss_results, _keyword_results, graph_results=_graph_results)
                 _ctx_ratio = (session_state or {}).get("context_usage_percent", 0) / 100.0
                 _recall = get_recall_block(_results, context_usage_ratio=_ctx_ratio, agent_root=agent_root)
                 if _recall:

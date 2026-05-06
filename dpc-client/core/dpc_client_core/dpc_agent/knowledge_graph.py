@@ -264,6 +264,34 @@ class KnowledgeGraph:
         log.info("Bulk imported %d knowledge files as graph nodes", count)
         return count
 
+    def graph_expand(self, filenames: List[str], max_hops: int = 1) -> List[tuple]:
+        """Expand from FAISS/BM25 result filenames via graph edges.
+
+        Returns list of (meta_dict, score) tuples compatible with RRF input.
+        Score decreases with hop distance: 1-hop=1.0, 2-hop=0.5.
+        """
+        results = []
+        seen: set = set()
+        for fname in filenames:
+            stem = Path(fname).stem
+            src_id = f"kf:{stem}"
+            if self._backend.get_node(src_id) is None:
+                continue
+            neighbors = self._backend.get_neighbors(src_id, hops=max_hops)
+            for neighbor in neighbors:
+                if neighbor.node_id in seen or neighbor.node_type != NodeType.KNOWLEDGE_FILE:
+                    continue
+                seen.add(neighbor.node_id)
+                path = neighbor.properties.get("path", "")
+                if path and path not in filenames:
+                    results.append(({
+                        "source_file": path,
+                        "source_layer": "L7",
+                        "heading": neighbor.label,
+                        "graph_node_id": neighbor.node_id,
+                    }, 1.0))
+        return results
+
     def get_graph_results_for_query(self, seed_node_ids: List[str], hops: int = 2) -> List[dict]:
         """Traverse graph from seed nodes, return results compatible with RRF fusion."""
         results = []

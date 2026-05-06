@@ -8,7 +8,7 @@ Priority weights by source layer: L6 > L1 > L5 > L2-docs.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 LAYER_WEIGHTS: Dict[str, float] = {
     "L6": 1.5,
@@ -32,10 +32,11 @@ class SearchResult:
 def reciprocal_rank_fusion(
     faiss_results: List[Tuple[dict, float]],
     sparse_or_bm25_results: List[Tuple[dict, float]],
+    graph_results: Optional[List[Tuple[dict, float]]] = None,
     k: int = DEFAULT_RRF_K,
     layer_weights: Dict[str, float] = LAYER_WEIGHTS,
 ) -> List[SearchResult]:
-    """Merge FAISS dense and sparse/BM25 results using RRF with layer priority weights."""
+    """Merge FAISS dense, sparse/BM25, and graph results using RRF with layer priority weights."""
     scores: Dict[str, float] = {}
     meta_map: Dict[str, dict] = {}
 
@@ -49,6 +50,12 @@ def reciprocal_rank_fusion(
         key = _file_key(meta)
         meta_map[key] = meta
         weight = layer_weights.get(meta.get("source_layer", "L5"), 1.0)
+        scores[key] = scores.get(key, 0) + weight / (k + rank + 1)
+
+    for rank, (meta, _score) in enumerate(graph_results or []):
+        key = _file_key(meta)
+        meta_map[key] = meta
+        weight = layer_weights.get(meta.get("source_layer", "L7"), 1.0)
         scores[key] = scores.get(key, 0) + weight / (k + rank + 1)
 
     ranked = sorted(scores.items(), key=lambda x: x[1], reverse=True)
