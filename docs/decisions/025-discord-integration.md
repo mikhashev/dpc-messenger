@@ -60,13 +60,15 @@ Required privileged intents:
 
 **Important:** `message_content` is a privileged intent — without it the bot cannot read message text at all. Privileged intents are auto-approved for bots in <100 servers. DPC is personal-scale, no Discord verification needed. This is a Phase 1 prerequisite, not optional.
 
-### 5. Agent interaction model
+### 5. Agent interaction model (updated S97)
 
-- Dedicated `#ark` channel for agent conversations
+- Dedicated `#ark` channel for agent_007 (community manager) conversations — not Ark
+- **agent_007** handles all Discord interactions. Ark stays in DPC, does not spend context on Discord
 - **Whitelist enforcement:** Agent responds only in explicitly whitelisted channels (`allowed_channel_ids`) + DMs. @mention in non-whitelisted channels is silently ignored (same as Telegram `allowed_chat_ids` pattern)
-- Slash commands: `/ask`, `/status`, `/sleep`, `/extract_knowledge`, `/help`
+- **@mention only** — no slash commands (cancelled S97: `/ask`, `/status`, `/help` redundant with @mention)
 - Morning brief posted to configured `morning_brief_channel_id` (default: `#ark`) on wakeup, triggered by sleep consolidation pipeline
 - Sleep/event notifications via Discord embeds
+- **Multi-language:** agent_007 responds in user's language (system prompt instruction)
 
 ### 5a. Rate limit strategy
 
@@ -114,9 +116,9 @@ Voice channels deferred to v2 — fundamentally different from Telegram voice me
 - **Discord routing** — `discord.agent_id` in config to route Discord messages to agent_007 instead of auto-detect
 - **Group chat bridge** — new DPC group chat "dpc_discord" for mirroring Discord messages to team
 
-### Phase 1.5: agent_007 Setup (new, S97)
-- System prompt refactor: `memory/system_prompt.md` per-agent override
-- Create agent_007 with community manager system prompt
+### Phase 1.5: System Prompt + agent_007 (new, S97)
+- **Infrastructure (all agents):** System prompt refactor — `memory/system_prompt.md` per-agent override. Prerequisite for agent_007 and any future agent with custom prompt. Existing agents without file continue on hardcoded default.
+- **agent_007 setup:** Create agent with community manager system prompt
 - Knowledge scope: indexed_paths = ["docs/", "README.md", "ROADMAP.md", "CHANGELOG.md"] (public only)
 - Discord routing: config.ini `discord.agent_id = agent_007`
 - Multi-language: system prompt instruction "respond in user's language"
