@@ -42,6 +42,12 @@
   // or is 'cc' (Claude Code responses injected via @CC mentions).
   const isAiSender = (sender: string, msg?: any) => sender === 'ai' || sender === 'cc' || sender?.startsWith('agent_') || msg?.isAgent;
 
+  const truncateNodeId = (id: string) => {
+    const prefix = 'dpc-node-';
+    if (id.startsWith(prefix)) return prefix + id.slice(prefix.length, prefix.length + 8);
+    return id;
+  };
+
   // Debug: Log when progress props change
   $effect(() => {
     if (agentProgressTool || agentProgressMessage) {
@@ -118,11 +124,11 @@
             {:else}
               {#if conversationId.startsWith('group-')}
                 {#if msg.isAgent && msg.senderName}
-                  {msg.senderName} <span class="agent-badge">(agent{#if msg.agentOwner}, {msg.agentOwner.startsWith('dpc-node-') ? msg.agentOwner.slice(0, 17) : msg.agentOwner}{/if})</span>
+                  {msg.senderName} <span class="agent-badge" title={msg.agentOwner || ''}>(agent{#if msg.agentOwner}, {msg.agentOwner.startsWith('dpc-node-') ? truncateNodeId(msg.agentOwner) : msg.agentOwner}{/if})</span>
                 {:else}
                   {peerDisplayNames.get(msg.sender)?.split(' | ')[0] || msg.senderName || msg.sender}
                   {#if msg.sender && msg.sender.startsWith('dpc-node-') && msg.sender !== 'user'}
-                    <span class="node-id-badge">({msg.sender.slice(0, 17)})</span>
+                    <span class="node-id-badge" title={msg.sender}>({truncateNodeId(msg.sender)})</span>
                   {/if}
                 {/if}
               {:else}
