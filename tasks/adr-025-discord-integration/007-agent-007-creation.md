@@ -22,7 +22,7 @@ Create agent_007 as a dedicated community manager agent for Discord. Separate fr
 - Write system_prompt.md: community manager role, multi-language (respond in user's language), knowledge of public repo docs
 - Knowledge scope: `docs/`, `README.md`, `ROADMAP.md`, `CHANGELOG.md`, `VISION.md` (public only)
 - Configure Discord routing: `discord.agent_id = agent_007` in config.ini
-- Agent must NOT have access to private files (backlog.md, protocol-13.md, memory/)
+- Security boundary via configuration (not runtime enforcement): agent_007's `extended_sandbox_paths` whitelist includes ONLY public paths (`docs/`, `README.md`, etc.). Private files (backlog.md, protocol-13.md, memory/) are excluded by not being listed — this is configuration-level isolation, not a security boundary. Formal enforcement (firewall rules per agent) is a separate future task if needed.
 
 ## Done criteria
 

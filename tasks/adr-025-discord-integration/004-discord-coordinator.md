@@ -29,4 +29,4 @@ Create coordinators/discord_coordinator.py — bidirectional DPC ↔ Discord mes
 - Messages flow bidirectionally between DPC conversation and Discord channel
 - Files/images forwarded in both directions
 - New conversation creates Discord thread
-- Thread auto-archives after inactivity
+- Thread created per conversation, Discord default auto-archive applies

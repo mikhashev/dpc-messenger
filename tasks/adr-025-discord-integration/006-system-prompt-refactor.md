@@ -16,6 +16,7 @@ Add per-agent system prompt override via `memory/system_prompt.md` in each agent
 ## Implementation
 
 - In `build_llm_messages` (around line 539), check for `memory/system_prompt.md` in agent sandbox
+- Sandbox path: `build_llm_messages` already receives `self.agent` which has `self.agent.sandbox_dir` (Path). Read `self.agent.sandbox_dir / "memory" / "system_prompt.md"`.
 - If file exists and is non-empty, use its content as the system prompt (Block 1)
 - If file does not exist, fall back to `_default_system_prompt()` (current behavior)
 - No changes to existing agents needed
