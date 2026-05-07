@@ -118,7 +118,7 @@
             {:else}
               {#if conversationId.startsWith('group-')}
                 {#if msg.isAgent && msg.senderName}
-                  {msg.senderName} <span class="agent-badge">(agent{#if msg.agentOwner}, {msg.agentOwner}{/if})</span>
+                  {msg.senderName} <span class="agent-badge">(agent{#if msg.agentOwner}, {msg.agentOwner.startsWith('dpc-node-') ? msg.agentOwner.slice(0, 17) : msg.agentOwner}{/if})</span>
                 {:else}
                   {peerDisplayNames.get(msg.sender)?.split(' | ')[0] || msg.senderName || msg.sender}
                   {#if msg.sender && msg.sender.startsWith('dpc-node-') && msg.sender !== 'user'}

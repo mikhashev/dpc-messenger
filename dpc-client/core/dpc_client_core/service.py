@@ -4170,7 +4170,7 @@ class CoreService:
             "sender_node_id": node_id,
             "sender_name": agent_name,
             "sender_type": "agent",
-            "agent_owner": node_id,
+            "agent_owner": self.p2p_manager.get_display_name() or node_id,
             "message_id": message_id,
             "timestamp": timestamp,
             "mentions": [],
