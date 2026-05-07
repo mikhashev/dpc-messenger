@@ -1107,6 +1107,7 @@
   {processedMessageIds}
   chatWindow={chatWindow}
   {getPeerDisplayName}
+  selfNodeId={$nodeStatus?.node_id || ''}
   onUpdateTokenUsage={(chatId, usage) => {
     tokenUsageMap = new Map(tokenUsageMap);
     tokenUsageMap.set(chatId, usage);
@@ -1121,6 +1122,7 @@
   chatWindow={chatWindow ?? null}
   {processedMessageIds}
   {getPeerDisplayName}
+  selfNodeId={$nodeStatus?.node_id || ''}
   onAgentToast={(message, type) => {
     agentToastMessage = message;
     agentToastType = type;
