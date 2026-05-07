@@ -49,6 +49,17 @@ class GroupCreateHandler(MessageHandler):
                 "members": group.members,
             })
 
+            # Request conversation history from the sender (group creator/admin)
+            import uuid
+            await self.service.p2p_manager.send_message_to_peer(sender_node_id, {
+                "command": "REQUEST_CHAT_HISTORY",
+                "payload": {
+                    "conversation_id": group.group_id,
+                    "request_id": str(uuid.uuid4())[:8],
+                }
+            })
+            self.logger.info("Requested history for group %s from %s", group.group_id, sender_node_id[:16])
+
         return None
 
 

@@ -4227,6 +4227,34 @@ class CoreService:
                     "payload": group.to_dict()
                 })
 
+                # Send conversation history to the new member
+                conv_dir = self.group_manager._get_conversation_dir(group_id)
+                history_path = conv_dir / "history.json" if conv_dir else None
+                if history_path and history_path.exists():
+                    try:
+                        import json as _json
+                        with open(history_path, encoding="utf-8") as f:
+                            data = _json.load(f)
+                        messages = data.get("messages", [])
+                        if messages:
+                            await self.p2p_manager.send_message_to_peer(node_id, {
+                                "command": "CHAT_HISTORY_RESPONSE",
+                                "payload": {
+                                    "conversation_id": group_id,
+                                    "messages": messages,
+                                }
+                            })
+                            logger.info("Sent %d history messages to new member %s in group %s",
+                                        len(messages), node_id[:16], group_id)
+                    except Exception as e:
+                        logger.warning("Could not send history to new member: %s", e)
+
+            # Notify local UI to refresh group settings
+            await self.local_api.broadcast_event("group_updated", {
+                "group_id": group_id,
+                "group": group.to_dict(),
+            })
+
             return {"status": "success", "group": group.to_dict()}
         except Exception as e:
             logger.error("Error adding group member: %s", e, exc_info=True)

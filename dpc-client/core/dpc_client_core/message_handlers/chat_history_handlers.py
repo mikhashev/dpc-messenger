@@ -28,13 +28,18 @@ class RequestChatHistoryHandler(MessageHandler):
         conversation_id = payload.get("conversation_id")
         request_id = payload.get("request_id")
 
-        self.logger.info(f"Chat history request from {sender_node_id} (request_id: {request_id})")
+        self.logger.info(f"Chat history request from {sender_node_id} for {conversation_id} (request_id: {request_id})")
 
-        # Get conversation monitor for this peer
-        conversation_monitor = self.service.conversation_monitors.get(sender_node_id)
+        # For group chats, use conversation_id; for 1:1, use sender_node_id
+        monitor_key = conversation_id if conversation_id and conversation_id.startswith("group-") else sender_node_id
+        conversation_monitor = self.service.conversation_monitors.get(monitor_key)
+
+        if not conversation_monitor and monitor_key.startswith("group-"):
+            if hasattr(self.service, 'knowledge_service') and self.service.knowledge_service:
+                conversation_monitor = self.service.knowledge_service._get_or_create_conversation_monitor(monitor_key)
 
         if not conversation_monitor:
-            self.logger.warning(f"No conversation monitor found for {sender_node_id}")
+            self.logger.warning(f"No conversation monitor found for {monitor_key}")
             # Send empty response
             await self.service.p2p_manager.send_message_to_peer(sender_node_id, {
                 "command": "CHAT_HISTORY_RESPONSE",
@@ -91,13 +96,18 @@ class ChatHistoryResponseHandler(MessageHandler):
         messages = payload.get("messages", [])
         total_count = payload.get("total_count", 0)
 
-        self.logger.info(f"Received {total_count} messages from {sender_node_id} (request_id: {request_id})")
+        self.logger.info(f"Received {total_count} messages from {sender_node_id} for {conversation_id} (request_id: {request_id})")
 
-        # Get or create conversation monitor for this peer
-        conversation_monitor = self.service.conversation_monitors.get(sender_node_id)
+        # For group chats, use conversation_id from payload; for 1:1, use sender_node_id
+        monitor_key = conversation_id if conversation_id and conversation_id.startswith("group-") else sender_node_id
+        conversation_monitor = self.service.conversation_monitors.get(monitor_key)
+
+        if not conversation_monitor and monitor_key.startswith("group-"):
+            if hasattr(self.service, 'knowledge_service') and self.service.knowledge_service:
+                conversation_monitor = self.service.knowledge_service._get_or_create_conversation_monitor(monitor_key)
 
         if not conversation_monitor:
-            self.logger.warning(f"No conversation monitor found for {sender_node_id} - cannot import history")
+            self.logger.warning(f"No conversation monitor found for {monitor_key} - cannot import history")
             return None
 
         # Import history into conversation monitor
@@ -105,11 +115,11 @@ class ChatHistoryResponseHandler(MessageHandler):
 
         # Broadcast to UI for display
         await self.service.local_api.broadcast_event("history_restored", {
-            "conversation_id": sender_node_id,
+            "conversation_id": monitor_key,
             "message_count": len(messages),
             "messages": messages
         })
 
-        self.logger.info(f"Chat history restored: {len(messages)} messages from {sender_node_id}")
+        self.logger.info(f"Chat history restored: {len(messages)} messages for {monitor_key}")
 
         return None
