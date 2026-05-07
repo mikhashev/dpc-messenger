@@ -358,8 +358,34 @@ class GroupSyncHandler(MessageHandler):
                 "name": result.name,
                 "topic": result.topic,
                 "members": result.members,
+                "agents": result.agents,
                 "version": result.version,
             })
+
+        # Request history if we have no local messages for this group
+        if group_id:
+            conv_dir = self.service.group_manager._get_conversation_dir(group_id)
+            history_path = conv_dir / "history.json" if conv_dir else None
+            needs_history = not history_path or not history_path.exists()
+            if not needs_history and history_path and history_path.exists():
+                try:
+                    import json as _json
+                    with open(history_path, encoding="utf-8") as f:
+                        data = _json.load(f)
+                    needs_history = len(data.get("messages", [])) == 0
+                except Exception:
+                    needs_history = True
+
+            if needs_history:
+                import uuid
+                await self.service.p2p_manager.send_message_to_peer(sender_node_id, {
+                    "command": "REQUEST_CHAT_HISTORY",
+                    "payload": {
+                        "conversation_id": group_id,
+                        "request_id": str(uuid.uuid4())[:8],
+                    }
+                })
+                self.logger.info("Requested history for group %s from %s (local history empty)", group_id, sender_node_id[:16])
 
         return None
 
