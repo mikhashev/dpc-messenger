@@ -158,7 +158,7 @@
         if (seenAgents.has(agentId)) continue;
         seenAgents.add(agentId);
         const localAgent = $agentsList.find((a: any) => a.agent_id === agentId);
-        const agentName = localAgent?.name || group.agent_names?.[agentId] || agentId;
+        const agentName = localAgent?.name || (group.agent_names as any)?.[nodeId]?.[agentId] || agentId;
         result.push({ node_id: agentId, name: `${agentName} (${ownerName})`, mention_name: agentName });
       }
     }

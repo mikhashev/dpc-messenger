@@ -28,7 +28,7 @@ class GroupMetadata:
     created_at: str = ""
     members: List[str] = field(default_factory=list)
     agents: Dict[str, List[str]] = field(default_factory=dict)
-    agent_names: Dict[str, str] = field(default_factory=dict)
+    agent_names: Dict[str, Dict[str, str]] = field(default_factory=dict)
     version: int = 1
 
     def to_dict(self) -> Dict[str, Any]:
@@ -349,7 +349,7 @@ class GroupManager:
             return
         group.agents[node_id] = agent_ids
         if agent_names:
-            group.agent_names.update(agent_names)
+            group.agent_names[node_id] = agent_names
         self._save_group(group_id)
 
     def get_group(self, group_id: str) -> Optional[GroupMetadata]:
