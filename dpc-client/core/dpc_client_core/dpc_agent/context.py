@@ -339,7 +339,13 @@ def build_llm_messages(
 
     # --- Build system prompt ---
     if system_prompt is None:
-        system_prompt = _default_system_prompt()
+        custom_prompt_path = agent_root / "memory" / "system_prompt.md"
+        if custom_prompt_path.exists():
+            custom_text = read_text(custom_prompt_path).strip()
+            if custom_text:
+                system_prompt = custom_text
+        if system_prompt is None:
+            system_prompt = _default_system_prompt()
 
     # --- Assemble sections ---
     static_text = system_prompt
