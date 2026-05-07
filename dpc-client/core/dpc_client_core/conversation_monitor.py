@@ -1903,11 +1903,22 @@ PARTICIPANTS' CULTURAL CONTEXTS:
             Path to ~/.dpc/conversations/{conversation_id}-{slug}/
             Falls back to ~/.dpc/conversations/{conversation_id}/ if no display_name.
             Auto-migrates old unnamed folder to new named folder on first access.
+            For groups: discovers existing slugged directory even if display_name wasn't
+            set at monitor creation time (fixes duplicate directory bug).
         """
         base = Path.home() / ".dpc" / "conversations"
         folder = self._get_folder_name()
         new_dir = base / folder
         old_dir = base / self.conversation_id
+        # If no display_name for a group, check if a slugged dir already exists on disk
+        if folder == self.conversation_id and self.conversation_id.startswith("group-") and base.exists():
+            prefix = self.conversation_id + "-"
+            for d in base.iterdir():
+                if d.is_dir() and d.name.startswith(prefix):
+                    self.display_name = d.name[len(prefix):]
+                    logger.info("Discovered slugged dir for %s: %s", self.conversation_id, d.name)
+                    new_dir = d
+                    break
         if folder != self.conversation_id and old_dir.exists() and not new_dir.exists():
             try:
                 old_dir.rename(new_dir)
