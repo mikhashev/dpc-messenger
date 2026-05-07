@@ -61,11 +61,12 @@ class DiscordService:
                     str(message.channel.id), "Agent not available."
                 )
                 return
-            agents_dir = getattr(self._core, 'settings', None)
-            from pathlib import Path
-            dpc_home = Path.home() / ".dpc"
-            agent_dirs = sorted((dpc_home / "agents").iterdir()) if (dpc_home / "agents").exists() else []
-            agent_id = agent_dirs[0].name if agent_dirs else None
+            agent_id = self._settings.get("discord", "agent_id", fallback=None)
+            if not agent_id:
+                from pathlib import Path
+                dpc_home = Path.home() / ".dpc"
+                agent_dirs = sorted((dpc_home / "agents").iterdir()) if (dpc_home / "agents").exists() else []
+                agent_id = agent_dirs[0].name if agent_dirs else None
             if not agent_id:
                 await self.discord_manager.send_message(str(message.channel.id), "No agents configured.")
                 return
