@@ -152,11 +152,13 @@
     }
     const seenAgents = new Set<string>();
     for (const [nodeId, agentIds] of Object.entries(group.agents || {})) {
+      const ownerName = nodeId === selfId ? 'You' : (peerDisplayNames.get(nodeId)?.split(' | ')[0] || nodeId.substring(0, 12));
       for (const agentId of (agentIds as string[])) {
         if (seenAgents.has(agentId)) continue;
         seenAgents.add(agentId);
         const localAgent = $agentsList.find((a: any) => a.agent_id === agentId);
-        result.push({ node_id: agentId, name: localAgent?.name || agentId.replace('agent_', 'Agent ') });
+        const agentName = localAgent?.name || group.agent_names?.[agentId] || agentId;
+        result.push({ node_id: agentId, name: `${agentName} (${ownerName})` });
       }
     }
     return result;

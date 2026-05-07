@@ -28,6 +28,7 @@ class GroupMetadata:
     created_at: str = ""
     members: List[str] = field(default_factory=list)
     agents: Dict[str, List[str]] = field(default_factory=dict)
+    agent_names: Dict[str, str] = field(default_factory=dict)
     version: int = 1
 
     def to_dict(self) -> Dict[str, Any]:
@@ -43,6 +44,7 @@ class GroupMetadata:
             created_at=data.get("created_at", ""),
             members=data.get("members", []),
             agents=data.get("agents", {}),
+            agent_names=data.get("agent_names", {}),
             version=data.get("version", 1),
         )
 
@@ -339,12 +341,15 @@ class GroupManager:
         logger.info("Created group '%s' (%s) with %d members", name, group_id, len(members))
         return group
 
-    def set_node_agents(self, group_id: str, node_id: str, agent_ids: List[str]):
+    def set_node_agents(self, group_id: str, node_id: str, agent_ids: List[str],
+                        agent_names: Dict[str, str] = None):
         """Set the list of agents a node has in this group."""
         group = self._groups.get(group_id)
         if not group:
             return
         group.agents[node_id] = agent_ids
+        if agent_names:
+            group.agent_names.update(agent_names)
         self._save_group(group_id)
 
     def get_group(self, group_id: str) -> Optional[GroupMetadata]:

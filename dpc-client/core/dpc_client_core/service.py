@@ -3920,10 +3920,12 @@ class CoreService:
             if self.agent_service:
                 try:
                     result = await self.agent_service.list_agents()
-                    agent_ids = [a["agent_id"] for a in result.get("agents", [])]
+                    agents = result.get("agents", [])
+                    agent_ids = [a["agent_id"] for a in agents]
+                    agent_names = {a["agent_id"]: a.get("name", a["agent_id"]) for a in agents}
                     if agent_ids:
                         self.group_manager.set_node_agents(
-                            group.group_id, self.p2p_manager.node_id, agent_ids
+                            group.group_id, self.p2p_manager.node_id, agent_ids, agent_names
                         )
                 except Exception:
                     pass
@@ -3947,8 +3949,14 @@ class CoreService:
     async def set_group_agents(self, group_id: str, agent_ids: list = None) -> Dict[str, Any]:
         """Set which agents from this node participate in a group."""
         try:
+            agent_names = {}
+            if agent_ids and self.agent_service:
+                result = await self.agent_service.list_agents()
+                for a in result.get("agents", []):
+                    if a["agent_id"] in agent_ids:
+                        agent_names[a["agent_id"]] = a.get("name", a["agent_id"])
             self.group_manager.set_node_agents(
-                group_id, self.p2p_manager.node_id, agent_ids or []
+                group_id, self.p2p_manager.node_id, agent_ids or [], agent_names
             )
             return {"status": "success"}
         except Exception as e:
