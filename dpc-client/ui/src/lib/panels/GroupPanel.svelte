@@ -150,10 +150,13 @@
         }
       }
     }
-    const allowedAgents = group.agents?.[selfId] || [];
-    for (const agent of $agentsList) {
-      if (allowedAgents.includes(agent.agent_id)) {
-        result.push({ node_id: agent.agent_id, name: agent.name });
+    const seenAgents = new Set<string>();
+    for (const [nodeId, agentIds] of Object.entries(group.agents || {})) {
+      for (const agentId of (agentIds as string[])) {
+        if (seenAgents.has(agentId)) continue;
+        seenAgents.add(agentId);
+        const localAgent = $agentsList.find((a: any) => a.agent_id === agentId);
+        result.push({ node_id: agentId, name: localAgent?.name || agentId.replace('agent_', 'Agent ') });
       }
     }
     return result;

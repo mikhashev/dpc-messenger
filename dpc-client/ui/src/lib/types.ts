@@ -146,6 +146,7 @@ export interface GroupChat {
     topic?: string;
     created_by: string;
     members: string[];         // node_ids
+    agents?: Record<string, string[]>; // node_id -> agent_ids
     version?: number;
 }
 
