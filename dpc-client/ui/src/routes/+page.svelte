@@ -764,9 +764,14 @@
     showNewSessionConfirm = true;
   }
 
-  function confirmNewSession() {
+  async function confirmNewSession() {
     if (pendingNewSessionChatId) {
-      proposeNewSession(pendingNewSessionChatId);
+      const result = await proposeNewSession(pendingNewSessionChatId);
+      if (result?.status === 'error') {
+        commitResultMessage = result.message || 'Failed to start new session';
+        commitResultType = 'error';
+        showCommitResultToast = true;
+      }
     }
     showNewSessionConfirm = false;
     pendingNewSessionChatId = null;
