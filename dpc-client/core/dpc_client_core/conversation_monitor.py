@@ -1757,10 +1757,9 @@ PARTICIPANTS' CULTURAL CONTEXTS:
             }
             if "attachments" in msg:
                 exported_msg["attachments"] = msg["attachments"]
-            if "sender_node_id" in msg:
-                exported_msg["sender_node_id"] = msg["sender_node_id"]
-            if "sender_name" in msg:
-                exported_msg["sender_name"] = msg["sender_name"]
+            for field in ("sender_node_id", "sender_name", "sender_type", "agent_owner", "isAgent"):
+                if field in msg:
+                    exported_msg[field] = msg[field]
             exported.append(exported_msg)
 
         logger.info(f"Exported {len(exported)} messages from conversation history")
@@ -1787,27 +1786,30 @@ PARTICIPANTS' CULTURAL CONTEXTS:
         import uuid
 
         for msg in messages:
-            # 1. Add to message_history (original format)
+            # 1. Add to message_history preserving all sender metadata
             imported_msg = {
                 "role": msg.get("role", "user"),
                 "content": msg.get("content", "")
             }
+            for field in ("sender_name", "sender_node_id", "sender_type", "agent_owner",
+                          "timestamp", "id", "isAgent"):
+                if field in msg:
+                    imported_msg[field] = msg[field]
             if "attachments" in msg:
-                # Fix file paths in attachments (convert peer's paths to local paths)
                 imported_msg["attachments"] = self._remap_attachment_paths(msg["attachments"])
             self.message_history.append(imported_msg)
 
-            # 2. Also create Message objects for extraction buffers (v0.14.0 fix)
-            # Map role to sender info
-            role = msg.get("role", "user")
-            if role == "user":
-                # User is the local node (first participant is always self)
-                sender_node_id = self.participants[0]["node_id"] if self.participants else "local"
-                sender_name = self.participants[0]["name"] if self.participants else "You"
-            else:  # role == "assistant" or "peer"
-                # Assistant/peer is the conversation partner (second participant)
-                sender_node_id = self.participants[1]["node_id"] if len(self.participants) > 1 else "peer"
-                sender_name = self.participants[1]["name"] if len(self.participants) > 1 else "Peer"
+            # 2. Also create Message objects for extraction buffers
+            sender_node_id = msg.get("sender_node_id") or (
+                self.participants[0]["node_id"] if self.participants else "local"
+            ) if msg.get("role") == "user" else msg.get("sender_node_id") or (
+                self.participants[1]["node_id"] if len(self.participants) > 1 else "peer"
+            )
+            sender_name = msg.get("sender_name") or (
+                self.participants[0]["name"] if self.participants else "You"
+            ) if msg.get("role") == "user" else msg.get("sender_name") or (
+                self.participants[1]["name"] if len(self.participants) > 1 else "Peer"
+            )
 
             # Create Message object (same as add_message() does)
             message_obj = Message(
