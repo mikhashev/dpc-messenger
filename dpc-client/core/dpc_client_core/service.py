@@ -4109,7 +4109,7 @@ class CoreService:
                 return
             if not agent_id:
                 agent_id = self._get_default_agent_id()
-            manager = dpc_provider.get_manager(agent_id)
+            manager = await dpc_provider._ensure_manager(agent_id)
 
             # Build prompt with full group history for context
             history_lines = []
