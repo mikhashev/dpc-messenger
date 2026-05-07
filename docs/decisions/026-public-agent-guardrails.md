@@ -2,7 +2,7 @@
 
 **Status:** Proposed
 **Date:** 2026-05-08
-**Authors:** Ark (architecture), CC (implementation), Mike (decision)
+**Authors:** Ark (architecture), CC (implementation), Iris (agent perspective), Mike (decision)
 **Depends on:** ADR-024 (Knowledge Graph), ADR-025 (Discord Integration)
 
 ## Context
@@ -24,17 +24,17 @@ Agents receive a restricted tool set when the message originates from an externa
 
 **Mechanism:**
 - `discord_manager` tags each message with `source: "discord"` in metadata
-- Agent tool list is built from the existing 3-layer firewall whitelist
-- A source-based filter removes write/destructive tools when `source != "local"`
-- Restricted tools (configurable, not hardcoded): write_file, update_identity, repo_delete, git_commit, repo_write, shell_exec
+- For external sources: only **whitelisted read-only tools** are available (whitelist approach, not blacklist — new tools are blocked by default)
+- Read-only tools allowed from Discord: memory_search, browse_page, search_web, read_file, list_my_tools, knowledge_list
+- Write/mutating tools (write_file, update_identity, repo_delete, git_commit, etc.) are excluded for external sources
 
 **Configuration:**
 ```ini
 [discord.guardrails]
-restricted_tools = write_file,update_identity,repo_delete,git_commit,repo_write,shell_exec
+allowed_tools = memory_search,browse_page,search_web,read_file,list_my_tools,knowledge_list
 ```
 
-**Why code-level, not prompt-level:** Code enforcement cannot be bypassed by prompt injection. System prompt reinforcement ("never modify your configuration") serves as a secondary defense layer in Block1.
+**Defense in depth:** The agent firewall already restricts dangerous tools for Iris (drive_list, import_skill_from_agent, repo_commit_push, run_shell are disabled). Source-based filtering is an additional layer — even if firewall config drifts, Discord-sourced messages still can't trigger write tools. Code enforcement cannot be bypassed by prompt injection. System prompt reinforcement ("never modify your configuration") serves as a third defense layer in Block1.
 
 ### 2. URL Whitelist for User-Submitted Content
 
@@ -43,13 +43,14 @@ URLs in Discord user messages are validated against a configurable whitelist bef
 **Mechanism:**
 - Extract URLs from incoming Discord message text
 - Check domain against whitelist
-- Replace non-whitelisted URLs with a placeholder: `[URL removed — not in whitelist]`
+- For non-whitelisted URLs: agent responds "I can't follow external links directly, but I can search for information about [topic]" and uses search_web instead
 - Agent's own web search/browse tools are unrestricted (agent-initiated, not user-supplied)
+- Additional domains can be added to whitelist via config as community grows
 
 **Configuration:**
 ```ini
 [discord.guardrails]
-url_whitelist = github.com/mikhashev/*,docs.dpc-messenger.org/*
+url_whitelist = github.com/mikhashev/*
 ```
 
 ### 3. Per-User Conversation Lifecycle
@@ -71,10 +72,12 @@ Each Discord user gets a dedicated conversation with TTL-based lifecycle managem
 
 **Layer 3: Long-term memory via Knowledge Graph (ADR-024)**
 - On conversation expiration (TTL or limit): extract key facts to knowledge graph
-- Entity extraction via existing GLiNER + LLM pipeline
+- Entity extraction is lightweight (GLiNER NER, not full LLM call) to keep cost manageable at scale
+- On expiry: save `last_topic` (user's last message) as context node — enables "I remember you asked about X" on return
 - `discord_user_id` stored as metadata on graph nodes/edges
 - On next interaction: Active Recall loads relevant subgraph for that user
 - Cross-user analytics: popular topics, FAQ patterns (aggregated, no PII)
+- TTL cleanup physically deletes expired conversation files
 
 **Configuration:**
 ```ini
@@ -82,6 +85,7 @@ Each Discord user gets a dedicated conversation with TTL-based lifecycle managem
 ttl_minutes = 30
 max_messages = 50
 extract_on_expiry = true
+cleanup_expired = true
 ```
 
 ## Not in Scope
