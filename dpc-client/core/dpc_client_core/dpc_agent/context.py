@@ -338,12 +338,21 @@ def build_llm_messages(
     memory.ensure_files()
 
     # --- Build system prompt ---
+    MAX_SYSTEM_PROMPT_BYTES = 100_000
     if system_prompt is None:
         custom_prompt_path = agent_root / "memory" / "system_prompt.md"
         if custom_prompt_path.exists():
-            custom_text = read_text(custom_prompt_path).strip()
-            if custom_text:
-                system_prompt = custom_text
+            try:
+                size = custom_prompt_path.stat().st_size
+                if size > MAX_SYSTEM_PROMPT_BYTES:
+                    log.warning("system_prompt.md too large (%d bytes, limit %d) — using default",
+                                size, MAX_SYSTEM_PROMPT_BYTES)
+                else:
+                    custom_text = read_text(custom_prompt_path).strip()
+                    if custom_text:
+                        system_prompt = custom_text
+            except OSError as e:
+                log.warning("Failed to read system_prompt.md: %s — using default", e)
         if system_prompt is None:
             system_prompt = _default_system_prompt()
 
