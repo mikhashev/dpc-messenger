@@ -137,16 +137,17 @@
   // Mention autocomplete (moved from ChatPanel)
   // ---------------------------------------------------------------------------
 
-  function getMentionableMembers(): Array<{ node_id: string; name: string }> {
+  function getMentionableMembers(): Array<{ node_id: string; name: string; mention_name: string }> {
     if (!activeChatId.startsWith('group-')) return [];
     const group = $groupChats.get(activeChatId);
     if (!group) return [];
     const selfId = $nodeStatus?.node_id || '';
-    const result: Array<{ node_id: string; name: string }> = [];
+    const result: Array<{ node_id: string; name: string; mention_name: string }> = [];
     if (group.members) {
       for (const nodeId of group.members) {
         if (nodeId !== selfId) {
-          result.push({ node_id: nodeId, name: peerDisplayNames.get(nodeId)?.split(' | ')[0] || nodeId });
+          const peerName = peerDisplayNames.get(nodeId)?.split(' | ')[0] || nodeId;
+          result.push({ node_id: nodeId, name: peerName, mention_name: peerName });
         }
       }
     }
@@ -158,7 +159,7 @@
         seenAgents.add(agentId);
         const localAgent = $agentsList.find((a: any) => a.agent_id === agentId);
         const agentName = localAgent?.name || group.agent_names?.[agentId] || agentId;
-        result.push({ node_id: agentId, name: `${agentName} (${ownerName})` });
+        result.push({ node_id: agentId, name: `${agentName} (${ownerName})`, mention_name: agentName });
       }
     }
     return result;
@@ -191,11 +192,11 @@
     mentionAutocompleteVisible = false;
   }
 
-  function handleMentionSelect(member: { node_id: string; name: string }) {
+  function handleMentionSelect(member: { node_id: string; name: string; mention_name: string }) {
     const currentInput = getCurrentInput();
     const before = currentInput.slice(0, mentionStartPosition);
     const after = currentInput.slice(mentionStartPosition + mentionQuery.length + 1);
-    onSetCurrentInput(`${before}@${member.name} ${after}`);
+    onSetCurrentInput(`${before}@${member.mention_name} ${after}`);
     mentionAutocompleteVisible = false;
     mentionSelectedIndex = 0;
   }
