@@ -3717,11 +3717,17 @@ class CoreService:
             # For agent monitors, stored in _last_context_estimated.
             # For local AI monitors, current_token_count = prompt_tokens (already the full context).
             context_estimated = getattr(monitor, '_last_context_estimated', 0) or token_usage.get("tokens_used", 0)
+            # For group chats, current_token_count may be 0 (no LLM calls update it).
+            # Use history_tokens as the floor to keep the UI counter accurate.
+            tokens_used = token_usage.get("tokens_used", 0)
+            if conversation_id.startswith("group-") and tokens_used < history_tokens:
+                tokens_used = history_tokens
+                monitor.set_token_count(history_tokens)
             return {
                 "status": "success",
                 "messages": messages,
                 "message_count": len(messages),
-                "tokens_used": token_usage.get("tokens_used", 0),
+                "tokens_used": tokens_used,
                 "token_limit": token_usage.get("token_limit", 0),
                 "history_tokens": history_tokens,
                 "context_estimated": context_estimated,
@@ -4050,12 +4056,13 @@ class CoreService:
             # Detect @agent mentions and route to Ark / CC
             await self._handle_group_agent_mentions(group_id, text, sender_name)
 
-            token_usage = monitor.get_token_usage()
             history_tokens = sum(len(m.get("content", "") or "") for m in monitor.get_message_history()) // 4
+            monitor.set_token_count(history_tokens)
+            token_usage = monitor.get_token_usage()
             return {
                 "status": "success",
                 "message_id": message_id,
-                "tokens_used": token_usage.get("tokens_used", 0),
+                "tokens_used": history_tokens,
                 "token_limit": token_usage.get("token_limit", 0) or 128000,
                 "history_tokens": history_tokens,
                 "context_estimated": 0,
@@ -4206,6 +4213,18 @@ class CoreService:
             agent_owner=self.p2p_manager.node_id,
         ))
         monitor.save_history()
+
+        # Update token count so UI counter stays in sync
+        history_tokens = sum(len(m.get("content", "") or "") for m in monitor.get_message_history()) // 4
+        monitor.set_token_count(history_tokens)
+        token_usage = monitor.get_token_usage()
+        await self.local_api.broadcast_event("token_usage_updated", {
+            "conversation_id": group_id,
+            "tokens_used": history_tokens,
+            "token_limit": token_usage.get("token_limit", 0) or 128000,
+            "history_tokens": history_tokens,
+            "context_estimated": 0,
+        })
 
         # Route @mentions from agent messages (enables CC→Ark and Ark→CC communication)
         await self._handle_group_agent_mentions(group_id, text, agent_name)
