@@ -118,9 +118,12 @@
             {:else}
               {#if conversationId.startsWith('group-')}
                 {#if msg.isAgent && msg.senderName}
-                  {msg.senderName} <span class="agent-badge">(agent)</span>
+                  {msg.senderName} <span class="agent-badge">(agent{#if msg.agentOwner}, {msg.agentOwner}{/if})</span>
                 {:else}
                   {peerDisplayNames.get(msg.sender)?.split(' | ')[0] || msg.senderName || msg.sender}
+                  {#if msg.sender && msg.sender.startsWith('dpc-node-') && msg.sender !== 'user'}
+                    <span class="node-id-badge">({msg.sender.slice(0, 17)})</span>
+                  {/if}
                 {/if}
               {:else}
                 {msg.senderName || msg.sender}
@@ -577,5 +580,11 @@
     font-size: 0.75em;
     color: #888;
     font-weight: normal;
+  }
+  .node-id-badge {
+    font-size: 0.7em;
+    color: #999;
+    font-weight: normal;
+    margin-left: 4px;
   }
 </style>

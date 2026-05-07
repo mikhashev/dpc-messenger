@@ -64,6 +64,7 @@ export type Message = {
   attachments?: MessageAttachment[];
   isError?: boolean;           // Error message styling (v0.19.2+)
   isAgent?: boolean;           // Agent message in group chat (v0.25.0+)
+  agentOwner?: string | null;
 };
 
 // --- Provider System ---

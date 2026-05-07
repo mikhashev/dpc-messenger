@@ -96,6 +96,7 @@
                     timestamp: timestamp,
                     attachments: msg.attachments || [],
                     isAgent: isAgent,
+                    agentOwner: msg.agent_owner || null,
                   };
                 });
                 // Populate processedMessageIds so real-time events for these messages are deduped

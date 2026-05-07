@@ -98,6 +98,7 @@
                     timestamp: new Date(msg.timestamp).getTime() || Date.now() - (response.messages.length - index) * 1000,
                     attachments: msg.attachments || [],
                     isAgent: isAgent,
+                    agentOwner: msg.agent_owner || null,
                   };
                 });
 
