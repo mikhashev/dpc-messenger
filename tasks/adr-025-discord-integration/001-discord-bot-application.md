@@ -1,6 +1,6 @@
 # Task 001: Discord Bot Application Setup (Phase 1 prerequisite)
 
-**Status:** TODO
+**Status:** DONE (S97)
 **Phase:** 1
 **Effort:** Zero code — manual setup
 **Depends on:** Task 000

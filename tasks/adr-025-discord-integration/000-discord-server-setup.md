@@ -1,6 +1,6 @@
 # Task 000: Discord Server Setup (Phase 0)
 
-**Status:** TODO
+**Status:** DONE (S97)
 **Phase:** 0
 **Effort:** Zero code — manual setup
 **Depends on:** Nothing

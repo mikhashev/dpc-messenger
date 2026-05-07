@@ -1,6 +1,6 @@
 # Task 002: DiscordService + DiscordBotManager (Phase 1)
 
-**Status:** TODO
+**Status:** DONE (S97, commit 1b0d66a)
 **Phase:** 1
 **Effort:** ~150 lines
 **Depends on:** Task 001

@@ -1,6 +1,6 @@
 # Task 003: AgentDiscordBridge (Phase 1)
 
-**Status:** TODO
+**Status:** DONE (S97, commit 30aeea9) — slash commands cancelled per S97 decision
 **Phase:** 1
 **Effort:** ~200 lines
 **Depends on:** Task 002
