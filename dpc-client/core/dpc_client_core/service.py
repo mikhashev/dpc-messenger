@@ -4077,17 +4077,16 @@ class CoreService:
         node_id = self.p2p_manager.node_id
         allowed_agents = set(group.agents.get(node_id, [])) if group else set()
 
-        # Check if any mention matches agent name or agent_id
-        agent_id = self._get_default_agent_id()
-        agent_name = self._get_agent_display_name(agent_id).lower()
+        # Check if any mention matches an allowed agent's name or id
         sender_lower = sender_name.lower() if sender_name else ""
-        if (agent_name in mentions or agent_id in mentions) and agent_name != sender_lower:
-            if agent_id in allowed_agents:
-                matched = agent_name if agent_name in mentions else agent_id
-                logger.info("Group @%s mention detected — invoking agent in group %s", matched, group_id)
-                asyncio.ensure_future(self._invoke_agent_in_group(group_id, text, sender_name))
-            else:
-                logger.debug("Group @%s mention skipped — agent %s not in metadata.agents for %s", agent_name, agent_id, group_id)
+        for aid in allowed_agents:
+            aname = self._get_agent_display_name(aid).lower()
+            if aname == sender_lower:
+                continue
+            if aname in mentions or aid in mentions:
+                matched = aname if aname in mentions else aid
+                logger.info("Group @%s mention detected — invoking agent %s in group %s", matched, aid, group_id)
+                asyncio.ensure_future(self._invoke_agent_in_group(group_id, text, sender_name, aid))
 
         cc_name = self.get_cc_display_name().lower()
         if cc_name in mentions and cc_name != sender_lower:
@@ -4100,15 +4099,16 @@ class CoreService:
             })
 
     async def _invoke_agent_in_group(
-        self, group_id: str, text: str, sender_name: str
+        self, group_id: str, text: str, sender_name: str, agent_id: str = None
     ) -> None:
-        """Invoke the default agent and post its response to the group."""
+        """Invoke a specific agent and post its response to the group."""
         try:
             dpc_provider = self.llm_manager.providers.get("dpc_agent")
             if not dpc_provider:
                 logger.warning("_invoke_agent_in_group: dpc_agent provider not found")
                 return
-            agent_id = self._get_default_agent_id()
+            if not agent_id:
+                agent_id = self._get_default_agent_id()
             manager = dpc_provider.get_manager(agent_id)
 
             # Build prompt with full group history for context
