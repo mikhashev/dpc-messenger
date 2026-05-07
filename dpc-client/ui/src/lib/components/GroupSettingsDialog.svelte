@@ -79,22 +79,37 @@
     dispatch('removeMember', { group_id: group?.group_id, node_id: nodeId });
   }
 
+  let localAgentIds: string[] = [];
+  let agentsDirty = false;
+
+  $: if (open && group) {
+    localAgentIds = [...(group.agents?.[selfNodeId] || [])];
+    agentsDirty = false;
+  }
+
   function isAgentEnabled(agentId: string): boolean {
-    const nodeList = group?.agents?.[selfNodeId] || [];
-    return nodeList.includes(agentId);
+    return localAgentIds.includes(agentId);
   }
 
   function toggleAgent(agentId: string) {
+    if (localAgentIds.includes(agentId)) {
+      localAgentIds = localAgentIds.filter(id => id !== agentId);
+    } else {
+      localAgentIds = [...localAgentIds, agentId];
+    }
+    const saved = group?.agents?.[selfNodeId] || [];
+    agentsDirty = JSON.stringify([...localAgentIds].sort()) !== JSON.stringify([...saved].sort());
+  }
+
+  function saveAgents() {
     if (!group) return;
-    const current = group.agents?.[selfNodeId] || [];
-    const updated = current.includes(agentId)
-      ? current.filter(id => id !== agentId)
-      : [...current, agentId];
-    dispatch('updateAgents', { group_id: group.group_id, agent_ids: updated });
+    dispatch('updateAgents', { group_id: group.group_id, agent_ids: localAgentIds });
+    agentsDirty = false;
   }
 
   function handleClose() {
     showAddMember = false;
+    agentsDirty = false;
     open = false;
   }
 </script>
@@ -246,6 +261,13 @@
             </div>
           </div>
         {/if}
+
+        <!-- Save Button -->
+        {#if agentsDirty}
+          <div class="save-row">
+            <button class="btn-save" on:click={saveAgents}>Save</button>
+          </div>
+        {/if}
       </div>
     </div>
   </div>
@@ -361,6 +383,27 @@
   .btn-add:hover {
     background: #313244;
     border-color: #89b4fa;
+  }
+
+  .save-row {
+    display: flex;
+    justify-content: flex-end;
+    padding: 8px 0 0;
+  }
+
+  .btn-save {
+    padding: 8px 24px;
+    border: none;
+    border-radius: 6px;
+    background: #89b4fa;
+    color: #1e1e2e;
+    cursor: pointer;
+    font-size: 0.85rem;
+    font-weight: 600;
+  }
+
+  .btn-save:hover {
+    background: #74c7ec;
   }
 
   .add-member-panel {
