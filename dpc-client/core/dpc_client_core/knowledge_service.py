@@ -368,6 +368,29 @@ class KnowledgeService:
                         conversation_id,
                         len(self.conversation_monitors[conversation_id].message_history),
                     )
+                # Set token_limit to max context window among agents in the group
+                if group and self.llm_manager:
+                    max_ctx = 0
+                    node_id = getattr(self.p2p_manager, "node_id", None)
+                    for aid in group.agents.get(node_id, []):
+                        try:
+                            from .dpc_agent.utils import load_agent_config
+                            cfg = load_agent_config(aid) or {}
+                            ctx = cfg.get("context_window", 0)
+                            if not ctx:
+                                pa = cfg.get("provider_alias")
+                                if pa and pa in self.llm_manager.providers:
+                                    model = self.llm_manager.providers[pa].model
+                                    ctx = self.llm_manager.get_context_window(model) or 0
+                            max_ctx = max(max_ctx, ctx)
+                        except Exception:
+                            pass
+                    if not max_ctx:
+                        model = self.llm_manager.get_active_model_name()
+                        max_ctx = self.llm_manager.get_context_window(model) or 0
+                    if max_ctx > 0:
+                        self.conversation_monitors[conversation_id].set_token_limit(max_ctx)
+                        logger.info("Group %s token_limit set to %d (max agent context)", conversation_id, max_ctx)
 
             logger.info(
                 "Created conversation monitor for %s with %d participant(s) "
