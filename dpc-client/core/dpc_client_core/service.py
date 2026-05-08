@@ -4059,11 +4059,19 @@ class CoreService:
             history_tokens = sum(len(m.get("content", "") or "") for m in monitor.get_message_history()) // 4
             monitor.set_token_count(history_tokens)
             token_usage = monitor.get_token_usage()
+            token_limit = token_usage.get("token_limit", 0) or 128000
+            await self.local_api.broadcast_event("token_usage_updated", {
+                "conversation_id": group_id,
+                "tokens_used": history_tokens,
+                "token_limit": token_limit,
+                "history_tokens": history_tokens,
+                "context_estimated": 0,
+            })
             return {
                 "status": "success",
                 "message_id": message_id,
                 "tokens_used": history_tokens,
-                "token_limit": token_usage.get("token_limit", 0) or 128000,
+                "token_limit": token_limit,
                 "history_tokens": history_tokens,
                 "context_estimated": 0,
             }

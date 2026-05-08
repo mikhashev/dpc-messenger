@@ -10,6 +10,7 @@
     extractionFailure,
     contextUpdated,
     peerContextUpdated,
+    tokenUsageUpdated,
   } from '$lib/coreService';
   import { showNotificationIfBackground } from '$lib/notificationService';
 
@@ -71,6 +72,19 @@
       onShowTokenWarning(
         `Context window ${Math.round(usage_percent * 100)}% full. Consider ending session to save knowledge.`
       );
+    }
+  });
+
+  // Handle token usage updates (group chat counter)
+  $effect(() => {
+    if ($tokenUsageUpdated) {
+      const { conversation_id, tokens_used, token_limit, history_tokens, context_estimated } = $tokenUsageUpdated;
+      onUpdateTokenUsage(conversation_id, {
+        used: tokens_used,
+        limit: token_limit,
+        historyTokens: history_tokens ?? 0,
+        contextEstimated: context_estimated ?? 0,
+      });
     }
   });
 
