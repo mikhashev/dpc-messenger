@@ -193,7 +193,14 @@ def _collect_group_archive_digests(
                 return digests
         except (json.JSONDecodeError, OSError):
             pass
-    group_id = group_dir.name.split("-", 2)[0] + "-" + group_dir.name.split("-", 2)[1] if "-" in group_dir.name else group_dir.name
+    if metadata_path.exists():
+        try:
+            _meta = json.loads(metadata_path.read_text(encoding="utf-8"))
+            group_id = _meta.get("group_id", group_dir.name)
+        except (json.JSONDecodeError, OSError):
+            group_id = group_dir.name
+    else:
+        group_id = group_dir.name
     for archive_path in sorted(archive_dir.rglob("*.json")):
         try:
             data = json.loads(archive_path.read_text(encoding="utf-8"))

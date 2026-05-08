@@ -6630,14 +6630,21 @@ class CoreService:
         except Exception as e:
             logger.debug("Failed to emit sleep event: %s", e)
 
+    @staticmethod
+    def _find_group_dir(group_id: str) -> Optional[Path]:
+        """Find group conversation directory by ID. Tries exact match first, then prefix."""
+        conversations_dir = Path.home() / ".dpc" / "conversations"
+        exact = conversations_dir / group_id
+        if exact.is_dir():
+            return exact
+        for d in conversations_dir.iterdir():
+            if d.is_dir() and d.name.startswith(group_id + "-"):
+                return d
+        return None
+
     async def trigger_group_sleep(self, group_id: str) -> Dict[str, Any]:
         """Trigger sleep pipeline for all agents in a group, using group archives only."""
-        conversations_dir = Path.home() / ".dpc" / "conversations"
-        group_dir = None
-        for d in conversations_dir.iterdir():
-            if d.is_dir() and d.name.startswith(group_id):
-                group_dir = d
-                break
+        group_dir = self._find_group_dir(group_id)
         if not group_dir:
             return {"status": "error", "message": f"Group {group_id} not found"}
 
@@ -6705,11 +6712,7 @@ class CoreService:
     async def activate_group_chat(self, group_id: str) -> Dict[str, Any]:
         """Called when user opens a group chat. Posts pending morning briefs."""
         conversations_dir = Path.home() / ".dpc" / "conversations"
-        group_dir = None
-        for d in conversations_dir.iterdir():
-            if d.is_dir() and d.name.startswith(group_id):
-                group_dir = d
-                break
+        group_dir = self._find_group_dir(group_id)
         if not group_dir:
             return {"status": "ok", "briefs_posted": 0}
 
