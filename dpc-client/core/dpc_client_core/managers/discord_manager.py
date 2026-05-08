@@ -125,6 +125,18 @@ class DiscordBotManager:
             logger.exception("Failed to send Discord message to %s", channel_id)
             return False
 
+    async def create_thread_and_reply(self, message, text: str, thread_name: str = None) -> bool:
+        """Create a thread from a Discord message and reply in it."""
+        try:
+            name = thread_name or text[:97] + "..." if len(text) > 100 else text[:100] or "Discussion"
+            thread = await message.create_thread(name=name, auto_archive_duration=60)
+            for chunk in self._split_message(text):
+                await thread.send(chunk)
+            return True
+        except Exception:
+            logger.exception("Failed to create thread")
+            return False
+
     @staticmethod
     def _split_message(text: str) -> list[str]:
         if len(text) <= DISCORD_MESSAGE_MAX_LENGTH:

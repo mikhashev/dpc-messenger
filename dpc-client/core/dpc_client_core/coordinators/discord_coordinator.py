@@ -132,7 +132,11 @@ class DiscordCoordinator:
                 sender_name=f"{sender} (Discord)",
             )
             if response:
-                await self.discord_manager.send_message(channel_id, response)
+                thread_ok = await self.discord_manager.create_thread_and_reply(
+                    message, response, thread_name=text[:100] or "Discussion"
+                )
+                if not thread_ok:
+                    await self.discord_manager.send_message(channel_id, response)
                 agent_name = getattr(manager, 'display_name', None) or agent_id
                 await self._echo_response_to_mirror(response, agent_name)
         except Exception:
