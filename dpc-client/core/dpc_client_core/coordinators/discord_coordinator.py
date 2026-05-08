@@ -29,6 +29,7 @@ class DiscordCoordinator:
         self.discord_manager = discord_manager
         self._channel_to_conversation: Dict[str, str] = {}
         self._conversation_to_channel: Dict[str, str] = {}
+        self._user_conversations: Dict[str, str] = {}
         self._load_links()
 
     def _links_path(self) -> Path:
@@ -41,7 +42,8 @@ class DiscordCoordinator:
                 data = json.loads(path.read_text(encoding="utf-8"))
                 self._channel_to_conversation = data.get("channel_to_conversation", {})
                 self._conversation_to_channel = data.get("conversation_to_channel", {})
-                logger.info("Loaded %d Discord conversation links", len(self._channel_to_conversation))
+                self._user_conversations = data.get("user_conversations", {})
+                logger.info("Loaded %d Discord conversation links, %d per-user", len(self._channel_to_conversation), len(self._user_conversations))
             except Exception as e:
                 logger.warning("Failed to load Discord links: %s", e)
 
@@ -50,6 +52,7 @@ class DiscordCoordinator:
             self._links_path().write_text(json.dumps({
                 "channel_to_conversation": self._channel_to_conversation,
                 "conversation_to_channel": self._conversation_to_channel,
+                "user_conversations": self._user_conversations,
             }, indent=2), encoding="utf-8")
         except Exception as e:
             logger.warning("Failed to save Discord links: %s", e)
@@ -62,6 +65,15 @@ class DiscordCoordinator:
 
     def get_conversation_id(self, channel_id: str) -> Optional[str]:
         return self._channel_to_conversation.get(channel_id)
+
+    def get_user_conversation_id(self, discord_user_id: str) -> str:
+        """Get or create a per-user conversation ID for Discord user."""
+        if discord_user_id not in self._user_conversations:
+            conv_id = f"discord-user-{discord_user_id}"
+            self._user_conversations[discord_user_id] = conv_id
+            self._save_links()
+            logger.info("Created per-user conversation %s for Discord user %s", conv_id, discord_user_id)
+        return self._user_conversations[discord_user_id]
 
     def get_channel_id(self, conversation_id: str) -> Optional[str]:
         return self._conversation_to_channel.get(conversation_id)
@@ -107,13 +119,16 @@ class DiscordCoordinator:
             await self.discord_manager.send_message(channel_id, "Agent not ready.")
             return
 
+        discord_user_id = str(message.author.id)
+        user_conv_id = self.get_user_conversation_id(discord_user_id)
+
         if not self.get_conversation_id(channel_id):
             self.link(channel_id, agent_id)
 
         try:
             response = await manager.process_message(
                 message=f"[Discord — {sender}]: {text}",
-                conversation_id=agent_id,
+                conversation_id=user_conv_id,
                 sender_name=f"{sender} (Discord)",
             )
             if response:
