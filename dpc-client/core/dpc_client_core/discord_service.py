@@ -39,10 +39,11 @@ class DiscordService:
             await self.discord_manager.stop()
 
     async def _handle_message(self, message):
-        if not self.discord_manager:
+        if not self.discord_manager or not self.coordinator:
             return
-        if self.discord_manager.is_mention(message) and self.coordinator:
+        if self.discord_manager.is_mention(message):
             await self.coordinator.handle_mention(message)
+        await self.coordinator.mirror_to_dpc_group(message)
 
     async def send_to_ark_channel(self, text: str) -> bool:
         if not self.discord_manager or not self.discord_manager.is_running:

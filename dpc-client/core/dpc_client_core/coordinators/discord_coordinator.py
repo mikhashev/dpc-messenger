@@ -122,6 +122,45 @@ class DiscordCoordinator:
             logger.exception("Discord agent routing error")
             await self.discord_manager.send_message(channel_id, "Error processing request.")
 
+    async def mirror_to_dpc_group(self, message) -> None:
+        """Mirror a Discord message to the linked DPC group chat."""
+        channel_id = str(message.channel.id)
+        sender = str(message.author.display_name or message.author.name)
+        text = message.content
+
+        settings = getattr(self.service, 'settings', None)
+        mirror_group_id = settings.get("discord", "mirror_group_id", fallback=None) if settings else None
+        if not mirror_group_id:
+            return
+
+        try:
+            from ..conversation_monitor import Message as ConvMessage
+            from datetime import datetime, timezone
+            monitor = self.service._get_or_create_conversation_monitor(mirror_group_id)
+            msg = ConvMessage(
+                message_id=f"discord-{message.id}",
+                conversation_id=mirror_group_id,
+                sender_node_id=f"discord-{message.author.id}",
+                sender_name=f"{sender} (Discord)",
+                text=text,
+                timestamp=datetime.now(timezone.utc).isoformat(),
+                sender_type="human",
+            )
+            await monitor.on_message(msg)
+            monitor.save_history()
+            await self.service.local_api.broadcast_event("group_text_received", {
+                "group_id": mirror_group_id,
+                "text": text,
+                "sender_name": f"{sender} (Discord)",
+                "sender_type": "human",
+                "sender_node_id": f"discord-{message.author.id}",
+                "message_id": f"discord-{message.id}",
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            })
+            logger.debug("Mirrored Discord message from %s to DPC group %s", sender, mirror_group_id)
+        except Exception as e:
+            logger.warning("Failed to mirror Discord message: %s", e)
+
     async def forward_to_discord(self, conversation_id: str, text: str, sender_name: str = "Agent") -> bool:
         channel_id = self.get_channel_id(conversation_id)
         if not channel_id:
