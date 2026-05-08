@@ -1,6 +1,6 @@
 # ADR-026: Public Agent Guardrails and Context Architecture
 
-**Status:** Proposed
+**Status:** Partially Implemented
 **Date:** 2026-05-08
 **Authors:** Ark (architecture), CC (implementation), Iris (agent perspective), Mike (decision)
 **Depends on:** ADR-024 (Knowledge Graph), ADR-025 (Discord Integration)
@@ -134,6 +134,34 @@ response_delay_seconds = 3
 - ADR describes mechanisms, not values. Concrete tool lists, whitelist domains, and TTL values live in config (not in public repo).
 - System prompt (Block1) reinforces boundaries as secondary defense.
 - Defense in depth, not security through obscurity — code-level enforcement works regardless of attacker knowledge.
+
+## Implementation Status
+
+| Item | Status |
+|---|---|
+| Per-user conversation routing (Layer 1) | DONE (004d, `71e53d4`) |
+| Discord threads (004e) | DONE (`f11622f`) |
+| Mention cleanup + echo (004c) | DONE (`440302e`) |
+| Source-based tool filtering | TODO |
+| Rate limiting + response delay | TODO |
+| URL whitelist | TODO |
+| Graceful fallback | TODO |
+| TTL + context management (Layer 2) | TODO |
+| KG long-term memory (Layer 3) | TODO (depends ADR-024) |
+| Output content filtering | TODO |
+| Mention sanitization | TODO |
+
+## Open Questions (S102 Review)
+
+**From Iris:**
+1. `read_file` in tool whitelist — restrict to whitelisted directories (knowledge/, docs/) for external sources? Otherwise prompt injection could leak arbitrary files.
+2. GLiNER extraction on conversation expiry — quality without LLM verification? May produce noisy entities.
+3. Thread auto-archive (1h) should sync with conversation TTL (30 min) — which takes precedence?
+
+**From Ark:**
+4. Output content filtering — ADR covers input filtering (tools, URLs) but not output. Agent should not post PII, internal file paths, or sandbox URLs to public Discord. Need output sanitization.
+5. Mention sanitization — @agent in code blocks, quotes, or technical text triggers routing. Parser should only match plain-text mentions.
+6. Priority items need concrete backlog task IDs.
 
 ## Consequences
 
