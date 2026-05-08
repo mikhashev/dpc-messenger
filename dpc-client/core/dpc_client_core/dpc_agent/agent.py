@@ -311,7 +311,7 @@ class DpcAgent:
             agent_root=self.agent_root,
             emit_progress=emit_progress or (lambda msg, tool=None, rnd=None: None),
             task_id=conversation_id,
-            budget_remaining_usd=self.config.budget_usd,
+            budget_remaining_usd=None if self.config.billing_model == "subscription" else self.config.budget_usd,
             max_rounds=self.config.max_rounds,
             on_stream_chunk=on_stream_chunk,
             conversation_id=conversation_id,
