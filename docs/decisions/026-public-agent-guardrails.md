@@ -88,18 +88,46 @@ extract_on_expiry = true
 cleanup_expired = true
 ```
 
+### 4. Rate Limiting
+
+Protect the LLM provider and prevent abuse by throttling requests.
+
+**Per-user rate limit:** max N messages per M minutes (default: 5 / 10 min). Prevents single user from monopolizing agent compute.
+
+**Global rate limit:** max X agent invocations per hour across all users. Prevents burst overload on subscription-based providers with concurrency limits.
+
+**Response delay:** minimum pause before agent reply (default: 3 seconds). Prevents bot-like rapid-fire responses.
+
+**Exceeded behavior:** short message "Please wait a moment" instead of silence.
+
+**Configuration:**
+```ini
+[discord.guardrails]
+rate_limit_per_user = 5/10m
+rate_limit_global = 60/1h
+response_delay_seconds = 3
+```
+
+### 5. Graceful Fallback
+
+**LLM provider down:** agent stays silent (no error spam to Discord channel). Log error internally.
+
+**Rate limit exceeded:** short polite message with cooldown hint.
+
+**Context window full:** agent responds "Let me start a fresh conversation" and auto-resets per-user conversation.
+
 ## Not in Scope
 
 - Bidirectional bridge (ADR-025 Phase 2 — technical task, not architectural decision)
-- Discord thread support (ADR-025 Phase 2)
-- Rate limiting (future consideration)
 
 ## Implementation Priority
 
 1. **Source-based tool filtering** — security first
-2. **URL whitelist** — input sanitization
-3. **Per-user conversation routing + TTL** — UX improvement
-4. **KG integration for long-term memory** — depends on ADR-024 completion
+2. **Rate limiting + response delay** — abuse prevention
+3. **URL whitelist** — input sanitization
+4. **Graceful fallback** — reliability
+5. **Per-user conversation routing + TTL** — UX improvement (004d DONE)
+6. **KG integration for long-term memory** — depends on ADR-024 completion
 
 ## Security Considerations
 
