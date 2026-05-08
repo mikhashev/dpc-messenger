@@ -118,15 +118,21 @@ class DiscordCoordinator:
             )
             if response:
                 await self.discord_manager.send_message(channel_id, response)
+                agent_name = getattr(manager, 'display_name', None) or agent_id
+                await self._echo_response_to_mirror(response, agent_name)
         except Exception:
             logger.exception("Discord agent routing error")
             await self.discord_manager.send_message(channel_id, "Error processing request.")
 
-    async def mirror_to_dpc_group(self, message) -> None:
+    async def mirror_to_dpc_group(self, message, text_override: str = None, sender_override: str = None) -> None:
         """Mirror a Discord message to the linked DPC group chat."""
-        channel_id = str(message.channel.id)
-        sender = str(message.author.display_name or message.author.name)
-        text = message.content
+        channel_id = str(message.channel.id) if message else ""
+        sender = sender_override or str(message.author.display_name or message.author.name)
+        text = text_override or message.content
+        if message and not text_override:
+            for mention in getattr(message, 'mentions', []):
+                name = mention.display_name or mention.name
+                text = text.replace(f'<@{mention.id}>', f'@{name}').replace(f'<@!{mention.id}>', f'@{name}')
 
         settings = getattr(self.service, 'settings', None)
         mirror_group_id = settings.get("discord", "mirror_group_id", fallback=None) if settings else None
@@ -160,6 +166,17 @@ class DiscordCoordinator:
             logger.debug("Mirrored Discord message from %s to DPC group %s", sender, mirror_group_id)
         except Exception as e:
             logger.warning("Failed to mirror Discord message: %s", e)
+
+    async def _echo_response_to_mirror(self, text: str, agent_name: str) -> None:
+        """Echo agent response to the DPC mirror group so the team sees both sides."""
+        settings = getattr(self.service, 'settings', None)
+        mirror_group_id = settings.get("discord", "mirror_group_id", fallback=None) if settings else None
+        if not mirror_group_id:
+            return
+        try:
+            await self.service.send_group_agent_message(mirror_group_id, agent_name, text)
+        except Exception as e:
+            logger.debug("Failed to echo agent response to mirror: %s", e)
 
     async def forward_to_discord(self, conversation_id: str, text: str, sender_name: str = "Agent") -> bool:
         channel_id = self.get_channel_id(conversation_id)
