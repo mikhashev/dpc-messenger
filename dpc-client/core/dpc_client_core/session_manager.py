@@ -286,6 +286,15 @@ class NewSessionProposalManager:
             ui_payload
         )
 
+        # GROUP-SLEEP-1: auto-trigger sleep for all agents after group New Session
+        if is_approved and is_group:
+            try:
+                import asyncio
+                asyncio.create_task(self.core_service.trigger_group_sleep(local_conversation_id))
+                self.logger.info("Auto-triggered group sleep for %s", local_conversation_id[:20])
+            except Exception as e:
+                self.logger.error("Failed to trigger group sleep: %s", e)
+
         # Remove from active sessions
         del self.active_sessions[proposal_id]
 

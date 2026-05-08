@@ -176,6 +176,47 @@ def _collect_group_digests(
     return digests
 
 
+def _collect_group_archive_digests(
+    group_dir: Path, agent_id: str, since: Optional[str]
+) -> List[Dict[str, Any]]:
+    """Collect archived session digests from a specific group's archive/."""
+    digests = []
+    archive_dir = group_dir / "archive"
+    if not archive_dir.exists():
+        return digests
+    metadata_path = group_dir / "metadata.json"
+    if metadata_path.exists():
+        try:
+            metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+            agents_map = metadata.get("agents", {})
+            if agents_map and not any(agent_id in ids for ids in agents_map.values()):
+                return digests
+        except (json.JSONDecodeError, OSError):
+            pass
+    group_id = group_dir.name.split("-", 2)[0] + "-" + group_dir.name.split("-", 2)[1] if "-" in group_dir.name else group_dir.name
+    for archive_path in sorted(archive_dir.rglob("*.json")):
+        try:
+            data = json.loads(archive_path.read_text(encoding="utf-8"))
+            messages = data.get("messages", [])
+            if not messages:
+                continue
+            archive_date = messages[0].get("timestamp", "")
+            if since and archive_date <= since:
+                continue
+            digests.append({
+                "archive_file": f"group_archive:{group_dir.name}:{archive_path.name}",
+                "date": archive_date[:10],
+                "message_count": len(messages),
+                "duration_mins": 0,
+                "source": "group_archive",
+                "group_id": data.get("conversation_id", group_id),
+                "_archive_path": str(archive_path),
+            })
+        except (json.JSONDecodeError, OSError):
+            continue
+    return digests[-MAX_ARCHIVES_PER_CYCLE:]
+
+
 def _find_unprocessed_archives(conversation_dir: Path, since: Optional[str]) -> List[Dict[str, Any]]:
     digest_path = conversation_dir / "digest.jsonl"
     if not digest_path.exists():
@@ -234,8 +275,12 @@ async def _analyze_single_session(
 ) -> Optional[Dict[str, Any]]:
     archive_file = digest.get("archive_file", "")
 
-    # ADR-023 Task 10: group chat source — load from history.json directly
-    if digest.get("source") == "group":
+    if digest.get("source") == "group_archive":
+        archive_path_str = digest.get("_archive_path", "")
+        if not archive_path_str or not Path(archive_path_str).exists():
+            return None
+        archive = json.loads(Path(archive_path_str).read_text(encoding="utf-8"))
+    elif digest.get("source") == "group":
         group_dir = conversation_dir.parent / archive_file.replace("group:", "")
         history_path = group_dir / "history.json"
         if not history_path.exists():
@@ -267,7 +312,7 @@ async def _analyze_single_session(
 async def run_sleep(
     conversation_dir: Path, llm_manager, agent_id: str = "",
     force: bool = False, provider_alias: Optional[str] = None,
-    progress_callback=None,
+    progress_callback=None, group_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     state = _read_sleep_state(conversation_dir)
     if state.get("status") == "sleeping":
@@ -280,13 +325,27 @@ async def run_sleep(
 
     try:
         since = None if force else _get_last_sleep_timestamp(conversation_dir)
-        digests = _find_unprocessed_archives(conversation_dir, since)
 
-        # ADR-023 Task 10: include group chat sessions where this agent participates
-        group_digests = _collect_group_digests(conversation_dir.parent, agent_id, since)
-        if group_digests:
-            digests.extend(group_digests)
-            log.info("Sleep pipeline: added %d group chat segments", len(group_digests))
+        if group_id:
+            # Group-only mode: read only from this group's archives
+            conversations_dir = conversation_dir.parent
+            group_dir = None
+            for d in conversations_dir.iterdir():
+                if d.is_dir() and d.name.startswith(group_id):
+                    group_dir = d
+                    break
+            if not group_dir:
+                _write_sleep_state(conversation_dir, {"status": "awake"})
+                return {"status": "error", "message": f"Group {group_id} not found"}
+            digests = _collect_group_archive_digests(group_dir, agent_id, since)
+        else:
+            digests = _find_unprocessed_archives(conversation_dir, since)
+
+            # ADR-023 Task 10: include group chat sessions where this agent participates
+            group_digests = _collect_group_digests(conversation_dir.parent, agent_id, since)
+            if group_digests:
+                digests.extend(group_digests)
+                log.info("Sleep pipeline: added %d group chat segments", len(group_digests))
 
         if not digests:
             _write_sleep_state(conversation_dir, {"status": "awake"})

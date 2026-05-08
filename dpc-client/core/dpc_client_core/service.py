@@ -6630,6 +6630,123 @@ class CoreService:
         except Exception as e:
             logger.debug("Failed to emit sleep event: %s", e)
 
+    async def trigger_group_sleep(self, group_id: str) -> Dict[str, Any]:
+        """Trigger sleep pipeline for all agents in a group, using group archives only."""
+        conversations_dir = Path.home() / ".dpc" / "conversations"
+        group_dir = None
+        for d in conversations_dir.iterdir():
+            if d.is_dir() and d.name.startswith(group_id):
+                group_dir = d
+                break
+        if not group_dir:
+            return {"status": "error", "message": f"Group {group_id} not found"}
+
+        metadata_path = group_dir / "metadata.json"
+        if not metadata_path.exists():
+            return {"status": "error", "message": "Group metadata not found"}
+
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        local_node_id = self.node_id if hasattr(self, "node_id") else None
+        local_agents = metadata.get("agents", {}).get(local_node_id, []) if local_node_id else []
+        if not local_agents:
+            for node_agents in metadata.get("agents", {}).values():
+                local_agents.extend(node_agents)
+
+        if not local_agents:
+            return {"status": "error", "message": "No agents in group"}
+
+        from dpc_client_core.dpc_agent.sleep_pipeline import run_sleep
+        from dpc_client_core.dpc_agent.utils import load_agent_config
+
+        triggered = []
+        for agent_id in local_agents:
+            agent_dir = conversations_dir / agent_id
+            if not agent_dir.exists():
+                continue
+
+            agent_config = load_agent_config(agent_id)
+            sleep_provider = agent_config.get("sleep_provider_alias") or None
+
+            sleep_data = {"agent_id": agent_id, "group_id": group_id, "status": "sleeping"}
+            await self.local_api.broadcast_event("sleep_state_changed", sleep_data)
+
+            async def _run_group_sleep(aid=agent_id, adir=agent_dir, sp=sleep_provider):
+                async def _progress(current, total, phase, archive_file):
+                    await self.local_api.broadcast_event("sleep_progress", {
+                        "agent_id": aid, "group_id": group_id,
+                        "current": current, "total": total,
+                        "phase": phase, "archive_file": archive_file,
+                    })
+                try:
+                    result = await run_sleep(
+                        adir, self.llm_manager, agent_id=aid, force=True,
+                        provider_alias=sp, progress_callback=_progress, group_id=group_id,
+                    )
+                    if result.get("status") == "completed":
+                        brief = result.get("morning_brief", {})
+                        brief["group_id"] = group_id
+                        brief_path = adir / f"morning_brief_group_{group_id}.json"
+                        brief_path.write_text(json.dumps(brief, ensure_ascii=False, indent=2), encoding="utf-8")
+                    done_data = {"agent_id": aid, "group_id": group_id, "status": "awake",
+                                 "result": result.get("status", "unknown"),
+                                 "sessions_analyzed": result.get("sessions_analyzed", 0)}
+                    await self.local_api.broadcast_event("sleep_state_changed", done_data)
+                except Exception as e:
+                    logger.error("Group sleep error for %s: %s", aid, e, exc_info=True)
+                    await self.local_api.broadcast_event("sleep_state_changed", {
+                        "agent_id": aid, "group_id": group_id, "status": "awake", "result": "error", "error": str(e)})
+
+            asyncio.create_task(_run_group_sleep())
+            triggered.append(agent_id)
+            await asyncio.sleep(2)
+
+        return {"status": "sleeping", "agents": triggered, "group_id": group_id}
+
+    async def activate_group_chat(self, group_id: str) -> Dict[str, Any]:
+        """Called when user opens a group chat. Posts pending morning briefs."""
+        conversations_dir = Path.home() / ".dpc" / "conversations"
+        group_dir = None
+        for d in conversations_dir.iterdir():
+            if d.is_dir() and d.name.startswith(group_id):
+                group_dir = d
+                break
+        if not group_dir:
+            return {"status": "ok", "briefs_posted": 0}
+
+        metadata_path = group_dir / "metadata.json"
+        if not metadata_path.exists():
+            return {"status": "ok", "briefs_posted": 0}
+
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        all_agents = []
+        agent_names = {}
+        for node_id, agent_ids in metadata.get("agents", {}).items():
+            for aid in agent_ids:
+                all_agents.append(aid)
+                names_map = metadata.get("agent_names", {}).get(node_id, {})
+                agent_names[aid] = names_map.get(aid, aid)
+
+        posted = 0
+        for agent_id in all_agents:
+            brief_path = conversations_dir / agent_id / f"morning_brief_group_{group_id}.json"
+            if not brief_path.exists():
+                continue
+            try:
+                brief = json.loads(brief_path.read_text(encoding="utf-8"))
+                if brief.get("consumed"):
+                    continue
+                chat_text = self._format_morning_brief(brief)
+                display_name = agent_names.get(agent_id, agent_id)
+                await self.send_group_agent_message(group_id, display_name, chat_text)
+                brief["consumed"] = True
+                brief_path.write_text(json.dumps(brief, ensure_ascii=False, indent=2), encoding="utf-8")
+                posted += 1
+                await asyncio.sleep(1)
+            except Exception as e:
+                logger.error("Failed to post group brief for %s: %s", agent_id, e)
+
+        return {"status": "ok", "briefs_posted": posted}
+
     # --- Hub Methods ---
 
     async def login_to_hub(self, provider: str = "google"):

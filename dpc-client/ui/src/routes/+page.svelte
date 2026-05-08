@@ -438,6 +438,9 @@
   // Reactive: Update active chat in coreService to prevent unread badges on open chats
   $effect(() => {
     setActiveChat(activeChatId);
+    if (activeChatId.startsWith('group-')) {
+      sendCommand('activate_group_chat', { group_id: activeChatId });
+    }
   });
 
   // Reactive: Sync provider dropdown with chat-specific provider when switching chats

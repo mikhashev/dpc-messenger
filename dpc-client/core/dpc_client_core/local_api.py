@@ -145,6 +145,8 @@ ALLOWED_COMMANDS: frozenset = frozenset({
     "ui_log",
     # Sleep Consolidation (ADR-014)
     "toggle_sleep",
+    "trigger_group_sleep",
+    "activate_group_chat",
     # Memory system (ADR-010)
     "get_memory_status",
     "memory_search",
