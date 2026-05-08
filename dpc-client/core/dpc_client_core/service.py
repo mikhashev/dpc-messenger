@@ -4126,24 +4126,7 @@ class CoreService:
                 agent_id = self._get_default_agent_id()
             manager = await dpc_provider._ensure_manager(agent_id)
 
-            # Build prompt with full group history for context
-            history_lines = []
-            monitor = self.conversation_monitors.get(group_id)
-            if monitor:
-                for i, msg in enumerate(monitor.get_message_history()):
-                    name = msg.get("sender_name", msg.get("role", "?"))
-                    content = msg.get("content", "")
-                    if content:
-                        history_lines.append(f"[{i}] {name}: {content}")
-            if history_lines:
-                history_block = "\n".join(history_lines)
-                prompt = (
-                    f"[Group chat context — last {len(history_lines)} messages]\n"
-                    f"{history_block}\n\n"
-                    f"[New message from {sender_name}]: {text}"
-                )
-            else:
-                prompt = f"[Group chat — {sender_name} says]: {text}"
+            prompt = f"[{sender_name}]: {text}"
 
             response = await manager.process_message(
                 message=prompt,
