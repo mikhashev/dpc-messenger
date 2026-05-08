@@ -77,8 +77,10 @@
 
   // Handle token usage updates (group chat counter)
   $effect(() => {
-    if ($tokenUsageUpdated) {
-      const { conversation_id, tokens_used, token_limit, history_tokens, context_estimated } = $tokenUsageUpdated;
+    const payload = $tokenUsageUpdated;
+    if (payload) {
+      tokenUsageUpdated.set(null);
+      const { conversation_id, tokens_used, token_limit, history_tokens, context_estimated } = payload;
       onUpdateTokenUsage(conversation_id, {
         used: tokens_used,
         limit: token_limit,
