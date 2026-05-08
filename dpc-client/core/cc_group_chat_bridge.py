@@ -194,7 +194,7 @@ def format_message(i: int, msg: dict) -> str:
     if ts and "T" in ts:
         ts = ts.split("T")[1][:8]
     preview = content.replace("\n", "\n       ")
-    return f"  [{i}] {ts} {sender}: {preview}"
+    return f"  [{i + 1}] {ts} {sender}: {preview}"
 
 
 if __name__ == "__main__":
