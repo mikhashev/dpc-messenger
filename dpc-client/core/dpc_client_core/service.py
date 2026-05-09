@@ -3848,6 +3848,17 @@ class CoreService:
                     # Single-node group (human + agents): direct reset, no voting needed
                     logger.info("Resetting single-node group conversation: %s", conversation_id)
                     result = await self.reset_conversation(conversation_id)
+                    # Broadcast token limit so UI shows correct value after reset
+                    monitor = self.knowledge_service._get_or_create_conversation_monitor(conversation_id)
+                    token_usage = monitor.get_token_usage()
+                    token_limit = token_usage.get("token_limit", 0) or 128000
+                    await self.local_api.broadcast_event("token_usage_updated", {
+                        "conversation_id": conversation_id,
+                        "tokens_used": 0,
+                        "token_limit": token_limit,
+                        "history_tokens": 0,
+                        "context_estimated": 0,
+                    })
                     asyncio.create_task(self.trigger_group_sleep(conversation_id))
                     return result
 
@@ -6644,6 +6655,9 @@ class CoreService:
         if not local_agents:
             return {"status": "error", "message": "No agents in group"}
 
+        logger.info("Group sleep: found %d agents for %s (node=%s): %s",
+                     len(local_agents), group_id, local_node_id, local_agents)
+
         from dpc_client_core.dpc_agent.sleep_pipeline import run_sleep
         from dpc_client_core.dpc_agent.utils import load_agent_config
 
@@ -6651,6 +6665,7 @@ class CoreService:
         for agent_id in local_agents:
             agent_dir = conversations_dir / agent_id
             if not agent_dir.exists():
+                logger.warning("Group sleep: skipping %s — dir %s not found", agent_id, agent_dir)
                 continue
 
             agent_config = load_agent_config(agent_id)

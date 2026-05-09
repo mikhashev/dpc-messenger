@@ -189,6 +189,14 @@
         🌙 Sleep
       {/if}
     </button>
+  {:else if showForChatId?.startsWith('group-') && isSleeping}
+    <span class="btn-sleep-toggle active" title="Agents are consolidating session data">
+      {#if sleepTotal > 0}
+        ☀️ {sleepCurrent}/{sleepTotal} {sleepPhase === 'synthesizing' ? 'Synthesis' : 'Wakeup'}
+      {:else}
+        ☀️ Wakeup
+      {/if}
+    </span>
   {/if}
 </div>
 

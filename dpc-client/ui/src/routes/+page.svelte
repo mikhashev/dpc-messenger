@@ -215,7 +215,8 @@
   // Update sleep state from backend events
   $effect(() => {
     const state = $sleepStateChanged;
-    if (state && state.agent_id === activeChatId) {
+    const sleepMatchesActive = state && (state.agent_id === activeChatId || state.group_id === activeChatId);
+    if (sleepMatchesActive) {
       isSleeping = state.status === 'sleeping';
       if (state.status === 'awake') {
         const cmd = sendCommand('get_conversation_history', { conversation_id: state.agent_id });
@@ -963,9 +964,9 @@
             bind:enableMarkdown
             isExtracting={isExtractingKnowledge}
             {isSleeping}
-            sleepCurrent={$sleepProgress?.agent_id === activeChatId ? $sleepProgress?.current ?? 0 : 0}
-            sleepTotal={$sleepProgress?.agent_id === activeChatId ? $sleepProgress?.total ?? 0 : 0}
-            sleepPhase={$sleepProgress?.agent_id === activeChatId ? $sleepProgress?.phase ?? '' : ''}
+            sleepCurrent={($sleepProgress?.agent_id === activeChatId || $sleepProgress?.group_id === activeChatId) ? $sleepProgress?.current ?? 0 : 0}
+            sleepTotal={($sleepProgress?.agent_id === activeChatId || $sleepProgress?.group_id === activeChatId) ? $sleepProgress?.total ?? 0 : 0}
+            sleepPhase={($sleepProgress?.agent_id === activeChatId || $sleepProgress?.group_id === activeChatId) ? $sleepProgress?.phase ?? '' : ''}
             onNewSession={handleNewChat}
             onEndSession={handleEndSession}
             onToggleSleep={handleToggleSleep}
