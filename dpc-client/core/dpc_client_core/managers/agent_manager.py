@@ -1000,7 +1000,7 @@ class DpcAgentManager:
         usage = monitor.get_token_usage()
         token_limit = usage.get("token_limit") or config_cw or 204800
         history_tokens = usage.get("tokens_used", 0)
-        context_estimated = getattr(monitor, '_last_context_estimated', 0)
+        context_estimated = monitor._last_context_estimated
         return {
             # Conversation history only (user+assistant text ÷ 4).
             # Same basis as the token counter shown in the UI.

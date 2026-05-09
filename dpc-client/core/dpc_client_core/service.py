@@ -3716,7 +3716,7 @@ class CoreService:
             # context_estimated: full LLM context from the last request.
             # For agent monitors, stored in _last_context_estimated.
             # For local AI monitors, current_token_count = prompt_tokens (already the full context).
-            context_estimated = getattr(monitor, '_last_context_estimated', 0) or token_usage.get("tokens_used", 0)
+            context_estimated = monitor._last_context_estimated or token_usage.get("tokens_used", 0)
             # For group chats, current_token_count may be 0 (no LLM calls update it).
             # Use history_tokens as the floor to keep the UI counter accurate.
             tokens_used = token_usage.get("tokens_used", 0)
@@ -5733,11 +5733,8 @@ class CoreService:
             )
             monitor.save_history()
 
-            # Update token stats so UI counter reflects CC messages (#4)
-            cc_tokens = len(text) // 4  # rough estimate
-            old_estimate = getattr(monitor, '_last_context_estimated', 0)
-            if old_estimate:
-                monitor._last_context_estimated = old_estimate + cc_tokens
+            # context_estimated is updated after each LLM response — no additive
+            # increment here (same fix as agent_manager.py drift removal).
             token_stats = manager.get_session_state(conversation_id)
 
             # Reset chain depth — each CC message starts a fresh chain allowance

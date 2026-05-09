@@ -100,6 +100,7 @@ class ConversationMonitor:
         self.current_token_count: int = 0
         self.token_limit: int = 100000  # Default limit, will be updated per model
         self.token_warning_threshold: float = 0.8  # Warn at 80%
+        self._last_context_estimated: int = 0
 
         # Conversation history tracking (Phase 7: Conversation History)
         self.message_history: List[Dict[str, str]] = []  # List of {"role": "user/assistant", "content": "..."}
@@ -2075,7 +2076,7 @@ PARTICIPANTS' CULTURAL CONTEXTS:
                 "token_stats": {
                     "current_token_count": self.current_token_count,
                     "token_limit": self.token_limit,
-                    "context_estimated": getattr(self, '_last_context_estimated', 0),
+                    "context_estimated": self._last_context_estimated,
                 },
                 "messages": self.message_history
             }
