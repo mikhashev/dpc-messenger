@@ -4,7 +4,7 @@
 **Date:** 2026-05-06
 **Session:** S97
 **Authors:** Ark (research, architecture analysis), CC (research, implementation plan), Mike (direction, decision)
-**Depends on:** None (standalone, mirrors Telegram pattern)
+**Depends on:** ADR-026 (Public Agent Guardrails) for production deployment
 
 ## Context
 
@@ -62,13 +62,13 @@ Required privileged intents:
 
 ### 5. Agent interaction model (updated S97)
 
-- Dedicated `#ark` channel for agent_007 (community manager) conversations — not Ark
-- **agent_007** handles all Discord interactions. Ark stays in DPC, does not spend context on Discord
+- Dedicated `#ark` channel for Iris (`agent_iris_63f1b6bf`, originally planned as agent_007) conversations — not Ark
+- **Iris** handles all Discord interactions. Ark stays in DPC, does not spend context on Discord
 - **Whitelist enforcement:** Agent responds only in explicitly whitelisted channels (`allowed_channel_ids`) + DMs. @mention in non-whitelisted channels is silently ignored (same as Telegram `allowed_chat_ids` pattern)
 - **@mention only** — no slash commands (cancelled S97: `/ask`, `/status`, `/help` redundant with @mention)
 - Morning brief posted to configured `morning_brief_channel_id` (default: `#ark`) on wakeup, triggered by sleep consolidation pipeline
 - Sleep/event notifications via Discord embeds
-- **Multi-language:** agent_007 responds in user's language (system prompt instruction)
+- **Multi-language:** Iris responds in user's language (system prompt instruction)
 
 ### 5a. Rate limit strategy
 
@@ -109,19 +109,20 @@ Voice channels deferred to v2 — fundamentally different from Telegram voice me
 - **Commits:** `1b0d66a` (initial), `30aeea9` (agent routing fix)
 - **Verified:** Bot online, @mention routing to Ark confirmed
 
-**S97 decisions (slash commands, agent_007):**
+**S97 decisions (slash commands, Iris):**
 - ~~Slash commands~~ — **cancelled**. `/ask`, `/status`, `/help` redundant with @mention. `/endsession` deferred to session lifecycle design
-- **agent_007** — new dedicated community manager agent (not Ark) for Discord. Separate system prompt, knowledge scope = public docs only
+- **Iris** (`agent_iris_63f1b6bf`, originally planned as agent_007) — dedicated community manager agent (not Ark) for Discord. Separate system prompt, knowledge scope = public docs only
 - **System prompt refactor** — move from hardcoded `context.py:539` to `~/.dpc/agents/{id}/memory/system_prompt.md` (~10 lines fallback). Existing agents without file continue on default
-- **Discord routing** — `discord.agent_id` in config to route Discord messages to agent_007 instead of auto-detect
+- **Discord routing** — `discord.agent_id` in config to route Discord messages to Iris instead of auto-detect
 - **Group chat bridge** — new DPC group chat "dpc_discord" for mirroring Discord messages to team
 
-### Phase 1.5: System Prompt + agent_007 (new, S97)
-- **Infrastructure (all agents):** System prompt refactor — `memory/system_prompt.md` per-agent override. Prerequisite for agent_007 and any future agent with custom prompt. Existing agents without file continue on hardcoded default.
-- **agent_007 setup:** Create agent with community manager system prompt
+### Phase 1.5: System Prompt + Iris — DONE (S99-S101)
+- **Infrastructure (all agents):** System prompt refactor — `memory/system_prompt.md` per-agent override. Prerequisite for Iris and any future agent with custom prompt. Existing agents without file continue on hardcoded default.
+- **Iris setup:** Created `agent_iris_63f1b6bf` with community manager system prompt
 - Knowledge scope: indexed_paths = ["docs/", "README.md", "ROADMAP.md", "CHANGELOG.md"] (public only)
-- Discord routing: config.ini `discord.agent_id = agent_007`
+- Discord routing: config.ini `discord.agent_id = agent_iris_63f1b6bf`
 - Multi-language: system prompt instruction "respond in user's language"
+- **Note:** Originally planned as agent_007 (S97), created as Iris (`agent_iris_63f1b6bf`) in S99
 
 ### Phase 2: Full Bridge (~200 lines)
 - `coordinators/discord_coordinator.py` — bidirectional DPC ↔ Discord routing
@@ -139,3 +140,4 @@ Voice channels deferred to v2 — fundamentally different from Telegram voice me
 - discord.py: github.com/Rapptz/discord.py
 - Telegram bridge: managers/telegram_manager.py, coordinators/telegram_coordinator.py, managers/agent_telegram_bridge.py
 - ADR-016 pattern: same modular service → manager → coordinator architecture
+- ADR-026 (Public Agent Guardrails): Production deployment requires ADR-026 implementation (tool whitelist, URL whitelist, per-user TTL, rate limiting, response delay)

@@ -352,6 +352,9 @@ class ContextFirewall:
         if not self.dpc_agent_enabled:
             return False
 
+        if profile_name is None:
+            logger.warning("can_agent_access_context('%s') called without profile_name — using global config", context_type)
+
         if context_type == 'personal':
             return bool(self._get_profile_or_global(
                 profile_name, 'personal_context_access',
