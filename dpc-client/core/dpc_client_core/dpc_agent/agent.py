@@ -239,7 +239,7 @@ class DpcAgent:
 
         # Log context window usage — warn if approaching limit or sections were trimmed
         _estimated = cap_info.get("estimated_tokens_before", 0)
-        _ctx_window = (session_state or {}).get("tokens_limit", 200000) or 200000
+        _ctx_window = (session_state or {}).get("tokens_limit") or 204800
         _trimmed = cap_info.get("trimmed_sections", [])
         if _trimmed:
             log.warning(

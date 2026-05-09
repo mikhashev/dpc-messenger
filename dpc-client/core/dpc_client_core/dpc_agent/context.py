@@ -111,7 +111,7 @@ def _build_runtime_section(
 
     # Session state from ConversationMonitor (token usage, context window)
     if session_state:
-        token_limit = session_state.get("tokens_limit", 128000)
+        token_limit = session_state.get("tokens_limit") or 204800
         history_tokens = session_state.get("history_tokens", 0)
         context_estimated = session_state.get("context_estimated", 0)
         runtime_data["session"] = {

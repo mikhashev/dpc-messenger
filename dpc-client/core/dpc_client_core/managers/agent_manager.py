@@ -665,12 +665,9 @@ class DpcAgentManager:
             )
             monitor.save_history()  # Save to disk immediately
 
-            # Update context_estimated immediately so UI counter reflects user message (#4)
-            # Token stats will be included in Ark's response via get_session_state()
-            user_tokens = len(message) // 4
-            old_estimate = getattr(monitor, '_last_context_estimated', 0)
-            if old_estimate:
-                monitor._last_context_estimated = old_estimate + user_tokens
+            # context_estimated is updated after each LLM response (lines 778-786)
+            # from accurate token counts. No additive increment here — it caused
+            # cumulative drift (63% claimed vs 14% actual after 40 messages).
 
         agent_display_name = self._agent_display_name or self.agent_id or "DPC Agent"
 
@@ -979,16 +976,17 @@ class DpcAgentManager:
             Dict with tokens_used, tokens_limit, usage_percent, messages_count
         """
         monitor = self._agent_monitors.get(conversation_id)
+        config_cw = int(self.config.get("context_window", 0)) or 0
         if not monitor:
             return {
                 "tokens_used": 0,
-                "tokens_limit": 128000,
+                "tokens_limit": config_cw or 204800,
                 "usage_percent": 0,
                 "messages_count": 0,
             }
 
         usage = monitor.get_token_usage()
-        token_limit = usage.get("token_limit", 128000)
+        token_limit = usage.get("token_limit") or config_cw or 204800
         history_tokens = usage.get("tokens_used", 0)
         context_estimated = getattr(monitor, '_last_context_estimated', 0)
         return {
