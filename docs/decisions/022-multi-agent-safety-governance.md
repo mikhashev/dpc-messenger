@@ -253,6 +253,31 @@ These risks are well-studied problems (automation bias since 1980s, GDPR consent
 - **Hope**: structural heterogeneity, "collusion happens above protocol layer"
 - **Johnny**: protocol-first enforcement, stress-tested all three layers, latency constraint, "defense in depth = brake fluid if separate hops"
 
+## Per-Agent Firewall Context Isolation (S103)
+
+Layer 1-2 assume per-agent isolation, but isolation breaks silently if the firewall is queried without identifying which agent is asking.
+
+### Problem
+
+`can_agent_access_context()` accepts an optional `profile_name` parameter. When omitted, it falls back to the global `dpc_agent` profile. This means an agent configured with `human_knowledge_access: false` (e.g., Iris) still passes firewall checks using the global profile's permissions — breaking isolation without any error or log.
+
+**Bug found in S103:** Iris (configured with `human_knowledge_access: false`) was indexing human knowledge because 5 call sites were missing `profile_name`:
+- `agent_manager.py` — 4 sites (knowledge graph queries, context assembly)
+- `knowledge_service.py` — 1 site (restructured from a single global check to a per-agent loop)
+
+### Rule
+
+All calls to `can_agent_access_context()` **MUST** pass `profile_name=agent_id`. No exceptions. The global `dpc_agent` config is a fallback for backward compatibility, not a valid isolation boundary.
+
+### Fix
+
+- `agent_manager.py`: 4 call sites updated to pass `profile_name=agent_id`
+- `knowledge_service.py`: refactored from a global access check to iterating per-agent, passing each agent's ID as `profile_name`
+
+### Relationship to ADR-022
+
+This is a Layer 1 enforcement gap. Per-agent quota counters (2c) and protocol guards (1b) are meaningless if the firewall itself does not distinguish between agents. Firewall identity propagation is a prerequisite for all three layers.
+
 ## Lessons Learned
 
 1. **Individual alignment does not scale**: seven independent sources confirm component safety ≠ system safety
@@ -261,3 +286,4 @@ These risks are well-studied problems (automation bias since 1980s, GDPR consent
 4. **Protocol constraints are the foundation**: Johnny's critique maps directly to Institutional AI empirical results — governance in the wire, not in the model
 5. **Community validation strengthens ADR**: three independent practitioners stress-tested the design from different angles before it was written
 6. **False positive whitelist is the real artifact**: the algorithm is simple, the exclusion list accumulated from production is the valuable output
+7. **Default parameters break isolation silently**: optional `profile_name` with global fallback meant 5 call sites passed firewall checks under the wrong identity. Defaults that weaken security boundaries must either be removed or logged as warnings (S103)

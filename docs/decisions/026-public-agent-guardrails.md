@@ -163,6 +163,26 @@ response_delay_seconds = 3
 5. Mention sanitization — @agent in code blocks, quotes, or technical text triggers routing. Parser should only match plain-text mentions.
 6. Priority items need concrete backlog task IDs.
 
+## Future: Discord Curation Model
+
+Ark can be added to the same DPC group chat as Iris (e.g., `group-3a5c50f5024b` / "DPC Discord General") to serve as a backstage curator.
+
+**How it works:**
+- Iris answers Discord @mentions publicly in the Discord channel
+- Ark participates in the internal DPC group chat only — providing context, corrections, and warnings to Iris
+- Discord channel shows only Iris's responses; Ark's contributions stay internal
+- No new infrastructure required — existing group chat routing already separates DPC-internal messages from Discord-bridged output
+
+**Use cases:**
+- Ark corrects a factual error before Iris posts (if pre-send gate is not yet implemented)
+- Ark provides deeper context on a topic Iris is unsure about
+- Ark flags a prompt injection attempt visible in the group chat history
+
+**Constraints:**
+- Ark must not echo to Discord — only Iris has Discord bridge output
+- Group chat token budget applies to both agents combined
+- This is a future consideration, not immediate implementation — depends on multi-agent group chat stability
+
 ## Consequences
 
 - Public agents become safe to deploy on external platforms
