@@ -9,6 +9,7 @@ Mirrors TelegramCoordinator pattern but simplified:
 ADR-025 Task 004.
 """
 
+import asyncio
 import json
 import logging
 import re
@@ -120,7 +121,7 @@ class DiscordCoordinator:
             wait = int(cfg["per_user_window"] - (now - self._user_timestamps[discord_user_id][0]))
             return f"Please wait ~{wait}s before sending another message."
 
-        self._global_timestamps = [t for t in self._global_timestamps if now - t < cfg["global_window"]]
+        self._global_timestamps = [t for t in self._global_timestamps if now - t < cfg["global_window"]][-cfg["global_max"]:]
         if len(self._global_timestamps) >= cfg["global_max"]:
             return "The bot is busy right now. Please try again in a few minutes."
 
@@ -178,7 +179,6 @@ class DiscordCoordinator:
             if response:
                 delay = self._get_rate_config()["delay"]
                 if delay > 0:
-                    import asyncio
                     await asyncio.sleep(delay)
                 sanitized = self._sanitize_output(response)
                 thread_ok = await self.discord_manager.create_thread_and_reply(
