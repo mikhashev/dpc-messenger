@@ -643,17 +643,17 @@ class CoreService:
             return
         logger.info("Eager index rebuild: scanning %s for agents with memory.enabled=true", agents_dir)
         for agent_dir in sorted(agents_dir.iterdir()):
-            if not agent_dir.is_dir():
+            if not agent_dir.is_dir() or agent_dir.name.startswith('.'):
                 continue
             config_path = agent_dir / "config.json"
             if not config_path.exists():
                 continue
             try:
-                cfg = _json.loads(config_path.read_text(encoding="utf-8"))
-                memory_cfg = cfg.get("memory", {})
+                agent_id = agent_dir.name
+                profile = self.firewall.get_agent_profile_settings(agent_id) if self.firewall else {}
+                memory_cfg = profile.get("memory", {})
                 if not memory_cfg.get("enabled", False):
                     continue
-                agent_id = agent_dir.name
                 logger.info("Eager index rebuild: initializing agent %s", agent_id)
                 await dpc_provider._ensure_manager(agent_id=agent_id)
             except Exception as e:
