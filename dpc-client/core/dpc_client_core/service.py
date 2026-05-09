@@ -3848,6 +3848,7 @@ class CoreService:
                     # Single-node group (human + agents): direct reset, no voting needed
                     logger.info("Resetting single-node group conversation: %s", conversation_id)
                     result = await self.reset_conversation(conversation_id)
+                    asyncio.create_task(self.trigger_group_sleep(conversation_id))
                     return result
 
                 participants = set(group.members)
@@ -6627,6 +6628,7 @@ class CoreService:
 
     async def trigger_group_sleep(self, group_id: str) -> Dict[str, Any]:
         """Trigger sleep pipeline for all agents in a group, using group archives only."""
+        conversations_dir = Path.home() / ".dpc" / "conversations"
         group_dir = self._find_group_dir(group_id)
         if not group_dir:
             return {"status": "error", "message": f"Group {group_id} not found"}
