@@ -285,7 +285,7 @@ class DpcAgentManager:
                             extra_metas = []
 
                             # L6: human knowledge (always re-index, not just on full rebuild)
-                            if self.firewall and self.firewall.can_agent_access_context('knowledge'):
+                            if self.firewall and self.firewall.can_agent_access_context('knowledge', profile_name=self.agent_id):
                                 l6_dir = Path(os.environ.get("DPC_HOME", Path.home() / ".dpc")) / "knowledge"
                                 if l6_dir.is_dir():
                                     for f in sorted(l6_dir.iterdir()):
@@ -354,7 +354,7 @@ class DpcAgentManager:
                                 from dpc_client_core.dpc_agent.knowledge_graph import KnowledgeGraph
                                 _kg = KnowledgeGraph(agent_root)
                                 _kg.bulk_import_knowledge_files(knowledge_dir)
-                                if self.firewall and self.firewall.can_agent_access_context('knowledge'):
+                                if self.firewall and self.firewall.can_agent_access_context('knowledge', profile_name=self.agent_id):
                                     _l6_dir = Path(os.environ.get("DPC_HOME", Path.home() / ".dpc")) / "knowledge"
                                     _kg.bulk_import_knowledge_files(_l6_dir)
                                 _archive_dir = Path(os.environ.get("DPC_HOME", Path.home() / ".dpc")) / "conversations" / (self.agent_id or "agent_001") / "archive"
@@ -873,7 +873,7 @@ class DpcAgentManager:
             return context
 
         # Load personal context (with firewall check)
-        if self.firewall is None or self.firewall.can_agent_access_context('personal'):
+        if self.firewall is None or self.firewall.can_agent_access_context('personal', profile_name=self.agent_id):
             personal_path = dpc_dir / "personal.json"
             if personal_path.exists():
                 try:
@@ -885,7 +885,7 @@ class DpcAgentManager:
             log.debug("Personal context access denied by firewall")
 
         # Load device context (with firewall check)
-        if self.firewall is None or self.firewall.can_agent_access_context('device'):
+        if self.firewall is None or self.firewall.can_agent_access_context('device', profile_name=self.agent_id):
             device_path = dpc_dir / "device_context.json"
             if device_path.exists():
                 try:
