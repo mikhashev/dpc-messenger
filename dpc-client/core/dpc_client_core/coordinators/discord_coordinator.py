@@ -130,6 +130,7 @@ class DiscordCoordinator:
                 message=f"[Discord — {sender}]: {text}",
                 conversation_id=user_conv_id,
                 sender_name=f"{sender} (Discord)",
+                message_source="discord",
             )
             if response:
                 thread_ok = await self.discord_manager.create_thread_and_reply(

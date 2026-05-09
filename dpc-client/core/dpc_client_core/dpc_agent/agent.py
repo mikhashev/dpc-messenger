@@ -167,6 +167,7 @@ class DpcAgent:
         # Reply routing: when set, injected into ToolContext so schedule_task
         # can propagate it into task data for automatic result delivery.
         reply_telegram_chat_id: Optional[str] = None,
+        message_source: Optional[str] = None,
     ) -> str:
         """
         Process a user message and return response.
@@ -207,7 +208,7 @@ class DpcAgent:
                 prior_history = full_history[:-1]  # exclude the current user message
 
         # Get firewall-controlled tool access (needed for both context and tool registry)
-        allowed_tools = self._get_allowed_tools()
+        allowed_tools = self._get_allowed_tools(message_source=message_source)
 
         # Collect firewall metadata for capabilities section (transparency)
         all_tools_map = None
@@ -394,20 +395,27 @@ class DpcAgent:
         state_path.parent.mkdir(parents=True, exist_ok=True)
         state_path.write_text(json.dumps(state, indent=2), encoding="utf-8")
 
-    def _get_allowed_tools(self) -> Optional[set]:
-        """
-        Get set of allowed tools from firewall.
+    EXTERNAL_SOURCE_ALLOWED_TOOLS = frozenset({
+        "memory_search", "browse_page", "search_web",
+        "read_file", "list_my_tools", "knowledge_list",
+    })
 
-        Returns:
-            Set of allowed tool names, or None if no firewall (all tools allowed)
+    def _get_allowed_tools(self, message_source: Optional[str] = None) -> Optional[set]:
+        """
+        Get set of allowed tools from firewall, restricted by message source.
+
+        External sources (discord, telegram_public) get a read-only whitelist
+        intersected with firewall permissions — new tools blocked by default.
         """
         if self._firewall is None:
             log.warning("No firewall configured - all tools allowed")
-            return None  # No restriction
+            if message_source in ("discord", "telegram_public"):
+                return set(self.EXTERNAL_SOURCE_ALLOWED_TOOLS)
+            return None
 
         if not self._firewall.dpc_agent_enabled:
             log.info("DPC Agent disabled in firewall")
-            return set()  # No tools allowed
+            return set()
 
         if self._firewall_profile:
             allowed = self._firewall.get_allowed_agent_tools_for_profile(self._firewall_profile)
@@ -415,6 +423,11 @@ class DpcAgent:
         else:
             allowed = self._firewall.get_allowed_agent_tools()
             log.debug(f"Firewall allowed tools (global): {len(allowed)} tools")
+
+        if message_source in ("discord", "telegram_public"):
+            allowed = allowed & self.EXTERNAL_SOURCE_ALLOWED_TOOLS
+            log.info("Source %s: restricted to %d read-only tools", message_source, len(allowed))
+
         return allowed
 
     def get_memory(self) -> Memory:

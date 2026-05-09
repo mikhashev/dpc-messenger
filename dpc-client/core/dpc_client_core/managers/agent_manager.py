@@ -655,6 +655,8 @@ class DpcAgentManager:
         # When set, injected into ToolContext so schedule_task auto-fills
         # _reply_telegram_chat_id in task data for later result delivery.
         telegram_chat_id: Optional[str] = None,
+        # Source of the message for tool filtering (discord, telegram_public, etc.)
+        message_source: Optional[str] = None,
         # When True, don't save user message to history (already saved by caller)
         _skip_history: bool = False,
     ) -> str:
@@ -772,6 +774,7 @@ class DpcAgentManager:
                     image_mime=image_mime,
                     image_caption=image_caption,
                     reply_telegram_chat_id=telegram_chat_id,
+                    message_source=message_source,
                 )
             finally:
                 # ADR-022 Task 07: update daily token counter
