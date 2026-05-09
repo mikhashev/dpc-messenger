@@ -321,9 +321,22 @@ async def run_sleep(
     force: bool = False, provider_alias: Optional[str] = None,
     progress_callback=None, group_id: Optional[str] = None,
 ) -> Dict[str, Any]:
+    SLEEP_TIMEOUT_MINUTES = 30
     state = _read_sleep_state(conversation_dir)
     if state.get("status") == "sleeping":
-        return {"status": "already_sleeping"}
+        started = state.get("started_at")
+        if started:
+            try:
+                started_dt = datetime.fromisoformat(started)
+                elapsed = (datetime.now(timezone.utc) - started_dt).total_seconds() / 60
+                if elapsed > SLEEP_TIMEOUT_MINUTES:
+                    log.warning("Stuck sleep detected for %s (%.0f min), resetting", agent_id, elapsed)
+                else:
+                    return {"status": "already_sleeping"}
+            except (ValueError, TypeError):
+                log.warning("Sleep state has invalid started_at for %s, resetting", agent_id)
+        else:
+            log.warning("Sleep state missing started_at for %s, resetting", agent_id)
 
     _write_sleep_state(conversation_dir, {
         "status": "sleeping",

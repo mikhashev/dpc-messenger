@@ -125,7 +125,7 @@ import { availableProviders, defaultProviders, providersList, peerProviders, aiR
 import { fileTransferOffer, fileTransferProgress, fileTransferComplete, fileTransferCancelled, activeFileTransfers, filePreparationStarted, filePreparationProgress, filePreparationCompleted } from './services/fileTransfer';
 import { voiceOfferReceived, voiceTranscriptionReceived, voiceTranscriptionComplete, voiceTranscriptionConfig, whisperModelLoadingStarted, whisperModelLoaded, whisperModelLoadingFailed, whisperModelUnloaded, whisperModelDownloadRequired, whisperModelDownloadStarted, whisperModelDownloadCompleted, whisperModelDownloadFailed } from './services/voice';
 import { groupChats, groupTextReceived, groupFileReceived, groupInviteReceived, groupUpdated, groupMemberLeft, groupDeleted, groupHistorySynced, tokenUsageUpdated } from './services/groups';
-import { agentsList, agentCreated, agentUpdated, agentDeleted, agentProfiles, agentProgress, agentProgressClear, agentTextChunk, agentChatMessage, sleepStateChanged, sleepProgress } from './services/agents';
+import { agentsList, agentCreated, agentUpdated, agentDeleted, agentProfiles, agentProgress, agentProgressClear, agentTextChunk, agentChatMessage, sleepStateChanged, sleepProgress, sleepAgentStates } from './services/agents';
 import { telegramEnabled, telegramConnected, telegramStatus, telegramError, telegramLinkedChats, telegramMessages, telegramMessageReceived, telegramVoiceReceived, telegramImageReceived, telegramFileReceived, agentTelegramLinked, agentTelegramUnlinked, agentHistoryUpdated } from './services/telegram';
 import { personalContext, contextUpdated, peerContextUpdated, knowledgeCommitProposal, knowledgeCommitResult, extractionFailure, tokenWarning, integrityWarnings } from './services/knowledge';
 import { historyRestored, newSessionProposal, newSessionResult, conversationReset, conversationSettings, conversationSettingsChanged, conversationDeleted } from './services/session';
@@ -139,7 +139,7 @@ export { availableProviders, defaultProviders, providersList, peerProviders, aiR
 export { fileTransferOffer, fileTransferProgress, fileTransferComplete, fileTransferCancelled, activeFileTransfers, filePreparationStarted, filePreparationProgress, filePreparationCompleted };
 export { voiceOfferReceived, voiceTranscriptionReceived, voiceTranscriptionComplete, voiceTranscriptionConfig, whisperModelLoadingStarted, whisperModelLoaded, whisperModelLoadingFailed, whisperModelUnloaded, whisperModelDownloadRequired, whisperModelDownloadStarted, whisperModelDownloadCompleted, whisperModelDownloadFailed };
 export { groupChats, groupTextReceived, groupFileReceived, groupInviteReceived, groupUpdated, groupMemberLeft, groupDeleted, groupHistorySynced, tokenUsageUpdated };
-export { agentsList, agentCreated, agentUpdated, agentDeleted, agentProfiles, agentProgress, agentProgressClear, agentTextChunk, agentChatMessage, sleepStateChanged, sleepProgress };
+export { agentsList, agentCreated, agentUpdated, agentDeleted, agentProfiles, agentProgress, agentProgressClear, agentTextChunk, agentChatMessage, sleepStateChanged, sleepProgress, sleepAgentStates };
 export { telegramEnabled, telegramConnected, telegramStatus, telegramError, telegramLinkedChats, telegramMessages, telegramMessageReceived, telegramVoiceReceived, telegramImageReceived, telegramFileReceived, agentTelegramLinked, agentTelegramUnlinked, agentHistoryUpdated };
 export { personalContext, contextUpdated, peerContextUpdated, knowledgeCommitProposal, knowledgeCommitResult, extractionFailure, tokenWarning, integrityWarnings };
 export { historyRestored, newSessionProposal, newSessionResult, conversationReset, conversationSettings, conversationSettingsChanged, conversationDeleted };
@@ -992,12 +992,35 @@ export async function connectToCoreService() {
                 else if (message.event === "sleep_state_changed") {
                     console.log("[Sleep]", message.payload?.status, message.payload?.agent_id);
                     sleepStateChanged.set(message.payload);
+                    const aid = message.payload?.agent_id;
+                    if (aid) {
+                        let aName = aid;
+                        agentsList.subscribe(list => { const a = list?.find((x: any) => x.agent_id === aid); if (a?.name) aName = a.name; })();
+                        sleepAgentStates.update(m => {
+                            const nm = new Map(m);
+                            if (message.payload?.status === "awake") {
+                                nm.delete(aid);
+                            } else {
+                                nm.set(aid, { agent_id: aid, agent_name: aName, status: message.payload?.status, current: 0, total: 0, phase: '' });
+                            }
+                            return nm;
+                        });
+                    }
                     if (message.payload?.status === "awake") {
                         sleepProgress.set(null);
                     }
                 }
                 else if (message.event === "sleep_progress") {
                     sleepProgress.set(message.payload);
+                    const aid = message.payload?.agent_id;
+                    if (aid) {
+                        sleepAgentStates.update(m => {
+                            const nm = new Map(m);
+                            const existing = nm.get(aid);
+                            nm.set(aid, { ...existing, agent_id: aid, agent_name: existing?.agent_name || aid, status: 'sleeping', current: message.payload?.current ?? 0, total: message.payload?.total ?? 0, phase: message.payload?.phase ?? '' });
+                            return nm;
+                        });
+                    }
                 }
             } catch (error) {
                 console.error("Error parsing message:", error);
