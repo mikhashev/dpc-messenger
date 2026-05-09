@@ -6671,10 +6671,15 @@ class CoreService:
             agent_config = load_agent_config(agent_id)
             sleep_provider = agent_config.get("sleep_provider_alias") or None
 
+            agent_display_name = agent_id
+            if local_node_id:
+                names_map = metadata.get("agent_names", {}).get(local_node_id, {})
+                agent_display_name = names_map.get(agent_id, agent_id)
+
             sleep_data = {"agent_id": agent_id, "group_id": group_id, "status": "sleeping"}
             await self.local_api.broadcast_event("sleep_state_changed", sleep_data)
 
-            async def _run_group_sleep(aid=agent_id, adir=agent_dir, sp=sleep_provider):
+            async def _run_group_sleep(aid=agent_id, adir=agent_dir, sp=sleep_provider, dname=agent_display_name):
                 async def _progress(current, total, phase, archive_file):
                     await self.local_api.broadcast_event("sleep_progress", {
                         "agent_id": aid, "group_id": group_id,
@@ -6690,6 +6695,9 @@ class CoreService:
                         brief = result.get("morning_brief", {})
                         brief["group_id"] = group_id
                         brief_path = adir / f"morning_brief_group_{group_id}.json"
+                        chat_text = self._format_morning_brief(brief)
+                        await self.send_group_agent_message(group_id, dname, chat_text)
+                        brief["consumed"] = True
                         brief_path.write_text(json.dumps(brief, ensure_ascii=False, indent=2), encoding="utf-8")
                     done_data = {"agent_id": aid, "group_id": group_id, "status": "awake",
                                  "result": result.get("status", "unknown"),
