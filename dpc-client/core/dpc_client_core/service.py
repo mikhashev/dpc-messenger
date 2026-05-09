@@ -4082,8 +4082,7 @@ class CoreService:
             await monitor.on_message(conv_message)
             monitor.save_history()
 
-            last_msg = monitor.get_message_history()[-1] if monitor.get_message_history() else {}
-            msg_index = last_msg.get("msg_index", 0)
+            msg_index = monitor.get_last_msg_index()
 
             group_payload = {
                 "group_id": group_id,

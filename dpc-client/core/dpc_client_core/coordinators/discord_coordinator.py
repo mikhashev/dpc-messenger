@@ -206,7 +206,7 @@ class DiscordCoordinator:
         (re.compile(r'/home/[^\s/]+/[^\s]*'), '[path]'),
         (re.compile(r'dpc-node-[0-9a-f]{16,}'), '[node]'),
         (re.compile(r'agent_[0-9a-f]{8,}'), '[agent]'),
-        (re.compile(r'agent_\d{3}\b'), '[agent]'),
+        (re.compile(r'agent_\d{3,}\b'), '[agent]'),
     ]
 
     def _sanitize_output(self, text: str) -> str:

@@ -1484,6 +1484,11 @@ PARTICIPANTS' CULTURAL CONTEXTS:
         """
         return self.message_history.copy()
 
+    def get_last_msg_index(self) -> int:
+        if self.message_history:
+            return self.message_history[-1].get("msg_index", 0)
+        return 0
+
     def update_peer_context_hash(self, node_id: str, context_hash: str):
         """Update the stored hash for a peer's context
 
