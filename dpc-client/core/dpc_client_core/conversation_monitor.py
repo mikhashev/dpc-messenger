@@ -1440,6 +1440,15 @@ PARTICIPANTS' CULTURAL CONTEXTS:
         self.message_ids.add(message_id)
         self._history_dirty = True
 
+        # Compute msg_index (1-based) and chain_hash (MSG-CHAIN, S105)
+        prev_index = max((m.get("msg_index", 0) for m in self.message_history), default=0)
+        msg_index = prev_index + 1 if self.message_history else 1
+        message_dict["msg_index"] = msg_index
+
+        prev_hash = self.message_history[-1].get("chain_hash", "genesis") if self.message_history else "genesis"
+        chain_input = f"{msg_index}|{message_id}|{role}|{sender_name or ''}|{content}|{timestamp or ''}|{prev_hash}"
+        message_dict["chain_hash"] = hashlib.sha256(chain_input.encode("utf-8")).hexdigest()
+
         self.message_history.append(message_dict)
 
         # Also add to knowledge extraction buffers (v0.13.2 fix for voice messages)
@@ -2126,6 +2135,29 @@ PARTICIPANTS' CULTURAL CONTEXTS:
                 data = json.load(f)
 
             messages = data.get("messages", [])
+
+            # Backfill msg_index + verify chain_hash (MSG-CHAIN, S105)
+            chain_ok = True
+            prev_hash = "genesis"
+            for i, m in enumerate(messages):
+                if "msg_index" not in m:
+                    m["msg_index"] = i + 1  # 1-based backfill
+                expected_input = (
+                    f"{m['msg_index']}|{m.get('id', '')}|{m.get('role', '')}"
+                    f"|{m.get('sender_name', '')}|{m.get('content', '')}"
+                    f"|{m.get('timestamp', '')}|{prev_hash}"
+                )
+                expected_hash = hashlib.sha256(expected_input.encode("utf-8")).hexdigest()
+                stored_hash = m.get("chain_hash")
+                if stored_hash and stored_hash != expected_hash:
+                    logger.warning("Chain broken at message #%d (conversation %s)", m["msg_index"], self.conversation_id)
+                    chain_ok = False
+                if not stored_hash:
+                    m["chain_hash"] = expected_hash
+                prev_hash = m.get("chain_hash", "genesis")
+            if chain_ok and any(m.get("chain_hash") for m in messages):
+                logger.info("Chain integrity verified: %d messages OK", len(messages))
+
             self.message_history = messages
 
             # Rebuild message_ids set for deduplication

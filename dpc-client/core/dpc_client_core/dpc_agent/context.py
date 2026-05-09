@@ -508,26 +508,26 @@ def build_llm_messages(
 
     # Insert previous conversation turns so the agent has continuity
     if conversation_history:
-        for msg_idx, hist_msg in enumerate(conversation_history):
+        for hist_msg in conversation_history:
             role = hist_msg.get("role", "")
             content = hist_msg.get("content", "")
             if role in ("user", "assistant") and content:
-                if role == "user":
-                    timestamp = hist_msg.get("timestamp", "")
-                    sender = hist_msg.get("sender_name", "")
-                    prefix_parts = [str(msg_idx)]
-                    if timestamp:
-                        ts_display = timestamp.split('T')[1][:8] if 'T' in timestamp else timestamp
-                        prefix_parts.append(ts_display)
-                    if sender:
-                        prefix_parts.append(sender)
-                    content = f"[{' | '.join(prefix_parts)}] {content}"
+                msg_index = hist_msg.get("msg_index", "")
+                timestamp = hist_msg.get("timestamp", "")
+                sender = hist_msg.get("sender_name", "")
+                prefix_parts = [f"#{msg_index}" if msg_index else ""]
+                if timestamp:
+                    ts_display = timestamp.split('T')[1][:8] if 'T' in timestamp else timestamp
+                    prefix_parts.append(ts_display)
+                if sender:
+                    prefix_parts.append(sender)
+                content = f"[{' | '.join(p for p in prefix_parts if p)}] {content}"
                 messages.append({"role": role, "content": content})
 
-    current_idx = len(conversation_history) if conversation_history else 0
+    next_idx = max((m.get("msg_index", 0) for m in conversation_history), default=0) + 1 if conversation_history else 1
     user_content = _build_user_content(task)
     if isinstance(user_content, str):
-        user_content = f"[{current_idx}] {user_content}"
+        user_content = f"[#{next_idx}] {user_content}"
     messages.append({"role": "user", "content": user_content})
 
     # --- Soft-cap token trimming ---
