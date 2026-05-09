@@ -12,8 +12,10 @@ ADR-025 Task 004.
 import json
 import logging
 import re
+import time
+from collections import defaultdict
 from pathlib import Path
-from typing import TYPE_CHECKING, Dict, Optional
+from typing import TYPE_CHECKING, Dict, List, Optional
 
 if TYPE_CHECKING:
     from ..managers.discord_manager import DiscordBotManager
@@ -31,6 +33,8 @@ class DiscordCoordinator:
         self._channel_to_conversation: Dict[str, str] = {}
         self._conversation_to_channel: Dict[str, str] = {}
         self._user_conversations: Dict[str, str] = {}
+        self._user_timestamps: Dict[str, List[float]] = defaultdict(list)
+        self._global_timestamps: List[float] = []
         self._load_links()
 
     def _links_path(self) -> Path:
@@ -92,6 +96,38 @@ class DiscordCoordinator:
                 return dirs[0].name
         return None
 
+    def _get_rate_config(self) -> dict:
+        settings = getattr(self.service, 'settings', None)
+        if not settings:
+            return {"per_user_max": 10, "per_user_window": 600, "global_max": 60, "global_window": 3600, "delay": 3}
+        return {
+            "per_user_max": int(settings.get("discord.guardrails", "rate_limit_per_user_max", fallback="10")),
+            "per_user_window": int(settings.get("discord.guardrails", "rate_limit_per_user_window", fallback="600")),
+            "global_max": int(settings.get("discord.guardrails", "rate_limit_global_max", fallback="60")),
+            "global_window": int(settings.get("discord.guardrails", "rate_limit_global_window", fallback="3600")),
+            "delay": int(settings.get("discord.guardrails", "response_delay_seconds", fallback="3")),
+        }
+
+    def _check_rate_limit(self, discord_user_id: str) -> Optional[str]:
+        """Check per-user and global rate limits. Returns error message or None."""
+        now = time.time()
+        cfg = self._get_rate_config()
+
+        self._user_timestamps[discord_user_id] = [
+            t for t in self._user_timestamps[discord_user_id] if now - t < cfg["per_user_window"]
+        ]
+        if len(self._user_timestamps[discord_user_id]) >= cfg["per_user_max"]:
+            wait = int(cfg["per_user_window"] - (now - self._user_timestamps[discord_user_id][0]))
+            return f"Please wait ~{wait}s before sending another message."
+
+        self._global_timestamps = [t for t in self._global_timestamps if now - t < cfg["global_window"]]
+        if len(self._global_timestamps) >= cfg["global_max"]:
+            return "The bot is busy right now. Please try again in a few minutes."
+
+        self._user_timestamps[discord_user_id].append(now)
+        self._global_timestamps.append(now)
+        return None
+
     async def handle_mention(self, message) -> None:
         text = message.content
         for mention in message.mentions:
@@ -102,6 +138,12 @@ class DiscordCoordinator:
 
         channel_id = str(message.channel.id)
         sender = str(message.author.display_name or message.author.name)
+        discord_user_id = str(message.author.id)
+
+        rate_error = self._check_rate_limit(discord_user_id)
+        if rate_error:
+            await self.discord_manager.send_message(channel_id, rate_error)
+            return
 
         agent_id = self._get_agent_id()
         if not agent_id:
@@ -134,6 +176,10 @@ class DiscordCoordinator:
                 message_source="discord",
             )
             if response:
+                delay = self._get_rate_config()["delay"]
+                if delay > 0:
+                    import asyncio
+                    await asyncio.sleep(delay)
                 sanitized = self._sanitize_output(response)
                 thread_ok = await self.discord_manager.create_thread_and_reply(
                     message, sanitized, thread_name=text[:100] or "Discussion"
