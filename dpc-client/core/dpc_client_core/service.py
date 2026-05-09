@@ -4067,23 +4067,7 @@ class CoreService:
 
             node_id = self.p2p_manager.node_id
 
-            # Fan-out GROUP_TEXT to all connected members
-            await self._broadcast_to_group(group_id, {
-                "command": "GROUP_TEXT",
-                "payload": {
-                    "group_id": group_id,
-                    "text": text,
-                    "sender_name": sender_name,
-                    "sender_type": "human",
-                    "sender_node_id": node_id,
-                    "agent_owner": None,
-                    "mentions": mentions,
-                    "message_id": message_id,  # v0.20.0: Include sender-generated ID
-                    "timestamp": timestamp,
-                }
-            })
-
-            # Track in conversation monitor for knowledge extraction
+            # Track in conversation monitor FIRST so msg_index gets assigned
             monitor = self._get_or_create_conversation_monitor(group_id)
             from .conversation_monitor import Message as ConvMessage
             conv_message = ConvMessage(
@@ -4097,6 +4081,28 @@ class CoreService:
             )
             await monitor.on_message(conv_message)
             monitor.save_history()
+
+            last_msg = monitor.get_message_history()[-1] if monitor.get_message_history() else {}
+            msg_index = last_msg.get("msg_index", 0)
+
+            group_payload = {
+                "group_id": group_id,
+                "text": text,
+                "sender_name": sender_name,
+                "sender_type": "human",
+                "sender_node_id": node_id,
+                "agent_owner": None,
+                "mentions": mentions,
+                "message_id": message_id,
+                "timestamp": timestamp,
+                "msg_index": msg_index,
+            }
+
+            # Fan-out GROUP_TEXT to all connected members
+            await self._broadcast_to_group(group_id, {
+                "command": "GROUP_TEXT",
+                "payload": group_payload,
+            })
 
             # Detect @agent mentions and route to Ark / CC
             await self._handle_group_agent_mentions(group_id, text, sender_name)
@@ -4207,35 +4213,8 @@ class CoreService:
         timestamp = datetime.now(timezone.utc).isoformat()
 
         node_id = self.p2p_manager.node_id
-        payload = {
-            "group_id": group_id,
-            "text": text,
-            "sender_node_id": node_id,
-            "sender_name": agent_name,
-            "sender_type": "agent",
-            "agent_owner": self.p2p_manager.get_display_name() or node_id,
-            "message_id": message_id,
-            "timestamp": timestamp,
-            "mentions": [],
-            "is_agent": True,
-        }
 
-        # Broadcast to UI
-        await self.local_api.broadcast_event("group_text_received", payload)
-
-        # Pre-register message ID so GroupTextHandler ignores it if a peer relays it back
-        dedup_key = f"{group_id}:{message_id}"
-        self._processed_message_ids.add(dedup_key)
-        if len(self._processed_message_ids) > self._max_processed_ids:
-            # Trim oldest half to keep memory bounded
-            to_remove = list(self._processed_message_ids)[:len(self._processed_message_ids) // 2]
-            for k in to_remove:
-                self._processed_message_ids.discard(k)
-
-        # Relay to P2P peers so remote members see the agent response
-        await self._broadcast_to_group(group_id, {"command": "GROUP_TEXT", "payload": payload})
-
-        # Feed to ConversationMonitor (persistence + knowledge extraction)
+        # Feed to ConversationMonitor FIRST so msg_index gets assigned
         monitor = self._get_or_create_conversation_monitor(group_id)
         from .conversation_monitor import Message as ConvMessage
         await monitor.on_message(ConvMessage(
@@ -4250,16 +4229,48 @@ class CoreService:
         ))
         monitor.save_history()
 
-        # Update token count so UI counter stays in sync
+        last_msg = monitor.get_message_history()[-1] if monitor.get_message_history() else {}
+        msg_index = last_msg.get("msg_index", 0)
+
+        payload = {
+            "group_id": group_id,
+            "text": text,
+            "sender_node_id": node_id,
+            "sender_name": agent_name,
+            "sender_type": "agent",
+            "agent_owner": self.p2p_manager.get_display_name() or node_id,
+            "message_id": message_id,
+            "timestamp": timestamp,
+            "mentions": [],
+            "is_agent": True,
+            "msg_index": msg_index,
+        }
+
+        # Broadcast to UI
+        await self.local_api.broadcast_event("group_text_received", payload)
+
+        # Pre-register message ID so GroupTextHandler ignores it if a peer relays it back
+        dedup_key = f"{group_id}:{message_id}"
+        self._processed_message_ids.add(dedup_key)
+        if len(self._processed_message_ids) > self._max_processed_ids:
+            to_remove = list(self._processed_message_ids)[:len(self._processed_message_ids) // 2]
+            for k in to_remove:
+                self._processed_message_ids.discard(k)
+
+        # Relay to P2P peers so remote members see the agent response
+        await self._broadcast_to_group(group_id, {"command": "GROUP_TEXT", "payload": payload})
+
+        # Update token count — use agent's context_estimated if available
         history_tokens = sum(len(m.get("content", "") or "") for m in monitor.get_message_history()) // 4
-        monitor.set_token_count(history_tokens)
+        context_estimated = getattr(monitor, '_last_context_estimated', 0) or 0
+        monitor.set_token_count(max(history_tokens, context_estimated))
         token_usage = monitor.get_token_usage()
         await self.local_api.broadcast_event("token_usage_updated", {
             "conversation_id": group_id,
-            "tokens_used": history_tokens,
+            "tokens_used": max(history_tokens, context_estimated),
             "token_limit": token_usage.get("token_limit", 0) or 128000,
             "history_tokens": history_tokens,
-            "context_estimated": 0,
+            "context_estimated": context_estimated,
         })
 
         # Route @mentions from agent messages (enables CC→Ark and Ark→CC communication)

@@ -148,6 +148,7 @@
             mentions: msg.mentions || [],
             isAgent: msg.sender_type === 'agent' || msg.is_agent || false,
             agentOwner: msg.agent_owner || null,
+            msg_index: msg.msg_index || 0,
           }]);
           return newMap;
         });

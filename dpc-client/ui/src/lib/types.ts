@@ -65,6 +65,7 @@ export type Message = {
   isError?: boolean;           // Error message styling (v0.19.2+)
   isAgent?: boolean;           // Agent message in group chat (v0.25.0+)
   agentOwner?: string | null;
+  msg_index?: number;          // Sequential message number (MSG-CHAIN, v0.25.0+)
 };
 
 // --- Provider System ---
@@ -368,6 +369,7 @@ export interface GroupMessageEvent {
     is_agent?: boolean;
     sender_type?: string;
     agent_owner?: string | null;
+    msg_index?: number;
 }
 
 export interface GroupFileEvent {

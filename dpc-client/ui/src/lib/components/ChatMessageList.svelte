@@ -136,7 +136,7 @@
               {/if}
             {/if}
           </strong>
-          <span class="timestamp"><span class="msg-index">#{msg.msg_index}</span> {new Date(msg.timestamp).toLocaleTimeString()}</span>
+          <span class="timestamp">{#if msg.msg_index}<span class="msg-index">#{msg.msg_index}</span> {/if}{new Date(msg.timestamp).toLocaleTimeString()}</span>
         </div>
         <!-- Thinking block (v1.4+): Display AI reasoning before main response -->
         {#if isAiSender(msg.sender, msg) && msg.thinking}
