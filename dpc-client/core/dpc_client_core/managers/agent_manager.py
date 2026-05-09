@@ -957,6 +957,18 @@ class DpcAgentManager:
                 # in-memory session and miss all historical context.
                 monitor.rebuild_extraction_buffers_from_history()
 
+            if llm_manager:
+                stored_cw = self.config.get("context_window")
+                if stored_cw:
+                    monitor.set_token_limit(int(stored_cw))
+                else:
+                    provider_alias = self.config.get("provider_alias", "")
+                    if provider_alias and provider_alias in llm_manager.providers:
+                        model = llm_manager.providers[provider_alias].model
+                        cw = llm_manager.get_context_window(model)
+                        if cw:
+                            monitor.set_token_limit(cw)
+
             self._agent_monitors[conversation_id] = monitor
             log.debug(f"Created ConversationMonitor for agent conversation: {conversation_id}")
 
