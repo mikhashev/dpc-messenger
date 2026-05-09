@@ -2095,6 +2095,16 @@ PARTICIPANTS' CULTURAL CONTEXTS:
 
             self._history_dirty = False
             logger.info(f"Saved {len(self.message_history)} messages to {path}")
+
+            # Write chain anchor for deletion detection (MSG-CHAIN-2, S105)
+            last_hash = self.message_history[-1].get("chain_hash", "") if self.message_history else ""
+            meta_path = path.parent / ".chain_meta.json"
+            try:
+                json.dump({"msg_count": len(self.message_history), "last_chain_hash": last_hash},
+                          open(meta_path, "w", encoding="utf-8"))
+            except Exception:
+                pass  # non-critical
+
             return True
 
         except Exception as e:
@@ -2157,6 +2167,23 @@ PARTICIPANTS' CULTURAL CONTEXTS:
                 prev_hash = m.get("chain_hash", "genesis")
             if chain_ok and any(m.get("chain_hash") for m in messages):
                 logger.info("Chain integrity verified: %d messages OK", len(messages))
+
+            # Check chain anchor for deletion detection (MSG-CHAIN-2, S105)
+            meta_path = path.parent / ".chain_meta.json"
+            if meta_path.exists():
+                try:
+                    meta = json.load(open(meta_path, encoding="utf-8"))
+                    expected_count = meta.get("msg_count", 0)
+                    expected_last = meta.get("last_chain_hash", "")
+                    actual_last = messages[-1].get("chain_hash", "") if messages else ""
+                    if expected_count and len(messages) != expected_count:
+                        logger.warning("Message count mismatch: expected %d, got %d (conversation %s) — possible deletion",
+                                       expected_count, len(messages), self.conversation_id)
+                    elif expected_last and actual_last != expected_last:
+                        logger.warning("Last chain hash mismatch (conversation %s) — history may have been modified",
+                                       self.conversation_id)
+                except Exception:
+                    pass  # meta file corrupt — non-critical
 
             self.message_history = messages
 
