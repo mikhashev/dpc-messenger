@@ -238,6 +238,7 @@
                   attachments: msg.attachments || [],
                   thinking: msg.thinking,
                   streamingRaw: msg.streaming_raw,
+                  msg_index: msg.msg_index || 0,
                 };
               });
               newMap.set(state.agent_id, msgs);

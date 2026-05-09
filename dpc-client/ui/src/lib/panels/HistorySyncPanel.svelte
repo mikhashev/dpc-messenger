@@ -99,6 +99,7 @@
                     attachments: msg.attachments || [],
                     isAgent: isAgent,
                     agentOwner: msg.agent_owner || null,
+                    msg_index: msg.msg_index || 0,
                   };
                 });
 
