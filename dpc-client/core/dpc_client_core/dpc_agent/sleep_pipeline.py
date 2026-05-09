@@ -328,6 +328,8 @@ async def run_sleep(
         if started:
             try:
                 started_dt = datetime.fromisoformat(started)
+                if started_dt.tzinfo is None:
+                    started_dt = started_dt.replace(tzinfo=timezone.utc)
                 elapsed = (datetime.now(timezone.utc) - started_dt).total_seconds() / 60
                 if elapsed > SLEEP_TIMEOUT_MINUTES:
                     log.warning("Stuck sleep detected for %s (%.0f min), resetting", agent_id, elapsed)
