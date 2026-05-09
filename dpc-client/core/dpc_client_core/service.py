@@ -635,10 +635,13 @@ class CoreService:
         import json as _json
         agents_dir = Path.home() / ".dpc" / "agents"
         if not agents_dir.is_dir():
+            logger.debug("Eager index rebuild: agents dir %s not found", agents_dir)
             return
         dpc_provider = self.llm_manager.providers.get("dpc_agent")
         if not dpc_provider or not hasattr(dpc_provider, '_ensure_manager'):
+            logger.debug("Eager index rebuild: dpc_agent provider not available (provider=%s)", type(dpc_provider).__name__ if dpc_provider else None)
             return
+        logger.info("Eager index rebuild: scanning %s for agents with memory.enabled=true", agents_dir)
         for agent_dir in sorted(agents_dir.iterdir()):
             if not agent_dir.is_dir():
                 continue
