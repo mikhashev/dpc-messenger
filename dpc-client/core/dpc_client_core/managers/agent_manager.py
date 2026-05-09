@@ -262,6 +262,7 @@ class DpcAgentManager:
                         """Runs in thread executor to avoid blocking the event loop."""
                         try:
                             import numpy as np
+                            import hashlib
                             from pathlib import Path
                             import os
                             from dpc_client_core.dpc_agent.memory import EmbeddingProvider
@@ -327,14 +328,42 @@ class DpcAgentManager:
                                 except Exception as e:
                                     log.debug("Extended paths indexing skipped: %s", e)
 
-                            # Embed + index extra documents one at a time (whole-doc, no batching)
+                            # Hash-based staleness check: skip re-embedding if sources unchanged
+                            source_fingerprint = hashlib.sha256(
+                                "\n".join(sorted(m.get("source_file", "") for m in extra_metas)).encode()
+                            ).hexdigest()[:16]
+                            extra_hash = f"{l6_count}:{ext_count}:{source_fingerprint}"
+
+                            stored_extra_hash = ""
+                            meta_path = index_dir / "index_meta.json"
+                            if meta_path.exists() and not needs_full_rebuild:
+                                try:
+                                    import json as _json2
+                                    _stored = _json2.loads(meta_path.read_text(encoding="utf-8"))
+                                    stored_extra_hash = _stored.get("extra_hash", "")
+                                except Exception:
+                                    pass
+
+                            if stored_extra_hash == extra_hash and not needs_full_rebuild and extra_texts:
+                                faiss_idx.load()
+                                bm25_idx.load()
+                                log.info("Extra index unchanged (hash=%s), skipping re-embed of %d docs", extra_hash, len(extra_texts))
+                                extra_texts = []
+
+                            # Embed + index extra documents in batches
+                            BATCH_SIZE = 4
                             if extra_texts:
-                                for doc_text, meta in zip(extra_texts, extra_metas):
+                                indexed = 0
+                                for batch_start in range(0, len(extra_texts), BATCH_SIZE):
                                     if self._stop_event.is_set():
-                                        log.info("Extra indexing interrupted by shutdown")
+                                        log.info("Extra indexing interrupted by shutdown at batch %d/%d", batch_start, len(extra_texts))
                                         break
-                                    vector = np.array(provider.embed(doc_text), dtype=np.float32).reshape(1, -1)
-                                    faiss_idx.add(vector, [meta])
+                                    batch_texts = extra_texts[batch_start:batch_start + BATCH_SIZE]
+                                    batch_metas = extra_metas[batch_start:batch_start + BATCH_SIZE]
+                                    vectors = np.array(provider.embed_batch(batch_texts), dtype=np.float32)
+                                    for vec, meta in zip(vectors, batch_metas):
+                                        faiss_idx.add(vec.reshape(1, -1), [meta])
+                                        indexed += 1
                                 if not self._stop_event.is_set():
                                     bm25_idx.add(extra_texts, extra_metas)
                                     log.info("Bulk indexed %d extra documents (L6: %d, EXT: %d)", len(extra_texts), l6_count, ext_count)
@@ -344,6 +373,15 @@ class DpcAgentManager:
                             if needs_full_rebuild or extra_texts:
                                 faiss_idx.save()
                                 bm25_idx.save()
+                                # Persist extra_hash for staleness detection on next startup
+                                try:
+                                    import json as _json3
+                                    _mp = index_dir / "index_meta.json"
+                                    _md = _json3.loads(_mp.read_text(encoding="utf-8")) if _mp.exists() else {}
+                                    _md["extra_hash"] = extra_hash
+                                    _mp.write_text(_json3.dumps(_md, ensure_ascii=False, indent=2), encoding="utf-8")
+                                except Exception as _e:
+                                    log.debug("Failed to save extra_hash: %s", _e)
                             if needs_full_rebuild:
                                 total = count + l6_count + ext_count
                                 log.info("Memory index built: %d documents (L5: %d, L6: %d, EXT: %d)", total, count, l6_count, ext_count)

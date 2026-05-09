@@ -629,6 +629,33 @@ class CoreService:
         else:
             logger.info("Knowledge integrity verified (%d commits)", verified_count)
 
+    async def _eager_agent_index_rebuild(self):
+        """Scan all agents with memory.enabled=true and trigger index rebuild on startup."""
+        from pathlib import Path
+        import json as _json
+        agents_dir = Path.home() / ".dpc" / "agents"
+        if not agents_dir.is_dir():
+            return
+        dpc_provider = self.llm_manager.providers.get("dpc_agent")
+        if not dpc_provider or not hasattr(dpc_provider, '_ensure_manager'):
+            return
+        for agent_dir in sorted(agents_dir.iterdir()):
+            if not agent_dir.is_dir():
+                continue
+            config_path = agent_dir / "config.json"
+            if not config_path.exists():
+                continue
+            try:
+                cfg = _json.loads(config_path.read_text(encoding="utf-8"))
+                memory_cfg = cfg.get("memory", {})
+                if not memory_cfg.get("enabled", False):
+                    continue
+                agent_id = agent_dir.name
+                logger.info("Eager index rebuild: initializing agent %s", agent_id)
+                await dpc_provider._ensure_manager(agent_id=agent_id)
+            except Exception as e:
+                logger.warning("Eager index rebuild failed for %s: %s", agent_dir.name, e)
+
     async def start(self):
         """Starts all background services and runs indefinitely."""
         if self._is_running:
@@ -784,6 +811,9 @@ class CoreService:
             discord_task = await self.discord_service.start()
             if discord_task:
                 self._background_tasks.add(discord_task)
+
+        # Eager agent index rebuild for all agents with memory.enabled=true
+        await self._eager_agent_index_rebuild()
 
         # Try to connect to Hub for WebRTC signaling (with graceful degradation)
         hub_connected = False
