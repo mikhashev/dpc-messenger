@@ -686,7 +686,8 @@ def memory_search(ctx: ToolContext, query: str, top_k: int = 5) -> str:
         faiss_results = []
         if faiss_idx.load():
             try:
-                provider = EmbeddingProvider(local_files_only=True)
+                from dpc_client_core.dpc_agent.memory import get_embedding_provider
+                provider = get_embedding_provider(local_files_only=True)
                 qvec = np.array(provider.embed(query), dtype=np.float32)
                 faiss_results = faiss_idx.search(qvec, top_k)
             except Exception as e:

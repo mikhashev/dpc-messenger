@@ -402,7 +402,8 @@ def build_llm_messages(
                 _q2_results = []
                 if _faiss_idx.load():
                     if embedding_provider is None:
-                        embedding_provider = EmbeddingProvider(local_files_only=True)
+                        from .memory import get_embedding_provider
+                        embedding_provider = get_embedding_provider(local_files_only=True)
                         log.info("Active Recall: created fallback EmbeddingProvider (local_files_only)")
                     if _faiss_idx.needs_rebuild(embedding_provider.model_name):
                         log.info("Active Recall: FAISS index needs rebuild (model changed), skipping search")

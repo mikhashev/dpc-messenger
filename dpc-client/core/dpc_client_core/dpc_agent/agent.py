@@ -112,8 +112,8 @@ class DpcAgent:
             firewall_profile=firewall_profile,
         )
 
-        from .memory import EmbeddingProvider
-        self._embedding_provider = EmbeddingProvider(local_files_only=True)
+        from .memory import get_embedding_provider
+        self._embedding_provider = get_embedding_provider(local_files_only=True)
 
         # Task queue for background execution
         self.queue = TaskQueue(self.agent_root)

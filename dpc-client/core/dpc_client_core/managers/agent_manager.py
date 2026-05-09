@@ -265,12 +265,12 @@ class DpcAgentManager:
                             import hashlib
                             from pathlib import Path
                             import os
-                            from dpc_client_core.dpc_agent.memory import EmbeddingProvider
+                            from dpc_client_core.dpc_agent.memory import get_embedding_provider
                             from dpc_client_core.dpc_agent.faiss_index import FaissIndex
                             from dpc_client_core.dpc_agent.bm25_index import BM25Index
                             from dpc_client_core.dpc_agent.text_extract import extract_text
                             from dpc_client_core.dpc_agent.indexing_pipeline import _extract_heading, _build_doc_text
-                            provider = _provider_ref or EmbeddingProvider(model_name=_actual_model)
+                            provider = _provider_ref or get_embedding_provider(model_name=_actual_model)
                             faiss_idx = FaissIndex(index_dir, model_name=_actual_model, dimensions=provider.dimensions)
                             bm25_idx = BM25Index(index_dir)
 
