@@ -408,9 +408,10 @@ class DpcAgent:
         intersected with firewall permissions — new tools blocked by default.
         """
         if self._firewall is None:
-            log.warning("No firewall configured - all tools allowed")
             if message_source in ("discord", "telegram_public"):
+                log.warning("No firewall configured — external source %s, using read-only fallback", message_source)
                 return set(self.EXTERNAL_SOURCE_ALLOWED_TOOLS)
+            log.warning("No firewall configured - all tools allowed")
             return None
 
         if not self._firewall.dpc_agent_enabled:

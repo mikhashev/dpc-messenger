@@ -144,9 +144,9 @@ response_delay_seconds = 3
 | Per-user conversation routing (Layer 1) | DONE (004d, `71e53d4`) | ADR-025 Task 004d |
 | Discord threads (004e) | DONE (`f11622f`) | ADR-025 Task 004e |
 | Mention cleanup + echo (004c) | DONE (`440302e`) | ADR-025 Task 004c |
-| Source-based tool filtering | TODO | [001](../../tasks/adr-026-guardrails/001-source-tool-filtering.md) |
+| Source-based tool filtering | DONE (`5556a15`) | [001](../../tasks/adr-026-guardrails/001-source-tool-filtering.md) |
 | Rate limiting + response delay | TODO | [002](../../tasks/adr-026-guardrails/002-rate-limiting.md) |
-| Output content filtering | TODO | [003](../../tasks/adr-026-guardrails/003-output-sanitization.md) |
+| Output content filtering | DONE (`pending`) | [003](../../tasks/adr-026-guardrails/003-output-sanitization.md) |
 | URL whitelist | TODO | [004](../../tasks/adr-026-guardrails/004-url-whitelist.md) |
 | Graceful fallback | TODO | [005](../../tasks/adr-026-guardrails/005-graceful-fallback.md) |
 | TTL + context management (Layer 2) | TODO | [006](../../tasks/adr-026-guardrails/006-ttl-context-management.md) |

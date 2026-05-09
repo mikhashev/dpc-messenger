@@ -11,6 +11,7 @@ ADR-025 Task 004.
 
 import json
 import logging
+import re
 from pathlib import Path
 from typing import TYPE_CHECKING, Dict, Optional
 
@@ -133,11 +134,12 @@ class DiscordCoordinator:
                 message_source="discord",
             )
             if response:
+                sanitized = self._sanitize_output(response)
                 thread_ok = await self.discord_manager.create_thread_and_reply(
-                    message, response, thread_name=text[:100] or "Discussion"
+                    message, sanitized, thread_name=text[:100] or "Discussion"
                 )
                 if not thread_ok:
-                    await self.discord_manager.send_message(channel_id, response)
+                    await self.discord_manager.send_message(channel_id, sanitized)
                 agent_name = getattr(manager, 'display_name', None) or agent_id
                 await self._echo_response_to_mirror(response, agent_name)
         except Exception:
@@ -198,12 +200,28 @@ class DiscordCoordinator:
         except Exception as e:
             logger.debug("Failed to echo agent response to mirror: %s", e)
 
+    _SANITIZE_PATTERNS = [
+        (re.compile(r'[A-Z]:\\Users\\[^\s\\]+\\[^\s]*', re.IGNORECASE), '[path]'),
+        (re.compile(r'~\/\.dpc\/[^\s]*'), '[path]'),
+        (re.compile(r'/home/[^\s/]+/[^\s]*'), '[path]'),
+        (re.compile(r'dpc-node-[0-9a-f]{16,}'), '[node]'),
+        (re.compile(r'agent_[0-9a-f]{8,}'), '[agent]'),
+        (re.compile(r'agent_\d{3}\b'), '[agent]'),
+    ]
+
+    def _sanitize_output(self, text: str) -> str:
+        """Strip internal paths, node IDs, and agent identifiers before Discord send."""
+        for pattern, replacement in self._SANITIZE_PATTERNS:
+            text = pattern.sub(replacement, text)
+        return text
+
     async def forward_to_discord(self, conversation_id: str, text: str, sender_name: str = "Agent") -> bool:
         channel_id = self.get_channel_id(conversation_id)
         if not channel_id:
             return False
+        sanitized = self._sanitize_output(text)
         prefix = f"**{sender_name}:** " if sender_name and sender_name != "Agent" else ""
-        return await self.discord_manager.send_message(channel_id, f"{prefix}{text}")
+        return await self.discord_manager.send_message(channel_id, f"{prefix}{sanitized}")
 
     def _get_agent_provider(self):
         llm_manager = getattr(self.service, 'llm_manager', None)
