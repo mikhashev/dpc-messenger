@@ -531,7 +531,8 @@ def build_llm_messages(
     messages.append({"role": "user", "content": user_content})
 
     # --- Soft-cap token trimming ---
-    messages, cap_info = apply_message_token_soft_cap(messages, 200000)
+    soft_cap = (session_state or {}).get("tokens_limit") or 204800
+    messages, cap_info = apply_message_token_soft_cap(messages, soft_cap)
 
     return messages, cap_info
 
