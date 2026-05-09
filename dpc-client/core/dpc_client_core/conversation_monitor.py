@@ -1960,12 +1960,13 @@ PARTICIPANTS' CULTURAL CONTEXTS:
         return self._get_conversation_dir() / "settings.json"
 
     def _is_group_conversation(self) -> bool:
-        """Check if this is a group conversation.
+        """Check if this conversation should persist history by default.
 
         Returns:
-            True if conversation_id starts with 'group-' or 'agent_' (both persist history)
+            True for groups, agents, and Discord per-user conversations
         """
-        return self.conversation_id.startswith("group-") or self.conversation_id.startswith("agent_")
+        cid = self.conversation_id
+        return cid.startswith("group-") or cid.startswith("agent_") or cid.startswith("discord-")
 
     def _load_conversation_settings(self) -> Dict[str, Any]:
         """Load per-conversation settings from disk.
