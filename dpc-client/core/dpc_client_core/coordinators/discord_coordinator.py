@@ -38,6 +38,7 @@ class DiscordCoordinator:
         self._user_conversations: Dict[str, str] = {}
         self._user_timestamps: Dict[str, List[float]] = defaultdict(list)
         self._global_timestamps: List[float] = []
+        self._user_last_message: Dict[str, float] = {}
         self._load_links()
 
     def _links_path(self) -> Path:
@@ -111,6 +112,47 @@ class DiscordCoordinator:
             "delay": int(settings.get("discord.guardrails", "response_delay_seconds", fallback="3")),
         }
 
+    def _get_conversation_config(self) -> dict:
+        settings = getattr(self.service, 'settings', None)
+        if not settings:
+            return {"ttl_minutes": 30, "max_messages": 50}
+        return {
+            "ttl_minutes": int(settings.get("discord.conversations", "ttl_minutes", fallback="30")),
+            "max_messages": int(settings.get("discord.conversations", "max_messages", fallback="50")),
+        }
+
+    def _check_conversation_ttl(self, discord_user_id: str) -> bool:
+        """Check if per-user conversation has expired. Returns True if reset happened."""
+        now = time.time()
+        cfg = self._get_conversation_config()
+        ttl_seconds = cfg["ttl_minutes"] * 60
+        last_ts = self._user_last_message.get(discord_user_id, 0)
+
+        if last_ts and (now - last_ts) > ttl_seconds:
+            conv_id = self._user_conversations.get(discord_user_id)
+            if conv_id:
+                monitor = self.service._get_or_create_conversation_monitor(conv_id)
+                monitor.message_history.clear()
+                monitor.save_history()
+                logger.info("TTL expired for Discord user %s (%.0f min idle), conversation reset",
+                            discord_user_id, (now - last_ts) / 60)
+
+        self._user_last_message[discord_user_id] = now
+        return False
+
+    def _trim_conversation(self, discord_user_id: str) -> None:
+        """Trim oldest messages if per-user conversation exceeds max_messages."""
+        cfg = self._get_conversation_config()
+        conv_id = self._user_conversations.get(discord_user_id)
+        if not conv_id:
+            return
+        monitor = self.service._get_or_create_conversation_monitor(conv_id)
+        if len(monitor.message_history) > cfg["max_messages"]:
+            excess = len(monitor.message_history) - cfg["max_messages"]
+            monitor.message_history = monitor.message_history[excess:]
+            monitor.save_history()
+            logger.info("Trimmed %d oldest messages for Discord user %s", excess, discord_user_id)
+
     def _check_rate_limit(self, discord_user_id: str) -> Optional[str]:
         """Check per-user and global rate limits. Returns error message or None."""
         now = time.time()
@@ -181,6 +223,8 @@ class DiscordCoordinator:
             await self.discord_manager.send_message(channel_id, rate_error)
             return
 
+        self._check_conversation_ttl(discord_user_id)
+
         text, blocked_domains = self._filter_urls(text)
         if blocked_domains:
             logger.info("URL whitelist blocked domains from %s: %s", sender, blocked_domains)
@@ -223,6 +267,7 @@ class DiscordCoordinator:
                 await self.discord_manager.send_message(channel_id, sanitized)
                 agent_name = getattr(manager, 'display_name', None) or agent_id
                 await self._echo_response_to_mirror(response, agent_name)
+                self._trim_conversation(discord_user_id)
         except Exception as e:
             logger.exception("Discord agent routing error")
             err_lower = str(e).lower()

@@ -4132,12 +4132,14 @@ class CoreService:
             logger.error("Error sending group message: %s", e, exc_info=True)
             return {"status": "error", "message": str(e)}
 
+    _CODE_BLOCK_RE = re.compile(r'```[\s\S]*?```|`[^`\n]+`')
+
     async def _handle_group_agent_mentions(
         self, group_id: str, text: str, sender_name: str
     ) -> None:
         """Detect @agent / @CC mentions in outgoing group messages and route to agents."""
-        import re
-        mentions = {m.lower() for m in re.findall(r'@(\w+)\b', text, re.IGNORECASE)}
+        plain_text = self._CODE_BLOCK_RE.sub('', text)
+        mentions = {m.lower() for m in re.findall(r'@(\w+)\b', plain_text, re.IGNORECASE)}
         logger.debug("_handle_group_agent_mentions: mentions=%s in group %s", mentions, group_id)
 
         # Get allowed agents for this group from metadata
