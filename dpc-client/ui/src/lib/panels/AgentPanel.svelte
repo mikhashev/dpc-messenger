@@ -172,6 +172,7 @@
                     text: msg.content,
                     timestamp: ts,
                     attachments: msg.attachments || [],
+                    msg_index: msg.msg_index || 0,
                     // Restore rich metadata: prefer persisted history.json fields, fall back to localStorage
                     thinking: msg.thinking || local?.thinking,
                     streamingRaw: msg.streaming_raw || local?.streamingRaw,
@@ -333,6 +334,7 @@
               text: msg.content,
               timestamp: msg.timestamp ? new Date(msg.timestamp).getTime() : Date.now(),
               attachments: msg.attachments || [],
+              msg_index: msg.msg_index || 0,
             } as Message;
           });
 

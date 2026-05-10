@@ -328,11 +328,14 @@ class DpcAgentManager:
                                 except Exception as e:
                                     log.debug("Extended paths indexing skipped: %s", e)
 
-                            # Hash-based staleness check: skip re-embedding if sources unchanged
+                            # Hash-based staleness check: skip re-embedding if sources AND content unchanged
                             source_fingerprint = hashlib.sha256(
                                 "\n".join(sorted(m.get("source_file", "") for m in extra_metas)).encode()
                             ).hexdigest()[:16]
-                            extra_hash = f"{l6_count}:{ext_count}:{source_fingerprint}"
+                            content_fingerprint = hashlib.sha256(
+                                "\n".join(extra_texts).encode()
+                            ).hexdigest()[:16]
+                            extra_hash = f"{l6_count}:{ext_count}:{source_fingerprint}:{content_fingerprint}"
 
                             stored_extra_hash = ""
                             meta_path = index_dir / "index_meta.json"
