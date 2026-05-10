@@ -15,6 +15,8 @@ import logging
 import re
 import time
 from collections import defaultdict
+from fnmatch import fnmatch
+from urllib.parse import urlparse
 from pathlib import Path
 from typing import TYPE_CHECKING, Dict, List, Optional
 
@@ -129,6 +131,39 @@ class DiscordCoordinator:
         self._global_timestamps.append(now)
         return None
 
+    _URL_RE = re.compile(r'https?://[^\s<>\)]+')
+
+    def _get_url_whitelist(self) -> list:
+        settings = getattr(self.service, 'settings', None)
+        if not settings:
+            return []
+        raw = settings.get("discord.guardrails", "url_whitelist", fallback="")
+        return [p.strip() for p in raw.split(",") if p.strip()]
+
+    def _filter_urls(self, text: str) -> tuple:
+        """Filter non-whitelisted URLs from user text.
+
+        Returns (filtered_text, blocked_domains). Blocked URLs are replaced
+        with [link removed]. Agent-initiated browsing is unaffected.
+        """
+        whitelist = self._get_url_whitelist()
+        if not whitelist:
+            return text, []
+
+        blocked = []
+        def _replace(match):
+            url = match.group(0)
+            parsed = urlparse(url)
+            host_path = f"{parsed.netloc}{parsed.path}"
+            for pattern in whitelist:
+                if fnmatch(host_path, pattern) or fnmatch(parsed.netloc, pattern):
+                    return url
+            blocked.append(parsed.netloc)
+            return "[link removed]"
+
+        filtered = self._URL_RE.sub(_replace, text)
+        return filtered, blocked
+
     async def handle_mention(self, message) -> None:
         text = message.content
         for mention in message.mentions:
@@ -145,6 +180,10 @@ class DiscordCoordinator:
         if rate_error:
             await self.discord_manager.send_message(channel_id, rate_error)
             return
+
+        text, blocked_domains = self._filter_urls(text)
+        if blocked_domains:
+            logger.info("URL whitelist blocked domains from %s: %s", sender, blocked_domains)
 
         agent_id = self._get_agent_id()
         if not agent_id:
