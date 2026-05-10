@@ -1449,6 +1449,23 @@ PARTICIPANTS' CULTURAL CONTEXTS:
         chain_input = f"{msg_index}|{message_id}|{role}|{sender_name or ''}|{content}|{timestamp or ''}|{prev_hash}"
         message_dict["chain_hash"] = hashlib.sha256(chain_input.encode("utf-8")).hexdigest()
 
+        content_hash_input = f"{message_id}|{sender_node_id or ''}|{content}|{timestamp or ''}"
+        message_dict["content_hash"] = hashlib.sha256(content_hash_input.encode("utf-8")).hexdigest()
+        try:
+            from cryptography.hazmat.primitives import serialization
+            key_path = Path.home() / ".dpc" / "node.key"
+            if key_path.exists():
+                from dpc_protocol.commit_integrity import CommitSigner
+                with open(key_path, "rb") as f:
+                    private_key = serialization.load_pem_private_key(f.read(), password=None)
+                node_id_path = Path.home() / ".dpc" / "node.id"
+                node_id = node_id_path.read_text().strip() if node_id_path.exists() else ""
+                signer = CommitSigner(node_id, private_key)
+                message_dict["signature"] = signer.sign_commit(message_dict["content_hash"])
+                message_dict["signer_node_id"] = node_id
+        except Exception as e:
+            logger.debug("Message signing skipped: %s", e)
+
         self.message_history.append(message_dict)
 
         # Also add to knowledge extraction buffers (v0.13.2 fix for voice messages)
@@ -2040,9 +2057,10 @@ PARTICIPANTS' CULTURAL CONTEXTS:
         return self._save_conversation_settings(settings)
 
     def compute_history_hash(self) -> str:
-        """Compute SHA256 hash of current message history
+        """Compute SHA256 hash of current message history.
 
-        Uses sorted message IDs + timestamps for deterministic hashing.
+        Uses last chain_hash if available (MSG-CHAIN integration with P2P sync).
+        Falls back to sorted ID+timestamp hash for backward compatibility.
 
         Returns:
             Hash string like "sha256:abc123..." or "sha256:empty" if no messages
@@ -2050,13 +2068,14 @@ PARTICIPANTS' CULTURAL CONTEXTS:
         if not self.message_history:
             return "sha256:empty"
 
-        # Sort by timestamp, then by message ID for determinism
+        last_chain = self.message_history[-1].get("chain_hash")
+        if last_chain:
+            return f"sha256:{last_chain[:16]}"
+
         sorted_msgs = sorted(
             self.message_history,
             key=lambda m: (m.get("timestamp", ""), m.get("id", ""))
         )
-
-        # Hash the concatenated IDs and timestamps
         data = "|".join(
             f"{m.get('id', '?')}:{m.get('timestamp', '?')}"
             for m in sorted_msgs
@@ -2298,13 +2317,30 @@ PARTICIPANTS' CULTURAL CONTEXTS:
             Count of new messages added
         """
         added = 0
+        rejected = 0
         for msg in remote_messages:
+            sig = msg.get("signature")
+            content_hash = msg.get("content_hash")
+            signer = msg.get("signer_node_id")
+            if sig and content_hash and signer:
+                try:
+                    from dpc_protocol.commit_integrity import CommitSigner
+                    result = CommitSigner.verify_signature(signer, content_hash, sig)
+                    if result is False:
+                        logger.warning("Rejected message %s: invalid signature from %s",
+                                       msg.get("id", "?"), signer)
+                        rejected += 1
+                        continue
+                except Exception as e:
+                    logger.debug("Signature verification skipped: %s", e)
             if self.add_message_with_id(msg):
                 added += 1
 
+        if rejected:
+            logger.warning("Rejected %d messages with invalid signatures during merge", rejected)
         if added > 0:
             self.save_history()
-            logger.info(f"Merged {added} new messages into conversation history")
+            logger.info("Merged %d new messages into conversation history", added)
 
         return added
 

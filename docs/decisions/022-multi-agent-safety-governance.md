@@ -156,12 +156,32 @@ Track: agent reasoned X, agent did Y. MAST data shows 13.2% mismatch frequency i
 | C6 — Groupthink | Structural dissent role | — | Consensus quality metrics |
 | C7 — Error Amplification | Pre-send fact gate | Action provenance | Drift detection in relay chains |
 
+### Layer 2 Extension: MSG-CHAIN + P2P Sync Integrity (S108)
+
+Extends Layer 2 governance infrastructure to cover **message integrity during P2P history sync**. Uses existing RSA signing infrastructure (CommitSigner) — no new key material needed.
+
+**2d. Cryptographic Message Signing**
+
+Every message signed at creation via `CommitSigner.sign_commit(chain_hash)`. Signature stored in message dict alongside `chain_hash` and `msg_index`. Verification at merge via `CommitSigner.verify_signature(sender_node_id, chain_hash, signature)`.
+
+**2e. Chain-Aware Sync**
+
+`compute_history_hash()` uses `last_chain_hash` instead of independent ID+timestamp hash. `merge_history()` verifies incoming chain integrity before accepting messages. Broken chain = warn + reject tampered segment.
+
+**Gap closed:** MSG-CHAIN (per-message hash chain) was disconnected from P2P sync. Messages were signed locally but sync used independent hash. Now both mechanisms are unified.
+
+| Risk | Coverage |
+|------|----------|
+| C4 — Info Withholding | Tampered relay history detected at merge |
+| C9 — Impersonation | Unsigned messages rejected; signature proves sender identity |
+
 ### Implementation Priority
 
 **Phase 1 — Cheap (existing infrastructure):**
 1. Fix BUDGET_LIMIT (cost: 0.0 → configurable)
 2. Extend RSA signing to all agent tool calls
 3. Add per-agent quota counters
+4. MSG-CHAIN + P2P sync integration (2d, 2e above)
 
 **Phase 2 — Medium (new code, architecture ready):**
 4. Pre-send fact gate (Chado spec: signature → regex → tool-history cross-reference)
