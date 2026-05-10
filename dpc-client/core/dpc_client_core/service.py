@@ -6602,7 +6602,9 @@ class CoreService:
         if history_path.exists():
             try:
                 data = json.loads(history_path.read_text(encoding="utf-8"))
-                if data.get("messages"):
+                msgs = data.get("messages", [])
+                has_user_messages = any(m.get("role") == "user" for m in msgs)
+                if has_user_messages:
                     return {"status": "error", "message": "End session first — chat must be empty to sleep"}
             except (json.JSONDecodeError, OSError):
                 pass
