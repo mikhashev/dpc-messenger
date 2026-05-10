@@ -30,6 +30,7 @@ class GroupMetadata:
     agents: Dict[str, List[str]] = field(default_factory=dict)
     agent_names: Dict[str, Dict[str, str]] = field(default_factory=dict)
     version: int = 1
+    is_discord_bridge: bool = False
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -46,6 +47,7 @@ class GroupMetadata:
             agents=data.get("agents", {}),
             agent_names=data.get("agent_names", {}),
             version=data.get("version", 1),
+            is_discord_bridge=data.get("is_discord_bridge", False),
         )
 
 

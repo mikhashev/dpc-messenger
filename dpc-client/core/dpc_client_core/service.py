@@ -3892,7 +3892,10 @@ class CoreService:
                         "history_tokens": 0,
                         "context_estimated": 0,
                     })
-                    asyncio.create_task(self.trigger_group_sleep(conversation_id))
+                    if not group.is_discord_bridge:
+                        asyncio.create_task(self.trigger_group_sleep(conversation_id))
+                    else:
+                        logger.info("Skipping sleep for Discord bridge group: %s", conversation_id)
                     return result
 
                 participants = set(group.members)

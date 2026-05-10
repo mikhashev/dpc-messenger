@@ -122,6 +122,8 @@ def find_mentions(messages: list, since_index: int = 0) -> list:
 
 async def send_group_message(group_id: str, text: str) -> dict:
     """Send CC response to group chat via WebSocket."""
+    canonical_id = _resolve_group_id(group_id)
+
     try:
         import websockets
     except ImportError:
@@ -134,7 +136,7 @@ async def send_group_message(group_id: str, text: str) -> dict:
         "id": str(uuid.uuid4())[:8],
         "command": "send_group_agent_message",
         "payload": {
-            "group_id": group_id,
+            "group_id": canonical_id,
             "agent_name": cc_name,
             "text": text,
         }
@@ -179,6 +181,27 @@ async def send_group_message(group_id: str, text: str) -> dict:
     except Exception as e:
         print(f"[ERROR] {e}")
         return {"status": "error", "message": str(e)}
+
+
+def _resolve_group_id(group_id: str) -> str:
+    """Resolve canonical group_id from metadata.json.
+
+    The --group argument may be a slugged directory name (e.g. group-abc123-dpc-discord)
+    but the backend expects the canonical group_id from metadata.json (e.g. group-abc123).
+    """
+    group_dir = _find_group_dir(group_id)
+    metadata_path = group_dir / "metadata.json"
+    if metadata_path.exists():
+        try:
+            with open(metadata_path, "r", encoding="utf-8") as f:
+                meta = json.load(f)
+            canonical = meta.get("group_id", group_id)
+            if canonical != group_id:
+                print(f"[INFO] Resolved {group_id} → {canonical}")
+            return canonical
+        except Exception:
+            pass
+    return group_id
 
 
 def send_group_message_sync(group_id: str, text: str) -> dict:
