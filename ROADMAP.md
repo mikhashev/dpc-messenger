@@ -1,6 +1,6 @@
 # D-PC Messenger Development Roadmap
 
-> **Status:** Alpha | **Last Updated:** May 2026 | **Current Version:** 0.24.0 | **Current Phase:** Phase 2 - Agent Maturity (Track 1 mostly complete, Track 2 in progress)
+> **Status:** Alpha | **Last Updated:** May 2026 | **Current Version:** 0.24.0 (0.25.0 in preparation) | **Current Phase:** Phase 2 - Agent Maturity (Track 1 mostly complete, Track 2 in progress, Discord community live)
 
 ---
 
@@ -107,14 +107,18 @@ North Star: Sleep consolidates session learnings → Memory system enables recal
 - **Device-Aware Deps (ADR-012)** — CUDA torch via platform markers, cross-platform (S51, S69-S70)
 - **Retrieval Upgrade (ADR-018)** — BGE-M3 embeddings, whole-document indexing, sparse+dense RRF fusion (S76)
 - **PyTorch Unified ML (ADR-021)** — ONNX fully removed, PyTorch as single ML framework (S83)
-- **Multi-Agent Safety (ADR-022)** — Three-layer defense framework, 10 risks (C1-C10). ADR accepted (S87). Phase 1 done (S91): token-based budgets, real provider limits, per-agent daily quotas. Phase 2 needs design
+- **Multi-Agent Safety (ADR-022)** — Three-layer defense framework, 10 risks (C1-C10). ADR accepted (S87). Phase 1 done (S91): token-based budgets, real provider limits, per-agent daily quotas. Layer 2 partial (S108): RSA message signing + chain-aware P2P sync + signature verification at merge. Phase 2 remaining items need design
 - **Knowledge Graph (ADR-024)** — SQLite graph layer, 5 node types, 9 edge types. **Phase 1+2 COMPLETE** (S96): GraphBackend ABC + SQLite, structural edges, L7 RRF channel, GLiNER NER, guided LLM relations, bi-temporal metadata. Phase 3-4 deferred (federation, GRAVITON). Tasks: `tasks/adr-024-knowledge-graph/`
 - **Phase C Decomposition** — service.py 7799→6484 lines (-1315, -16.9%). Pragmatic ceiling reached (S85-S86)
 - **Rate Limiting + Security (ARCH-26)** — security/ folder, THREAT-MODEL.md (S58)
 - **Protocol 13** (v1.13) — Human-AI team coordination (Mike=approve, CC=execute, Ark=review)
 - **External Agent Bridge** — CC ↔ DPC via cc_agent_bridge.py + cc_group_chat_bridge.py, cron monitoring, P13 coordination
-- **Group Chat** (v0.19.0) — Multi-participant with files, voice, knowledge commits. Phase 1 dogfooding complete (S88-S92): 20+ bugs fixed (persistence, routing, mentions, sender display, agent membership, self-mention guard)
-- **Agent Skills** — 10 static SKILL.md files. Reflection removed (S68). Rewrite planned (Track 1)
+- **Group Chat** (v0.19.0) — Multi-participant with files, voice, knowledge commits. Phase 1 dogfooding complete (S88-S92). Phase 2 multi-node fixes (S97-S108): history sync, remote agent @mention, sender metadata, Discord bridge
+- **Discord Integration (ADR-025)** — Phase 1.5 done (S97-S107): discord_service.py, @mention routing, Iris agent (agent_007) created, system prompt, identity, Discord channel live
+- **Public Agent Guardrails (ADR-026)** — 7/7 tasks done (S106-S107): source-based tool filtering, rate limiting, output sanitization, URL whitelist, graceful fallback, TTL + context management, mention sanitization
+- **MSG-CHAIN Integrity** — Per-message hash chain (S105) + RSA content signing + chain-aware P2P sync (S108). Content hash + signature + signer_node_id on every message. Verification at merge
+- **Content-Aware Index Staleness** — Full content fingerprint in staleness hash (S108). Changed files trigger re-indexing even without rename
+- **Agent Skills** — Static SKILL.md files. Reflection removed (S68). Rewrite planned (Track 1)
 - **Agent Progress Board** — Sleep state works. Evolution panel needs rework (shows removed system data)
 
 **Dependencies:** Phases 0-1 DONE → unblocked all. Memory + Skills independent. (Phases 2-3 removed per ADR-015/ADR-014). ADR-024 builds on ADR-010 (memory layers), ADR-018 (retrieval), ADR-019 (scaling). Integrates with ADR-022 (safety provenance).
