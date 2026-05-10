@@ -693,6 +693,11 @@ class DpcAgentManager:
         # Get or create ConversationMonitor for this agent conversation (reuse existing)
         monitor = self._get_or_create_agent_monitor(conversation_id)
 
+        # Reload history from disk for group conversations so the agent sees
+        # messages added by other monitors (service.py, group_handler, CC bridge).
+        if conversation_id.startswith("group-"):
+            monitor.load_history()
+
         # Track user message in monitor (skip when caller already saved it, e.g. CC chain trigger)
         if not _skip_history:
             node_id = getattr(self.service.p2p_manager, "node_id", "local-user")
