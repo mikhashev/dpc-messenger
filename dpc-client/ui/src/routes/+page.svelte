@@ -443,6 +443,37 @@
     if (activeChatId.startsWith('group-')) {
       sendCommand('activate_group_chat', { group_id: activeChatId });
     }
+    if (activeChatId.startsWith('agent_') && $connectionStatus === 'connected') {
+      sendCommand('get_conversation_history', { conversation_id: activeChatId }).then((result: any) => {
+        if (result?.status === 'success' && result.messages?.length > 0) {
+          const agentName = $agentsList?.find((a: any) => a.agent_id === activeChatId)?.name || activeChatId;
+          chatHistories.update(map => {
+            const newMap = new Map(map);
+            const localHistory: any[] = newMap.get(activeChatId) || [];
+            const localById = new Map(localHistory.map((m: any) => [m.id, m]));
+            const msgs = result.messages.map((msg: any, index: number) => {
+              const ts = msg.timestamp ? new Date(msg.timestamp).getTime() : Date.now() - (result.messages.length - index) * 1000;
+              const stableId = msg.id || `${activeChatId}-${ts}`;
+              const local = localById.get(stableId);
+              const isAgent = msg.role === 'assistant' || msg.sender_name === activeChatId;
+              return {
+                id: stableId,
+                sender: isAgent ? activeChatId : 'user',
+                senderName: msg.sender_name || (isAgent ? agentName : 'You'),
+                text: msg.content,
+                timestamp: ts,
+                attachments: msg.attachments || [],
+                thinking: msg.thinking || local?.thinking,
+                streamingRaw: msg.streaming_raw || local?.streamingRaw,
+                msg_index: msg.msg_index || 0,
+              };
+            });
+            newMap.set(activeChatId, msgs);
+            return newMap;
+          });
+        }
+      }).catch(() => {});
+    }
   });
 
   // Reactive: Sync provider dropdown with chat-specific provider when switching chats
