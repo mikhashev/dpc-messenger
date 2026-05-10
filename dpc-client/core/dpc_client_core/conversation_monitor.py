@@ -106,6 +106,7 @@ class ConversationMonitor:
         self.message_history: List[Dict[str, str]] = []  # List of {"role": "user/assistant", "content": "..."}
         self.message_ids: Set[str] = set()  # Track unique message IDs for deduplication
         self._history_dirty: bool = False  # Track unsaved changes
+        self._signer = None  # Lazy-loaded CommitSigner for message signing
         self.peer_context_hashes: Dict[str, str] = {}  # {node_id: context_hash} for peer cache invalidation
 
         # Phase 7: Peer context caching (to avoid re-fetching unchanged contexts)
@@ -138,6 +139,26 @@ class ConversationMonitor:
             model or "default",
             provider or "default"
         )
+
+    def _get_signer(self):
+        """Lazy-load CommitSigner for RSA message signing."""
+        if self._signer is not None:
+            return self._signer
+        try:
+            from cryptography.hazmat.primitives import serialization
+            from dpc_protocol.commit_integrity import CommitSigner
+            key_path = Path.home() / ".dpc" / "node.key"
+            if not key_path.exists():
+                return None
+            with open(key_path, "rb") as f:
+                private_key = serialization.load_pem_private_key(f.read(), password=None)
+            node_id_path = Path.home() / ".dpc" / "node.id"
+            node_id = node_id_path.read_text().strip() if node_id_path.exists() else ""
+            self._signer = CommitSigner(node_id, private_key)
+            return self._signer
+        except Exception as e:
+            logger.debug("CommitSigner init failed: %s", e)
+            return None
 
     async def on_message(self, message: Message) -> Optional[KnowledgeCommitProposal]:
         """Process new message in conversation
@@ -1451,20 +1472,10 @@ PARTICIPANTS' CULTURAL CONTEXTS:
 
         content_hash_input = f"{message_id}|{sender_node_id or ''}|{content}|{timestamp or ''}"
         message_dict["content_hash"] = hashlib.sha256(content_hash_input.encode("utf-8")).hexdigest()
-        try:
-            from cryptography.hazmat.primitives import serialization
-            key_path = Path.home() / ".dpc" / "node.key"
-            if key_path.exists():
-                from dpc_protocol.commit_integrity import CommitSigner
-                with open(key_path, "rb") as f:
-                    private_key = serialization.load_pem_private_key(f.read(), password=None)
-                node_id_path = Path.home() / ".dpc" / "node.id"
-                node_id = node_id_path.read_text().strip() if node_id_path.exists() else ""
-                signer = CommitSigner(node_id, private_key)
-                message_dict["signature"] = signer.sign_commit(message_dict["content_hash"])
-                message_dict["signer_node_id"] = node_id
-        except Exception as e:
-            logger.debug("Message signing skipped: %s", e)
+        signer = self._get_signer()
+        if signer:
+            message_dict["signature"] = signer.sign_commit(message_dict["content_hash"])
+            message_dict["signer_node_id"] = signer.node_id
 
         self.message_history.append(message_dict)
 
