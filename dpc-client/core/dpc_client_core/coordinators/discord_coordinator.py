@@ -223,9 +223,16 @@ class DiscordCoordinator:
                 await self.discord_manager.send_message(channel_id, sanitized)
                 agent_name = getattr(manager, 'display_name', None) or agent_id
                 await self._echo_response_to_mirror(response, agent_name)
-        except Exception:
+        except Exception as e:
             logger.exception("Discord agent routing error")
-            await self.discord_manager.send_message(channel_id, "Error processing request.")
+            err_lower = str(e).lower()
+            if any(k in err_lower for k in ("timeout", "connect", "502", "503", "rate")):
+                friendly = "I'm having trouble reaching my AI provider right now. Please try again in a minute."
+            elif "context" in err_lower or "token" in err_lower:
+                friendly = "Our conversation got too long. Let me start fresh — please ask your question again."
+            else:
+                friendly = "Something went wrong on my end. Please try again shortly."
+            await self.discord_manager.send_message(channel_id, friendly)
 
     async def mirror_to_dpc_group(self, message, text_override: str = None, sender_override: str = None) -> None:
         """Mirror a Discord message to the linked DPC group chat."""
