@@ -872,124 +872,90 @@ Send a voice message and it will be transcribed and processed\\.
         # Send "recording audio" action
         await context.bot.send_chat_action(chat_id=chat_id, action="upload_voice")
 
-        try:
-            # Download voice file
-            voice_filename = f"agent_voice_{update.message.message_id}.ogg"
-            # Use agent-specific storage instead of legacy ~/.dpc/agent/ path
-            voice_dir = self._agent_manager.agent_root / "voice"
-            voice_dir.mkdir(parents=True, exist_ok=True)
-            voice_path = voice_dir / voice_filename
+        import tempfile
 
-            # Download from Telegram
-            from telegram import Bot
+        voice_path = None
+        try:
+            # Download voice file to temp directory (not agent storage)
+            with tempfile.NamedTemporaryFile(suffix=".ogg", prefix="tg_voice_", delete=False) as tmp:
+                voice_path = Path(tmp.name)
+
             file = await self._bot.get_file(file_id)
             await file.download_to_drive(voice_path)
-            log.info(f"Downloaded voice file to {voice_path}")
+            log.info(f"Downloaded voice file to temp: {voice_path}")
 
             # Transcribe if enabled
-            transcription_text = None
-
-            if self.transcription_enabled:
-                try:
-                    # Get transcription service via agent_manager -> service
-                    if self._agent_manager and hasattr(self._agent_manager, 'service'):
-                        service = self._agent_manager.service
-
-                        # Check if service has transcribe_audio method
-                        if hasattr(service, 'transcribe_audio'):
-                            # Read file and encode as base64
-                            with open(voice_path, "rb") as f:
-                                audio_data = f.read()
-                                audio_base64 = base64.b64encode(audio_data).decode("utf-8")
-
-                            # Transcribe using service method
-                            transcription_result = await service.transcribe_audio(
-                                audio_base64=audio_base64,
-                                mime_type="audio/ogg"
-                            )
-
-                            transcription_text = transcription_result.get("text", "")
-                            provider = transcription_result.get("provider", "unknown")
-
-                            log.info(f"Transcribed voice message ({len(transcription_text)} chars, provider: {provider})")
-
-                            # Send transcription back to user
-                            if transcription_text:
-                                await update.message.reply_text(
-                                    f"📝 *Transcription:*\n{escape_markdown(transcription_text)}",
-                                    parse_mode="MarkdownV2"
-                                )
-                            else:
-                                await update.message.reply_text("⚠️ No speech detected in voice message.")
-                                return
-                        else:
-                            log.warning("Service does not have transcribe_audio method")
-                            await update.message.reply_text("⚠️ Transcription service not available.")
-                            return
-                    else:
-                        log.warning("No access to service for transcription")
-                        await update.message.reply_text("⚠️ Transcription service not available.")
-                        return
-
-                except Exception as e:
-                    log.error(f"Failed to transcribe voice message: {e}", exc_info=True)
-                    await update.message.reply_text(f"❌ Transcription failed: {str(e)[:100]}")
-                    return
-            else:
+            if not self.transcription_enabled:
                 await update.message.reply_text("⚠️ Voice transcription is disabled.")
                 return
 
-            # If we have transcription, process through agent
-            if transcription_text:
-                # Send "typing" action
-                await context.bot.send_chat_action(chat_id=chat_id, action="typing")
+            service = getattr(self._agent_manager, 'service', None)
+            if not service or not hasattr(service, 'transcribe_audio'):
+                await update.message.reply_text("⚠️ Transcription service not available.")
+                return
 
-                # Build sender attribution for history
-                tg_user = update.effective_user
-                tg_display_name = (tg_user.first_name or tg_user.username or "Telegram User") if tg_user else "Telegram User"
-                sender_name = f"{tg_display_name} (Telegram)"
+            with open(voice_path, "rb") as f:
+                audio_base64 = base64.b64encode(f.read()).decode("utf-8")
 
-                log.info(f"Processing transcribed voice message from chat {chat_id} ({sender_name}): {transcription_text[:50]}...")
+            transcription_result = await service.transcribe_audio(
+                audio_base64=audio_base64,
+                mime_type="audio/ogg"
+            )
 
-                # Use agent_id as conversation_id when unified_conversation is enabled
-                conversation_id = self._agent_id if self._unified_conversation and self._agent_id else f"telegram-{chat_id}"
+            transcription_text = transcription_result.get("text", "")
+            provider = transcription_result.get("provider", "unknown")
+            log.info(f"Transcribed voice message ({len(transcription_text)} chars, provider: {provider})")
 
-                # Call the message handler (agent_manager.process_message)
-                response = await self._message_handler(
-                    message=transcription_text,
-                    conversation_id=conversation_id,
-                    include_context=True,
-                    sender_name=sender_name,
-                    telegram_chat_id=chat_id,  # Enables reply routing for scheduled tasks
-                )
+            if not transcription_text:
+                await update.message.reply_text("⚠️ No speech detected in voice message.")
+                return
 
-                # Send response (escape for MarkdownV2, split if needed)
-                try:
-                    if len(response) > TELEGRAM_MESSAGE_MAX_LENGTH:
-                        # Split long messages
-                        chunks = self._split_message(response, TELEGRAM_MESSAGE_MAX_LENGTH - 100)
-                        for i, chunk in enumerate(chunks):
-                            prefix = f"📄 *Part {i+1}/{len(chunks)}*\n\n" if len(chunks) > 1 else ""
-                            await update.message.reply_text(prefix + escape_markdown(chunk), parse_mode="MarkdownV2")
-                    else:
-                        await update.message.reply_text(escape_markdown(response), parse_mode="MarkdownV2")
-                except Exception as send_err:
-                    log.warning(f"MarkdownV2 send failed, falling back to plain text: {send_err}")
-                    await update.message.reply_text(response[:TELEGRAM_MESSAGE_MAX_LENGTH])
-                finally:
-                    # Always push updated history to DPC chat UI in unified_conversation mode
-                    if self._unified_conversation and self._agent_manager:
-                        await self._broadcast_history_to_ui(conversation_id)
+            await update.message.reply_text(
+                f"📝 *Transcription:*\n{escape_markdown(transcription_text)}",
+                parse_mode="MarkdownV2"
+            )
 
-            # Clean up voice file
+            # Process transcription through agent
+            await context.bot.send_chat_action(chat_id=chat_id, action="typing")
+
+            tg_user = update.effective_user
+            tg_display_name = (tg_user.first_name or tg_user.username or "Telegram User") if tg_user else "Telegram User"
+            sender_name = f"{tg_display_name} (Telegram)"
+
+            conversation_id = self._agent_id if self._unified_conversation and self._agent_id else f"telegram-{chat_id}"
+
+            response = await self._message_handler(
+                message=transcription_text,
+                conversation_id=conversation_id,
+                include_context=True,
+                sender_name=sender_name,
+                telegram_chat_id=chat_id,
+            )
+
             try:
-                voice_path.unlink(missing_ok=True)
-            except Exception:
-                pass
+                if len(response) > TELEGRAM_MESSAGE_MAX_LENGTH:
+                    chunks = self._split_message(response, TELEGRAM_MESSAGE_MAX_LENGTH - 100)
+                    for i, chunk in enumerate(chunks):
+                        prefix = f"📄 *Part {i+1}/{len(chunks)}*\n\n" if len(chunks) > 1 else ""
+                        await update.message.reply_text(prefix + escape_markdown(chunk), parse_mode="MarkdownV2")
+                else:
+                    await update.message.reply_text(escape_markdown(response), parse_mode="MarkdownV2")
+            except Exception as send_err:
+                log.warning(f"MarkdownV2 send failed, falling back to plain text: {send_err}")
+                await update.message.reply_text(response[:TELEGRAM_MESSAGE_MAX_LENGTH])
+            finally:
+                if self._unified_conversation and self._agent_manager:
+                    await self._broadcast_history_to_ui(conversation_id)
 
         except Exception as e:
             log.error(f"Error processing voice message: {e}", exc_info=True)
             await update.message.reply_text(f"❌ Error processing voice message: {str(e)[:200]}")
+        finally:
+            if voice_path:
+                try:
+                    voice_path.unlink(missing_ok=True)
+                except Exception:
+                    pass
 
     async def _handle_photo_message(self, update, context):
         """
