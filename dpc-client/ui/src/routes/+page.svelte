@@ -204,20 +204,20 @@
     localStorage.setItem('enableMarkdown', enableMarkdown.toString());
   });
 
-  // Sleep state (ADR-014)
-  let isSleeping = $state(false);
+  // Sleep state (ADR-014) — derived from per-agent store, keyed by activeChatId.
+  // Prevents stale leak across chats when switching between agents (S110 SLEEP-UI-LEAK).
+  let activeAgentSleep = $derived($sleepAgentStates.get(activeChatId));
+  let isSleeping = $derived(activeAgentSleep?.status === 'sleeping');
 
   function handleToggleSleep() {
-    isSleeping = !isSleeping;
     sendCommand('toggle_sleep', { agent_id: activeChatId });
   }
 
-  // Update sleep state from backend events
+  // Reload history when active agent wakes up (side-effect only — isSleeping is derived above)
   $effect(() => {
     const state = $sleepStateChanged;
     const sleepMatchesActive = state && (state.agent_id === activeChatId || state.group_id === activeChatId);
     if (sleepMatchesActive) {
-      isSleeping = state.status === 'sleeping';
       if (state.status === 'awake') {
         const cmd = sendCommand('get_conversation_history', { conversation_id: state.agent_id });
         if (cmd && typeof cmd === 'object' && 'then' in cmd) (cmd as Promise<any>).then((result: any) => {
@@ -992,9 +992,9 @@
             bind:enableMarkdown
             isExtracting={isExtractingKnowledge}
             {isSleeping}
-            sleepCurrent={($sleepProgress?.agent_id === activeChatId || $sleepProgress?.group_id === activeChatId) ? $sleepProgress?.current ?? 0 : 0}
-            sleepTotal={($sleepProgress?.agent_id === activeChatId || $sleepProgress?.group_id === activeChatId) ? $sleepProgress?.total ?? 0 : 0}
-            sleepPhase={($sleepProgress?.agent_id === activeChatId || $sleepProgress?.group_id === activeChatId) ? $sleepProgress?.phase ?? '' : ''}
+            sleepCurrent={activeAgentSleep?.current ?? 0}
+            sleepTotal={activeAgentSleep?.total ?? 0}
+            sleepPhase={activeAgentSleep?.phase ?? ''}
             sleepAgents={$sleepAgentStates}
             onNewSession={handleNewChat}
             onEndSession={handleEndSession}
