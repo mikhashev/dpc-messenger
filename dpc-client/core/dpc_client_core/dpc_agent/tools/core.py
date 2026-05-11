@@ -52,11 +52,12 @@ def _resolve_file_path(ctx: ToolContext, path: str, require_write: bool = False)
     """Resolve path to a file: relative → sandbox, absolute → firewall-checked extended path."""
     import os
     if os.path.isabs(path):
-        # Check extended path access gates (S31)
+        # Check extended path access gates (S31) — per-agent profile aware (S110 fix)
         if ctx.firewall:
-            if require_write and not getattr(ctx.firewall, 'extended_write_enabled', False):
+            profile = getattr(getattr(ctx, "_agent", None), "_firewall_profile", None)
+            if require_write and not ctx.firewall.get_extended_write_enabled(profile):
                 raise PermissionError("Extended path write access is disabled. Enable it in Agent Permissions → Extended Paths.")
-            if not require_write and not getattr(ctx.firewall, 'extended_read_enabled', True):
+            if not require_write and not ctx.firewall.get_extended_read_enabled(profile):
                 raise PermissionError("Extended path read access is disabled. Enable it in Agent Permissions → Extended Paths.")
         return ctx.validate_extended_path(path, require_write=require_write)
     return ctx.repo_path(path)

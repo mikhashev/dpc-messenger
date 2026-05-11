@@ -270,6 +270,24 @@ class ContextFirewall:
                 return default
         return val if val is not None else default
 
+    def get_extended_write_enabled(self, profile_name: Optional[str] = None) -> bool:
+        """Per-agent extended path write gate (sandbox_extensions.extended_write_enabled).
+
+        Mirrors S104 isolation pattern: per-agent profile takes precedence,
+        falls back to global dpc_agent block, defaults to False.
+        """
+        val = self._get_profile_or_global(
+            profile_name, 'sandbox_extensions', 'extended_write_enabled', default=False
+        )
+        return bool(val)
+
+    def get_extended_read_enabled(self, profile_name: Optional[str] = None) -> bool:
+        """Per-agent extended path read gate. Defaults to True (read is permissive)."""
+        val = self._get_profile_or_global(
+            profile_name, 'sandbox_extensions', 'extended_read_enabled', default=True
+        )
+        return bool(val)
+
     def is_extended_path_allowed(self, path: str, require_write: bool = False,
                                  profile_name: Optional[str] = None) -> bool:
         """
