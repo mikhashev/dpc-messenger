@@ -293,7 +293,6 @@ class NewSessionProposalManager:
                 self.logger.info("Skipping sleep for Discord bridge group: %s", local_conversation_id[:20])
             else:
                 try:
-                    import asyncio
                     asyncio.create_task(self.core_service.trigger_group_sleep(local_conversation_id))
                     self.logger.info("Auto-triggered group sleep for %s", local_conversation_id[:20])
                 except Exception as e:
