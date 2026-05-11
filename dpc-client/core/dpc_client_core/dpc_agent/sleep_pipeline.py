@@ -369,6 +369,15 @@ async def run_sleep(
                 digests.extend(group_digests)
                 log.info("Sleep pipeline: added %d group chat segments", len(group_digests))
 
+            # Include archived group sessions (past New Session resets)
+            conversations_dir = conversation_dir.parent
+            for group_dir in conversations_dir.iterdir():
+                if group_dir.is_dir() and group_dir.name.startswith("group-"):
+                    archive_digests = _collect_group_archive_digests(group_dir, agent_id, since)
+                    if archive_digests:
+                        digests.extend(archive_digests)
+                        log.info("Sleep pipeline: added %d group archive sessions from %s", len(archive_digests), group_dir.name)
+
         if not digests:
             _write_sleep_state(conversation_dir, {"status": "awake"})
             return {"status": "no_new_sessions", "sessions_analyzed": 0}
