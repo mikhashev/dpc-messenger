@@ -209,9 +209,10 @@ class ContextFirewall:
         sandbox_extensions = dpc_agent.get('sandbox_extensions', {})
         self.sandbox_read_only_paths: List[str] = sandbox_extensions.get('read_only', [])
         self.sandbox_read_write_paths: List[str] = sandbox_extensions.get('read_write', [])
-        # Extended path access gates (S31 — UI checkboxes)
-        self.extended_read_enabled: bool = sandbox_extensions.get('extended_read_enabled', True)
-        self.extended_write_enabled: bool = sandbox_extensions.get('extended_write_enabled', False)
+        # Extended path access gates (S31 UI checkboxes) — per-agent resolution
+        # lives in get_extended_{read,write}_enabled(profile_name). Flat attributes
+        # were removed in S110 (FIREWALL-EXT-WRITE-PROFILE) to prevent accidental
+        # reads that bypass the per-agent profile.
 
         # Validate and normalize paths
         self.sandbox_read_only_paths = [self._normalize_path(p) for p in self.sandbox_read_only_paths if p]
