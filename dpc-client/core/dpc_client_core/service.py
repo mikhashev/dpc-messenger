@@ -1341,6 +1341,41 @@ class CoreService:
         # This allows us to request history again when they reconnect
         self._history_requested_peers.discard(peer_id)
 
+        # Schedule auto-reconnect if peer is in a node group (known peer)
+        if hasattr(self, 'connection_orchestrator') and self.connection_orchestrator:
+            node_groups = getattr(self.firewall, 'node_groups', {})
+            is_known = any(peer_id in ids for ids in node_groups.values())
+            if is_known:
+                task = asyncio.create_task(self._auto_reconnect_peer(peer_id))
+                task.set_name(f"reconnect_{peer_id[:16]}")
+                self._background_tasks.add(task)
+
+    async def _auto_reconnect_peer(self, peer_id: str, max_attempts: int = 5):
+        """Auto-reconnect to a known peer after disconnect with exponential backoff."""
+        for attempt in range(1, max_attempts + 1):
+            if not self._is_running:
+                return
+            if peer_id in self.p2p_manager.peers:
+                return
+            delay = min(2 ** attempt, 60)
+            logger.info("Reconnect attempt %d/%d for %s in %ds", attempt, max_attempts, peer_id[:20], delay)
+            await self.local_api.broadcast_event("peer_reconnecting", {
+                "node_id": peer_id, "attempt": attempt, "max_attempts": max_attempts,
+            })
+            await asyncio.sleep(delay)
+            if peer_id in self.p2p_manager.peers:
+                return
+            try:
+                await self.connection_orchestrator.connect(peer_id)
+                logger.info("Reconnected to %s on attempt %d", peer_id[:20], attempt)
+                await self.local_api.broadcast_event("peer_reconnected", {
+                    "node_id": peer_id, "attempt": attempt,
+                })
+                return
+            except Exception as e:
+                logger.debug("Reconnect attempt %d failed for %s: %s", attempt, peer_id[:20], e)
+        logger.warning("Gave up reconnecting to %s after %d attempts", peer_id[:20], max_attempts)
+
     # --- High-level methods (API for the UI) ---
 
     def _is_global_ipv6(self, ip: str) -> bool:
