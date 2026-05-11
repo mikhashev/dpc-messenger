@@ -194,8 +194,8 @@ class ConversationMonitor:
         agent_owner = getattr(message, 'agent_owner', None)
         self.add_message(role, message.text, attachments=attachments,
                         timestamp=timestamp, sender_node_id=sender_node_id,
-                        sender_name=sender_name, sender_type=sender_type,
-                        agent_owner=agent_owner)
+                        sender_name=sender_name, message_id=message.message_id,
+                        sender_type=sender_type, agent_owner=agent_owner)
         logger.debug(f"Added message to history: role={role}, text_len={len(message.text)}")
 
         # Only run automatic detection if enabled
