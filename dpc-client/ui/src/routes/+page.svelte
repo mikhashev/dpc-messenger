@@ -625,38 +625,34 @@
   });
 
   // Reactive derived value that maps peer IDs to display names
-  // This ensures Svelte tracks changes to peer_info properly
+  // Returns same reference when content unchanged to prevent reactive loops (FREEZE-1 fix)
+  let _prevPeerDisplayNames = new Map<string, string>();
   let peerDisplayNames = $derived.by(() => {
     const names = new Map<string, string>();
 
-    // Add current user's own name first (from personal context)
     const selfId = $nodeStatus?.node_id;
     const selfName = $personalContext?.profile?.name;
     if (selfId && selfName) {
-      const displayName = `${selfName} | ${selfId}`;
-      console.log(`[PeerNames] SELF ${selfId} -> ${displayName}`);
-      names.set(selfId, displayName);
+      names.set(selfId, `${selfName} | ${selfId}`);
     }
 
-    // Add connected peers
-    if (!$nodeStatus || !$nodeStatus.peer_info) {
-      console.log('[PeerNames] No peer_info, returning self only');
-      return names;
-    }
-    console.log('[PeerNames] Building display names map from peer_info:', $nodeStatus.peer_info);
-    for (const peer of $nodeStatus.peer_info) {
-      const peerName = peer.name || peer.display_name;
-      if (peerName) {
-        const displayName = `${peerName} | ${peer.node_id}`;
-        console.log(`[PeerNames] ${peer.node_id} -> ${displayName}`);
-        names.set(peer.node_id, displayName);
-      } else {
-        const displayName = peer.node_id;
-        console.log(`[PeerNames] ${peer.node_id} -> ${displayName} (no name)`);
+    if ($nodeStatus?.peer_info) {
+      for (const peer of $nodeStatus.peer_info) {
+        const peerName = peer.name || peer.display_name;
+        const displayName = peerName ? `${peerName} | ${peer.node_id}` : peer.node_id;
         names.set(peer.node_id, displayName);
       }
     }
-    console.log('[PeerNames] Final map size:', names.size);
+
+    // Return same reference if content unchanged — prevents Svelte 5 reactive loop
+    if (names.size === _prevPeerDisplayNames.size) {
+      let same = true;
+      for (const [k, v] of names) {
+        if (_prevPeerDisplayNames.get(k) !== v) { same = false; break; }
+      }
+      if (same) return _prevPeerDisplayNames;
+    }
+    _prevPeerDisplayNames = names;
     return names;
   });
 

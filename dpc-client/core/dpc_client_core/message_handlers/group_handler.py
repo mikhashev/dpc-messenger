@@ -93,10 +93,18 @@ class GroupTextHandler(MessageHandler):
                 f"{group_id}:{sender_node_id}:{text}:{int(time.time() * 1000)}".encode()
             ).hexdigest()[:16]
 
-        # Deduplication
+        # Deduplication: runtime set (survives within session)
         dedup_key = f"{group_id}:{message_id}"
         if dedup_key in self.service._processed_message_ids:
             self.logger.debug("Duplicate group message from %s, skipping", sender_node_id)
+            return None
+
+        # Deduplication: check history on disk (survives across restarts)
+        monitor_key = group_id
+        monitor = self.service.conversation_monitors.get(monitor_key)
+        if monitor and hasattr(monitor, "message_ids") and message_id in monitor.message_ids:
+            self.logger.debug("Duplicate group message %s (already in history), skipping", message_id[:8])
+            self.service._processed_message_ids.add(dedup_key)
             return None
 
         self.service._processed_message_ids.add(dedup_key)
