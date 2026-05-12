@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import logging
 import sqlite3
+import threading
 from datetime import datetime, timezone
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field, asdict
@@ -52,6 +53,40 @@ DEFAULT_ENTITY_TYPES = ["person", "organization", "technology", "concept", "loca
 GLINER_MODEL_NAME = "urchade/gliner_multi-v2.1"
 GLINER_THRESHOLD = 0.5
 GLINER_MAX_TEXT_LEN = 5000
+
+# Module-level GLiNER singleton — mirrors the BGE-M3 embedding singleton
+# pattern from S105 (get_embedding_provider). Loading the model is ~2 GB
+# of RAM and ~30 s of first-time download; parallel group sleep would
+# otherwise instantiate it once per agent. Double-checked locking under
+# threading.Lock guards init; after _GLINER_MODEL is set, every reader is
+# a pure attribute read (safe under the GIL).
+_GLINER_MODEL: Any = None
+_GLINER_LOAD_LOCK = threading.Lock()
+
+
+def _get_gliner_model():
+    """Return the process-wide GLiNER model, loading lazily on first call.
+
+    Returns None if `gliner` is not installed — callers should treat the
+    absence as "skip NER", mirroring the ImportError path in
+    extract_entities_gliner. Safe to call from any thread (including
+    asyncio worker threads via to_thread()).
+    """
+    global _GLINER_MODEL
+    if _GLINER_MODEL is not None:
+        return _GLINER_MODEL
+    with _GLINER_LOAD_LOCK:
+        if _GLINER_MODEL is not None:
+            return _GLINER_MODEL
+        try:
+            from gliner import GLiNER
+        except ImportError:
+            log.debug("GLiNER not installed — skip entity extraction (install with: uv sync --extra graph-ner)")
+            return None
+        log.info("Loading GLiNER model %s (first use, process-wide singleton)...", GLINER_MODEL_NAME)
+        _GLINER_MODEL = GLiNER.from_pretrained(GLINER_MODEL_NAME)
+        log.info("GLiNER model loaded")
+        return _GLINER_MODEL
 
 
 @dataclass
@@ -451,6 +486,10 @@ class KnowledgeGraph:
         """Run GLiNER NER over texts and return extracted entities. Pure
         compute — no SQLite writes. Safe to call from a worker thread.
 
+        Uses the module-level GLiNER singleton (_get_gliner_model) — parallel
+        group sleep on N agents shares one model instance instead of loading
+        N copies (~2 GB each).
+
         Args:
             texts: list of {"source_id": str, "text": str} dicts
             entity_types: NER labels to extract (default: person, organization, technology, concept)
@@ -462,22 +501,15 @@ class KnowledgeGraph:
             GLiNER load/predict is offloaded to asyncio.to_thread() and SQLite
             connections are bound to the thread that created them.
         """
-        try:
-            from gliner import GLiNER
-        except ImportError:
-            log.debug("GLiNER not installed — skip entity extraction (install with: uv sync --extra graph-ner)")
+        if not texts:
             return []
 
-        if not texts:
+        model = _get_gliner_model()
+        if model is None:
             return []
 
         if entity_types is None:
             entity_types = DEFAULT_ENTITY_TYPES
-
-        if not hasattr(self, "_gliner_model"):
-            log.info("Loading GLiNER model %s (first use)...", GLINER_MODEL_NAME)
-            self._gliner_model = GLiNER.from_pretrained(GLINER_MODEL_NAME)
-            log.info("GLiNER model loaded")
 
         all_entities = []
         for item in texts:
@@ -486,7 +518,7 @@ class KnowledgeGraph:
             if not text or len(text) < 20:
                 continue
             try:
-                entities = self._gliner_model.predict_entities(text[:GLINER_MAX_TEXT_LEN], entity_types, threshold=GLINER_THRESHOLD)
+                entities = model.predict_entities(text[:GLINER_MAX_TEXT_LEN], entity_types, threshold=GLINER_THRESHOLD)
             except Exception as e:
                 log.debug("GLiNER extraction failed for %s: %s", source_id, e)
                 continue
