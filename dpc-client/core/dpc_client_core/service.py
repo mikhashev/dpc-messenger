@@ -5600,6 +5600,7 @@ class CoreService:
                     sender_name=self.p2p_manager.get_display_name() or "User",
                 )
                 monitor.save_history()
+                user_msg_index = monitor.get_last_msg_index()
 
                 # Broadcast @CC mention event (picked up by dpc-agent-chat MCP server)
                 await self._check_agent_cc_mention(
@@ -5620,6 +5621,7 @@ class CoreService:
                         "token_limit": 128000,
                         "history_tokens": 0,
                         "context_estimated": 0,
+                        "user_msg_index": user_msg_index,
                     }
                 )
                 logger.info("@CC-only mention in %s — broadcast to MCP bridge (real CC)", conversation_id)
@@ -5690,6 +5692,19 @@ class CoreService:
                 if thinking_text:
                     thinking_tokens = len(thinking_text) // 4  # rough token estimate
 
+            # Pull msg_index for both user and assistant turns from monitor —
+            # process_message() appends user msg then assistant msg, so the
+            # last two history entries are the pair we just produced. Frontend
+            # uses these to update the optimistic user message and tag the
+            # assistant response with the "#N" badge on first render.
+            assistant_msg_index = 0
+            user_msg_index = 0
+            if monitor and monitor.message_history:
+                if monitor.message_history[-1].get("role") == "assistant":
+                    assistant_msg_index = monitor.message_history[-1].get("msg_index", 0)
+                if len(monitor.message_history) >= 2 and monitor.message_history[-2].get("role") == "user":
+                    user_msg_index = monitor.message_history[-2].get("msg_index", 0)
+
             # Send response to UI with actual metadata including token info
             await self.local_api.send_response_to_all(
                 command_id=command_id,
@@ -5706,6 +5721,8 @@ class CoreService:
                     "context_estimated": session_state.get("context_estimated", 0),
                     "thinking": thinking_text,
                     "thinking_tokens": thinking_tokens,
+                    "user_msg_index": user_msg_index,
+                    "assistant_msg_index": assistant_msg_index,
                 }
             )
 
