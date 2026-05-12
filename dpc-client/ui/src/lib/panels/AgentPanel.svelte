@@ -375,7 +375,7 @@
   $effect(() => {
     if ($agentChatMessage) {
       const { conversation_id, message_id, content, sender_name, sender_node_id, timestamp, role, thinking, streaming_raw,
-              context_estimated, history_tokens, tokens_limit } = $agentChatMessage;
+              msg_index, context_estimated, history_tokens, tokens_limit } = $agentChatMessage;
 
       untrack(() => {
         chatHistories.update(map => {
@@ -390,6 +390,7 @@
             text: content,
             timestamp: timestamp ? new Date(timestamp).getTime() : Date.now(),
             attachments: [],
+            msg_index: msg_index || 0,
             thinking: thinking || undefined,
             streamingRaw: streaming_raw || undefined,
           };

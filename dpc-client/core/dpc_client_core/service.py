@@ -5845,6 +5845,7 @@ class CoreService:
                     "sender_name": cc_name,
                     "sender_node_id": "cc",
                     "timestamp": timestamp,
+                    "msg_index": monitor.get_last_msg_index(),
                     "context_estimated": token_stats.get("context_estimated", 0),
                     "history_tokens": token_stats.get("history_tokens", 0),
                     "tokens_limit": token_stats.get("tokens_limit", 128000),
@@ -5936,6 +5937,9 @@ class CoreService:
                 from dpc_client_core.dpc_agent.utils import utc_now_iso
                 import uuid
                 agent_name = self._get_agent_display_name(conversation_id)
+                # Pull msg_index from the same monitor entry just inspected for
+                # thinking/streaming_raw — it was assigned at on_message time.
+                msg_index = monitor.get_last_msg_index() if monitor else 0
                 await self.local_api.broadcast_event("agent_chat_message", {
                     "conversation_id": conversation_id,
                     "message_id": str(uuid.uuid4()),
@@ -5943,6 +5947,7 @@ class CoreService:
                     "content": response,
                     "sender_name": agent_name,
                     "timestamp": utc_now_iso(),
+                    "msg_index": msg_index,
                     "thinking": thinking_text,
                     "streaming_raw": streaming_raw,
                 })
