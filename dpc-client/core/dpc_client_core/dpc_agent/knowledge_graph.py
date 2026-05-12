@@ -558,28 +558,63 @@ class KnowledgeGraph:
         now = _utc_now()
         edges_added = 0
         orphan_sources: set = set()
-        for ent in entities:
-            label = ent.get("entity", "").strip()
-            if not label:
-                continue
-            ent_type = ent.get("type", "concept")
-            source_id = ent.get("source_id", "")
-            score = ent.get("score", 0.0)
-            entity_id = f"e:{label.lower().replace(' ', '_')}"
-            self._ensure_node(entity_id, NodeType.ENTITY, label)
-            if source_id:
+        # Single batched transaction for the whole entity list. Sleep pipeline
+        # typically passes 100-200 entities; the previous per-entity pattern
+        # called `_ensure_node` and `_add_edge_safe`, each opening their own
+        # `with self._conn:` block — ~2N transactions per persist call. Inlined
+        # SQL here keeps the per-call existence checks (idempotency and
+        # skip-orphan) but amortises commit cost across the whole batch.
+        conn = self._backend._conn
+        entity_exempt = 1 if NodeType.ENTITY in ALWAYS_EXEMPT else 0
+        with conn:
+            for ent in entities:
+                label = ent.get("entity", "").strip()
+                if not label:
+                    continue
+                ent_type = ent.get("type", "concept")
+                source_id = ent.get("source_id", "")
+                score = ent.get("score", 0.0)
+                entity_id = f"e:{label.lower().replace(' ', '_')}"
+
+                # _ensure_node inlined: upsert entity node if missing.
+                if conn.execute(
+                    "SELECT 1 FROM nodes WHERE node_id=? LIMIT 1", (entity_id,)
+                ).fetchone() is None:
+                    conn.execute(
+                        "INSERT OR REPLACE INTO nodes (node_id, node_type, label, source_layer, exempt, properties) VALUES (?,?,?,?,?,?)",
+                        (entity_id, NodeType.ENTITY.value, label, "L7", entity_exempt, "{}"),
+                    )
+
+                if not source_id:
+                    continue
+
                 # Skip-orphan guard: caller (sleep_pipeline) may pass source_ids
                 # for sessions that aren't represented as graph nodes yet
                 # (group archives use a different stem format that bypasses
                 # _extract_archive_edges). Without this check, the MENTIONS
-                # edge INSERT fails the FK constraint, leaving an orphan
-                # transaction that locks the DB for downstream writers.
-                if self._backend.get_node(source_id) is None:
+                # edge INSERT would fail the FK constraint and abort the whole
+                # batch transaction.
+                if conn.execute(
+                    "SELECT 1 FROM nodes WHERE node_id=? LIMIT 1", (source_id,)
+                ).fetchone() is None:
                     orphan_sources.add(source_id)
                     continue
-                self._add_edge_safe(source_id, entity_id, EdgeType.MENTIONS,
-                                    f"GLiNER extracted ({ent_type}, score={score:.2f})", now)
-                edges_added += 1
+
+                # _add_edge_safe inlined: insert MENTIONS edge if not already present.
+                if conn.execute(
+                    "SELECT 1 FROM edges WHERE source_id=? AND target_id=? AND edge_type=? LIMIT 1",
+                    (source_id, entity_id, EdgeType.MENTIONS.value),
+                ).fetchone() is None:
+                    conn.execute(
+                        "INSERT INTO edges (source_id, target_id, edge_type, t_created, t_invalidated, confidence, justification, edge_weight, properties) VALUES (?,?,?,?,?,?,?,?,?)",
+                        (
+                            source_id, entity_id, EdgeType.MENTIONS.value,
+                            now, None, 1.0,
+                            f"GLiNER extracted ({ent_type}, score={score:.2f})",
+                            "medium", json.dumps({"auto": True}, ensure_ascii=False),
+                        ),
+                    )
+                    edges_added += 1
         if orphan_sources:
             log.warning(
                 "KG persist: skipped MENTIONS edges for %d orphan source(s) not in graph: %s",
