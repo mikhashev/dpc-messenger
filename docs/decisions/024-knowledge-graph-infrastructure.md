@@ -1,6 +1,6 @@
 # ADR-024: Knowledge Graph as Unified Infrastructure
 
-**Status:** Proposed
+**Status:** Accepted (Phase 1 implemented, Phase 2 partial, S112 hardened persistence)
 **Date:** 2026-05-05
 **Session:** S93
 **Authors:** CC (draft, code analysis, web research), Ark (prior art research, GRAVITON mapping, dotmd analysis), Mike (direction, scale framing, decision)
@@ -221,6 +221,13 @@ The entity relation section is appended to the sleep synthesis prompt (SYNTHESIS
 
 **Important:** This section is part of the sleep synthesis LLM call — not a separate call. Modifications to SYNTHESIS_PROMPT must preserve the `{entity_section}` placeholder and the `extracted_relations` JSON key in the response schema.
 
+**GLiNER model pin:** Phase 2 uses `urchade/gliner_multi-v2.1` (multilingual, ~2 GB). Pinned in `knowledge_graph.py:GLINER_MODEL_NAME` constant. Swap requires reload of process-wide singleton (`_GLINER_MODEL` cache invalidation) and verification that entity types in `DEFAULT_ENTITY_TYPES` (person, organization, technology, concept, location) remain valid for the new model's label schema.
+
+**Persistence invariants (added S112 after FK-cascade incident):**
+- **Skip-orphan policy:** `persist_extracted_entities` skips MENTIONS edges when source node is not in graph rather than fabricating phantom nodes. Caller (sleep_pipeline) is responsible for ensuring source nodes exist via a separate indexing path. Aggregated warn log per persist call lists up to 5 example orphan source_ids.
+- **Transactional safety:** all write paths (`add_node`, `add_edge`, `_clear_structural_edges`, `invalidate_edges`, `backfill_edge_timestamps`) use `with self._conn:` context manager. FK violations / UNIQUE collisions / NOT NULL errors auto-rollback the implicit transaction; otherwise the deferred transaction stays open and holds the WAL write lock, producing `database is locked` for any subsequent KnowledgeGraph instance.
+- **Group archive coverage gap:** `_extract_archive_edges` indexes only 1:1 conversation archives. Group archives bypass this — their `sa:` nodes are absent from the graph, MENTIONS edges from them are dropped by skip-orphan (logged but otherwise silent). Closing this gap requires a policy decision on NodeType for group sessions; not deferred for capacity reasons but because the architectural choice has not been made.
+
 ### 6. Scaling model
 
 | Scale | Graph behavior |
@@ -256,7 +263,7 @@ The entity relation section is appended to the sleep synthesis prompt (SYNTHESIS
 - Test Grafeo: verify HNSW+BM25+Cypher work together, test Python API stability
 - Decision gate: pick primary DB or stay on SQLite for Phase 1
 
-### Phase 1: Foundation (immediate, DB-agnostic)
+### Phase 1: Foundation (immediate, DB-agnostic) — DONE
 - Create `knowledge_graph.py` module with abstract graph interface
 - Structural edge extraction from existing .md files (parse links, tags, session metadata) — store as SQLite/JSON initially
 - Integrate graph traversal as 4th source in `hybrid_search.py` RRF fusion
@@ -264,11 +271,15 @@ The entity relation section is appended to the sleep synthesis prompt (SYNTHESIS
 - If smoke test passed: add graph DB dependency and wire concrete backend
 - Tests: graph queries return expected edges, RRF fusion includes graph results
 
-### Phase 2: Enrichment
-- GLiNER entity extraction (runs before LLM, feeds entity list as scaffolding)
-- Guided LLM relation extraction during sleep consolidation (extend `sleep_pipeline.py`)
-- Temporal metadata on edges (`t_created`, `t_invalidated`) — bi-temporal recording only
+Status: implemented on SQLite (smoke test deferred — LadybugDB/Grafeo selection pending separate evaluation). Runtime: agent_001 KG at 535 nodes / 740 edges as of S112.
+
+### Phase 2: Enrichment — PARTIAL
+- GLiNER entity extraction (runs before LLM, feeds entity list as scaffolding) — operational since S112 hardening
+- Guided LLM relation extraction during sleep consolidation (extend `sleep_pipeline.py`) — wired but end-to-end verification pending (blocked on `database is locked` cascade until S112)
+- Temporal metadata on edges (`t_created`, `t_invalidated`) — bi-temporal recording in place
 - Entity extraction (GLiNER NER, configurable opt-in)
+
+S112 hardening: cascade bugfix in persistence layer — see backlog `GLINER-FK-CONSTRAINT + KG-DB-LOCKED` entry. Commit `b2b90c6` added skip-orphan guard + `with self._conn:` across all KG write paths.
 
 ### Phase 3: Federation
 - Graph schema descriptors for P2P gossip (ADR-017/019)
@@ -290,13 +301,14 @@ The entity relation section is appended to the sleep synthesis prompt (SYNTHESIS
 3. **Hammer/nail bias:** Risk of over-applying graph to problems that don't need it. BM25 keyword search remains primary for ad-hoc queries. Graph = supplement.
 4. **LLM hallucinated alternatives (S94 finding):** 2 of 5 alternatives suggested by external LLMs (SparrowDB, ocpg) were fabricated. All alternatives must be verified on PyPI/GitHub before consideration (P14 Rule: Solution Check).
 5. **Schema evolution:** Graph schema changes may require migration. Mitigated by starting minimal (Phase 1) and extending incrementally.
+6. **Persistence cascade bugs (S111-S112):** Multi-layer dependency chain (env → async → threading → singleton → FK → transaction) means each fix may expose the next layer. Pipeline silently degrades — reports "complete" while enriched edges don't land. Mitigation: monitor KG edge delta per sleep cycle, not just completion status.
 
 ## Open Questions
 
 1. Should graph replace `_meta.json` + `_index.md` or coexist? (Recommendation: coexist initially, migrate when graph proves stable)
 2. Edge extraction prompt design — what quality bar for LLM-extracted edges?
 3. Privacy: which graph edges are shareable in federation? Per-edge consent or per-type consent?
-4. How does graph interact with Extract Knowledge button flow? Knowledge commits should create graph edges automatically.
+4. ~~How does graph interact with Extract Knowledge button flow? Knowledge commits should create graph edges automatically.~~ **Answered (S112):** indirect via file indexing — knowledge commit writes .md to `~/.dpc/knowledge/`, then `bulk_import_knowledge_files` creates KnowledgeFile nodes and `extract_structural_edges` parses markdown links/refs into DEPENDS_ON/RESPONDS_TO/DECIDED_BY edges on eager init or next sleep cycle. No incremental on-commit update path; refresh latency = time until next eager init or sleep trigger. If sub-second freshness is required for chat-path retrieval, add an on-commit hook (separate ADR).
 5. **(S94, Ark note)** If Grafeo passes smoke test, its built-in HNSW+BM25+RRF could consolidate FAISS+BM25+graph into one DB. This is an architectural decision beyond ADR-024 scope — needs separate evaluation of migration cost, performance parity with BGE-M3 FAISS, and fallback strategy.
 
 ## References
