@@ -209,6 +209,25 @@
   let activeAgentSleep = $derived($sleepAgentStates.get(activeChatId));
   let isSleeping = $derived(activeAgentSleep?.status === 'sleeping');
 
+  // Group-scoped sleep view — only show agents that are members of the active
+  // group, not every sleeping agent globally (S111 SLEEP-UI-GROUP-LEAK).
+  // The global $sleepAgentStates Map is unfiltered; passing it directly into
+  // SessionControls leaked agents from 1:1 chats into every group header.
+  let groupSleepAgents = $derived.by(() => {
+    if (!activeChatId?.startsWith('group-')) return new Map();
+    const group = $groupChats.get(activeChatId);
+    if (!group?.agents) return new Map();
+    const memberAgentIds = new Set<string>();
+    for (const ids of Object.values(group.agents)) {
+      for (const id of ids) memberAgentIds.add(id);
+    }
+    const filtered = new Map();
+    for (const [aid, state] of $sleepAgentStates) {
+      if (memberAgentIds.has(aid)) filtered.set(aid, state);
+    }
+    return filtered;
+  });
+
   function handleToggleSleep() {
     sendCommand('toggle_sleep', { agent_id: activeChatId });
   }
@@ -995,7 +1014,7 @@
             sleepCurrent={activeAgentSleep?.current ?? 0}
             sleepTotal={activeAgentSleep?.total ?? 0}
             sleepPhase={activeAgentSleep?.phase ?? ''}
-            sleepAgents={$sleepAgentStates}
+            sleepAgents={groupSleepAgents}
             onNewSession={handleNewChat}
             onEndSession={handleEndSession}
             onToggleSleep={handleToggleSleep}
