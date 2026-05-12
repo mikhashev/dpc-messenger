@@ -277,6 +277,47 @@ def _parse_llm_json(response: str) -> Dict[str, Any]:
         return json.loads(cleaned)
 
 
+def _build_session_source_id(archive: str) -> tuple[str, str]:
+    """Build (source_id, display_label) for a sleep session.
+
+    Returns the canonical KG node id used as `source_id` on MENTIONS edges
+    in ADR-024 Phase 2. The source node itself must exist in the graph
+    before persist_extracted_entities runs, or the FK violates and the
+    MENTIONS edge is skipped by L5a's skip-orphan guard.
+
+    Formats handled (matching what _collect_group_digests /
+    _collect_group_archive_digests / _find_unprocessed_archives produce):
+
+    - 1:1 archive filename ("2026-04-01T17-27-00_reset_session.json")
+      → sa:2026-04-01T17-27-00 — matches the format extract_structural_edges
+        creates via _extract_archive_edges on the agent's archive_dir.
+    - Live group chat ("group:<group_id>")
+      → sa:<group_id>:live — stable per group across sleeps; same node
+        accumulates MENTIONS over the group's lifetime.
+    - Group archive ("group_archive:<group_id>:<filename>")
+      → sa:<group_id>:<timestamp> — per-session node for past resets.
+
+    Returns ("", "") for empty input. Callers must `_ensure_node` the
+    returned id on the KG before passing it to persist_extracted_entities,
+    since 1:1 sa: nodes are auto-created by extract_structural_edges but
+    group sa: nodes are not.
+    """
+    if not archive:
+        return "", ""
+    if archive.startswith("group:"):
+        group_id = archive[len("group:"):]
+        return f"sa:{group_id}:live", group_id
+    if archive.startswith("group_archive:"):
+        rest = archive[len("group_archive:"):]
+        if ":" in rest:
+            group_id, filename = rest.split(":", 1)
+            timestamp = Path(filename).stem.split("_")[0]
+            return f"sa:{group_id}:{timestamp}", f"{group_id}/{timestamp}"
+        return f"sa:{rest}", rest
+    timestamp = Path(archive).stem.split("_")[0]
+    return f"sa:{timestamp}", timestamp
+
+
 async def _analyze_single_session(
     digest: Dict, conversation_dir: Path, llm_manager,
     provider_alias: Optional[str] = None,
@@ -412,16 +453,26 @@ async def run_sleep(
         # ADR-024 Phase 2: GLiNER entity extraction (before LLM synthesis)
         gliner_entities: list = []
         try:
-            from .knowledge_graph import KnowledgeGraph
+            from .knowledge_graph import KnowledgeGraph, NodeType
             from .utils import get_agent_root
             _agent_root = get_agent_root(agent_id) if agent_id else conversation_dir.parent.parent / "agents" / conversation_dir.name
             _kg = KnowledgeGraph(_agent_root)
             _ner_texts = []
+            _session_nodes = []  # (source_id, label) for SessionArchive nodes to ensure
             for f in per_session_findings:
                 if "error" not in f:
                     summary = f.get("summary", "") or json.dumps(f, ensure_ascii=False)[:3000]
                     archive = f.get("archive_file", "")
-                    _ner_texts.append({"source_id": f"sa:{Path(archive).stem.split('_')[0]}" if archive else "", "text": summary})
+                    source_id, label = _build_session_source_id(archive)
+                    if source_id:
+                        _session_nodes.append((source_id, label))
+                    _ner_texts.append({"source_id": source_id, "text": summary})
+            # L5b: group sessions don't go through extract_structural_edges, so
+            # their sa: nodes don't exist in the graph by default. Ensure them
+            # here so persist_extracted_entities can attach MENTIONS edges
+            # instead of dropping them via skip-orphan.
+            for source_id, label in _session_nodes:
+                _kg._ensure_node(source_id, NodeType.SESSION_ARCHIVE, label)
             if _ner_texts:
                 # Run GLiNER inference in a worker thread — GLiNER.from_pretrained()
                 # may trigger a synchronous HF model download on first use that
