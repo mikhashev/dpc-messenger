@@ -576,14 +576,17 @@ class KnowledgeGraph:
                 score = ent.get("score", 0.0)
                 entity_id = f"e:{label.lower().replace(' ', '_')}"
 
-                # _ensure_node inlined: upsert entity node if missing.
-                if conn.execute(
-                    "SELECT 1 FROM nodes WHERE node_id=? LIMIT 1", (entity_id,)
-                ).fetchone() is None:
-                    conn.execute(
-                        "INSERT OR REPLACE INTO nodes (node_id, node_type, label, source_layer, exempt, properties) VALUES (?,?,?,?,?,?)",
-                        (entity_id, NodeType.ENTITY.value, label, "L7", entity_exempt, "{}"),
-                    )
+                # _ensure_node inlined: INSERT OR IGNORE skips existing rows
+                # via the PRIMARY KEY on node_id, so existing entity nodes are
+                # left untouched. `OR REPLACE` would DELETE-then-INSERT and
+                # could nuke properties if entities later gain them (frequency
+                # counts, last-seen timestamps, etc.); `OR IGNORE` is
+                # defensively equivalent to SELECT-then-INSERT but in one
+                # statement.
+                conn.execute(
+                    "INSERT OR IGNORE INTO nodes (node_id, node_type, label, source_layer, exempt, properties) VALUES (?,?,?,?,?,?)",
+                    (entity_id, NodeType.ENTITY.value, label, "L7", entity_exempt, "{}"),
+                )
 
                 if not source_id:
                     continue
