@@ -434,8 +434,21 @@ class KnowledgeGraph:
         return count
 
     def _clear_structural_edges(self) -> None:
+        # Canonical marker is source=structural. Legacy edges (pre-KG-LLM-MARKER
+        # fix) carry only auto=true with no source field — matched here so they
+        # re-extract with the new marker on next startup. LLM relations and
+        # GLiNER MENTIONS in the legacy state also get cleared; sleep pipeline
+        # regenerates them with source=llm_relation / source=gliner_ner on the
+        # next sleep cycle. Once all KGs migrate (after one sleep), the legacy
+        # clauses can be removed.
         with self._backend._conn:
-            self._backend._conn.execute("DELETE FROM edges WHERE properties LIKE '%\"auto\": true%' OR properties LIKE '%\"auto\":true%'")
+            self._backend._conn.execute(
+                "DELETE FROM edges WHERE "
+                "properties LIKE '%\"source\": \"structural\"%' "
+                "OR properties LIKE '%\"source\":\"structural\"%' "
+                "OR ((properties LIKE '%\"auto\": true%' OR properties LIKE '%\"auto\":true%') "
+                "AND properties NOT LIKE '%\"source\"%')"
+            )
 
     def _load_meta(self, knowledge_dir: Path) -> dict:
         meta_path = knowledge_dir / "_meta.json"
@@ -450,12 +463,12 @@ class KnowledgeGraph:
         if self._backend.get_node(node_id) is None:
             self._backend.add_node(GraphNode(node_id=node_id, node_type=node_type, label=label))
 
-    def _add_edge_safe(self, src: str, tgt: str, etype: EdgeType, justification: str, t_created: str) -> None:
+    def _add_edge_safe(self, src: str, tgt: str, etype: EdgeType, justification: str, t_created: str, properties: dict | None = None) -> None:
         if not self._edge_exists(src, tgt, etype):
             self._backend.add_edge(GraphEdge(
                 source_id=src, target_id=tgt, edge_type=etype,
                 t_created=t_created, justification=justification,
-                properties={"auto": True},
+                properties=properties if properties is not None else {"source": "structural"},
             ))
 
     def _edge_exists(self, src: str, tgt: str, etype: EdgeType) -> bool:
@@ -614,7 +627,7 @@ class KnowledgeGraph:
                             source_id, entity_id, EdgeType.MENTIONS.value,
                             now, None, 1.0,
                             f"GLiNER extracted ({ent_type}, score={score:.2f})",
-                            "medium", json.dumps({"auto": True}, ensure_ascii=False),
+                            "medium", json.dumps({"source": "gliner_ner"}, ensure_ascii=False),
                         ),
                     )
                     edges_added += 1

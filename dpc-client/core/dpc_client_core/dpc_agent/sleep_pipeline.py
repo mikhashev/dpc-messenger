@@ -548,10 +548,10 @@ async def run_sleep(
                     tgt_id = f"e:{target}"
                     _kg._ensure_node(src_id, NodeType.ENTITY, rel.get("source", source))
                     _kg._ensure_node(tgt_id, NodeType.ENTITY, rel.get("target", target))
-                    props = {"auto": True, "llm_extracted": True}
+                    props = {"source": "llm_relation"}
                     if rel.get("needs_review"):
                         props["needs_review"] = True
-                    _kg._add_edge_safe(src_id, tgt_id, edge_type, justification, now)
+                    _kg._add_edge_safe(src_id, tgt_id, edge_type, justification, now, props)
                     added += 1
                 if added:
                     log.info("Sleep pipeline: LLM extracted %d relations (from %d candidates)", added, len(extracted_relations))
