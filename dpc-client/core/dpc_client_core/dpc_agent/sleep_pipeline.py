@@ -222,6 +222,13 @@ def _collect_group_archive_digests(
             })
         except (json.JSONDecodeError, OSError):
             continue
+    if len(digests) > MAX_ARCHIVES_PER_CYCLE:
+        log.warning(
+            "Sleep: %d unprocessed group archives in %s, analyzing last %d. "
+            "%d oldest will be silently skipped (next sleep treats them as analyzed).",
+            len(digests), group_dir.name, MAX_ARCHIVES_PER_CYCLE,
+            len(digests) - MAX_ARCHIVES_PER_CYCLE,
+        )
     return digests[-MAX_ARCHIVES_PER_CYCLE:]
 
 
@@ -244,6 +251,13 @@ def _find_unprocessed_archives(conversation_dir: Path, since: Optional[str]) -> 
         digests = [d for d in digests if d.get("date", "") > since]
 
     digests.sort(key=lambda d: d.get("date", ""))
+    if len(digests) > MAX_ARCHIVES_PER_CYCLE:
+        log.warning(
+            "Sleep: %d unprocessed 1:1 archives in %s, analyzing last %d. "
+            "%d oldest will be silently skipped (next sleep treats them as analyzed).",
+            len(digests), conversation_dir.name, MAX_ARCHIVES_PER_CYCLE,
+            len(digests) - MAX_ARCHIVES_PER_CYCLE,
+        )
     return digests[-MAX_ARCHIVES_PER_CYCLE:]
 
 
