@@ -289,6 +289,59 @@ class ContextFirewall:
         )
         return bool(val)
 
+    def get_agent_enabled(self, profile_name: Optional[str] = None) -> bool:
+        """Per-agent enabled flag with global fallback.
+
+        Mirrors S110 isolation pattern: per-agent profile takes precedence,
+        falls back to global dpc_agent block.
+        """
+        val = self._get_profile_or_global(
+            profile_name, 'enabled', default=True
+        )
+        return bool(val)
+
+    def get_sandbox_read_only_paths(self, profile_name: Optional[str] = None) -> List[str]:
+        """Per-agent sandbox read-only paths with global fallback.
+
+        Per-agent profile sandbox_extensions.read_only takes precedence, falls back
+        to the parsed global self.sandbox_read_only_paths.
+        """
+        val = self._get_profile_or_global(
+            profile_name, 'sandbox_extensions', 'read_only', default=None
+        )
+        if val is None:
+            return list(self.sandbox_read_only_paths)
+        return [self._normalize_path(p) for p in val if p]
+
+    def get_sandbox_read_write_paths(self, profile_name: Optional[str] = None) -> List[str]:
+        """Per-agent sandbox read-write paths with global fallback."""
+        val = self._get_profile_or_global(
+            profile_name, 'sandbox_extensions', 'read_write', default=None
+        )
+        if val is None:
+            return list(self.sandbox_read_write_paths)
+        return [self._normalize_path(p) for p in val if p]
+
+    def get_agent_tools_map(self, profile_name: Optional[str] = None) -> Dict[str, bool]:
+        """Per-agent tools map with profile overrides merged onto global defaults.
+
+        Returns the full Dict[str, bool] of tool -> enabled (unlike
+        get_allowed_agent_tools_for_profile which returns the Set of enabled
+        names). Used for transparency / capability sections that need to show
+        the full set of tools and their state, not just the enabled ones.
+        """
+        merged = dict(self.dpc_agent_tools)
+        if not profile_name:
+            return merged
+        profile = self.get_agent_profile_settings(profile_name)
+        if not profile:
+            return merged
+        profile_tools = profile.get('tools', {})
+        for tool_name, enabled in profile_tools.items():
+            if not tool_name.startswith('_'):
+                merged[tool_name] = bool(enabled)
+        return merged
+
     def is_extended_path_allowed(self, path: str, require_write: bool = False,
                                  profile_name: Optional[str] = None) -> bool:
         """

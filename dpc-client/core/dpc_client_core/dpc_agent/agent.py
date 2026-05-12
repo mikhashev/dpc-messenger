@@ -215,9 +215,9 @@ class DpcAgent:
         sandbox_ro = None
         sandbox_rw = None
         if self._firewall is not None:
-            all_tools_map = dict(self._firewall.dpc_agent_tools)
-            sandbox_ro = list(self._firewall.sandbox_read_only_paths)
-            sandbox_rw = list(self._firewall.sandbox_read_write_paths)
+            all_tools_map = self._firewall.get_agent_tools_map(self._firewall_profile)
+            sandbox_ro = self._firewall.get_sandbox_read_only_paths(self._firewall_profile)
+            sandbox_rw = self._firewall.get_sandbox_read_write_paths(self._firewall_profile)
 
         messages, cap_info = build_llm_messages(
             agent_root=self.agent_root,

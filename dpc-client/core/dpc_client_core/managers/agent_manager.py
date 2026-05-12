@@ -916,9 +916,9 @@ class DpcAgentManager:
         context = {}
         dpc_dir = pathlib.Path.home() / ".dpc"
 
-        # Check if agent is enabled via firewall
-        if self.firewall and not self.firewall.dpc_agent_enabled:
-            log.debug("DPC Agent is disabled via firewall rules")
+        # Check if agent is enabled via firewall (per-agent profile takes precedence)
+        if self.firewall and not self.firewall.get_agent_enabled(self.agent_id):
+            log.debug("DPC Agent is disabled via firewall rules (profile=%s)", self.agent_id or 'global')
             return context
 
         # Load personal context (with firewall check)
