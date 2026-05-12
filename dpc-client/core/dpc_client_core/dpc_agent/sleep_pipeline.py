@@ -7,6 +7,7 @@ toggle button via WebSocket command.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from datetime import datetime, timezone
@@ -422,7 +423,13 @@ async def run_sleep(
                     archive = f.get("archive_file", "")
                     _ner_texts.append({"source_id": f"sa:{Path(archive).stem.split('_')[0]}" if archive else "", "text": summary})
             if _ner_texts:
-                gliner_entities = _kg.extract_entities_gliner(_ner_texts)
+                # Run GLiNER in a worker thread — GLiNER.from_pretrained() may
+                # trigger a synchronous HF model download on first use that
+                # blocks the event loop for minutes and stalls Discord
+                # heartbeats / WebSocket auth (S111 incident). Subsequent
+                # calls (model cached) are fast but still CPU-bound, so
+                # offloading keeps the loop responsive either way.
+                gliner_entities = await asyncio.to_thread(_kg.extract_entities_gliner, _ner_texts)
                 if gliner_entities:
                     log.info("Sleep pipeline: GLiNER extracted %d entities from %d sessions", len(gliner_entities), len(_ner_texts))
         except Exception as e:
