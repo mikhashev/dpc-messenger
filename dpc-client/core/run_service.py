@@ -4,6 +4,24 @@ import asyncio
 import logging
 from logging.handlers import RotatingFileHandler
 import os
+
+# HF fast-transfer guard — must run BEFORE any import that pulls in
+# huggingface_hub. The env var is read at huggingface_hub import time, not at
+# use time, so per-consumer guards (memory.py, whisper_provider.py, etc.) are
+# too late if the parent module already imported huggingface_hub. Single
+# source of truth — every downstream HF consumer (BGE-M3, GLiNER, Whisper)
+# inherits the corrected value automatically.
+if os.environ.get("HF_HUB_ENABLE_HF_TRANSFER") == "1":
+    try:
+        import hf_transfer  # noqa: F401
+    except ImportError:
+        os.environ["HF_HUB_ENABLE_HF_TRANSFER"] = "0"
+        # Logging not configured yet at this stage — use print.
+        print(
+            "[startup] Disabled HF_HUB_ENABLE_HF_TRANSFER "
+            "(hf_transfer package not installed)"
+        )
+
 import platform  # Import the platform module to check the OS
 import subprocess
 import sys

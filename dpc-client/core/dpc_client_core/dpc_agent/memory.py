@@ -228,12 +228,6 @@ class EmbeddingProvider:
         with self._load_lock:
             if self._model is not None:
                 return
-            if os.environ.get("HF_HUB_ENABLE_HF_TRANSFER") == "1":
-                try:
-                    import hf_transfer  # noqa: F401
-                except ImportError:
-                    os.environ["HF_HUB_ENABLE_HF_TRANSFER"] = "0"
-                    log.info("Disabled HF_HUB_ENABLE_HF_TRANSFER (hf_transfer not installed)")
             from sentence_transformers import SentenceTransformer
             import torch
             kwargs = {"device": self.device}
