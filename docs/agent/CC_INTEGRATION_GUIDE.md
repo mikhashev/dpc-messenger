@@ -109,7 +109,7 @@ call re-reads `history.json` from scratch.
 ## The cron loop (Claude Code side)
 
 CC runs the following cron inside Claude Code. The exact prompt text
-lives in [`cc_cron_prompt.md`](../../dpc-client/core/cc_cron_prompt.md)
+lives in [`cc_cron_prompt_public.md`](../../dpc-client/core/cc_cron_prompt_public.md)
 and is versioned there.
 
 **Schedule:** every minute while the Claude Code session is open. Cron
@@ -129,7 +129,7 @@ need to recreate the cron after reopening the IDE.
 The cron prompt does the filtering; CC just executes what the cron
 says. Substitute the agent name (or folder id) for `<agent>` when you
 create the cron — see the canonical prompt in
-[`cc_cron_prompt.md`](../../dpc-client/core/cc_cron_prompt.md), which
+[`cc_cron_prompt_public.md`](../../dpc-client/core/cc_cron_prompt_public.md), which
 ships with `Ark` as the default and notes how to swap it.
 
 ---
@@ -170,7 +170,7 @@ own setup can use CC differently (or not use CC at all).
    update time.
 
 3. In Claude Code, create a cron using the exact prompt from
-   [`cc_cron_prompt.md`](../../dpc-client/core/cc_cron_prompt.md). The
+   [`cc_cron_prompt_public.md`](../../dpc-client/core/cc_cron_prompt_public.md). The
    schedule is `every 1 minute`. The shipped prompt targets the agent
    named `Ark`; if your agent uses a different display name, replace
    `Ark` with that name (or with the folder id) in both the
@@ -191,7 +191,7 @@ own setup can use CC differently (or not use CC at all).
 backend is down, start it. If you see
 `[ERROR] Multiple agents found, specify --conversation-id...`, the
 cron prompt is missing the flag — recreate the cron with the current
-[`cc_cron_prompt.md`](../../dpc-client/core/cc_cron_prompt.md). If the
+[`cc_cron_prompt_public.md`](../../dpc-client/core/cc_cron_prompt_public.md). If the
 warning is `--conversation-id=... did not match any known agent`, you
 have a typo (or the agent was deleted) — the bridge prints the list of
 known agents alongside the warning.
@@ -205,7 +205,7 @@ every backend start. If the bridge was last run against a previous
 backend process, re-run it — it reads the file fresh each time.
 
 **CC responds when it shouldn't (or vice versa).** The cron prompt
-defines the filter. Tune it in `cc_cron_prompt.md` and recreate the
+defines the filter. Tune it in `cc_cron_prompt_public.md` and recreate the
 cron — the prompt version you create the cron with is what runs.
 
 ---
@@ -213,7 +213,7 @@ cron — the prompt version you create the cron with is what runs.
 ## Related
 
 - [`../../dpc-client/core/cc_agent_bridge.py`](../../dpc-client/core/cc_agent_bridge.py) — bridge source
-- [`../../dpc-client/core/cc_cron_prompt.md`](../../dpc-client/core/cc_cron_prompt.md) — canonical cron prompt
+- [`../../dpc-client/core/cc_cron_prompt_public.md`](../../dpc-client/core/cc_cron_prompt_public.md) — canonical cron prompt
 - [`../../protocol-13-public.md`](../../protocol-13-public.md) — three-agent collaboration contract
 - [`./DPC_AGENT_GUIDE.md`](./DPC_AGENT_GUIDE.md) — embedded DPC agent (the one CC talks *with*, not the one CC *is*)
 - [`./DPC_AGENT_TELEGRAM.md`](./DPC_AGENT_TELEGRAM.md) — Telegram integration (parallel concept, different channel)
