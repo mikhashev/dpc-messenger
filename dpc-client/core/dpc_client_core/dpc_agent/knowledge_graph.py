@@ -448,15 +448,19 @@ class KnowledgeGraph:
         return count
 
     def extract_entities_gliner(self, texts: List[dict], entity_types: Optional[List[str]] = None) -> List[dict]:
-        """Extract named entities from texts using GLiNER (zero-shot NER).
+        """Run GLiNER NER over texts and return extracted entities. Pure
+        compute — no SQLite writes. Safe to call from a worker thread.
 
         Args:
             texts: list of {"source_id": str, "text": str} dicts
             entity_types: NER labels to extract (default: person, organization, technology, concept)
 
         Returns:
-            list of {"entity": str, "type": str, "source_id": str} for Task 004 scaffolding.
-            Also creates Entity nodes + MENTIONS edges in graph.
+            list of {"entity": str, "type": str, "source_id": str, "score": float}.
+            Call persist_extracted_entities() from the main thread to write the
+            corresponding Entity nodes + MENTIONS edges. Split exists because
+            GLiNER load/predict is offloaded to asyncio.to_thread() and SQLite
+            connections are bound to the thread that created them.
         """
         try:
             from gliner import GLiNER
@@ -475,7 +479,6 @@ class KnowledgeGraph:
             self._gliner_model = GLiNER.from_pretrained(GLINER_MODEL_NAME)
             log.info("GLiNER model loaded")
 
-        now = _utc_now()
         all_entities = []
         for item in texts:
             source_id = item.get("source_id", "")
@@ -492,15 +495,46 @@ class KnowledgeGraph:
                 ent_type = ent.get("label", "concept")
                 if not label or len(label) < 2:
                     continue
-                entity_id = f"e:{label.lower().replace(' ', '_')}"
-                self._ensure_node(entity_id, NodeType.ENTITY, label)
-                if source_id:
-                    self._add_edge_safe(source_id, entity_id, EdgeType.MENTIONS,
-                                        f"GLiNER extracted ({ent_type}, score={ent.get('score', 0):.2f})", now)
-                all_entities.append({"entity": label, "type": ent_type, "source_id": source_id})
+                all_entities.append({
+                    "entity": label,
+                    "type": ent_type,
+                    "source_id": source_id,
+                    "score": float(ent.get("score", 0.0)),
+                })
 
         log.info("GLiNER extracted %d entities from %d texts", len(all_entities), len(texts))
         return all_entities
+
+    def persist_extracted_entities(self, entities: List[dict]) -> int:
+        """Write Entity nodes + MENTIONS edges for entities produced by
+        extract_entities_gliner(). Must run on the SQLite connection's owner
+        thread (typically the main asyncio loop thread).
+
+        Args:
+            entities: list of dicts from extract_entities_gliner()
+
+        Returns:
+            number of MENTIONS edges added (entities without source_id are
+            still upserted as nodes but contribute no edge).
+        """
+        if not entities:
+            return 0
+        now = _utc_now()
+        edges_added = 0
+        for ent in entities:
+            label = ent.get("entity", "").strip()
+            if not label:
+                continue
+            ent_type = ent.get("type", "concept")
+            source_id = ent.get("source_id", "")
+            score = ent.get("score", 0.0)
+            entity_id = f"e:{label.lower().replace(' ', '_')}"
+            self._ensure_node(entity_id, NodeType.ENTITY, label)
+            if source_id:
+                self._add_edge_safe(source_id, entity_id, EdgeType.MENTIONS,
+                                    f"GLiNER extracted ({ent_type}, score={score:.2f})", now)
+                edges_added += 1
+        return edges_added
 
     def invalidate_edges(self, node_id: str) -> int:
         """Mark all active edges touching node_id as invalidated (bi-temporal)."""
