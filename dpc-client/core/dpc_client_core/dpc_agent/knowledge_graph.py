@@ -188,19 +188,23 @@ class SQLiteGraphBackend(GraphBackend):
         c.commit()
 
     def add_node(self, node: GraphNode) -> None:
+        # `with self._conn:` auto-commits on success, rolls back on exception.
+        # Prevents orphan transactions holding the WAL write lock when an
+        # INSERT fails (e.g. FK violation in add_edge), which would otherwise
+        # produce "database is locked" for any subsequent KG writer.
         exempt = 1 if (node.exempt or node.node_type in ALWAYS_EXEMPT) else 0
-        self._conn.execute(
-            "INSERT OR REPLACE INTO nodes (node_id, node_type, label, source_layer, exempt, properties) VALUES (?,?,?,?,?,?)",
-            (node.node_id, node.node_type.value, node.label, node.source_layer, exempt, json.dumps(node.properties, ensure_ascii=False)),
-        )
-        self._conn.commit()
+        with self._conn:
+            self._conn.execute(
+                "INSERT OR REPLACE INTO nodes (node_id, node_type, label, source_layer, exempt, properties) VALUES (?,?,?,?,?,?)",
+                (node.node_id, node.node_type.value, node.label, node.source_layer, exempt, json.dumps(node.properties, ensure_ascii=False)),
+            )
 
     def add_edge(self, edge: GraphEdge) -> None:
-        self._conn.execute(
-            "INSERT INTO edges (source_id, target_id, edge_type, t_created, t_invalidated, confidence, justification, edge_weight, properties) VALUES (?,?,?,?,?,?,?,?,?)",
-            (edge.source_id, edge.target_id, edge.edge_type.value, edge.t_created, edge.t_invalidated, edge.confidence, edge.justification, edge.edge_weight, json.dumps(edge.properties, ensure_ascii=False)),
-        )
-        self._conn.commit()
+        with self._conn:
+            self._conn.execute(
+                "INSERT INTO edges (source_id, target_id, edge_type, t_created, t_invalidated, confidence, justification, edge_weight, properties) VALUES (?,?,?,?,?,?,?,?,?)",
+                (edge.source_id, edge.target_id, edge.edge_type.value, edge.t_created, edge.t_invalidated, edge.confidence, edge.justification, edge.edge_weight, json.dumps(edge.properties, ensure_ascii=False)),
+            )
 
     def get_node(self, node_id: str) -> Optional[GraphNode]:
         row = self._conn.execute("SELECT node_id, node_type, label, source_layer, exempt, properties FROM nodes WHERE node_id=?", (node_id,)).fetchone()
@@ -430,8 +434,8 @@ class KnowledgeGraph:
         return count
 
     def _clear_structural_edges(self) -> None:
-        self._backend._conn.execute("DELETE FROM edges WHERE properties LIKE '%\"auto\": true%' OR properties LIKE '%\"auto\":true%'")
-        self._backend._conn.commit()
+        with self._backend._conn:
+            self._backend._conn.execute("DELETE FROM edges WHERE properties LIKE '%\"auto\": true%' OR properties LIKE '%\"auto\":true%'")
 
     def _load_meta(self, knowledge_dir: Path) -> dict:
         meta_path = knowledge_dir / "_meta.json"
@@ -553,6 +557,7 @@ class KnowledgeGraph:
             return 0
         now = _utc_now()
         edges_added = 0
+        orphan_sources: set = set()
         for ent in entities:
             label = ent.get("entity", "").strip()
             if not label:
@@ -563,20 +568,35 @@ class KnowledgeGraph:
             entity_id = f"e:{label.lower().replace(' ', '_')}"
             self._ensure_node(entity_id, NodeType.ENTITY, label)
             if source_id:
+                # Skip-orphan guard: caller (sleep_pipeline) may pass source_ids
+                # for sessions that aren't represented as graph nodes yet
+                # (group archives use a different stem format that bypasses
+                # _extract_archive_edges). Without this check, the MENTIONS
+                # edge INSERT fails the FK constraint, leaving an orphan
+                # transaction that locks the DB for downstream writers.
+                if self._backend.get_node(source_id) is None:
+                    orphan_sources.add(source_id)
+                    continue
                 self._add_edge_safe(source_id, entity_id, EdgeType.MENTIONS,
                                     f"GLiNER extracted ({ent_type}, score={score:.2f})", now)
                 edges_added += 1
+        if orphan_sources:
+            log.warning(
+                "KG persist: skipped MENTIONS edges for %d orphan source(s) not in graph: %s",
+                len(orphan_sources),
+                sorted(orphan_sources)[:5],
+            )
         return edges_added
 
     def invalidate_edges(self, node_id: str) -> int:
         """Mark all active edges touching node_id as invalidated (bi-temporal)."""
         now = _utc_now()
-        cursor = self._backend._conn.execute(
-            "UPDATE edges SET t_invalidated = ? WHERE (source_id = ? OR target_id = ?) AND t_invalidated IS NULL",
-            (now, node_id, node_id),
-        )
-        self._backend._conn.commit()
-        count = cursor.rowcount
+        with self._backend._conn:
+            cursor = self._backend._conn.execute(
+                "UPDATE edges SET t_invalidated = ? WHERE (source_id = ? OR target_id = ?) AND t_invalidated IS NULL",
+                (now, node_id, node_id),
+            )
+            count = cursor.rowcount
         if count:
             log.info("Invalidated %d edges for node %s", count, node_id)
         return count
@@ -586,17 +606,17 @@ class KnowledgeGraph:
         count = 0
         if not knowledge_dir.exists():
             return count
-        for md_file in sorted(knowledge_dir.glob("*.md")):
-            if md_file.name.startswith("_"):
-                continue
-            node_id = f"kf:{md_file.stem}"
-            mtime = datetime.fromtimestamp(md_file.stat().st_mtime, tz=timezone.utc).isoformat()
-            cursor = self._backend._conn.execute(
-                "UPDATE edges SET t_created = ? WHERE (source_id = ? OR target_id = ?) AND (t_created = '' OR t_created IS NULL)",
-                (mtime, node_id, node_id),
-            )
-            count += cursor.rowcount
-        self._backend._conn.commit()
+        with self._backend._conn:
+            for md_file in sorted(knowledge_dir.glob("*.md")):
+                if md_file.name.startswith("_"):
+                    continue
+                node_id = f"kf:{md_file.stem}"
+                mtime = datetime.fromtimestamp(md_file.stat().st_mtime, tz=timezone.utc).isoformat()
+                cursor = self._backend._conn.execute(
+                    "UPDATE edges SET t_created = ? WHERE (source_id = ? OR target_id = ?) AND (t_created = '' OR t_created IS NULL)",
+                    (mtime, node_id, node_id),
+                )
+                count += cursor.rowcount
         if count:
             log.info("Backfilled t_created on %d edges from file timestamps", count)
         return count
