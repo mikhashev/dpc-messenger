@@ -2236,6 +2236,11 @@ PARTICIPANTS' CULTURAL CONTEXTS:
                 self.token_limit = token_stats.get("token_limit", self.token_limit)
                 self._last_context_estimated = token_stats.get("context_estimated", 0)
 
+            # Restore extraction buffers so end_session/extract_knowledge sees historical
+            # messages, not only those added in the current in-memory session (S89 regression).
+            # Idempotent — repeats are safe (rebuild dedupes by message_id).
+            self.rebuild_extraction_buffers_from_history()
+
             self._history_dirty = False
             logger.info(f"Loaded {len(messages)} messages from {path}")
             return True
