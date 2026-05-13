@@ -76,3 +76,36 @@ async def test_local_api_status_command(mock_dpc_env):
             await service_task
         except asyncio.CancelledError:
             pass  # Expected when cancelling the task
+
+
+# Commands intercepted in local_api before reaching CoreService — these are
+# legitimately in ALLOWED_COMMANDS without a CoreService method (the dispatch
+# loop in LocalApiServer._handle_message has explicit short-circuits for them).
+# Keep in sync with local_api.py dispatch.
+_LOCAL_API_HANDLED_COMMANDS = frozenset({
+    "ui_log",  # frontend log relay → ui_logger, no CoreService dispatch
+})
+
+
+def test_allowed_commands_have_matching_coreservice_methods():
+    """GRAFEMA-AUDIT regression guard: every entry in ALLOWED_COMMANDS must map to
+    a method on CoreService (or be on the local_api short-circuit list). Dead
+    allowlist entries are silent drift — a command accepted by the dispatcher
+    that immediately fails with AttributeError.
+
+    Direction-of-travel: ALLOWED_COMMANDS → CoreService. The reverse (every
+    CoreService public method must be in the allowlist) is intentionally NOT
+    checked — CoreService has internal helpers and methods that should stay
+    out of the UI surface.
+    """
+    from dpc_client_core.local_api import ALLOWED_COMMANDS
+    from dpc_client_core.service import CoreService
+
+    missing = sorted(
+        cmd for cmd in ALLOWED_COMMANDS
+        if cmd not in _LOCAL_API_HANDLED_COMMANDS and not hasattr(CoreService, cmd)
+    )
+    assert not missing, (
+        f"{len(missing)} ALLOWED_COMMANDS entries have no matching CoreService method "
+        f"and are not on the local_api short-circuit list: {missing}"
+    )
