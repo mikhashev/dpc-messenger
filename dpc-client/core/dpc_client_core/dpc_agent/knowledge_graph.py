@@ -369,7 +369,6 @@ class KnowledgeGraph:
         count = 0
         meta = self._load_meta(knowledge_dir)
         md_link_re = re.compile(r'\[([^\]]+)\]\(([^)]+)\)')
-        session_re = re.compile(r'\bS(\d{2,3})\b')
         adr_re = re.compile(r'\bADR-(\d{3})\b')
         file_ref_re = re.compile(r'\b([\w_-]+\.md)\b')
         now = _utc_now()
@@ -395,14 +394,6 @@ class KnowledgeGraph:
                         self._add_edge_safe(src_id, f"kf:{ref_stem}", EdgeType.DEPENDS_ON,
                                             f"file reference {match.group(1)}", now)
                         count += 1
-
-            for match in session_re.finditer(text):
-                session_num = match.group(1)
-                session_id = f"sa:S{session_num}"
-                self._ensure_node(session_id, NodeType.SESSION_ARCHIVE, f"Session {session_num}")
-                self._add_edge_safe(src_id, session_id, EdgeType.DERIVED_FROM,
-                                    f"references session S{session_num}", now)
-                count += 1
 
             for match in adr_re.finditer(text):
                 adr_num = match.group(1)
