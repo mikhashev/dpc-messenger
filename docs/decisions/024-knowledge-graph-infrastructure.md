@@ -158,14 +158,14 @@ Full source-code review of cloned repository + live GitHub issue/PR verification
 - Project still young (~200 Rust source files, v0.5.x) — monitor adoption signals
 - WASM performance on mobile devices not yet measured
 
-**Migration assessment (with clean GraphBackend abstraction, see KG-ABSTRACTION-DEBT in backlog):**
+**Migration assessment (GraphBackend abstraction cleanup DONE S116, commit `4aefa84`):**
 - Storage: SQLite nodes/edges/properties → Grafeo native properties (direct mapping)
 - FAISS: eliminated (Grafeo HNSW replaces)
 - BM25: eliminated (Grafeo BM25 replaces)
 - RRF fusion: rewrite under Grafeo API (conceptually identical)
-- GLiNER pipeline: writes through GraphBackend ABC (one implementation swap)
+- GLiNER pipeline: writes through GraphBackend ABC (one implementation swap — `bulk_upsert_entities_with_mentions` encapsulates the batch transaction)
 - Active Recall: rewrite under Grafeo query API
-- Estimated effort: 5-7 days migration + 2-3 days regression testing (with clean abstraction)
+- Estimated effort: 5-7 days migration + 2-3 days regression testing (now achievable — fasade has zero `_backend._conn` access, all writes route through 4 new ABC methods: `edge_exists`, `clear_structural_edges`, `update_edge_timestamp_for_node`, `bulk_upsert_entities_with_mentions`)
 
 **Reference architecture:** Graphiti/Zep (arxiv:2501.13956) — episodes → entities → facts with bi-temporal validity. Neo4j dependency prevents direct use, but architectural model is our reference.
 
@@ -266,7 +266,7 @@ The entity relation section is appended to the sleep synthesis prompt (SYNTHESIS
 
 **Persistence invariants (added S112 after FK-cascade incident):**
 - **Skip-orphan policy:** `persist_extracted_entities` skips MENTIONS edges when source node is not in graph rather than fabricating phantom nodes. Caller (sleep_pipeline) is responsible for ensuring source nodes exist via a separate indexing path. Aggregated warn log per persist call lists up to 5 example orphan source_ids.
-- **Transactional safety:** all write paths (`add_node`, `add_edge`, `_clear_structural_edges`, `invalidate_edges`, `backfill_edge_timestamps`) use `with self._conn:` context manager. FK violations / UNIQUE collisions / NOT NULL errors auto-rollback the implicit transaction; otherwise the deferred transaction stays open and holds the WAL write lock, producing `database is locked` for any subsequent KnowledgeGraph instance.
+- **Transactional safety:** all backend write paths (`add_node`, `add_edge`, `clear_structural_edges`, `update_edge_timestamp_for_node`, `bulk_upsert_entities_with_mentions` in `SQLiteGraphBackend`) use `with self._conn:` context manager. FK violations / UNIQUE collisions / NOT NULL errors auto-rollback the implicit transaction; otherwise the deferred transaction stays open and holds the WAL write lock, producing `database is locked` for any subsequent KnowledgeGraph instance. Since S116 (commit `4aefa84`) the `KnowledgeGraph` fasade no longer touches `_conn` directly — all writes delegate through the `GraphBackend` ABC, and the transaction discipline is backend-internal.
 - **Group archive coverage gap:** `_extract_archive_edges` indexes only 1:1 conversation archives. Group archives bypass this — their `sa:` nodes are absent from the graph, MENTIONS edges from them are dropped by skip-orphan (logged but otherwise silent). Closing this gap requires a policy decision on NodeType for group sessions; not deferred for capacity reasons but because the architectural choice has not been made.
 
 ### 6. Scaling model
@@ -347,7 +347,7 @@ S112 hardening: cascade bugfix in persistence layer — see backlog `GLINER-FK-C
 
 ## Risks
 
-1. **Graph DB maturity (HIGH → MEDIUM, revised S115):** Grafeo v0.5.42 significantly more mature than S94 assessment. 4+ contributors, 13 critical bugs closed in 6 weeks, production-quality code (`unsafe_code=deny`, MVCC, encryption at rest). Remaining risk: project youth (v0.5.x), pending Release/0.5.43 validation, #318 path-element surfaces incomplete. Mitigated by cleanup-first strategy (KG-ABSTRACTION-DEBT in backlog) which buys option on any backend without premature commitment. LadybugDB legacy issues (#452 throughput collapse at 60K, #430 FTS segfault) remain relevant if Grafeo later disqualified.
+1. **Graph DB maturity (HIGH → MEDIUM, revised S115):** Grafeo v0.5.42 significantly more mature than S94 assessment. 4+ contributors, 13 critical bugs closed in 6 weeks, production-quality code (`unsafe_code=deny`, MVCC, encryption at rest). Remaining risk: project youth (v0.5.x), pending Release/0.5.43 validation, #318 path-element surfaces incomplete. Mitigation: cleanup-first strategy executed S116 (KG-ABSTRACTION-DEBT DONE, commit `4aefa84`) — fasade has zero backend-specific knowledge; swapping to Grafeo or any future backend is now a one-class implementation swap rather than a multi-week rewrite. LadybugDB legacy issues (#452 throughput collapse at 60K, #430 FTS segfault) remain relevant if Grafeo later disqualified.
 2. **Cold start:** Graph empty until edges extracted. Mitigated by structural extraction (zero-cost, runs on existing files).
 3. **Hammer/nail bias:** Risk of over-applying graph to problems that don't need it. BM25 keyword search remains primary for ad-hoc queries. Graph = supplement.
 4. **LLM hallucinated alternatives (S94 finding):** 2 of 5 alternatives suggested by external LLMs (SparrowDB, ocpg) were fabricated. All alternatives must be verified on PyPI/GitHub before consideration (P14 Rule: Solution Check).
@@ -360,7 +360,7 @@ S112 hardening: cascade bugfix in persistence layer — see backlog `GLINER-FK-C
 2. Edge extraction prompt design — what quality bar for LLM-extracted edges?
 3. Privacy: which graph edges are shareable in federation? Per-edge consent or per-type consent?
 4. ~~How does graph interact with Extract Knowledge button flow? Knowledge commits should create graph edges automatically.~~ **Answered (S112):** indirect via file indexing — knowledge commit writes .md to `~/.dpc/knowledge/`, then `bulk_import_knowledge_files` creates KnowledgeFile nodes and `extract_structural_edges` parses markdown links/refs into DEPENDS_ON/RESPONDS_TO/DECIDED_BY edges on eager init or next sleep cycle. No incremental on-commit update path; refresh latency = time until next eager init or sleep trigger. If sub-second freshness is required for chat-path retrieval, add an on-commit hook (separate ADR).
-5. **(S94, revised S115)** Grafeo HNSW+BM25+RRF consolidation is now viable. Source-code verification confirms feature parity with our FAISS+BM25+graph stack. Migration assessment: 5-7 days with clean abstraction (see KG-ABSTRACTION-DEBT in backlog). Architectural simplification (3 systems → 1 DB) is compelling. Decision gated on: (a) Release/0.5.43 stability, (b) GraphBackend abstraction cleanup, (c) benchmark on DPC-scale data.
+5. **(S94, revised S115, S116)** Grafeo HNSW+BM25+RRF consolidation is now viable. Source-code verification confirms feature parity with our FAISS+BM25+graph stack. Migration assessment: 5-7 days. Architectural simplification (3 systems → 1 DB) is compelling. Decision gated on: (a) Release/0.5.43 stability — pending PR #339 merge, (b) ~~GraphBackend abstraction cleanup~~ DONE S116 commit `4aefa84`, (c) benchmark on DPC-scale data — pending.
 
 ## References
 
