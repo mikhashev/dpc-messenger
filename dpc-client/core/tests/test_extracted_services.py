@@ -15,13 +15,21 @@ import pytest
 from dpc_client_core.agent_service import AgentService
 
 
-def make_agent_service():
-    """Create an AgentService with mocked dependencies."""
+def make_agent_service(*, max_sessions: int = 0, preserve_on_reset: bool = True):
+    """Create an AgentService with mocked dependencies.
+
+    `max_sessions` / `preserve_on_reset` configure the value returned by
+    `firewall.get_history_settings(...)`. Tests that override the profile
+    via `svc.firewall.rules` should also call
+    `svc.firewall.get_history_settings.return_value = (preserve, max)`
+    to match the firewall helper they expect to be invoked.
+    """
     llm_manager = MagicMock()
     local_api = MagicMock()
     local_api.broadcast_event = AsyncMock()
     firewall = MagicMock()
     firewall.rules = {}
+    firewall.get_history_settings.return_value = (preserve_on_reset, max_sessions)
     peer_metadata = {}
 
     svc = AgentService(llm_manager, local_api, firewall, peer_metadata)
@@ -69,7 +77,8 @@ async def test_archive_info_with_sessions(tmp_path):
 
 @pytest.mark.asyncio
 async def test_archive_info_per_agent_max_sessions():
-    svc = make_agent_service()
+    """Per-agent profile override is read via firewall.get_history_settings."""
+    svc = make_agent_service(max_sessions=50)
     svc.firewall.rules = {
         "agent_profiles": {
             "agent_001": {
@@ -82,6 +91,8 @@ async def test_archive_info_per_agent_max_sessions():
         result = await svc.get_session_archive_info("agent_001")
 
     assert result["max_sessions"] == 50
+    # Sanity: agent_service delegated the per-agent lookup to the firewall helper.
+    svc.firewall.get_history_settings.assert_called_with("agent_001")
 
 
 # ───────���─────────────────────────────��───────────────────────
