@@ -101,6 +101,7 @@ ALLOWED_COMMANDS: frozenset = frozenset({
     "vote_new_session",
     # Group chat
     "create_group_chat",
+    "set_group_agents",
     "send_group_message",
     "send_group_agent_message",
     "send_cc_agent_response",
@@ -144,12 +145,11 @@ ALLOWED_COMMANDS: frozenset = frozenset({
     "ui_log",
     # Sleep Consolidation (ADR-014)
     "toggle_sleep",
-    # Memory system (ADR-010)
-    "get_memory_status",
-    "memory_search",
-    "run_memory_consolidation",
-    "get_memory_proposals",
-    "review_memory_proposal",
+    "trigger_group_sleep",
+    "activate_group_chat",
+    # Reload from disk
+    "reload_personal_context",
+    "reload_firewall",
 })
 
 

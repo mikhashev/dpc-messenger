@@ -1053,6 +1053,45 @@ class Settings:
             'transcription_enabled': self.get_dpc_agent_telegram_transcription_enabled(),
         }
 
+    # ── Discord Integration ──────────────────────────────────
+
+    def get_discord_enabled(self) -> bool:
+        value = self.get('discord', 'enabled', 'false')
+        return value.lower() in ('true', '1', 'yes')
+
+    def get_discord_bot_token(self) -> str:
+        env_key = self.get('discord', 'bot_token_env', '')
+        if env_key:
+            import os
+            return os.environ.get(env_key, '')
+        return self.get('discord', 'bot_token', '')
+
+    def get_discord_guild_id(self) -> str:
+        return self.get('discord', 'guild_id', '')
+
+    def get_discord_allowed_channel_ids(self) -> list[str]:
+        import json
+        try:
+            return json.loads(self.get('discord', 'allowed_channel_ids', '[]'))
+        except json.JSONDecodeError:
+            return []
+
+    def get_discord_ark_channel_id(self) -> str:
+        return self.get('discord', 'ark_channel_id', '')
+
+    def get_discord_morning_brief_channel_id(self) -> str:
+        return self.get('discord', 'morning_brief_channel_id', '') or self.get_discord_ark_channel_id()
+
+    def get_discord_config(self) -> dict:
+        return {
+            'enabled': self.get_discord_enabled(),
+            'bot_token': self.get_discord_bot_token(),
+            'guild_id': self.get_discord_guild_id(),
+            'allowed_channel_ids': self.get_discord_allowed_channel_ids(),
+            'ark_channel_id': self.get_discord_ark_channel_id(),
+            'morning_brief_channel_id': self.get_discord_morning_brief_channel_id(),
+        }
+
     def save_config(self):
         """Save configuration to file."""
         with open(self.config_file, 'w') as f:

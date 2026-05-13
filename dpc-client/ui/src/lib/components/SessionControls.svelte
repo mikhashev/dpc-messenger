@@ -21,6 +21,7 @@
     sleepCurrent = 0,
     sleepTotal = 0,
     sleepPhase = '',
+    sleepAgents = new Map(),
     onNewSession,
     onEndSession,
     onToggleSleep
@@ -42,6 +43,7 @@
     sleepCurrent?: number;
     sleepTotal?: number;
     sleepPhase?: string;
+    sleepAgents?: Map<string, { agent_id: string; agent_name?: string; status: string; current: number; total: number; phase: string }>;
     onNewSession: (chatId: string) => void;
     onEndSession: (chatId: string) => void;
     onToggleSleep?: () => void;
@@ -98,7 +100,7 @@
   );
 </script>
 
-{#if isAIChat}
+{#if isAIChat || showForChatId.startsWith('group-')}
   <div class="token-counter" class:token-counter--detailed={showThreeMetrics}>
     {#if showThreeMetrics}
       <div class="token-row">
@@ -163,7 +165,7 @@
       Extract Knowledge
     {/if}
   </button>
-  {#if isAIChat}
+  {#if isAIChat || showForChatId?.startsWith('group-')}
     <button
       class="btn-markdown-toggle"
       class:active={enableMarkdown}
@@ -189,6 +191,12 @@
         🌙 Sleep
       {/if}
     </button>
+  {:else if showForChatId?.startsWith('group-') && sleepAgents.size > 0}
+    <span class="btn-sleep-toggle active" title="Agents are consolidating session data">
+      {#each [...sleepAgents.values()] as sa}
+        <span class="sleep-agent-entry">☀️ {sa.agent_name || sa.agent_id}: {sa.total > 0 ? `${sa.current}/${sa.total}` : ''} {sa.phase === 'synthesizing' ? 'Synthesis' : 'Wakeup'}</span>
+      {/each}
+    </span>
   {/if}
 </div>
 
@@ -406,5 +414,11 @@
   .btn-sleep-toggle:disabled {
     opacity: 0.4;
     cursor: not-allowed;
+  }
+
+  .sleep-agent-entry {
+    display: block;
+    font-size: 0.75rem;
+    white-space: nowrap;
   }
 </style>

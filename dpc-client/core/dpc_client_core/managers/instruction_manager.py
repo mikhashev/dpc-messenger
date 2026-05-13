@@ -348,3 +348,52 @@ class InstructionManager:
         except Exception as e:
             logger.error("Error reloading instruction sets: %s", e, exc_info=True)
             return False
+
+    def get_available_templates(self) -> list:
+        """Scan templates directory and return metadata for each template."""
+        import json as _json
+        templates_dir = Path(__file__).parent.parent.parent / "templates" / "instructions"
+        if not templates_dir.exists():
+            return []
+        templates = []
+        for f in templates_dir.glob("*.json"):
+            try:
+                data = _json.loads(f.read_text(encoding="utf-8"))
+                templates.append({
+                    "file": str(f), "filename": f.name, "key": f.stem,
+                    "name": data.get("name", f.stem),
+                    "description": data.get("description", ""),
+                })
+            except Exception as e:
+                logger.warning("Error reading template %s: %s", f, e)
+        templates.sort(key=lambda t: t["name"])
+        return templates
+
+    def get_wizard_config(self) -> Optional[Dict[str, Any]]:
+        """Load wizard template configuration."""
+        import json as _json
+        wizard_file = Path(__file__).parent.parent.parent / "templates" / "wizard_template.json"
+        if not wizard_file.exists():
+            return None
+        return _json.loads(wizard_file.read_text(encoding="utf-8"))
+
+    @staticmethod
+    def extract_instruction_json(response_text: str) -> Dict[str, Any]:
+        """Extract and validate instruction JSON from LLM response."""
+        import json as _json
+        if "```json" in response_text:
+            start = response_text.find("```json") + 7
+            end = response_text.find("```", start)
+            json_text = response_text[start:end].strip()
+        elif "```" in response_text:
+            start = response_text.find("```") + 3
+            end = response_text.find("```", start)
+            json_text = response_text[start:end].strip()
+        else:
+            json_text = response_text.strip()
+        instruction_data = _json.loads(json_text)
+        required_fields = ["name", "description", "primary"]
+        missing = [f for f in required_fields if f not in instruction_data]
+        if missing:
+            raise ValueError(f"Missing required fields: {missing}")
+        return instruction_data

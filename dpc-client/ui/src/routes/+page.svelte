@@ -4,7 +4,7 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { writable } from "svelte/store";
-  import { connectionStatus, nodeStatus, sendCommand, resetReconnection, connectToCoreService, knowledgeCommitProposal, personalContext, tokenWarning, extractionFailure, availableProviders, peerProviders, unreadMessageCounts, resetUnreadCount, setActiveChat, newSessionProposal, proposeNewSession, voteNewSession, defaultProviders, providersList, groupChats, loadGroups, listAgents, agentsList, sleepStateChanged, sleepProgress } from "$lib/coreService";
+  import { connectionStatus, nodeStatus, sendCommand, resetReconnection, connectToCoreService, knowledgeCommitProposal, personalContext, tokenWarning, extractionFailure, availableProviders, peerProviders, unreadMessageCounts, resetUnreadCount, setActiveChat, newSessionProposal, proposeNewSession, voteNewSession, defaultProviders, providersList, groupChats, loadGroups, listAgents, agentsList, sleepStateChanged, sleepProgress, sleepAgentStates, tokenUsageUpdated } from "$lib/coreService";
   import KnowledgeCommitDialog from "$lib/components/KnowledgeCommitDialog.svelte";
   import NewSessionDialog from "$lib/components/NewSessionDialog.svelte";
   import VoteResultDialog from "$lib/components/VoteResultDialog.svelte";
@@ -204,19 +204,39 @@
     localStorage.setItem('enableMarkdown', enableMarkdown.toString());
   });
 
-  // Sleep state (ADR-014)
-  let isSleeping = $state(false);
+  // Sleep state (ADR-014) — derived from per-agent store, keyed by activeChatId.
+  // Prevents stale leak across chats when switching between agents (S110 SLEEP-UI-LEAK).
+  let activeAgentSleep = $derived($sleepAgentStates.get(activeChatId));
+  let isSleeping = $derived(activeAgentSleep?.status === 'sleeping');
+
+  // Group-scoped sleep view — only show agents that are members of the active
+  // group, not every sleeping agent globally (S111 SLEEP-UI-GROUP-LEAK).
+  // The global $sleepAgentStates Map is unfiltered; passing it directly into
+  // SessionControls leaked agents from 1:1 chats into every group header.
+  let groupSleepAgents = $derived.by(() => {
+    if (!activeChatId?.startsWith('group-')) return new Map();
+    const group = $groupChats.get(activeChatId);
+    if (!group?.agents) return new Map();
+    const memberAgentIds = new Set<string>();
+    for (const ids of Object.values(group.agents)) {
+      for (const id of ids) memberAgentIds.add(id);
+    }
+    const filtered = new Map();
+    for (const [aid, state] of $sleepAgentStates) {
+      if (memberAgentIds.has(aid)) filtered.set(aid, state);
+    }
+    return filtered;
+  });
 
   function handleToggleSleep() {
-    isSleeping = !isSleeping;
     sendCommand('toggle_sleep', { agent_id: activeChatId });
   }
 
-  // Update sleep state from backend events
+  // Reload history when active agent wakes up (side-effect only — isSleeping is derived above)
   $effect(() => {
     const state = $sleepStateChanged;
-    if (state && state.agent_id === activeChatId) {
-      isSleeping = state.status === 'sleeping';
+    const sleepMatchesActive = state && (state.agent_id === activeChatId || state.group_id === activeChatId);
+    if (sleepMatchesActive) {
       if (state.status === 'awake') {
         const cmd = sendCommand('get_conversation_history', { conversation_id: state.agent_id });
         if (cmd && typeof cmd === 'object' && 'then' in cmd) (cmd as Promise<any>).then((result: any) => {
@@ -237,6 +257,7 @@
                   attachments: msg.attachments || [],
                   thinking: msg.thinking,
                   streamingRaw: msg.streaming_raw,
+                  msg_index: msg.msg_index || 0,
                 };
               });
               newMap.set(state.agent_id, msgs);
@@ -438,6 +459,41 @@
   // Reactive: Update active chat in coreService to prevent unread badges on open chats
   $effect(() => {
     setActiveChat(activeChatId);
+    if (activeChatId.startsWith('group-')) {
+      sendCommand('activate_group_chat', { group_id: activeChatId });
+    }
+    if (activeChatId.startsWith('agent_') && $connectionStatus === 'connected') {
+      // sendCommand returns `boolean | Promise<any>`; connected branch is always Promise.
+      (sendCommand('get_conversation_history', { conversation_id: activeChatId }) as Promise<any>).then((result: any) => {
+        if (result?.status === 'success' && result.messages?.length > 0) {
+          const agentName = $agentsList?.find((a: any) => a.agent_id === activeChatId)?.name || activeChatId;
+          chatHistories.update(map => {
+            const newMap = new Map(map);
+            const localHistory: any[] = newMap.get(activeChatId) || [];
+            const localById = new Map(localHistory.map((m: any) => [m.id, m]));
+            const msgs = result.messages.map((msg: any, index: number) => {
+              const ts = msg.timestamp ? new Date(msg.timestamp).getTime() : Date.now() - (result.messages.length - index) * 1000;
+              const stableId = msg.id || `${activeChatId}-${ts}`;
+              const local = localById.get(stableId);
+              const isAgent = msg.role === 'assistant' || msg.sender_name === activeChatId;
+              return {
+                id: stableId,
+                sender: isAgent ? activeChatId : 'user',
+                senderName: msg.sender_name || (isAgent ? agentName : 'You'),
+                text: msg.content,
+                timestamp: ts,
+                attachments: msg.attachments || [],
+                thinking: msg.thinking || local?.thinking,
+                streamingRaw: msg.streaming_raw || local?.streamingRaw,
+                msg_index: msg.msg_index || 0,
+              };
+            });
+            newMap.set(activeChatId, msgs);
+            return newMap;
+          });
+        }
+      }).catch(() => {});
+    }
   });
 
   // Reactive: Sync provider dropdown with chat-specific provider when switching chats
@@ -589,38 +645,34 @@
   });
 
   // Reactive derived value that maps peer IDs to display names
-  // This ensures Svelte tracks changes to peer_info properly
+  // Returns same reference when content unchanged to prevent reactive loops (FREEZE-1 fix)
+  let _prevPeerDisplayNames = new Map<string, string>();
   let peerDisplayNames = $derived.by(() => {
     const names = new Map<string, string>();
 
-    // Add current user's own name first (from personal context)
     const selfId = $nodeStatus?.node_id;
     const selfName = $personalContext?.profile?.name;
     if (selfId && selfName) {
-      const displayName = `${selfName} | ${selfId}`;
-      console.log(`[PeerNames] SELF ${selfId} -> ${displayName}`);
-      names.set(selfId, displayName);
+      names.set(selfId, `${selfName} | ${selfId}`);
     }
 
-    // Add connected peers
-    if (!$nodeStatus || !$nodeStatus.peer_info) {
-      console.log('[PeerNames] No peer_info, returning self only');
-      return names;
-    }
-    console.log('[PeerNames] Building display names map from peer_info:', $nodeStatus.peer_info);
-    for (const peer of $nodeStatus.peer_info) {
-      const peerName = peer.name || peer.display_name;
-      if (peerName) {
-        const displayName = `${peerName} | ${peer.node_id}`;
-        console.log(`[PeerNames] ${peer.node_id} -> ${displayName}`);
-        names.set(peer.node_id, displayName);
-      } else {
-        const displayName = peer.node_id;
-        console.log(`[PeerNames] ${peer.node_id} -> ${displayName} (no name)`);
+    if ($nodeStatus?.peer_info) {
+      for (const peer of $nodeStatus.peer_info) {
+        const peerName = peer.name || peer.display_name;
+        const displayName = peerName ? `${peerName} | ${peer.node_id}` : peer.node_id;
         names.set(peer.node_id, displayName);
       }
     }
-    console.log('[PeerNames] Final map size:', names.size);
+
+    // Return same reference if content unchanged — prevents Svelte 5 reactive loop
+    if (names.size === _prevPeerDisplayNames.size) {
+      let same = true;
+      for (const [k, v] of names) {
+        if (_prevPeerDisplayNames.get(k) !== v) { same = false; break; }
+      }
+      if (same) return _prevPeerDisplayNames;
+    }
+    _prevPeerDisplayNames = names;
     return names;
   });
 
@@ -764,9 +816,14 @@
     showNewSessionConfirm = true;
   }
 
-  function confirmNewSession() {
+  async function confirmNewSession() {
     if (pendingNewSessionChatId) {
-      proposeNewSession(pendingNewSessionChatId);
+      const result = await proposeNewSession(pendingNewSessionChatId);
+      if (result?.status === 'error') {
+        commitResultMessage = result.message || 'Failed to start new session';
+        commitResultType = 'error';
+        showCommitResultToast = true;
+      }
     }
     showNewSessionConfirm = false;
     pendingNewSessionChatId = null;
@@ -852,7 +909,7 @@
       onLinkAgentTelegram={handleLinkAgentTelegram}
       onUnlinkAgentTelegram={handleUnlinkAgentTelegram}
       onGetAgentModelConfig={async (agentId) => await sendCommand('get_agent_model_config', { agent_id: agentId })}
-      onSaveAgentModelConfig={async (agentId, config) => { await sendCommand('save_agent_model_config', { agent_id: agentId, ...config }); listAgents(); }}
+      onSaveAgentModelConfig={async (agentId, config) => { await sendCommand('save_agent_model_config', { agent_id: agentId, ...config }); const r = await listAgents(); if (r?.status === 'success' && r.agents) agentsList.set(r.agents); if (config.provider_alias) aiChats.update(m => { const e = m.get(agentId); if (e) { e.llm_provider = config.provider_alias; } return new Map(m); }); }}
     />
 
 
@@ -884,7 +941,7 @@
                   </span>
                 </span>
               {:else if isActuallyAIChat}
-                {$aiChats.get(activeChatId)?.name || 'AI Assistant'}
+                {$agentsList.find((a: any) => a.agent_id === activeChatId)?.name || $aiChats.get(activeChatId)?.name || 'AI Assistant'}
               {:else}
                 Chat with {getPeerDisplayName(activeChatId)}
               {/if}
@@ -896,8 +953,8 @@
             <div class="group-topic">{$groupChats.get(activeChatId)?.topic}</div>
           {/if}
 
-          <!-- Auto Transcribe toggle (P2P and Telegram chats, NOT AI chats) -->
-          {#if !$aiChats.has(activeChatId) && activeChatId !== 'local_ai'}
+          <!-- Auto Transcribe toggle (P2P and Telegram chats, NOT AI or group chats — groups have it in Settings) -->
+          {#if !$aiChats.has(activeChatId) && activeChatId !== 'local_ai' && !activeChatId.startsWith('group-')}
             <label class="auto-transcribe-toggle" title="Automatically transcribe received voice messages">
               <input
                 type="checkbox"
@@ -955,9 +1012,10 @@
             bind:enableMarkdown
             isExtracting={isExtractingKnowledge}
             {isSleeping}
-            sleepCurrent={$sleepProgress?.agent_id === activeChatId ? $sleepProgress?.current ?? 0 : 0}
-            sleepTotal={$sleepProgress?.agent_id === activeChatId ? $sleepProgress?.total ?? 0 : 0}
-            sleepPhase={$sleepProgress?.agent_id === activeChatId ? $sleepProgress?.phase ?? '' : ''}
+            sleepCurrent={activeAgentSleep?.current ?? 0}
+            sleepTotal={activeAgentSleep?.total ?? 0}
+            sleepPhase={activeAgentSleep?.phase ?? ''}
+            sleepAgents={groupSleepAgents}
             onNewSession={handleNewChat}
             onEndSession={handleEndSession}
             onToggleSleep={handleToggleSleep}
@@ -1102,6 +1160,7 @@
   {processedMessageIds}
   chatWindow={chatWindow}
   {getPeerDisplayName}
+  selfNodeId={$nodeStatus?.node_id || ''}
   onUpdateTokenUsage={(chatId, usage) => {
     tokenUsageMap = new Map(tokenUsageMap);
     tokenUsageMap.set(chatId, usage);
@@ -1116,6 +1175,7 @@
   chatWindow={chatWindow ?? null}
   {processedMessageIds}
   {getPeerDisplayName}
+  selfNodeId={$nodeStatus?.node_id || ''}
   onAgentToast={(message, type) => {
     agentToastMessage = message;
     agentToastType = type;
@@ -1171,8 +1231,27 @@
   selfNodeId={$nodeStatus?.node_id || ''}
   connectedPeers={($nodeStatus?.peer_info || []).map((p: any) => ({ node_id: p.node_id, name: p.name || p.node_id }))}
   peerDisplayNames={peerDisplayNames}
+  nodeAgents={$agentsList.map((a: any) => ({ agent_id: a.agent_id, name: a.name, provider_alias: a.provider_alias }))}
+  {autoTranscribeEnabled}
+  {whisperModelLoading}
   on:addMember={handleGroupAddMember}
   on:removeMember={handleGroupRemoveMember}
+  on:toggleAutoTranscribe={() => { autoTranscribeEnabled = !autoTranscribeEnabled; voicePanelComp?.saveAutoTranscribeSetting(); }}
+  on:updateAgents={async (e) => {
+    const result = await sendCommand('set_group_agents', { group_id: e.detail.group_id, agent_ids: e.detail.agent_ids });
+    if (result?.status === 'success') {
+      groupChats.update(map => {
+        const newMap = new Map(map);
+        const grp = newMap.get(e.detail.group_id);
+        if (grp) {
+          const agents = { ...(grp.agents || {}) };
+          agents[$nodeStatus?.node_id || ''] = e.detail.agent_ids;
+          newMap.set(e.detail.group_id, { ...grp, agents });
+        }
+        return newMap;
+      });
+    }
+  }}
 />
 
 <ContextViewer

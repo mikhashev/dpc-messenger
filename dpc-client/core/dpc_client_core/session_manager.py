@@ -271,8 +271,10 @@ class NewSessionProposalManager:
             self.logger.info("Proposal approved, clearing local conversation history for %s", local_conversation_id[:20] if local_conversation_id else "unknown")
             monitor = self.core_service._get_or_create_conversation_monitor(local_conversation_id)
             _firewall = getattr(self.core_service, "firewall", None)
-            _preserve = getattr(_firewall, "history_preserve_on_reset", True) if _firewall else True
-            _max = getattr(_firewall, "history_max_archived_sessions", 0) if _firewall else 0
+            if _firewall:
+                _preserve, _max = _firewall.get_history_settings(local_conversation_id)
+            else:
+                _preserve, _max = True, 0
             monitor.reset_conversation(preserve=_preserve, max_sessions=_max)
 
         # Broadcast result to all participants (use original conversation_id so initiator can look it up)
@@ -285,6 +287,18 @@ class NewSessionProposalManager:
             "new_session_result",
             ui_payload
         )
+
+        # GROUP-SLEEP-1: auto-trigger sleep for all agents after group New Session
+        if is_approved and is_group:
+            group = self.core_service.group_manager.get_group(local_conversation_id)
+            if group and group.is_discord_bridge:
+                self.logger.info("Skipping sleep for Discord bridge group: %s", local_conversation_id[:20])
+            else:
+                try:
+                    asyncio.create_task(self.core_service.trigger_group_sleep(local_conversation_id))
+                    self.logger.info("Auto-triggered group sleep for %s", local_conversation_id[:20])
+                except Exception as e:
+                    self.logger.error("Failed to trigger group sleep: %s", e)
 
         # Remove from active sessions
         del self.active_sessions[proposal_id]

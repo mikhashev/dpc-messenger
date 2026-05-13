@@ -22,6 +22,7 @@
     processedMessageIds,
     getPeerDisplayName,
     onAgentToast,
+    selfNodeId = "",
   }: {
     activeChatId: string;
     chatHistories: Writable<Map<string, any[]>>;
@@ -29,6 +30,7 @@
     processedMessageIds: Set<string>;
     getPeerDisplayName: (id: string) => string;
     onAgentToast: (message: string, type: 'info' | 'warning' | 'error') => void;
+    selfNodeId?: string;
   } = $props();
 
   // ---------------------------------------------------------------------------
@@ -85,13 +87,19 @@
                 const newMap = new Map(map);
                 const syncedMessages = response.messages.map((msg: any, index: number) => {
                   const stableId = msg.message_id || msg.id || `synced-${index}-${Date.now()}`;
+                  const senderName = msg.sender_name || '';
+                  const isAgent = msg.sender_type === 'agent' || msg.is_agent || false;
+                  const isLocalHuman = !isAgent && (!msg.sender_node_id || msg.sender_node_id === selfNodeId);
                   return {
                     id: stableId,
-                    sender: msg.sender_node_id || msg.node_id || (msg.role === 'user' ? 'user' : syncedGroupId),
-                    senderName: msg.sender_name || msg.display_name || (msg.role === 'user' ? 'You' : getPeerDisplayName(msg.sender_node_id || msg.node_id || syncedGroupId)),
+                    sender: isLocalHuman ? 'user' : (msg.sender_node_id || msg.node_id || syncedGroupId),
+                    senderName: isLocalHuman ? 'You' : (senderName || getPeerDisplayName(msg.sender_node_id || syncedGroupId)),
                     text: msg.content || msg.text,
                     timestamp: new Date(msg.timestamp).getTime() || Date.now() - (response.messages.length - index) * 1000,
-                    attachments: msg.attachments || []
+                    attachments: msg.attachments || [],
+                    isAgent: isAgent,
+                    agentOwner: msg.agent_owner || null,
+                    msg_index: msg.msg_index || 0,
                   };
                 });
 

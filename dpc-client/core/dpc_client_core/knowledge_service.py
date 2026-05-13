@@ -154,6 +154,123 @@ class KnowledgeService:
                 logger.error("Error notifying %s of context update: %s", peer_id[:20], e, exc_info=True)
 
     # ─────────────────────────────────────────────────────────────
+    # Personal context CRUD
+    # ─────────────────────────────────────────────────────────────
+
+    async def get_personal_context(self) -> Dict[str, Any]:
+        """Load and return personal context for UI display."""
+        try:
+            import hashlib
+            from dataclasses import asdict
+            from dpc_protocol.markdown_manager import MarkdownKnowledgeManager
+
+            context = self.pcm_core.load_context()
+            markdown_manager = MarkdownKnowledgeManager()
+
+            for topic_name, topic in context.knowledge.items():
+                if topic.markdown_file:
+                    filepath = self.dpc_home_dir / topic.markdown_file
+                    if filepath.exists():
+                        frontmatter, content = markdown_manager.parse_markdown_with_frontmatter(filepath)
+                        if 'content_hash' in frontmatter:
+                            actual_hash = hashlib.sha256(content.encode('utf-8')).hexdigest()[:16]
+                            if actual_hash != frontmatter['content_hash']:
+                                logger.warning("Content hash mismatch for %s: %s", topic_name, frontmatter['commit_id'])
+                        entries = markdown_manager.markdown_to_entries(content)
+                        topic.entries = entries
+                    else:
+                        logger.warning("Markdown file not found: %s", topic.markdown_file)
+
+            return {"status": "success", "context": asdict(context)}
+        except Exception as e:
+            logger.error("Error loading personal context: %s", e, exc_info=True)
+            return {"status": "error", "message": str(e)}
+
+    async def save_personal_context(self, context_dict: Dict[str, Any]) -> Dict[str, Any]:
+        """Save updated personal context from UI editor."""
+        try:
+            from dpc_protocol.pcm_core import PersonalContext
+            from datetime import datetime, timezone
+
+            current = self.pcm_core.load_context()
+            if isinstance(current, dict):
+                current = PersonalContext.from_dict(current)
+
+            if "profile" in context_dict:
+                current.profile.__dict__.update(context_dict["profile"])
+
+            if isinstance(current.metadata, dict):
+                current.metadata['last_updated'] = datetime.now(timezone.utc).isoformat()
+            else:
+                current.metadata.last_updated = datetime.now(timezone.utc).isoformat()
+
+            self.pcm_core.save_context(current)
+
+            if hasattr(self, 'p2p_manager') and self.p2p_manager:
+                self.p2p_manager.local_context = current
+                if current.profile and current.profile.name:
+                    self.p2p_manager.set_display_name(current.profile.name)
+                    logger.info("Notifying connected peers of name change")
+                    await self._notify_peers_of_name_change(current.profile.name)
+
+            new_context_hash = self._compute_context_hash()
+            await self.local_api.broadcast_event("personal_context_updated", {
+                "message": "Personal context saved successfully",
+                "context_hash": new_context_hash
+            })
+
+            if hasattr(self, 'p2p_manager') and self.p2p_manager:
+                await self._broadcast_context_updated_to_peers(new_context_hash)
+
+            return {"status": "success", "message": "Personal context saved successfully"}
+        except Exception as e:
+            logger.error("Error saving personal context: %s", e, exc_info=True)
+            return {"status": "error", "message": str(e)}
+
+    async def reload_personal_context(self) -> Dict[str, Any]:
+        """Reload personal context from disk."""
+        try:
+            from dataclasses import asdict
+
+            context = self.pcm_core.load_context()
+
+            if hasattr(self, 'p2p_manager') and self.p2p_manager:
+                self.p2p_manager.local_context = context
+                if context.profile and context.profile.name:
+                    self.p2p_manager.set_display_name(context.profile.name)
+                    logger.info("Notifying connected peers of name change")
+                    await self._notify_peers_of_name_change(context.profile.name)
+
+            await self.local_api.broadcast_event("personal_context_reloaded", {
+                "context": asdict(context)
+            })
+
+            return {
+                "status": "success",
+                "message": "Personal context reloaded from disk",
+                "context": asdict(context)
+            }
+        except Exception as e:
+            logger.error("Error reloading personal context: %s", e, exc_info=True)
+            return {"status": "error", "message": str(e)}
+
+    async def _notify_peers_of_name_change(self, new_name: str):
+        """Notify all connected peers of name change via HELLO message."""
+        from dpc_protocol.protocol import create_hello_message
+
+        connected_peers = list(self.p2p_manager.peers.keys())
+        if not connected_peers:
+            logger.debug("No connected peers to notify")
+            return
+        for peer_id in connected_peers:
+            try:
+                hello_msg = create_hello_message(self.p2p_manager.node_id, new_name)
+                await self.p2p_manager.send_message_to_peer(peer_id, hello_msg)
+                logger.debug("Notified %s of name change: %s", peer_id, new_name)
+            except Exception as e:
+                logger.error("Error notifying %s of name change: %s", peer_id, e, exc_info=True)
+
+    # ─────────────────────────────────────────────────────────────
     # Telegram bridge helper
     # ─────────────────────────────────────────────────────────────
 
@@ -245,11 +362,35 @@ class KnowledgeService:
             # Load persisted history from disk — only for group chats
             if conversation_id.startswith("group-"):
                 if self.conversation_monitors[conversation_id].load_history():
+                    self.conversation_monitors[conversation_id].rebuild_extraction_buffers_from_history()
                     logger.info(
-                        "Loaded persisted history for group %s (%d messages)",
+                        "Loaded persisted history for group %s (%d messages, extraction buffers rebuilt)",
                         conversation_id,
                         len(self.conversation_monitors[conversation_id].message_history),
                     )
+                # Set token_limit to max context window among agents in the group
+                if group and self.llm_manager:
+                    max_ctx = 0
+                    node_id = getattr(self.p2p_manager, "node_id", None)
+                    for aid in group.agents.get(node_id, []):
+                        try:
+                            from .dpc_agent.utils import load_agent_config
+                            cfg = load_agent_config(aid) or {}
+                            ctx = cfg.get("context_window", 0)
+                            if not ctx:
+                                pa = cfg.get("provider_alias")
+                                if pa and pa in self.llm_manager.providers:
+                                    model = self.llm_manager.providers[pa].model
+                                    ctx = self.llm_manager.get_context_window(model) or 0
+                            max_ctx = max(max_ctx, ctx)
+                        except Exception:
+                            pass
+                    if not max_ctx:
+                        model = self.llm_manager.get_active_model_name()
+                        max_ctx = self.llm_manager.get_context_window(model) or 0
+                    if max_ctx > 0:
+                        self.conversation_monitors[conversation_id].set_token_limit(max_ctx)
+                        logger.info("Group %s token_limit set to %d (max agent context)", conversation_id, max_ctx)
 
             logger.info(
                 "Created conversation monitor for %s with %d participant(s) "
@@ -771,30 +912,29 @@ Respond in JSON format:
         # MEM-3.7 trigger #2: incremental reindex for Active Recall (L6)
         try:
             firewall = getattr(self, '_firewall', None) or getattr(self.p2p_manager, '_service', None) and getattr(self.p2p_manager._service, 'firewall', None)
-            if firewall and not firewall.can_agent_access_context('knowledge'):
-                logger.info("MEM-3.7: L6 reindex skipped (human_knowledge_access disabled)")
-            else:
-                commit_path = self.dpc_home_dir / markdown_file
-                if commit_path.exists():
-                    dpc_agent_provider = self.llm_manager.providers.get("dpc_agent")
-                    if dpc_agent_provider and hasattr(dpc_agent_provider, '_managers'):
-                        for agent_mgr in dpc_agent_provider._managers.values():
-                            agent = agent_mgr._agent
-                            if agent and hasattr(agent, '_embedding_provider') and agent._embedding_provider:
-                                from .dpc_agent.indexing_pipeline import index_single_file
-                                from .dpc_agent.faiss_index import FaissIndex
-                                from .dpc_agent.bm25_index import BM25Index
-                                index_dir = agent_mgr.agent_root / "state" / "memory_index"
-                                if index_dir.exists():
-                                    faiss_idx = FaissIndex(index_dir)
-                                    bm25_idx = BM25Index(index_dir)
-                                    if faiss_idx.load():
-                                        bm25_idx.load()
-                                        index_single_file(commit_path, agent._embedding_provider, faiss_idx, bm25_idx, source_layer="L6")
-                                        faiss_idx.save()
-                                        bm25_idx.save()
-                                        logger.info("MEM-3.7: reindexed L6 commit %s for agent %s", commit_path.name, agent_mgr.agent_id)
-                                break
+            commit_path = self.dpc_home_dir / markdown_file
+            if commit_path.exists():
+                dpc_agent_provider = self.llm_manager.providers.get("dpc_agent")
+                if dpc_agent_provider and hasattr(dpc_agent_provider, '_managers'):
+                    for agent_mgr in dpc_agent_provider._managers.values():
+                        if firewall and not firewall.can_agent_access_context('knowledge', profile_name=agent_mgr.agent_id):
+                            logger.info("MEM-3.7: L6 reindex skipped for %s (human_knowledge_access disabled)", agent_mgr.agent_id)
+                            continue
+                        agent = agent_mgr._agent
+                        if agent and hasattr(agent, '_embedding_provider') and agent._embedding_provider:
+                            from .dpc_agent.indexing_pipeline import index_single_file
+                            from .dpc_agent.faiss_index import FaissIndex
+                            from .dpc_agent.bm25_index import BM25Index
+                            index_dir = agent_mgr.agent_root / "state" / "memory_index"
+                            if index_dir.exists():
+                                faiss_idx = FaissIndex(index_dir)
+                                bm25_idx = BM25Index(index_dir)
+                                if faiss_idx.load():
+                                    bm25_idx.load()
+                                    index_single_file(commit_path, agent._embedding_provider, faiss_idx, bm25_idx, source_layer="L6")
+                                    faiss_idx.save()
+                                    bm25_idx.save()
+                                    logger.info("MEM-3.7: reindexed L6 commit %s for agent %s", commit_path.name, agent_mgr.agent_id)
         except Exception as e:
             logger.warning("MEM-3.7 L6 reindex failed for commit %s: %s", commit.commit_id, e)
 
@@ -1129,3 +1269,78 @@ Respond in JSON format:
                 )
 
         await self.local_api.broadcast_event("knowledge_commit_result", result_payload)
+
+    # --- Session / Conversation Management ---
+
+    async def reset_conversation(self, conversation_id: str) -> Dict[str, Any]:
+        """Reset conversation history (internal, called after approval)."""
+        try:
+            monitor = self._get_or_create_conversation_monitor(conversation_id)
+            monitor.reset_conversation()
+            logger.info("Reset Conversation - cleared history for %s", conversation_id)
+            await self.local_api.broadcast_event(
+                "conversation_reset", {"conversation_id": conversation_id}
+            )
+            return {"status": "success", "message": "Conversation reset successfully"}
+        except Exception as e:
+            logger.error("Error resetting conversation: %s", e, exc_info=True)
+            return {"status": "error", "message": str(e)}
+
+    async def get_conversation_settings(self, conversation_id: str) -> Dict[str, Any]:
+        """Get per-conversation settings including history persistence."""
+        try:
+            monitor = self._get_or_create_conversation_monitor(conversation_id)
+            settings = monitor._load_conversation_settings()
+            return {"status": "success", "settings": settings}
+        except Exception as e:
+            logger.error("Error getting conversation settings: %s", e, exc_info=True)
+            return {"status": "error", "message": str(e)}
+
+    async def set_conversation_persist_history(self, conversation_id: str, persist: bool) -> Dict[str, Any]:
+        """Set whether to persist history for a conversation."""
+        try:
+            monitor = self._get_or_create_conversation_monitor(conversation_id)
+            success = monitor.set_persist_history(persist)
+            if not success:
+                return {"status": "error", "message": "Failed to save settings"}
+
+            if persist and monitor.message_history:
+                monitor.save_history()
+            elif not persist:
+                monitor.clear_history()
+
+            await self.local_api.broadcast_event(
+                "conversation_settings_changed",
+                {"conversation_id": conversation_id, "persist_history": persist}
+            )
+            return {"status": "success", "persist_history": persist}
+        except Exception as e:
+            logger.error("Error setting conversation persistence: %s", e, exc_info=True)
+            return {"status": "error", "message": str(e)}
+
+    async def delete_conversation(self, conversation_id: str) -> Dict[str, Any]:
+        """Delete an entire conversation including history, settings, and files."""
+        try:
+            if conversation_id.startswith("group-"):
+                success = self.group_manager.leave_group(conversation_id)
+                if not success:
+                    return {"status": "error", "message": "Group not found or could not be deleted"}
+            else:
+                if conversation_id in self.conversation_monitors:
+                    monitor = self.conversation_monitors[conversation_id]
+                    monitor.delete_conversation_folder()
+                    del self.conversation_monitors[conversation_id]
+                else:
+                    import shutil
+                    conv_dir = Path.home() / ".dpc" / "conversations" / conversation_id
+                    if conv_dir.exists():
+                        shutil.rmtree(conv_dir)
+
+            logger.info("Deleted conversation: %s", conversation_id)
+            await self.local_api.broadcast_event(
+                "conversation_deleted", {"conversation_id": conversation_id}
+            )
+            return {"status": "success", "message": "Conversation deleted successfully"}
+        except Exception as e:
+            logger.error("Error deleting conversation: %s", e, exc_info=True)
+            return {"status": "error", "message": str(e)}

@@ -1074,7 +1074,7 @@ class P2PManager:
             # Graceful cancellation during shutdown
             logger.debug("Listener task for peer %s cancelled during shutdown", peer.node_id)
             raise  # Re-raise to properly exit the task
-        except (asyncio.IncompleteReadError, ConnectionResetError):
+        except (asyncio.IncompleteReadError, ConnectionResetError, TimeoutError):
             pass
         finally:
             # Clean up task tracking

@@ -1,6 +1,6 @@
 # D-PC Messenger Development Roadmap
 
-> **Status:** Alpha | **Last Updated:** April 2026 | **Current Version:** 0.24.0 | **Current Phase:** Phase 2 - Agent Maturity (Track 1 mostly complete, Track 2 planned)
+> **Status:** Alpha | **Last Updated:** May 2026 | **Current Version:** 0.25.0 | **Current Phase:** Phase 2 - Agent Maturity (Track 1 mostly complete, Track 2 in progress, Discord community live)
 
 ---
 
@@ -93,31 +93,50 @@ North Star: Sleep consolidates session learnings → Memory system enables recal
 | **Decision Proposals Pipeline** | **DONE** (S57-S59) | Extraction triggers, JSONL storage, review_proposal + list_proposals tools |
 | **Morning Brief Pipeline** | **DONE** (S66-S69) | Startup posting, consumed tracking, UI reload on wakeup, Telegram delivery |
 | **Context Window Guard** | **DONE** (S69) | Blocks LLM call at 95% context, user-visible error |
-| **Agent Web Pipeline (ADR-016)** | **DONE** (S67) | ddgs multi-engine search + trafilatura extraction + Camoufox JS fallback |
+| **Agent Web Pipeline (ADR-016)** | **ADR Accepted** (S67) | ddgs multi-engine search + trafilatura extraction. Implementation pending |
 | **Per-Agent Permission Profiles** | **DONE** (S55-S60) | Inheritance model, per-agent firewall, UI panel |
 | **Agent Storage Isolation** | **DONE** | Per-conversation folders, per-agent managers |
 | **Agent Telegram Commands** | **DONE** (S69) | /sleep, /extract_knowledge, sleep notifications |
 | **Memory Upgrade (ADR-010)** | **DONE** (S81) | 19/19 tasks. Consolidation wired to sleep pipeline. model_swap superseded by ADR-018 |
-| **Skill Rewrite** | NOT STARTED | Break append-only limit. A/B testing with auto-rollback |
+| **Skill Rewrite** | DEFERRED | Break append-only limit. A/B testing with auto-rollback. Needs investigation why agent doesn't use skills |
 | ~~Agent Evolution (ADR-015)~~ | REMOVED (S68) | Code deleted (-1723 lines). Replaced by Sleep + co-evolution |
 | ~~Consciousness~~ | REMOVED (S65-S68) | Background worker deleted. Extended thinking IS consciousness |
 
 **Completed infrastructure and maintenance items:**
 - **Poetry → uv migration (ADR-011)** — 3 packages migrated, -6705 lines (S51)
 - **Device-Aware Deps (ADR-012)** — CUDA torch via platform markers, cross-platform (S51, S69-S70)
+- **Retrieval Upgrade (ADR-018)** — BGE-M3 embeddings, whole-document indexing, sparse+dense RRF fusion (S76)
+- **PyTorch Unified ML (ADR-021)** — ONNX fully removed, PyTorch as single ML framework (S83)
+- **Multi-Agent Safety (ADR-022)** — Three-layer defense framework, 10 risks (C1-C10). ADR accepted (S87). Phase 1 done (S91): token-based budgets, real provider limits, per-agent daily quotas. Layer 2 partial (S108): RSA message signing + chain-aware P2P sync + signature verification at merge. Phase 2 remaining items need design
+- **Knowledge Graph (ADR-024)** — SQLite graph layer, 5 node types, 9 edge types. **Phase 1+2 COMPLETE** (S96): GraphBackend ABC + SQLite, structural edges, L7 RRF channel, GLiNER NER, guided LLM relations, bi-temporal metadata. Phase 3-4 deferred (federation, GRAVITON). Tasks: `tasks/adr-024-knowledge-graph/`
+- **Phase C Decomposition** — service.py 7799→6484 lines (-1315, -16.9%). Pragmatic ceiling reached (S85-S86)
 - **Rate Limiting + Security (ARCH-26)** — security/ folder, THREAT-MODEL.md (S58)
 - **Protocol 13** (v1.13) — Human-AI team coordination (Mike=approve, CC=execute, Ark=review)
-- **External Agent Bridge** — CC ↔ DPC via cc_agent_bridge.py, cron monitoring, P13 coordination
-- **Group Chat** (v0.19.0) — Multi-participant with files, voice, knowledge commits
-- **Agent Skills** — 10 static SKILL.md files. Reflection removed (S68). Rewrite planned (Track 1)
+- **External Agent Bridge** — CC ↔ DPC via cc_agent_bridge.py + cc_group_chat_bridge.py, cron monitoring, P13 coordination
+- **Group Chat** (v0.19.0) — Multi-participant with files, voice, knowledge commits. Phase 1 dogfooding complete (S88-S92). Phase 2 multi-node fixes (S97-S108): history sync, remote agent @mention, sender metadata, Discord bridge
+- **Discord Integration (ADR-025)** — Phase 1.5 done (S97-S107): discord_service.py, @mention routing, Iris agent (agent_007) created, system prompt, identity, Discord channel live
+- **Public Agent Guardrails (ADR-026)** — 7/7 tasks done (S106-S107): source-based tool filtering, rate limiting, output sanitization, URL whitelist, graceful fallback, TTL + context management, mention sanitization
+- **MSG-CHAIN Integrity** — Per-message hash chain (S105) + RSA content signing + chain-aware P2P sync (S108). Content hash + signature + signer_node_id on every message. Verification at merge
+- **Content-Aware Index Staleness** — Full content fingerprint in staleness hash (S108). Changed files trigger re-indexing even without rename
+- **Agent Skills** — Static SKILL.md files. Reflection removed (S68). Rewrite planned (Track 1)
 - **Agent Progress Board** — Sleep state works. Evolution panel needs rework (shows removed system data)
 
-**Dependencies:** Phases 0-1 DONE → unblocked all. Memory + Skills independent. (Phases 2-3 removed per ADR-015/ADR-014)
+**Dependencies:** Phases 0-1 DONE → unblocked all. Memory + Skills independent. (Phases 2-3 removed per ADR-015/ADR-014). ADR-024 builds on ADR-010 (memory layers), ADR-018 (retrieval), ADR-019 (scaling). Integrates with ADR-022 (safety provenance).
 **Research basis:** See `ideas/cc-mike-research/README.md`.
 
 ### Track 2: Team Collaboration
 
-External Agent Bridge (CC) validates that non-embedded AI can participate as a full team member — foundation for multi-AI teams. Current implementation is cron-based polling; future direction: webhook or event-driven.
+**Status:** Phase 1 dogfooding COMPLETE (S92). Group chat "DPC Project" (Mike + Ark + CC) functional — agent participation, @mention routing, persistence, history sync all working. Phase 2 (multi-node P2P) not started.
+
+**Design decisions (S88):**
+- Trust boundary = node level (node = human + agents). No separate agent crypto identity needed.
+- Per-agent permissions via firewall agent_profiles (already implemented).
+- Agents off by default in multi-node groups — humans invited, agents need explicit permission.
+- Three communication modes: H↔H (slow), H↔A (@mention), A↔A (supervised).
+
+**Migration plan:** Phase 1 (single-node group chat) → Phase 2 (Ubuntu second node, multi-node P2P) → Phase 3 (scale).
+
+External Agent Bridge (CC) validates that non-embedded AI can participate as a full team member — foundation for multi-AI teams. CC operates via cc_agent_bridge.py (agent chat) + cc_group_chat_bridge.py (group chat), cron monitoring.
 
 | # | Feature | Complexity | Description |
 |---|---------|------------|-------------|
@@ -129,7 +148,9 @@ External Agent Bridge (CC) validates that non-embedded AI can participate as a f
 | 6 | **Team AI Assistants** | Medium | AI queries with `team_id`, access to collective team knowledge |
 | 7 | **Team Compute Pools** | Medium | Auto-discovery, load balancing, "Team Compute" panel |
 | 8 | **DPC Agent Team Integration** | Medium | Agent tasks across team context, multi-peer coordination |
-| 9 | **Shared Knowledge Search** | Medium | P2P knowledge query between trusted peers — stateless pull model reusing shared inference pattern. ADR-017 accepted, research complete. See `ideas/dpc-research/p2p-knowledge-discovery/` |
+| 9 | **Shared Knowledge Search** | Medium | P2P knowledge query between trusted peers — stateless pull model reusing shared inference pattern. ADR-017 accepted, research complete. Graph federation (ADR-024 Phase 3) extends to subgraph query shipping. See `ideas/dpc-research/p2p-knowledge-discovery/` |
+
+> **Note:** This feature table predates the S32 full-picture analysis. Node trust model, agent participation rules, and priorities will be revised based on Phase 1-2 dogfooding results.
 
 **Cross-track dependencies:** Agent Isolation → Agent-to-Agent (A2A) → Teams. Memory Upgrade → Team Knowledge Repo. Memory Upgrade (ADR-010 FAISS) → Shared Knowledge Search.
 
@@ -161,7 +182,7 @@ From triggered to proactive. Sleep consolidation, scheduled sessions, self-impro
 ### 2. Network Effects
 From 1:1 to team networks to ecosystem. Agent Isolation → A2A → Teams → Open Source starter packs. Skills sharing and inference sharing already work. Hub becomes optional bootstrap, not architecture center. Any two nodes can connect directly via `dpc://` URI exchange — no server required.
 
-**P2P Knowledge Discovery (researched S71):** Trust-routed multi-hop discovery through overlapping Dunbar circles. Each node indexes knowledge locally (FAISS+BM25), queries peers via stateless P2P search (same pattern as shared inference). Firewall controls visibility per Dunbar tier. At planetary scale (8B nodes), ~6 hops reach entire network via small-world property. Research: [`ideas/dpc-research/p2p-knowledge-discovery/`](ideas/dpc-research/p2p-knowledge-discovery/)
+**P2P Knowledge Discovery (researched S71):** Trust-routed multi-hop discovery through overlapping Dunbar circles. Each node indexes knowledge locally (FAISS+BM25), queries peers via stateless P2P search (same pattern as shared inference). Knowledge Graph (ADR-024) adds graph traversal as 4th retrieval channel and subgraph federation for cross-node knowledge discovery. Firewall controls visibility per Dunbar tier. At planetary scale (8B nodes), ~6 hops reach entire network via small-world property. Research: [`ideas/dpc-research/p2p-knowledge-discovery/`](ideas/dpc-research/p2p-knowledge-discovery/)
 
 ### 3. Local-First Sovereignty
 All LLMs run locally (Ollama, llama.cpp, etc). P2P network = mutual aid (share compute with peers), not dependency. Works fully offline. Your data never leaves your machine. Knowledge and skills portable across agents.
@@ -170,7 +191,7 @@ All LLMs run locally (Ollama, llama.cpp, etc). P2P network = mutual aid (share c
 
 ## Knowledge Architecture
 
-14-phase knowledge architecture. Phases 1-8 complete (v0.7.0-v0.8.0), Phases 9-12 partially implemented (extraction, tracking, consensus voting). See [docs/KNOWLEDGE_ARCHITECTURE.md](./docs/KNOWLEDGE_ARCHITECTURE.md) for full specification.
+14-phase knowledge architecture. Phases 1-8 complete (v0.7.0-v0.8.0), Phases 9-12 partially implemented (extraction, tracking, consensus voting). Graph layer (ADR-024) adds typed edges between knowledge units, temporal decay, and cross-layer retrieval (archives ↔ knowledge bridge). See [docs/KNOWLEDGE_ARCHITECTURE.md](./docs/KNOWLEDGE_ARCHITECTURE.md) for full specification. See [docs/decisions/024-knowledge-graph-infrastructure.md](./docs/decisions/024-knowledge-graph-infrastructure.md) for graph architecture.
 
 ---
 
@@ -180,6 +201,6 @@ See `git log` for complete version history.
 
 ---
 
-**Last Updated:** April 2026
+**Last Updated:** May 2026
 **Maintained By:** D-PC Messenger Core Team
 **License:** See [LICENSE.md](./LICENSE.md)

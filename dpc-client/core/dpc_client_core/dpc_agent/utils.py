@@ -764,7 +764,12 @@ def delete_agent_storage(agent_id: str) -> bool:
         return False
 
     try:
-        shutil.rmtree(agent_path)
+        def _force_remove_readonly(func, path, exc_info):
+            import stat
+            os.chmod(path, stat.S_IWRITE)
+            func(path)
+
+        shutil.rmtree(agent_path, onerror=_force_remove_readonly)
 
         # Unregister from registry
         registry = AgentRegistry()

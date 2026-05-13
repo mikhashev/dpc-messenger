@@ -60,6 +60,7 @@
   // State (all owned here)
   // ---------------------------------------------------------------------------
   let showAddAIChatDialog = $state(false);
+  let isAgentMode = $state(false);
   let selectedProviderForNewChat = $state('');
   let selectedInstructionSetForNewChat = $state('general');
   let selectedProfileForNewAgent = $state('default');
@@ -88,6 +89,7 @@
       availableAgentProfiles = ['default'];
     }
 
+    isAgentMode = false;
     selectedProviderForNewChat = $availableProviders.default_provider;
     selectedInstructionSetForNewChat = availableInstructionSets?.default || 'general';
     selectedProfileForNewAgent = 'default';
@@ -111,6 +113,7 @@
       availableAgentProfiles = ['default'];
     }
 
+    isAgentMode = true;
     selectedProviderForNewChat = 'dpc_agent';
     selectedInstructionSetForNewChat = availableInstructionSets?.default || 'general';
     selectedProfileForNewAgent = 'default';
@@ -405,8 +408,8 @@
       tabindex="-1"
       onclick={(e) => e.stopPropagation()}
     >
-      <h2 id="modal-title">Create New AI Agent with Chat</h2>
-      <p>Select an AI provider for the new chat:</p>
+      <h2 id="modal-title">{isAgentMode ? 'Create New AI Agent' : 'Create New AI Chat'}</h2>
+      <p>{isAgentMode ? 'Configure your new autonomous AI agent:' : 'Select an AI provider for the new chat:'}</p>
 
       {#if $nodeStatus?.peer_info && $nodeStatus.peer_info.length > 0}
         <div class="dialog-provider-selector">
@@ -422,27 +425,29 @@
         </div>
       {/if}
 
-      <div class="dialog-provider-selector">
-        <label for="new-chat-provider">Chat Type:</label>
-        <select id="new-chat-provider" bind:value={selectedProviderForNewChat}>
-          {#each (selectedDialogComputeHost === 'local' ? $availableProviders.providers : ($peerProviders.get(selectedDialogComputeHost) ?? [])) as provider}
-            <option value={provider.alias}>
-              {#if provider.alias === 'dpc_agent'}
-                DPC Agent (Autonomous AI with tools)
-              {:else}
-                {provider.alias} - {provider.model}
-              {/if}
-            </option>
-          {/each}
-        </select>
-        <p class="dialog-hint" style="font-size: 0.85em; color: #888; margin-top: 4px;">
-          {#if selectedProviderForNewChat === 'dpc_agent'}
-            Agents are autonomous AI assistants with tool access (file system, web search, etc.)
-          {:else}
-            Standard AI chat using the selected provider
-          {/if}
-        </p>
-      </div>
+      {#if !isAgentMode}
+        <div class="dialog-provider-selector">
+          <label for="new-chat-provider">Chat Type:</label>
+          <select id="new-chat-provider" bind:value={selectedProviderForNewChat}>
+            {#each (selectedDialogComputeHost === 'local' ? $availableProviders.providers : ($peerProviders.get(selectedDialogComputeHost) ?? [])) as provider}
+              <option value={provider.alias}>
+                {#if provider.alias === 'dpc_agent'}
+                  DPC Agent (Autonomous AI with tools)
+                {:else}
+                  {provider.alias} - {provider.model}
+                {/if}
+              </option>
+            {/each}
+          </select>
+          <p class="dialog-hint" style="font-size: 0.85em; color: #888; margin-top: 4px;">
+            {#if selectedProviderForNewChat === 'dpc_agent'}
+              Agents are autonomous AI assistants with tool access (file system, web search, etc.)
+            {:else}
+              Standard AI chat using the selected provider
+            {/if}
+          </p>
+        </div>
+      {/if}
 
       {#if selectedProviderForNewChat === 'dpc_agent'}
         <div class="dialog-provider-selector">

@@ -1030,7 +1030,7 @@
         isContextWindowFull ? 'Context window full - Delete text or end session to continue' :
         ($connectionStatus === 'connected' ? (pendingImage ? 'Add a caption (optional)...' : 'Type a message or paste an image... (Enter to send, Shift+Enter for new line)') : 'Connect to Core Service first...')
       }
-      disabled={$connectionStatus !== 'connected' || isLoading || isSleeping}
+      disabled={$connectionStatus !== 'connected' || isLoading || (activeChatId.startsWith('agent_') && isSleeping)}
       oninput={(e) => { groupPanelRef?.handleMentionInput(e); }}
       onkeydown={(e) => {
         if (groupPanelRef?.getMentionVisible() && (e.key === 'ArrowUp' || e.key === 'ArrowDown' || e.key === 'Tab' || e.key === 'Enter' || e.key === 'Escape')) {

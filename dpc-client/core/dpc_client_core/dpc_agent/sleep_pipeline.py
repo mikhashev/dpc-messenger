@@ -7,6 +7,7 @@ toggle button via WebSocket command.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from datetime import datetime, timezone
@@ -86,6 +87,26 @@ things explicitly "pending" or "carryover".
 
 --- PER-SESSION FINDINGS ---
 {findings}
+{entity_section}"""
+
+ENTITY_RELATION_SECTION = """
+--- ENTITY RELATION EXTRACTION ---
+The following named entities were extracted from session texts by NER:
+{entity_list}
+
+For each PAIR of entities that are meaningfully related, add an entry to \
+"extracted_relations" in the JSON response:
+
+"extracted_relations": [
+  {{"source": "entity_name_1", "target": "entity_name_2", "relation_type": "DEPENDS_ON|SUPPORTS|CONTRADICTS|RESPONDS_TO", "confidence": 0.0-1.0, "justification": "min 20 chars explaining WHY this relation exists"}}
+]
+
+Rules:
+- Only use entities from the list above (do NOT invent new ones)
+- Only add relations with confidence >= 0.7
+- justification MUST be at least 20 characters
+- If a relation involves a Decision (ADR, protocol rule), add "needs_review": true
+- If no meaningful relations found, return empty list
 """
 
 
@@ -115,6 +136,102 @@ def _get_last_sleep_timestamp(conversation_dir: Path) -> Optional[str]:
     return None
 
 
+def _collect_group_digests(
+    conversations_dir: Path, agent_id: str, since: Optional[str]
+) -> List[Dict[str, Any]]:
+    """Collect group chat history segments where this agent participated."""
+    digests = []
+    if not conversations_dir.exists() or not agent_id:
+        return digests
+    for group_dir in conversations_dir.iterdir():
+        if not group_dir.is_dir() or not group_dir.name.startswith("group-"):
+            continue
+        metadata_path = group_dir / "metadata.json"
+        history_path = group_dir / "history.json"
+        if not metadata_path.exists() or not history_path.exists():
+            continue
+        try:
+            metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+            agents_map = metadata.get("agents", {})
+            agent_in_group = any(agent_id in ids for ids in agents_map.values())
+            if not agent_in_group and agents_map:
+                continue
+            history = json.loads(history_path.read_text(encoding="utf-8"))
+            messages = history.get("messages", [])
+            if not messages:
+                continue
+            if since:
+                messages = [m for m in messages if m.get("timestamp", "") > since]
+            if not messages:
+                continue
+            digests.append({
+                "archive_file": f"group:{group_dir.name}",
+                "date": messages[0].get("timestamp", "")[:10],
+                "message_count": len(messages),
+                "duration_mins": 0,
+                "source": "group",
+                "group_id": metadata.get("group_id", group_dir.name),
+            })
+        except (json.JSONDecodeError, OSError):
+            continue
+    return digests
+
+
+def _collect_group_archive_digests(
+    group_dir: Path, agent_id: str, since: Optional[str]
+) -> List[Dict[str, Any]]:
+    """Collect archived session digests from a specific group's archive/."""
+    digests = []
+    archive_dir = group_dir / "archive"
+    if not archive_dir.exists():
+        return digests
+    metadata_path = group_dir / "metadata.json"
+    if metadata_path.exists():
+        try:
+            metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+            agents_map = metadata.get("agents", {})
+            if agents_map and not any(agent_id in ids for ids in agents_map.values()):
+                return digests
+        except (json.JSONDecodeError, OSError):
+            pass
+    if metadata_path.exists():
+        try:
+            _meta = json.loads(metadata_path.read_text(encoding="utf-8"))
+            group_id = _meta.get("group_id", group_dir.name)
+        except (json.JSONDecodeError, OSError):
+            group_id = group_dir.name
+    else:
+        group_id = group_dir.name
+    for archive_path in sorted(archive_dir.rglob("*.json")):
+        try:
+            data = json.loads(archive_path.read_text(encoding="utf-8"))
+            messages = data.get("messages", [])
+            if not messages:
+                continue
+            archive_date = messages[0].get("timestamp", "")
+            if since and archive_date <= since:
+                continue
+            digests.append({
+                "archive_file": f"group_archive:{group_dir.name}:{archive_path.name}",
+                "date": archive_date[:10],
+                "message_count": len(messages),
+                "duration_mins": 0,
+                "source": "group_archive",
+                "group_id": data.get("conversation_id", group_id),
+                "_archive_path": str(archive_path),
+            })
+        except (json.JSONDecodeError, OSError):
+            continue
+    if len(digests) > MAX_ARCHIVES_PER_CYCLE:
+        log.warning(
+            "Sleep: %d unprocessed group archives in %s, analyzing last %d. "
+            "%d oldest will be silently skipped (next sleep treats them as analyzed).",
+            len(digests), group_dir.name, MAX_ARCHIVES_PER_CYCLE,
+            len(digests) - MAX_ARCHIVES_PER_CYCLE,
+        )
+    return digests[-MAX_ARCHIVES_PER_CYCLE:]
+
+
 def _find_unprocessed_archives(conversation_dir: Path, since: Optional[str]) -> List[Dict[str, Any]]:
     digest_path = conversation_dir / "digest.jsonl"
     if not digest_path.exists():
@@ -134,6 +251,13 @@ def _find_unprocessed_archives(conversation_dir: Path, since: Optional[str]) -> 
         digests = [d for d in digests if d.get("date", "") > since]
 
     digests.sort(key=lambda d: d.get("date", ""))
+    if len(digests) > MAX_ARCHIVES_PER_CYCLE:
+        log.warning(
+            "Sleep: %d unprocessed 1:1 archives in %s, analyzing last %d. "
+            "%d oldest will be silently skipped (next sleep treats them as analyzed).",
+            len(digests), conversation_dir.name, MAX_ARCHIVES_PER_CYCLE,
+            len(digests) - MAX_ARCHIVES_PER_CYCLE,
+        )
     return digests[-MAX_ARCHIVES_PER_CYCLE:]
 
 
@@ -167,12 +291,66 @@ def _parse_llm_json(response: str) -> Dict[str, Any]:
         return json.loads(cleaned)
 
 
+def _build_session_source_id(archive: str) -> tuple[str, str]:
+    """Build (source_id, display_label) for a sleep session.
+
+    Returns the canonical KG node id used as `source_id` on MENTIONS edges
+    in ADR-024 Phase 2. The source node itself must exist in the graph
+    before persist_extracted_entities runs, or the FK violates and the
+    MENTIONS edge is skipped by L5a's skip-orphan guard.
+
+    Formats handled (matching what _collect_group_digests /
+    _collect_group_archive_digests / _find_unprocessed_archives produce):
+
+    - 1:1 archive filename ("2026-04-01T17-27-00_reset_session.json")
+      → sa:2026-04-01T17-27-00 — matches the format extract_structural_edges
+        creates via _extract_archive_edges on the agent's archive_dir.
+    - Live group chat ("group:<group_id>")
+      → sa:<group_id>:live — stable per group across sleeps; same node
+        accumulates MENTIONS over the group's lifetime.
+    - Group archive ("group_archive:<group_id>:<filename>")
+      → sa:<group_id>:<timestamp> — per-session node for past resets.
+
+    Returns ("", "") for empty input. Callers must `_ensure_node` the
+    returned id on the KG before passing it to persist_extracted_entities,
+    since 1:1 sa: nodes are auto-created by extract_structural_edges but
+    group sa: nodes are not.
+    """
+    if not archive:
+        return "", ""
+    if archive.startswith("group:"):
+        group_id = archive[len("group:"):]
+        return f"sa:{group_id}:live", group_id
+    if archive.startswith("group_archive:"):
+        rest = archive[len("group_archive:"):]
+        if ":" in rest:
+            group_id, filename = rest.split(":", 1)
+            timestamp = Path(filename).stem.split("_")[0]
+            return f"sa:{group_id}:{timestamp}", f"{group_id}/{timestamp}"
+        return f"sa:{rest}", rest
+    timestamp = Path(archive).stem.split("_")[0]
+    return f"sa:{timestamp}", timestamp
+
+
 async def _analyze_single_session(
     digest: Dict, conversation_dir: Path, llm_manager,
     provider_alias: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
     archive_file = digest.get("archive_file", "")
-    archive = _load_archive(conversation_dir, archive_file) if archive_file else None
+
+    if digest.get("source") == "group_archive":
+        archive_path_str = digest.get("_archive_path", "")
+        if not archive_path_str or not Path(archive_path_str).exists():
+            return None
+        archive = json.loads(Path(archive_path_str).read_text(encoding="utf-8"))
+    elif digest.get("source") == "group":
+        group_dir = conversation_dir.parent / archive_file.replace("group:", "")
+        history_path = group_dir / "history.json"
+        if not history_path.exists():
+            return None
+        archive = json.loads(history_path.read_text(encoding="utf-8"))
+    else:
+        archive = _load_archive(conversation_dir, archive_file) if archive_file else None
     if not archive:
         return None
 
@@ -197,11 +375,26 @@ async def _analyze_single_session(
 async def run_sleep(
     conversation_dir: Path, llm_manager, agent_id: str = "",
     force: bool = False, provider_alias: Optional[str] = None,
-    progress_callback=None,
+    progress_callback=None, group_id: Optional[str] = None,
 ) -> Dict[str, Any]:
+    SLEEP_TIMEOUT_MINUTES = 30
     state = _read_sleep_state(conversation_dir)
     if state.get("status") == "sleeping":
-        return {"status": "already_sleeping"}
+        started = state.get("started_at")
+        if started:
+            try:
+                started_dt = datetime.fromisoformat(started)
+                if started_dt.tzinfo is None:
+                    started_dt = started_dt.replace(tzinfo=timezone.utc)
+                elapsed = (datetime.now(timezone.utc) - started_dt).total_seconds() / 60
+                if elapsed > SLEEP_TIMEOUT_MINUTES:
+                    log.warning("Stuck sleep detected for %s (%.0f min), resetting", agent_id, elapsed)
+                else:
+                    return {"status": "already_sleeping"}
+            except (ValueError, TypeError):
+                log.warning("Sleep state has invalid started_at for %s, resetting", agent_id)
+        else:
+            log.warning("Sleep state missing started_at for %s, resetting", agent_id)
 
     _write_sleep_state(conversation_dir, {
         "status": "sleeping",
@@ -210,7 +403,36 @@ async def run_sleep(
 
     try:
         since = None if force else _get_last_sleep_timestamp(conversation_dir)
-        digests = _find_unprocessed_archives(conversation_dir, since)
+
+        if group_id:
+            # Group-only mode: read only from this group's archives
+            conversations_dir = conversation_dir.parent
+            group_dir = None
+            for d in conversations_dir.iterdir():
+                if d.is_dir() and d.name.startswith(group_id):
+                    group_dir = d
+                    break
+            if not group_dir:
+                _write_sleep_state(conversation_dir, {"status": "awake"})
+                return {"status": "error", "message": f"Group {group_id} not found"}
+            digests = _collect_group_archive_digests(group_dir, agent_id, since)
+        else:
+            digests = _find_unprocessed_archives(conversation_dir, since)
+
+            # ADR-023 Task 10: include group chat sessions where this agent participates
+            group_digests = _collect_group_digests(conversation_dir.parent, agent_id, since)
+            if group_digests:
+                digests.extend(group_digests)
+                log.info("Sleep pipeline: added %d group chat segments", len(group_digests))
+
+            # Include archived group sessions (past New Session resets)
+            conversations_dir = conversation_dir.parent
+            for group_dir in conversations_dir.iterdir():
+                if group_dir.is_dir() and group_dir.name.startswith("group-"):
+                    archive_digests = _collect_group_archive_digests(group_dir, agent_id, since)
+                    if archive_digests:
+                        digests.extend(archive_digests)
+                        log.info("Sleep pipeline: added %d group archive sessions from %s", len(archive_digests), group_dir.name)
 
         if not digests:
             _write_sleep_state(conversation_dir, {"status": "awake"})
@@ -234,12 +456,55 @@ async def run_sleep(
                     result_path = results_dir / f"session_{i}.json"
                     result_path.write_text(json.dumps(finding, ensure_ascii=False, indent=2), encoding="utf-8")
             except Exception as e:
-                log.warning("Sleep: failed to analyze session %d: %s", i + 1, e)
-                per_session_findings.append({"error": str(e), "archive_file": digest.get("archive_file", "")})
+                err_desc = f"{type(e).__name__}: {e}" if str(e) else type(e).__name__
+                log.warning("Sleep: failed to analyze session %d: %s", i + 1, err_desc)
+                per_session_findings.append({"error": err_desc, "archive_file": digest.get("archive_file", "")})
 
         if not per_session_findings:
             _write_sleep_state(conversation_dir, {"status": "awake"})
             return {"status": "no_analyzable_sessions", "sessions_analyzed": 0}
+
+        # ADR-024 Phase 2: GLiNER entity extraction (before LLM synthesis)
+        gliner_entities: list = []
+        try:
+            from .knowledge_graph import KnowledgeGraph, NodeType
+            from .utils import get_agent_root
+            _agent_root = get_agent_root(agent_id) if agent_id else conversation_dir.parent.parent / "agents" / conversation_dir.name
+            _kg = KnowledgeGraph(_agent_root)
+            _ner_texts = []
+            _session_nodes = []  # (source_id, label) for SessionArchive nodes to ensure
+            for f in per_session_findings:
+                if "error" not in f:
+                    summary = f.get("summary", "") or json.dumps(f, ensure_ascii=False)[:3000]
+                    archive = f.get("archive_file", "")
+                    source_id, label = _build_session_source_id(archive)
+                    if source_id:
+                        _session_nodes.append((source_id, label))
+                    _ner_texts.append({"source_id": source_id, "text": summary})
+            # L5b: group sessions don't go through extract_structural_edges, so
+            # their sa: nodes don't exist in the graph by default. Ensure them
+            # here so persist_extracted_entities can attach MENTIONS edges
+            # instead of dropping them via skip-orphan.
+            for source_id, label in _session_nodes:
+                _kg._ensure_node(source_id, NodeType.SESSION_ARCHIVE, label)
+            if _ner_texts:
+                # Run GLiNER inference in a worker thread — GLiNER.from_pretrained()
+                # may trigger a synchronous HF model download on first use that
+                # blocks the event loop for minutes and stalls Discord
+                # heartbeats / WebSocket auth (S111 incident). Subsequent
+                # calls (model cached) are fast but still CPU-bound, so
+                # offloading keeps the loop responsive either way.
+                #
+                # SQLite writes must run on the main thread (the connection's
+                # owner), so persist_extracted_entities() is called here, not
+                # inside the worker.
+                gliner_entities = await asyncio.to_thread(_kg.extract_entities_gliner, _ner_texts)
+                if gliner_entities:
+                    edges_added = _kg.persist_extracted_entities(gliner_entities)
+                    log.info("Sleep pipeline: GLiNER extracted %d entities (%d edges) from %d sessions",
+                             len(gliner_entities), edges_added, len(_ner_texts))
+        except Exception as e:
+            log.debug("Sleep pipeline: GLiNER entity extraction skipped: %s", e)
 
         dates = [d.get("date", "") for d in digests if d.get("date")]
         period = f"{dates[0][:10]} to {dates[-1][:10]}" if len(dates) >= 2 else dates[0][:10] if dates else "unknown"
@@ -252,10 +517,18 @@ async def run_sleep(
         if progress_callback:
             await progress_callback(total, total, "synthesizing", "")
 
+        entity_section = ""
+        if gliner_entities:
+            unique_entities = sorted({e["entity"] for e in gliner_entities})
+            entity_section = ENTITY_RELATION_SECTION.format(
+                entity_list=", ".join(unique_entities)
+            )
+
         synthesis_prompt = SYNTHESIS_PROMPT.format(
             n=len(per_session_findings),
             period=period,
             findings=findings_text,
+            entity_section=entity_section,
         )
 
         response = await llm_manager.query(synthesis_prompt, provider_alias=provider_alias)
@@ -263,6 +536,41 @@ async def run_sleep(
 
         morning_brief = result.get("morning_brief", {})
         sleep_findings = result.get("sleep_findings", {})
+
+        extracted_relations = result.get("extracted_relations", [])
+        if extracted_relations and gliner_entities:
+            try:
+                from .knowledge_graph import KnowledgeGraph, GraphEdge, EdgeType, NodeType, _utc_now
+                from .utils import get_agent_root
+                _agent_root = get_agent_root(agent_id) if agent_id else conversation_dir.parent.parent / "agents" / conversation_dir.name
+                _kg = KnowledgeGraph(_agent_root)
+                now = _utc_now()
+                added = 0
+                for rel in extracted_relations:
+                    conf = rel.get("confidence", 0)
+                    justification = rel.get("justification", "")
+                    if conf < 0.7 or len(justification) < 20:
+                        continue
+                    source = rel.get("source", "").lower().replace(" ", "_")
+                    target = rel.get("target", "").lower().replace(" ", "_")
+                    rel_type = rel.get("relation_type", "SUPPORTS")
+                    try:
+                        edge_type = EdgeType(rel_type)
+                    except ValueError:
+                        edge_type = EdgeType.SUPPORTS
+                    src_id = f"e:{source}"
+                    tgt_id = f"e:{target}"
+                    _kg._ensure_node(src_id, NodeType.ENTITY, rel.get("source", source))
+                    _kg._ensure_node(tgt_id, NodeType.ENTITY, rel.get("target", target))
+                    props = {"source": "llm_relation"}
+                    if rel.get("needs_review"):
+                        props["needs_review"] = True
+                    _kg._add_edge_safe(src_id, tgt_id, edge_type, justification, now, props)
+                    added += 1
+                if added:
+                    log.info("Sleep pipeline: LLM extracted %d relations (from %d candidates)", added, len(extracted_relations))
+            except Exception as e:
+                log.debug("Sleep pipeline: LLM relation extraction failed: %s", e)
 
         morning_brief["generated_at"] = datetime.now(timezone.utc).isoformat()
         morning_brief["consumed"] = False
@@ -304,10 +612,11 @@ async def run_sleep(
         }
 
     except Exception as e:
-        log.error("Sleep pipeline failed: %s", e, exc_info=True)
+        err_desc = f"{type(e).__name__}: {e}" if str(e) else type(e).__name__
+        log.error("Sleep pipeline failed: %s", err_desc, exc_info=True)
         _write_sleep_state(conversation_dir, {
             "status": "awake",
-            "last_error": str(e),
+            "last_error": err_desc,
             "error_at": datetime.now(timezone.utc).isoformat(),
         })
-        return {"status": "error", "error": str(e)}
+        return {"status": "error", "error": err_desc}

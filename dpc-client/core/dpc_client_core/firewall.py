@@ -209,9 +209,10 @@ class ContextFirewall:
         sandbox_extensions = dpc_agent.get('sandbox_extensions', {})
         self.sandbox_read_only_paths: List[str] = sandbox_extensions.get('read_only', [])
         self.sandbox_read_write_paths: List[str] = sandbox_extensions.get('read_write', [])
-        # Extended path access gates (S31 — UI checkboxes)
-        self.extended_read_enabled: bool = sandbox_extensions.get('extended_read_enabled', True)
-        self.extended_write_enabled: bool = sandbox_extensions.get('extended_write_enabled', False)
+        # Extended path access gates (S31 UI checkboxes) — per-agent resolution
+        # lives in get_extended_{read,write}_enabled(profile_name). Flat attributes
+        # were removed in S110 (FIREWALL-EXT-WRITE-PROFILE) to prevent accidental
+        # reads that bypass the per-agent profile.
 
         # Validate and normalize paths
         self.sandbox_read_only_paths = [self._normalize_path(p) for p in self.sandbox_read_only_paths if p]
@@ -269,6 +270,92 @@ class ContextFirewall:
             else:
                 return default
         return val if val is not None else default
+
+    def get_history_settings(self, profile_name: Optional[str] = None) -> tuple:
+        """Return (preserve_on_reset, max_archived_sessions) for an agent profile,
+        falling back to global dpc_agent.history when the profile has no override.
+
+        Profile-name that does not match any known agent falls back cleanly to
+        global — safe to pass peer/group conversation ids.
+        """
+        preserve = self._get_profile_or_global(
+            profile_name, 'history', 'preserve_on_reset',
+            default=self.history_preserve_on_reset)
+        max_sessions = self._get_profile_or_global(
+            profile_name, 'history', 'max_archived_sessions',
+            default=self.history_max_archived_sessions)
+        return bool(preserve), max(0, int(max_sessions))
+
+    def get_extended_write_enabled(self, profile_name: Optional[str] = None) -> bool:
+        """Per-agent extended path write gate (sandbox_extensions.extended_write_enabled).
+
+        Mirrors S104 isolation pattern: per-agent profile takes precedence,
+        falls back to global dpc_agent block, defaults to False.
+        """
+        val = self._get_profile_or_global(
+            profile_name, 'sandbox_extensions', 'extended_write_enabled', default=False
+        )
+        return bool(val)
+
+    def get_extended_read_enabled(self, profile_name: Optional[str] = None) -> bool:
+        """Per-agent extended path read gate. Defaults to True (read is permissive)."""
+        val = self._get_profile_or_global(
+            profile_name, 'sandbox_extensions', 'extended_read_enabled', default=True
+        )
+        return bool(val)
+
+    def get_agent_enabled(self, profile_name: Optional[str] = None) -> bool:
+        """Per-agent enabled flag with global fallback.
+
+        Mirrors S110 isolation pattern: per-agent profile takes precedence,
+        falls back to global dpc_agent block.
+        """
+        val = self._get_profile_or_global(
+            profile_name, 'enabled', default=True
+        )
+        return bool(val)
+
+    def get_sandbox_read_only_paths(self, profile_name: Optional[str] = None) -> List[str]:
+        """Per-agent sandbox read-only paths with global fallback.
+
+        Per-agent profile sandbox_extensions.read_only takes precedence, falls back
+        to the parsed global self.sandbox_read_only_paths.
+        """
+        val = self._get_profile_or_global(
+            profile_name, 'sandbox_extensions', 'read_only', default=None
+        )
+        if val is None:
+            return list(self.sandbox_read_only_paths)
+        return [self._normalize_path(p) for p in val if p]
+
+    def get_sandbox_read_write_paths(self, profile_name: Optional[str] = None) -> List[str]:
+        """Per-agent sandbox read-write paths with global fallback."""
+        val = self._get_profile_or_global(
+            profile_name, 'sandbox_extensions', 'read_write', default=None
+        )
+        if val is None:
+            return list(self.sandbox_read_write_paths)
+        return [self._normalize_path(p) for p in val if p]
+
+    def get_agent_tools_map(self, profile_name: Optional[str] = None) -> Dict[str, bool]:
+        """Per-agent tools map with profile overrides merged onto global defaults.
+
+        Returns the full Dict[str, bool] of tool -> enabled (unlike
+        get_allowed_agent_tools_for_profile which returns the Set of enabled
+        names). Used for transparency / capability sections that need to show
+        the full set of tools and their state, not just the enabled ones.
+        """
+        merged = dict(self.dpc_agent_tools)
+        if not profile_name:
+            return merged
+        profile = self.get_agent_profile_settings(profile_name)
+        if not profile:
+            return merged
+        profile_tools = profile.get('tools', {})
+        for tool_name, enabled in profile_tools.items():
+            if not tool_name.startswith('_'):
+                merged[tool_name] = bool(enabled)
+        return merged
 
     def is_extended_path_allowed(self, path: str, require_write: bool = False,
                                  profile_name: Optional[str] = None) -> bool:
@@ -351,6 +438,9 @@ class ContextFirewall:
         """
         if not self.dpc_agent_enabled:
             return False
+
+        if profile_name is None:
+            logger.warning("can_agent_access_context('%s') called without profile_name — using global config", context_type)
 
         if context_type == 'personal':
             return bool(self._get_profile_or_global(
@@ -1781,6 +1871,35 @@ class ContextFirewall:
 
         except Exception as e:
             return (False, f"Firewall reload failed: {str(e)}")
+
+    def get_rules_as_dict(self) -> Dict[str, Any]:
+        """Read raw rules from disk as a JSON dict."""
+        config_text = self.access_file_path.read_text()
+        return json.loads(config_text)
+
+    def save_rules_from_dict(self, rules_dict: Dict[str, Any]) -> Tuple[bool, str, List[str]]:
+        """Validate, write, and reload rules from a dict.
+
+        Rolls back file on failed reload so disk and runtime stay consistent.
+
+        Returns:
+            (success, message, errors)
+        """
+        is_valid, errors = self.validate_config(rules_dict)
+        if not is_valid:
+            return (False, "Validation failed", errors)
+
+        backup = self.access_file_path.read_text() if self.access_file_path.exists() else None
+
+        rules_text = json.dumps(rules_dict, indent=2)
+        self.access_file_path.write_text(rules_text)
+
+        success, message = self.reload()
+        if not success and backup is not None:
+            self.access_file_path.write_text(backup)
+            logger.warning("Rolled back firewall rules after failed reload")
+
+        return (success, message, [])
 
 
 # --- Self-testing block ---

@@ -63,6 +63,9 @@ export type Message = {
   mentions?: Mention[];        // @-mentions in group chat messages
   attachments?: MessageAttachment[];
   isError?: boolean;           // Error message styling (v0.19.2+)
+  isAgent?: boolean;           // Agent message in group chat (v0.25.0+)
+  agentOwner?: string | null;
+  msg_index?: number;          // Sequential message number (MSG-CHAIN, v0.25.0+)
 };
 
 // --- Provider System ---
@@ -145,6 +148,8 @@ export interface GroupChat {
     topic?: string;
     created_by: string;
     members: string[];         // node_ids
+    agents?: Record<string, string[]>; // node_id -> agent_ids
+    agent_names?: Record<string, Record<string, string>>; // node_id -> {agent_id -> name}
     version?: number;
 }
 
@@ -361,6 +366,10 @@ export interface GroupMessageEvent {
     timestamp?: number;
     attachments?: MessageAttachment[];
     mentions?: Mention[];
+    is_agent?: boolean;
+    sender_type?: string;
+    agent_owner?: string | null;
+    msg_index?: number;
 }
 
 export interface GroupFileEvent {

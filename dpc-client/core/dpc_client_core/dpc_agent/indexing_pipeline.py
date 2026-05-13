@@ -124,15 +124,24 @@ def full_rebuild(
         return 0
 
     BATCH_SIZE = 4
+    indexed_count = 0
     for batch_start in range(0, len(all_doc_texts), BATCH_SIZE):
         if stop_event and stop_event.is_set():
             log.info("Indexing interrupted by shutdown at batch %d/%d", batch_start, len(all_doc_texts))
-            return batch_start
+            return indexed_count
         batch_texts = all_doc_texts[batch_start:batch_start + BATCH_SIZE]
         batch_metas = all_metas[batch_start:batch_start + BATCH_SIZE]
         vectors = np.array(embedding_provider.embed_batch(batch_texts), dtype=np.float32)
+        if stop_event and stop_event.is_set():
+            log.info("Indexing interrupted by shutdown after embedding batch %d/%d", batch_start, len(all_doc_texts))
+            return indexed_count
         for vec, meta in zip(vectors, batch_metas):
             faiss_index.add(vec.reshape(1, -1), [meta])
+            indexed_count += 1
+
+    if stop_event and stop_event.is_set():
+        log.info("Indexing interrupted by shutdown before BM25 build")
+        return indexed_count
 
     bm25_index.build(all_doc_texts, all_metas)
 

@@ -367,7 +367,7 @@ def format_message(i: int, msg: dict, show_thinking: bool = False, show_tools: b
         if len(content) > 500:
             preview += "..."
 
-    line = f"  [{i}] {ts} {sender}: {preview}"
+    line = f"  [{i + 1}] {ts} {sender}: {preview}"
 
     if show_thinking:
         thinking = extract_thinking(msg)

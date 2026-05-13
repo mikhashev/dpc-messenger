@@ -15,6 +15,7 @@
     groupMemberLeft,
     nodeStatus,
     leaveGroup,
+    agentsList,
   } from '$lib/coreService';
 
   // ---------------------------------------------------------------------------
@@ -136,17 +137,32 @@
   // Mention autocomplete (moved from ChatPanel)
   // ---------------------------------------------------------------------------
 
-  function getMentionableMembers(): Array<{ node_id: string; name: string }> {
+  function getMentionableMembers(): Array<{ node_id: string; name: string; mention_name: string }> {
     if (!activeChatId.startsWith('group-')) return [];
     const group = $groupChats.get(activeChatId);
-    if (!group?.members) return [];
+    if (!group) return [];
     const selfId = $nodeStatus?.node_id || '';
-    return group.members
-      .filter((nodeId: string) => nodeId !== selfId)
-      .map((nodeId: string) => ({
-        node_id: nodeId,
-        name: peerDisplayNames.get(nodeId)?.split(' | ')[0] || nodeId,
-      }));
+    const result: Array<{ node_id: string; name: string; mention_name: string }> = [];
+    if (group.members) {
+      for (const nodeId of group.members) {
+        if (nodeId !== selfId) {
+          const peerName = peerDisplayNames.get(nodeId)?.split(' | ')[0] || nodeId;
+          result.push({ node_id: nodeId, name: peerName, mention_name: peerName });
+        }
+      }
+    }
+    const seenAgents = new Set<string>();
+    for (const [nodeId, agentIds] of Object.entries(group.agents || {})) {
+      const ownerName = nodeId === selfId ? 'You' : (peerDisplayNames.get(nodeId)?.split(' | ')[0] || nodeId.substring(0, 12));
+      for (const agentId of (agentIds as string[])) {
+        if (seenAgents.has(agentId)) continue;
+        seenAgents.add(agentId);
+        const localAgent = $agentsList.find((a: any) => a.agent_id === agentId);
+        const agentName = localAgent?.name || (group.agent_names as any)?.[nodeId]?.[agentId] || agentId;
+        result.push({ node_id: agentId, name: `${agentName} (${ownerName})`, mention_name: agentName });
+      }
+    }
+    return result;
   }
 
   export function handleMentionInput(event: Event) {
@@ -176,11 +192,11 @@
     mentionAutocompleteVisible = false;
   }
 
-  function handleMentionSelect(member: { node_id: string; name: string }) {
+  function handleMentionSelect(member: { node_id: string; name: string; mention_name: string }) {
     const currentInput = getCurrentInput();
     const before = currentInput.slice(0, mentionStartPosition);
     const after = currentInput.slice(mentionStartPosition + mentionQuery.length + 1);
-    onSetCurrentInput(`${before}@${member.name} | ${member.node_id} ${after}`);
+    onSetCurrentInput(`${before}@${member.mention_name} ${after}`);
     mentionAutocompleteVisible = false;
     mentionSelectedIndex = 0;
   }

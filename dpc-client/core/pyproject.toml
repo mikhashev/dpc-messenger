@@ -1,6 +1,6 @@
 [project]
 name = "dpc-client-core"
-version = "0.24.0"
+version = "0.25.0"
 description = ""
 authors = [{name = "Mike Shevchenko", email = "legoogmiha@gmail.com"}]
 readme = "README.md"
@@ -35,6 +35,7 @@ dependencies = [
     "ddgs>=9.14",
     "trafilatura>=1.12,<3.0",
     "stopwordsiso>=0.6",
+    "discord.py>=2.7.0,<3.0.0",
 ]
 
 [project.optional-dependencies]
@@ -45,6 +46,9 @@ mlx = [
 ]
 browser = [
     "camoufox>=0.4.11",
+]
+graph-ner = [
+    "gliner>=0.2.20",
 ]
 
 [dependency-groups]

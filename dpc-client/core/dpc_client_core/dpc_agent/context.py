@@ -34,6 +34,21 @@ log = logging.getLogger(__name__)
 
 FAISS_TOP_K = 10
 BM25_TOP_K = 10
+GRAPH_MAX_HOPS = 1
+
+_kg_cache: dict = {}
+
+
+def _get_knowledge_graph(agent_root: pathlib.Path):
+    """Cached KnowledgeGraph singleton per agent_root."""
+    key = str(agent_root)
+    if key not in _kg_cache:
+        try:
+            from .knowledge_graph import KnowledgeGraph
+            _kg_cache[key] = KnowledgeGraph(agent_root)
+        except Exception:
+            return None
+    return _kg_cache[key]
 
 
 def _build_user_content(task: Dict[str, Any]) -> Any:
@@ -96,7 +111,7 @@ def _build_runtime_section(
 
     # Session state from ConversationMonitor (token usage, context window)
     if session_state:
-        token_limit = session_state.get("tokens_limit", 128000)
+        token_limit = session_state.get("tokens_limit") or 204800
         history_tokens = session_state.get("history_tokens", 0)
         context_estimated = session_state.get("context_estimated", 0)
         runtime_data["session"] = {
@@ -323,8 +338,23 @@ def build_llm_messages(
     memory.ensure_files()
 
     # --- Build system prompt ---
+    MAX_SYSTEM_PROMPT_BYTES = 100_000
     if system_prompt is None:
-        system_prompt = _default_system_prompt()
+        custom_prompt_path = agent_root / "memory" / "system_prompt.md"
+        if custom_prompt_path.exists():
+            try:
+                size = custom_prompt_path.stat().st_size
+                if size > MAX_SYSTEM_PROMPT_BYTES:
+                    log.warning("system_prompt.md too large (%d bytes, limit %d) — using default",
+                                size, MAX_SYSTEM_PROMPT_BYTES)
+                else:
+                    custom_text = read_text(custom_prompt_path).strip()
+                    if custom_text:
+                        system_prompt = custom_text
+            except OSError as e:
+                log.warning("Failed to read system_prompt.md: %s — using default", e)
+        if system_prompt is None:
+            system_prompt = _default_system_prompt()
 
     # --- Assemble sections ---
     static_text = system_prompt
@@ -372,7 +402,8 @@ def build_llm_messages(
                 _q2_results = []
                 if _faiss_idx.load():
                     if embedding_provider is None:
-                        embedding_provider = EmbeddingProvider(local_files_only=True)
+                        from .memory import get_embedding_provider
+                        embedding_provider = get_embedding_provider(local_files_only=True)
                         log.info("Active Recall: created fallback EmbeddingProvider (local_files_only)")
                     if _faiss_idx.needs_rebuild(embedding_provider.model_name):
                         log.info("Active Recall: FAISS index needs rebuild (model changed), skipping search")
@@ -396,7 +427,19 @@ def build_llm_messages(
                     log.debug("Active Recall BM25: %d results — %s", len(_bm25_results),
                               [m.get("source_file", "?") for m, _ in _bm25_results])
 
-                _results = reciprocal_rank_fusion(_faiss_results, _keyword_results)
+                _graph_results = []
+                try:
+                    from .knowledge_graph import KnowledgeGraph
+                    _kg = _get_knowledge_graph(agent_root)
+                    _seed_files = list({m.get("source_file", "") for m, _ in _faiss_results + _keyword_results if m.get("source_file")})
+                    if _seed_files and _kg:
+                        _graph_results = _kg.graph_expand(_seed_files, max_hops=GRAPH_MAX_HOPS)
+                        if _graph_results:
+                            log.debug("Active Recall Graph L7: %d results from %d seeds", len(_graph_results), len(_seed_files))
+                except Exception:
+                    log.debug("Active Recall Graph L7: unavailable (cold start or no graph DB)")
+
+                _results = reciprocal_rank_fusion(_faiss_results, _keyword_results, graph_results=_graph_results)
                 _ctx_ratio = (session_state or {}).get("context_usage_percent", 0) / 100.0
                 _recall = get_recall_block(_results, context_usage_ratio=_ctx_ratio, agent_root=agent_root)
                 if _recall:
@@ -470,23 +513,27 @@ def build_llm_messages(
             role = hist_msg.get("role", "")
             content = hist_msg.get("content", "")
             if role in ("user", "assistant") and content:
-                if role == "user":
-                    timestamp = hist_msg.get("timestamp", "")
-                    sender = hist_msg.get("sender_name", "")
-                    prefix_parts = []
-                    if timestamp:
-                        ts_display = timestamp.split('T')[1][:8] if 'T' in timestamp else timestamp
-                        prefix_parts.append(ts_display)
-                    if sender:
-                        prefix_parts.append(sender)
-                    if prefix_parts:
-                        content = f"[{' | '.join(prefix_parts)}] {content}"
+                msg_index = hist_msg.get("msg_index", "")
+                timestamp = hist_msg.get("timestamp", "")
+                sender = hist_msg.get("sender_name", "")
+                prefix_parts = [f"#{msg_index}" if msg_index else ""]
+                if timestamp:
+                    ts_display = timestamp.split('T')[1][:8] if 'T' in timestamp else timestamp
+                    prefix_parts.append(ts_display)
+                if sender:
+                    prefix_parts.append(sender)
+                content = f"[{' | '.join(p for p in prefix_parts if p)}] {content}"
                 messages.append({"role": role, "content": content})
 
-    messages.append({"role": "user", "content": _build_user_content(task)})
+    next_idx = max((m.get("msg_index", 0) for m in conversation_history), default=0) + 1 if conversation_history else 1
+    user_content = _build_user_content(task)
+    if isinstance(user_content, str):
+        user_content = f"[#{next_idx}] {user_content}"
+    messages.append({"role": "user", "content": user_content})
 
     # --- Soft-cap token trimming ---
-    messages, cap_info = apply_message_token_soft_cap(messages, 200000)
+    soft_cap = (session_state or {}).get("tokens_limit") or 204800
+    messages, cap_info = apply_message_token_soft_cap(messages, soft_cap)
 
     return messages, cap_info
 

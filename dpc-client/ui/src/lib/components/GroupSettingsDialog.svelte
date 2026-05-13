@@ -11,10 +11,14 @@
     topic?: string;
     created_by: string;
     members: string[];
+    agents?: Record<string, string[]>;
   } | null = null;
   export let selfNodeId: string = '';
   export let connectedPeers: Array<{ node_id: string; name: string }> = [];
   export let peerDisplayNames: Map<string, string> = new Map();
+  export let nodeAgents: Array<{ agent_id: string; name: string; provider_alias: string }> = [];
+  export let autoTranscribeEnabled: boolean = true;
+  export let whisperModelLoading: boolean = false;
 
   const dispatch = createEventDispatcher();
 
@@ -75,8 +79,37 @@
     dispatch('removeMember', { group_id: group?.group_id, node_id: nodeId });
   }
 
+  let localAgentIds: string[] = [];
+  let agentsDirty = false;
+
+  $: if (open && group) {
+    localAgentIds = [...(group.agents?.[selfNodeId] || [])];
+    agentsDirty = false;
+  }
+
+  function isAgentEnabled(agentId: string): boolean {
+    return localAgentIds.includes(agentId);
+  }
+
+  function toggleAgent(agentId: string) {
+    if (localAgentIds.includes(agentId)) {
+      localAgentIds = localAgentIds.filter(id => id !== agentId);
+    } else {
+      localAgentIds = [...localAgentIds, agentId];
+    }
+    const saved = group?.agents?.[selfNodeId] || [];
+    agentsDirty = JSON.stringify([...localAgentIds].sort()) !== JSON.stringify([...saved].sort());
+  }
+
+  function saveAgents() {
+    if (!group) return;
+    dispatch('updateAgents', { group_id: group.group_id, agent_ids: localAgentIds });
+    agentsDirty = false;
+  }
+
   function handleClose() {
     showAddMember = false;
+    agentsDirty = false;
     open = false;
   }
 </script>
@@ -120,6 +153,29 @@
                 Save conversation history
                 {#if !persistHistory}
                   <span class="toggle-hint">(ephemeral - cleared on restart)</span>
+                {/if}
+              </span>
+            </label>
+          </div>
+        </div>
+
+        <!-- Voice Transcription -->
+        <div class="section">
+          <div class="section-header">
+            <h3>Voice</h3>
+          </div>
+          <div class="toggle-row">
+            <label class="toggle-label">
+              <input
+                type="checkbox"
+                checked={autoTranscribeEnabled}
+                on:change={() => dispatch('toggleAutoTranscribe')}
+                disabled={whisperModelLoading}
+              />
+              <span class="toggle-text">
+                Auto Transcribe
+                {#if whisperModelLoading}
+                  <span class="toggle-hint">(loading model...)</span>
                 {/if}
               </span>
             </label>
@@ -179,6 +235,39 @@
             {/each}
           </div>
         </div>
+
+        <!-- Agents (ADR-023 Task 08) -->
+        {#if nodeAgents.length > 0}
+          <div class="section">
+            <div class="section-header">
+              <h3>Agents</h3>
+            </div>
+            <div class="member-list">
+              {#each nodeAgents as agent}
+                <div class="member-row">
+                  <label class="toggle-label" style="flex: 1;">
+                    <input
+                      type="checkbox"
+                      checked={isAgentEnabled(agent.agent_id)}
+                      on:change={() => toggleAgent(agent.agent_id)}
+                    />
+                    <span class="toggle-text">
+                      {agent.name}
+                      <span class="agent-provider-hint">{agent.provider_alias}</span>
+                    </span>
+                  </label>
+                </div>
+              {/each}
+            </div>
+          </div>
+        {/if}
+
+        <!-- Save Button -->
+        {#if agentsDirty}
+          <div class="save-row">
+            <button class="btn-save" on:click={saveAgents}>Save</button>
+          </div>
+        {/if}
       </div>
     </div>
   </div>
@@ -294,6 +383,27 @@
   .btn-add:hover {
     background: #313244;
     border-color: #89b4fa;
+  }
+
+  .save-row {
+    display: flex;
+    justify-content: flex-end;
+    padding: 8px 0 0;
+  }
+
+  .btn-save {
+    padding: 8px 24px;
+    border: none;
+    border-radius: 6px;
+    background: #89b4fa;
+    color: #1e1e2e;
+    cursor: pointer;
+    font-size: 0.85rem;
+    font-weight: 600;
+  }
+
+  .btn-save:hover {
+    background: #74c7ec;
   }
 
   .add-member-panel {
@@ -414,5 +524,10 @@
     font-size: 0.75rem;
     color: #6c7086;
     font-style: italic;
+  }
+  .agent-provider-hint {
+    font-size: 0.8em;
+    color: #888;
+    margin-left: 0.5em;
   }
 </style>

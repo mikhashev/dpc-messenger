@@ -19,8 +19,8 @@ export const newSessionResult = writable<NewSessionResultEvent | null>(null);
 
 // Conversation lifecycle
 export const conversationReset = writable<ConversationEvent | null>(null);
-// Per-conversation settings — free-form, varies by conversation type
-export const conversationSettings = writable<any>(null);
+// Per-conversation settings — free-form, varies by conversation type (currently unused)
+export const conversationSettings = writable<Record<string, any> | null>(null);
 export const conversationSettingsChanged = writable<ConversationSettingsChangedEvent | null>(null);
 export const conversationDeleted = writable<ConversationEvent | null>(null);
 

@@ -40,7 +40,13 @@
   // A sender counts as "AI" if it's the canonical 'ai' string (direct DPC queries),
   // starts with 'agent_' (Telegram-bridged, history-loaded, or proactively-fetched agent messages),
   // or is 'cc' (Claude Code responses injected via @CC mentions).
-  const isAiSender = (sender: string) => sender === 'ai' || sender === 'cc' || sender?.startsWith('agent_');
+  const isAiSender = (sender: string, msg?: any) => sender === 'ai' || sender === 'cc' || sender?.startsWith('agent_') || msg?.isAgent;
+
+  const truncateNodeId = (id: string) => {
+    const prefix = 'dpc-node-';
+    if (id.startsWith(prefix)) return prefix + id.slice(prefix.length, prefix.length + 8);
+    return id;
+  };
 
   // Debug: Log when progress props change
   $effect(() => {
@@ -107,10 +113,8 @@
           <strong>
             {#if msg.sender === 'user'}
               {#if conversationId.startsWith('group-') && selfName}
-                <!-- Group chat: Show own name instead of "You" -->
-                {selfName} | {selfNodeId}
+                {selfName}
               {:else if conversationId.startsWith('agent_') || conversationId.startsWith('agent-')}
-                <!-- Agent chat: always "You" for user messages, backend may set senderName -->
                 You
               {:else}
                 {msg.senderName || 'You'}
@@ -119,23 +123,29 @@
               {msg.senderName || (msg.model ? `AI (${msg.model})` : 'AI Assistant')}
             {:else}
               {#if conversationId.startsWith('group-')}
-                <!-- Group chat: Use peerDisplayNames or senderName (no truncation) -->
-                {peerDisplayNames.get(msg.sender)?.split(' | ')[0] || msg.senderName || msg.sender} | {msg.sender}
+                {#if msg.isAgent && msg.senderName}
+                  {msg.senderName} <span class="agent-badge" title={msg.agentOwner || ''}>(agent{#if msg.agentOwner}, {msg.agentOwner.startsWith('dpc-node-') ? truncateNodeId(msg.agentOwner) : msg.agentOwner}{/if})</span>
+                {:else}
+                  {peerDisplayNames.get(msg.sender)?.split(' | ')[0] || msg.senderName || msg.sender}
+                  {#if msg.sender && msg.sender.startsWith('dpc-node-') && msg.sender !== 'user'}
+                    <span class="node-id-badge" title={msg.sender}>({truncateNodeId(msg.sender)})</span>
+                  {/if}
+                {/if}
               {:else}
-                {msg.senderName ? `${msg.senderName} | ${msg.sender}` : msg.sender}
+                {msg.senderName || msg.sender}
               {/if}
             {/if}
           </strong>
-          <span class="timestamp"><span class="msg-index">#{i}</span> {new Date(msg.timestamp).toLocaleTimeString()}</span>
+          <span class="timestamp">{#if msg.msg_index}<span class="msg-index">#{msg.msg_index}</span> {/if}{new Date(msg.timestamp).toLocaleTimeString()}</span>
         </div>
         <!-- Thinking block (v1.4+): Display AI reasoning before main response -->
-        {#if isAiSender(msg.sender) && msg.thinking}
+        {#if isAiSender(msg.sender, msg) && msg.thinking}
           <ThinkingBlock thinking={msg.thinking} tokenCount={msg.thinkingTokens} />
         {/if}
 
         <!-- Message text (hidden for voice attachments with transcription to avoid duplication, v0.15.1+) -->
         {#if msg.text && msg.text !== '[Image]' && !msg.attachments?.some(a => a.type === 'voice' && a.transcription)}
-          {#if isAiSender(msg.sender) && enableMarkdown}
+          {#if enableMarkdown}
             <MarkdownMessage content={msg.text} />
           {:else if msg.mentions && msg.mentions.length > 0}
             <!-- Group chat message with @-mentions -->
@@ -146,7 +156,7 @@
         {/if}
 
         <!-- Raw streaming output (v0.16.0+): Collapsible section showing incremental text -->
-        {#if isAiSender(msg.sender) && msg.streamingRaw && msg.streamingRaw.length > 50}
+        {#if isAiSender(msg.sender, msg) && msg.streamingRaw && msg.streamingRaw.length > 50}
           <details class="streaming-raw-details">
             <summary class="streaming-raw-summary">
               <span class="streaming-raw-icon">📝</span>
@@ -571,5 +581,16 @@
     max-height: 300px;
     overflow-y: auto;
     color: #555;
+  }
+  .agent-badge {
+    font-size: 0.75em;
+    color: #888;
+    font-weight: normal;
+  }
+  .node-id-badge {
+    font-size: 0.7em;
+    color: #999;
+    font-weight: normal;
+    margin-left: 4px;
   }
 </style>

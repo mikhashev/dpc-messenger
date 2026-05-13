@@ -31,6 +31,8 @@ class Message:
     text: str
     timestamp: str
     attachment_transfer_id: Optional[str] = None  # Link to attachment transfer (v0.14.0)
+    sender_type: Optional[str] = None  # "human" or "agent"
+    agent_owner: Optional[str] = None  # node_id of agent's owner
 
 
 class ConversationMonitor:
@@ -98,11 +100,13 @@ class ConversationMonitor:
         self.current_token_count: int = 0
         self.token_limit: int = 100000  # Default limit, will be updated per model
         self.token_warning_threshold: float = 0.8  # Warn at 80%
+        self._last_context_estimated: int = 0
 
         # Conversation history tracking (Phase 7: Conversation History)
         self.message_history: List[Dict[str, str]] = []  # List of {"role": "user/assistant", "content": "..."}
         self.message_ids: Set[str] = set()  # Track unique message IDs for deduplication
         self._history_dirty: bool = False  # Track unsaved changes
+        self._signer = None  # Lazy-loaded CommitSigner for message signing
         self.peer_context_hashes: Dict[str, str] = {}  # {node_id: context_hash} for peer cache invalidation
 
         # Phase 7: Peer context caching (to avoid re-fetching unchanged contexts)
@@ -136,6 +140,26 @@ class ConversationMonitor:
             provider or "default"
         )
 
+    def _get_signer(self):
+        """Lazy-load CommitSigner for RSA message signing."""
+        if self._signer is not None:
+            return self._signer
+        try:
+            from cryptography.hazmat.primitives import serialization
+            from dpc_protocol.commit_integrity import CommitSigner
+            key_path = Path.home() / ".dpc" / "node.key"
+            if not key_path.exists():
+                return None
+            with open(key_path, "rb") as f:
+                private_key = serialization.load_pem_private_key(f.read(), password=None)
+            node_id_path = Path.home() / ".dpc" / "node.id"
+            node_id = node_id_path.read_text().strip() if node_id_path.exists() else ""
+            self._signer = CommitSigner(node_id, private_key)
+            return self._signer
+        except Exception as e:
+            logger.debug("CommitSigner init failed: %s", e)
+            return None
+
     async def on_message(self, message: Message) -> Optional[KnowledgeCommitProposal]:
         """Process new message in conversation
 
@@ -166,9 +190,12 @@ class ConversationMonitor:
         # Extract attachments if present (dynamic attribute for Telegram messages)
         attachments = getattr(message, 'attachments', None)
 
+        sender_type = getattr(message, 'sender_type', None)
+        agent_owner = getattr(message, 'agent_owner', None)
         self.add_message(role, message.text, attachments=attachments,
                         timestamp=timestamp, sender_node_id=sender_node_id,
-                        sender_name=sender_name)
+                        sender_name=sender_name, message_id=message.message_id,
+                        sender_type=sender_type, agent_owner=agent_owner)
         logger.debug(f"Added message to history: role={role}, text_len={len(message.text)}")
 
         # Only run automatic detection if enabled
@@ -893,6 +920,11 @@ DO NOT include any text before or after the JSON. DO NOT use markdown code block
         json_str = re.sub(r'```(?:json)?\s*', '', json_str)
         json_str = json_str.strip()
 
+        # Fix invalid JSON escape sequences (e.g. \U, \e from Windows paths)
+        def _fix_escape(m):
+            return '\\\\' + m.group(1)
+        json_str = re.sub(r'\\([^"\\/bfnrtu])', _fix_escape, json_str)
+
         # Remove trailing commas before closing brackets/braces
         json_str = re.sub(r',\s*([}\]])', r'\1', json_str)
 
@@ -1379,7 +1411,8 @@ PARTICIPANTS' CULTURAL CONTEXTS:
                     timestamp: Optional[str] = None, sender_node_id: Optional[str] = None,
                     sender_name: Optional[str] = None, message_id: Optional[str] = None,
                     thinking: Optional[str] = None, streaming_raw: Optional[str] = None,
-                    source: Optional[str] = None):
+                    source: Optional[str] = None, sender_type: Optional[str] = None,
+                    agent_owner: Optional[str] = None):
         """Add a message to the conversation history
 
         Args:
@@ -1419,10 +1452,30 @@ PARTICIPANTS' CULTURAL CONTEXTS:
             message_dict["streaming_raw"] = streaming_raw
         if source:
             message_dict["source"] = source
+        if sender_type:
+            message_dict["sender_type"] = sender_type
+        if agent_owner:
+            message_dict["agent_owner"] = agent_owner
 
         # Track message ID for deduplication (v0.20.0)
         self.message_ids.add(message_id)
         self._history_dirty = True
+
+        # Compute msg_index (1-based) and chain_hash (MSG-CHAIN, S105)
+        prev_index = max((m.get("msg_index", 0) for m in self.message_history), default=0)
+        msg_index = prev_index + 1 if self.message_history else 1
+        message_dict["msg_index"] = msg_index
+
+        prev_hash = self.message_history[-1].get("chain_hash", "genesis") if self.message_history else "genesis"
+        chain_input = f"{msg_index}|{message_id}|{role}|{sender_name or ''}|{content}|{timestamp or ''}|{prev_hash}"
+        message_dict["chain_hash"] = hashlib.sha256(chain_input.encode("utf-8")).hexdigest()
+
+        content_hash_input = f"{message_id}|{sender_node_id or ''}|{content}|{timestamp or ''}"
+        message_dict["content_hash"] = hashlib.sha256(content_hash_input.encode("utf-8")).hexdigest()
+        signer = self._get_signer()
+        if signer:
+            message_dict["signature"] = signer.sign_commit(message_dict["content_hash"])
+            message_dict["signer_node_id"] = signer.node_id
 
         self.message_history.append(message_dict)
 
@@ -1458,6 +1511,11 @@ PARTICIPANTS' CULTURAL CONTEXTS:
             List of message dicts with 'role' and 'content' keys
         """
         return self.message_history.copy()
+
+    def get_last_msg_index(self) -> int:
+        if self.message_history:
+            return self.message_history[-1].get("msg_index", 0)
+        return 0
 
     def update_peer_context_hash(self, node_id: str, context_hash: str):
         """Update the stored hash for a peer's context
@@ -1742,10 +1800,9 @@ PARTICIPANTS' CULTURAL CONTEXTS:
             }
             if "attachments" in msg:
                 exported_msg["attachments"] = msg["attachments"]
-            if "sender_node_id" in msg:
-                exported_msg["sender_node_id"] = msg["sender_node_id"]
-            if "sender_name" in msg:
-                exported_msg["sender_name"] = msg["sender_name"]
+            for field in ("sender_node_id", "sender_name", "sender_type", "agent_owner", "isAgent"):
+                if field in msg:
+                    exported_msg[field] = msg[field]
             exported.append(exported_msg)
 
         logger.info(f"Exported {len(exported)} messages from conversation history")
@@ -1772,27 +1829,30 @@ PARTICIPANTS' CULTURAL CONTEXTS:
         import uuid
 
         for msg in messages:
-            # 1. Add to message_history (original format)
+            # 1. Add to message_history preserving all sender metadata
             imported_msg = {
                 "role": msg.get("role", "user"),
                 "content": msg.get("content", "")
             }
+            for field in ("sender_name", "sender_node_id", "sender_type", "agent_owner",
+                          "timestamp", "id", "isAgent"):
+                if field in msg:
+                    imported_msg[field] = msg[field]
             if "attachments" in msg:
-                # Fix file paths in attachments (convert peer's paths to local paths)
                 imported_msg["attachments"] = self._remap_attachment_paths(msg["attachments"])
             self.message_history.append(imported_msg)
 
-            # 2. Also create Message objects for extraction buffers (v0.14.0 fix)
-            # Map role to sender info
-            role = msg.get("role", "user")
-            if role == "user":
-                # User is the local node (first participant is always self)
-                sender_node_id = self.participants[0]["node_id"] if self.participants else "local"
-                sender_name = self.participants[0]["name"] if self.participants else "You"
-            else:  # role == "assistant" or "peer"
-                # Assistant/peer is the conversation partner (second participant)
-                sender_node_id = self.participants[1]["node_id"] if len(self.participants) > 1 else "peer"
-                sender_name = self.participants[1]["name"] if len(self.participants) > 1 else "Peer"
+            # 2. Also create Message objects for extraction buffers
+            sender_node_id = msg.get("sender_node_id") or (
+                self.participants[0]["node_id"] if self.participants else "local"
+            ) if msg.get("role") == "user" else msg.get("sender_node_id") or (
+                self.participants[1]["node_id"] if len(self.participants) > 1 else "peer"
+            )
+            sender_name = msg.get("sender_name") or (
+                self.participants[0]["name"] if self.participants else "You"
+            ) if msg.get("role") == "user" else msg.get("sender_name") or (
+                self.participants[1]["name"] if len(self.participants) > 1 else "Peer"
+            )
 
             # Create Message object (same as add_message() does)
             message_obj = Message(
@@ -1886,11 +1946,22 @@ PARTICIPANTS' CULTURAL CONTEXTS:
             Path to ~/.dpc/conversations/{conversation_id}-{slug}/
             Falls back to ~/.dpc/conversations/{conversation_id}/ if no display_name.
             Auto-migrates old unnamed folder to new named folder on first access.
+            For groups: discovers existing slugged directory even if display_name wasn't
+            set at monitor creation time (fixes duplicate directory bug).
         """
         base = Path.home() / ".dpc" / "conversations"
         folder = self._get_folder_name()
         new_dir = base / folder
         old_dir = base / self.conversation_id
+        # If no display_name for a group, check if a slugged dir already exists on disk
+        if folder == self.conversation_id and self.conversation_id.startswith("group-") and base.exists():
+            prefix = self.conversation_id + "-"
+            for d in base.iterdir():
+                if d.is_dir() and d.name.startswith(prefix):
+                    self.display_name = d.name[len(prefix):]
+                    logger.info("Discovered slugged dir for %s: %s", self.conversation_id, d.name)
+                    new_dir = d
+                    break
         if folder != self.conversation_id and old_dir.exists() and not new_dir.exists():
             try:
                 old_dir.rename(new_dir)
@@ -1917,12 +1988,13 @@ PARTICIPANTS' CULTURAL CONTEXTS:
         return self._get_conversation_dir() / "settings.json"
 
     def _is_group_conversation(self) -> bool:
-        """Check if this is a group conversation.
+        """Check if this conversation should persist history by default.
 
         Returns:
-            True if conversation_id starts with 'group-' or 'agent_' (both persist history)
+            True for groups, agents, and Discord per-user conversations
         """
-        return self.conversation_id.startswith("group-") or self.conversation_id.startswith("agent_")
+        cid = self.conversation_id
+        return cid.startswith("group-") or cid.startswith("agent_") or cid.startswith("discord-")
 
     def _load_conversation_settings(self) -> Dict[str, Any]:
         """Load per-conversation settings from disk.
@@ -1996,9 +2068,10 @@ PARTICIPANTS' CULTURAL CONTEXTS:
         return self._save_conversation_settings(settings)
 
     def compute_history_hash(self) -> str:
-        """Compute SHA256 hash of current message history
+        """Compute SHA256 hash of current message history.
 
-        Uses sorted message IDs + timestamps for deterministic hashing.
+        Uses last chain_hash if available (MSG-CHAIN integration with P2P sync).
+        Falls back to sorted ID+timestamp hash for backward compatibility.
 
         Returns:
             Hash string like "sha256:abc123..." or "sha256:empty" if no messages
@@ -2006,13 +2079,14 @@ PARTICIPANTS' CULTURAL CONTEXTS:
         if not self.message_history:
             return "sha256:empty"
 
-        # Sort by timestamp, then by message ID for determinism
+        last_chain = self.message_history[-1].get("chain_hash")
+        if last_chain:
+            return f"sha256:{last_chain[:16]}"
+
         sorted_msgs = sorted(
             self.message_history,
             key=lambda m: (m.get("timestamp", ""), m.get("id", ""))
         )
-
-        # Hash the concatenated IDs and timestamps
         data = "|".join(
             f"{m.get('id', '?')}:{m.get('timestamp', '?')}"
             for m in sorted_msgs
@@ -2047,7 +2121,7 @@ PARTICIPANTS' CULTURAL CONTEXTS:
                 "token_stats": {
                     "current_token_count": self.current_token_count,
                     "token_limit": self.token_limit,
-                    "context_estimated": getattr(self, '_last_context_estimated', 0),
+                    "context_estimated": self._last_context_estimated,
                 },
                 "messages": self.message_history
             }
@@ -2057,6 +2131,16 @@ PARTICIPANTS' CULTURAL CONTEXTS:
 
             self._history_dirty = False
             logger.info(f"Saved {len(self.message_history)} messages to {path}")
+
+            # Write chain anchor for deletion detection (MSG-CHAIN-2, S105)
+            last_hash = self.message_history[-1].get("chain_hash", "") if self.message_history else ""
+            meta_path = path.parent / ".chain_meta.json"
+            try:
+                json.dump({"msg_count": len(self.message_history), "last_chain_hash": last_hash},
+                          open(meta_path, "w", encoding="utf-8"))
+            except Exception:
+                pass  # non-critical
+
             return True
 
         except Exception as e:
@@ -2097,6 +2181,46 @@ PARTICIPANTS' CULTURAL CONTEXTS:
                 data = json.load(f)
 
             messages = data.get("messages", [])
+
+            # Backfill msg_index + verify chain_hash (MSG-CHAIN, S105)
+            chain_ok = True
+            prev_hash = "genesis"
+            for i, m in enumerate(messages):
+                if "msg_index" not in m:
+                    m["msg_index"] = i + 1  # 1-based backfill
+                expected_input = (
+                    f"{m['msg_index']}|{m.get('id', '')}|{m.get('role', '')}"
+                    f"|{m.get('sender_name', '')}|{m.get('content', '')}"
+                    f"|{m.get('timestamp', '')}|{prev_hash}"
+                )
+                expected_hash = hashlib.sha256(expected_input.encode("utf-8")).hexdigest()
+                stored_hash = m.get("chain_hash")
+                if stored_hash and stored_hash != expected_hash:
+                    logger.warning("Chain broken at message #%d (conversation %s)", m["msg_index"], self.conversation_id)
+                    chain_ok = False
+                if not stored_hash:
+                    m["chain_hash"] = expected_hash
+                prev_hash = m.get("chain_hash", "genesis")
+            if chain_ok and any(m.get("chain_hash") for m in messages):
+                logger.info("Chain integrity verified: %d messages OK", len(messages))
+
+            # Check chain anchor for deletion detection (MSG-CHAIN-2, S105)
+            meta_path = path.parent / ".chain_meta.json"
+            if meta_path.exists():
+                try:
+                    meta = json.load(open(meta_path, encoding="utf-8"))
+                    expected_count = meta.get("msg_count", 0)
+                    expected_last = meta.get("last_chain_hash", "")
+                    actual_last = messages[-1].get("chain_hash", "") if messages else ""
+                    if expected_count and len(messages) != expected_count:
+                        logger.warning("Message count mismatch: expected %d, got %d (conversation %s) — possible deletion",
+                                       expected_count, len(messages), self.conversation_id)
+                    elif expected_last and actual_last != expected_last:
+                        logger.warning("Last chain hash mismatch (conversation %s) — history may have been modified",
+                                       self.conversation_id)
+                except Exception:
+                    pass  # meta file corrupt — non-critical
+
             self.message_history = messages
 
             # Rebuild message_ids set for deduplication
@@ -2111,6 +2235,11 @@ PARTICIPANTS' CULTURAL CONTEXTS:
                 self.current_token_count = token_stats.get("current_token_count", self.current_token_count)
                 self.token_limit = token_stats.get("token_limit", self.token_limit)
                 self._last_context_estimated = token_stats.get("context_estimated", 0)
+
+            # Restore extraction buffers so end_session/extract_knowledge sees historical
+            # messages, not only those added in the current in-memory session (S89 regression).
+            # Idempotent — repeats are safe (rebuild dedupes by message_id).
+            self.rebuild_extraction_buffers_from_history()
 
             self._history_dirty = False
             logger.info(f"Loaded {len(messages)} messages from {path}")
@@ -2204,13 +2333,30 @@ PARTICIPANTS' CULTURAL CONTEXTS:
             Count of new messages added
         """
         added = 0
+        rejected = 0
         for msg in remote_messages:
+            sig = msg.get("signature")
+            content_hash = msg.get("content_hash")
+            signer = msg.get("signer_node_id")
+            if sig and content_hash and signer:
+                try:
+                    from dpc_protocol.commit_integrity import CommitSigner
+                    result = CommitSigner.verify_signature(signer, content_hash, sig)
+                    if result is False:
+                        logger.warning("Rejected message %s: invalid signature from %s",
+                                       msg.get("id", "?"), signer)
+                        rejected += 1
+                        continue
+                except Exception as e:
+                    logger.debug("Signature verification skipped: %s", e)
             if self.add_message_with_id(msg):
                 added += 1
 
+        if rejected:
+            logger.warning("Rejected %d messages with invalid signatures during merge", rejected)
         if added > 0:
             self.save_history()
-            logger.info(f"Merged {added} new messages into conversation history")
+            logger.info("Merged %d new messages into conversation history", added)
 
         return added
 

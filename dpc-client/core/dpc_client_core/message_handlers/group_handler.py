@@ -49,6 +49,17 @@ class GroupCreateHandler(MessageHandler):
                 "members": group.members,
             })
 
+            # Request conversation history from the sender (group creator/admin)
+            import uuid
+            await self.service.p2p_manager.send_message_to_peer(sender_node_id, {
+                "command": "REQUEST_CHAT_HISTORY",
+                "payload": {
+                    "conversation_id": group.group_id,
+                    "request_id": str(uuid.uuid4())[:8],
+                }
+            })
+            self.logger.info("Requested history for group %s from %s", group.group_id, sender_node_id[:16])
+
         return None
 
 
@@ -82,10 +93,18 @@ class GroupTextHandler(MessageHandler):
                 f"{group_id}:{sender_node_id}:{text}:{int(time.time() * 1000)}".encode()
             ).hexdigest()[:16]
 
-        # Deduplication
+        # Deduplication: runtime set (survives within session)
         dedup_key = f"{group_id}:{message_id}"
         if dedup_key in self.service._processed_message_ids:
             self.logger.debug("Duplicate group message from %s, skipping", sender_node_id)
+            return None
+
+        # Deduplication: check history on disk (survives across restarts)
+        monitor_key = group_id
+        monitor = self.service.conversation_monitors.get(monitor_key)
+        if monitor and hasattr(monitor, "message_ids") and message_id in monitor.message_ids:
+            self.logger.debug("Duplicate group message %s (already in history), skipping", message_id[:8])
+            self.service._processed_message_ids.add(dedup_key)
             return None
 
         self.service._processed_message_ids.add(dedup_key)
@@ -127,6 +146,8 @@ class GroupTextHandler(MessageHandler):
             "group_id": group_id,
             "sender_node_id": sender_node_id,
             "sender_name": sender_name,
+            "sender_type": payload.get("sender_type", "human"),
+            "agent_owner": payload.get("agent_owner"),
             "text": text,
             "message_id": message_id,
             "timestamp": timestamp,
@@ -175,11 +196,19 @@ class GroupTextHandler(MessageHandler):
         mentions = re.findall(r'@(\w+)\b', text, re.IGNORECASE)
         mention_names = {m.lower() for m in mentions}
 
+        # Get allowed agents for this group from metadata
+        group = self.service.group_manager.get_group(group_id) if self.service.group_manager else None
+        node_id = self.service.p2p_manager.node_id
+        allowed_agents = set(group.agents.get(node_id, [])) if group else set()
+
         # Check if any mention matches agent name or agent_id
         agent_id = self.service._get_default_agent_id()
         agent_name = self.service._get_agent_display_name(agent_id).lower()
         if agent_name in mention_names or agent_id in mention_names:
-            await self._invoke_agent(group_id, text, sender_name)
+            if agent_id in allowed_agents:
+                await self._invoke_agent(group_id, text, sender_name)
+            else:
+                self.logger.debug("Skipping @%s — agent %s not in metadata.agents for %s", agent_name, agent_id, group_id)
 
         cc_name = self.service.get_cc_display_name().lower()
         if cc_name in mention_names:
@@ -337,8 +366,34 @@ class GroupSyncHandler(MessageHandler):
                 "name": result.name,
                 "topic": result.topic,
                 "members": result.members,
+                "agents": result.agents,
                 "version": result.version,
             })
+
+        # Request history if we have no local messages for this group
+        if group_id:
+            conv_dir = self.service.group_manager._get_conversation_dir(group_id)
+            history_path = conv_dir / "history.json" if conv_dir else None
+            needs_history = not history_path or not history_path.exists()
+            if not needs_history and history_path and history_path.exists():
+                try:
+                    import json as _json
+                    with open(history_path, encoding="utf-8") as f:
+                        data = _json.load(f)
+                    needs_history = len(data.get("messages", [])) == 0
+                except Exception:
+                    needs_history = True
+
+            if needs_history:
+                import uuid
+                await self.service.p2p_manager.send_message_to_peer(sender_node_id, {
+                    "command": "REQUEST_CHAT_HISTORY",
+                    "payload": {
+                        "conversation_id": group_id,
+                        "request_id": str(uuid.uuid4())[:8],
+                    }
+                })
+                self.logger.info("Requested history for group %s from %s (local history empty)", group_id, sender_node_id[:16])
 
         return None
 

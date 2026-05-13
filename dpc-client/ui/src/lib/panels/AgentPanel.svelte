@@ -81,6 +81,10 @@
     return { sender: msg.sender_node_id, senderName: msg.sender_name || msg.sender_node_id };
   }
 
+  function getAgentName(conversationId: string): string {
+    return $agentsList?.find((a: any) => a.agent_id === conversationId)?.name || getPeerDisplayName(conversationId);
+  }
+
   /** Clear all streaming state (buffer + state). Called by chat-switch and response handler. */
   function clearAgentStreaming() {
     if (streamingFlushTimeout) {
@@ -168,6 +172,7 @@
                     text: msg.content,
                     timestamp: ts,
                     attachments: msg.attachments || [],
+                    msg_index: msg.msg_index || 0,
                     // Restore rich metadata: prefer persisted history.json fields, fall back to localStorage
                     thinking: msg.thinking || local?.thinking,
                     streamingRaw: msg.streaming_raw || local?.streamingRaw,
@@ -320,7 +325,7 @@
 
           // B2 Fix 1: Use backend msg.id for stable IDs (prevents dedup collisions on same-timestamp msgs)
           const mappedMessages = (messages || []).map((msg: any, index: number) => {
-            const { sender, senderName } = mapMessageSender(msg, conversation_id, getPeerDisplayName(conversation_id));
+            const { sender, senderName } = mapMessageSender(msg, conversation_id, getAgentName(conversation_id));
             const stableId = msg.id || `${conversation_id}-${msg.timestamp ? new Date(msg.timestamp).getTime() : index}`;
             return {
               id: stableId,
@@ -329,6 +334,7 @@
               text: msg.content,
               timestamp: msg.timestamp ? new Date(msg.timestamp).getTime() : Date.now(),
               attachments: msg.attachments || [],
+              msg_index: msg.msg_index || 0,
             } as Message;
           });
 
@@ -369,13 +375,13 @@
   $effect(() => {
     if ($agentChatMessage) {
       const { conversation_id, message_id, content, sender_name, sender_node_id, timestamp, role, thinking, streaming_raw,
-              context_estimated, history_tokens, tokens_limit } = $agentChatMessage;
+              msg_index, context_estimated, history_tokens, tokens_limit } = $agentChatMessage;
 
       untrack(() => {
         chatHistories.update(map => {
           const newMap = new Map(map);
           const existing = newMap.get(conversation_id) || [];
-          const { sender, senderName } = mapMessageSender({ role, sender_node_id, sender_name }, conversation_id, getPeerDisplayName(conversation_id));
+          const { sender, senderName } = mapMessageSender({ role, sender_node_id, sender_name }, conversation_id, getAgentName(conversation_id));
           const stableId = message_id || `${sender}-${timestamp ? new Date(timestamp).getTime() : Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
           const newMsg: Message = {
             id: stableId,
@@ -384,6 +390,7 @@
             text: content,
             timestamp: timestamp ? new Date(timestamp).getTime() : Date.now(),
             attachments: [],
+            msg_index: msg_index || 0,
             thinking: thinking || undefined,
             streamingRaw: streaming_raw || undefined,
           };

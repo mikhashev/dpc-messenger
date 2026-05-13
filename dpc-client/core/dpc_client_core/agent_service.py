@@ -185,6 +185,8 @@ class AgentService:
                 agent_id = agent.get("agent_id", "")
                 if agent_id:
                     cfg = load_agent_config(agent_id) or {}
+                    if cfg.get("name"):
+                        agent["name"] = cfg["name"]
                     if cfg.get("compute_host"):
                         agent["compute_host"] = cfg["compute_host"]
 
@@ -764,3 +766,136 @@ class AgentService:
     def _get_iso_timestamp(self) -> str:
         """Get current timestamp in ISO format."""
         return datetime.now(timezone.utc).isoformat()
+
+    async def get_agent_model_config(self, agent_id: str, providers_getter) -> Dict[str, Any]:
+        """Get per-agent model configuration (Main LLM + Sleep LLM)."""
+        try:
+            from dpc_client_core.dpc_agent.utils import load_agent_config, AgentRegistry
+            registry = AgentRegistry()
+            if not registry.get_agent(agent_id):
+                return {"status": "error", "message": f"Agent not found: {agent_id}"}
+            config = load_agent_config(agent_id)
+            providers_data = await providers_getter()
+            return {
+                "status": "ok",
+                "agent_id": agent_id,
+                "provider_alias": config.get("provider_alias"),
+                "sleep_provider_alias": config.get("sleep_provider_alias"),
+                "providers": providers_data.get("providers", []),
+                "default_provider": providers_data.get("default_provider", ""),
+            }
+        except Exception as e:
+            logger.error("get_agent_model_config failed: %s", e, exc_info=True)
+            return {"status": "error", "message": str(e)}
+
+    async def save_agent_model_config(
+        self, agent_id: str,
+        provider_alias: str = None,
+        sleep_provider_alias: str = None,
+        providers_getter=None,
+    ) -> Dict[str, Any]:
+        """Save per-agent model configuration (Main LLM + Sleep LLM)."""
+        try:
+            from dpc_client_core.dpc_agent.utils import load_agent_config, save_agent_config, AgentRegistry
+            registry = AgentRegistry()
+            if not registry.get_agent(agent_id):
+                return {"status": "error", "message": f"Agent not found: {agent_id}"}
+            config = load_agent_config(agent_id)
+            if provider_alias is not None:
+                config["provider_alias"] = provider_alias
+                registry.update_agent(agent_id, {"provider_alias": provider_alias})
+            if sleep_provider_alias is not None:
+                config["sleep_provider_alias"] = sleep_provider_alias
+            save_agent_config(agent_id, config)
+            providers_data = await providers_getter() if providers_getter else {"providers": [], "default_provider": ""}
+            return {
+                "status": "ok",
+                "agent_id": agent_id,
+                "provider_alias": config.get("provider_alias"),
+                "sleep_provider_alias": config.get("sleep_provider_alias"),
+                "providers": providers_data.get("providers", []),
+                "default_provider": providers_data.get("default_provider", ""),
+            }
+        except Exception as e:
+            logger.error("save_agent_model_config failed: %s", e, exc_info=True)
+            return {"status": "error", "message": str(e)}
+
+    # ─────────────────────────────────────────────────────────────
+    # Session archive management
+    # ─────────────────────────────────────────────────────────────
+
+    async def get_session_archive_info(self, conversation_id: str) -> Dict[str, Any]:
+        """Return archive metadata for a conversation's session archive folder."""
+        try:
+            archive_dir = Path.home() / ".dpc" / "conversations" / conversation_id / "archive"
+            if self.firewall:
+                _, max_sessions = self.firewall.get_history_settings(conversation_id)
+            else:
+                max_sessions = 0
+
+            if not archive_dir.exists():
+                return {
+                    "status": "success",
+                    "conversation_id": conversation_id,
+                    "count": 0,
+                    "max_sessions": max_sessions,
+                    "archive_path": str(archive_dir),
+                    "sessions": [],
+                }
+
+            archives = sorted(archive_dir.rglob("*_session.json"))
+            sessions = []
+            for p in archives:
+                try:
+                    data = json.loads(p.read_text(encoding="utf-8"))
+                    sessions.append({
+                        "filename": p.name,
+                        "archived_at": data.get("archived_at", ""),
+                        "reason": data.get("session_reason", ""),
+                        "message_count": data.get("message_count", 0),
+                    })
+                except Exception:
+                    sessions.append({"filename": p.name, "archived_at": "", "reason": "", "message_count": 0})
+
+            return {
+                "status": "success",
+                "conversation_id": conversation_id,
+                "count": len(archives),
+                "max_sessions": max_sessions,
+                "archive_path": str(archive_dir),
+                "sessions": sessions,
+            }
+        except Exception as e:
+            logger.error("Error getting session archive info: %s", e, exc_info=True)
+            return {"status": "error", "message": str(e)}
+
+    async def clear_session_archives(self, conversation_id: str, keep_latest: int = 0) -> Dict[str, Any]:
+        """Delete archived sessions, optionally keeping the most recent N."""
+        try:
+            archive_dir = Path.home() / ".dpc" / "conversations" / conversation_id / "archive"
+
+            if not archive_dir.exists():
+                return {"status": "success", "deleted_count": 0, "remaining": 0}
+
+            archives = sorted(archive_dir.rglob("*_session.json"))
+            keep_latest = max(0, int(keep_latest))
+            to_delete = archives[: max(0, len(archives) - keep_latest)]
+
+            deleted = 0
+            for p in to_delete:
+                try:
+                    p.unlink()
+                    deleted += 1
+                    try:
+                        p.parent.rmdir()
+                    except OSError:
+                        pass
+                except Exception as e:
+                    logger.warning("Failed to delete archive %s: %s", p.name, e)
+
+            remaining = len(archives) - deleted
+            logger.info("Cleared %d archives for %s (%d remaining)", deleted, conversation_id, remaining)
+            return {"status": "success", "deleted_count": deleted, "remaining": remaining}
+        except Exception as e:
+            logger.error("Error clearing session archives: %s", e, exc_info=True)
+            return {"status": "error", "message": str(e)}

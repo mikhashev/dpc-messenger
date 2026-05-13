@@ -183,6 +183,18 @@ def generate_smart_index(knowledge_dir: pathlib.Path) -> str:
 # Embedding Provider (ADR-010, MEM-3.1)
 # ---------------------------------------------------------------------------
 
+_singleton_providers: Dict[str, "EmbeddingProvider"] = {}
+_singleton_lock = threading.Lock()
+
+
+def get_embedding_provider(model_name: str = "BAAI/bge-m3", **kwargs) -> "EmbeddingProvider":
+    """Return a singleton EmbeddingProvider per model_name to avoid duplicate GPU loads."""
+    with _singleton_lock:
+        if model_name not in _singleton_providers:
+            _singleton_providers[model_name] = EmbeddingProvider(model_name=model_name, **kwargs)
+        return _singleton_providers[model_name]
+
+
 class EmbeddingProvider:
     """Lazy-loading embedding provider. BGE-M3 via sentence-transformers + PyTorch."""
 
@@ -216,12 +228,6 @@ class EmbeddingProvider:
         with self._load_lock:
             if self._model is not None:
                 return
-            if os.environ.get("HF_HUB_ENABLE_HF_TRANSFER") == "1":
-                try:
-                    import hf_transfer  # noqa: F401
-                except ImportError:
-                    os.environ["HF_HUB_ENABLE_HF_TRANSFER"] = "0"
-                    log.info("Disabled HF_HUB_ENABLE_HF_TRANSFER (hf_transfer not installed)")
             from sentence_transformers import SentenceTransformer
             import torch
             kwargs = {"device": self.device}

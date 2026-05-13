@@ -22,6 +22,7 @@ export const groupUpdated = writable<GroupChat | null>(null);
 export const groupMemberLeft = writable<GroupMemberLeftEvent | null>(null);
 export const groupDeleted = writable<GroupDeletedEvent | null>(null);
 export const groupHistorySynced = writable<GroupHistorySyncedEvent | null>(null);
+export const tokenUsageUpdated = writable<{conversation_id: string; tokens_used: number; token_limit: number; history_tokens: number; context_estimated: number} | null>(null);
 
 // --- Command functions ---
 type SendCommandFn = (command: string, payload?: any) => Promise<any> | boolean;

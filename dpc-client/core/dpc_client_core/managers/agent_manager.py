@@ -56,6 +56,7 @@ class DpcAgentManager:
         self.service = service
         self.config = config
         self.agent_id = agent_id  # Store agent_id for per-agent configuration
+        self._agent_display_name: str | None = None  # Cached display name from config.json
         self._stop_event = threading.Event()
 
         # Get firewall reference from CoreService
@@ -74,11 +75,31 @@ class DpcAgentManager:
         # Telegram bridge for notifications
         self._telegram_bridge = None
 
+        # Eagerly load display name from config.json
+        self._agent_display_name = self._load_display_name()
+
         # Conversation monitors for agent sessions (reuse existing ConversationMonitor)
         # Key: conversation_id, Value: ConversationMonitor instance
         self._agent_monitors: Dict[str, ConversationMonitor] = {}
 
+        # Per-agent daily quota (ADR-022 Task 07)
+        self._daily_tokens_used: int = 0
+        self._daily_tokens_date: str = ""
+
         log.info(f"DpcAgentManager initialized (agent_id={agent_id or 'singleton'}) with storage at {self.agent_root}")
+
+    def _load_display_name(self) -> str:
+        """Read agent display name from config.json, fall back to agent_id."""
+        if not self.agent_id:
+            return "DPC Agent"
+        try:
+            from dpc_client_core.dpc_agent.utils import load_agent_config
+            cfg = load_agent_config(self.agent_id)
+            if cfg and cfg.get("name"):
+                return cfg["name"]
+        except Exception:
+            pass
+        return self.agent_id
 
     @property
     def agent(self) -> DpcAgent:
@@ -119,8 +140,10 @@ class DpcAgentManager:
             raise RuntimeError("CoreService does not have llm_manager")
 
         # Build agent config
+        raw_budget = self.config.get("budget_usd", 500_000)
+        budget = raw_budget if raw_budget >= 1000 else 500_000
         agent_config = AgentConfig(
-            budget_usd=self.config.get("budget_usd", 50.0),
+            budget_usd=budget,
             max_rounds=self.config.get("max_rounds", 200),
             enable_task_queue=False,
             billing_model=self.config.get("billing_model", "subscription"),
@@ -171,8 +194,10 @@ class DpcAgentManager:
             else None
         )
 
+        raw_budget = self.config.get("budget_usd", 500_000)
+        budget = raw_budget if raw_budget >= 1000 else 500_000
         agent_config = AgentConfig(
-            budget_usd=self.config.get("budget_usd", 50.0),
+            budget_usd=budget,
             max_rounds=self.config.get("max_rounds", 200),
             enable_task_queue=self.config.get("enable_task_queue", True),
             billing_model=self.config.get("billing_model", "subscription"),
@@ -237,14 +262,15 @@ class DpcAgentManager:
                         """Runs in thread executor to avoid blocking the event loop."""
                         try:
                             import numpy as np
+                            import hashlib
                             from pathlib import Path
                             import os
-                            from dpc_client_core.dpc_agent.memory import EmbeddingProvider
+                            from dpc_client_core.dpc_agent.memory import get_embedding_provider
                             from dpc_client_core.dpc_agent.faiss_index import FaissIndex
                             from dpc_client_core.dpc_agent.bm25_index import BM25Index
                             from dpc_client_core.dpc_agent.text_extract import extract_text
                             from dpc_client_core.dpc_agent.indexing_pipeline import _extract_heading, _build_doc_text
-                            provider = _provider_ref or EmbeddingProvider(model_name=_actual_model)
+                            provider = _provider_ref or get_embedding_provider(model_name=_actual_model)
                             faiss_idx = FaissIndex(index_dir, model_name=_actual_model, dimensions=provider.dimensions)
                             bm25_idx = BM25Index(index_dir)
 
@@ -260,7 +286,7 @@ class DpcAgentManager:
                             extra_metas = []
 
                             # L6: human knowledge (always re-index, not just on full rebuild)
-                            if self.firewall and self.firewall.can_agent_access_context('knowledge'):
+                            if self.firewall and self.firewall.can_agent_access_context('knowledge', profile_name=self.agent_id):
                                 l6_dir = Path(os.environ.get("DPC_HOME", Path.home() / ".dpc")) / "knowledge"
                                 if l6_dir.is_dir():
                                     for f in sorted(l6_dir.iterdir()):
@@ -302,25 +328,82 @@ class DpcAgentManager:
                                 except Exception as e:
                                     log.debug("Extended paths indexing skipped: %s", e)
 
-                            # Embed + index extra documents one at a time (whole-doc, no batching)
+                            # Hash-based staleness check: skip re-embedding if sources AND content unchanged
+                            source_fingerprint = hashlib.sha256(
+                                "\n".join(sorted(m.get("source_file", "") for m in extra_metas)).encode()
+                            ).hexdigest()[:16]
+                            content_fingerprint = hashlib.sha256(
+                                "\n".join(extra_texts).encode()
+                            ).hexdigest()[:16]
+                            extra_hash = f"{l6_count}:{ext_count}:{source_fingerprint}:{content_fingerprint}"
+
+                            stored_extra_hash = ""
+                            meta_path = index_dir / "index_meta.json"
+                            if meta_path.exists() and not needs_full_rebuild:
+                                try:
+                                    import json as _json2
+                                    _stored = _json2.loads(meta_path.read_text(encoding="utf-8"))
+                                    stored_extra_hash = _stored.get("extra_hash", "")
+                                except Exception:
+                                    pass
+
+                            if stored_extra_hash == extra_hash and not needs_full_rebuild and extra_texts:
+                                faiss_idx.load()
+                                bm25_idx.load()
+                                log.info("Extra index unchanged (hash=%s), skipping re-embed of %d docs", extra_hash, len(extra_texts))
+                                extra_texts = []
+
+                            # Embed + index extra documents in batches
+                            BATCH_SIZE = 4
                             if extra_texts:
-                                for doc_text, meta in zip(extra_texts, extra_metas):
+                                indexed = 0
+                                for batch_start in range(0, len(extra_texts), BATCH_SIZE):
                                     if self._stop_event.is_set():
-                                        log.info("Extra indexing interrupted by shutdown")
+                                        log.info("Extra indexing interrupted by shutdown at batch %d/%d", batch_start, len(extra_texts))
                                         break
-                                    vector = np.array(provider.embed(doc_text), dtype=np.float32).reshape(1, -1)
-                                    faiss_idx.add(vector, [meta])
-                                bm25_idx.add(extra_texts, extra_metas)
-                                log.info("Bulk indexed %d extra documents (L6: %d, EXT: %d)", len(extra_texts), l6_count, ext_count)
+                                    batch_texts = extra_texts[batch_start:batch_start + BATCH_SIZE]
+                                    batch_metas = extra_metas[batch_start:batch_start + BATCH_SIZE]
+                                    vectors = np.array(provider.embed_batch(batch_texts), dtype=np.float32)
+                                    for vec, meta in zip(vectors, batch_metas):
+                                        faiss_idx.add(vec.reshape(1, -1), [meta])
+                                        indexed += 1
+                                if not self._stop_event.is_set():
+                                    bm25_idx.add(extra_texts, extra_metas)
+                                    log.info("Bulk indexed %d extra documents (L6: %d, EXT: %d)", len(extra_texts), l6_count, ext_count)
+                                else:
+                                    log.info("Extra indexing interrupted by shutdown before BM25")
 
                             if needs_full_rebuild or extra_texts:
                                 faiss_idx.save()
                                 bm25_idx.save()
+                                # Persist extra_hash for staleness detection on next startup
+                                try:
+                                    import json as _json3
+                                    _mp = index_dir / "index_meta.json"
+                                    _md = _json3.loads(_mp.read_text(encoding="utf-8")) if _mp.exists() else {}
+                                    _md["extra_hash"] = extra_hash
+                                    _mp.write_text(_json3.dumps(_md, ensure_ascii=False, indent=2), encoding="utf-8")
+                                except Exception as _e:
+                                    log.debug("Failed to save extra_hash: %s", _e)
                             if needs_full_rebuild:
                                 total = count + l6_count + ext_count
                                 log.info("Memory index built: %d documents (L5: %d, L6: %d, EXT: %d)", total, count, l6_count, ext_count)
                             elif ext_count > 0:
                                 log.info("Extended paths re-indexed on startup: %d documents", ext_count)
+                            # ADR-024: Build knowledge graph (nodes + structural edges)
+                            try:
+                                from dpc_client_core.dpc_agent.knowledge_graph import KnowledgeGraph
+                                _kg = KnowledgeGraph(agent_root)
+                                _kg.bulk_import_knowledge_files(knowledge_dir)
+                                if self.firewall and self.firewall.can_agent_access_context('knowledge', profile_name=self.agent_id):
+                                    _l6_dir = Path(os.environ.get("DPC_HOME", Path.home() / ".dpc")) / "knowledge"
+                                    _kg.bulk_import_knowledge_files(_l6_dir)
+                                _archive_dir = Path(os.environ.get("DPC_HOME", Path.home() / ".dpc")) / "conversations" / (self.agent_id or "agent_001") / "archive"
+                                _kg.extract_structural_edges(knowledge_dir, _archive_dir if _archive_dir.exists() else None)
+                                log.info("Knowledge graph built: %d nodes, %d edges", _kg.backend.node_count(), _kg.backend.edge_count())
+                            except Exception as e:
+                                log.warning("Knowledge graph build failed (non-fatal): %s", e)
+
                         except Exception as e:
                             log.warning("Background memory indexing failed: %s", e)
 
@@ -354,7 +437,7 @@ class DpcAgentManager:
                     monitor = self._get_or_create_agent_monitor(self.agent_id)
                     if monitor:
                         from datetime import datetime, timezone
-                        monitor.add_message("assistant", chat_text, sender_name=self.agent_id, timestamp=datetime.now(timezone.utc).isoformat())
+                        monitor.add_message("assistant", chat_text, sender_name=self._agent_display_name or self.agent_id, timestamp=datetime.now(timezone.utc).isoformat())
                         monitor.save_history()
                         _brief["consumed"] = True
                         _brief_path.write_text(_json.dumps(_brief, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -575,6 +658,8 @@ class DpcAgentManager:
         # When set, injected into ToolContext so schedule_task auto-fills
         # _reply_telegram_chat_id in task data for later result delivery.
         telegram_chat_id: Optional[str] = None,
+        # Source of the message for tool filtering (discord, telegram_public, etc.)
+        message_source: Optional[str] = None,
         # When True, don't save user message to history (already saved by caller)
         _skip_history: bool = False,
     ) -> str:
@@ -611,6 +696,11 @@ class DpcAgentManager:
         # Get or create ConversationMonitor for this agent conversation (reuse existing)
         monitor = self._get_or_create_agent_monitor(conversation_id)
 
+        # Reload history from disk for group conversations so the agent sees
+        # messages added by other monitors (service.py, group_handler, CC bridge).
+        if conversation_id.startswith("group-"):
+            monitor.load_history()
+
         # Track user message in monitor (skip when caller already saved it, e.g. CC chain trigger)
         if not _skip_history:
             node_id = getattr(self.service.p2p_manager, "node_id", "local-user")
@@ -623,15 +713,11 @@ class DpcAgentManager:
             )
             monitor.save_history()  # Save to disk immediately
 
-            # Update context_estimated immediately so UI counter reflects user message (#4)
-            # Token stats will be included in Ark's response via get_session_state()
-            user_tokens = len(message) // 4
-            old_estimate = getattr(monitor, '_last_context_estimated', 0)
-            if old_estimate:
-                monitor._last_context_estimated = old_estimate + user_tokens
+            # context_estimated is updated after each LLM response (lines 778-786)
+            # from accurate token counts. No additive increment here — it caused
+            # cumulative drift (63% claimed vs 14% actual after 40 messages).
 
-        # Use agent_id as sender name for better identification in chat UI
-        agent_display_name = self.agent_id or "DPC Agent"
+        agent_display_name = self._agent_display_name or self.agent_id or "DPC Agent"
 
         # Get DPC context if requested
         dpc_context = None
@@ -670,6 +756,17 @@ class DpcAgentManager:
             # Phase 3: Get provider-specific agent if agent_llm_provider is specified
             agent = self._get_or_create_agent_for_provider(agent_llm_provider) if agent_llm_provider else self.agent
 
+            # ADR-022 Task 07: per-agent daily quota check
+            quota_limit = self.config.get("quota_tokens_per_day", 0)
+            if quota_limit > 0:
+                from datetime import datetime, timezone
+                today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+                if self._daily_tokens_date != today:
+                    self._daily_tokens_used = 0
+                    self._daily_tokens_date = today
+                if self._daily_tokens_used >= quota_limit:
+                    return f"⚠️ Agent quota exceeded ({self._daily_tokens_used:,}/{quota_limit:,} tokens today). Reset at midnight UTC."
+
             try:
                 response = await agent.process(
                     message=message,
@@ -685,9 +782,13 @@ class DpcAgentManager:
                     image_mime=image_mime,
                     image_caption=image_caption,
                     reply_telegram_chat_id=telegram_chat_id,
+                    message_source=message_source,
                 )
             finally:
-                pass
+                # ADR-022 Task 07: update daily token counter
+                last_usage = getattr(agent, '_last_usage', None)
+                if last_usage and quota_limit:
+                    self._daily_tokens_used += last_usage.get("total_tokens", 0)
 
             # Track agent response in monitor.
             # Always save if there's content, thinking, or streaming_raw — the UI
@@ -815,13 +916,13 @@ class DpcAgentManager:
         context = {}
         dpc_dir = pathlib.Path.home() / ".dpc"
 
-        # Check if agent is enabled via firewall
-        if self.firewall and not self.firewall.dpc_agent_enabled:
-            log.debug("DPC Agent is disabled via firewall rules")
+        # Check if agent is enabled via firewall (per-agent profile takes precedence)
+        if self.firewall and not self.firewall.get_agent_enabled(self.agent_id):
+            log.debug("DPC Agent is disabled via firewall rules (profile=%s)", self.agent_id or 'global')
             return context
 
         # Load personal context (with firewall check)
-        if self.firewall is None or self.firewall.can_agent_access_context('personal'):
+        if self.firewall is None or self.firewall.can_agent_access_context('personal', profile_name=self.agent_id):
             personal_path = dpc_dir / "personal.json"
             if personal_path.exists():
                 try:
@@ -833,7 +934,7 @@ class DpcAgentManager:
             log.debug("Personal context access denied by firewall")
 
         # Load device context (with firewall check)
-        if self.firewall is None or self.firewall.can_agent_access_context('device'):
+        if self.firewall is None or self.firewall.can_agent_access_context('device', profile_name=self.agent_id):
             device_path = dpc_dir / "device_context.json"
             if device_path.exists():
                 try:
@@ -870,7 +971,7 @@ class DpcAgentManager:
                 },
                 {
                     "node_id": self.agent_id or "dpc-agent",
-                    "name": self.agent_id or "DPC Agent",
+                    "name": self._agent_display_name or self.agent_id or "DPC Agent",
                     "context": "agent"
                 }
             ]
@@ -905,6 +1006,18 @@ class DpcAgentManager:
                 # in-memory session and miss all historical context.
                 monitor.rebuild_extraction_buffers_from_history()
 
+            if llm_manager:
+                stored_cw = self.config.get("context_window")
+                if stored_cw:
+                    monitor.set_token_limit(int(stored_cw))
+                else:
+                    provider_alias = self.config.get("provider_alias", "")
+                    if provider_alias and provider_alias in llm_manager.providers:
+                        model = llm_manager.providers[provider_alias].model
+                        cw = llm_manager.get_context_window(model)
+                        if cw:
+                            monitor.set_token_limit(cw)
+
             self._agent_monitors[conversation_id] = monitor
             log.debug(f"Created ConversationMonitor for agent conversation: {conversation_id}")
 
@@ -924,18 +1037,19 @@ class DpcAgentManager:
             Dict with tokens_used, tokens_limit, usage_percent, messages_count
         """
         monitor = self._agent_monitors.get(conversation_id)
+        config_cw = int(self.config.get("context_window", 0)) or 0
         if not monitor:
             return {
                 "tokens_used": 0,
-                "tokens_limit": 128000,
+                "tokens_limit": config_cw or 204800,
                 "usage_percent": 0,
                 "messages_count": 0,
             }
 
         usage = monitor.get_token_usage()
-        token_limit = usage.get("token_limit", 128000)
+        token_limit = usage.get("token_limit") or config_cw or 204800
         history_tokens = usage.get("tokens_used", 0)
-        context_estimated = getattr(monitor, '_last_context_estimated', 0)
+        context_estimated = monitor._last_context_estimated
         return {
             # Conversation history only (user+assistant text ÷ 4).
             # Same basis as the token counter shown in the UI.
@@ -987,18 +1101,7 @@ class DpcAgentManager:
         """
         if not self.firewall:
             return True, 0
-        preserve = getattr(self.firewall, "history_preserve_on_reset", True)
-        max_sessions = getattr(self.firewall, "history_max_archived_sessions", 0)
-        # Per-agent profile override
-        if self.agent_id:
-            profile = self.firewall.rules.get("agent_profiles", {}).get(self.agent_id, {})
-            if profile:
-                hist = profile.get("history", {})
-                if "preserve_on_reset" in hist:
-                    preserve = hist["preserve_on_reset"]
-                if "max_archived_sessions" in hist:
-                    max_sessions = max(0, int(hist["max_archived_sessions"]))
-        return preserve, max_sessions
+        return self.firewall.get_history_settings(self.agent_id)
 
     def _emit_progress(
         self,
@@ -1041,7 +1144,7 @@ class DpcAgentManager:
             "initialized": self._agent is not None,
             "agent_root": str(self.agent_root),
             "config": {
-                "budget_usd": self.config.get("budget_usd", 50.0),
+                "budget_usd": self.config.get("budget_usd", 500_000),
                 "max_rounds": self.config.get("max_rounds", 200),
                 "tools": self.config.get("tools", []),
             },

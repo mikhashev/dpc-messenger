@@ -20,6 +20,7 @@
     getPeerDisplayName,
     onUpdateTokenUsage,
     hasTokenUsage,
+    selfNodeId = "",
   }: {
     activeChatId: string;
     chatHistories: Writable<Map<string, any[]>>;
@@ -29,6 +30,7 @@
     getPeerDisplayName: (id: string) => string;
     onUpdateTokenUsage: (chatId: string, usage: { used: number; limit: number; historyTokens?: number; contextEstimated?: number }) => void;
     hasTokenUsage: (chatId: string) => boolean;
+    selfNodeId?: string;
   } = $props();
 
   // ---------------------------------------------------------------------------
@@ -84,13 +86,18 @@
                   }
 
                   const stableId = msg.message_id || `backend-${index}-${Date.now()}`;
+                  const isAgent = msg.sender_type === 'agent' || msg.is_agent || false;
+                  const isLocalHuman = msg.sender_type === 'human' && (!msg.sender_node_id || msg.sender_node_id === selfNodeId);
                   return {
                     id: stableId,
-                    sender: sender,
-                    senderName: senderName,
+                    sender: isLocalHuman ? 'user' : sender,
+                    senderName: isLocalHuman ? 'You' : senderName,
                     text: msg.content,
                     timestamp: timestamp,
-                    attachments: msg.attachments || []
+                    attachments: msg.attachments || [],
+                    isAgent: isAgent,
+                    agentOwner: msg.agent_owner || null,
+                    msg_index: msg.msg_index || 0,
                   };
                 });
                 // Populate processedMessageIds so real-time events for these messages are deduped

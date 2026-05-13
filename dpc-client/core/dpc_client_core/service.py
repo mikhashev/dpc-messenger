@@ -265,6 +265,17 @@ class CoreService:
         self.telegram_manager = self.telegram_service.telegram_manager if self.telegram_service else None
         self.telegram_bridge = self.telegram_service.telegram_bridge if self.telegram_service else None
 
+        # Discord bot integration (ADR-025)
+        try:
+            from .discord_service import DiscordService
+            self.discord_service = DiscordService(
+                core_service_ref=self,
+                settings=self.settings,
+            )
+        except Exception as e:
+            logger.error("DiscordService init failed, continuing without Discord: %s", e)
+            self.discord_service = None
+
         # Group chat manager (v0.19.0)
         self.group_manager = GroupManager(Path.home() / ".dpc", self.p2p_manager.node_id)
         self.group_manager.load_from_disk()
@@ -618,6 +629,36 @@ class CoreService:
         else:
             logger.info("Knowledge integrity verified (%d commits)", verified_count)
 
+    async def _eager_agent_index_rebuild(self):
+        """Scan all agents with memory.enabled=true and trigger index rebuild on startup."""
+        from pathlib import Path
+        import json as _json
+        agents_dir = Path.home() / ".dpc" / "agents"
+        if not agents_dir.is_dir():
+            logger.debug("Eager index rebuild: agents dir %s not found", agents_dir)
+            return
+        dpc_provider = self.llm_manager.providers.get("dpc_agent")
+        if not dpc_provider or not hasattr(dpc_provider, '_ensure_manager'):
+            logger.debug("Eager index rebuild: dpc_agent provider not available (provider=%s)", type(dpc_provider).__name__ if dpc_provider else None)
+            return
+        logger.info("Eager index rebuild: scanning %s for agents with memory.enabled=true", agents_dir)
+        for agent_dir in sorted(agents_dir.iterdir()):
+            if not agent_dir.is_dir() or agent_dir.name.startswith('.'):
+                continue
+            config_path = agent_dir / "config.json"
+            if not config_path.exists():
+                continue
+            try:
+                agent_id = agent_dir.name
+                profile = self.firewall.get_agent_profile_settings(agent_id) if self.firewall else {}
+                memory_cfg = profile.get("memory", {})
+                if not memory_cfg.get("enabled", False):
+                    continue
+                logger.info("Eager index rebuild: initializing agent %s", agent_id)
+                await dpc_provider._ensure_manager(agent_id=agent_id)
+            except Exception as e:
+                logger.warning("Eager index rebuild failed for %s: %s", agent_dir.name, e)
+
     async def start(self):
         """Starts all background services and runs indefinitely."""
         if self._is_running:
@@ -767,6 +808,16 @@ class CoreService:
             if telegram_task:
                 self._background_tasks.add(telegram_task)
 
+        # Start Discord bot integration (ADR-025)
+        if self.discord_service:
+            logger.info("Starting Discord bot integration...")
+            discord_task = await self.discord_service.start()
+            if discord_task:
+                self._background_tasks.add(discord_task)
+
+        # Eager agent index rebuild for all agents with memory.enabled=true
+        await self._eager_agent_index_rebuild()
+
         # Try to connect to Hub for WebRTC signaling (with graceful degradation)
         hub_connected = False
 
@@ -870,6 +921,14 @@ class CoreService:
         if saved_count > 0:
             logger.info("Saved %d group chat histories to disk", saved_count)
 
+        # Stop agent manager early (sets _stop_event to interrupt indexing threads)
+        dpc_provider = self.llm_manager.providers.get("dpc_agent")
+        if dpc_provider:
+            for mgr in dpc_provider._managers.values() if hasattr(dpc_provider, '_managers') else []:
+                if hasattr(mgr, 'stop'):
+                    await mgr.stop()
+                    logger.info("Agent manager stopped (indexing interrupted)")
+
         # Shutdown Phase 6 managers
         if hasattr(self, 'dht_manager'):
             logger.info("Stopping DHT Manager...")
@@ -887,6 +946,11 @@ class CoreService:
         if hasattr(self, 'telegram_service') and self.telegram_service:
             logger.info("Stopping Telegram bot...")
             await self.telegram_service.stop()
+
+        # Shutdown Discord bot integration (ADR-025)
+        if hasattr(self, 'discord_service') and self.discord_service:
+            logger.info("Stopping Discord bot...")
+            await self.discord_service.stop()
 
         # Unload Whisper model if loaded (free VRAM before shutdown)
         try:
@@ -1276,6 +1340,41 @@ class CoreService:
         # Clear history request tracking for this peer
         # This allows us to request history again when they reconnect
         self._history_requested_peers.discard(peer_id)
+
+        # Schedule auto-reconnect if peer is in a node group (known peer)
+        if hasattr(self, 'connection_orchestrator') and self.connection_orchestrator:
+            node_groups = getattr(self.firewall, 'node_groups', {})
+            is_known = any(peer_id in ids for ids in node_groups.values())
+            if is_known:
+                task = asyncio.create_task(self._auto_reconnect_peer(peer_id))
+                task.set_name(f"reconnect_{peer_id[:16]}")
+                self._background_tasks.add(task)
+
+    async def _auto_reconnect_peer(self, peer_id: str, max_attempts: int = 5):
+        """Auto-reconnect to a known peer after disconnect with exponential backoff."""
+        for attempt in range(1, max_attempts + 1):
+            if not self._is_running:
+                return
+            if peer_id in self.p2p_manager.peers:
+                return
+            delay = min(2 ** attempt, 60)
+            logger.info("Reconnect attempt %d/%d for %s in %ds", attempt, max_attempts, peer_id[:20], delay)
+            await self.local_api.broadcast_event("peer_reconnecting", {
+                "node_id": peer_id, "attempt": attempt, "max_attempts": max_attempts,
+            })
+            await asyncio.sleep(delay)
+            if peer_id in self.p2p_manager.peers:
+                return
+            try:
+                await self.connection_orchestrator.connect(peer_id)
+                logger.info("Reconnected to %s on attempt %d", peer_id[:20], attempt)
+                await self.local_api.broadcast_event("peer_reconnected", {
+                    "node_id": peer_id, "attempt": attempt,
+                })
+                return
+            except Exception as e:
+                logger.debug("Reconnect attempt %d failed for %s: %s", attempt, peer_id[:20], e)
+        logger.warning("Gave up reconnecting to %s after %d attempts", peer_id[:20], max_attempts)
 
     # --- High-level methods (API for the UI) ---
 
@@ -1994,174 +2093,16 @@ class CoreService:
     # --- Knowledge Architecture Command Handlers ---
 
     async def get_personal_context(self) -> Dict[str, Any]:
-        """Load and return personal context for UI display.
-
-        UI Integration: Called when user opens ContextViewer component.
-        Returns the full v2.0 PersonalContext with all metadata.
-
-        Loads knowledge from markdown files when markdown_file is set (v2.0 schema).
-        """
-        try:
-            import hashlib
-            from dpc_protocol.markdown_manager import MarkdownKnowledgeManager
-
-            # Load JSON
-            context = self.pcm_core.load_context()
-
-            # Load knowledge from markdown files
-            markdown_manager = MarkdownKnowledgeManager()
-
-            for topic_name, topic in context.knowledge.items():
-                if topic.markdown_file:
-                    filepath = DPC_HOME_DIR / topic.markdown_file
-
-                    if filepath.exists():
-                        # Parse markdown with frontmatter
-                        frontmatter, content = markdown_manager.parse_markdown_with_frontmatter(filepath)
-
-                        # Verify integrity
-                        if 'content_hash' in frontmatter:
-                            actual_hash = hashlib.sha256(content.encode('utf-8')).hexdigest()[:16]
-                            if actual_hash != frontmatter['content_hash']:
-                                logger.warning(
-                                    "Content hash mismatch for %s: %s",
-                                    topic_name,
-                                    frontmatter['commit_id']
-                                )
-
-                        # Convert markdown to entries
-                        entries = markdown_manager.markdown_to_entries(content)
-                        topic.entries = entries  # In-memory only
-                    else:
-                        logger.warning("Markdown file not found: %s", topic.markdown_file)
-
-            return {
-                "status": "success",
-                "context": asdict(context)
-            }
-        except Exception as e:
-            logger.error("Error loading personal context: %s", e, exc_info=True)
-            return {
-                "status": "error",
-                "message": str(e)
-            }
+        """Delegated to KnowledgeService."""
+        return await self.knowledge_service.get_personal_context()
 
     async def save_personal_context(self, context_dict: Dict[str, Any]) -> Dict[str, Any]:
-        """Save updated personal context from UI editor.
-
-        UI Integration: Called when user clicks 'Save' in ContextViewer.
-
-        Args:
-            context_dict: Dictionary representation of PersonalContext
-
-        Returns:
-            Dict with status and message
-        """
-        try:
-            from dpc_protocol.pcm_core import PersonalContext
-            from datetime import datetime, timezone
-
-            # Load current context to preserve metadata
-            current = self.pcm_core.load_context()
-
-            # Ensure current is a PersonalContext object, not a dict
-            if isinstance(current, dict):
-                current = PersonalContext.from_dict(current)
-
-            # Update fields from the editor
-            # Note: We're doing a simple update here. For production, you might want
-            # more sophisticated merging logic
-            if "profile" in context_dict:
-                current.profile.__dict__.update(context_dict["profile"])
-
-            if "knowledge" in context_dict:
-                # For knowledge, we need to be more careful with the structure
-                # This is a simplified version - full implementation would handle topics properly
-                pass  # Knowledge editing is complex, leave for future enhancement
-
-            # Update timestamp (metadata might be a dict)
-            if isinstance(current.metadata, dict):
-                current.metadata['last_updated'] = datetime.now(timezone.utc).isoformat()
-            else:
-                current.metadata.last_updated = datetime.now(timezone.utc).isoformat()
-
-            # Save to disk
-            self.pcm_core.save_context(current)
-
-            # Reload in P2PManager if it exists
-            if hasattr(self, 'p2p_manager') and self.p2p_manager:
-                self.p2p_manager.local_context = current
-                # Also update display name cache for HELLO messages
-                if current.profile and current.profile.name:
-                    self.p2p_manager.set_display_name(current.profile.name)
-                    # Notify all connected peers of the name change
-                    logger.info("Notifying connected peers of name change")
-                    await self._notify_peers_of_name_change(current.profile.name)
-
-            # Phase 7: Compute new context hash after saving
-            new_context_hash = self._compute_context_hash()
-
-            # Emit event to UI with new hash (Phase 7: for status indicators)
-            await self.local_api.broadcast_event("personal_context_updated", {
-                "message": "Personal context saved successfully",
-                "context_hash": new_context_hash
-            })
-
-            # Phase 7: Broadcast CONTEXT_UPDATED to all connected peers
-            # This notifies peers to invalidate their cache and re-fetch on next query
-            if hasattr(self, 'p2p_manager') and self.p2p_manager:
-                await self._broadcast_context_updated_to_peers(new_context_hash)
-
-            return {
-                "status": "success",
-                "message": "Personal context saved successfully"
-            }
-
-        except Exception as e:
-            logger.error("Error saving personal context: %s", e, exc_info=True)
-            return {
-                "status": "error",
-                "message": str(e)
-            }
+        """Delegated to KnowledgeService."""
+        return await self.knowledge_service.save_personal_context(context_dict)
 
     async def reload_personal_context(self) -> Dict[str, Any]:
-        """Reload personal context from disk.
-
-        UI Integration: Called when user clicks 'Reload' or when external changes detected.
-
-        Returns:
-            Dict with status, message, and updated context
-        """
-        try:
-            context = self.pcm_core.load_context()
-
-            # Update in P2PManager
-            if hasattr(self, 'p2p_manager') and self.p2p_manager:
-                self.p2p_manager.local_context = context
-                # Also update display name cache for HELLO messages
-                if context.profile and context.profile.name:
-                    self.p2p_manager.set_display_name(context.profile.name)
-                    # Notify all connected peers of the name change
-                    logger.info("Notifying connected peers of name change")
-                    await self._notify_peers_of_name_change(context.profile.name)
-
-            # Emit event to UI
-            await self.local_api.broadcast_event("personal_context_reloaded", {
-                "context": asdict(context)
-            })
-
-            return {
-                "status": "success",
-                "message": "Personal context reloaded from disk",
-                "context": asdict(context)
-            }
-
-        except Exception as e:
-            logger.error("Error reloading personal context: %s", e, exc_info=True)
-            return {
-                "status": "error",
-                "message": str(e)
-            }
+        """Delegated to KnowledgeService."""
+        return await self.knowledge_service.reload_personal_context()
 
     async def get_instructions(self) -> Dict[str, Any]:
         """Load and return all AI instruction sets for UI display (v2.0).
@@ -2480,100 +2421,24 @@ class CoreService:
             }
 
     async def get_available_templates(self) -> Dict[str, Any]:
-        """Get list of available instruction set templates.
-
-        UI Integration: Called to populate template picker dialog.
-
-        Returns:
-            Dict with status and list of templates with metadata
-        """
+        """Get list of available instruction set templates."""
         try:
-            from pathlib import Path
-            import json
-
-            # Get templates directory (go up to dpc-client/core/)
-            templates_dir = Path(__file__).parent.parent / "templates" / "instructions"
-
-            if not templates_dir.exists():
-                logger.warning("Templates directory not found: %s", templates_dir)
-                return {
-                    "status": "success",
-                    "templates": []
-                }
-
-            templates = []
-
-            # Scan for JSON template files (exclude README.md)
-            for template_file in templates_dir.glob("*.json"):
-                try:
-                    with open(template_file, 'r', encoding='utf-8') as f:
-                        template_data = json.load(f)
-
-                    templates.append({
-                        "file": str(template_file),
-                        "filename": template_file.name,
-                        "key": template_file.stem,  # filename without extension
-                        "name": template_data.get("name", template_file.stem),
-                        "description": template_data.get("description", ""),
-                    })
-
-                except Exception as e:
-                    logger.warning("Error reading template %s: %s", template_file, e)
-                    continue
-
-            # Sort templates by name
-            templates.sort(key=lambda t: t["name"])
-
-            return {
-                "status": "success",
-                "templates": templates
-            }
-
+            templates = self.instruction_manager.get_available_templates()
+            return {"status": "success", "templates": templates}
         except Exception as e:
             logger.error("Error listing templates: %s", e, exc_info=True)
-            return {
-                "status": "error",
-                "message": str(e),
-                "templates": []
-            }
+            return {"status": "error", "message": str(e), "templates": []}
 
     async def get_wizard_template(self) -> Dict[str, Any]:
-        """Get wizard template configuration for AI-assisted instruction creation.
-
-        UI Integration: Called when user starts the AI wizard to get question sequence
-        and system instructions.
-
-        Returns:
-            Dict with wizard configuration (system_instruction, question_sequence, etc.)
-        """
+        """Get wizard template configuration for AI-assisted instruction creation."""
         try:
-            from pathlib import Path
-            import json
-
-            # Load wizard template (go up to dpc-client/core/)
-            wizard_file = Path(__file__).parent.parent / "templates" / "wizard_template.json"
-
-            if not wizard_file.exists():
-                logger.error("Wizard template not found: %s", wizard_file)
-                return {
-                    "status": "error",
-                    "message": "Wizard template configuration not found"
-                }
-
-            with open(wizard_file, 'r', encoding='utf-8') as f:
-                wizard_config = json.load(f)
-
-            return {
-                "status": "success",
-                "wizard": wizard_config
-            }
-
+            wizard_config = self.instruction_manager.get_wizard_config()
+            if wizard_config is None:
+                return {"status": "error", "message": "Wizard template configuration not found"}
+            return {"status": "success", "wizard": wizard_config}
         except Exception as e:
             logger.error("Error loading wizard template: %s", e, exc_info=True)
-            return {
-                "status": "error",
-                "message": str(e)
-            }
+            return {"status": "error", "message": str(e)}
 
     async def ai_assisted_instruction_creation(
         self,
@@ -2581,29 +2446,12 @@ class CoreService:
         provider: str = "ollama",
         model: str = None
     ) -> Dict[str, Any]:
-        """Generate instruction set using AI based on user responses.
-
-        UI Integration: Called after wizard collects user's answers to questions.
-        Uses AI to generate a custom instruction set tailored to user's needs.
-
-        Args:
-            user_responses: Dict mapping question IDs to user's answers
-            provider: AI provider to use (ollama, openai, anthropic)
-            model: Model name (optional, uses provider default if not specified)
-
-        Returns:
-            Dict with generated instruction set data or error
-        """
+        """Generate instruction set using AI based on user responses."""
         try:
-            from pathlib import Path
-            import json
+            wizard_config = self.instruction_manager.get_wizard_config()
+            if not wizard_config:
+                return {"status": "error", "message": "Wizard template not found"}
 
-            # Load wizard template for generation prompt (go up to dpc-client/core/)
-            wizard_file = Path(__file__).parent.parent / "templates" / "wizard_template.json"
-            with open(wizard_file, 'r', encoding='utf-8') as f:
-                wizard_config = json.load(f)
-
-            # Build prompt using template
             generation_prompt = wizard_config["generation_prompt_template"].format(
                 use_case=user_responses.get("use_case", "general conversation"),
                 learning_style=user_responses.get("learning_style", "adaptive"),
@@ -2611,102 +2459,35 @@ class CoreService:
                 challenges=user_responses.get("challenges", "none specified"),
                 verification=user_responses.get("verification", "provide reasoning")
             )
-
-            # Add system instruction
-            system_instruction = wizard_config["system_instruction"]
-            full_prompt = f"{system_instruction}\n\n{generation_prompt}"
-
-            # Execute AI query to generate instruction set
-            logger.info("Generating instruction set via AI wizard (provider=%s, model=%s)", provider, model)
+            full_prompt = f"{wizard_config['system_instruction']}\n\n{generation_prompt}"
 
             result = await self.llm_manager.query(
-                prompt=full_prompt,
-                provider_alias=provider,
-                return_metadata=True,
-                model=model,
-                temperature=0.7
+                prompt=full_prompt, provider_alias=provider,
+                return_metadata=True, model=model, temperature=0.7
             )
 
-            # Parse AI response (should be JSON)
             response_text = result.get("response", "")
-
-            # Extract JSON from response (handle markdown code blocks)
-            if "```json" in response_text:
-                # Extract from markdown code block
-                start = response_text.find("```json") + 7
-                end = response_text.find("```", start)
-                json_text = response_text[start:end].strip()
-            elif "```" in response_text:
-                # Generic code block
-                start = response_text.find("```") + 3
-                end = response_text.find("```", start)
-                json_text = response_text[start:end].strip()
-            else:
-                # Assume entire response is JSON
-                json_text = response_text.strip()
-
-            # Parse JSON
             try:
-                instruction_data = json.loads(json_text)
-            except json.JSONDecodeError as e:
-                logger.error("Failed to parse AI response as JSON: %s", e)
-                logger.debug("AI response: %s", response_text[:500])
-                return {
-                    "status": "error",
-                    "message": f"Failed to parse AI response: {e}",
-                    "raw_response": response_text
-                }
+                instruction_data = InstructionManager.extract_instruction_json(response_text)
+            except (json.JSONDecodeError, ValueError) as e:
+                return {"status": "error", "message": str(e), "raw_response": response_text}
 
-            # Validate required fields
-            required_fields = ["name", "description", "primary"]
-            missing_fields = [f for f in required_fields if f not in instruction_data]
-            if missing_fields:
-                return {
-                    "status": "error",
-                    "message": f"Generated instruction set missing required fields: {missing_fields}",
-                    "instruction_data": instruction_data
-                }
-
-            return {
-                "status": "success",
-                "instruction_data": instruction_data,
-                "message": "Instruction set generated successfully"
-            }
-
+            return {"status": "success", "instruction_data": instruction_data, "message": "Instruction set generated successfully"}
         except Exception as e:
             logger.error("Error in AI-assisted instruction creation: %s", e, exc_info=True)
-            return {
-                "status": "error",
-                "message": str(e)
-            }
+            return {"status": "error", "message": str(e)}
 
     async def ai_assisted_instruction_creation_remote(
         self,
         user_responses: Dict[str, str],
         peer_node_id: str
     ) -> Dict[str, Any]:
-        """Generate instruction set using AI via remote inference.
-
-        UI Integration: Called when user selects "Remote Inference" in wizard.
-        Uses a peer's AI to generate the instruction set.
-
-        Args:
-            user_responses: Dict mapping question IDs to user's answers
-            peer_node_id: Node ID of peer to use for remote inference
-
-        Returns:
-            Dict with generated instruction set data or error
-        """
+        """Generate instruction set using AI via remote inference."""
         try:
-            from pathlib import Path
-            import json
+            wizard_config = self.instruction_manager.get_wizard_config()
+            if not wizard_config:
+                return {"status": "error", "message": "Wizard template not found"}
 
-            # Load wizard template for generation prompt
-            wizard_file = Path(__file__).parent.parent / "templates" / "wizard_template.json"
-            with open(wizard_file, 'r', encoding='utf-8') as f:
-                wizard_config = json.load(f)
-
-            # Build prompt using template
             generation_prompt = wizard_config["generation_prompt_template"].format(
                 use_case=user_responses.get("use_case", "general conversation"),
                 learning_style=user_responses.get("learning_style", "adaptive"),
@@ -2714,71 +2495,22 @@ class CoreService:
                 challenges=user_responses.get("challenges", "none specified"),
                 verification=user_responses.get("verification", "provide reasoning")
             )
-
-            # Add system instruction
-            system_instruction = wizard_config["system_instruction"]
-            full_prompt = f"{system_instruction}\n\n{generation_prompt}"
-
-            # Execute AI query via remote inference
-            logger.info("Generating instruction set via remote AI wizard (peer=%s)", peer_node_id)
+            full_prompt = f"{wizard_config['system_instruction']}\n\n{generation_prompt}"
 
             result = await self.inference_orchestrator.execute_inference(
-                prompt=full_prompt,
-                compute_host=peer_node_id
+                prompt=full_prompt, compute_host=peer_node_id
             )
 
-            # Parse AI response (should be JSON)
             response_text = result.get("response", "")
-
-            # Extract JSON from response (handle markdown code blocks)
-            if "```json" in response_text:
-                # Extract from markdown code block
-                start = response_text.find("```json") + 7
-                end = response_text.find("```", start)
-                json_text = response_text[start:end].strip()
-            elif "```" in response_text:
-                # Generic code block
-                start = response_text.find("```") + 3
-                end = response_text.find("```", start)
-                json_text = response_text[start:end].strip()
-            else:
-                # Assume entire response is JSON
-                json_text = response_text.strip()
-
-            # Parse JSON
             try:
-                instruction_data = json.loads(json_text)
-            except json.JSONDecodeError as e:
-                logger.error("Failed to parse AI response as JSON: %s", e)
-                logger.debug("AI response: %s", response_text[:500])
-                return {
-                    "status": "error",
-                    "message": f"Failed to parse AI response: {e}",
-                    "raw_response": response_text
-                }
+                instruction_data = InstructionManager.extract_instruction_json(response_text)
+            except (json.JSONDecodeError, ValueError) as e:
+                return {"status": "error", "message": str(e), "raw_response": response_text}
 
-            # Validate required fields
-            required_fields = ["name", "description", "primary"]
-            missing_fields = [f for f in required_fields if f not in instruction_data]
-            if missing_fields:
-                return {
-                    "status": "error",
-                    "message": f"Generated instruction set missing required fields: {missing_fields}",
-                    "instruction_data": instruction_data
-                }
-
-            return {
-                "status": "success",
-                "instruction_data": instruction_data,
-                "message": "Instruction set generated successfully via remote inference"
-            }
-
+            return {"status": "success", "instruction_data": instruction_data, "message": "Instruction set generated successfully via remote inference"}
         except Exception as e:
             logger.error("Error in AI-assisted instruction creation (remote): %s", e, exc_info=True)
-            return {
-                "status": "error",
-                "message": str(e)
-            }
+            return {"status": "error", "message": str(e)}
 
     async def send_p2p_image(self, node_id: str, image_base64: str, filename: str = None, text: str = "") -> dict:
         """
@@ -3758,17 +3490,9 @@ class CoreService:
                 logger.error(f"Failed to broadcast transcription to {node_id}: {e}")
 
     async def get_firewall_rules(self) -> Dict[str, Any]:
-        """Get current firewall rules as JSON dict for editor.
-
-        UI Integration: Called when user opens Firewall Editor.
-
-        Returns:
-            Dict with status and rules as JSON object
-        """
+        """Get current firewall rules as JSON dict for editor."""
         try:
-            import json
-            rules_text = self.firewall.access_file_path.read_text()
-            rules_dict = json.loads(rules_text)
+            rules_dict = self.firewall.get_rules_as_dict()
             return {
                 "status": "success",
                 "rules": rules_dict,
@@ -3776,250 +3500,63 @@ class CoreService:
             }
         except Exception as e:
             logger.error("Error reading firewall rules: %s", e, exc_info=True)
-            return {
-                "status": "error",
-                "message": str(e)
-            }
+            return {"status": "error", "message": str(e)}
 
     async def save_firewall_rules(self, rules_dict: Dict[str, Any]) -> Dict[str, Any]:
-        """Save updated firewall rules from UI editor.
-
-        UI Integration: Called when user clicks 'Save' in Firewall Editor.
-
-        Args:
-            rules_dict: New firewall rules as JSON dict
-
-        Returns:
-            Dict with status and message
-        """
+        """Save updated firewall rules from UI editor."""
         try:
-            import json
-            from dpc_client_core.firewall import ContextFirewall
+            success, message, errors = self.firewall.save_rules_from_dict(rules_dict)
 
-            # Validate before saving
-            is_valid, errors = ContextFirewall.validate_config(rules_dict)
+            if not success:
+                return {"status": "error", "message": message, "errors": errors}
 
-            if not is_valid:
-                return {
-                    "status": "error",
-                    "message": "Validation failed",
-                    "errors": errors
-                }
+            await self._notify_peers_of_provider_changes()
 
-            # Save to file
-            rules_text = json.dumps(rules_dict, indent=2)
-            self.firewall.access_file_path.write_text(rules_text)
+            try:
+                dpc_agent_provider = self.llm_manager.providers.get("dpc_agent")
+                if dpc_agent_provider and hasattr(dpc_agent_provider, '_managers'):
+                    for mgr in dpc_agent_provider._managers.values():
+                        mgr.sync_firewall_settings()
+            except Exception as e:
+                logger.warning("Failed to sync agent firewall settings: %s", e)
 
-            # Reload the firewall
-            success, message = self.firewall.reload()
-
-            if success:
-                # Notify all connected peers of updated providers (compute sharing settings may have changed)
-                logger.info("Notifying connected peers of provider changes")
-                await self._notify_peers_of_provider_changes()
-
-                # Sync agent settings without restart
-                try:
-                    dpc_agent_provider = self.llm_manager.providers.get("dpc_agent")
-                    if dpc_agent_provider and hasattr(dpc_agent_provider, '_managers'):
-                        for mgr in dpc_agent_provider._managers.values():
-                            mgr.sync_firewall_settings()
-                except Exception as e:
-                    logger.warning("Failed to sync agent firewall settings: %s", e)
-
-                # Emit event to UI
-                await self.local_api.broadcast_event("firewall_rules_updated", {
-                    "message": message
-                })
-
-                return {
-                    "status": "success",
-                    "message": message
-                }
-            else:
-                return {
-                    "status": "error",
-                    "message": message
-                }
+            await self.local_api.broadcast_event("firewall_rules_updated", {"message": message})
+            return {"status": "success", "message": message}
 
         except Exception as e:
             logger.error("Error saving firewall rules: %s", e, exc_info=True)
-            return {
-                "status": "error",
-                "message": str(e)
-            }
+            return {"status": "error", "message": str(e)}
 
     async def reload_firewall(self) -> Dict[str, Any]:
-        """Reload firewall rules from disk.
-
-        UI Integration: Called when user clicks 'Reload' or when external changes detected.
-
-        Returns:
-            Dict with status and message
-        """
+        """Reload firewall rules from disk."""
         try:
             success, message = self.firewall.reload()
+            if not success:
+                return {"status": "error", "message": message}
 
-            if success:
-                # Notify all connected peers of updated providers
-                logger.info("Notifying connected peers of provider changes")
-                await self._notify_peers_of_provider_changes()
-
-                # Emit event to UI
-                await self.local_api.broadcast_event("firewall_reloaded", {
-                    "message": message
-                })
-
-                return {
-                    "status": "success",
-                    "message": message
-                }
-            else:
-                return {
-                    "status": "error",
-                    "message": message
-                }
-
+            await self._notify_peers_of_provider_changes()
+            await self.local_api.broadcast_event("firewall_reloaded", {"message": message})
+            return {"status": "success", "message": message}
         except Exception as e:
             logger.error("Error reloading firewall: %s", e, exc_info=True)
-            return {
-                "status": "error",
-                "message": str(e)
-            }
+            return {"status": "error", "message": str(e)}
 
     async def get_session_archive_info(self, conversation_id: str) -> Dict[str, Any]:
-        """Return archive metadata for a conversation's session archive folder.
-
-        UI Integration: Called when the Agent Permissions panel opens for a specific agent.
-
-        Args:
-            conversation_id: The conversation/agent ID (e.g. "agent_001")
-
-        Returns:
-            Dict with count, max_sessions, archive_path, and session list.
-        """
-        try:
-            import json as _json
-            from pathlib import Path
-            archive_dir = Path.home() / ".dpc" / "conversations" / conversation_id / "archive"
-            # S25 Batch 1.1: honour per-agent profile override, not just global firewall setting.
-            # ARCH-19: max_sessions = 0 means unlimited (keep all archives).
-            max_sessions = getattr(self.firewall, "history_max_archived_sessions", 0) if self.firewall else 0
-            if self.firewall:
-                profile = self.firewall.rules.get("agent_profiles", {}).get(conversation_id, {})
-                hist = profile.get("history", {}) if profile else {}
-                if "max_archived_sessions" in hist:
-                    max_sessions = max(0, int(hist["max_archived_sessions"]))
-
-            if not archive_dir.exists():
-                return {
-                    "status": "success",
-                    "conversation_id": conversation_id,
-                    "count": 0,
-                    "max_sessions": max_sessions,
-                    "archive_path": str(archive_dir),
-                    "sessions": [],
-                }
-
-            # ADR-008: rglob to find sessions in YYYY/MM subdirs + flat (backward compat)
-            archives = sorted(archive_dir.rglob("*_session.json"))
-            sessions = []
-            for p in archives:
-                try:
-                    data = _json.loads(p.read_text(encoding="utf-8"))
-                    sessions.append({
-                        "filename": p.name,
-                        "archived_at": data.get("archived_at", ""),
-                        "reason": data.get("session_reason", ""),
-                        "message_count": data.get("message_count", 0),
-                    })
-                except Exception:
-                    sessions.append({"filename": p.name, "archived_at": "", "reason": "", "message_count": 0})
-
-            return {
-                "status": "success",
-                "conversation_id": conversation_id,
-                "count": len(archives),
-                "max_sessions": max_sessions,
-                "archive_path": str(archive_dir),
-                "sessions": sessions,
-            }
-        except Exception as e:
-            logger.error("Error getting session archive info: %s", e, exc_info=True)
-            return {"status": "error", "message": str(e)}
+        """Delegated to AgentService."""
+        return await self.agent_service.get_session_archive_info(conversation_id)
 
     async def clear_session_archives(self, conversation_id: str, keep_latest: int = 0) -> Dict[str, Any]:
-        """Delete archived sessions for a conversation, optionally keeping the most recent N.
-
-        UI Integration: Called when user clicks 'Clear old archives' in Agent Permissions panel.
-
-        Args:
-            conversation_id: The conversation/agent ID (e.g. "agent_001")
-            keep_latest: Number of most recent archives to keep (0 = delete all)
-
-        Returns:
-            Dict with deleted_count and remaining count.
-        """
-        try:
-            from pathlib import Path
-            archive_dir = Path.home() / ".dpc" / "conversations" / conversation_id / "archive"
-
-            if not archive_dir.exists():
-                return {"status": "success", "deleted_count": 0, "remaining": 0}
-
-            # ADR-008: rglob to find sessions in YYYY/MM subdirs + flat (backward compat)
-            archives = sorted(archive_dir.rglob("*_session.json"))
-            keep_latest = max(0, int(keep_latest))
-            to_delete = archives[: max(0, len(archives) - keep_latest)]
-
-            deleted = 0
-            for p in to_delete:
-                try:
-                    p.unlink()
-                    deleted += 1
-                    # Clean up empty YYYY/MM dirs after deletion
-                    try:
-                        p.parent.rmdir()  # only removes if empty
-                    except OSError:
-                        pass
-                except Exception as e:
-                    logger.warning("Failed to delete archive %s: %s", p.name, e)
-
-            remaining = len(archives) - deleted
-            logger.info("Cleared %d archives for %s (%d remaining)", deleted, conversation_id, remaining)
-            return {"status": "success", "deleted_count": deleted, "remaining": remaining}
-        except Exception as e:
-            logger.error("Error clearing session archives: %s", e, exc_info=True)
-            return {"status": "error", "message": str(e)}
+        """Delegated to AgentService."""
+        return await self.agent_service.clear_session_archives(conversation_id, keep_latest)
 
     async def validate_firewall_rules(self, rules_text: str) -> Dict[str, Any]:
-        """Validate firewall rules without saving.
-
-        UI Integration: Called on-the-fly while user edits rules.
-
-        Args:
-            rules_text: Firewall rules text to validate
-
-        Returns:
-            Dict with validation status and errors if any
-        """
+        """Validate firewall rules without saving."""
         try:
-            from dpc_client_core.firewall import ContextFirewall
-
-            is_valid, errors = ContextFirewall.validate_config(rules_text)
-
-            return {
-                "status": "success",
-                "is_valid": is_valid,
-                "errors": errors
-            }
-
+            is_valid, errors = self.firewall.validate_config(rules_text)
+            return {"status": "success", "is_valid": is_valid, "errors": errors}
         except Exception as e:
             logger.error("Error validating firewall rules: %s", e, exc_info=True)
-            return {
-                "status": "error",
-                "message": str(e)
-            }
+            return {"status": "error", "message": str(e)}
 
     async def get_voice_transcription_config(self) -> dict:
         """Delegated to VoiceService."""
@@ -4154,6 +3691,37 @@ class CoreService:
                     logger.debug("No history file found for %s", conversation_id)
 
             if not monitor:
+                # Try loading from disk for group conversations (same pattern as agent_)
+                if conversation_id.startswith("group-"):
+                    conv_dir = None
+                    if hasattr(self, 'group_manager') and self.group_manager:
+                        conv_dir = self.group_manager._get_conversation_dir(conversation_id)
+                    if conv_dir and (conv_dir / "history.json").exists():
+                        try:
+                            import json as _json
+                            with open(conv_dir / "history.json", encoding="utf-8") as f:
+                                data = _json.load(f)
+                            messages = data.get("messages", [])
+                            for msg in messages:
+                                msg.setdefault("sender_type", "human")
+                                msg.setdefault("agent_owner", None)
+                            history_tokens = sum(len(msg.get("content", "") or "") for msg in messages) // 4
+                            token_limit = 0
+                            if hasattr(self, 'llm_manager') and self.llm_manager:
+                                model = self.llm_manager.get_active_model_name()
+                                token_limit = self.llm_manager.get_context_window(model) or 0
+                            logger.info("Loaded %d messages from disk for %s (%s)", len(messages), conversation_id, conv_dir.name)
+                            return {
+                                "status": "success",
+                                "messages": messages,
+                                "message_count": len(messages),
+                                "tokens_used": history_tokens,
+                                "token_limit": token_limit,
+                                "history_tokens": history_tokens,
+                            }
+                        except Exception as e:
+                            logger.error("Failed to load group history from disk: %s", e)
+
                 logger.debug("No conversation monitor found for %s, returning empty history", conversation_id)
                 return {
                     "status": "success",
@@ -4216,12 +3784,18 @@ class CoreService:
             # context_estimated: full LLM context from the last request.
             # For agent monitors, stored in _last_context_estimated.
             # For local AI monitors, current_token_count = prompt_tokens (already the full context).
-            context_estimated = getattr(monitor, '_last_context_estimated', 0) or token_usage.get("tokens_used", 0)
+            context_estimated = monitor._last_context_estimated or token_usage.get("tokens_used", 0)
+            # For group chats, current_token_count may be 0 (no LLM calls update it).
+            # Use history_tokens as the floor to keep the UI counter accurate.
+            tokens_used = token_usage.get("tokens_used", 0)
+            if conversation_id.startswith("group-") and tokens_used < history_tokens:
+                tokens_used = history_tokens
+                monitor.set_token_count(history_tokens)
             return {
                 "status": "success",
                 "messages": messages,
                 "message_count": len(messages),
-                "tokens_used": token_usage.get("tokens_used", 0),
+                "tokens_used": tokens_used,
                 "token_limit": token_usage.get("token_limit", 0),
                 "history_tokens": history_tokens,
                 "context_estimated": context_estimated,
@@ -4337,10 +3911,32 @@ class CoreService:
                 if not group:
                     return {"status": "error", "message": f"Group {conversation_id} not found"}
 
+                other_members = [m for m in group.members if m != self.p2p_manager.node_id]
+                if not other_members:
+                    # Single-node group (human + agents): direct reset, no voting needed
+                    logger.info("Resetting single-node group conversation: %s", conversation_id)
+                    result = await self.reset_conversation(conversation_id)
+                    # Broadcast token limit so UI shows correct value after reset
+                    monitor = self.knowledge_service._get_or_create_conversation_monitor(conversation_id)
+                    token_usage = monitor.get_token_usage()
+                    token_limit = token_usage.get("token_limit", 0) or 128000
+                    await self.local_api.broadcast_event("token_usage_updated", {
+                        "conversation_id": conversation_id,
+                        "tokens_used": 0,
+                        "token_limit": token_limit,
+                        "history_tokens": 0,
+                        "context_estimated": 0,
+                    })
+                    if not group.is_discord_bridge:
+                        asyncio.create_task(self.trigger_group_sleep(conversation_id))
+                    else:
+                        logger.info("Skipping sleep for Discord bridge group: %s", conversation_id)
+                    return result
+
                 participants = set(group.members)
                 # Check at least one other member is online
                 connected = self.p2p_coordinator.get_connected_peers()
-                online_members = [m for m in group.members if m != self.p2p_manager.node_id and m in connected]
+                online_members = [m for m in other_members if m in connected]
                 if not online_members:
                     return {"status": "error", "message": "No group members are online"}
             else:
@@ -4378,162 +3974,20 @@ class CoreService:
             }
 
     async def reset_conversation(self, conversation_id: str) -> Dict[str, Any]:
-        """Reset conversation history and context tracking (internal method).
-
-        NOTE: This is now an internal method called after proposal approval.
-        UI should call propose_new_session() instead for mutual approval.
-
-        Args:
-            conversation_id: The conversation/chat ID to reset
-
-        Returns:
-            Dict with status
-        """
-        try:
-            monitor = self._get_or_create_conversation_monitor(conversation_id)
-            monitor.reset_conversation()
-            logger.info("Reset Conversation - cleared history for %s", conversation_id)
-
-            # Broadcast to UI
-            await self.local_api.broadcast_event(
-                "conversation_reset",
-                {"conversation_id": conversation_id}
-            )
-
-            return {
-                "status": "success",
-                "message": "Conversation reset successfully"
-            }
-
-        except Exception as e:
-            logger.error("Error resetting conversation: %s", e, exc_info=True)
-            return {
-                "status": "error",
-                "message": str(e)
-            }
+        """Delegated to KnowledgeService."""
+        return await self.knowledge_service.reset_conversation(conversation_id)
 
     async def get_conversation_settings(self, conversation_id: str) -> Dict[str, Any]:
-        """Get per-conversation settings including history persistence.
-
-        Args:
-            conversation_id: The conversation/chat ID
-
-        Returns:
-            Dict with conversation settings
-        """
-        try:
-            monitor = self._get_or_create_conversation_monitor(conversation_id)
-            settings = monitor._load_conversation_settings()
-            return {
-                "status": "success",
-                "settings": settings
-            }
-        except Exception as e:
-            logger.error("Error getting conversation settings: %s", e, exc_info=True)
-            return {
-                "status": "error",
-                "message": str(e)
-            }
+        """Delegated to KnowledgeService."""
+        return await self.knowledge_service.get_conversation_settings(conversation_id)
 
     async def set_conversation_persist_history(self, conversation_id: str, persist: bool) -> Dict[str, Any]:
-        """Set whether to persist history for a conversation.
-
-        Args:
-            conversation_id: The conversation/chat ID
-            persist: True to persist history, False for ephemeral
-
-        Returns:
-            Dict with status
-        """
-        try:
-            monitor = self._get_or_create_conversation_monitor(conversation_id)
-            success = monitor.set_persist_history(persist)
-
-            if success:
-                # If enabling persistence and there's existing history, save it
-                if persist and monitor.message_history:
-                    monitor.save_history()
-                    logger.info("Enabled history persistence for %s and saved %d messages",
-                               conversation_id, len(monitor.message_history))
-                elif not persist:
-                    # If disabling persistence, delete any existing history file
-                    monitor.clear_history()
-                    logger.info("Disabled history persistence for %s and cleared history", conversation_id)
-
-                # Broadcast to UI
-                await self.local_api.broadcast_event(
-                    "conversation_settings_changed",
-                    {"conversation_id": conversation_id, "persist_history": persist}
-                )
-
-                return {
-                    "status": "success",
-                    "persist_history": persist
-                }
-            else:
-                return {
-                    "status": "error",
-                    "message": "Failed to save settings"
-                }
-        except Exception as e:
-            logger.error("Error setting conversation persistence: %s", e, exc_info=True)
-            return {
-                "status": "error",
-                "message": str(e)
-            }
+        """Delegated to KnowledgeService."""
+        return await self.knowledge_service.set_conversation_persist_history(conversation_id, persist)
 
     async def delete_conversation(self, conversation_id: str) -> Dict[str, Any]:
-        """Delete an entire conversation including history, settings, and files.
-
-        This is a complete deletion - removes the conversation folder.
-
-        Args:
-            conversation_id: The conversation/chat ID to delete
-
-        Returns:
-            Dict with status
-        """
-        try:
-            # For groups, use the group manager
-            if conversation_id.startswith("group-"):
-                success = self.group_manager.leave_group(conversation_id)
-                if not success:
-                    return {
-                        "status": "error",
-                        "message": "Group not found or could not be deleted"
-                    }
-            else:
-                # For P2P conversations, delete via conversation monitor
-                if conversation_id in self.conversation_monitors:
-                    monitor = self.conversation_monitors[conversation_id]
-                    monitor.delete_conversation_folder()
-                    del self.conversation_monitors[conversation_id]
-                else:
-                    # Even if no monitor exists, try to delete the folder
-                    from pathlib import Path
-                    import shutil
-                    conv_dir = Path.home() / ".dpc" / "conversations" / conversation_id
-                    if conv_dir.exists():
-                        shutil.rmtree(conv_dir)
-
-            logger.info("Deleted conversation: %s", conversation_id)
-
-            # Broadcast to UI
-            await self.local_api.broadcast_event(
-                "conversation_deleted",
-                {"conversation_id": conversation_id}
-            )
-
-            return {
-                "status": "success",
-                "message": "Conversation deleted successfully"
-            }
-        except Exception as e:
-            logger.error("Error deleting conversation: %s", e, exc_info=True)
-            return {
-                "status": "error",
-                "message": str(e)
-            }
+        """Delegated to KnowledgeService."""
+        return await self.knowledge_service.delete_conversation(conversation_id)
 
     # =========================================================================
     # Group Chat Commands (v0.19.0)
@@ -4551,6 +4005,20 @@ class CoreService:
             members = member_node_ids or []
             group = self.group_manager.create_group(name, topic, members)
 
+            # Auto-populate agents from this node's registry
+            if self.agent_service:
+                try:
+                    result = await self.agent_service.list_agents()
+                    agents = result.get("agents", [])
+                    agent_ids = [a["agent_id"] for a in agents]
+                    agent_names = {a["agent_id"]: a.get("name", a["agent_id"]) for a in agents}
+                    if agent_ids:
+                        self.group_manager.set_node_agents(
+                            group.group_id, self.p2p_manager.node_id, agent_ids, agent_names
+                        )
+                except Exception:
+                    pass
+
             # Send GROUP_CREATE to all members
             await self._broadcast_to_group(group.group_id, {
                 "command": "GROUP_CREATE",
@@ -4566,6 +4034,22 @@ class CoreService:
         """Get all groups this node belongs to."""
         groups = [g.to_dict() for g in self.group_manager.get_all_groups()]
         return {"status": "success", "groups": groups}
+
+    async def set_group_agents(self, group_id: str, agent_ids: list = None) -> Dict[str, Any]:
+        """Set which agents from this node participate in a group."""
+        try:
+            agent_names = {}
+            if agent_ids and self.agent_service:
+                result = await self.agent_service.list_agents()
+                for a in result.get("agents", []):
+                    if a["agent_id"] in agent_ids:
+                        agent_names[a["agent_id"]] = a.get("name", a["agent_id"])
+            self.group_manager.set_node_agents(
+                group_id, self.p2p_manager.node_id, agent_ids or [], agent_names
+            )
+            return {"status": "success"}
+        except Exception as e:
+            return {"status": "error", "message": str(e)}
 
     def parse_mentions(self, text: str, group_members: List[str]) -> List[Dict[str, Any]]:
         """Parse @mentions in text and return list of mention objects.
@@ -4619,20 +4103,9 @@ class CoreService:
             message_id = str(uuid.uuid4())
             timestamp = datetime.now(timezone.utc).isoformat()
 
-            # Fan-out GROUP_TEXT to all connected members
-            await self._broadcast_to_group(group_id, {
-                "command": "GROUP_TEXT",
-                "payload": {
-                    "group_id": group_id,
-                    "text": text,
-                    "sender_name": sender_name,
-                    "mentions": mentions,
-                    "message_id": message_id,  # v0.20.0: Include sender-generated ID
-                    "timestamp": timestamp,
-                }
-            })
+            node_id = self.p2p_manager.node_id
 
-            # Track in conversation monitor for knowledge extraction
+            # Track in conversation monitor FIRST so msg_index gets assigned
             monitor = self._get_or_create_conversation_monitor(group_id)
             from .conversation_monitor import Message as ConvMessage
             conv_message = ConvMessage(
@@ -4642,35 +4115,86 @@ class CoreService:
                 sender_name=sender_name,
                 text=text,
                 timestamp=timestamp,
+                sender_type="human",
             )
             await monitor.on_message(conv_message)
+            monitor.save_history()
+
+            msg_index = monitor.get_last_msg_index()
+
+            group_payload = {
+                "group_id": group_id,
+                "text": text,
+                "sender_name": sender_name,
+                "sender_type": "human",
+                "sender_node_id": node_id,
+                "agent_owner": None,
+                "mentions": mentions,
+                "message_id": message_id,
+                "timestamp": timestamp,
+                "msg_index": msg_index,
+            }
+
+            # Fan-out GROUP_TEXT to all connected members
+            await self._broadcast_to_group(group_id, {
+                "command": "GROUP_TEXT",
+                "payload": group_payload,
+            })
 
             # Detect @agent mentions and route to Ark / CC
             await self._handle_group_agent_mentions(group_id, text, sender_name)
 
-            return {"status": "success", "message_id": message_id}
+            history_tokens = sum(len(m.get("content", "") or "") for m in monitor.get_message_history()) // 4
+            monitor.set_token_count(history_tokens)
+            token_usage = monitor.get_token_usage()
+            token_limit = token_usage.get("token_limit", 0) or 128000
+            await self.local_api.broadcast_event("token_usage_updated", {
+                "conversation_id": group_id,
+                "tokens_used": history_tokens,
+                "token_limit": token_limit,
+                "history_tokens": history_tokens,
+                "context_estimated": 0,
+            })
+            return {
+                "status": "success",
+                "message_id": message_id,
+                "tokens_used": history_tokens,
+                "token_limit": token_limit,
+                "history_tokens": history_tokens,
+                "context_estimated": 0,
+            }
         except Exception as e:
             logger.error("Error sending group message: %s", e, exc_info=True)
             return {"status": "error", "message": str(e)}
+
+    _CODE_BLOCK_RE = re.compile(r'```[\s\S]*?```|`[^`\n]+`')
 
     async def _handle_group_agent_mentions(
         self, group_id: str, text: str, sender_name: str
     ) -> None:
         """Detect @agent / @CC mentions in outgoing group messages and route to agents."""
-        import re
-        mentions = {m.lower() for m in re.findall(r'@(\w+)\b', text, re.IGNORECASE)}
+        plain_text = self._CODE_BLOCK_RE.sub('', text)
+        mentions = {m.lower() for m in re.findall(r'@(\w+)\b', plain_text, re.IGNORECASE)}
         logger.debug("_handle_group_agent_mentions: mentions=%s in group %s", mentions, group_id)
 
-        # Check if any mention matches agent name or agent_id
-        agent_id = self._get_default_agent_id()
-        agent_name = self._get_agent_display_name(agent_id).lower()
-        if agent_name in mentions or agent_id in mentions:
-            matched = agent_name if agent_name in mentions else agent_id
-            logger.info("Group @%s mention detected — invoking agent in group %s", matched, group_id)
-            asyncio.ensure_future(self._invoke_agent_in_group(group_id, text, sender_name))
+        # Get allowed agents for this group from metadata
+        group = self.group_manager.get_group(group_id) if self.group_manager else None
+        node_id = self.p2p_manager.node_id
+        allowed_agents = set(group.agents.get(node_id, [])) if group else set()
+
+        # Check if any mention matches an allowed agent's name or id
+        sender_lower = sender_name.lower() if sender_name else ""
+        for aid in allowed_agents:
+            aname = self._get_agent_display_name(aid).lower()
+            if aname == sender_lower:
+                continue
+            if aname in mentions or aid in mentions:
+                matched = aname if aname in mentions else aid
+                logger.info("Group @%s mention detected — invoking agent %s in group %s", matched, aid, group_id)
+                asyncio.ensure_future(self._invoke_agent_in_group(group_id, text, sender_name, aid))
 
         cc_name = self.get_cc_display_name().lower()
-        if cc_name in mentions:
+        if cc_name in mentions and cc_name != sender_lower:
             logger.info("Group @cc mention detected — broadcasting cc_group_mention in group %s", group_id)
             await self.local_api.broadcast_event("cc_group_mention", {
                 "group_id": group_id,
@@ -4680,17 +4204,20 @@ class CoreService:
             })
 
     async def _invoke_agent_in_group(
-        self, group_id: str, text: str, sender_name: str
+        self, group_id: str, text: str, sender_name: str, agent_id: str = None
     ) -> None:
-        """Invoke the default agent and post its response to the group."""
+        """Invoke a specific agent and post its response to the group."""
         try:
             dpc_provider = self.llm_manager.providers.get("dpc_agent")
             if not dpc_provider:
                 logger.warning("_invoke_agent_in_group: dpc_agent provider not found")
                 return
-            agent_id = self._get_default_agent_id()
-            manager = dpc_provider.get_manager(agent_id)
-            prompt = f"[Group chat — {sender_name} says]: {text}"
+            if not agent_id:
+                agent_id = self._get_default_agent_id()
+            manager = await dpc_provider._ensure_manager(agent_id)
+
+            prompt = f"[{sender_name}]: {text}"
+
             response = await manager.process_message(
                 message=prompt,
                 conversation_id=group_id,
@@ -4724,15 +4251,38 @@ class CoreService:
         message_id = uuid.uuid4().hex[:16]
         timestamp = datetime.now(timezone.utc).isoformat()
 
+        node_id = self.p2p_manager.node_id
+
+        # Feed to ConversationMonitor FIRST so msg_index gets assigned
+        monitor = self._get_or_create_conversation_monitor(group_id)
+        from .conversation_monitor import Message as ConvMessage
+        await monitor.on_message(ConvMessage(
+            message_id=message_id,
+            conversation_id=group_id,
+            sender_node_id=self.p2p_manager.node_id,
+            sender_name=agent_name,
+            text=text,
+            timestamp=timestamp,
+            sender_type="agent",
+            agent_owner=self.p2p_manager.node_id,
+        ))
+        monitor.save_history()
+
+        last_msg = monitor.get_message_history()[-1] if monitor.get_message_history() else {}
+        msg_index = last_msg.get("msg_index", 0)
+
         payload = {
             "group_id": group_id,
             "text": text,
-            "sender_node_id": self.p2p_manager.node_id,
+            "sender_node_id": node_id,
             "sender_name": agent_name,
+            "sender_type": "agent",
+            "agent_owner": self.p2p_manager.get_display_name() or node_id,
             "message_id": message_id,
             "timestamp": timestamp,
             "mentions": [],
             "is_agent": True,
+            "msg_index": msg_index,
         }
 
         # Broadcast to UI
@@ -4742,7 +4292,6 @@ class CoreService:
         dedup_key = f"{group_id}:{message_id}"
         self._processed_message_ids.add(dedup_key)
         if len(self._processed_message_ids) > self._max_processed_ids:
-            # Trim oldest half to keep memory bounded
             to_remove = list(self._processed_message_ids)[:len(self._processed_message_ids) // 2]
             for k in to_remove:
                 self._processed_message_ids.discard(k)
@@ -4750,17 +4299,21 @@ class CoreService:
         # Relay to P2P peers so remote members see the agent response
         await self._broadcast_to_group(group_id, {"command": "GROUP_TEXT", "payload": payload})
 
-        # Feed to ConversationMonitor so knowledge extraction captures agent responses
-        monitor = self._get_or_create_conversation_monitor(group_id)
-        from .conversation_monitor import Message as ConvMessage
-        monitor.message_buffer.append(ConvMessage(
-            message_id=message_id,
-            conversation_id=group_id,
-            sender_node_id=self.p2p_manager.node_id,
-            sender_name=agent_name,
-            text=text,
-            timestamp=timestamp,
-        ))
+        # Update token count — use agent's context_estimated if available
+        history_tokens = sum(len(m.get("content", "") or "") for m in monitor.get_message_history()) // 4
+        context_estimated = getattr(monitor, '_last_context_estimated', 0) or 0
+        monitor.set_token_count(max(history_tokens, context_estimated))
+        token_usage = monitor.get_token_usage()
+        await self.local_api.broadcast_event("token_usage_updated", {
+            "conversation_id": group_id,
+            "tokens_used": max(history_tokens, context_estimated),
+            "token_limit": token_usage.get("token_limit", 0) or 128000,
+            "history_tokens": history_tokens,
+            "context_estimated": context_estimated,
+        })
+
+        # Route @mentions from agent messages (enables CC→Ark and Ark→CC communication)
+        await self._handle_group_agent_mentions(group_id, text, agent_name)
 
     async def add_group_member(self, group_id: str, node_id: str) -> Dict[str, Any]:
         """Add a member to a group and notify all members.
@@ -4786,6 +4339,34 @@ class CoreService:
                     "command": "GROUP_CREATE",
                     "payload": group.to_dict()
                 })
+
+                # Send conversation history to the new member
+                conv_dir = self.group_manager._get_conversation_dir(group_id)
+                history_path = conv_dir / "history.json" if conv_dir else None
+                if history_path and history_path.exists():
+                    try:
+                        import json as _json
+                        with open(history_path, encoding="utf-8") as f:
+                            data = _json.load(f)
+                        messages = data.get("messages", [])
+                        if messages:
+                            await self.p2p_manager.send_message_to_peer(node_id, {
+                                "command": "CHAT_HISTORY_RESPONSE",
+                                "payload": {
+                                    "conversation_id": group_id,
+                                    "messages": messages,
+                                }
+                            })
+                            logger.info("Sent %d history messages to new member %s in group %s",
+                                        len(messages), node_id[:16], group_id)
+                    except Exception as e:
+                        logger.warning("Could not send history to new member: %s", e)
+
+            # Notify local UI to refresh group settings
+            await self.local_api.broadcast_event("group_updated", {
+                "group_id": group_id,
+                "group": group.to_dict(),
+            })
 
             return {"status": "success", "group": group.to_dict()}
         except Exception as e:
@@ -5439,50 +5020,8 @@ class CoreService:
             logger.error("Error tracking outgoing message in conversation monitor: %s", e, exc_info=True)
 
     async def send_file(self, node_id: str, file_path: str, file_size_bytes: int = None):
-        """
-        Send a file to a peer via P2P file transfer.
-
-        Args:
-            node_id: Target peer's node ID
-            file_path: Absolute path to file to send
-            file_size_bytes: Optional file size (used by frontend for timeout calculation, ignored by backend)
-
-        Returns:
-            Dict with transfer_id and status
-        """
-        from pathlib import Path
-
-        file = Path(file_path)
-        if not file.exists():
-            raise FileNotFoundError(f"File not found: {file_path}")
-
-        # Initiate file transfer (sends FILE_OFFER to peer)
-        transfer_id = await self.file_transfer_manager.send_file(node_id, file)
-
-        # Prepare file metadata
-        size_bytes = file.stat().st_size
-        size_mb = round(size_bytes / (1024 * 1024), 2)
-        message_content = f"Sent file: {file.name} ({size_mb} MB)"
-
-        attachments = [{
-            "type": "file",
-            "filename": file.name,
-            "size_bytes": size_bytes,
-            "size_mb": size_mb,
-            "transfer_id": transfer_id,
-            "status": "sending"
-        }]
-
-        # Note: Don't add to conversation history or broadcast message yet
-        # We'll do that when FILE_COMPLETE is received (in file_complete_handler.py)
-        # This prevents phantom messages if the receiver rejects the transfer
-
-        return {
-            "transfer_id": transfer_id,
-            "status": "pending",
-            "filename": file.name,
-            "size_bytes": file.stat().st_size
-        }
+        """Delegated to P2PCoordinator."""
+        return await self.p2p_coordinator.send_file(node_id, file_path, file_size_bytes)
 
     async def send_image(self, conversation_id: str, image_base64: str, filename: str, caption: str = "", provider_alias: str = None, compute_host: str = None, chat_provider: str = None):
         """
@@ -5678,66 +5217,12 @@ class CoreService:
                 tmp_path.unlink()
 
     async def accept_file_transfer(self, transfer_id: str):
-        """
-        Accept an incoming file transfer offer.
-
-        Args:
-            transfer_id: Transfer ID from FILE_OFFER
-
-        Returns:
-            Dict with transfer_id and status
-        """
-        transfer = self.file_transfer_manager.active_transfers.get(transfer_id)
-        if not transfer:
-            raise ValueError(f"Unknown transfer: {transfer_id}")
-
-        if transfer.direction != "download":
-            raise ValueError(f"Transfer {transfer_id} is not a download")
-
-        # Send FILE_ACCEPT to peer
-        await self.p2p_manager.send_message_to_peer(transfer.node_id, {
-            "command": "FILE_ACCEPT",
-            "payload": {"transfer_id": transfer_id}
-        })
-
-        return {
-            "transfer_id": transfer_id,
-            "status": "accepted"
-        }
+        """Delegated to P2PCoordinator."""
+        return await self.p2p_coordinator.accept_file_transfer(transfer_id)
 
     async def cancel_file_transfer(self, transfer_id: str, reason: str = "user_cancelled"):
-        """
-        Cancel an active file transfer.
-
-        Args:
-            transfer_id: Transfer ID to cancel
-            reason: Cancellation reason
-
-        Returns:
-            Dict with transfer_id and status
-        """
-        # Get transfer info BEFORE deletion (for UI notification)
-        transfer = self.file_transfer_manager.active_transfers.get(transfer_id)
-
-        # Cancel the transfer (sends FILE_CANCEL to peer and deletes locally)
-        await self.file_transfer_manager.cancel_transfer(transfer_id, reason)
-
-        # Broadcast cancellation event to local UI (so Active Transfers panel updates)
-        if transfer:
-            await self.local_api.broadcast_event("file_transfer_cancelled", {
-                "transfer_id": transfer_id,
-                "node_id": transfer.node_id,
-                "filename": transfer.filename,
-                "direction": transfer.direction,
-                "reason": reason,
-                "status": "cancelled"
-            })
-
-        return {
-            "transfer_id": transfer_id,
-            "status": "cancelled",
-            "reason": reason
-        }
+        """Delegated to P2PCoordinator."""
+        return await self.p2p_coordinator.cancel_file_transfer(transfer_id, reason)
 
     async def send_ai_query(self, prompt: str, compute_host: str = None, model: str = None, provider: str = None, conversation_id: str = None, agent_llm_provider: str = None):
         """
@@ -5788,335 +5273,24 @@ class CoreService:
         await self.context_coordinator.handle_device_context_request(peer_id, request_id)
 
     async def _handle_inference_request(self, peer_id: str, request_id: str, prompt: str, model: str = None, provider: str = None, images: list = None):
-        """
-        Handle incoming remote inference request from a peer.
-        Check firewall permissions, run inference, and send response.
-
-        Args:
-            peer_id: Node ID of the requesting peer
-            request_id: Unique request identifier
-            prompt: Text prompt for the model
-            model: Optional model name
-            provider: Optional provider alias
-            images: Optional list of image dicts for vision queries (Phase 2: Remote Vision)
-        """
-        from dpc_protocol.protocol import create_remote_inference_response
-
-        logger.debug("Handling inference request from %s (request_id: %s, images: %s)", peer_id, request_id, "yes" if images else "no")
-
-        # Check if peer is allowed to request inference
-        if not self.firewall.can_request_inference(peer_id, model):
-            logger.warning("Access denied: %s cannot request inference%s", peer_id, f" for model {model}" if model else "")
-            error_response = create_remote_inference_response(
-                request_id=request_id,
-                error=f"Access denied: You are not authorized to request inference" + (f" for model {model}" if model else "")
-            )
-            try:
-                await self.p2p_manager.send_message_to_peer(peer_id, error_response)
-            except Exception as e:
-                logger.error("Error sending inference error response to %s: %s", peer_id, e, exc_info=True)
-            return
-
-        # Run inference
-        try:
-            logger.info("Running inference for %s (model: %s, provider: %s)", peer_id, model or 'default', provider or 'default')
-
-            # Determine which provider to use:
-            # 1. If model name specified, find provider by model
-            # 2. Otherwise use provider alias if specified
-            # 3. Otherwise use default provider
-            provider_alias_to_use = provider
-
-            if model and not provider:
-                # Find provider by model name
-                found_alias = self.llm_manager.find_provider_by_model(model)
-                if found_alias:
-                    provider_alias_to_use = found_alias
-                    logger.debug("Found provider '%s' for model '%s'", found_alias, model)
-                else:
-                    raise ValueError(f"No provider found for model '{model}'")
-
-            result = await self.llm_manager.query(prompt, provider_alias=provider_alias_to_use, images=images, return_metadata=True)
-            logger.info("Inference completed successfully for %s", peer_id)
-
-            # Send success response with token and model metadata
-            # Use the actual model name from result if available (e.g., "claude-haiku-4.5"),
-            # otherwise fall back to the original model parameter (e.g., "default")
-            actual_model = result.get("model", model)
-
-            success_response = create_remote_inference_response(
-                request_id=request_id,
-                response=result["response"],
-                tokens_used=result.get("tokens_used"),
-                prompt_tokens=result.get("prompt_tokens"),
-                response_tokens=result.get("response_tokens"),
-                model_max_tokens=result.get("model_max_tokens"),
-                model=actual_model,
-                provider=result.get("provider"),
-                thinking=result.get("thinking"),
-                thinking_tokens=result.get("thinking_tokens")
-            )
-            await self.p2p_manager.send_message_to_peer(peer_id, success_response)
-            logger.debug("Sent inference result to %s", peer_id)
-
-        except Exception as e:
-            logger.error("Inference failed for %s: %s", peer_id, e, exc_info=True)
-            error_response = create_remote_inference_response(
-                request_id=request_id,
-                error=str(e)
-            )
-            try:
-                await self.p2p_manager.send_message_to_peer(peer_id, error_response)
-            except Exception as send_err:
-                logger.error("Error sending inference error response to %s: %s", peer_id, send_err, exc_info=True)
+        """Delegated to P2PCoordinator."""
+        await self.p2p_coordinator.handle_inference_request(peer_id, request_id, prompt, model, provider, images)
 
     async def _handle_transcription_request(self, peer_id: str, request_id: str, audio_base64: str, mime_type: str, model: str = None, provider: str = None, language: str = "auto", task: str = "transcribe"):
-        """
-        Handle incoming remote transcription request from a peer.
-        Check firewall permissions, run transcription, and send response.
-
-        Args:
-            peer_id: Node ID of the requesting peer
-            request_id: Unique request identifier
-            audio_base64: Base64-encoded audio data
-            mime_type: Audio MIME type (e.g., audio/webm)
-            model: Optional model name
-            provider: Optional provider alias
-            language: Language code or "auto" for detection
-            task: "transcribe" or "translate"
-        """
-        from dpc_protocol.protocol import create_remote_transcription_response
-        import base64
-        import tempfile
-        import os
-
-        logger.debug("Handling transcription request from %s (request_id: %s, mime_type: %s)", peer_id, request_id, mime_type)
-
-        # Check if peer is allowed to request transcription
-        if not self.firewall.can_request_transcription(peer_id, model):
-            logger.warning("Access denied: %s cannot request transcription%s", peer_id, f" for model {model}" if model else "")
-            error_response = create_remote_transcription_response(
-                request_id=request_id,
-                error=f"Access denied: You are not authorized to request transcription" + (f" for model {model}" if model else "")
-            )
-            try:
-                await self.p2p_manager.send_message_to_peer(peer_id, error_response)
-            except Exception as e:
-                logger.error("Error sending transcription error response to %s: %s", peer_id, e, exc_info=True)
-            return
-
-        # Run transcription
-        temp_audio_path = None
-        try:
-            logger.info("Running transcription for %s (model: %s, provider: %s, language: %s, task: %s)",
-                       peer_id, model or 'default', provider or 'default', language, task)
-
-            # Decode base64 audio data and save to temporary file
-            audio_data = base64.b64decode(audio_base64)
-
-            # Determine file extension from MIME type
-            ext_map = {
-                "audio/webm": ".webm",
-                "audio/opus": ".opus",
-                "audio/ogg": ".ogg",
-                "audio/wav": ".wav",
-                "audio/mp3": ".mp3",
-                "audio/mp4": ".mp4",
-                "audio/mpeg": ".mp3"
-            }
-            file_ext = ext_map.get(mime_type, ".webm")
-
-            # Create temporary file
-            with tempfile.NamedTemporaryFile(delete=False, suffix=file_ext) as temp_file:
-                temp_audio_path = temp_file.name
-                temp_file.write(audio_data)
-
-            # Determine which provider to use
-            provider_alias_to_use = provider
-
-            if model and not provider:
-                # Find provider by model name
-                found_alias = self.llm_manager.find_provider_by_model(model)
-                if found_alias:
-                    provider_alias_to_use = found_alias
-                    logger.debug("Found provider '%s' for model '%s'", found_alias, model)
-                else:
-                    raise ValueError(f"No provider found for model '{model}'")
-
-            # Get the provider instance
-            provider_instance = self.llm_manager.providers.get(provider_alias_to_use)
-
-            # Check if provider supports transcription
-            if not hasattr(provider_instance, 'transcribe'):
-                raise ValueError(f"Provider '{provider_alias_to_use}' does not support transcription")
-
-            # Update provider settings for this transcription
-            if language != "auto":
-                provider_instance.language = language
-            if task:
-                provider_instance.task = task
-
-            # Run transcription
-            result = await provider_instance.transcribe(temp_audio_path)
-            logger.info("Transcription completed successfully for %s", peer_id)
-
-            # Send success response
-            success_response = create_remote_transcription_response(
-                request_id=request_id,
-                text=result.get("text", ""),
-                language=result.get("language"),
-                duration_seconds=result.get("duration"),
-                provider=result.get("provider") or provider_alias_to_use
-            )
-            await self.p2p_manager.send_message_to_peer(peer_id, success_response)
-            logger.debug("Sent transcription result to %s", peer_id)
-
-        except Exception as e:
-            logger.error("Transcription failed for %s: %s", peer_id, e, exc_info=True)
-            error_response = create_remote_transcription_response(
-                request_id=request_id,
-                error=str(e)
-            )
-            try:
-                await self.p2p_manager.send_message_to_peer(peer_id, error_response)
-            except Exception as send_err:
-                logger.error("Error sending transcription error response to %s: %s", peer_id, send_err, exc_info=True)
-
-        finally:
-            # Clean up temporary file
-            if temp_audio_path and os.path.exists(temp_audio_path):
-                try:
-                    os.unlink(temp_audio_path)
-                except Exception as cleanup_err:
-                    logger.warning("Failed to delete temporary audio file %s: %s", temp_audio_path, cleanup_err)
+        """Delegated to P2PCoordinator."""
+        await self.p2p_coordinator.handle_transcription_request(peer_id, request_id, audio_base64, mime_type, model, provider, language, task)
 
     async def _handle_get_providers_request(self, peer_id: str):
-        """
-        Handle GET_PROVIDERS request from a peer.
-        Check firewall permissions and send available providers that the peer can use.
-        Supports both compute sharing (AI inference) and transcription sharing (Whisper).
-        """
-        from dpc_protocol.protocol import create_providers_response
-
-        logger.debug("Handling GET_PROVIDERS request from %s", peer_id)
-
-        # Check if peer has access to compute OR transcription resources
-        has_compute_access = self.firewall.can_request_inference(peer_id)
-        has_transcription_access = self.firewall.can_request_transcription(peer_id)
-
-        if not has_compute_access and not has_transcription_access:
-            logger.warning("Access denied: %s cannot access compute or transcription resources", peer_id)
-            # Send empty provider list (no access)
-            response = create_providers_response([])
-            try:
-                await self.p2p_manager.send_message_to_peer(peer_id, response)
-            except Exception as e:
-                logger.error("Error sending providers response to %s: %s", peer_id, e, exc_info=True)
-            return
-
-        # Get all available providers
-        all_providers = []
-        compute_models = []
-        transcription_models = []
-
-        for alias, provider in self.llm_manager.providers.items():
-            model = provider.model
-            provider_type = provider.config.get("type", "unknown")
-
-            provider_info = {
-                "alias": alias,
-                "model": model,
-                "type": provider_type,
-                "supports_vision": provider.supports_vision(),
-                "supports_voice": self._provider_supports_voice(provider)  # Mark transcription providers
-            }
-
-            # Categorize by provider type
-            if provider_type == "local_whisper":
-                transcription_models.append(model)
-            else:
-                compute_models.append(model)
-
-            all_providers.append(provider_info)
-
-        # Filter providers based on firewall permissions
-        filtered_providers = []
-
-        for provider_info in all_providers:
-            provider_type = provider_info["type"]
-            model = provider_info["model"]
-
-            # Check transcription providers
-            if provider_type == "local_whisper":
-                if has_transcription_access:
-                    # Check if model is allowed for transcription
-                    if self.firewall.can_request_transcription(peer_id, model):
-                        filtered_providers.append(provider_info)
-                        logger.debug("Including transcription provider '%s' for %s", provider_info["alias"], peer_id[:20])
-            # Check compute providers (text/vision models)
-            else:
-                if has_compute_access:
-                    # Check if model is allowed for compute
-                    if self.firewall.can_request_inference(peer_id, model):
-                        filtered_providers.append(provider_info)
-                        logger.debug("Including compute provider '%s' for %s", provider_info["alias"], peer_id[:20])
-
-        logger.debug("Sending %d providers to %s (filtered from %d total, compute_access=%s, transcription_access=%s)",
-                    len(filtered_providers), peer_id[:20], len(all_providers), has_compute_access, has_transcription_access)
-
-        # Send response with filtered providers
-        response = create_providers_response(filtered_providers)
-        try:
-            await self.p2p_manager.send_message_to_peer(peer_id, response)
-        except Exception as e:
-            logger.error("Error sending providers response to %s: %s", peer_id, e, exc_info=True)
+        """Delegated to P2PCoordinator."""
+        await self.p2p_coordinator.handle_get_providers_request(peer_id)
 
     async def _handle_providers_response(self, peer_id: str, providers: list):
-        """
-        Handle PROVIDERS_RESPONSE from a peer.
-        Store the providers in peer metadata and broadcast to UI.
-        Also resolves any pending query_remote_providers request.
-        """
-        logger.debug("Received %d providers from %s", len(providers), peer_id)
-
-        # Update peer metadata with providers
-        if peer_id not in self.peer_metadata:
-            self.peer_metadata[peer_id] = {}
-
-        self.peer_metadata[peer_id]["providers"] = providers
-
-        # Resolve pending request if any (for on-demand provider queries)
-        pending_future = self._pending_providers_requests.pop(peer_id, None)
-        if pending_future and not pending_future.done():
-            pending_future.set_result(providers)
-            logger.debug("Resolved pending providers request for %s", peer_id)
-
-        # Broadcast to UI
-        await self.local_api.broadcast_event("peer_providers_updated", {
-            "node_id": peer_id,
-            "providers": providers
-        })
+        """Delegated to P2PCoordinator."""
+        await self.p2p_coordinator.handle_providers_response(peer_id, providers)
 
     async def _notify_peers_of_name_change(self, new_name: str):
-        """
-        Notify all connected peers of name change (e.g., after personal context edit).
-        Sends HELLO message to each peer so they can update their cached display name.
-        """
-        from dpc_protocol.protocol import create_hello_message
-
-        connected_peers = list(self.p2p_manager.peers.keys())
-        if not connected_peers:
-            logger.debug("No connected peers to notify")
-            return
-
-        for peer_id in connected_peers:
-            try:
-                # Send HELLO message with updated name
-                hello_msg = create_hello_message(self.p2p_manager.node_id, new_name)
-                await self.p2p_manager.send_message_to_peer(peer_id, hello_msg)
-                logger.debug("Notified %s of name change: %s", peer_id, new_name)
-            except Exception as e:
-                logger.error("Error notifying %s of name change: %s", peer_id, e, exc_info=True)
+        """Delegated to KnowledgeService."""
+        await self.knowledge_service._notify_peers_of_name_change(new_name)
 
     async def _on_proposal_received_from_peer(self, proposal):
         """Delegated to KnowledgeService."""
@@ -6359,182 +5533,20 @@ class CoreService:
             return {"status": "error", "message": str(e)}
 
     async def _request_inference_from_peer(self, peer_id: str, prompt: str, model: str = None, provider: str = None, images: list = None, timeout: float = 240.0) -> str:
-        """
-        Request remote inference from a specific peer.
-        Uses async request-response pattern with Future.
-
-        Args:
-            peer_id: The node_id of the peer to request inference from
-            prompt: The prompt to send for inference
-            model: Optional model name to use
-            provider: Optional provider alias to use
-            images: Optional list of image dicts for vision queries (Phase 2: Remote Vision)
-            timeout: Timeout in seconds (default 240s for inference)
-
-        Returns:
-            The inference result as a string
-
-        Raises:
-            ConnectionError: If peer is not connected
-            TimeoutError: If request times out
-            RuntimeError: If inference fails on remote peer
-        """
-        from dpc_protocol.protocol import create_remote_inference_request
-
-        logger.debug("Requesting inference from peer: %s (images: %s)", peer_id, 'yes' if images else 'no')
-
-        if peer_id not in self.p2p_manager.peers:
-            raise ConnectionError(f"Peer {peer_id} is not connected")
-
-        try:
-            # Generate unique request ID
-            request_id = str(uuid.uuid4())
-
-            # Create Future to wait for response
-            response_future = asyncio.Future()
-            self._pending_inference_requests[request_id] = response_future
-
-            # Create inference request message (Phase 2: includes images)
-            request_message = create_remote_inference_request(
-                request_id=request_id,
-                prompt=prompt,
-                model=model,
-                provider=provider,
-                images=images
-            )
-
-            # Send request
-            await self.p2p_manager.send_message_to_peer(peer_id, request_message)
-
-            # Wait for response with timeout
-            try:
-                result = await asyncio.wait_for(response_future, timeout=timeout)
-                logger.info("Received inference result from %s", peer_id)
-                return result
-
-            except asyncio.TimeoutError:
-                logger.warning("Timeout waiting for inference from %s", peer_id)
-                raise TimeoutError(f"Inference request to {peer_id} timed out after {timeout}s")
-            finally:
-                # Clean up pending request
-                self._pending_inference_requests.pop(request_id, None)
-
-        except Exception as e:
-            logger.error("Error requesting inference from %s: %s", peer_id, e, exc_info=True)
-            raise
+        """Delegated to P2PCoordinator."""
+        return await self.p2p_coordinator.request_inference_from_peer(peer_id, prompt, model, provider, images, timeout)
 
     async def _request_transcription_from_peer(
         self, peer_id: str, audio_base64: str, mime_type: str,
         model: str = None, provider: str = None, language: str = "auto",
         task: str = "transcribe", timeout: float = 120.0
     ) -> Dict[str, Any]:
-        """
-        Request remote transcription from a specific peer.
-        Uses async request-response pattern with Future.
-
-        Args:
-            peer_id: The node_id of the peer to request transcription from
-            audio_base64: Base64-encoded audio data
-            mime_type: Audio MIME type (e.g., audio/webm)
-            model: Optional model name to use
-            provider: Optional provider alias to use
-            language: Language code or "auto" for detection
-            task: "transcribe" (default) or "translate" (to English)
-            timeout: Timeout in seconds (default 120s for transcription)
-
-        Returns:
-            Dict containing transcription result with keys:
-                - text: Transcribed text
-                - language: Detected language
-                - duration_seconds: Audio duration
-                - provider: Provider used
-
-        Raises:
-            ConnectionError: If peer is not connected
-            TimeoutError: If request times out
-            RuntimeError: If transcription fails on remote peer
-        """
-        from dpc_protocol.protocol import create_remote_transcription_request
-
-        logger.debug("Requesting transcription from peer: %s (mime_type: %s, language: %s)",
-                    peer_id, mime_type, language)
-
-        if peer_id not in self.p2p_manager.peers:
-            raise ConnectionError(f"Peer {peer_id} is not connected")
-
-        try:
-            # Generate unique request ID
-            request_id = str(uuid.uuid4())
-
-            # Create Future to wait for response
-            response_future = asyncio.Future()
-            self._pending_transcription_requests[request_id] = response_future
-
-            # Create transcription request message
-            request_message = create_remote_transcription_request(
-                request_id=request_id,
-                audio_base64=audio_base64,
-                mime_type=mime_type,
-                model=model,
-                provider=provider,
-                language=language,
-                task=task
-            )
-
-            # Send request
-            await self.p2p_manager.send_message_to_peer(peer_id, request_message)
-
-            # Wait for response with timeout
-            try:
-                result = await asyncio.wait_for(response_future, timeout=timeout)
-                logger.info("Received transcription result from %s: %d chars",
-                           peer_id, len(result.get("text", "")))
-                return result
-
-            except asyncio.TimeoutError:
-                logger.warning("Timeout waiting for transcription from %s", peer_id)
-                raise TimeoutError(f"Transcription request to {peer_id} timed out after {timeout}s")
-            finally:
-                # Clean up pending request
-                self._pending_transcription_requests.pop(request_id, None)
-
-        except Exception as e:
-            logger.error("Error requesting transcription from %s: %s", peer_id, e, exc_info=True)
-            raise
+        """Delegated to P2PCoordinator."""
+        return await self.p2p_coordinator.request_transcription_from_peer(peer_id, audio_base64, mime_type, model, provider, language, task, timeout)
 
     async def _aggregate_contexts(self, query: str, peer_ids: List[str] = None) -> Dict[str, PersonalContext]:
-        """
-        Aggregate contexts from local user and connected peers.
-        
-        Args:
-            query: The user's query (used for context relevance)
-            peer_ids: Optional list of specific peer IDs to request from.
-                     If None, requests from all connected peers.
-        
-        Returns:
-            Dictionary mapping node_id to PersonalContext
-        """
-        contexts = {}
-        
-        # Always include local context
-        contexts[self.p2p_manager.node_id] = self.p2p_manager.local_context
-        
-        # Determine which peers to query
-        if peer_ids is None:
-            peer_ids = list(self.p2p_manager.peers.keys())
-        
-        # Request context from each peer in parallel
-        if peer_ids:
-            tasks = [self._request_context_from_peer(peer_id, query) for peer_id in peer_ids]
-            results = await asyncio.gather(*tasks, return_exceptions=True)
-
-            for peer_id, result in zip(peer_ids, results):
-                if isinstance(result, PersonalContext):
-                    contexts[peer_id] = result
-                elif result is not None:
-                    logger.error("Error getting context from %s: %s", peer_id, result)
-
-        return contexts
+        """Delegated to P2PCoordinator."""
+        return await self.p2p_coordinator.aggregate_contexts(query, peer_ids)
 
     # --- AI Query Methods ---
 
@@ -6588,6 +5600,7 @@ class CoreService:
                     sender_name=self.p2p_manager.get_display_name() or "User",
                 )
                 monitor.save_history()
+                user_msg_index = monitor.get_last_msg_index()
 
                 # Broadcast @CC mention event (picked up by dpc-agent-chat MCP server)
                 await self._check_agent_cc_mention(
@@ -6608,6 +5621,7 @@ class CoreService:
                         "token_limit": 128000,
                         "history_tokens": 0,
                         "context_estimated": 0,
+                        "user_msg_index": user_msg_index,
                     }
                 )
                 logger.info("@CC-only mention in %s — broadcast to MCP bridge (real CC)", conversation_id)
@@ -6678,6 +5692,19 @@ class CoreService:
                 if thinking_text:
                     thinking_tokens = len(thinking_text) // 4  # rough token estimate
 
+            # Pull msg_index for both user and assistant turns from monitor —
+            # process_message() appends user msg then assistant msg, so the
+            # last two history entries are the pair we just produced. Frontend
+            # uses these to update the optimistic user message and tag the
+            # assistant response with the "#N" badge on first render.
+            assistant_msg_index = 0
+            user_msg_index = 0
+            if monitor and monitor.message_history:
+                if monitor.message_history[-1].get("role") == "assistant":
+                    assistant_msg_index = monitor.message_history[-1].get("msg_index", 0)
+                if len(monitor.message_history) >= 2 and monitor.message_history[-2].get("role") == "user":
+                    user_msg_index = monitor.message_history[-2].get("msg_index", 0)
+
             # Send response to UI with actual metadata including token info
             await self.local_api.send_response_to_all(
                 command_id=command_id,
@@ -6694,6 +5721,8 @@ class CoreService:
                     "context_estimated": session_state.get("context_estimated", 0),
                     "thinking": thinking_text,
                     "thinking_tokens": thinking_tokens,
+                    "user_msg_index": user_msg_index,
+                    "assistant_msg_index": assistant_msg_index,
                 }
             )
 
@@ -6815,11 +5844,8 @@ class CoreService:
             )
             monitor.save_history()
 
-            # Update token stats so UI counter reflects CC messages (#4)
-            cc_tokens = len(text) // 4  # rough estimate
-            old_estimate = getattr(monitor, '_last_context_estimated', 0)
-            if old_estimate:
-                monitor._last_context_estimated = old_estimate + cc_tokens
+            # context_estimated is updated after each LLM response — no additive
+            # increment here (same fix as agent_manager.py drift removal).
             token_stats = manager.get_session_state(conversation_id)
 
             # Reset chain depth — each CC message starts a fresh chain allowance
@@ -6836,6 +5862,7 @@ class CoreService:
                     "sender_name": cc_name,
                     "sender_node_id": "cc",
                     "timestamp": timestamp,
+                    "msg_index": monitor.get_last_msg_index(),
                     "context_estimated": token_stats.get("context_estimated", 0),
                     "history_tokens": token_stats.get("history_tokens", 0),
                     "tokens_limit": token_stats.get("tokens_limit", 128000),
@@ -6927,6 +5954,9 @@ class CoreService:
                 from dpc_client_core.dpc_agent.utils import utc_now_iso
                 import uuid
                 agent_name = self._get_agent_display_name(conversation_id)
+                # Pull msg_index from the same monitor entry just inspected for
+                # thinking/streaming_raw — it was assigned at on_message time.
+                msg_index = monitor.get_last_msg_index() if monitor else 0
                 await self.local_api.broadcast_event("agent_chat_message", {
                     "conversation_id": conversation_id,
                     "message_id": str(uuid.uuid4()),
@@ -6934,6 +5964,7 @@ class CoreService:
                     "content": response,
                     "sender_name": agent_name,
                     "timestamp": utc_now_iso(),
+                    "msg_index": msg_index,
                     "thinking": thinking_text,
                     "streaming_raw": streaming_raw,
                 })
@@ -7502,68 +6533,26 @@ class CoreService:
             return {"status": "error", "message": str(e)}
 
     async def get_agent_model_config(self, agent_id: str = None) -> Dict[str, Any]:
-        """Get per-agent model configuration (Main LLM + Sleep LLM) along with available providers."""
+        """Delegated to AgentService."""
+        if not self.agent_service:
+            return {"status": "error", "message": "Agent service not available"}
         if agent_id is None:
             agent_id = self._get_default_agent_id()
-        try:
-            from dpc_client_core.dpc_agent.utils import load_agent_config, AgentRegistry
-            registry = AgentRegistry()
-            if not registry.get_agent(agent_id):
-                return {"status": "error", "message": f"Agent not found: {agent_id}"}
-
-            config = load_agent_config(agent_id)
-            providers_data = await self.get_providers_list()
-
-            return {
-                "status": "ok",
-                "agent_id": agent_id,
-                "provider_alias": config.get("provider_alias"),
-                "sleep_provider_alias": config.get("sleep_provider_alias"),
-                "providers": providers_data.get("providers", []),
-                "default_provider": providers_data.get("default_provider", ""),
-            }
-        except Exception as e:
-            logger.error("get_agent_model_config failed: %s", e, exc_info=True)
-            return {"status": "error", "message": str(e)}
+        return await self.agent_service.get_agent_model_config(agent_id, self.get_providers_list)
 
     async def save_agent_model_config(
         self, agent_id: str = None,
         provider_alias: str = None,
         sleep_provider_alias: str = None,
     ) -> Dict[str, Any]:
-        """Save per-agent model configuration (Main LLM + Sleep LLM)."""
+        """Delegated to AgentService."""
+        if not self.agent_service:
+            return {"status": "error", "message": "Agent service not available"}
         if agent_id is None:
             agent_id = self._get_default_agent_id()
-        try:
-            from dpc_client_core.dpc_agent.utils import load_agent_config, save_agent_config, AgentRegistry
-            registry = AgentRegistry()
-            if not registry.get_agent(agent_id):
-                return {"status": "error", "message": f"Agent not found: {agent_id}"}
-
-            config = load_agent_config(agent_id)
-            if provider_alias is not None:
-                config["provider_alias"] = provider_alias
-                agent_entry = registry.get_agent(agent_id)
-                if agent_entry:
-                    agent_entry["provider_alias"] = provider_alias
-                    registry._save_registry()
-            if sleep_provider_alias is not None:
-                config["sleep_provider_alias"] = sleep_provider_alias
-            save_agent_config(agent_id, config)
-
-            providers_data = await self.get_providers_list()
-
-            return {
-                "status": "ok",
-                "agent_id": agent_id,
-                "provider_alias": config.get("provider_alias"),
-                "sleep_provider_alias": config.get("sleep_provider_alias"),
-                "providers": providers_data.get("providers", []),
-                "default_provider": providers_data.get("default_provider", ""),
-            }
-        except Exception as e:
-            logger.error("save_agent_model_config failed: %s", e, exc_info=True)
-            return {"status": "error", "message": str(e)}
+        return await self.agent_service.save_agent_model_config(
+            agent_id, provider_alias, sleep_provider_alias, self.get_providers_list
+        )
 
     # --- Agent Task Board Methods (v0.20.0) ---
 
@@ -7670,7 +6659,9 @@ class CoreService:
         if history_path.exists():
             try:
                 data = json.loads(history_path.read_text(encoding="utf-8"))
-                if data.get("messages"):
+                msgs = data.get("messages", [])
+                has_user_messages = any(m.get("role") == "user" for m in msgs)
+                if has_user_messages:
                     return {"status": "error", "message": "End session first — chat must be empty to sleep"}
             except (json.JSONDecodeError, OSError):
                 pass
@@ -7737,6 +6728,139 @@ class CoreService:
             await get_event_emitter().emit(EventType.SLEEP_STATE_CHANGED, data)
         except Exception as e:
             logger.debug("Failed to emit sleep event: %s", e)
+
+    @staticmethod
+    def _find_group_dir(group_id: str) -> Optional[Path]:
+        """Find group conversation directory by ID. Tries exact match first, then prefix."""
+        conversations_dir = Path.home() / ".dpc" / "conversations"
+        exact = conversations_dir / group_id
+        if exact.is_dir():
+            return exact
+        for d in conversations_dir.iterdir():
+            if d.is_dir() and d.name.startswith(group_id + "-"):
+                return d
+        return None
+
+    async def trigger_group_sleep(self, group_id: str) -> Dict[str, Any]:
+        """Trigger sleep pipeline for all agents in a group, using group archives only."""
+        conversations_dir = Path.home() / ".dpc" / "conversations"
+        group_dir = self._find_group_dir(group_id)
+        if not group_dir:
+            return {"status": "error", "message": f"Group {group_id} not found"}
+
+        metadata_path = group_dir / "metadata.json"
+        if not metadata_path.exists():
+            return {"status": "error", "message": "Group metadata not found"}
+
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        local_node_id = self.node_id if hasattr(self, "node_id") else None
+        local_agents = metadata.get("agents", {}).get(local_node_id, []) if local_node_id else []
+        if not local_agents:
+            for node_agents in metadata.get("agents", {}).values():
+                local_agents.extend(node_agents)
+
+        if not local_agents:
+            return {"status": "error", "message": "No agents in group"}
+
+        logger.info("Group sleep: found %d agents for %s (node=%s): %s",
+                     len(local_agents), group_id, local_node_id, local_agents)
+
+        from dpc_client_core.dpc_agent.sleep_pipeline import run_sleep
+        from dpc_client_core.dpc_agent.utils import load_agent_config
+
+        triggered = []
+        for agent_id in local_agents:
+            agent_dir = conversations_dir / agent_id
+            if not agent_dir.exists():
+                logger.warning("Group sleep: skipping %s — dir %s not found", agent_id, agent_dir)
+                continue
+
+            agent_config = load_agent_config(agent_id)
+            sleep_provider = agent_config.get("sleep_provider_alias") or None
+
+            agent_display_name = agent_id
+            if local_node_id:
+                names_map = metadata.get("agent_names", {}).get(local_node_id, {})
+                agent_display_name = names_map.get(agent_id, agent_id)
+
+            sleep_data = {"agent_id": agent_id, "group_id": group_id, "status": "sleeping"}
+            await self.local_api.broadcast_event("sleep_state_changed", sleep_data)
+
+            async def _run_group_sleep(aid=agent_id, adir=agent_dir, sp=sleep_provider, dname=agent_display_name):
+                async def _progress(current, total, phase, archive_file):
+                    await self.local_api.broadcast_event("sleep_progress", {
+                        "agent_id": aid, "group_id": group_id,
+                        "current": current, "total": total,
+                        "phase": phase, "archive_file": archive_file,
+                    })
+                try:
+                    result = await run_sleep(
+                        adir, self.llm_manager, agent_id=aid, force=True,
+                        provider_alias=sp, progress_callback=_progress, group_id=group_id,
+                    )
+                    if result.get("status") == "completed":
+                        brief = result.get("morning_brief", {})
+                        brief["group_id"] = group_id
+                        brief_path = adir / f"morning_brief_group_{group_id}.json"
+                        chat_text = self._format_morning_brief(brief)
+                        await self.send_group_agent_message(group_id, dname, chat_text)
+                        brief["consumed"] = True
+                        brief_path.write_text(json.dumps(brief, ensure_ascii=False, indent=2), encoding="utf-8")
+                    done_data = {"agent_id": aid, "group_id": group_id, "status": "awake",
+                                 "result": result.get("status", "unknown"),
+                                 "sessions_analyzed": result.get("sessions_analyzed", 0)}
+                    await self.local_api.broadcast_event("sleep_state_changed", done_data)
+                except Exception as e:
+                    logger.error("Group sleep error for %s: %s", aid, e, exc_info=True)
+                    await self.local_api.broadcast_event("sleep_state_changed", {
+                        "agent_id": aid, "group_id": group_id, "status": "awake", "result": "error", "error": str(e)})
+
+            asyncio.create_task(_run_group_sleep())
+            triggered.append(agent_id)
+            await asyncio.sleep(2)
+
+        return {"status": "sleeping", "agents": triggered, "group_id": group_id}
+
+    async def activate_group_chat(self, group_id: str) -> Dict[str, Any]:
+        """Called when user opens a group chat. Posts pending morning briefs."""
+        conversations_dir = Path.home() / ".dpc" / "conversations"
+        group_dir = self._find_group_dir(group_id)
+        if not group_dir:
+            return {"status": "ok", "briefs_posted": 0}
+
+        metadata_path = group_dir / "metadata.json"
+        if not metadata_path.exists():
+            return {"status": "ok", "briefs_posted": 0}
+
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        all_agents = []
+        agent_names = {}
+        for node_id, agent_ids in metadata.get("agents", {}).items():
+            for aid in agent_ids:
+                all_agents.append(aid)
+                names_map = metadata.get("agent_names", {}).get(node_id, {})
+                agent_names[aid] = names_map.get(aid, aid)
+
+        posted = 0
+        for agent_id in all_agents:
+            brief_path = conversations_dir / agent_id / f"morning_brief_group_{group_id}.json"
+            if not brief_path.exists():
+                continue
+            try:
+                brief = json.loads(brief_path.read_text(encoding="utf-8"))
+                if brief.get("consumed"):
+                    continue
+                chat_text = self._format_morning_brief(brief)
+                display_name = agent_names.get(agent_id, agent_id)
+                await self.send_group_agent_message(group_id, display_name, chat_text)
+                brief["consumed"] = True
+                brief_path.write_text(json.dumps(brief, ensure_ascii=False, indent=2), encoding="utf-8")
+                posted += 1
+                await asyncio.sleep(1)
+            except Exception as e:
+                logger.error("Failed to post group brief for %s: %s", agent_id, e)
+
+        return {"status": "ok", "briefs_posted": posted}
 
     # --- Hub Methods ---
 

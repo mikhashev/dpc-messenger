@@ -48,7 +48,7 @@ log = logging.getLogger(__name__)
 @dataclass
 class AgentConfig:
     """Configuration for the DPC agent."""
-    budget_usd: float = 50.0
+    budget_usd: float = 500_000
     max_rounds: int = 200
     # Tool control is via firewall (privacy_rules.json), not config
     # Task queue settings
@@ -112,8 +112,8 @@ class DpcAgent:
             firewall_profile=firewall_profile,
         )
 
-        from .memory import EmbeddingProvider
-        self._embedding_provider = EmbeddingProvider(local_files_only=True)
+        from .memory import get_embedding_provider
+        self._embedding_provider = get_embedding_provider(local_files_only=True)
 
         # Task queue for background execution
         self.queue = TaskQueue(self.agent_root)
@@ -133,7 +133,7 @@ class DpcAgent:
         # Budget tracker
         billing_model = BillingModel.SUBSCRIPTION if self.config.billing_model == "subscription" else BillingModel.PAY_PER_USE
         self.budget = HybridBudget(
-            provider="dpc_agent",
+            provider=provider_alias or "default",
             billing_model=self.config.billing_model,
             budget_usd=self.config.budget_usd,
         )
@@ -167,6 +167,7 @@ class DpcAgent:
         # Reply routing: when set, injected into ToolContext so schedule_task
         # can propagate it into task data for automatic result delivery.
         reply_telegram_chat_id: Optional[str] = None,
+        message_source: Optional[str] = None,
     ) -> str:
         """
         Process a user message and return response.
@@ -207,16 +208,16 @@ class DpcAgent:
                 prior_history = full_history[:-1]  # exclude the current user message
 
         # Get firewall-controlled tool access (needed for both context and tool registry)
-        allowed_tools = self._get_allowed_tools()
+        allowed_tools = self._get_allowed_tools(message_source=message_source)
 
         # Collect firewall metadata for capabilities section (transparency)
         all_tools_map = None
         sandbox_ro = None
         sandbox_rw = None
         if self._firewall is not None:
-            all_tools_map = dict(self._firewall.dpc_agent_tools)
-            sandbox_ro = list(self._firewall.sandbox_read_only_paths)
-            sandbox_rw = list(self._firewall.sandbox_read_write_paths)
+            all_tools_map = self._firewall.get_agent_tools_map(self._firewall_profile)
+            sandbox_ro = self._firewall.get_sandbox_read_only_paths(self._firewall_profile)
+            sandbox_rw = self._firewall.get_sandbox_read_write_paths(self._firewall_profile)
 
         messages, cap_info = build_llm_messages(
             agent_root=self.agent_root,
@@ -239,7 +240,7 @@ class DpcAgent:
 
         # Log context window usage — warn if approaching limit or sections were trimmed
         _estimated = cap_info.get("estimated_tokens_before", 0)
-        _ctx_window = (session_state or {}).get("tokens_limit", 200000) or 200000
+        _ctx_window = (session_state or {}).get("tokens_limit") or 204800
         _trimmed = cap_info.get("trimmed_sections", [])
         if _trimmed:
             log.warning(
@@ -311,7 +312,7 @@ class DpcAgent:
             agent_root=self.agent_root,
             emit_progress=emit_progress or (lambda msg, tool=None, rnd=None: None),
             task_id=conversation_id,
-            budget_remaining_usd=self.config.budget_usd,
+            budget_remaining_usd=None if self.config.billing_model == "subscription" else self.config.budget_usd,
             max_rounds=self.config.max_rounds,
             on_stream_chunk=on_stream_chunk,
             conversation_id=conversation_id,
@@ -394,20 +395,28 @@ class DpcAgent:
         state_path.parent.mkdir(parents=True, exist_ok=True)
         state_path.write_text(json.dumps(state, indent=2), encoding="utf-8")
 
-    def _get_allowed_tools(self) -> Optional[set]:
-        """
-        Get set of allowed tools from firewall.
+    EXTERNAL_SOURCE_ALLOWED_TOOLS = frozenset({
+        "memory_search", "browse_page", "search_web",
+        "read_file", "list_my_tools", "knowledge_list",
+    })
 
-        Returns:
-            Set of allowed tool names, or None if no firewall (all tools allowed)
+    def _get_allowed_tools(self, message_source: Optional[str] = None) -> Optional[set]:
+        """
+        Get set of allowed tools from firewall, restricted by message source.
+
+        External sources (discord, telegram_public) get a read-only whitelist
+        intersected with firewall permissions — new tools blocked by default.
         """
         if self._firewall is None:
+            if message_source in ("discord", "telegram_public"):
+                log.warning("No firewall configured — external source %s, using read-only fallback", message_source)
+                return set(self.EXTERNAL_SOURCE_ALLOWED_TOOLS)
             log.warning("No firewall configured - all tools allowed")
-            return None  # No restriction
+            return None
 
         if not self._firewall.dpc_agent_enabled:
             log.info("DPC Agent disabled in firewall")
-            return set()  # No tools allowed
+            return set()
 
         if self._firewall_profile:
             allowed = self._firewall.get_allowed_agent_tools_for_profile(self._firewall_profile)
@@ -415,6 +424,11 @@ class DpcAgent:
         else:
             allowed = self._firewall.get_allowed_agent_tools()
             log.debug(f"Firewall allowed tools (global): {len(allowed)} tools")
+
+        if message_source in ("discord", "telegram_public"):
+            allowed = allowed & self.EXTERNAL_SOURCE_ALLOWED_TOOLS
+            log.info("Source %s: restricted to %d read-only tools", message_source, len(allowed))
+
         return allowed
 
     def get_memory(self) -> Memory:

@@ -27,7 +27,10 @@ class GroupMetadata:
     created_by: str = ""
     created_at: str = ""
     members: List[str] = field(default_factory=list)
+    agents: Dict[str, List[str]] = field(default_factory=dict)
+    agent_names: Dict[str, Dict[str, str]] = field(default_factory=dict)
     version: int = 1
+    is_discord_bridge: bool = False
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -41,7 +44,10 @@ class GroupMetadata:
             created_by=data.get("created_by", ""),
             created_at=data.get("created_at", ""),
             members=data.get("members", []),
+            agents=data.get("agents", {}),
+            agent_names=data.get("agent_names", {}),
             version=data.get("version", 1),
+            is_discord_bridge=data.get("is_discord_bridge", False),
         )
 
 
@@ -65,15 +71,33 @@ class GroupManager:
         self._deleted_groups: Dict[str, Dict[str, str]] = {}  # group_id -> {deleted_at, deleted_by}
         self._deleted_registry_path = self.groups_dir / "deleted_registry.json"
 
+    @staticmethod
+    def _slugify(name: str) -> str:
+        """Convert a display name to a filesystem-safe slug (matches conversation_monitor)."""
+        import re
+        slug = name.lower()
+        slug = re.sub(r'[^a-z0-9\s-]', '', slug)
+        slug = re.sub(r'\s+', '-', slug)
+        slug = re.sub(r'-+', '-', slug).strip('-')
+        return slug[:20]
+
     def _get_conversation_dir(self, group_id: str) -> Path:
         """Get the conversation folder path for a group.
+
+        Uses {group_id}-{slug} format when group has a name,
+        matching conversation_monitor._get_conversation_dir().
 
         Args:
             group_id: Group ID
 
         Returns:
-            Path to ~/.dpc/conversations/{group_id}/
+            Path to ~/.dpc/conversations/{group_id}-{slug}/ or ~/.dpc/conversations/{group_id}/
         """
+        group = self._groups.get(group_id)
+        if group and group.name:
+            slug = self._slugify(group.name)
+            if slug:
+                return self.conversations_dir / f"{group_id}-{slug}"
         return self.conversations_dir / group_id
 
     def _get_group_metadata_path(self, group_id: str) -> Path:
@@ -318,6 +342,17 @@ class GroupManager:
         self._save_group(group_id)
         logger.info("Created group '%s' (%s) with %d members", name, group_id, len(members))
         return group
+
+    def set_node_agents(self, group_id: str, node_id: str, agent_ids: List[str],
+                        agent_names: Dict[str, str] = None):
+        """Set the list of agents a node has in this group."""
+        group = self._groups.get(group_id)
+        if not group:
+            return
+        group.agents[node_id] = agent_ids
+        if agent_names:
+            group.agent_names[node_id] = agent_names
+        self._save_group(group_id)
 
     def get_group(self, group_id: str) -> Optional[GroupMetadata]:
         """Get group metadata by ID."""

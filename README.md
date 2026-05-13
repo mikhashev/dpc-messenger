@@ -1,7 +1,7 @@
 # D-PC Messenger: Privacy-First Platform for Human-AI Co-Evolution
 
-> **Status:** Alpha | **License:** Multi-License (GPL/LGPL/AGPL/CC0) | **Version:** 0.24.0
-> **Platforms:** Windows | Linux | macOS
+> **Status:** Alpha | **License:** Multi-License (GPL/LGPL/AGPL/CC0) | **Version:** 0.25.0
+> **Platforms:** Windows | Linux | macOS | [**Discord**](https://discord.gg/BMbwPatd)
 
 ---
 
@@ -101,8 +101,9 @@ Built with [aiortc](https://github.com/aiortc/aiortc), [Tauri](https://tauri.app
 
 ---
 
-## Support & Contributing
+## Community & Support
 
+- **Discord:** [Join our community](https://discord.gg/BMbwPatd) — chat with the team and Iris, our AI community agent
 - **Contributing:** We're not accepting external contributions yet. Questions? [Open an issue](https://github.com/mikhashev/dpc-messenger/issues) or [start a discussion](https://github.com/mikhashev/dpc-messenger/discussions).
 - **Issues:** [GitHub Issues](https://github.com/mikhashev/dpc-messenger/issues) | **Discussions:** [GitHub Discussions](https://github.com/mikhashev/dpc-messenger/discussions) | **Email:** legoogmiha@gmail.com
 - **Business:** Interested in partnerships or investment? [legoogmiha@gmail.com](mailto:legoogmiha@gmail.com)

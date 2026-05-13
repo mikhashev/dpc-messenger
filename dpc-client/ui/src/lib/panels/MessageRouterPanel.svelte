@@ -145,7 +145,10 @@
             senderName: msg.sender_name,
             text: msg.text,
             timestamp: Date.now(),
-            mentions: msg.mentions || []
+            mentions: msg.mentions || [],
+            isAgent: msg.sender_type === 'agent' || msg.is_agent || false,
+            agentOwner: msg.agent_owner || null,
+            msg_index: msg.msg_index || 0,
           }]);
           return newMap;
         });
@@ -319,19 +322,37 @@
               ? 'CC'
               : (chatId?.startsWith('agent_') ? ($aiChats.get(chatId)?.name || undefined) : undefined);
 
-            newMap.set(chatId, hist.map((m: any) =>
-              m.commandId === responseCommandId ? {
-                ...m,
-                sender: newSender,
-                senderName: agentSenderName,
-                text: newText,
-                model: modelName,
-                thinking: thinkingContent,
-                thinkingTokens: thinkingTokenCount,
-                streamingRaw: capturedStreamingText || undefined,
-                commandId: undefined
-              } : m
-            ));
+            // MSG-CHAIN-LIVE-LEAK (S111 full scope): backend now echoes
+            // msg_index for both the user prompt and the assistant response.
+            // Frontend added the user message optimistically before the
+            // round-trip, so apply user_msg_index to the user msg immediately
+            // preceding the placeholder.
+            const userMsgIndex = message.status === 'OK' ? (message.payload.user_msg_index || 0) : 0;
+            const assistantMsgIndex = message.status === 'OK' ? (message.payload.assistant_msg_index || 0) : 0;
+            const placeholderIdx = hist.findIndex((m: any) => m.commandId === responseCommandId);
+
+            const next = hist.map((m: any, idx: number) => {
+              if (m.commandId === responseCommandId) {
+                return {
+                  ...m,
+                  sender: newSender,
+                  senderName: agentSenderName,
+                  text: newText,
+                  model: modelName,
+                  msg_index: assistantMsgIndex || m.msg_index || 0,
+                  thinking: thinkingContent,
+                  thinkingTokens: thinkingTokenCount,
+                  streamingRaw: capturedStreamingText || undefined,
+                  commandId: undefined,
+                };
+              }
+              // Tag the optimistic user message that triggered this round
+              if (placeholderIdx > 0 && idx === placeholderIdx - 1 && m.sender === 'user' && !m.msg_index && userMsgIndex) {
+                return { ...m, msg_index: userMsgIndex };
+              }
+              return m;
+            });
+            newMap.set(chatId, next);
             return newMap;
           });
 

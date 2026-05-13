@@ -68,9 +68,25 @@ def list_groups() -> list:
     return groups
 
 
+def _find_group_dir(group_id: str) -> Path:
+    """Find the conversation directory for a group, with or without slug suffix.
+
+    The backend may store group history in either:
+      ~/.dpc/conversations/{group_id}/history.json           (no display name)
+      ~/.dpc/conversations/{group_id}-{slug}/history.json    (with display name)
+
+    Prefer the slugged directory (backend's active write target).
+    """
+    base = DPC_HOME / "conversations"
+    for d in sorted(base.iterdir()):
+        if d.is_dir() and d.name.startswith(group_id + "-") and (d / "history.json").exists():
+            return d
+    return base / group_id
+
+
 def read_history(group_id: str, last_n: int = None) -> list:
     """Read group chat history from disk."""
-    history_path = DPC_HOME / "conversations" / group_id / "history.json"
+    history_path = _find_group_dir(group_id) / "history.json"
     if not history_path.exists():
         return []
     try:
@@ -106,6 +122,8 @@ def find_mentions(messages: list, since_index: int = 0) -> list:
 
 async def send_group_message(group_id: str, text: str) -> dict:
     """Send CC response to group chat via WebSocket."""
+    canonical_id = _resolve_group_id(group_id)
+
     try:
         import websockets
     except ImportError:
@@ -118,26 +136,72 @@ async def send_group_message(group_id: str, text: str) -> dict:
         "id": str(uuid.uuid4())[:8],
         "command": "send_group_agent_message",
         "payload": {
-            "group_id": group_id,
+            "group_id": canonical_id,
             "agent_name": cc_name,
             "text": text,
         }
     }
 
+    ws_token_path = DPC_HOME / ".ws_token"
+    try:
+        auth_token = ws_token_path.read_text(encoding="utf-8").strip()
+    except OSError as e:
+        print(f"[ERROR] Cannot read auth token at {ws_token_path}: {e}")
+        return {"status": "error", "message": "no auth token"}
+
     try:
         async with websockets.connect(_get_ws_url()) as ws:
+            await ws.send(json.dumps({
+                "id": "group-bridge-auth",
+                "command": "auth",
+                "token": auth_token,
+            }))
+            try:
+                auth_resp = await asyncio.wait_for(ws.recv(), timeout=5)
+                auth_result = json.loads(auth_resp)
+                if auth_result.get("status") != "OK":
+                    print(f"[ERROR] Auth rejected: {auth_result}")
+                    return {"status": "error", "message": "auth rejected"}
+            except asyncio.TimeoutError:
+                print("[ERROR] Auth response timeout")
+                return {"status": "error", "message": "auth timeout"}
+
             await ws.send(json.dumps(command))
             try:
-                raw = await asyncio.wait_for(ws.recv(), timeout=5)
+                raw = await asyncio.wait_for(ws.recv(), timeout=10)
                 result = json.loads(raw)
                 print(f"[SENT] {len(text)} chars → group {group_id}: {result.get('status', '?')}")
                 return result
             except asyncio.TimeoutError:
                 print(f"[SENT] {len(text)} chars → group {group_id} (no response, timeout)")
                 return {"status": "sent"}
+    except ConnectionRefusedError:
+        print("[ERROR] Cannot connect to backend. Is it running?")
+        return {"status": "error", "message": "connection refused"}
     except Exception as e:
         print(f"[ERROR] {e}")
         return {"status": "error", "message": str(e)}
+
+
+def _resolve_group_id(group_id: str) -> str:
+    """Resolve canonical group_id from metadata.json.
+
+    The --group argument may be a slugged directory name (e.g. group-abc123-dpc-discord)
+    but the backend expects the canonical group_id from metadata.json (e.g. group-abc123).
+    """
+    group_dir = _find_group_dir(group_id)
+    metadata_path = group_dir / "metadata.json"
+    if metadata_path.exists():
+        try:
+            with open(metadata_path, "r", encoding="utf-8") as f:
+                meta = json.load(f)
+            canonical = meta.get("group_id", group_id)
+            if canonical != group_id:
+                print(f"[INFO] Resolved {group_id} → {canonical}")
+            return canonical
+        except Exception:
+            pass
+    return group_id
 
 
 def send_group_message_sync(group_id: str, text: str) -> dict:
@@ -146,13 +210,14 @@ def send_group_message_sync(group_id: str, text: str) -> dict:
 
 
 def format_message(i: int, msg: dict) -> str:
-    """Format a message for display."""
+    """Format a message for display. Full content, no truncation."""
     sender = msg.get("sender_name", msg.get("sender", "?"))
     content = msg.get("content", "") or msg.get("text", "")
     ts = msg.get("timestamp", "")
     if ts and "T" in ts:
         ts = ts.split("T")[1][:8]
-    return f"  [{i}] {ts} {sender}: {content[:200]}"
+    preview = content.replace("\n", "\n       ")
+    return f"  [{i + 1}] {ts} {sender}: {preview}"
 
 
 if __name__ == "__main__":
@@ -162,6 +227,8 @@ if __name__ == "__main__":
     parser.add_argument("--last", type=int, default=10, help="Last N messages")
     parser.add_argument("--mentions", action="store_true", help="Show @CC mentions")
     parser.add_argument("--send", type=str, help="Send CC response text")
+    parser.add_argument("--send-file", type=str, dest="send_file",
+                        help="Send CC response from file (backtick-safe)")
     args = parser.parse_args()
 
     if args.list:
@@ -180,6 +247,15 @@ if __name__ == "__main__":
 
     if args.send:
         send_group_message_sync(args.group, args.send)
+        sys.exit(0)
+
+    if args.send_file:
+        try:
+            text = Path(args.send_file).read_text(encoding="utf-8")
+        except OSError as e:
+            print(f"[ERROR] Cannot read --send-file: {e}", file=sys.stderr)
+            sys.exit(1)
+        send_group_message_sync(args.group, text)
         sys.exit(0)
 
     messages = read_history(args.group, last_n=args.last)
