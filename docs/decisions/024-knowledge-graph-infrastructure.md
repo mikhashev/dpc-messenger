@@ -126,6 +126,47 @@ Phase 1 uses structural edges in SQLite/JSON (no graph DB dependency). Graph DB 
 
 **Smoke test (pre-Phase 2):** LadybugDB vs Grafeo benchmark on <10K nodes, Windows, Python API. If Grafeo passes — consider as primary (HNSW+BM25+graph consolidation replaces FAISS+BM25+separate graph). If neither stable — remain on SQLite.
 
+### Grafeo v0.5.42 Source-Code Verification (S115, 2026-05-13)
+
+Full source-code review of cloned repository + live GitHub issue/PR verification. Prior assessment (S94) significantly revised.
+
+**Code quality:** Rust workspace with `unsafe_code = "deny"`, pedantic clippy, MVCC transactions, WAL checkpoint recovery, columnar storage with zone maps, tiered storage (RAM + disk spill).
+
+**Resolved since S94 assessment:**
+- **#335 (ORDER BY + LIMIT):** Fixed via TopK operator (PR #326, @temporaryfix) in v0.5.42 + regression test in pending PR #339 (Release/0.5.43).
+- **#318 (shortest path):** Label = `enhancement` (NOT bug). Bidirectional BFS with path materialization implemented in `shortest_path.rs` (1052 lines). Remaining work per #318: `nodes(p)`/`edges(p)`/list comprehensions/`ELEMENTS()` materialization — multiple Cypher path projection surfaces, not just `ELEMENTS()`.
+- **Bus factor:** Grew from 1 to 4+ active contributors. @temporaryfix (CompactStore, hybrid queries, TopK), @CorvusYe (Dart bindings), @Imaclean74, @Michaelzag (Python CDC, grafeo-server). Sponsor: Supernovae.
+- **Maintenance velocity:** 13 critical bugs closed in April-May 2026 (data loss, schema corruption, WAL replay, Windows backup). New minor release every ~10 days.
+
+**Feature verification (relevant to DPC migration):**
+- HNSW + BM25 + RRF native (replaces FAISS + BM25 + separate graph)
+- Encryption at rest (AES-256-GCM, argon2, zeroize) — addresses ADR-022 requirement
+- Bi-temporal properties + time travel — maps to our `t_created`/`t_invalidated` model
+- Backup/restore: `backup_full`, `backup_incremental`, `restore_to_epoch`
+- Python API: PyO3 bindings, NetworkX bridge, CDC streaming, MCP server
+- Cross-platform: Windows/macOS/Linux wheels (x64, aarch64, musl). CI tests all three OS.
+- 8 language bindings (Python, Node.js, Go, C#, Dart, C, WASM, Rust)
+- WASM binding: browser + mobile (React Native/Capacitor via WASM, Flutter via Dart)
+
+**Federation pattern (clarification per ADR-019 Decision #4):** Grafeo supports both query shipping (Cypher queries serialized and executed on peer instances — matches our committed pattern) AND CDC replication (Change Data Capture event streams — alternative push-based pattern). DPC federation uses query shipping; CDC available if architectural revision needed.
+
+**Scaling fit (S115 verification against full-picture-s32 model):** Grafeo's per-instance embedded design matches the sovereign-subgraph model (each node owns its graph, 8B = sum of federated subgraphs, not single index). Per-instance scale stays within Grafeo's verified sweet spot. Cross-platform wheels + Dart/WASM bindings cover the Windows/macOS/Linux/mobile P2P-mesh requirement.
+
+**Remaining risks:**
+- PR #339 (Release/0.5.43) pending merge — post-release validation needed
+- Shortest path path-element materialization (#318) not yet fully complete (partial feature, not bug — issue formally OPEN)
+- Project still young (~200 Rust source files, v0.5.x) — monitor adoption signals
+- WASM performance on mobile devices not yet measured
+
+**Migration assessment (with clean GraphBackend abstraction, see KG-ABSTRACTION-DEBT in backlog):**
+- Storage: SQLite nodes/edges/properties → Grafeo native properties (direct mapping)
+- FAISS: eliminated (Grafeo HNSW replaces)
+- BM25: eliminated (Grafeo BM25 replaces)
+- RRF fusion: rewrite under Grafeo API (conceptually identical)
+- GLiNER pipeline: writes through GraphBackend ABC (one implementation swap)
+- Active Recall: rewrite under Grafeo query API
+- Estimated effort: 5-7 days migration + 2-3 days regression testing (with clean abstraction)
+
 **Reference architecture:** Graphiti/Zep (arxiv:2501.13956) — episodes → entities → facts with bi-temporal validity. Neo4j dependency prevents direct use, but architectural model is our reference.
 
 **Community validation (S94):** Karpathy gist 699 comments — property graph + Cypher is consensus direction. segundo-cerebro (orobsonn) uses 9 typed edges almost identical to ours.
@@ -256,12 +297,22 @@ The entity relation section is appended to the sleep synthesis prompt (SYNTHESIS
 
 ## Implementation Phases
 
-### Phase 0: Smoke Test (pre-implementation, new)
-- Install `real-ladybug` and `grafeo` in test venv
-- Benchmark: create 1K nodes, 5K edges, run Cypher queries, measure latency + memory on Windows
-- Test LadybugDB: verify #452 does not reproduce at <10K scale
-- Test Grafeo: verify HNSW+BM25+Cypher work together, test Python API stability
-- Decision gate: pick primary DB or stay on SQLite for Phase 1
+### Phase 0: Smoke Test (pre-implementation, updated S115) — PARTIALLY DONE
+
+Source-code verification of Grafeo v0.5.42 completed (S115). Live benchmark on DPC data still pending.
+
+**Completed:**
+- [x] Grafeo source-code review (Rust core, Python bindings, WASM, CI matrix)
+- [x] Live GitHub issue/PR verification (#335 fix confirmed in PR #339, #318 = enhancement not bug)
+- [x] Cross-platform wheel verification (Windows/macOS/Linux/aarch64/musl)
+- [x] Feature mapping to DPC requirements (HNSW, encryption, bi-temporal, backup, federation pattern)
+
+**Pending (post-Release/0.5.43):**
+- [ ] Install `grafeo` in test venv, benchmark: create 1K nodes, 5K edges, Cypher queries on Windows
+- [ ] Test HNSW+BM25+Cypher together on DPC-scale data
+- [ ] Test Python API stability under concurrent access (P2P pattern)
+- [ ] Compare retrieval quality: current FAISS+BM25+SQLite-graph vs Grafeo unified
+- [ ] Decision gate: commit to Grafeo or remain on SQLite for Phase 1+
 
 ### Phase 1: Foundation (immediate, DB-agnostic) — DONE
 - Create `knowledge_graph.py` module with abstract graph interface
@@ -296,7 +347,7 @@ S112 hardening: cascade bugfix in persistence layer — see backlog `GLINER-FK-C
 
 ## Risks
 
-1. **Graph DB maturity (HIGH, S94 finding):** LadybugDB has throughput collapse at 60K nodes (#452) and FTS segfault (#430). Grafeo is beta with bus factor=1. Mitigated by DB-agnostic Phase 1 and smoke test before commit.
+1. **Graph DB maturity (HIGH → MEDIUM, revised S115):** Grafeo v0.5.42 significantly more mature than S94 assessment. 4+ contributors, 13 critical bugs closed in 6 weeks, production-quality code (`unsafe_code=deny`, MVCC, encryption at rest). Remaining risk: project youth (v0.5.x), pending Release/0.5.43 validation, #318 path-element surfaces incomplete. Mitigated by cleanup-first strategy (KG-ABSTRACTION-DEBT in backlog) which buys option on any backend without premature commitment. LadybugDB legacy issues (#452 throughput collapse at 60K, #430 FTS segfault) remain relevant if Grafeo later disqualified.
 2. **Cold start:** Graph empty until edges extracted. Mitigated by structural extraction (zero-cost, runs on existing files).
 3. **Hammer/nail bias:** Risk of over-applying graph to problems that don't need it. BM25 keyword search remains primary for ad-hoc queries. Graph = supplement.
 4. **LLM hallucinated alternatives (S94 finding):** 2 of 5 alternatives suggested by external LLMs (SparrowDB, ocpg) were fabricated. All alternatives must be verified on PyPI/GitHub before consideration (P14 Rule: Solution Check).
@@ -309,7 +360,7 @@ S112 hardening: cascade bugfix in persistence layer — see backlog `GLINER-FK-C
 2. Edge extraction prompt design — what quality bar for LLM-extracted edges?
 3. Privacy: which graph edges are shareable in federation? Per-edge consent or per-type consent?
 4. ~~How does graph interact with Extract Knowledge button flow? Knowledge commits should create graph edges automatically.~~ **Answered (S112):** indirect via file indexing — knowledge commit writes .md to `~/.dpc/knowledge/`, then `bulk_import_knowledge_files` creates KnowledgeFile nodes and `extract_structural_edges` parses markdown links/refs into DEPENDS_ON/RESPONDS_TO/DECIDED_BY edges on eager init or next sleep cycle. No incremental on-commit update path; refresh latency = time until next eager init or sleep trigger. If sub-second freshness is required for chat-path retrieval, add an on-commit hook (separate ADR).
-5. **(S94, Ark note)** If Grafeo passes smoke test, its built-in HNSW+BM25+RRF could consolidate FAISS+BM25+graph into one DB. This is an architectural decision beyond ADR-024 scope — needs separate evaluation of migration cost, performance parity with BGE-M3 FAISS, and fallback strategy.
+5. **(S94, revised S115)** Grafeo HNSW+BM25+RRF consolidation is now viable. Source-code verification confirms feature parity with our FAISS+BM25+graph stack. Migration assessment: 5-7 days with clean abstraction (see KG-ABSTRACTION-DEBT in backlog). Architectural simplification (3 systems → 1 DB) is compelling. Decision gated on: (a) Release/0.5.43 stability, (b) GraphBackend abstraction cleanup, (c) benchmark on DPC-scale data.
 
 ## References
 
