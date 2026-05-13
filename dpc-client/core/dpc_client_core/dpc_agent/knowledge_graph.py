@@ -142,6 +142,43 @@ class GraphBackend(ABC):
     @abstractmethod
     def close(self) -> None: ...
 
+    @abstractmethod
+    def edge_exists(self, source_id: str, target_id: str, edge_type: EdgeType) -> bool:
+        """Return True iff ANY edge of given type connects source_id → target_id,
+        regardless of t_invalidated. Active-only filtering can be added later as
+        a separate method or include_invalidated parameter."""
+        ...
+
+    @abstractmethod
+    def clear_structural_edges(self) -> int:
+        """Delete all structural edges. Returns rows deleted. Property-matching
+        and any legacy markers are backend-internal — fasade does not know SQL
+        LIKE patterns."""
+        ...
+
+    @abstractmethod
+    def update_edge_timestamp_for_node(self, node_id: str, field: str, value: str) -> int:
+        """Set `field` to `value` on edges touching node_id where `field` is
+        empty/null. `field` ∈ {"t_invalidated", "t_created"}. Empty predicate
+        is field-specific (t_invalidated uses IS NULL; t_created uses ='' OR IS
+        NULL for backward compat with pre-bi-temporal rows). Returns rows affected."""
+        ...
+
+    @abstractmethod
+    def bulk_upsert_entities_with_mentions(
+        self,
+        entities: List[dict],
+        t_created: str,
+        entity_exempt: bool,
+    ) -> tuple[int, set[str]]:
+        """Upsert Entity nodes and MENTIONS edges from GLiNER output. Idempotent.
+        Backend MAY implement as single transaction (SQLite) or as ordered
+        operations (other backends) — caller treats as logical batch with
+        skip-orphan semantics: edges to source_ids absent from graph are skipped
+        and reported in the returned orphan set for caller logging.
+        Returns (edges_added, orphan_source_ids)."""
+        ...
+
 
 class SQLiteGraphBackend(GraphBackend):
     """SQLite-based graph storage. Zero external dependencies."""
@@ -264,6 +301,118 @@ class SQLiteGraphBackend(GraphBackend):
 
     def close(self) -> None:
         self._conn.close()
+
+    def edge_exists(self, source_id: str, target_id: str, edge_type: EdgeType) -> bool:
+        row = self._conn.execute(
+            "SELECT 1 FROM edges WHERE source_id=? AND target_id=? AND edge_type=? LIMIT 1",
+            (source_id, target_id, edge_type.value),
+        ).fetchone()
+        return row is not None
+
+    def clear_structural_edges(self) -> int:
+        # Canonical marker is source=structural. Legacy edges (pre-KG-LLM-MARKER
+        # fix) carry only auto=true with no source field — matched here so they
+        # re-extract with the new marker on next startup. LLM relations and
+        # GLiNER MENTIONS in the legacy state also get cleared; sleep pipeline
+        # regenerates them with source=llm_relation / source=gliner_ner on the
+        # next sleep cycle. Once all KGs migrate (after one sleep), the legacy
+        # clauses can be removed — tracked in backlog as KG-LEGACY-CLEANUP.
+        with self._conn:
+            cursor = self._conn.execute(
+                "DELETE FROM edges WHERE "
+                "properties LIKE '%\"source\": \"structural\"%' "
+                "OR properties LIKE '%\"source\":\"structural\"%' "
+                "OR ((properties LIKE '%\"auto\": true%' OR properties LIKE '%\"auto\":true%') "
+                "AND properties NOT LIKE '%\"source\"%')"
+            )
+            return cursor.rowcount
+
+    def update_edge_timestamp_for_node(self, node_id: str, field: str, value: str) -> int:
+        if field == "t_invalidated":
+            empty_predicate = "t_invalidated IS NULL"
+        elif field == "t_created":
+            # Legacy rows pre-dating bi-temporal schema have t_created=''.
+            empty_predicate = "(t_created = '' OR t_created IS NULL)"
+        else:
+            raise ValueError(
+                f"Unsupported field: {field!r}. Expected one of: t_invalidated, t_created"
+            )
+        with self._conn:
+            cursor = self._conn.execute(
+                f"UPDATE edges SET {field} = ? "
+                f"WHERE (source_id = ? OR target_id = ?) AND {empty_predicate}",
+                (value, node_id, node_id),
+            )
+            return cursor.rowcount
+
+    def bulk_upsert_entities_with_mentions(
+        self,
+        entities: List[dict],
+        t_created: str,
+        entity_exempt: bool,
+    ) -> tuple[int, set[str]]:
+        edges_added = 0
+        orphan_sources: set = set()
+        exempt_int = 1 if entity_exempt else 0
+        # Single batched transaction for the whole entity list. Sleep pipeline
+        # typically passes 100-200 entities; per-entity transactions would mean
+        # ~2N commits. Inlined SQL here keeps per-call existence checks
+        # (idempotency and skip-orphan) but amortises commit cost across the
+        # whole batch.
+        with self._conn:
+            for ent in entities:
+                label = ent.get("entity", "").strip()
+                if not label:
+                    continue
+                ent_type = ent.get("type", "concept")
+                source_id = ent.get("source_id", "")
+                score = ent.get("score", 0.0)
+                entity_id = f"e:{label.lower().replace(' ', '_')}"
+
+                # INSERT OR IGNORE skips existing rows via PRIMARY KEY on
+                # node_id, leaving existing entity nodes untouched. OR REPLACE
+                # would DELETE-then-INSERT and could nuke properties if entities
+                # later gain them (frequency counts, last-seen timestamps);
+                # OR IGNORE is defensively equivalent to SELECT-then-INSERT in
+                # one statement.
+                self._conn.execute(
+                    "INSERT OR IGNORE INTO nodes (node_id, node_type, label, source_layer, exempt, properties) VALUES (?,?,?,?,?,?)",
+                    (entity_id, NodeType.ENTITY.value, label, "L7", exempt_int, "{}"),
+                )
+
+                if not source_id:
+                    continue
+
+                # Skip-orphan guard: caller (sleep_pipeline) may pass source_ids
+                # for sessions that aren't represented as graph nodes yet (group
+                # archives use a different stem format that bypasses
+                # _extract_archive_edges). Without this check, the MENTIONS edge
+                # INSERT would fail the FK constraint and abort the whole batch.
+                if self._conn.execute(
+                    "SELECT 1 FROM nodes WHERE node_id=? LIMIT 1", (source_id,)
+                ).fetchone() is None:
+                    orphan_sources.add(source_id)
+                    continue
+
+                # Insert MENTIONS edge if not already present (idempotency).
+                # Inlined edge_exists check to stay within the batch transaction
+                # — calling self.edge_exists() here would race with concurrent
+                # readers. Keep this SELECT in sync with edge_exists().
+                if self._conn.execute(
+                    "SELECT 1 FROM edges WHERE source_id=? AND target_id=? AND edge_type=? LIMIT 1",
+                    (source_id, entity_id, EdgeType.MENTIONS.value),
+                ).fetchone() is None:
+                    self._conn.execute(
+                        "INSERT INTO edges (source_id, target_id, edge_type, t_created, t_invalidated, confidence, justification, edge_weight, properties) VALUES (?,?,?,?,?,?,?,?,?)",
+                        (
+                            source_id, entity_id, EdgeType.MENTIONS.value,
+                            t_created, None, 1.0,
+                            f"GLiNER extracted ({ent_type}, score={score:.2f})",
+                            "medium", json.dumps({"source": "gliner_ner"}, ensure_ascii=False),
+                        ),
+                    )
+                    edges_added += 1
+        return edges_added, orphan_sources
 
     @staticmethod
     def _row_to_edge(row: tuple) -> GraphEdge:
@@ -425,21 +574,7 @@ class KnowledgeGraph:
         return count
 
     def _clear_structural_edges(self) -> None:
-        # Canonical marker is source=structural. Legacy edges (pre-KG-LLM-MARKER
-        # fix) carry only auto=true with no source field — matched here so they
-        # re-extract with the new marker on next startup. LLM relations and
-        # GLiNER MENTIONS in the legacy state also get cleared; sleep pipeline
-        # regenerates them with source=llm_relation / source=gliner_ner on the
-        # next sleep cycle. Once all KGs migrate (after one sleep), the legacy
-        # clauses can be removed.
-        with self._backend._conn:
-            self._backend._conn.execute(
-                "DELETE FROM edges WHERE "
-                "properties LIKE '%\"source\": \"structural\"%' "
-                "OR properties LIKE '%\"source\":\"structural\"%' "
-                "OR ((properties LIKE '%\"auto\": true%' OR properties LIKE '%\"auto\":true%') "
-                "AND properties NOT LIKE '%\"source\"%')"
-            )
+        self._backend.clear_structural_edges()
 
     def _load_meta(self, knowledge_dir: Path) -> dict:
         meta_path = knowledge_dir / "_meta.json"
@@ -463,11 +598,7 @@ class KnowledgeGraph:
             ))
 
     def _edge_exists(self, src: str, tgt: str, etype: EdgeType) -> bool:
-        row = self._backend._conn.execute(
-            "SELECT 1 FROM edges WHERE source_id=? AND target_id=? AND edge_type=? LIMIT 1",
-            (src, tgt, etype.value),
-        ).fetchone()
-        return row is not None
+        return self._backend.edge_exists(src, tgt, etype)
 
     def _extract_archive_edges(self, archive_dir: Path, known_files: dict, now: str) -> int:
         import re
@@ -560,68 +691,10 @@ class KnowledgeGraph:
         if not entities:
             return 0
         now = _utc_now()
-        edges_added = 0
-        orphan_sources: set = set()
-        # Single batched transaction for the whole entity list. Sleep pipeline
-        # typically passes 100-200 entities; the previous per-entity pattern
-        # called `_ensure_node` and `_add_edge_safe`, each opening their own
-        # `with self._conn:` block — ~2N transactions per persist call. Inlined
-        # SQL here keeps the per-call existence checks (idempotency and
-        # skip-orphan) but amortises commit cost across the whole batch.
-        conn = self._backend._conn
-        entity_exempt = 1 if NodeType.ENTITY in ALWAYS_EXEMPT else 0
-        with conn:
-            for ent in entities:
-                label = ent.get("entity", "").strip()
-                if not label:
-                    continue
-                ent_type = ent.get("type", "concept")
-                source_id = ent.get("source_id", "")
-                score = ent.get("score", 0.0)
-                entity_id = f"e:{label.lower().replace(' ', '_')}"
-
-                # _ensure_node inlined: INSERT OR IGNORE skips existing rows
-                # via the PRIMARY KEY on node_id, so existing entity nodes are
-                # left untouched. `OR REPLACE` would DELETE-then-INSERT and
-                # could nuke properties if entities later gain them (frequency
-                # counts, last-seen timestamps, etc.); `OR IGNORE` is
-                # defensively equivalent to SELECT-then-INSERT but in one
-                # statement.
-                conn.execute(
-                    "INSERT OR IGNORE INTO nodes (node_id, node_type, label, source_layer, exempt, properties) VALUES (?,?,?,?,?,?)",
-                    (entity_id, NodeType.ENTITY.value, label, "L7", entity_exempt, "{}"),
-                )
-
-                if not source_id:
-                    continue
-
-                # Skip-orphan guard: caller (sleep_pipeline) may pass source_ids
-                # for sessions that aren't represented as graph nodes yet
-                # (group archives use a different stem format that bypasses
-                # _extract_archive_edges). Without this check, the MENTIONS
-                # edge INSERT would fail the FK constraint and abort the whole
-                # batch transaction.
-                if conn.execute(
-                    "SELECT 1 FROM nodes WHERE node_id=? LIMIT 1", (source_id,)
-                ).fetchone() is None:
-                    orphan_sources.add(source_id)
-                    continue
-
-                # _add_edge_safe inlined: insert MENTIONS edge if not already present.
-                if conn.execute(
-                    "SELECT 1 FROM edges WHERE source_id=? AND target_id=? AND edge_type=? LIMIT 1",
-                    (source_id, entity_id, EdgeType.MENTIONS.value),
-                ).fetchone() is None:
-                    conn.execute(
-                        "INSERT INTO edges (source_id, target_id, edge_type, t_created, t_invalidated, confidence, justification, edge_weight, properties) VALUES (?,?,?,?,?,?,?,?,?)",
-                        (
-                            source_id, entity_id, EdgeType.MENTIONS.value,
-                            now, None, 1.0,
-                            f"GLiNER extracted ({ent_type}, score={score:.2f})",
-                            "medium", json.dumps({"source": "gliner_ner"}, ensure_ascii=False),
-                        ),
-                    )
-                    edges_added += 1
+        entity_exempt = NodeType.ENTITY in ALWAYS_EXEMPT
+        edges_added, orphan_sources = self._backend.bulk_upsert_entities_with_mentions(
+            entities, now, entity_exempt
+        )
         if orphan_sources:
             log.warning(
                 "KG persist: skipped MENTIONS edges for %d orphan source(s) not in graph: %s",
@@ -633,32 +706,29 @@ class KnowledgeGraph:
     def invalidate_edges(self, node_id: str) -> int:
         """Mark all active edges touching node_id as invalidated (bi-temporal)."""
         now = _utc_now()
-        with self._backend._conn:
-            cursor = self._backend._conn.execute(
-                "UPDATE edges SET t_invalidated = ? WHERE (source_id = ? OR target_id = ?) AND t_invalidated IS NULL",
-                (now, node_id, node_id),
-            )
-            count = cursor.rowcount
+        count = self._backend.update_edge_timestamp_for_node(node_id, "t_invalidated", now)
         if count:
             log.info("Invalidated %d edges for node %s", count, node_id)
         return count
 
     def backfill_edge_timestamps(self, knowledge_dir: Path) -> int:
-        """Backfill t_created on edges from source file mtime."""
+        """Backfill t_created on edges from source file mtime.
+
+        Atomicity note: each file's UPDATE is its own backend transaction (one
+        per file), not a single transaction wrapping the whole iteration. The
+        operation is idempotent and monotonic — partial failure on file N
+        leaves files 1..N-1 committed; the next run completes the rest. Safe
+        trade-off vs the prior single-transaction implementation that accessed
+        the backend connection directly."""
         count = 0
         if not knowledge_dir.exists():
             return count
-        with self._backend._conn:
-            for md_file in sorted(knowledge_dir.glob("*.md")):
-                if md_file.name.startswith("_"):
-                    continue
-                node_id = f"kf:{md_file.stem}"
-                mtime = datetime.fromtimestamp(md_file.stat().st_mtime, tz=timezone.utc).isoformat()
-                cursor = self._backend._conn.execute(
-                    "UPDATE edges SET t_created = ? WHERE (source_id = ? OR target_id = ?) AND (t_created = '' OR t_created IS NULL)",
-                    (mtime, node_id, node_id),
-                )
-                count += cursor.rowcount
+        for md_file in sorted(knowledge_dir.glob("*.md")):
+            if md_file.name.startswith("_"):
+                continue
+            node_id = f"kf:{md_file.stem}"
+            mtime = datetime.fromtimestamp(md_file.stat().st_mtime, tz=timezone.utc).isoformat()
+            count += self._backend.update_edge_timestamp_for_node(node_id, "t_created", mtime)
         if count:
             log.info("Backfilled t_created on %d edges from file timestamps", count)
         return count
