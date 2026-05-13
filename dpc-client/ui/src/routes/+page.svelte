@@ -463,7 +463,8 @@
       sendCommand('activate_group_chat', { group_id: activeChatId });
     }
     if (activeChatId.startsWith('agent_') && $connectionStatus === 'connected') {
-      sendCommand('get_conversation_history', { conversation_id: activeChatId }).then((result: any) => {
+      // sendCommand returns `boolean | Promise<any>`; connected branch is always Promise.
+      (sendCommand('get_conversation_history', { conversation_id: activeChatId }) as Promise<any>).then((result: any) => {
         if (result?.status === 'success' && result.messages?.length > 0) {
           const agentName = $agentsList?.find((a: any) => a.agent_id === activeChatId)?.name || activeChatId;
           chatHistories.update(map => {
