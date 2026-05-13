@@ -271,6 +271,21 @@ class ContextFirewall:
                 return default
         return val if val is not None else default
 
+    def get_history_settings(self, profile_name: Optional[str] = None) -> tuple:
+        """Return (preserve_on_reset, max_archived_sessions) for an agent profile,
+        falling back to global dpc_agent.history when the profile has no override.
+
+        Profile-name that does not match any known agent falls back cleanly to
+        global — safe to pass peer/group conversation ids.
+        """
+        preserve = self._get_profile_or_global(
+            profile_name, 'history', 'preserve_on_reset',
+            default=self.history_preserve_on_reset)
+        max_sessions = self._get_profile_or_global(
+            profile_name, 'history', 'max_archived_sessions',
+            default=self.history_max_archived_sessions)
+        return bool(preserve), max(0, int(max_sessions))
+
     def get_extended_write_enabled(self, profile_name: Optional[str] = None) -> bool:
         """Per-agent extended path write gate (sandbox_extensions.extended_write_enabled).
 

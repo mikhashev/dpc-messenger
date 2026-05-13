@@ -828,12 +828,10 @@ class AgentService:
         """Return archive metadata for a conversation's session archive folder."""
         try:
             archive_dir = Path.home() / ".dpc" / "conversations" / conversation_id / "archive"
-            max_sessions = getattr(self.firewall, "history_max_archived_sessions", 0) if self.firewall else 0
             if self.firewall:
-                profile = self.firewall.rules.get("agent_profiles", {}).get(conversation_id, {})
-                hist = profile.get("history", {}) if profile else {}
-                if "max_archived_sessions" in hist:
-                    max_sessions = max(0, int(hist["max_archived_sessions"]))
+                _, max_sessions = self.firewall.get_history_settings(conversation_id)
+            else:
+                max_sessions = 0
 
             if not archive_dir.exists():
                 return {

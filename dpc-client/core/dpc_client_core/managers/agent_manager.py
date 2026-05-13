@@ -1101,18 +1101,7 @@ class DpcAgentManager:
         """
         if not self.firewall:
             return True, 0
-        preserve = getattr(self.firewall, "history_preserve_on_reset", True)
-        max_sessions = getattr(self.firewall, "history_max_archived_sessions", 0)
-        # Per-agent profile override
-        if self.agent_id:
-            profile = self.firewall.rules.get("agent_profiles", {}).get(self.agent_id, {})
-            if profile:
-                hist = profile.get("history", {})
-                if "preserve_on_reset" in hist:
-                    preserve = hist["preserve_on_reset"]
-                if "max_archived_sessions" in hist:
-                    max_sessions = max(0, int(hist["max_archived_sessions"]))
-        return preserve, max_sessions
+        return self.firewall.get_history_settings(self.agent_id)
 
     def _emit_progress(
         self,
