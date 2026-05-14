@@ -165,7 +165,7 @@ def _collect_group_archive_digests(group_dir: Path, agent_id: str) -> List[Dict[
                 "duration_mins": 0,
                 "source": "group_archive",
                 "group_id": data.get("conversation_id", group_id),
-                "_archive_path": str(archive_path),
+                "archive_path": str(archive_path),
             })
         except (json.JSONDecodeError, OSError):
             continue
@@ -291,7 +291,7 @@ def _compute_archive_hash(digest: Dict[str, Any], conversation_dir: Path) -> str
     source = digest.get("source")
     archive_file = digest.get("archive_file", "")
     if source == "group_archive":
-        path_str = digest.get("_archive_path", "")
+        path_str = digest.get("archive_path", "")
         path = Path(path_str) if path_str else None
     else:
         # 1:1 archive — search via rglob (matches what _load_archive does).
@@ -356,16 +356,10 @@ async def _analyze_single_session(
     archive_file = digest.get("archive_file", "")
 
     if digest.get("source") == "group_archive":
-        archive_path_str = digest.get("_archive_path", "")
+        archive_path_str = digest.get("archive_path", "")
         if not archive_path_str or not Path(archive_path_str).exists():
             return None
         archive = json.loads(Path(archive_path_str).read_text(encoding="utf-8"))
-    elif digest.get("source") == "group":
-        group_dir = conversation_dir.parent / archive_file.replace("group:", "")
-        history_path = group_dir / "history.json"
-        if not history_path.exists():
-            return None
-        archive = json.loads(history_path.read_text(encoding="utf-8"))
     else:
         archive = _load_archive(conversation_dir, archive_file) if archive_file else None
     if not archive:

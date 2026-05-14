@@ -63,9 +63,9 @@ def test_compute_archive_hash_group_archive(tmp_path: Path):
     digest = {
         "archive_file": f"group_archive:group-xxx-dpc:{archive_path.name}",
         "source": "group_archive",
-        "_archive_path": str(archive_path),
+        "archive_path": str(archive_path),
     }
-    # conversation_dir is irrelevant for group_archive — hash uses _archive_path.
+    # conversation_dir is irrelevant for group_archive — hash uses archive_path.
     assert _compute_archive_hash(digest, tmp_path / "irrelevant") == expected
 
 
