@@ -9,6 +9,8 @@ from pathlib import Path
 import pytest
 
 from dpc_client_core.dpc_agent.sleep_pipeline import (
+    SYNTHESIS_PROMPT,
+    _collect_group_archive_digests,
     _compute_archive_hash,
     _migrate_legacy_results,
     _result_filename,
@@ -162,3 +164,86 @@ def test_migrate_legacy_results_ignores_non_legacy_files(tmp_path: Path):
 
     assert _migrate_legacy_results(results_dir) == 0
     assert (results_dir / "session_foo.json").exists()
+
+
+# --- last_session pick + date normalization (S118) ---
+
+def _write_group_archive(group_dir: Path, filename: str, first_ts: str, agent_id: str) -> None:
+    """Helper: create a minimal group archive + metadata.json."""
+    archive_dir = group_dir / "archive"
+    archive_dir.mkdir(parents=True, exist_ok=True)
+    (group_dir / "metadata.json").write_text(
+        json.dumps({"group_id": group_dir.name, "agents": {"some-node": [agent_id]}}),
+        encoding="utf-8",
+    )
+    (archive_dir / filename).write_text(
+        json.dumps({
+            "conversation_id": group_dir.name,
+            "messages": [{"timestamp": first_ts, "role": "user", "content": "hi"}],
+        }),
+        encoding="utf-8",
+    )
+
+
+def test_group_archive_digest_preserves_full_iso_date(tmp_path: Path):
+    """Bug fix: group archive `date` used to be truncated to YYYY-MM-DD, while
+    1:1 digests carry full ISO. The asymmetry confused chronological sort
+    (and the LLM) — last_session was picked from group archives because their
+    short date sorted differently than 1:1 full ISO."""
+    group = tmp_path / "group-test-abc"
+    full_ts = "2026-05-11T12:33:54.123456+00:00"
+    _write_group_archive(group, "2026-05-11T12-33-54_reset_session.json", full_ts, "agent_001")
+
+    digests = _collect_group_archive_digests(group, "agent_001")
+    assert len(digests) == 1
+    # The key assertion: full timestamp, not [:10] truncation.
+    assert digests[0]["date"] == full_ts
+    assert digests[0]["source"] == "group_archive"
+
+
+def test_group_archive_digest_skips_when_agent_not_member(tmp_path: Path):
+    group = tmp_path / "group-foreign"
+    _write_group_archive(group, "x_reset_session.json", "2026-05-11T00:00:00+00:00", "agent_002")
+    # agent_001 is NOT in metadata.agents, so it should get nothing.
+    assert _collect_group_archive_digests(group, "agent_001") == []
+
+
+def test_group_archive_digest_no_metadata_falls_back_to_dir_name(tmp_path: Path):
+    """When metadata.json missing, group_id falls back to directory name and
+    membership check is skipped (all agents see the archive)."""
+    group = tmp_path / "group-no-meta"
+    (group / "archive").mkdir(parents=True)
+    (group / "archive" / "2026-05-10T00-00-00_reset_session.json").write_text(
+        json.dumps({"messages": [{"timestamp": "2026-05-10T00:00:00+00:00", "content": "x"}]}),
+        encoding="utf-8",
+    )
+    digests = _collect_group_archive_digests(group, "any-agent")
+    assert len(digests) == 1
+    assert digests[0]["group_id"] == "group-no-meta"
+
+
+def test_synthesis_prompt_has_most_recent_placeholder():
+    """Regression guard: the {most_recent} placeholder must exist in the
+    prompt template so synthesis can inject the deterministically-picked
+    last_session source. If this disappears, the .format() call will fail
+    silently (KeyError) or revert to LLM-picks-its-own behaviour."""
+    assert "{most_recent}" in SYNTHESIS_PROMPT
+    assert "MOST RECENT SESSION" in SYNTHESIS_PROMPT
+    # Sanity: the LLM is told to NOT pick from per-session findings.
+    assert "pre-selected" in SYNTHESIS_PROMPT or "Do NOT pick" in SYNTHESIS_PROMPT
+
+
+def test_synthesis_prompt_format_with_required_keys():
+    """The four placeholders + entity_section must all be fillable. If a key
+    is renamed or removed and the call site forgets to update, .format()
+    raises KeyError — this test catches that at unit-test time."""
+    out = SYNTHESIS_PROMPT.format(
+        n=3,
+        period="2026-05-01 to 2026-05-14",
+        most_recent='{"summary": "test"}',
+        findings='Session 1: {"x": 1}',
+        entity_section="",
+    )
+    assert "test" in out
+    assert "Session 1" in out
+    assert "2026-05-01 to 2026-05-14" in out

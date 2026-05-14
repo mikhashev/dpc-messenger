@@ -77,14 +77,18 @@ Respond with ONLY a JSON object with two keys:
 }}
 
 Guidelines:
-- **last_session**: Extract from the MOST RECENT session only. List concrete \
-carryover items — tasks mentioned but not completed, decisions deferred, \
-things explicitly "pending" or "carryover".
+- **last_session**: Use the dedicated MOST RECENT SESSION block below. \
+Do NOT pick from --- PER-SESSION FINDINGS ---; the most recent has been \
+pre-selected for you. List concrete carryover items — tasks mentioned but \
+not completed, decisions deferred, things explicitly "pending" or "carryover".
 - Focus on CROSS-SESSION patterns: what changed, what reversed, what repeated.
 - Be factual. If sessions were unproductive, say so.
 - Language: match the language of the sessions.
 
---- PER-SESSION FINDINGS ---
+--- MOST RECENT SESSION (use this for last_session) ---
+{most_recent}
+
+--- PER-SESSION FINDINGS (newest first) ---
 {findings}
 {entity_section}"""
 
@@ -160,7 +164,7 @@ def _collect_group_archive_digests(group_dir: Path, agent_id: str) -> List[Dict[
             archive_date = messages[0].get("timestamp", "")
             digests.append({
                 "archive_file": f"group_archive:{group_dir.name}:{archive_path.name}",
-                "date": archive_date[:10],
+                "date": archive_date,
                 "message_count": len(messages),
                 "duration_mins": 0,
                 "source": "group_archive",
@@ -173,10 +177,11 @@ def _collect_group_archive_digests(group_dir: Path, agent_id: str) -> List[Dict[
 
 
 def _find_archive_digests(conversation_dir: Path) -> List[Dict[str, Any]]:
-    """Read all 1:1 session digests from digest.jsonl, sorted by date.
+    """Read all 1:1 session digests from digest.jsonl.
 
-    Returns ALL digests; reuse-detection happens later via per-archive sha256
-    in `sleep_results/result_*.json`.
+    Returns ALL digests in file order. Caller `run_sleep` is responsible for
+    sorting after merging with group archive digests — a single sort site
+    keeps the chronological invariant in one place.
     """
     digest_path = conversation_dir / "digest.jsonl"
     if not digest_path.exists():
@@ -192,7 +197,6 @@ def _find_archive_digests(conversation_dir: Path) -> List[Dict[str, Any]]:
                 except json.JSONDecodeError:
                     continue
 
-    digests.sort(key=lambda d: d.get("date", ""))
     return digests
 
 
@@ -380,6 +384,7 @@ async def _analyze_single_session(
     finding = _parse_llm_json(response)
     finding["archive_file"] = archive_file
     finding["digest_date"] = digest.get("date", "")
+    finding["source"] = digest.get("source", "1:1")
     return finding
 
 
@@ -449,6 +454,12 @@ async def run_sleep(
         if not digests:
             _write_sleep_state(conversation_dir, {"status": "awake"})
             return {"status": "no_new_sessions", "sessions_analyzed": 0}
+
+        # Sort ascending by `date` so downstream code can rely on chronological
+        # order: `period` uses dates[0]/dates[-1], and `most_recent_finding`
+        # below picks max(digest_date). Empty/missing dates sort first
+        # (= oldest treatment).
+        digests.sort(key=lambda d: d.get("date", ""))
 
         log.info("Sleep pipeline: %d candidate sessions for %s", len(digests), agent_id or conversation_dir.name)
 
@@ -547,9 +558,25 @@ async def run_sleep(
         dates = [d.get("date", "") for d in digests if d.get("date")]
         period = f"{dates[0][:10]} to {dates[-1][:10]}" if len(dates) >= 2 else dates[0][:10] if dates else "unknown"
 
+        # Pre-compute most-recent finding deterministically so the LLM only
+        # formats it, not picks it. Without this, the LLM picks `last_session`
+        # by position in the prompt rather than chronology, and the result
+        # was a 3-day-stale trivial group session over fresh 1:1 work.
+        non_error_findings = [f for f in per_session_findings if "error" not in f]
+        findings_sorted_desc = sorted(
+            non_error_findings,
+            key=lambda f: f.get("digest_date", ""),
+            reverse=True,
+        )
+        most_recent_finding = findings_sorted_desc[0] if findings_sorted_desc else None
+        most_recent_text = (
+            json.dumps(most_recent_finding, ensure_ascii=False, indent=2)
+            if most_recent_finding else "(no analyzable session)"
+        )
+
         findings_text = "\n\n".join(
             f"Session {i+1} ({f.get('digest_date', '')[:10]}):\n{json.dumps(f, ensure_ascii=False, indent=2)}"
-            for i, f in enumerate(per_session_findings) if "error" not in f
+            for i, f in enumerate(findings_sorted_desc)
         )
 
         if progress_callback:
@@ -565,6 +592,7 @@ async def run_sleep(
         synthesis_prompt = SYNTHESIS_PROMPT.format(
             n=len(per_session_findings),
             period=period,
+            most_recent=most_recent_text,
             findings=findings_text,
             entity_section=entity_section,
         )
