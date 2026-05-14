@@ -143,12 +143,6 @@ class ContextFirewall:
             'fetch_json': True,
             'check_url': True,
             'search_web': True,
-            # Review tools (safe, analysis only)
-            'self_review': True,
-            'request_critique': True,
-            'compare_approaches': True,
-            'quality_checklist': True,
-            'consensus_check': True,
             # Git tools (read-only)
             'git_status': False,
             'git_diff': False,
@@ -815,11 +809,6 @@ class ContextFirewall:
                         "fetch_json": True,
                         "check_url": True,
                         "search_web": True,
-                        "self_review": True,
-                        "request_critique": True,
-                        "compare_approaches": True,
-                        "quality_checklist": True,
-                        "consensus_check": True,
                         "git_status": False,
                         "git_diff": False,
                         "git_log": False,
@@ -1676,8 +1665,6 @@ class ContextFirewall:
                                 'get_dpc_context',
                                 # Web tools
                                 'browse_page', 'fetch_json', 'check_url', 'search_web',
-                                # Review tools
-                                'self_review', 'request_critique', 'compare_approaches', 'quality_checklist', 'consensus_check',
                                 # Git tools
                                 'git_status', 'git_diff', 'git_log', 'git_add', 'git_commit', 'git_branch', 'git_init',
                                 'git_checkout', 'git_merge', 'git_tag', 'git_reset', 'git_snapshot',
@@ -1765,7 +1752,6 @@ class ContextFirewall:
                                         'get_task_board',
                                         'get_dpc_context',
                                         'browse_page', 'fetch_json', 'check_url', 'search_web',
-                                        'self_review', 'request_critique', 'compare_approaches', 'quality_checklist', 'consensus_check',
                                         'git_status', 'git_diff', 'git_log', 'git_add', 'git_commit', 'git_branch', 'git_init',
                                         'git_checkout', 'git_merge', 'git_tag', 'git_reset', 'git_snapshot',
                                         'repo_commit_push',

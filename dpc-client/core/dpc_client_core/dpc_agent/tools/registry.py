@@ -218,8 +218,6 @@ CORE_TOOL_NAMES = {
     "get_dpc_context",
     # Browser tools (safe, read-only)
     "browse_page", "fetch_json", "check_url", "search_web",
-    # Review tools (safe, analysis only)
-    "self_review", "request_critique", "compare_approaches", "quality_checklist", "consensus_check",
     # Messaging tools (agent-to-user communication)
     "send_user_message",
     # Skill router (Read phase of Memento-Skills loop)

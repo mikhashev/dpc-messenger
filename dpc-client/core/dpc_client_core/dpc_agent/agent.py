@@ -894,7 +894,7 @@ class DpcAgent:
             return f"Unknown task type: {task.task_type}. Register a handler with register_task_handler('{task.task_type}', handler)"
 
     async def _execute_review(self, data: Dict[str, Any]) -> str:
-        """Execute a code review task using self_review + request_critique tools."""
+        """Execute a code review task — LLM produces the review in its response."""
         target = data.get("target", data.get("text", ""))
         focus = data.get("focus", "")
         reply_conversation_id = data.get("_reply_conversation_id") or "review_task"
@@ -907,8 +907,8 @@ class DpcAgent:
         prompt = (
             f"Please review the following:{focus_clause}\n\n"
             f"{target}\n\n"
-            f"Use your self_review and request_critique tools to produce a thorough review "
-            f"covering correctness, quality, edge cases, and any improvements."
+            f"Provide a thorough review covering correctness, quality, edge cases, "
+            f"and any improvements."
         )
 
         result = await self.process(
