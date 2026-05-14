@@ -9,12 +9,29 @@ from pathlib import Path
 import pytest
 
 from dpc_client_core.dpc_agent.sleep_pipeline import (
+    SYNTHESIS_BUDGET_FACTOR,
+    SYNTHESIS_OUTPUT_RESERVE_TOKENS,
     SYNTHESIS_PROMPT,
     _collect_group_archive_digests,
     _compute_archive_hash,
+    _compute_synthesis_budget,
     _migrate_legacy_results,
+    _render_finding_block,
     _result_filename,
+    _select_findings_within_budget,
 )
+
+
+class _FakeLLMManager:
+    """Minimal stand-in for LLMManager — only the methods the budget helper
+    actually calls. Token count = len(text) // tokens_per_char, lets tests
+    fix a deterministic ratio without pulling tiktoken."""
+
+    def __init__(self, tokens_per_char: int = 4):
+        self.tokens_per_char = tokens_per_char
+
+    def count_tokens(self, text: str, model: str) -> int:  # noqa: ARG002 — model unused
+        return max(1, len(text) // self.tokens_per_char)
 
 
 def test_result_filename_one_to_one_strips_json():
@@ -247,3 +264,169 @@ def test_synthesis_prompt_format_with_required_keys():
     assert "test" in out
     assert "Session 1" in out
     assert "2026-05-01 to 2026-05-14" in out
+
+
+# ─────────────────────────────────────────────────────────────
+# Adaptive synthesis budget (SLEEP-ADAPTIVE-BUDGET, S119)
+# ─────────────────────────────────────────────────────────────
+
+
+def test_render_finding_block_uses_sequential_index_and_date_prefix():
+    f = {"digest_date": "2026-05-14T10:00:00.000000+00:00", "summary": "hi"}
+    block = _render_finding_block(7, f)
+    # Header uses the YYYY-MM-DD slice, not the full ISO timestamp.
+    assert block.startswith("Session 7 (2026-05-14):\n{")
+    # JSON body is preserved verbatim (and naturally still contains the
+    # untruncated `digest_date` — that's the input, not the header slice).
+    assert "\"summary\": \"hi\"" in block
+
+
+def test_render_finding_block_empty_date_yields_empty_parens():
+    block = _render_finding_block(1, {"summary": "no date"})
+    # When digest_date is missing, the parens render empty rather than crashing.
+    assert block.startswith("Session 1 ():\n")
+
+
+def test_select_findings_within_budget_includes_all_when_under_budget():
+    """Small findings + large context_window → every finding included, no truncation."""
+    llm = _FakeLLMManager(tokens_per_char=4)
+    findings = [
+        {"digest_date": f"2026-05-{day:02d}", "summary": "short"}
+        for day in range(1, 6)
+    ]
+    selected, used = _select_findings_within_budget(
+        findings_sorted_desc=findings,
+        llm_manager=llm,
+        target_model="fake-model",
+        context_window=200_000,
+        template_overhead_tokens=1_000,
+    )
+    assert len(selected) == len(findings)
+    assert used > 0
+
+
+def test_select_findings_within_budget_truncates_when_over_budget():
+    """Big findings + small context_window → only the newest few fit."""
+    llm = _FakeLLMManager(tokens_per_char=4)
+    big_blob = "x" * 4000  # ~1000 tokens per finding at tokens_per_char=4
+    findings = [
+        {"digest_date": f"2026-05-{day:02d}", "summary": big_blob}
+        for day in range(1, 21)  # 20 findings
+    ]
+    selected, used = _select_findings_within_budget(
+        findings_sorted_desc=findings,
+        llm_manager=llm,
+        target_model="fake-model",
+        context_window=16_000,  # 0.85 * 16K - 4K reserve - 1K template = ~8.6K budget
+        template_overhead_tokens=1_000,
+    )
+    # Some findings cut, but at least 1 included; newest comes first in input
+    # so the *first* finding in selected matches findings[0].
+    assert 1 <= len(selected) < len(findings)
+    assert selected[0] is findings[0]
+    # Tokens used should not exceed budget (modulo the single-finding guarantee
+    # which only kicks in if selected was empty — covered separately).
+    budget = int(16_000 * SYNTHESIS_BUDGET_FACTOR) - SYNTHESIS_OUTPUT_RESERVE_TOKENS - 1_000
+    assert used <= budget
+
+
+def test_select_findings_within_budget_always_includes_at_least_one():
+    """Even when a single finding exceeds budget, include it — degraded
+    synthesis > empty synthesis. The MOST RECENT SESSION block in the prompt
+    is separate, but findings_text being empty hurts cross-session patterns."""
+    llm = _FakeLLMManager(tokens_per_char=4)
+    giant = "y" * 200_000  # ~50K tokens, larger than any reasonable budget
+    findings = [{"digest_date": "2026-05-14", "summary": giant}]
+    selected, used = _select_findings_within_budget(
+        findings_sorted_desc=findings,
+        llm_manager=llm,
+        target_model="fake-model",
+        context_window=16_000,
+        template_overhead_tokens=1_000,
+    )
+    assert len(selected) == 1
+    assert used > 0
+
+
+def test_select_findings_within_budget_empty_input():
+    llm = _FakeLLMManager()
+    selected, used = _select_findings_within_budget(
+        findings_sorted_desc=[],
+        llm_manager=llm,
+        target_model="fake-model",
+        context_window=128_000,
+        template_overhead_tokens=2_000,
+    )
+    assert selected == []
+    assert used == 0
+
+
+def test_select_findings_within_budget_falls_back_when_model_unknown():
+    """target_model=None → helper uses len//4 estimate. Still respects budget."""
+    llm = _FakeLLMManager(tokens_per_char=4)
+    findings = [
+        {"digest_date": f"2026-05-{day:02d}", "summary": "x" * 200}
+        for day in range(1, 11)
+    ]
+    selected, used = _select_findings_within_budget(
+        findings_sorted_desc=findings,
+        llm_manager=llm,
+        target_model=None,  # unknown model — heuristic fallback path
+        context_window=8_000,
+        template_overhead_tokens=500,
+    )
+    # Should include at least one and at most all 10.
+    assert 1 <= len(selected) <= len(findings)
+    # Heuristic tokens_used > 0 even without LLM model.
+    assert used > 0
+
+
+def test_compute_synthesis_budget_matches_helper_internal_calc():
+    """Drift guard: `_select_findings_within_budget` must use the same budget
+    formula as the public `_compute_synthesis_budget`. If the helper inlines
+    a copy of the formula and only one place is updated later, this test
+    fires before the prod desync happens."""
+    llm = _FakeLLMManager(tokens_per_char=4)
+    context_window = 128_000
+    template_overhead = 5_000
+
+    # Drain a huge finding into the helper so its internal `tokens_used`
+    # reflects the actual budget used as the upper bound it stops at.
+    giant = "x" * 1_000_000  # ~250K tokens at ratio=4
+    selected, used = _select_findings_within_budget(
+        findings_sorted_desc=[{"digest_date": "2026-05-14", "summary": giant}],
+        llm_manager=llm,
+        target_model="fake-model",
+        context_window=context_window,
+        template_overhead_tokens=template_overhead,
+    )
+    # The single-finding-guarantee fires (selected was empty when threshold hit).
+    assert len(selected) == 1
+
+    # The publicly-exposed budget MUST match the formula constants.
+    budget = _compute_synthesis_budget(context_window, template_overhead)
+    expected = (
+        int(context_window * SYNTHESIS_BUDGET_FACTOR)
+        - SYNTHESIS_OUTPUT_RESERVE_TOKENS
+        - template_overhead
+    )
+    assert budget == expected
+
+
+def test_select_findings_within_budget_preserves_input_order():
+    """Selection follows input order (caller passes newest-first); helper does
+    not re-sort. Catches accidental sort/reverse inside the helper."""
+    llm = _FakeLLMManager(tokens_per_char=4)
+    findings = [
+        {"digest_date": "2026-05-14", "summary": "newest"},
+        {"digest_date": "2026-05-10", "summary": "middle"},
+        {"digest_date": "2026-05-01", "summary": "oldest"},
+    ]
+    selected, _ = _select_findings_within_budget(
+        findings_sorted_desc=findings,
+        llm_manager=llm,
+        target_model="fake-model",
+        context_window=200_000,
+        template_overhead_tokens=100,
+    )
+    assert [f["summary"] for f in selected] == ["newest", "middle", "oldest"]

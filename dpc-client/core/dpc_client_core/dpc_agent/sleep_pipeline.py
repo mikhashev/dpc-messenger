@@ -113,6 +113,68 @@ Rules:
 """
 
 
+SYNTHESIS_BUDGET_FACTOR = 0.85
+SYNTHESIS_OUTPUT_RESERVE_TOKENS = 4000
+
+
+def _compute_synthesis_budget(context_window: int, template_overhead_tokens: int) -> int:
+    """Tokens available for findings_text after reserving output + template overhead.
+
+    Single source of truth for the budget formula — both the truncation
+    helper and the observability site read from this. If the factor or
+    reserve change, only this function needs editing.
+    """
+    return int(context_window * SYNTHESIS_BUDGET_FACTOR) - SYNTHESIS_OUTPUT_RESERVE_TOKENS - template_overhead_tokens
+
+
+def _render_finding_block(seq_index: int, finding: Dict[str, Any]) -> str:
+    """Render one finding into its `Session N (date): {json}` block.
+
+    Kept as a helper so the budget accounting and the final findings_text
+    rendering use the exact same text — token count == render size.
+    """
+    date_prefix = finding.get("digest_date", "")[:10]
+    return f"Session {seq_index} ({date_prefix}):\n{json.dumps(finding, ensure_ascii=False, indent=2)}"
+
+
+def _select_findings_within_budget(
+    findings_sorted_desc: List[Dict[str, Any]],
+    llm_manager,
+    target_model: Optional[str],
+    context_window: int,
+    template_overhead_tokens: int,
+) -> tuple[List[Dict[str, Any]], int]:
+    """Select findings newest-to-oldest until adaptive synthesis budget is hit.
+
+    Budget = SYNTHESIS_BUDGET_FACTOR * context_window minus output reserve
+    minus the synthesis prompt template + most_recent block (passed in as
+    template_overhead_tokens).
+
+    Always includes at least one finding when input is non-empty, even if
+    a single finding would exceed budget — degraded but non-empty synthesis
+    is better than empty findings_text.
+
+    Returns (selected_findings, tokens_consumed_by_findings).
+    """
+    budget = _compute_synthesis_budget(context_window, template_overhead_tokens)
+    selected: List[Dict[str, Any]] = []
+    tokens_used = 0
+
+    for f in findings_sorted_desc:
+        finding_text = _render_finding_block(len(selected) + 1, f)
+        if target_model:
+            finding_tokens = llm_manager.count_tokens(finding_text, target_model)
+        else:
+            finding_tokens = len(finding_text) // 4  # rough fallback
+
+        if selected and tokens_used + finding_tokens > budget:
+            break
+        selected.append(f)
+        tokens_used += finding_tokens
+
+    return selected, tokens_used
+
+
 def _read_sleep_state(conversation_dir: Path) -> Dict[str, Any]:
     path = conversation_dir / SLEEP_STATE_FILE
     if path.exists():
@@ -574,11 +636,6 @@ async def run_sleep(
             if most_recent_finding else "(no analyzable session)"
         )
 
-        findings_text = "\n\n".join(
-            f"Session {i+1} ({f.get('digest_date', '')[:10]}):\n{json.dumps(f, ensure_ascii=False, indent=2)}"
-            for i, f in enumerate(findings_sorted_desc)
-        )
-
         if progress_callback:
             await progress_callback(total, total, "synthesizing", "")
 
@@ -589,8 +646,69 @@ async def run_sleep(
                 entity_list=", ".join(unique_entities)
             )
 
-        synthesis_prompt = SYNTHESIS_PROMPT.format(
+        # Adaptive synthesis budget (S119): pack findings newest-to-oldest until
+        # SYNTHESIS_BUDGET_FACTOR * model context_window is reached. Bounded by
+        # the actual provider model, not a magic constant — caps growth at
+        # ~200-350 sessions without crashing into context limits.
+        target_alias = provider_alias or llm_manager.default_provider
+        target_provider = llm_manager.providers.get(target_alias) if target_alias else None
+        target_model = target_provider.model if target_provider else None
+
+        if target_model:
+            context_window = llm_manager.get_context_window(target_model)
+        else:
+            context_window = 128000  # safe default for unknown providers
+            log.warning(
+                "Sleep synthesis: target model unknown (alias=%s), using default context_window=%d",
+                target_alias, context_window,
+            )
+
+        # Estimate template overhead — SYNTHESIS_PROMPT formatted with empty
+        # findings + the most_recent block + entity_section. Anything we
+        # already commit to including before the variable findings_text.
+        template_skeleton = SYNTHESIS_PROMPT.format(
             n=len(per_session_findings),
+            period=period,
+            most_recent=most_recent_text,
+            findings="",
+            entity_section=entity_section,
+        )
+        if target_model:
+            template_overhead_tokens = llm_manager.count_tokens(template_skeleton, target_model)
+        else:
+            template_overhead_tokens = len(template_skeleton) // 4
+
+        selected_findings, tokens_used = _select_findings_within_budget(
+            findings_sorted_desc,
+            llm_manager,
+            target_model,
+            context_window,
+            template_overhead_tokens,
+        )
+
+        budget_available = _compute_synthesis_budget(context_window, template_overhead_tokens)
+        synthesis_budget_info = {
+            "total_findings": len(findings_sorted_desc),
+            "included_findings": len(selected_findings),
+            "oldest_included_date": (
+                selected_findings[-1].get("digest_date", "")[:10] if selected_findings else ""
+            ),
+            "budget_tokens_used": tokens_used,
+            "budget_tokens_available": budget_available,
+        }
+
+        log.info(
+            "Sleep synthesis budget: %d/%d findings, %d/%d tokens (context_window=%d, model=%s)",
+            len(selected_findings), len(findings_sorted_desc),
+            tokens_used, budget_available, context_window, target_model or "unknown",
+        )
+
+        findings_text = "\n\n".join(
+            _render_finding_block(i + 1, f) for i, f in enumerate(selected_findings)
+        )
+
+        synthesis_prompt = SYNTHESIS_PROMPT.format(
+            n=len(selected_findings),
             period=period,
             most_recent=most_recent_text,
             findings=findings_text,
@@ -640,6 +758,7 @@ async def run_sleep(
 
         morning_brief["generated_at"] = datetime.now(timezone.utc).isoformat()
         morning_brief["consumed"] = False
+        morning_brief["synthesis_budget"] = synthesis_budget_info
         sleep_findings["generated_at"] = datetime.now(timezone.utc).isoformat()
 
         (conversation_dir / MORNING_BRIEF_FILE).write_text(
