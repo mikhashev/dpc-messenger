@@ -691,7 +691,7 @@ def create_agent_storage(
     # Ensure agent directories exist
     ensure_agent_dirs(agent_id)
 
-    # Initialize default memory files (scratchpad.md, identity.md, dialogue_summary.md, scratchpad_journal.jsonl)
+    # Initialize default memory files (scratchpad.md, identity.md, dialogue_summary.md)
     # This ensures all agents have the same default files from creation, not just on first use
     from .memory import Memory
     memory = Memory(agent_root=get_agent_root(agent_id))

@@ -346,17 +346,6 @@ def update_scratchpad(ctx: ToolContext, content: str, mode: str = "append") -> s
         scratchpad_path.parent.mkdir(parents=True, exist_ok=True)
         scratchpad_path.write_text(new_content.strip(), encoding="utf-8")
 
-        # Log update
-        journal_path = ctx.memory_path("scratchpad_journal.jsonl")
-        journal_entry = {
-            "ts": datetime.now(timezone.utc).isoformat(),
-            "mode": mode,
-            "content_length": len(content),
-            "total_length": len(new_content),
-        }
-        with open(journal_path, "a", encoding="utf-8") as f:
-            f.write(json.dumps(journal_entry) + "\n")
-
         msg = f"✓ Updated scratchpad ({mode} mode, {len(new_content)} total chars)"
         if mode == "deduplicate" and duplicates_removed > 0:
             msg += f", removed {duplicates_removed} duplicate(s)"

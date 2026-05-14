@@ -302,10 +302,6 @@ class Memory:
         """Path to dialogue summary file."""
         return self._memory_path("dialogue_summary.md")
 
-    def journal_path(self) -> pathlib.Path:
-        """Path to scratchpad journal (history of changes)."""
-        return self._memory_path("scratchpad_journal.jsonl")
-
     def logs_path(self, name: str) -> pathlib.Path:
         """Get path to log file."""
         return (self.agent_root / "logs" / name).resolve()
@@ -364,8 +360,6 @@ class Memory:
             write_text(self.scratchpad_path(), self._default_scratchpad())
         if not self.identity_path().exists():
             write_text(self.identity_path(), self._default_identity())
-        if not self.journal_path().exists():
-            write_text(self.journal_path(), "")
 
     def cleanup_old_task_results(self, max_age_days: int = 30) -> int:
         """Remove task_results files older than max_age_days. Returns count deleted."""
@@ -523,12 +517,6 @@ class Memory:
             for e in errors[-10:]:
                 lines.append(f"  {e.get('type', '?')}: {short(str(e.get('error', '')), 120)}")
         return "\n".join(lines)
-
-    # --- Journal ---
-
-    def append_journal(self, entry: Dict[str, Any]) -> None:
-        """Append an entry to the scratchpad journal."""
-        append_jsonl(self.journal_path(), entry)
 
     # --- Defaults ---
 
