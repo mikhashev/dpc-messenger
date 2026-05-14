@@ -1251,10 +1251,18 @@ Respond in JSON format:
     async def _broadcast_commit_result(
         self, result_payload: dict, participants: List[str]
     ) -> None:
-        """Broadcast KNOWLEDGE_COMMIT_RESULT to all participants."""
-        message = {"command": "KNOWLEDGE_COMMIT_RESULT", "payload": result_payload}
+        """Broadcast KNOWLEDGE_COMMIT_RESULT to remote participants and emit UI event.
 
-        for node_id in participants:
+        Solo-vote conversations (agent_*, local_ai, ai_*, telegram-*) reduce
+        participants to [local_node_id] for voting. The local node is never in
+        p2p_manager.peers, so iterating it produced a misleading "Broadcasted"
+        log with zero recipients. Filter self out before iterating.
+        """
+        message = {"command": "KNOWLEDGE_COMMIT_RESULT", "payload": result_payload}
+        local_node_id = self.p2p_manager.node_id
+        remote_participants = [p for p in participants if p != local_node_id]
+
+        for node_id in remote_participants:
             if node_id in self.p2p_manager.peers:
                 try:
                     await self.p2p_manager.send_message_to_peer(node_id, message)

@@ -424,10 +424,15 @@ class ConsensusManager:
         if session.status == "approved":
             result_payload["commit_id"] = commit.commit_id
 
-        # Broadcast result to all participants (if callback registered)
+        # Fire result_broadcast callback — recipient filtering (self vs remote)
+        # happens inside the callback. Log reflects callback invocation, not
+        # delivery: callback may emit zero P2P sends for solo-vote conversations.
         if self.on_result_broadcast:
             await self.on_result_broadcast(result_payload, proposal.participants)
-            logger.info("Broadcasted KNOWLEDGE_COMMIT_RESULT for proposal %s", proposal.proposal_id)
+            logger.debug(
+                "result_broadcast callback fired for proposal %s (participants=%d)",
+                proposal.proposal_id, len(proposal.participants),
+            )
 
     async def _apply_commit(self, commit: KnowledgeCommit) -> bool:
         """Apply approved commit to local PCM with cryptographic integrity
