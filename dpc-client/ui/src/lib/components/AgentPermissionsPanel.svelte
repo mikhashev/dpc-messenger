@@ -85,16 +85,6 @@
       ]
     },
     {
-      name: 'Review Tools (safe analysis)',
-      tools: [
-        { key: 'self_review', label: 'Self Review', desc: 'Review own work' },
-        { key: 'request_critique', label: 'Request Critique', desc: 'Request feedback' },
-        { key: 'compare_approaches', label: 'Compare Approaches', desc: 'Compare solutions' },
-        { key: 'quality_checklist', label: 'Quality Checklist', desc: 'Run quality checks' },
-        { key: 'consensus_check', label: 'Consensus Check', desc: 'Check consensus' },
-      ]
-    },
-    {
       name: 'Restricted Tools (security sensitive)',
       isDanger: true,
       tools: [
