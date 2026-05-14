@@ -8,6 +8,7 @@ toggle button via WebSocket command.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 from datetime import datetime, timezone
@@ -16,9 +17,7 @@ from typing import Any, Dict, List, Optional
 
 log = logging.getLogger(__name__)
 
-MAX_ARCHIVES_PER_CYCLE = 20
 SLEEP_STATE_FILE = "sleep_state.json"
-LAST_SLEEP_FILE = "last_sleep.json"
 MORNING_BRIEF_FILE = "morning_brief.json"
 SLEEP_FINDINGS_FILE = "sleep_findings.json"
 
@@ -125,62 +124,12 @@ def _write_sleep_state(conversation_dir: Path, state: Dict[str, Any]) -> None:
     path.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
-def _get_last_sleep_timestamp(conversation_dir: Path) -> Optional[str]:
-    path = conversation_dir / LAST_SLEEP_FILE
-    if path.exists():
-        try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-            return data.get("last_sleep_at")
-        except (json.JSONDecodeError, OSError):
-            pass
-    return None
+def _collect_group_archive_digests(group_dir: Path, agent_id: str) -> List[Dict[str, Any]]:
+    """Collect archived session digests from a specific group's archive/.
 
-
-def _collect_group_digests(
-    conversations_dir: Path, agent_id: str, since: Optional[str]
-) -> List[Dict[str, Any]]:
-    """Collect group chat history segments where this agent participated."""
-    digests = []
-    if not conversations_dir.exists() or not agent_id:
-        return digests
-    for group_dir in conversations_dir.iterdir():
-        if not group_dir.is_dir() or not group_dir.name.startswith("group-"):
-            continue
-        metadata_path = group_dir / "metadata.json"
-        history_path = group_dir / "history.json"
-        if not metadata_path.exists() or not history_path.exists():
-            continue
-        try:
-            metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
-            agents_map = metadata.get("agents", {})
-            agent_in_group = any(agent_id in ids for ids in agents_map.values())
-            if not agent_in_group and agents_map:
-                continue
-            history = json.loads(history_path.read_text(encoding="utf-8"))
-            messages = history.get("messages", [])
-            if not messages:
-                continue
-            if since:
-                messages = [m for m in messages if m.get("timestamp", "") > since]
-            if not messages:
-                continue
-            digests.append({
-                "archive_file": f"group:{group_dir.name}",
-                "date": messages[0].get("timestamp", "")[:10],
-                "message_count": len(messages),
-                "duration_mins": 0,
-                "source": "group",
-                "group_id": metadata.get("group_id", group_dir.name),
-            })
-        except (json.JSONDecodeError, OSError):
-            continue
-    return digests
-
-
-def _collect_group_archive_digests(
-    group_dir: Path, agent_id: str, since: Optional[str]
-) -> List[Dict[str, Any]]:
-    """Collect archived session digests from a specific group's archive/."""
+    Returns ALL group archives where this agent was a member. Reuse-detection
+    happens later via per-archive sha256 in `sleep_results/result_*.json`.
+    """
     digests = []
     archive_dir = group_dir / "archive"
     if not archive_dir.exists():
@@ -209,8 +158,6 @@ def _collect_group_archive_digests(
             if not messages:
                 continue
             archive_date = messages[0].get("timestamp", "")
-            if since and archive_date <= since:
-                continue
             digests.append({
                 "archive_file": f"group_archive:{group_dir.name}:{archive_path.name}",
                 "date": archive_date[:10],
@@ -222,17 +169,15 @@ def _collect_group_archive_digests(
             })
         except (json.JSONDecodeError, OSError):
             continue
-    if len(digests) > MAX_ARCHIVES_PER_CYCLE:
-        log.warning(
-            "Sleep: %d unprocessed group archives in %s, analyzing last %d. "
-            "%d oldest will be silently skipped (next sleep treats them as analyzed).",
-            len(digests), group_dir.name, MAX_ARCHIVES_PER_CYCLE,
-            len(digests) - MAX_ARCHIVES_PER_CYCLE,
-        )
-    return digests[-MAX_ARCHIVES_PER_CYCLE:]
+    return digests
 
 
-def _find_unprocessed_archives(conversation_dir: Path, since: Optional[str]) -> List[Dict[str, Any]]:
+def _find_archive_digests(conversation_dir: Path) -> List[Dict[str, Any]]:
+    """Read all 1:1 session digests from digest.jsonl, sorted by date.
+
+    Returns ALL digests; reuse-detection happens later via per-archive sha256
+    in `sleep_results/result_*.json`.
+    """
     digest_path = conversation_dir / "digest.jsonl"
     if not digest_path.exists():
         return []
@@ -247,18 +192,8 @@ def _find_unprocessed_archives(conversation_dir: Path, since: Optional[str]) -> 
                 except json.JSONDecodeError:
                     continue
 
-    if since:
-        digests = [d for d in digests if d.get("date", "") > since]
-
     digests.sort(key=lambda d: d.get("date", ""))
-    if len(digests) > MAX_ARCHIVES_PER_CYCLE:
-        log.warning(
-            "Sleep: %d unprocessed 1:1 archives in %s, analyzing last %d. "
-            "%d oldest will be silently skipped (next sleep treats them as analyzed).",
-            len(digests), conversation_dir.name, MAX_ARCHIVES_PER_CYCLE,
-            len(digests) - MAX_ARCHIVES_PER_CYCLE,
-        )
-    return digests[-MAX_ARCHIVES_PER_CYCLE:]
+    return digests
 
 
 def _load_archive(conversation_dir: Path, archive_filename: str) -> Optional[Dict[str, Any]]:
@@ -299,8 +234,8 @@ def _build_session_source_id(archive: str) -> tuple[str, str]:
     before persist_extracted_entities runs, or the FK violates and the
     MENTIONS edge is skipped by L5a's skip-orphan guard.
 
-    Formats handled (matching what _collect_group_digests /
-    _collect_group_archive_digests / _find_unprocessed_archives produce):
+    Formats handled (matching what _collect_group_archive_digests /
+    _find_archive_digests produce):
 
     - 1:1 archive filename ("2026-04-01T17-27-00_reset_session.json")
       → sa:2026-04-01T17-27-00 — matches the format extract_structural_edges
@@ -330,6 +265,88 @@ def _build_session_source_id(archive: str) -> tuple[str, str]:
         return f"sa:{rest}", rest
     timestamp = Path(archive).stem.split("_")[0]
     return f"sa:{timestamp}", timestamp
+
+
+def _result_filename(archive_file: str) -> str:
+    """Stable result filename derived from `archive_file`.
+
+    1:1 archive: `result_<archive_stem>.json` (e.g. `result_2026-05-13T17-28-25_reset_session.json`).
+    Group archive: `result_group_archive--<group_id>--<archive_stem>.json` — `:`
+    replaced by `--` for Windows path safety (drive separator). `_` is reserved
+    for timestamp segments inside the archive name and group ids may contain
+    underscores, so `--` is unambiguous as a namespace separator.
+    """
+    sanitized = archive_file.replace(":", "--")
+    if sanitized.endswith(".json"):
+        sanitized = sanitized[:-5]
+    return f"result_{sanitized}.json"
+
+
+def _compute_archive_hash(digest: Dict[str, Any], conversation_dir: Path) -> str:
+    """sha256 hex of the raw archive bytes referenced by `digest`.
+
+    Returns "" if the archive file cannot be located (orphan digest, missing
+    file, read error). Callers treat "" as "skip cache, always re-analyze".
+    """
+    source = digest.get("source")
+    archive_file = digest.get("archive_file", "")
+    if source == "group_archive":
+        path_str = digest.get("_archive_path", "")
+        path = Path(path_str) if path_str else None
+    else:
+        # 1:1 archive — search via rglob (matches what _load_archive does).
+        path = None
+        if archive_file:
+            for p in (conversation_dir / "archive").rglob(archive_file):
+                path = p
+                break
+    if path is None or not path.exists():
+        return ""
+    try:
+        h = hashlib.sha256()
+        with open(path, "rb") as f:
+            for chunk in iter(lambda: f.read(8192), b""):
+                h.update(chunk)
+        return h.hexdigest()
+    except OSError:
+        return ""
+
+
+def _migrate_legacy_results(results_dir: Path) -> int:
+    """One-time rename: `session_<N>.json` → `result_<stem>.json`.
+
+    Reads the `archive_file` field inside each legacy file to derive the new
+    stable name. Idempotent: no-op when no `session_*.json` files exist, or
+    when the corresponding `result_*.json` already exists (delete legacy).
+    Returns the count of files renamed or deleted.
+    """
+    if not results_dir.exists():
+        return 0
+    migrated = 0
+    for legacy_path in results_dir.glob("session_*.json"):
+        stem = legacy_path.stem
+        # match session_<digits> exactly — avoid stomping any unrelated file.
+        if not (stem.startswith("session_") and stem[8:].isdigit()):
+            continue
+        try:
+            data = json.loads(legacy_path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            continue
+        archive_file = data.get("archive_file", "")
+        if not archive_file:
+            continue
+        new_path = results_dir / _result_filename(archive_file)
+        try:
+            if new_path.exists():
+                legacy_path.unlink()
+            else:
+                legacy_path.rename(new_path)
+            migrated += 1
+        except OSError as e:
+            log.warning("Sleep migration: %s → %s failed: %s", legacy_path.name, new_path.name, e)
+    if migrated:
+        log.info("Sleep migration: %d legacy session_*.json files mapped to result_*.json", migrated)
+    return migrated
 
 
 async def _analyze_single_session(
@@ -402,7 +419,11 @@ async def run_sleep(
     })
 
     try:
-        since = None if force else _get_last_sleep_timestamp(conversation_dir)
+        results_dir = conversation_dir / "sleep_results"
+        results_dir.mkdir(exist_ok=True)
+        # One-shot rename of legacy `session_<N>.json` → `result_<stem>.json`.
+        # Idempotent — no-op after the first cycle that runs the new code path.
+        _migrate_legacy_results(results_dir)
 
         if group_id:
             # Group-only mode: read only from this group's archives
@@ -415,21 +436,18 @@ async def run_sleep(
             if not group_dir:
                 _write_sleep_state(conversation_dir, {"status": "awake"})
                 return {"status": "error", "message": f"Group {group_id} not found"}
-            digests = _collect_group_archive_digests(group_dir, agent_id, since)
+            digests = _collect_group_archive_digests(group_dir, agent_id)
         else:
-            digests = _find_unprocessed_archives(conversation_dir, since)
+            digests = _find_archive_digests(conversation_dir)
 
-            # ADR-023 Task 10: include group chat sessions where this agent participates
-            group_digests = _collect_group_digests(conversation_dir.parent, agent_id, since)
-            if group_digests:
-                digests.extend(group_digests)
-                log.info("Sleep pipeline: added %d group chat segments", len(group_digests))
-
-            # Include archived group sessions (past New Session resets)
+            # Group archives — immutable, dedup'd by sha256 below.
+            # Live group history is intentionally NOT analyzed: it grows on every
+            # message, so the per-archive hash key never converges. Group analysis
+            # happens at reset_session points via group_archive entries.
             conversations_dir = conversation_dir.parent
             for group_dir in conversations_dir.iterdir():
                 if group_dir.is_dir() and group_dir.name.startswith("group-"):
-                    archive_digests = _collect_group_archive_digests(group_dir, agent_id, since)
+                    archive_digests = _collect_group_archive_digests(group_dir, agent_id)
                     if archive_digests:
                         digests.extend(archive_digests)
                         log.info("Sleep pipeline: added %d group archive sessions from %s", len(archive_digests), group_dir.name)
@@ -438,27 +456,53 @@ async def run_sleep(
             _write_sleep_state(conversation_dir, {"status": "awake"})
             return {"status": "no_new_sessions", "sessions_analyzed": 0}
 
-        log.info("Sleep pipeline: analyzing %d sessions for %s", len(digests), agent_id or conversation_dir.name)
-
-        results_dir = conversation_dir / "sleep_results"
-        results_dir.mkdir(exist_ok=True)
+        log.info("Sleep pipeline: %d candidate sessions for %s", len(digests), agent_id or conversation_dir.name)
 
         per_session_findings = []
+        cached_count = 0
+        analyzed_count = 0
         total = len(digests)
         for i, digest in enumerate(digests):
-            log.info("Sleep: analyzing session %d/%d (%s)", i + 1, total, digest.get("archive_file", ""))
+            archive_file = digest.get("archive_file", "")
+            archive_hash = _compute_archive_hash(digest, conversation_dir)
+            result_path = results_dir / _result_filename(archive_file) if archive_file else None
+
+            # Hash-skip path: result exists with matching archive_hash → reuse,
+            # no LLM call. Empty hash (missing archive bytes) bypasses cache and
+            # re-analyzes; force=True also bypasses cache (manual re-run after
+            # prompt change).
+            if (not force and result_path is not None and result_path.exists()
+                    and archive_hash):
+                try:
+                    cached = json.loads(result_path.read_text(encoding="utf-8"))
+                    if cached.get("archive_hash") == archive_hash:
+                        per_session_findings.append(cached)
+                        cached_count += 1
+                        if progress_callback:
+                            await progress_callback(i, total, "cached", archive_file)
+                        continue
+                except (json.JSONDecodeError, OSError):
+                    pass  # fall through to re-analyze
+
+            log.info("Sleep: analyzing session %d/%d (%s)", i + 1, total, archive_file)
             if progress_callback:
-                await progress_callback(i, total, "analyzing", digest.get("archive_file", ""))
+                await progress_callback(i, total, "analyzing", archive_file)
             try:
                 finding = await _analyze_single_session(digest, conversation_dir, llm_manager, provider_alias=provider_alias)
                 if finding:
+                    if archive_hash:
+                        finding["archive_hash"] = archive_hash
                     per_session_findings.append(finding)
-                    result_path = results_dir / f"session_{i}.json"
-                    result_path.write_text(json.dumps(finding, ensure_ascii=False, indent=2), encoding="utf-8")
+                    analyzed_count += 1
+                    if result_path is not None:
+                        result_path.write_text(json.dumps(finding, ensure_ascii=False, indent=2), encoding="utf-8")
             except Exception as e:
                 err_desc = f"{type(e).__name__}: {e}" if str(e) else type(e).__name__
                 log.warning("Sleep: failed to analyze session %d: %s", i + 1, err_desc)
-                per_session_findings.append({"error": err_desc, "archive_file": digest.get("archive_file", "")})
+                per_session_findings.append({"error": err_desc, "archive_file": archive_file})
+
+        log.info("Sleep pipeline: %d sessions ready (%d analyzed, %d cached)",
+                 len(per_session_findings), analyzed_count, cached_count)
 
         if not per_session_findings:
             _write_sleep_state(conversation_dir, {"status": "awake"})
@@ -581,10 +625,6 @@ async def run_sleep(
         )
         (conversation_dir / SLEEP_FINDINGS_FILE).write_text(
             json.dumps(sleep_findings, ensure_ascii=False, indent=2), encoding="utf-8"
-        )
-        (conversation_dir / LAST_SLEEP_FILE).write_text(
-            json.dumps({"last_sleep_at": datetime.now(timezone.utc).isoformat()}, ensure_ascii=False),
-            encoding="utf-8",
         )
 
         _write_sleep_state(conversation_dir, {

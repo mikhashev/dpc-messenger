@@ -6689,7 +6689,7 @@ class CoreService:
                 })
 
             try:
-                result = await run_sleep(conversation_dir, self.llm_manager, agent_id=agent_id, force=True, provider_alias=sleep_provider, progress_callback=_sleep_progress)
+                result = await run_sleep(conversation_dir, self.llm_manager, agent_id=agent_id, force=False, provider_alias=sleep_provider, progress_callback=_sleep_progress)
                 if result.get("status") == "completed":
                     brief = result.get("morning_brief", {})
                     chat_text = self._format_morning_brief(brief)
@@ -6795,7 +6795,7 @@ class CoreService:
                     })
                 try:
                     result = await run_sleep(
-                        adir, self.llm_manager, agent_id=aid, force=True,
+                        adir, self.llm_manager, agent_id=aid, force=False,
                         provider_alias=sp, progress_callback=_progress, group_id=group_id,
                     )
                     if result.get("status") == "completed":
