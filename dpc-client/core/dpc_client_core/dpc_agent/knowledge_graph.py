@@ -424,6 +424,67 @@ class SQLiteGraphBackend(GraphBackend):
         )
 
 
+class GrafeoGraphBackend(GraphBackend):
+    """Grafeo-based graph storage (ADR-024 Phase 1 stub).
+
+    Phase 1: signatures only, all methods raise NotImplementedError.
+    Implementation lands in Phase 2 (per-method, with parity tests against
+    SQLiteGraphBackend). Encryption-at-rest is transparent via Grafeo's
+    `encryption` Cargo feature (AES-256-GCM on WAL + .grafeo sections,
+    Argon2id key derivation) — wired in __init__ when methods are filled in.
+    """
+
+    def __init__(self, db_path: Path, encryption_key: Optional[bytes] = None):
+        self._db_path = db_path
+        self._encryption_key = encryption_key
+        db_path.parent.mkdir(parents=True, exist_ok=True)
+        # Phase 2: open grafeo.GrafeoDB(db_path, encryption_key=...)
+
+    def init_schema(self) -> None:
+        raise NotImplementedError("GrafeoGraphBackend.init_schema — Phase 2")
+
+    def add_node(self, node: GraphNode) -> None:
+        raise NotImplementedError("GrafeoGraphBackend.add_node — Phase 2")
+
+    def add_edge(self, edge: GraphEdge) -> None:
+        raise NotImplementedError("GrafeoGraphBackend.add_edge — Phase 2")
+
+    def get_node(self, node_id: str) -> Optional[GraphNode]:
+        raise NotImplementedError("GrafeoGraphBackend.get_node — Phase 2")
+
+    def get_neighbors(self, node_id: str, edge_type: Optional[EdgeType] = None, hops: int = 1) -> List[GraphNode]:
+        raise NotImplementedError("GrafeoGraphBackend.get_neighbors — Phase 2")
+
+    def get_edges(self, node_id: str, direction: str = "both") -> List[GraphEdge]:
+        raise NotImplementedError("GrafeoGraphBackend.get_edges — Phase 2")
+
+    def node_count(self) -> int:
+        raise NotImplementedError("GrafeoGraphBackend.node_count — Phase 2")
+
+    def edge_count(self) -> int:
+        raise NotImplementedError("GrafeoGraphBackend.edge_count — Phase 2")
+
+    def close(self) -> None:
+        raise NotImplementedError("GrafeoGraphBackend.close — Phase 2")
+
+    def edge_exists(self, source_id: str, target_id: str, edge_type: EdgeType) -> bool:
+        raise NotImplementedError("GrafeoGraphBackend.edge_exists — Phase 2")
+
+    def clear_structural_edges(self) -> int:
+        raise NotImplementedError("GrafeoGraphBackend.clear_structural_edges — Phase 2")
+
+    def update_edge_timestamp_for_node(self, node_id: str, field: str, value: str) -> int:
+        raise NotImplementedError("GrafeoGraphBackend.update_edge_timestamp_for_node — Phase 2")
+
+    def bulk_upsert_entities_with_mentions(
+        self,
+        entities: List[dict],
+        t_created: str,
+        entity_exempt: bool,
+    ) -> tuple[int, set[str]]:
+        raise NotImplementedError("GrafeoGraphBackend.bulk_upsert_entities_with_mentions — Phase 2")
+
+
 class KnowledgeGraph:
     """High-level API for the agent knowledge graph."""
 
