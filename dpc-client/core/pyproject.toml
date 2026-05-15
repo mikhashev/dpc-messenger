@@ -50,6 +50,9 @@ browser = [
 graph-ner = [
     "gliner>=0.2.20",
 ]
+graph-grafeo = [
+    "grafeo>=0.5.42",
+]
 
 [dependency-groups]
 dev = [

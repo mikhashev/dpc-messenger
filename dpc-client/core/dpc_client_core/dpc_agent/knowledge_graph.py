@@ -425,56 +425,114 @@ class SQLiteGraphBackend(GraphBackend):
 
 
 class GrafeoGraphBackend(GraphBackend):
-    """Grafeo-based graph storage (ADR-024 Phase 1 stub).
+    """Grafeo-based graph storage (ADR-024 migration).
 
-    Phase 1: signatures only, all methods raise NotImplementedError.
-    Implementation lands in Phase 2 (per-method, with parity tests against
-    SQLiteGraphBackend). Encryption-at-rest is transparent via Grafeo's
-    `encryption` Cargo feature (AES-256-GCM on WAL + .grafeo sections,
-    Argon2id key derivation) — wired in __init__ when methods are filled in.
+    Phase 2: implements init_schema, add_node, get_node, node_count with
+    parity tests against SQLiteGraphBackend. Remaining 9 ABC methods still
+    raise NotImplementedError (Phase 2.5+ scope).
+
+    Mapping (D1=A, D2=a per S123 design review):
+    - Grafeo node label = NodeType.value (5 labels: KnowledgeFile, Entity,
+      SessionArchive, Decision, Agent). Each node carries exactly one label.
+    - DPC `node_id` stored as a node property (Grafeo assigns its own
+      internal ID). Lookup by node_id uses MATCH-by-property; a property
+      index on `node_id` is a Phase 2.5 follow-up for scale.
+    - Opaque `properties` JSON blob preserved as a string property — parity
+      with SQLite, no field-collision risk.
+
+    Encryption: deferred. Grafeo Python binding does not expose its Rust
+    encryption feature as of 0.5.42; security docs explicitly state
+    "no encryption at rest" and recommend application-level encryption
+    or OS-level FDE (BitLocker / LUKS / FileVault). DPC currently relies
+    on OS FDE — see ADR-024 for the decision.
+
+    Phase 2 known limitation: add_node uses INSERT only (no upsert).
+    SQLite parity requires INSERT OR REPLACE semantics — deferred to
+    Phase 2.5 once a property index lets us MATCH-and-DELETE efficiently.
     """
 
-    def __init__(self, db_path: Path, encryption_key: Optional[bytes] = None):
+    def __init__(self, db_path: Path):
         self._db_path = db_path
-        self._encryption_key = encryption_key
-        db_path.parent.mkdir(parents=True, exist_ok=True)
-        # Phase 2: open grafeo.GrafeoDB(db_path, encryption_key=...)
+        try:
+            import grafeo
+        except ImportError as e:
+            raise ImportError(
+                "GrafeoGraphBackend requires the `grafeo` package. "
+                "Install with: uv sync --extra graph-grafeo"
+            ) from e
+        if str(db_path) == ":memory:":
+            self._db = grafeo.GrafeoDB()
+        else:
+            db_path.parent.mkdir(parents=True, exist_ok=True)
+            self._db = grafeo.GrafeoDB(str(db_path))
+        self.init_schema()
 
     def init_schema(self) -> None:
-        raise NotImplementedError("GrafeoGraphBackend.init_schema — Phase 2")
+        # Grafeo LPG is schemaless: labels and properties are defined on
+        # insert. SQLite's init_schema creates explicit tables; the Grafeo
+        # equivalent is a no-op. The method exists to satisfy the ABC
+        # contract and to keep a future-proof hook for property indexes.
+        return
 
     def add_node(self, node: GraphNode) -> None:
-        raise NotImplementedError("GrafeoGraphBackend.add_node — Phase 2")
+        exempt = bool(node.exempt or node.node_type in ALWAYS_EXEMPT)
+        props = {
+            "node_id": node.node_id,
+            "label": node.label,
+            "source_layer": node.source_layer,
+            "exempt": exempt,
+            "properties": json.dumps(node.properties, ensure_ascii=False),
+        }
+        # D1=A: Grafeo label = node_type.value. create_node returns a Node
+        # with Grafeo's internal id — we ignore it and look up by node_id.
+        self._db.create_node([node.node_type.value], props)
 
     def add_edge(self, edge: GraphEdge) -> None:
-        raise NotImplementedError("GrafeoGraphBackend.add_edge — Phase 2")
+        raise NotImplementedError("GrafeoGraphBackend.add_edge — Phase 2.5")
 
     def get_node(self, node_id: str) -> Optional[GraphNode]:
-        raise NotImplementedError("GrafeoGraphBackend.get_node — Phase 2")
+        rows = list(self._db.execute_cypher(
+            "MATCH (n {node_id: $id}) "
+            "RETURN labels(n)[0] AS lbl, n.label AS l, "
+            "n.source_layer AS sl, n.exempt AS ex, n.properties AS props",
+            {"id": node_id},
+        ))
+        if not rows:
+            return None
+        r = rows[0]
+        # D1=A: exactly one label per node, so labels(n)[0] is the node_type.
+        return GraphNode(
+            node_id=node_id,
+            node_type=NodeType(r["lbl"]),
+            label=r["l"],
+            source_layer=r["sl"],
+            exempt=bool(r["ex"]),
+            properties=json.loads(r["props"]) if r["props"] else {},
+        )
 
     def get_neighbors(self, node_id: str, edge_type: Optional[EdgeType] = None, hops: int = 1) -> List[GraphNode]:
-        raise NotImplementedError("GrafeoGraphBackend.get_neighbors — Phase 2")
+        raise NotImplementedError("GrafeoGraphBackend.get_neighbors — Phase 2.5")
 
     def get_edges(self, node_id: str, direction: str = "both") -> List[GraphEdge]:
-        raise NotImplementedError("GrafeoGraphBackend.get_edges — Phase 2")
+        raise NotImplementedError("GrafeoGraphBackend.get_edges — Phase 2.5")
 
     def node_count(self) -> int:
-        raise NotImplementedError("GrafeoGraphBackend.node_count — Phase 2")
+        return self._db.node_count
 
     def edge_count(self) -> int:
-        raise NotImplementedError("GrafeoGraphBackend.edge_count — Phase 2")
+        raise NotImplementedError("GrafeoGraphBackend.edge_count — Phase 2.5")
 
     def close(self) -> None:
-        raise NotImplementedError("GrafeoGraphBackend.close — Phase 2")
+        raise NotImplementedError("GrafeoGraphBackend.close — Phase 2.5")
 
     def edge_exists(self, source_id: str, target_id: str, edge_type: EdgeType) -> bool:
-        raise NotImplementedError("GrafeoGraphBackend.edge_exists — Phase 2")
+        raise NotImplementedError("GrafeoGraphBackend.edge_exists — Phase 2.5")
 
     def clear_structural_edges(self) -> int:
-        raise NotImplementedError("GrafeoGraphBackend.clear_structural_edges — Phase 2")
+        raise NotImplementedError("GrafeoGraphBackend.clear_structural_edges — Phase 2.5")
 
     def update_edge_timestamp_for_node(self, node_id: str, field: str, value: str) -> int:
-        raise NotImplementedError("GrafeoGraphBackend.update_edge_timestamp_for_node — Phase 2")
+        raise NotImplementedError("GrafeoGraphBackend.update_edge_timestamp_for_node — Phase 2.5")
 
     def bulk_upsert_entities_with_mentions(
         self,
@@ -482,7 +540,7 @@ class GrafeoGraphBackend(GraphBackend):
         t_created: str,
         entity_exempt: bool,
     ) -> tuple[int, set[str]]:
-        raise NotImplementedError("GrafeoGraphBackend.bulk_upsert_entities_with_mentions — Phase 2")
+        raise NotImplementedError("GrafeoGraphBackend.bulk_upsert_entities_with_mentions — Phase 2.5")
 
 
 class KnowledgeGraph:
