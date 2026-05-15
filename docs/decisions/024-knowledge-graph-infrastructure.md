@@ -1,6 +1,6 @@
 # ADR-024: Knowledge Graph as Unified Infrastructure
 
-**Status:** Accepted (Phase 1 implemented, Phase 2 partial, S112 hardened persistence)
+**Status:** Accepted (Phase 1 implemented, Phase 2 partial, Grafeo migration Phase 2 started S123)
 **Date:** 2026-05-05
 **Session:** S93
 **Authors:** CC (draft, code analysis, web research), Ark (prior art research, GRAVITON mapping, dotmd analysis), Mike (direction, scale framing, decision)
@@ -61,11 +61,9 @@ S93 discussion: a-a-k criticism on Karpathy gist identified two gaps in DPC — 
 **Lore** (re-cinq.com/blog/lore-recinqs-sw-agent-factory):
 - Org-scale shared context MCP server for Claude Code (15+ developers, GKE)
 - PostgreSQL + pgvector, HNSW + BM25 + RRF fusion (same pattern as ADR-018)
-- Temporal fact invalidation via embedding similarity (0.92 threshold) — new facts auto-invalidate contradicting old facts
-- Episode ingestion: enforced workflow (assemble_context → search_memory → write_episode), passive extraction from PR reviews
-- Importance decay (0–10 score), consolidation job (group facts by repo, synthesize patterns)
-- LoreTask CRD for autonomous K8s agents, 11 scheduled jobs (gap detection, autoresearch, spec drift)
-- Key lesson: wrapping black-box agents failed after 4 attempts; direct Anthropic API calls + structured outputs succeeded
+- Temporal fact invalidation via embedding similarity (0.92 threshold)
+- Episode ingestion: enforced workflow (assemble_context → search_memory → write_episode)
+- Key lesson: wrapping black-box agents failed; direct API calls + structured outputs succeeded
 - Source: re-cinq blog post, verified S97
 
 **obra/knowledge-graph** (github.com/obra/knowledge-graph, Jesse Vincent):
@@ -73,294 +71,186 @@ S93 discussion: a-a-k criticism on Karpathy gist identified two gaps in DPC — 
 - Unweighted edges (wiki links only), FTS5 full-text search
 - graphology: Louvain communities, betweenness centrality, PageRank, BFS
 - MCP server for Claude Code (10 tools), incremental indexing by mtime
-- 76 tests (vitest)
 - Source: GitHub, verified S97
 
 **All-Mem** (arxiv:2603.19595):
 - Visible surface + hop-bounded expansion model
 - DPC knowledge = visible surface, archives = deep evidence
-- Retrieval cost bounded by visible surface size, not total memory
 
 **EMem** (arxiv:2511.17208):
 - EDUs (enriched elementary discourse units) — non-compressive decomposition
 - Graph-based associative recall over atomic event-like propositions
 
+**grafeo-memory** (github.com/GrafeoDB/grafeo-memory, Apache 2.0, S123 research):
+- AI memory layer for LLM applications: fact extraction, deduplication, semantic search
+- Reconciliation loop: Extract → Search existing → Reconcile (LLM decides ADD/UPDATE/DELETE) → Execute
+- Borrowing candidates: `reconciliation_threshold`, `agreement_bonus`, `topology_boost_factor`
+- Limitations vs DPC: LLM-dependent (not offline), single-user, no provenance chain, no sovereignty model
+- Reference architecture for reconciliation patterns, not drop-in replacement
+
 ### Internal Prior Art
 
 **GRAVITON** (agent sandbox, April 2026):
-- Knowledge graph spec synthesized by agents (GR, JARVIS, Hope) commissioned by @gk0ed
+- Knowledge graph spec synthesized by agents (GR, JARVIS, Hope)
 - 6-axis scoring, 8-level confidence, exponential decay, exempt nodes, consequence walk
-- ARCH-20 (Knowledge DNA) overlap nearly complete
-- Reference document, one input among several (not privileged over Graphiti/Mem0/dotmd)
+- Reference document, one input among several
 
 ## Decision
 
 ### 1. Adopt graph as unified knowledge infrastructure
 
-Graph is not a retrieval-only feature. It is the structural layer connecting:
-- Memory layers (scratchpad ↔ knowledge ↔ archives) via typed edges
-- Knowledge units to their source sessions (provenance)
-- Knowledge units to each other (dependencies, contradictions, support)
-- Agents to their knowledge (ownership, scope)
-- Nodes to peer nodes (federation, consent)
+Graph is the structural layer connecting memory layers, knowledge units, agents, and nodes.
 
-### 2. Graph backend selection — DB-agnostic Phase 1, smoke test before commit
+### 2. Graph backend selection — Grafeo selected (S123)
 
-Phase 1 uses structural edges in SQLite/JSON (no graph DB dependency). Graph DB selection deferred to pre-Phase 2 smoke test based on S94 research findings.
+**Decision:** Grafeo selected as graph backend. Migration started S123 on branch `feature/grafeo-backend`.
 
-**Candidates (verified S94, CC independent PyPI/GitHub verification):**
+**Rationale:** HNSW + BM25 + RRF native (3 systems → 1), Cypher support, cross-platform PyPI wheels, Apache-2.0, active development.
 
-| DB | PyPI | Windows | Cypher | Status |
-|---|---|---|---|---|
-| **LadybugDB** | `real-ladybug` | Yes (wheels) | Yes | Active but #452 throughput collapse at 60K nodes, #430 FTS segfault |
-| **Grafeo** | `grafeo` v0.5.42 | Yes (wheels) | Yes + GQL/Gremlin/SPARQL/GraphQL/SQL-PGQ | Apache-2.0, built-in HNSW+BM25+RRF, bus factor=1, author self-admits "not that mature yet" (HN) |
-| **Velr** | `velr` v0.2.6 | Yes (wheels) | Yes (openCypher) | Alpha, SQLite backend |
+**Grafeo v0.5.42 Source-Code Verification (S115)**
 
-**Eliminated (S94 verification):**
-- SparrowDB — LLM hallucination, does not exist on PyPI/GitHub
-- ocpg — LLM hallucination, does not exist
-- FalkorDB Lite — real but no Windows wheels (Unix sockets)
-- NeuG — real but WSL2 only
-- Neo4j/FalkorDB (server) — requires separate process, heavy for personal device
-- NetworkX + JSON — no persistence, no Cypher, no vector search
+Full source-code review + live GitHub issue/PR verification.
 
-**Smoke test (pre-Phase 2):** LadybugDB vs Grafeo benchmark on <10K nodes, Windows, Python API. If Grafeo passes — consider as primary (HNSW+BM25+graph consolidation replaces FAISS+BM25+separate graph). If neither stable — remain on SQLite.
+**Code quality:** Rust workspace, `unsafe_code = "deny"`, MVCC transactions, WAL checkpoint recovery, columnar storage with zone maps.
 
-### Grafeo v0.5.42 Source-Code Verification (S115, 2026-05-13)
+**Resolved since S94:** #335 fixed (TopK operator), #318 = enhancement not bug, bus factor grew to 4+ contributors.
 
-Full source-code review of cloned repository + live GitHub issue/PR verification. Prior assessment (S94) significantly revised.
-
-**Code quality:** Rust workspace with `unsafe_code = "deny"`, pedantic clippy, MVCC transactions, WAL checkpoint recovery, columnar storage with zone maps, tiered storage (RAM + disk spill).
-
-**Resolved since S94 assessment:**
-- **#335 (ORDER BY + LIMIT):** Fixed via TopK operator (PR #326, @temporaryfix) in v0.5.42 + regression test in pending PR #339 (Release/0.5.43).
-- **#318 (shortest path):** Label = `enhancement` (NOT bug). Bidirectional BFS with path materialization implemented in `shortest_path.rs` (1052 lines). Remaining work per #318: `nodes(p)`/`edges(p)`/list comprehensions/`ELEMENTS()` materialization — multiple Cypher path projection surfaces, not just `ELEMENTS()`.
-- **Bus factor:** Grew from 1 to 4+ active contributors. @temporaryfix (CompactStore, hybrid queries, TopK), @CorvusYe (Dart bindings), @Imaclean74, @Michaelzag (Python CDC, grafeo-server). Sponsor: Supernovae.
-- **Maintenance velocity:** 13 critical bugs closed in April-May 2026 (data loss, schema corruption, WAL replay, Windows backup). New minor release every ~10 days.
-
-**Feature verification (relevant to DPC migration):**
-- HNSW + BM25 + RRF native (replaces FAISS + BM25 + separate graph)
-- Encryption at rest (AES-256-GCM, argon2, zeroize) — addresses ADR-022 requirement
-- Bi-temporal properties + time travel — maps to our `t_created`/`t_invalidated` model
-- Backup/restore: `backup_full`, `backup_incremental`, `restore_to_epoch`
+**Feature verification:**
+- HNSW + BM25 + RRF native
+- Bi-temporal properties + time travel
+- Backup/restore (full, incremental, point-in-time)
 - Python API: PyO3 bindings, NetworkX bridge, CDC streaming, MCP server
-- Cross-platform: Windows/macOS/Linux wheels (x64, aarch64, musl). CI tests all three OS.
-- 8 language bindings (Python, Node.js, Go, C#, Dart, C, WASM, Rust)
-- WASM binding: browser + mobile (React Native/Capacitor via WASM, Flutter via Dart)
+- Cross-platform wheels (Windows/macOS/Linux/x64/aarch64/musl)
 
-**Federation pattern (clarification per ADR-019 Decision #4):** Grafeo supports both query shipping (Cypher queries serialized and executed on peer instances — matches our committed pattern) AND CDC replication (Change Data Capture event streams — alternative push-based pattern). DPC federation uses query shipping; CDC available if architectural revision needed.
+**Encryption at rest — CORRECTION (S123):**
 
-**Scaling fit (S115 verification against full-picture-s32 model):** Grafeo's per-instance embedded design matches the sovereign-subgraph model (each node owns its graph, 8B = sum of federated subgraphs, not single index). Per-instance scale stays within Grafeo's verified sweet spot. Cross-platform wheels + Dart/WASM bindings cover the Windows/macOS/Linux/mobile P2P-mesh requirement.
+Grafeo Rust workspace has `encryption` Cargo feature (AES-256-GCM, Argon2id). However:
 
-**Remaining risks:**
-- PR #339 (Release/0.5.43) pending merge — post-release validation needed
-- Shortest path path-element materialization (#318) not yet fully complete (partial feature, not bug — issue formally OPEN)
-- Project still young (~200 Rust source files, v0.5.x) — monitor adoption signals
-- WASM performance on mobile devices not yet measured
+1. **Python binding does not expose encryption.** PyPI wheel has no encryption parameter.
+2. **Grafeo Security Best Practices docs** explicitly state: "No encryption at rest — Database files are not encrypted" and recommend application-level Fernet.
+3. **Conclusion:** Encryption at rest is NOT a currently available Grafeo capability for Python users.
 
-**Migration assessment (GraphBackend abstraction cleanup DONE S116, commit `4aefa84`):**
-- Storage: SQLite nodes/edges/properties → Grafeo native properties (direct mapping)
-- FAISS: eliminated (Grafeo HNSW replaces)
-- BM25: eliminated (Grafeo BM25 replaces)
-- RRF fusion: rewrite under Grafeo API (conceptually identical)
-- GLiNER pipeline: writes through GraphBackend ABC (one implementation swap — `bulk_upsert_entities_with_mentions` encapsulates the batch transaction)
-- Active Recall: rewrite under Grafeo query API
-- Estimated effort: 5-7 days migration + 2-3 days regression testing (now achievable — fasade has zero `_backend._conn` access, all writes route through 4 new ABC methods: `edge_exists`, `clear_structural_edges`, `update_edge_timestamp_for_node`, `bulk_upsert_entities_with_mentions`)
+**DPC encryption strategy (decided S123):**
+- **A_v2:** Defer DB-level encryption until Grafeo adds Python binding support.
+- **F:** Recommend OS-level full-disk encryption (BitLocker/LUKS/FileVault) in deployment docs.
+- Application-level Fernet available as future option.
+- `encryption_key` parameter removed from `GrafeoGraphBackend.__init__`.
 
-**Reference architecture:** Graphiti/Zep (arxiv:2501.13956) — episodes → entities → facts with bi-temporal validity. Neo4j dependency prevents direct use, but architectural model is our reference.
+**Migration design decisions (S123):**
 
-**Community validation (S94):** Karpathy gist 699 comments — property graph + Cypher is consensus direction. segundo-cerebro (orobsonn) uses 9 typed edges almost identical to ours.
+| Decision | Choice | Rationale |
+|---|---|---|
+| D1: node_type mapping | Label = node_type.value (A) | Canonical LPG, enables label index |
+| D2: properties storage | Opaque JSON string (a) | Parity with SQLite, no field collisions |
+| D3: node_id uniqueness | Simple INSERT (upsert → 2.5) | Tests don't push duplicates |
+| Query language | Cypher for queries, direct API for CRUD | Portability + clean CRUD |
+| Node identity | node_id as property, MATCH lookup | Grafeo generates internal IDs |
 
-### 3. Graph layer supplements existing retrieval, does not replace it
+**Candidates eliminated (S94):** LadybugDB (throughput collapse), SparrowDB/ocpg (fabricated), FalkorDB Lite (no Windows), Neo4j (too heavy), NetworkX (no persistence).
 
-Current pipeline (ADR-018):
-```
-query → [FAISS dense + BM25 sparse] → RRF fusion → Active Recall hints
-```
+### 3. Graph layer supplements existing retrieval
 
-Extended pipeline:
-```
-query → [FAISS dense + BM25 sparse + Graph traversal] → RRF fusion → Active Recall hints
-```
-
-Graph traversal = 4th retrieval channel in RRF. FAISS/BM25 remain primary for semantic/keyword search. Graph adds structural relationships that content similarity cannot capture.
-
-**Where graph does NOT help:** ad-hoc keyword search (error messages, config keys, function names). BM25 handles these in O(1). Graph traversal requires pre-existing edges.
+Extended pipeline: `query → [FAISS + BM25 + Graph] → RRF fusion → Active Recall hints`
 
 ### 4. Graph schema
 
-**Node types:**
-- `KnowledgeFile` — .md knowledge files (existing L5/L6)
-- `SessionArchive` — archived session transcripts
-- `Entity` — extracted named entities (persons, technologies, concepts)
-- `Decision` — ADRs, protocol rules, architectural choices
-- `Agent` — agent identities with scope metadata
+**Node types:** KnowledgeFile, SessionArchive, Entity, Decision, Agent
 
-**Edge types:**
-- `DERIVED_FROM` — knowledge ← source session (provenance)
-- `DEPENDS_ON` — knowledge → prerequisite knowledge (dependency chain)
-- `RESPONDS_TO` — knowledge → knowledge it addresses (dialogue structure)
-- `CONTRADICTS` — knowledge ↔ conflicting knowledge (version drift signal)
-- `SUPPORTS` — knowledge → supporting evidence
-- `DECIDED_BY` — decision → approver (governance audit trail)
-- `SHARED_WITH` — knowledge → peer node (federation consent)
-- `MENTIONS` — knowledge → entity (entity extraction)
-- `TEMPORAL_NEXT` — session → next session (chronological chain)
+**Edge types:** DERIVED_FROM, DEPENDS_ON, RESPONDS_TO, CONTRADICTS, SUPPORTS, DECIDED_BY, SHARED_WITH, MENTIONS, TEMPORAL_NEXT
 
-**Edge properties:**
-- `t_created` — when edge was established
-- `t_invalidated` — when edge was invalidated (null if still valid, bi-temporal per Graphiti)
-- `confidence` — edge confidence score (0.0-1.0)
-- `justification` — mandatory text explaining WHY the edge exists (min 20 chars, inspired by segundo-cerebro `why` field — quality gate against LLM extraction noise)
-- `edge_weight` — importance rating (critical/high/medium/low per GRAVITON)
+**Edge properties:** t_created, t_invalidated, confidence, justification (min 20 chars), edge_weight
 
-**Node properties:**
-- `exempt` — boolean, exempt from decay (constitutional, safety_critical per GRAVITON). Decision and SessionArchive = always exempt.
-- `source_layer` — L5/L6/L7/EXT for LAYER_WEIGHTS compatibility
+**Node properties:** exempt (boolean), source_layer (L5/L6/L7/EXT)
 
-**Temporal decay strategy (revised S94, validated by 2 independent LLMs + HN community):**
-- **Phase 1-2:** Bi-temporal edges only (record `t_created` / `t_invalidated`). NO storage-level decay scoring.
-- **Phase 4+:** Query-time decay if needed at >50K nodes. Apply temporal penalty in Cypher query (`WHERE` clause on age), not as persistent `decay_score` property. Rationale: uniform storage decay 18x worse than no decay (LLM 1 research); small graphs (<10K) don't need decay for performance; old edges contain critical "origin story" context (LLM 2).
+**Temporal decay:** Phase 1-2 = bi-temporal recording only. Phase 4+ = query-time decay (Cypher WHERE on age).
 
-### 5. Edge extraction pipeline (revised S94)
+### 5. Edge extraction pipeline
 
-Graph value grows with edges. Cold start (0 edges) = no benefit. Therefore edge extraction pipeline is the critical first deliverable.
+Three-stage: structural (zero-cost, deterministic) → GLiNER (NER, opt-in) → guided LLM (during sleep consolidation). GLiNER feeds entity list to LLM as scaffolding ("Guided Relation Extraction").
 
-**Three-stage pipeline: structural → GLiNER → guided LLM** (revised from original sequential order based on S94 external validation from 2 independent LLMs):
-
-1. **Structural extraction (zero-cost, deterministic, 100% precision, Phase 1):**
-   - Parse markdown links between knowledge files → `DEPENDS_ON` / `RESPONDS_TO` edges
-   - Parse `_meta.json` tags → `MENTIONS` edges to tag entities
-   - Parse session archive metadata (participants, topics) → `DERIVED_FROM` edges
-   - Parse `morning_brief.json` session_summaries → `DERIVED_FROM` edges (knowledge ← archive, cross-layer bridge)
-   - Parse ADR references in knowledge files → `DECIDED_BY` edges
-   - Parse knowledge file headers/footers for session references → `DERIVED_FROM` edges
-
-2. **GLiNER entity extraction (Phase 2, runs BEFORE LLM, opt-in):**
-   - GLiNER zero-shot NER (~100MB model dependency)
-   - Configurable: `collect_entities = true` in config.ini
-   - Extracts deterministic entity list from session text (50ms vs LLM 3500ms)
-   - Output: list of named entities fed to step 3 as scaffolding
-
-3. **Guided LLM relation extraction (Phase 2, during sleep consolidation):**
-   - Receives GLiNER entity list as input scaffolding ("Guided Relation Extraction" pattern)
-   - LLM finds relations ONLY between known entities — reduces hallucinations, simplifies entity resolution
-   - Confidence threshold > 0.7 + mandatory `justification` field (min 20 chars)
-   - Edges involving Decision nodes require human review before acceptance
-   - Budget: same LLM call as morning brief (extend prompt, not add new call)
-
-**Why GLiNER before LLM (not after):** GLiNER is deterministic and fast (50ms). Feeding its entity list to LLM as scaffolding prevents LLM from inventing entity synonyms and focuses it on relation extraction only. This is "Guided Relation Extraction" — validated by both independent LLMs in S94.
-
-**Entity section prompt format (S96 implementation):**
-The entity relation section is appended to the sleep synthesis prompt (SYNTHESIS_PROMPT in sleep_pipeline.py) when GLiNER entities are available. Format:
-- Header: `--- ENTITY RELATION EXTRACTION ---`
-- Entity list: comma-separated names from GLiNER output
-- Output schema: `extracted_relations` array with `source`, `target`, `relation_type`, `confidence`, `justification`
-- Relation types restricted to: DEPENDS_ON, SUPPORTS, CONTRADICTS, RESPONDS_TO
-- Constraints: confidence >= 0.7, justification min 20 chars, Decision edges flagged needs_review=true
-- When no entities available: section omitted entirely, morning brief works unchanged
-
-**Important:** This section is part of the sleep synthesis LLM call — not a separate call. Modifications to SYNTHESIS_PROMPT must preserve the `{entity_section}` placeholder and the `extracted_relations` JSON key in the response schema.
-
-**GLiNER model pin:** Phase 2 uses `urchade/gliner_multi-v2.1` (multilingual, ~2 GB). Pinned in `knowledge_graph.py:GLINER_MODEL_NAME` constant. Swap requires reload of process-wide singleton (`_GLINER_MODEL` cache invalidation) and verification that entity types in `DEFAULT_ENTITY_TYPES` (person, organization, technology, concept, location) remain valid for the new model's label schema.
-
-**Persistence invariants (added S112 after FK-cascade incident):**
-- **Skip-orphan policy:** `persist_extracted_entities` skips MENTIONS edges when source node is not in graph rather than fabricating phantom nodes. Caller (sleep_pipeline) is responsible for ensuring source nodes exist via a separate indexing path. Aggregated warn log per persist call lists up to 5 example orphan source_ids.
-- **Transactional safety:** all backend write paths (`add_node`, `add_edge`, `clear_structural_edges`, `update_edge_timestamp_for_node`, `bulk_upsert_entities_with_mentions` in `SQLiteGraphBackend`) use `with self._conn:` context manager. FK violations / UNIQUE collisions / NOT NULL errors auto-rollback the implicit transaction; otherwise the deferred transaction stays open and holds the WAL write lock, producing `database is locked` for any subsequent KnowledgeGraph instance. Since S116 (commit `4aefa84`) the `KnowledgeGraph` fasade no longer touches `_conn` directly — all writes delegate through the `GraphBackend` ABC, and the transaction discipline is backend-internal.
-- **Group archive coverage gap:** `_extract_archive_edges` indexes only 1:1 conversation archives. Group archives bypass this — their `sa:` nodes are absent from the graph, MENTIONS edges from them are dropped by skip-orphan (logged but otherwise silent). Closing this gap requires a policy decision on NodeType for group sessions; not deferred for capacity reasons but because the architectural choice has not been made.
+**Persistence invariants (S112):**
+- Skip-orphan policy for MENTIONS edges
+- Transactional safety via backend-internal `with self._conn:`
+- Group archive coverage gap (policy decision needed)
 
 ### 6. Scaling model
 
 | Scale | Graph behavior |
 |---|---|
-| **1 user, 120 docs** | Local LadybugDB, <1MB, <3ms queries. Structural extraction only. |
-| **Team (~20 nodes)** | Each node owns local graph. Cross-node: ship query + receive graph-enhanced results. Edge metadata shared with consent gate. |
-| **Dunbar (~150)** | Graph schema descriptors as gossip summaries ("I have legal_argument nodes with responds_to edges"). Routing by edge types. |
-| **8B** | Dunbar routing by design (ADR-019). Each node = sovereign subgraph. Federation = subgraph query shipping. Cypher queries portable across nodes. |
-
-**Key architectural properties:**
-- Each node owns its subgraph (sovereignty, per VISION.md)
-- Federation = union of subgraphs with consent gate on border edges
-- Query shipping, not index sharing (per ADR-019 Decision #4)
-- Dense vectors for semantic cross-node search (ADR-019 Decision #3) + graph edges for structural cross-node routing
-- Graph schema consistency enforced by shared Cypher types, not central authority
+| 1 user, 120 docs | Local embedded Grafeo, <3ms queries |
+| Team (~20) | Query shipping + consent gate |
+| Dunbar (~150) | Schema descriptors as gossip summaries |
+| 8B | Dunbar routing, sovereign subgraphs |
 
 ### 7. Integration with existing ADRs
 
-**ADR-010 (Agent Memory):** Three-layer model (scratchpad → knowledge → archives) gains structural bridge. Graph edges connect layers that were previously isolated.
-
-**ADR-018 (Retrieval):** Graph traversal becomes 4th RRF channel. `LAYER_WEIGHTS` extended with `"L7": 0.6` for graph-sourced results. BGE-M3 embeddings unchanged.
-
-**ADR-019 (Scaling):** Phase 3 "distributed knowledge graph" gets concrete implementation (LadybugDB + Cypher + federation protocol). Phases 1-2 unchanged.
-
-**ADR-022 (Safety):** Governance audit trail via provenance edges. Consequence walk for blast-radius analysis of safety decisions.
+**ADR-010:** Graph edges bridge memory layers. **ADR-018:** L7 as 4th RRF channel. **ADR-019:** Grafeo + Cypher + federation. **ADR-022:** Provenance edges for audit trail.
 
 ## Implementation Phases
 
-### Phase 0: Smoke Test (pre-implementation, updated S115) — PARTIALLY DONE
+### Phase 0: Smoke Test — DONE (S115)
+- [x] Grafeo source-code review
+- [x] Issue/PR verification
+- [x] Cross-platform wheel verification
+- [x] Encryption capability audit (S123: NOT available in Python)
+- [ ] Live benchmark on DPC-scale data (post-Release/0.5.43)
 
-Source-code verification of Grafeo v0.5.42 completed (S115). Live benchmark on DPC data still pending.
+### Phase 1: Foundation — DONE
+- [x] `knowledge_graph.py` with abstract GraphBackend ABC
+- [x] SQLiteGraphBackend implementation
+- [x] Structural edge extraction
+- [x] Graph as 4th RRF channel (`"L7": 0.6`)
 
-**Completed:**
-- [x] Grafeo source-code review (Rust core, Python bindings, WASM, CI matrix)
-- [x] Live GitHub issue/PR verification (#335 fix confirmed in PR #339, #318 = enhancement not bug)
-- [x] Cross-platform wheel verification (Windows/macOS/Linux/aarch64/musl)
-- [x] Feature mapping to DPC requirements (HNSW, encryption, bi-temporal, backup, federation pattern)
+### Phase 1.5: Grafeo Migration — IN PROGRESS (S123)
 
-**Pending (post-Release/0.5.43):**
-- [ ] Install `grafeo` in test venv, benchmark: create 1K nodes, 5K edges, Cypher queries on Windows
-- [ ] Test HNSW+BM25+Cypher together on DPC-scale data
-- [ ] Test Python API stability under concurrent access (P2P pattern)
-- [ ] Compare retrieval quality: current FAISS+BM25+SQLite-graph vs Grafeo unified
-- [ ] Decision gate: commit to Grafeo or remain on SQLite for Phase 1+
+Branch: `feature/grafeo-backend`
 
-### Phase 1: Foundation (immediate, DB-agnostic) — DONE
-- Create `knowledge_graph.py` module with abstract graph interface
-- Structural edge extraction from existing .md files (parse links, tags, session metadata) — store as SQLite/JSON initially
-- Integrate graph traversal as 4th source in `hybrid_search.py` RRF fusion
-- Add `"L7": 0.6` to `LAYER_WEIGHTS`
-- If smoke test passed: add graph DB dependency and wire concrete backend
-- Tests: graph queries return expected edges, RRF fusion includes graph results
+**Done:**
+- [x] GrafeoGraphBackend stub, 13 ABC methods (commit `cb8fe5c`)
+- [x] Phase 2: `__init__`, `init_schema` (no-op), `add_node` (direct API), `get_node` (Cypher), `node_count` (property) — commit `6444aa4`
+- [x] Parity tests: 14/14 green (7 tests × 2 backends)
+- [x] `grafeo>=0.5.42` optional extra in pyproject.toml
 
-Status: implemented on SQLite (smoke test deferred — LadybugDB/Grafeo selection pending separate evaluation). Runtime: agent_001 KG at 535 nodes / 740 edges as of S112.
+**Remaining (Phase 2.5):**
+- [ ] 9 methods: add_edge, get_neighbors, get_edges, edge_count, close, edge_exists, clear_structural_edges, update_edge_timestamp_for_node, bulk_upsert_entities_with_mentions
+- [ ] Property index on `node_id`
+- [ ] Upsert semantics for `add_node`
+- [ ] Full parity test suite for all 13 methods
 
 ### Phase 2: Enrichment — PARTIAL
-- GLiNER entity extraction (runs before LLM, feeds entity list as scaffolding) — operational since S112 hardening
-- Guided LLM relation extraction during sleep consolidation (extend `sleep_pipeline.py`) — wired but end-to-end verification pending (blocked on `database is locked` cascade until S112)
-- Temporal metadata on edges (`t_created`, `t_invalidated`) — bi-temporal recording in place
-- Entity extraction (GLiNER NER, configurable opt-in)
-
-S112 hardening: cascade bugfix in persistence layer — see backlog `GLINER-FK-CONSTRAINT + KG-DB-LOCKED` entry. Commit `b2b90c6` added skip-orphan guard + `with self._conn:` across all KG write paths.
+- [x] GLiNER entity extraction (operational since S112)
+- [ ] Guided LLM relation extraction (end-to-end verification pending)
+- [x] Bi-temporal recording on edges
 
 ### Phase 3: Federation
-- Graph schema descriptors for P2P gossip (ADR-017/019)
+- Graph schema descriptors for P2P gossip
 - Cross-node edge metadata shipping with consent gate
 - Subgraph query protocol (Cypher query shipping)
 
-### Phase 4: Advanced (GRAVITON integration + query-time decay)
-- Query-time decay scoring (Cypher WHERE clause on edge age, only if needed at >50K nodes)
-- GRAVITON 6-axis scoring (task_value, reuse_breadth, reuse_spread, correctness, system_load, touch_freq)
-- GRAVITON exempt nodes formalization (constitutional, safety_critical, sole_path, existential_anchor)
-- Consequence walk for safety audit (backward traversal from catastrophic anchors)
-- Perceptron predictor using graph features (S90)
-- Cross-encoder reranking (per dotmd)
+### Phase 4: Advanced
+- Query-time decay scoring
+- GRAVITON 6-axis scoring
+- Consequence walk for safety audit
+- Perceptron predictor using graph features
 
 ## Risks
 
-1. **Graph DB maturity (HIGH → MEDIUM, revised S115):** Grafeo v0.5.42 significantly more mature than S94 assessment. 4+ contributors, 13 critical bugs closed in 6 weeks, production-quality code (`unsafe_code=deny`, MVCC, encryption at rest). Remaining risk: project youth (v0.5.x), pending Release/0.5.43 validation, #318 path-element surfaces incomplete. Mitigation: cleanup-first strategy executed S116 (KG-ABSTRACTION-DEBT DONE, commit `4aefa84`) — fasade has zero backend-specific knowledge; swapping to Grafeo or any future backend is now a one-class implementation swap rather than a multi-week rewrite. LadybugDB legacy issues (#452 throughput collapse at 60K, #430 FTS segfault) remain relevant if Grafeo later disqualified.
-2. **Cold start:** Graph empty until edges extracted. Mitigated by structural extraction (zero-cost, runs on existing files).
-3. **Hammer/nail bias:** Risk of over-applying graph to problems that don't need it. BM25 keyword search remains primary for ad-hoc queries. Graph = supplement.
-4. **LLM hallucinated alternatives (S94 finding):** 2 of 5 alternatives suggested by external LLMs (SparrowDB, ocpg) were fabricated. All alternatives must be verified on PyPI/GitHub before consideration (P14 Rule: Solution Check).
-5. **Schema evolution:** Graph schema changes may require migration. Mitigated by starting minimal (Phase 1) and extending incrementally.
-6. **Persistence cascade bugs (S111-S112):** Multi-layer dependency chain (env → async → threading → singleton → FK → transaction) means each fix may expose the next layer. Pipeline silently degrades — reports "complete" while enriched edges don't land. Mitigation: monitor KG edge delta per sleep cycle, not just completion status.
+1. **Graph DB maturity (MEDIUM):** Grafeo v0.5.x, 4+ contributors, good code quality. Encryption NOT available in Python binding. Mitigation: ABC abstraction allows one-class backend swap.
+2. **Cold start:** Mitigated by structural extraction (zero-cost).
+3. **Hammer/nail bias:** BM25 remains primary. Graph = supplement.
+4. **LLM hallucinated alternatives (S94):** SparrowDB/ocpg fabricated. Verify before considering.
+5. **Schema evolution:** Start minimal, extend incrementally.
+6. **Persistence cascade bugs (S111-S112):** Monitor KG edge delta per sleep cycle.
+7. **Encryption gap (S123):** KG plaintext on disk. Mitigated by OS FDE.
 
 ## Open Questions
 
-1. Should graph replace `_meta.json` + `_index.md` or coexist? (Recommendation: coexist initially, migrate when graph proves stable)
-2. Edge extraction prompt design — what quality bar for LLM-extracted edges?
-3. Privacy: which graph edges are shareable in federation? Per-edge consent or per-type consent?
-4. ~~How does graph interact with Extract Knowledge button flow? Knowledge commits should create graph edges automatically.~~ **Answered (S112):** indirect via file indexing — knowledge commit writes .md to `~/.dpc/knowledge/`, then `bulk_import_knowledge_files` creates KnowledgeFile nodes and `extract_structural_edges` parses markdown links/refs into DEPENDS_ON/RESPONDS_TO/DECIDED_BY edges on eager init or next sleep cycle. No incremental on-commit update path; refresh latency = time until next eager init or sleep trigger. If sub-second freshness is required for chat-path retrieval, add an on-commit hook (separate ADR).
-5. **(S94, revised S115, S116)** Grafeo HNSW+BM25+RRF consolidation is now viable. Source-code verification confirms feature parity with our FAISS+BM25+graph stack. Migration assessment: 5-7 days. Architectural simplification (3 systems → 1 DB) is compelling. Decision gated on: (a) Release/0.5.43 stability — pending PR #339 merge, (b) ~~GraphBackend abstraction cleanup~~ DONE S116 commit `4aefa84`, (c) benchmark on DPC-scale data — pending.
+1. Graph vs `_meta.json` + `_index.md` coexistence? (Recommend: coexist, migrate when stable)
+2. Quality bar for LLM-extracted edges?
+3. Federation edge sharing: per-edge or per-type consent?
+4. ~~Knowledge commit → graph edges?~~ **Answered S112:** indirect via file indexing.
+5. Grafeo migration Phase 2.5 next. Benchmark pending post-Release/0.5.43.
+6. **grafeo-memory reference architecture (S123):** Reconciliation patterns identified for potential borrowing. Detailed source-code research deferred.
 
 ## References
 
@@ -370,20 +260,21 @@ S112 hardening: cascade bugfix in persistence layer — see backlog `GLINER-FK-C
 - EMem: arxiv:2511.17208
 - MemFactory: arxiv:2603.29493
 - dotmd: github.com/inventivepotter/dotmd
-- LadybugDB: github.com/LadybugDB/ladybug, ladybugdb.com
+- LadybugDB: github.com/LadybugDB/ladybug
 - GRAVITON: internal agent sandbox spec (April 2026)
 - Kuzu archived: theregister.com/2025/10/14/kuzudb_abandoned
 - DPC Full Picture: ideas/dpc-full-picture/dpc-full-picture-s32.md
 - VISION.md: project root
-- Grafeo: github.com/GrafeoDB/grafeo, Apache-2.0 (S94 CC discovery)
-- segundo-cerebro: github.com/orobsonn/segundo-cerebro (S94 CC discovery, `why` field on edges)
+- Grafeo: github.com/GrafeoDB/grafeo, Apache-2.0
+- grafeo-memory: github.com/GrafeoDB/grafeo-memory, Apache-2.0 (S123)
+- segundo-cerebro: github.com/orobsonn/segundo-cerebro (`why` field on edges)
 - S94 external validation: 2 independent LLMs + HN community + Karpathy gist 699 comments
 
-### FusionBrain Lab references (S121, 2026-05-16)
+### FusionBrain Lab references (S121)
 
-Surfaced during internal Razzhigaev/Ouroboros calibration discussion. FusionBrain Lab (AIRI/Innopolis), Andrey Kuznetsov as Head of Lab:
+FusionBrain Lab (AIRI/Innopolis), Andrey Kuznetsov as Head of Lab:
 
-- KG Embeddings as Additional Modality (Chekalina/Razzhigaev/Goncharova/Kuznetsov 2024): arxiv:2411.11531 — adapter-based KG integration, alternative to retrieval. Reference for hypothetical Ollama-track node-local specialized model path.
-- LLM-Microscope (Razzhigaev et al. NAACL 2025): arxiv:2502.15007 — token-level context mechanics, punctuation/stopwords carry context. Implication: caution against aggressive chunk compression in retrieval pipeline.
-- Multi-Agent GraphRAG (Kuznetsov-led, Nov 2025): arxiv:2511.08274 — text-to-Cypher framework for LPG (Memgraph backend), iterative refinement loop. Architectural pattern reference for post-Grafeo NL→GQL layer and iterative retrieval refinement.
-- GigaEvo (Kuznetsov co-author, Nov 2025): arxiv:2511.17592 — MAP-Elites quality-diversity + LLM-driven mutation. Candidate reference for ADR-022 evolution mechanisms or future agent self-improvement.
+- KG Embeddings as Additional Modality: arxiv:2411.11531
+- LLM-Microscope: arxiv:2502.15007
+- Multi-Agent GraphRAG: arxiv:2511.08274 — text-to-Cypher for LPG, iterative refinement
+- GigaEvo: arxiv:2511.17592 — MAP-Elites quality-diversity + LLM mutation
