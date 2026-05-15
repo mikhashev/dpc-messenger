@@ -378,3 +378,12 @@ S112 hardening: cascade bugfix in persistence layer — see backlog `GLINER-FK-C
 - Grafeo: github.com/GrafeoDB/grafeo, Apache-2.0 (S94 CC discovery)
 - segundo-cerebro: github.com/orobsonn/segundo-cerebro (S94 CC discovery, `why` field on edges)
 - S94 external validation: 2 independent LLMs + HN community + Karpathy gist 699 comments
+
+### FusionBrain Lab references (S121, 2026-05-16)
+
+Surfaced during internal Razzhigaev/Ouroboros calibration discussion. FusionBrain Lab (AIRI/Innopolis), Andrey Kuznetsov as Head of Lab:
+
+- KG Embeddings as Additional Modality (Chekalina/Razzhigaev/Goncharova/Kuznetsov 2024): arxiv:2411.11531 — adapter-based KG integration, alternative to retrieval. Reference for hypothetical Ollama-track node-local specialized model path.
+- LLM-Microscope (Razzhigaev et al. NAACL 2025): arxiv:2502.15007 — token-level context mechanics, punctuation/stopwords carry context. Implication: caution against aggressive chunk compression in retrieval pipeline.
+- Multi-Agent GraphRAG (Kuznetsov-led, Nov 2025): arxiv:2511.08274 — text-to-Cypher framework for LPG (Memgraph backend), iterative refinement loop. Architectural pattern reference for post-Grafeo NL→GQL layer and iterative retrieval refinement.
+- GigaEvo (Kuznetsov co-author, Nov 2025): arxiv:2511.17592 — MAP-Elites quality-diversity + LLM-driven mutation. Candidate reference for ADR-022 evolution mechanisms or future agent self-improvement.
