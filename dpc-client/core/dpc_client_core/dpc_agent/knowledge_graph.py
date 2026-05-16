@@ -475,17 +475,27 @@ class GrafeoGraphBackend(GraphBackend):
         return
 
     def add_node(self, node: GraphNode) -> None:
+        # Parity with SQLite INSERT OR REPLACE: MERGE upsert on node_id.
+        # Existing node of matching type has its mutable properties
+        # refreshed; missing node is created with the requested label set.
+        # Caveat: changing node_type (Grafeo label) for an already-stored
+        # node_id is out of contract — MERGE with the new label won't
+        # match the existing differently-labeled node and would create a
+        # sibling. KG / sleep flows never change node_type on the same
+        # node_id, so this is a documented boundary, not a bug.
         exempt = bool(node.exempt or node.node_type in ALWAYS_EXEMPT)
-        props = {
-            "node_id": node.node_id,
-            "label": node.label,
-            "source_layer": node.source_layer,
-            "exempt": exempt,
-            "properties": json.dumps(node.properties, ensure_ascii=False),
-        }
-        # D1=A: Grafeo label = node_type.value. create_node returns a Node
-        # with Grafeo's internal id — we ignore it and look up by node_id.
-        self._db.create_node([node.node_type.value], props)
+        self._db.execute_cypher(
+            f"MERGE (n:{node.node_type.value} {{node_id: $id}}) "
+            "SET n.label = $label, n.source_layer = $sl, "
+            "n.exempt = $ex, n.properties = $props",
+            {
+                "id": node.node_id,
+                "label": node.label,
+                "sl": node.source_layer,
+                "ex": exempt,
+                "props": json.dumps(node.properties, ensure_ascii=False),
+            },
+        )
 
     def add_edge(self, edge: GraphEdge) -> None:
         # Grafeo edges link by internal int id, not by string node_id.

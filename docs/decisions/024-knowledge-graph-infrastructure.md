@@ -207,7 +207,7 @@ Branch: `feature/grafeo-backend`
 
 **Done:**
 - [x] GrafeoGraphBackend stub, 13 ABC methods (commit `cb8fe5c`)
-- [x] Phase 2 (S123): `__init__`, `init_schema` (no-op), `add_node` (direct API), `get_node` (Cypher), `node_count` (property) — commit `6444aa4`
+- [x] Phase 2 (S123): `__init__`, `init_schema` (no-op), `add_node` (direct API → upgraded to MERGE upsert in S125 review), `get_node` (Cypher), `node_count` (property) — commit `6444aa4`
 - [x] Phase 2.5 Group A (S125): `add_edge`, `get_edges`, `get_neighbors`, `edge_count`, `edge_exists`, `close` — commit `e0a9a79`
 - [x] Phase 2.5 Group B (S125): `clear_structural_edges`, `update_edge_timestamp_for_node` + Group A review-note comments — commit `93f015f`
 - [x] Phase 2.5 Group C (S125): `bulk_upsert_entities_with_mentions` (three-phase UNWIND batch) — commit `cf444b5`
@@ -216,7 +216,6 @@ Branch: `feature/grafeo-backend`
 
 **Deferred (not blocking merge):**
 - [ ] Property index on `node_id` — Grafeo `create_property_index('Entity', 'node_id')` etc. Not blocking correctness; matters for performance at scale.
-- [ ] `add_node` upsert semantics review — Phase 2 implementation uses `create_node` which is INSERT-only, whereas SQLite uses `INSERT OR REPLACE`. Group C's `bulk_upsert` uses `MERGE` independently and is not affected; only direct `add_node(...)` callers with repeated `node_id` differ. Track as separate item if usage analysis surfaces a parity gap.
 - [ ] `_add_edge_safe` race condition in `KnowledgeGraph` (high-level wrapper, not backend) — flagged by Ark S125; non-blocker for single-threaded agent. Tracked in backlog as GRAFEO-RACE-AWARENESS.
 
 ### Phase 2: Enrichment — PARTIAL

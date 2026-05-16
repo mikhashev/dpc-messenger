@@ -95,6 +95,22 @@ def test_get_node_missing_returns_none(backend):
     assert backend.get_node("does-not-exist") is None
 
 
+def test_add_node_upsert_same_node_id(backend):
+    # Parity with SQLite INSERT OR REPLACE: add_node(node_id="n1") twice
+    # must yield exactly one node with the second call's properties.
+    backend.add_node(GraphNode(
+        node_id="n1", node_type=NodeType.ENTITY, label="v1",
+    ))
+    backend.add_node(GraphNode(
+        node_id="n1", node_type=NodeType.ENTITY, label="v2",
+        properties={"k": "v"},
+    ))
+    fetched = backend.get_node("n1")
+    assert fetched.label == "v2"
+    assert fetched.properties == {"k": "v"}
+    assert backend.node_count() == 1
+
+
 def test_always_exempt_node_types_set_exempt_true(backend):
     # DECISION and SESSION_ARCHIVE are in ALWAYS_EXEMPT — backend should
     # promote exempt=True regardless of input value.
