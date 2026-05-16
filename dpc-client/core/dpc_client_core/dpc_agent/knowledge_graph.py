@@ -798,10 +798,30 @@ class GrafeoGraphBackend(GraphBackend):
 class KnowledgeGraph:
     """High-level API for the agent knowledge graph."""
 
-    def __init__(self, agent_root: Path):
-        db_path = agent_root / "knowledge_graph.db"
-        self._backend: GraphBackend = SQLiteGraphBackend(db_path)
-        log.info("KnowledgeGraph initialized at %s (%d nodes, %d edges)", db_path, self._backend.node_count(), self._backend.edge_count())
+    def __init__(self, agent_root: Path, backend: Optional[str] = None):
+        # Backend selection (ADR-024 Phase 1.5): explicit `backend` arg
+        # wins (used by tests + integration scripts); otherwise read
+        # [knowledge_graph] backend from settings, defaulting to "sqlite"
+        # until Grafeo migration Level 2 + Level 3 verification close.
+        if backend is None:
+            from dpc_client_core.settings import Settings
+            # Settings takes the DPC home directory; the agent root lives
+            # inside it (~/.dpc/agents/<id>/), so the home is the agent
+            # root's grandparent (parent of `agents/`).
+            dpc_home = agent_root.parent.parent
+            backend = Settings(dpc_home).get_kg_backend()
+        backend = backend.strip().lower()
+
+        if backend == "grafeo":
+            db_path = agent_root / "knowledge_graph.grafeo"
+            self._backend = GrafeoGraphBackend(db_path)
+        else:
+            db_path = agent_root / "knowledge_graph.db"
+            self._backend = SQLiteGraphBackend(db_path)
+        log.info(
+            "KnowledgeGraph initialized at %s [backend=%s] (%d nodes, %d edges)",
+            db_path, backend, self._backend.node_count(), self._backend.edge_count(),
+        )
 
     @property
     def backend(self) -> GraphBackend:

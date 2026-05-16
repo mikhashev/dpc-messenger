@@ -436,6 +436,18 @@ class Settings:
         value = self.get('knowledge', 'cultural_perspectives_enabled', 'false')
         return value.lower() in ('true', '1', 'yes')
 
+    def get_kg_backend(self) -> str:
+        """Knowledge graph backend selection (ADR-024 Phase 1.5).
+
+        Returns one of "sqlite" (default, stable) or "grafeo" (Phase 1.5
+        migration target). Configured via [knowledge_graph] backend in
+        config.ini. Unknown values fall back to "sqlite" to preserve
+        backward compatibility — Grafeo migration is opt-in until Level 2
+        and Level 3 verification close (see backlog KG-GRAFEO-VERIFICATION).
+        """
+        value = self.get('knowledge_graph', 'backend', 'sqlite').strip().lower()
+        return value if value in ('sqlite', 'grafeo') else 'sqlite'
+
     def get_log_level(self) -> str:
         """Get global log level (DEBUG/INFO/WARNING/ERROR/CRITICAL)."""
         return self.get('logging', 'level', 'INFO').upper()
