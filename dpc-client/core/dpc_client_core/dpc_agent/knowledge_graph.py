@@ -488,7 +488,31 @@ class GrafeoGraphBackend(GraphBackend):
         self._db.create_node([node.node_type.value], props)
 
     def add_edge(self, edge: GraphEdge) -> None:
-        raise NotImplementedError("GrafeoGraphBackend.add_edge — Phase 2.5")
+        # Grafeo edges link by internal int id, not by string node_id.
+        # Look up int ids first; raise on missing nodes to match SQLite's
+        # FK constraint (PRAGMA foreign_keys=ON in SQLiteGraphBackend).
+        rows = list(self._db.execute_cypher(
+            "MATCH (s {node_id: $src}), (t {node_id: $tgt}) "
+            "RETURN id(s) AS sid, id(t) AS tid LIMIT 1",
+            {"src": edge.source_id, "tgt": edge.target_id},
+        ))
+        if not rows:
+            raise ValueError(
+                f"add_edge: source or target node not found "
+                f"({edge.source_id} → {edge.target_id})"
+            )
+        sid, tid = rows[0]["sid"], rows[0]["tid"]
+        self._db.create_edge(
+            sid, tid, edge.edge_type.value,
+            {
+                "t_created": edge.t_created,
+                "t_invalidated": edge.t_invalidated,
+                "confidence": edge.confidence,
+                "justification": edge.justification,
+                "edge_weight": edge.edge_weight,
+                "properties": json.dumps(edge.properties, ensure_ascii=False),
+            },
+        )
 
     def get_node(self, node_id: str) -> Optional[GraphNode]:
         rows = list(self._db.execute_cypher(
@@ -511,22 +535,91 @@ class GrafeoGraphBackend(GraphBackend):
         )
 
     def get_neighbors(self, node_id: str, edge_type: Optional[EdgeType] = None, hops: int = 1) -> List[GraphNode]:
-        raise NotImplementedError("GrafeoGraphBackend.get_neighbors — Phase 2.5")
+        # Undirected variable-length match — parity with SQLite's UNION
+        # over outgoing+incoming edges. SQLite's iterative BFS collects
+        # nodes reachable within `hops`; Grafeo's [*1..hops] returns the
+        # same set when paired with DISTINCT.
+        if edge_type:
+            query = (
+                f"MATCH (s {{node_id: $id}})-[r:{edge_type.value}*1..{hops}]-(t) "
+                "WHERE t.node_id <> $id "
+                "RETURN DISTINCT t.node_id AS nid, labels(t)[0] AS lbl, "
+                "t.label AS l, t.source_layer AS sl, t.exempt AS ex, "
+                "t.properties AS props"
+            )
+        else:
+            query = (
+                f"MATCH (s {{node_id: $id}})-[*1..{hops}]-(t) "
+                "WHERE t.node_id <> $id "
+                "RETURN DISTINCT t.node_id AS nid, labels(t)[0] AS lbl, "
+                "t.label AS l, t.source_layer AS sl, t.exempt AS ex, "
+                "t.properties AS props"
+            )
+        rows = list(self._db.execute_cypher(query, {"id": node_id}))
+        return [
+            GraphNode(
+                node_id=r["nid"],
+                node_type=NodeType(r["lbl"]),
+                label=r["l"],
+                source_layer=r["sl"],
+                exempt=bool(r["ex"]),
+                properties=json.loads(r["props"]) if r["props"] else {},
+            )
+            for r in rows
+        ]
 
     def get_edges(self, node_id: str, direction: str = "both") -> List[GraphEdge]:
-        raise NotImplementedError("GrafeoGraphBackend.get_edges — Phase 2.5")
+        results: List[GraphEdge] = []
+        if direction in ("out", "both"):
+            for r in self._db.execute_cypher(
+                "MATCH (s {node_id: $id})-[r]->(t) RETURN "
+                "s.node_id AS src, t.node_id AS tgt, type(r) AS et, "
+                "r.t_created AS tc, r.t_invalidated AS ti, r.confidence AS conf, "
+                "r.justification AS j, r.edge_weight AS ew, r.properties AS p",
+                {"id": node_id},
+            ):
+                results.append(self._cypher_row_to_edge(r))
+        if direction in ("in", "both"):
+            for r in self._db.execute_cypher(
+                "MATCH (s)-[r]->(t {node_id: $id}) RETURN "
+                "s.node_id AS src, t.node_id AS tgt, type(r) AS et, "
+                "r.t_created AS tc, r.t_invalidated AS ti, r.confidence AS conf, "
+                "r.justification AS j, r.edge_weight AS ew, r.properties AS p",
+                {"id": node_id},
+            ):
+                results.append(self._cypher_row_to_edge(r))
+        return results
+
+    @staticmethod
+    def _cypher_row_to_edge(r: dict) -> GraphEdge:
+        return GraphEdge(
+            source_id=r["src"],
+            target_id=r["tgt"],
+            edge_type=EdgeType(r["et"]),
+            t_created=r["tc"] or "",
+            t_invalidated=r["ti"],
+            confidence=r["conf"] if r["conf"] is not None else 1.0,
+            justification=r["j"] or "",
+            edge_weight=r["ew"] or "medium",
+            properties=json.loads(r["p"]) if r["p"] else {},
+        )
 
     def node_count(self) -> int:
         return self._db.node_count
 
     def edge_count(self) -> int:
-        raise NotImplementedError("GrafeoGraphBackend.edge_count — Phase 2.5")
+        return self._db.edge_count
 
     def close(self) -> None:
-        raise NotImplementedError("GrafeoGraphBackend.close — Phase 2.5")
+        self._db.close()
 
     def edge_exists(self, source_id: str, target_id: str, edge_type: EdgeType) -> bool:
-        raise NotImplementedError("GrafeoGraphBackend.edge_exists — Phase 2.5")
+        rows = list(self._db.execute_cypher(
+            "MATCH (s {node_id: $src})-[r]->(t {node_id: $tgt}) "
+            "WHERE type(r) = $et RETURN 1 LIMIT 1",
+            {"src": source_id, "tgt": target_id, "et": edge_type.value},
+        ))
+        return bool(rows)
 
     def clear_structural_edges(self) -> int:
         raise NotImplementedError("GrafeoGraphBackend.clear_structural_edges — Phase 2.5")
