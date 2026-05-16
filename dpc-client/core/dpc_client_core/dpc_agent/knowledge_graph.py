@@ -687,7 +687,102 @@ class GrafeoGraphBackend(GraphBackend):
         t_created: str,
         entity_exempt: bool,
     ) -> tuple[int, set[str]]:
-        raise NotImplementedError("GrafeoGraphBackend.bulk_upsert_entities_with_mentions — Phase 2.5")
+        # Three-phase batch (UNWIND) to amortise per-entity round-trips:
+        #   1. MERGE entity nodes (idempotent — matches SQLite INSERT OR IGNORE)
+        #   2. Detect orphan source_ids via single existence query
+        #   3. Find existing MENTIONS edges, CREATE only the new ones
+        # Phase 3 splits read+write rather than MERGE-with-marker because
+        # MERGE's ON CREATE/ON MATCH writes a marker property that would
+        # pollute the edge's persistent properties. Two queries, clean edges.
+        orphan_sources: set = set()
+
+        # Pre-process: build entity + edge batches, dedupe sources.
+        entity_batch: List[dict] = []
+        edge_batch: List[dict] = []
+        seen_sources: set = set()
+        for ent in entities:
+            label = ent.get("entity", "").strip()
+            if not label:
+                continue
+            ent_type = ent.get("type", "concept")
+            source_id = ent.get("source_id", "")
+            score = ent.get("score", 0.0)
+            entity_id = f"e:{label.lower().replace(' ', '_')}"
+            entity_batch.append({"entity_id": entity_id, "label": label})
+            if source_id:
+                seen_sources.add(source_id)
+                edge_batch.append({
+                    "entity_id": entity_id,
+                    "source_id": source_id,
+                    "justification": f"GLiNER extracted ({ent_type}, score={score:.2f})",
+                })
+
+        if not entity_batch:
+            return 0, orphan_sources
+
+        # Phase 1: MERGE entity nodes. ON CREATE sets properties; ON MATCH
+        # is intentionally omitted so existing entities keep their props
+        # (parity with SQLite's INSERT OR IGNORE which preserves rows).
+        list(self._db.execute_cypher(
+            "UNWIND $batch AS row "
+            "MERGE (e:Entity {node_id: row.entity_id}) "
+            "ON CREATE SET e.label = row.label, e.source_layer = 'L7', "
+            "e.exempt = $ex, e.properties = '{}' "
+            "RETURN e.node_id AS nid",
+            {"batch": entity_batch, "ex": entity_exempt},
+        ))
+
+        if not edge_batch:
+            return 0, orphan_sources
+
+        # Phase 2: orphan detection — which source_ids have a node?
+        source_ids = list(seen_sources)
+        existing_sources = {
+            r["existing"]
+            for r in self._db.execute_cypher(
+                "UNWIND $ids AS sid MATCH (s {node_id: sid}) "
+                "RETURN s.node_id AS existing",
+                {"ids": source_ids},
+            )
+        }
+        orphan_sources = set(source_ids) - existing_sources
+        edge_batch = [r for r in edge_batch if r["source_id"] in existing_sources]
+        if not edge_batch:
+            return 0, orphan_sources
+
+        # Phase 3a: which (source, entity) MENTIONS edges already exist?
+        existing_edges: set = set()
+        for r in self._db.execute_cypher(
+            "UNWIND $batch AS row "
+            "MATCH (s {node_id: row.source_id})-[r:MENTIONS]->"
+            "(e {node_id: row.entity_id}) "
+            "RETURN row.source_id AS sid, row.entity_id AS eid",
+            {"batch": edge_batch},
+        ):
+            existing_edges.add((r["sid"], r["eid"]))
+
+        # Phase 3b: CREATE only the new edges. Properties JSON is a
+        # constant string per spec ('{"source": "gliner_ner"}') — embed
+        # via Cypher literal rather than parameter to keep the round-trip
+        # batch-shaped.
+        new_edges = [
+            r for r in edge_batch
+            if (r["source_id"], r["entity_id"]) not in existing_edges
+        ]
+        if new_edges:
+            list(self._db.execute_cypher(
+                "UNWIND $batch AS row "
+                "MATCH (s {node_id: row.source_id}), (e {node_id: row.entity_id}) "
+                "CREATE (s)-[r:MENTIONS {"
+                "t_created: $tc, t_invalidated: null, confidence: 1.0, "
+                "justification: row.justification, edge_weight: 'medium', "
+                "properties: '{\"source\": \"gliner_ner\"}'"
+                "}]->(e) "
+                "RETURN r.t_created AS tc",
+                {"batch": new_edges, "tc": t_created},
+            ))
+
+        return len(new_edges), orphan_sources
 
 
 class KnowledgeGraph:

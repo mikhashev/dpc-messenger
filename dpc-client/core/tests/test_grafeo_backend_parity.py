@@ -330,3 +330,163 @@ def test_update_edge_timestamp_skips_already_set(backend):
 def test_update_edge_timestamp_invalid_field_raises(backend):
     with pytest.raises(ValueError):
         backend.update_edge_timestamp_for_node("a", "confidence", "0.5")
+
+
+# ─── Phase 2.5 Group C: bulk_upsert_entities_with_mentions ─────────
+
+
+def test_bulk_upsert_empty_list(backend):
+    added, orphans = backend.bulk_upsert_entities_with_mentions(
+        [], "2026-05-17", False,
+    )
+    assert added == 0
+    assert orphans == set()
+    assert backend.node_count() == 0
+    assert backend.edge_count() == 0
+
+
+def test_bulk_upsert_entities_no_sources(backend):
+    # Entities without source_id → only nodes created, no edges.
+    entities = [
+        {"entity": "Python", "type": "technology", "source_id": "", "score": 0.9},
+        {"entity": "FastAPI", "type": "technology", "source_id": "", "score": 0.85},
+    ]
+    added, orphans = backend.bulk_upsert_entities_with_mentions(
+        entities, "2026-05-17", False,
+    )
+    assert added == 0
+    assert orphans == set()
+    assert backend.node_count() == 2
+    assert backend.edge_count() == 0
+
+
+def test_bulk_upsert_full_path(backend):
+    # Add a source archive node first.
+    backend.add_node(GraphNode(
+        node_id="archive:s125",
+        node_type=NodeType.SESSION_ARCHIVE,
+        label="S125 archive",
+    ))
+    entities = [
+        {"entity": "Grafeo", "type": "technology", "source_id": "archive:s125", "score": 0.95},
+        {"entity": "Cypher", "type": "concept", "source_id": "archive:s125", "score": 0.88},
+    ]
+    added, orphans = backend.bulk_upsert_entities_with_mentions(
+        entities, "2026-05-17", False,
+    )
+    assert added == 2
+    assert orphans == set()
+    # 1 source + 2 entities = 3 nodes
+    assert backend.node_count() == 3
+    assert backend.edge_count() == 2
+    # Verify edge metadata
+    edges = backend.get_edges("archive:s125", direction="out")
+    assert len(edges) == 2
+    assert all(e.edge_type == EdgeType.MENTIONS for e in edges)
+    assert all(e.t_created == "2026-05-17" for e in edges)
+    assert all(e.confidence == 1.0 for e in edges)
+    assert all(e.edge_weight == "medium" for e in edges)
+    assert all(e.properties == {"source": "gliner_ner"} for e in edges)
+
+
+def test_bulk_upsert_orphan_sources(backend):
+    # No source nodes exist — all entities go orphan.
+    entities = [
+        {"entity": "X", "type": "concept", "source_id": "nope:1", "score": 0.7},
+        {"entity": "Y", "type": "concept", "source_id": "nope:2", "score": 0.7},
+        {"entity": "Z", "type": "concept", "source_id": "nope:1", "score": 0.7},  # dedupe
+    ]
+    added, orphans = backend.bulk_upsert_entities_with_mentions(
+        entities, "2026-05-17", False,
+    )
+    assert added == 0
+    assert orphans == {"nope:1", "nope:2"}
+    # Entities still created (parity: SQLite INSERT OR IGNORE runs before orphan check)
+    assert backend.node_count() == 3
+    assert backend.edge_count() == 0
+
+
+def test_bulk_upsert_idempotent(backend):
+    # Two identical calls — second must add zero edges/nodes.
+    backend.add_node(GraphNode(
+        node_id="archive:s1", node_type=NodeType.SESSION_ARCHIVE, label="s1",
+    ))
+    entities = [{"entity": "Foo", "type": "concept", "source_id": "archive:s1", "score": 0.9}]
+    added1, _ = backend.bulk_upsert_entities_with_mentions(entities, "2026-05-17", False)
+    added2, _ = backend.bulk_upsert_entities_with_mentions(entities, "2026-05-17", False)
+    assert added1 == 1
+    assert added2 == 0
+    assert backend.node_count() == 2  # archive + Foo
+    assert backend.edge_count() == 1
+
+
+def test_bulk_upsert_skips_blank_entity_label(backend):
+    entities = [
+        {"entity": "", "type": "concept", "source_id": "src", "score": 0.5},
+        {"entity": "   ", "type": "concept", "source_id": "src", "score": 0.5},
+        {"entity": "Real", "type": "concept", "source_id": "", "score": 0.9},
+    ]
+    added, orphans = backend.bulk_upsert_entities_with_mentions(
+        entities, "2026-05-17", False,
+    )
+    assert added == 0
+    assert orphans == set()
+    assert backend.node_count() == 1  # only "Real"
+
+
+def test_bulk_upsert_node_id_normalization(backend):
+    # Spaces in entity label → underscores in node_id, lowercase.
+    backend.add_node(GraphNode(
+        node_id="archive:s1", node_type=NodeType.SESSION_ARCHIVE, label="s1",
+    ))
+    entities = [
+        {"entity": "Machine Learning", "type": "concept", "source_id": "archive:s1", "score": 0.9},
+    ]
+    backend.bulk_upsert_entities_with_mentions(entities, "2026-05-17", False)
+    fetched = backend.get_node("e:machine_learning")
+    assert fetched is not None
+    assert fetched.label == "Machine Learning"
+
+
+def test_bulk_upsert_mixed_orphans_and_valid(backend):
+    # Two sources: one exists, one doesn't.
+    backend.add_node(GraphNode(
+        node_id="src:good", node_type=NodeType.KNOWLEDGE_FILE, label="good.md",
+    ))
+    entities = [
+        {"entity": "Alpha", "type": "concept", "source_id": "src:good", "score": 0.9},
+        {"entity": "Beta", "type": "concept", "source_id": "src:missing", "score": 0.9},
+    ]
+    added, orphans = backend.bulk_upsert_entities_with_mentions(
+        entities, "2026-05-17", False,
+    )
+    assert added == 1
+    assert orphans == {"src:missing"}
+    # 1 source + 2 entity nodes
+    assert backend.node_count() == 3
+    assert backend.edge_count() == 1
+
+
+def test_bulk_upsert_realistic_load(backend):
+    # 100 entities, 5 distinct source archives. Exercise UNWIND batch path.
+    for i in range(5):
+        backend.add_node(GraphNode(
+            node_id=f"archive:s{i}",
+            node_type=NodeType.SESSION_ARCHIVE,
+            label=f"session_{i}",
+        ))
+    entities = []
+    for i in range(100):
+        entities.append({
+            "entity": f"Entity{i}",
+            "type": "concept",
+            "source_id": f"archive:s{i % 5}",
+            "score": 0.5 + (i % 10) / 20,
+        })
+    added, orphans = backend.bulk_upsert_entities_with_mentions(
+        entities, "2026-05-17", False,
+    )
+    assert added == 100
+    assert orphans == set()
+    assert backend.node_count() == 5 + 100  # 5 archives + 100 entities
+    assert backend.edge_count() == 100
