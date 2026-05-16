@@ -237,3 +237,96 @@ def test_close_does_not_raise(backend):
     # close() must not raise on an active backend; double-close behaviour
     # is intentionally unspecified (SQLite raises, Grafeo varies).
     backend.close()
+
+
+# ─── Phase 2.5 Group B: maintenance ────────────────────────────────
+
+
+def test_clear_structural_edges_canonical_marker(backend):
+    backend.add_node(GraphNode(node_id="a", node_type=NodeType.ENTITY, label="a"))
+    backend.add_node(GraphNode(node_id="b", node_type=NodeType.ENTITY, label="b"))
+    backend.add_node(GraphNode(node_id="c", node_type=NodeType.ENTITY, label="c"))
+    # Structural edge (canonical source=structural)
+    backend.add_edge(GraphEdge(
+        source_id="a", target_id="b", edge_type=EdgeType.DEPENDS_ON,
+        properties={"source": "structural"},
+    ))
+    # LLM edge — not structural, must survive
+    backend.add_edge(GraphEdge(
+        source_id="b", target_id="c", edge_type=EdgeType.DEPENDS_ON,
+        properties={"source": "llm_relation"},
+    ))
+    assert backend.edge_count() == 2
+    deleted = backend.clear_structural_edges()
+    assert deleted == 1
+    assert backend.edge_count() == 1
+
+
+def test_clear_structural_edges_legacy_auto_marker(backend):
+    backend.add_node(GraphNode(node_id="a", node_type=NodeType.ENTITY, label="a"))
+    backend.add_node(GraphNode(node_id="b", node_type=NodeType.ENTITY, label="b"))
+    # Legacy auto=true edge with NO source field — should match
+    backend.add_edge(GraphEdge(
+        source_id="a", target_id="b", edge_type=EdgeType.DEPENDS_ON,
+        properties={"auto": True},
+    ))
+    deleted = backend.clear_structural_edges()
+    assert deleted == 1
+    assert backend.edge_count() == 0
+
+
+def test_clear_structural_edges_auto_with_source_preserved(backend):
+    # auto=true edges that ALSO have a source field are NOT legacy — they
+    # are typed (llm_relation, gliner_ner). Must survive the clear.
+    backend.add_node(GraphNode(node_id="a", node_type=NodeType.ENTITY, label="a"))
+    backend.add_node(GraphNode(node_id="b", node_type=NodeType.ENTITY, label="b"))
+    backend.add_edge(GraphEdge(
+        source_id="a", target_id="b", edge_type=EdgeType.DEPENDS_ON,
+        properties={"auto": True, "source": "llm_relation"},
+    ))
+    deleted = backend.clear_structural_edges()
+    assert deleted == 0
+    assert backend.edge_count() == 1
+
+
+def test_clear_structural_edges_empty_returns_zero(backend):
+    assert backend.clear_structural_edges() == 0
+
+
+def test_update_edge_timestamp_for_node_t_invalidated(backend):
+    backend.add_node(GraphNode(node_id="a", node_type=NodeType.ENTITY, label="a"))
+    backend.add_node(GraphNode(node_id="b", node_type=NodeType.ENTITY, label="b"))
+    backend.add_node(GraphNode(node_id="c", node_type=NodeType.ENTITY, label="c"))
+    backend.add_edge(GraphEdge(
+        source_id="a", target_id="b", edge_type=EdgeType.DEPENDS_ON,
+    ))
+    backend.add_edge(GraphEdge(
+        source_id="b", target_id="c", edge_type=EdgeType.DEPENDS_ON,
+    ))
+    updated = backend.update_edge_timestamp_for_node(
+        "a", "t_invalidated", "2026-05-17T20:00Z",
+    )
+    assert updated == 1
+    edges = backend.get_edges("a", direction="both")
+    assert all(e.t_invalidated == "2026-05-17T20:00Z" for e in edges)
+    # b→c edge untouched
+    bc_edges = backend.get_edges("c", direction="in")
+    assert bc_edges[0].t_invalidated is None
+
+
+def test_update_edge_timestamp_skips_already_set(backend):
+    backend.add_node(GraphNode(node_id="a", node_type=NodeType.ENTITY, label="a"))
+    backend.add_node(GraphNode(node_id="b", node_type=NodeType.ENTITY, label="b"))
+    backend.add_edge(GraphEdge(
+        source_id="a", target_id="b", edge_type=EdgeType.DEPENDS_ON,
+        t_invalidated="2026-01-01T00:00Z",  # already set
+    ))
+    updated = backend.update_edge_timestamp_for_node(
+        "a", "t_invalidated", "2026-05-17T20:00Z",
+    )
+    assert updated == 0
+
+
+def test_update_edge_timestamp_invalid_field_raises(backend):
+    with pytest.raises(ValueError):
+        backend.update_edge_timestamp_for_node("a", "confidence", "0.5")

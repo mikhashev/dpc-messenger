@@ -491,6 +491,10 @@ class GrafeoGraphBackend(GraphBackend):
         # Grafeo edges link by internal int id, not by string node_id.
         # Look up int ids first; raise on missing nodes to match SQLite's
         # FK constraint (PRAGMA foreign_keys=ON in SQLiteGraphBackend).
+        # node_id is the agent's canonical identifier and is unique by
+        # convention (SQLite PRIMARY KEY, Grafeo property index target);
+        # the MATCH cartesian product yields exactly one (sid, tid) pair
+        # when both nodes exist, so LIMIT 1 is correctness-preserving.
         rows = list(self._db.execute_cypher(
             "MATCH (s {node_id: $src}), (t {node_id: $tgt}) "
             "RETURN id(s) AS sid, id(t) AS tid LIMIT 1",
@@ -539,6 +543,11 @@ class GrafeoGraphBackend(GraphBackend):
         # over outgoing+incoming edges. SQLite's iterative BFS collects
         # nodes reachable within `hops`; Grafeo's [*1..hops] returns the
         # same set when paired with DISTINCT.
+        # `edge_type.value` is f-string-interpolated into the query, not
+        # passed as a Cypher parameter — relationship-type tokens are not
+        # parameterizable in Cypher. Safe today because EdgeType is a
+        # closed Enum of identifier-shaped strings; if the enum ever
+        # admits special characters this becomes a query-injection vector.
         if edge_type:
             query = (
                 f"MATCH (s {{node_id: $id}})-[r:{edge_type.value}*1..{hops}]-(t) "
@@ -622,10 +631,55 @@ class GrafeoGraphBackend(GraphBackend):
         return bool(rows)
 
     def clear_structural_edges(self) -> int:
-        raise NotImplementedError("GrafeoGraphBackend.clear_structural_edges — Phase 2.5")
+        # Parity with SQLite: match structural edges (canonical marker
+        # source=structural) plus legacy auto=true edges with no source
+        # field. Properties is a JSON-encoded string on the edge; we
+        # substring-match the same shapes SQLite does (both spaced and
+        # un-spaced JSON serializations). Grafeo Cypher counts the
+        # matched rows before DELETE consumes them in the same statement.
+        marker_a = '"source": "structural"'
+        marker_b = '"source":"structural"'
+        auto_a = '"auto": true'
+        auto_b = '"auto":true'
+        source_marker = '"source"'
+        rows = list(self._db.execute_cypher(
+            "MATCH ()-[r]->() WHERE "
+            "r.properties CONTAINS $sa OR r.properties CONTAINS $sb OR "
+            "((r.properties CONTAINS $aa OR r.properties CONTAINS $ab) "
+            "AND NOT r.properties CONTAINS $sm) "
+            "DELETE r RETURN count(r) AS deleted",
+            {"sa": marker_a, "sb": marker_b, "aa": auto_a, "ab": auto_b, "sm": source_marker},
+        ))
+        if not rows:
+            return 0
+        deleted = rows[0].get("deleted")
+        return int(deleted) if deleted is not None else 0
 
     def update_edge_timestamp_for_node(self, node_id: str, field: str, value: str) -> int:
-        raise NotImplementedError("GrafeoGraphBackend.update_edge_timestamp_for_node — Phase 2.5")
+        # Parity with SQLite: bump t_created or t_invalidated for edges
+        # touching node_id (either endpoint) where the field is currently
+        # empty/null. Undirected MATCH covers both endpoints in one pass.
+        if field == "t_invalidated":
+            empty_clause = "r.t_invalidated IS NULL"
+        elif field == "t_created":
+            # Legacy edges pre-bi-temporal store t_created='' (empty
+            # string). Treat both '' and NULL as "needs backfill".
+            empty_clause = "(r.t_created = '' OR r.t_created IS NULL)"
+        else:
+            raise ValueError(
+                f"Unsupported field: {field!r}. Expected one of: t_invalidated, t_created"
+            )
+        # Field name is f-string-interpolated; safe because the if/elif
+        # above accepts only two whitelist values.
+        rows = list(self._db.execute_cypher(
+            f"MATCH (s {{node_id: $id}})-[r]-() WHERE {empty_clause} "
+            f"SET r.{field} = $val RETURN count(r) AS updated",
+            {"id": node_id, "val": value},
+        ))
+        if not rows:
+            return 0
+        updated = rows[0].get("updated")
+        return int(updated) if updated is not None else 0
 
     def bulk_upsert_entities_with_mentions(
         self,
