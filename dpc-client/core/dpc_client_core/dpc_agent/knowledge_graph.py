@@ -424,6 +424,27 @@ class SQLiteGraphBackend(GraphBackend):
         )
 
 
+# Module-level GrafeoDB connection cache (S125 Level 3 smoke fix).
+#
+# Grafeo's WAL implementation creates a per-file `<db>.wal/wal_NNNNNNNN.log`
+# on first write. Opening a *second* GrafeoDB on the same path within the
+# same process and then issuing a write raises GRAFEO-X003 "file already
+# exists" on Windows — both instances try to create the same WAL segment.
+#
+# SQLite tolerates this pattern (multiple sqlite3.Connection objects on the
+# same file are fine), so the call sites at the time of Phase 1.5 landing
+# instantiate KnowledgeGraph (and thus the backend) ad-hoc in several
+# places: agent_manager.py, sleep_pipeline.py (two spots), context.py
+# (cached). Caching the underlying GrafeoDB by absolute path makes the
+# Grafeo backend equivalent to SQLite under that pattern without auditing
+# every call site.
+#
+# Trade-off: tests that explicitly want a fresh in-memory Grafeo per case
+# pass db_path == ":memory:" and bypass the cache (each call gets its own
+# handle, matching SQLite ":memory:" semantics).
+_grafeo_instance_cache: "Dict[str, Any]" = {}
+
+
 class GrafeoGraphBackend(GraphBackend):
     """Grafeo-based graph storage (ADR-024 migration).
 
@@ -460,11 +481,18 @@ class GrafeoGraphBackend(GraphBackend):
                 "GrafeoGraphBackend requires the `grafeo` package. "
                 "Install with: uv sync --extra graph-grafeo"
             ) from e
+        # `:memory:` always gets a fresh handle — there is no on-disk WAL
+        # to clash with, and parity tests rely on isolation between cases.
         if str(db_path) == ":memory:":
             self._db = grafeo.GrafeoDB()
         else:
-            db_path.parent.mkdir(parents=True, exist_ok=True)
-            self._db = grafeo.GrafeoDB(str(db_path))
+            key = str(db_path.resolve())
+            cached = _grafeo_instance_cache.get(key)
+            if cached is None:
+                db_path.parent.mkdir(parents=True, exist_ok=True)
+                cached = grafeo.GrafeoDB(key)
+                _grafeo_instance_cache[key] = cached
+            self._db = cached
         self.init_schema()
 
     def init_schema(self) -> None:
@@ -630,6 +658,15 @@ class GrafeoGraphBackend(GraphBackend):
         return self._db.edge_count
 
     def close(self) -> None:
+        # Drop from the singleton cache so a subsequent
+        # GrafeoGraphBackend(same_path) gets a fresh handle instead of
+        # the closed one. Only meaningful for on-disk paths — :memory:
+        # never enters the cache.
+        if str(self._db_path) != ":memory:":
+            key = str(Path(self._db_path).resolve())
+            cached = _grafeo_instance_cache.get(key)
+            if cached is self._db:
+                _grafeo_instance_cache.pop(key, None)
         self._db.close()
 
     def edge_exists(self, source_id: str, target_id: str, edge_type: EdgeType) -> bool:

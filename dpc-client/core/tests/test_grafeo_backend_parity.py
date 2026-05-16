@@ -255,6 +255,43 @@ def test_close_does_not_raise(backend):
     backend.close()
 
 
+def test_second_instance_same_path_can_write(request, tmp_path):
+    # Regression test for S125 Level 3 live-smoke failure:
+    # sleep_pipeline.py opens KnowledgeGraph (and thus the backend) twice
+    # per cycle. With Grafeo, the second handle on the same on-disk file
+    # used to raise GRAFEO-X003 on the next write because both instances
+    # tried to create the same WAL segment.
+    # Parametrized to run on both backends — SQLite has always tolerated
+    # this; Grafeo only after the singleton-cache fix in __init__.
+    for param in ("sqlite", "grafeo"):
+        suffix = "db" if param == "sqlite" else "grafeo"
+        path = tmp_path / f"second-instance-{param}.{suffix}"
+        if param == "sqlite":
+            b1 = SQLiteGraphBackend(path)
+            b2 = SQLiteGraphBackend(path)
+        else:
+            b1 = GrafeoGraphBackend(path)
+            b2 = GrafeoGraphBackend(path)
+        try:
+            b1.add_node(GraphNode(
+                node_id="x", node_type=NodeType.ENTITY, label="from_b1",
+            ))
+            # Second instance must observe b1's write and accept its own.
+            b2.add_node(GraphNode(
+                node_id="y", node_type=NodeType.ENTITY, label="from_b2",
+            ))
+            assert b1.get_node("x") is not None, f"{param}: b1 lost its node"
+            assert b1.get_node("y") is not None, f"{param}: b1 did not see b2's node"
+            assert b2.get_node("x") is not None, f"{param}: b2 did not see b1's node"
+        finally:
+            b1.close()
+            # b2 shares the same underlying handle on Grafeo; closing b1
+            # already dropped the cache entry and the connection. Calling
+            # b2.close() here would double-close — skipped intentionally.
+            if param == "sqlite":
+                b2.close()
+
+
 # ─── Phase 2.5 Group B: maintenance ────────────────────────────────
 
 
