@@ -61,7 +61,7 @@ def build_retrieval_backend(
 def make_backend_for_agent(
     agent_root: pathlib.Path,
     model_name: str = "",
-    dimensions: int = 384,
+    dimensions: Optional[int] = None,
 ) -> RetrievalBackend:
     """Build a RetrievalBackend for an agent, reading `retrieval_*` flags from its config.json.
 
@@ -71,6 +71,22 @@ def make_backend_for_agent(
     `<agent_root>/config.json` actually take effect.
 
     Missing config.json or unreadable file → empty config → native default.
+
+    `dimensions` resolution:
+    1. If passed explicitly, use that. Callers that already have an
+       embedding provider in scope (agent_manager._sync_index,
+       tools/core.memory_search) should pass `dimensions=provider.dimensions`
+       directly — that's the cheapest and most correct path.
+    2. If omitted, the helper derives `dimensions` from the agent's
+       effective `MemoryConfig.embedding_model` via the embedding-provider
+       singleton (no hardcoded constant). The singleton is loaded once at
+       startup by agent_manager so this is an instant lookup, not a fresh
+       model load.
+
+    `model_name` (vector-channel embedding-model identifier, stored on
+    GrafeoVectorIndex's _RetrievalSchema node) follows the same fallback:
+    explicit arg first, then `MemoryConfig.embedding_model` from the agent's
+    effective config.
     """
     config_path = agent_root / "config.json"
     cfg: dict = {}
@@ -84,6 +100,17 @@ def make_backend_for_agent(
             cfg = {}
     # Only pass through retrieval_* keys; everything else is unrelated.
     retrieval_cfg = {k: v for k, v in cfg.items() if k.startswith("retrieval_")}
+
+    # Only derive when caller didn't supply dimensions — `model_name` is
+    # an optional Schema-node identifier and stays "" when not given (matches
+    # NativeVectorIndex semantics; GrafeoVectorIndex skips Schema write on
+    # empty model_name). Deriving model_name unconditionally would force
+    # an embedding-provider load in tests that pass dimensions explicitly.
+    if dimensions is None:
+        derived_model, dimensions = _derive_embedding_metadata(cfg)
+        if not model_name:
+            model_name = derived_model
+
     index_dir = agent_root / "state" / "memory_index"
     return build_retrieval_backend(
         index_dir,
@@ -91,6 +118,29 @@ def make_backend_for_agent(
         model_name=model_name,
         dimensions=dimensions,
     )
+
+
+def _derive_embedding_metadata(agent_config: dict) -> tuple[str, int]:
+    """Look up the agent's embedding model + its vector dimension.
+
+    Reads `MemoryConfig` from the agent's effective config (with global
+    defaults). Asks the embedding-provider singleton for the model's
+    dimension count. Singleton means the model is loaded at most once per
+    process — agent_manager's startup pass already covers it, so this
+    helper is an instant lookup in production.
+
+    Lazy imports keep `factory.py` free of memory/sentence-transformer
+    dependencies in the unit-test path that supplies `dimensions` explicitly.
+    """
+    from ..memory import get_embedding_provider
+    from ..memory_config import get_memory_config
+
+    mem_cfg = get_memory_config(agent_config)
+    provider = get_embedding_provider(
+        model_name=mem_cfg.embedding_model,
+        local_files_only=True,
+    )
+    return provider.model_name, provider.dimensions
 
 
 def _grafeo_path(index_dir: pathlib.Path) -> pathlib.Path:

@@ -422,7 +422,7 @@ def build_llm_messages(
                             _q2_vec = _np.array(embedding_provider.embed(_context_text), dtype=_np.float32)
                             _q2_results = _backend.vector.search(_q2_vec, FAISS_TOP_K)
                         _faiss_results = _q1_results + _q2_results
-                    log.debug("Active Recall FAISS: %d results (Q1=%d + Q2=%d) — %s",
+                    log.debug("Active Recall vector: %d results (Q1=%d + Q2=%d) — %s",
                               len(_faiss_results), len(_q1_results), len(_q2_results),
                               [m.get("source_file", "?") for m, _ in _faiss_results])
 
@@ -431,7 +431,7 @@ def build_llm_messages(
                 if _backend.text.load():
                     _bm25_results = _backend.text.search(_sparse_query, BM25_TOP_K)
                     _keyword_results.extend(_bm25_results)
-                    log.debug("Active Recall BM25: %d results — %s", len(_bm25_results),
+                    log.debug("Active Recall text: %d results — %s", len(_bm25_results),
                               [m.get("source_file", "?") for m, _ in _bm25_results])
 
                 _graph_results = []
