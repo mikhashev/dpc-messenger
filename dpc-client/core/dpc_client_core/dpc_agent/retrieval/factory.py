@@ -68,7 +68,11 @@ def _build_vector(
             index_dir, model_name=model_name, dimensions=dimensions
         )
     if kind == "grafeo":
-        return GrafeoVectorIndex(_grafeo_path(index_dir), dimensions=dimensions)
+        return GrafeoVectorIndex(
+            _grafeo_path(index_dir),
+            dimensions=dimensions,
+            model_name=model_name,
+        )
     raise ValueError(
         f"Unknown retrieval_vector={kind!r}. Valid: 'native', 'grafeo'."
     )

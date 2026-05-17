@@ -14,13 +14,17 @@ Design choices for Phase 1.6b.2:
   owns its own node domain. Channels are fused by source_file in the
   HybridFuser layer (same dedup pattern as Native).
 
-- **GrafeoHybridFuser is a thin re-export of the RRF math** from
-  hybrid_search.reciprocal_rank_fusion. Grafeo's native db.hybrid_search()
-  takes the raw queries (text + vector) rather than already-fused results,
-  which doesn't fit the current HybridFuser ABC signature. Wiring the
-  native pathway would require an ABC extension (queries passed through)
-  — deferred to Phase 1.6c. Until then, "grafeo" fusion is behaviorally
-  identical to "custom".
+- **GrafeoHybridFuser intentionally inherits NativeHybridFuser unchanged
+  (1.6c decision).** Grafeo's native db.hybrid_search() does RRF too, but
+  it does not know about our per-layer source priority weights (L1/L5/L6
+  /L7 — see LAYER_WEIGHTS in hybrid_search.py). Those weights are DPC
+  policy, not a backend concern; routing through Grafeo's fuser would
+  silently drop the policy. Channel-result fusion (RRF + layer weights +
+  source_file dedup) therefore stays in the Native fuser regardless of
+  which backend produced the channel results. `retrieval_fusion: "grafeo"`
+  remains a valid config flag for symmetry and future
+  layer-weight-aware Grafeo support, but currently behaves identically
+  to `"custom"`.
 
 Grafeo v0.5.42 caveats applied:
 
@@ -28,8 +32,9 @@ Grafeo v0.5.42 caveats applied:
   and on every open (`rebuild_vector_index`, `rebuild_text_index`).
 - BM25 parameters (k1=1.2, Lucene IDF) hardcoded upstream — see Phase A
   benchmark report for the divergence-from-bm25s analysis.
-- needs_rebuild(model_name) always returns False — Grafeo doesn't track
-  embedding-model identifier yet. TODO 1.6c+: store a Schema node.
+- needs_rebuild(model_name) is functional as of 1.6c: a singleton
+  `_RetrievalSchema` node carries the embedding-model identifier so the
+  model-swap UX can detect a mismatch on Grafeo storage too.
 """
 
 from __future__ import annotations
@@ -57,6 +62,11 @@ TEXT_LABEL = "ChunkText"
 VECTOR_PROPERTY = "embedding"
 TEXT_PROPERTY = "text_preprocessed"
 RAW_TEXT_PROPERTY = "text"
+
+# Singleton metadata node — carries the embedding-model identifier so that
+# GrafeoVectorIndex.needs_rebuild(model_name) can detect a mismatch the same
+# way NativeVectorIndex does via the FAISS index_meta.json header.
+SCHEMA_LABEL = "_RetrievalSchema"
 
 
 # Process-wide cache mirroring knowledge_graph._grafeo_instance_cache pattern
@@ -121,6 +131,10 @@ def _chunk_meta_from_node(db, node_id) -> Optional[dict]:
 
 
 def _node_count(db, label: str) -> int:
+    # execute_cypher yields plain Python dicts with native values
+    # (`{'c': 5}`) — different from db.get_node() which returns a Node
+    # whose .get(name) is a Value wrapper. See _node_str/_node_int below
+    # for the get_node API path.
     try:
         rows = list(db.execute_cypher(f"MATCH (n:{label}) RETURN count(n) AS c"))
     except Exception as e:
@@ -128,15 +142,8 @@ def _node_count(db, label: str) -> int:
         return 0
     if not rows:
         return 0
-    row = rows[0]
-    # Cypher result rows expose .get(name) returning a Value wrapper.
-    try:
-        return int(row.get("c").as_int() or 0)
-    except Exception:
-        try:
-            return int(row["c"])
-        except Exception:
-            return 0
+    val = rows[0].get("c")
+    return int(val) if val is not None else 0
 
 
 class GrafeoVectorIndex(VectorIndex):
@@ -146,11 +153,13 @@ class GrafeoVectorIndex(VectorIndex):
         self,
         db_path: pathlib.Path,
         dimensions: int = 384,
+        model_name: str = "",
         m: int = 16,
         ef_construction: int = 200,
     ):
         self._db_path = db_path
         self._dimensions = dimensions
+        self._model_name = model_name
         self._m = m
         self._ef_construction = ef_construction
         self._db = None
@@ -184,6 +193,10 @@ class GrafeoVectorIndex(VectorIndex):
             return
         db = self._get_db()
         self._ensure_schema()
+        # Record the embedding model behind these vectors on first content
+        # write — anchors the needs_rebuild() check on subsequent opens.
+        if self._model_name:
+            self._set_stored_model(self._model_name)
         for item in items:
             vec = item.vector
             if vec.ndim > 1:
@@ -201,6 +214,37 @@ class GrafeoVectorIndex(VectorIndex):
             )
         # Rebuild required after insert for search to see the new data.
         db.rebuild_vector_index(label=VECTOR_LABEL, property=VECTOR_PROPERTY)
+
+    def _set_stored_model(self, model_name: str) -> None:
+        """Write/refresh the singleton _RetrievalSchema node with model_name."""
+        try:
+            self._get_db().execute_cypher(
+                f"MERGE (s:{SCHEMA_LABEL} {{singleton: 1}}) SET s.model_name = $m",
+                {"m": model_name},
+            )
+        except Exception as e:
+            log.debug("schema write failed: %s", e)
+
+    def _get_stored_model(self) -> str:
+        """Read embedding-model identifier from the singleton Schema node.
+
+        Grafeo's execute_cypher yields plain dict rows with native Python
+        values (verified empirically — `{'m': 'model-a'}`). The Value
+        wrapper / .is_null() / .as_str() pattern in run_grafeo_native.py is
+        only the get_node() property API, not the cypher row API.
+        """
+        try:
+            rows = list(self._get_db().execute_cypher(
+                f"MATCH (s:{SCHEMA_LABEL}) RETURN s.model_name AS m LIMIT 1"
+            ))
+        except Exception:
+            return ""
+        if not rows:
+            return ""
+        val = rows[0].get("m")
+        if val is None:
+            return ""
+        return str(val)
 
     def search(self, query_vector: np.ndarray, top_k: int) -> List[Tuple[dict, float]]:
         db = self._get_db()
@@ -285,10 +329,16 @@ class GrafeoVectorIndex(VectorIndex):
         return _node_count(self._get_db(), VECTOR_LABEL)
 
     def needs_rebuild(self, model_name: str) -> bool:
-        # Grafeo doesn't store the embedding-model identifier today. The
-        # model-swap UX (model_swap.py) won't detect changes on Grafeo
-        # storage until 1.6c+ adds a Schema node carrying model_name.
-        return False
+        # Compare requested model_name against the identifier stored on the
+        # singleton _RetrievalSchema node (written on first add()). Empty
+        # `model_name` arg or empty stored value (no Schema yet → first run)
+        # both return False — no detectable swap means no rebuild needed.
+        if not model_name:
+            return False
+        stored = self._get_stored_model()
+        if not stored:
+            return False
+        return stored != model_name
 
 
 class GrafeoTextIndex(TextIndex):
@@ -420,13 +470,15 @@ class GrafeoTextIndex(TextIndex):
 
 
 class GrafeoHybridFuser(NativeHybridFuser):
-    """Currently identical to NativeHybridFuser — same RRF math.
+    """Intentionally identical to NativeHybridFuser — see module docstring.
 
-    Grafeo's native db.hybrid_search() takes the raw query inputs (text +
-    vector) rather than fused channel results, which doesn't fit the
-    HybridFuser ABC signature. Routing the native pathway is a 1.6c task
-    (ABC extension to pass-through queries). Until then, choosing
-    `retrieval_fusion: "grafeo"` simply selects this subclass, leaving
-    the behavior bit-for-bit equal to "custom".
+    The decision NOT to route through Grafeo's native db.hybrid_search() is
+    deliberate, not a deferred-work item. Grafeo's fuser does not know
+    about our per-layer priority weights (LAYER_WEIGHTS in
+    hybrid_search.py — L1/L5/L6/L7 etc), which are DPC policy. Routing
+    fusion through Grafeo would silently drop those weights regardless of
+    any ABC extension. `retrieval_fusion: "grafeo"` remains a config slot
+    for symmetry and to leave room for layer-weight-aware Grafeo support
+    later, but right now it does the same RRF the Native fuser does.
     """
     pass

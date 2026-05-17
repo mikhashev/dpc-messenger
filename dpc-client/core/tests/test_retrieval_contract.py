@@ -172,10 +172,35 @@ def test_native_vector_needs_rebuild_detects_model_change(tmp_path):
     assert idx.needs_rebuild("model-a") is False
 
 
-def test_grafeo_vector_needs_rebuild_always_false(tmp_path):
-    """Grafeo doesn't track embedding-model identifier (TODO 1.6c+ Schema node)."""
+def test_grafeo_vector_needs_rebuild_no_schema_yet(tmp_path):
+    """Fresh Grafeo DB has no _RetrievalSchema node — nothing to compare against."""
     idx = GrafeoVectorIndex(tmp_path / "vec", dimensions=4)
     assert idx.needs_rebuild("any-model") is False
+
+
+def test_grafeo_vector_needs_rebuild_detects_model_change(tmp_path):
+    """After add() with model_name set, Schema node persists model identifier."""
+    idx = GrafeoVectorIndex(tmp_path / "vec", model_name="model-a", dimensions=4)
+    idx.add([
+        VectorAddItem(
+            vector=np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float32),
+            meta={"source_file": "x.md"},
+        ),
+    ])
+    assert idx.needs_rebuild("model-a") is False
+    assert idx.needs_rebuild("model-b") is True
+
+
+def test_grafeo_vector_needs_rebuild_empty_model_name_arg(tmp_path):
+    """Empty model_name arg means caller doesn't know — return False."""
+    idx = GrafeoVectorIndex(tmp_path / "vec", model_name="model-a", dimensions=4)
+    idx.add([
+        VectorAddItem(
+            vector=np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float32),
+            meta={"source_file": "x.md"},
+        ),
+    ])
+    assert idx.needs_rebuild("") is False
 
 
 # ─────────────────────────────────────────────────────────────────────────
