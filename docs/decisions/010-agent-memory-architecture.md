@@ -239,3 +239,19 @@ Index Manager designed as separate component (not inline) to support background 
 - Similarity score cutoff for hint injection — empirical testing needed
 - ONNX INT8 export for CPU-only fallback (<1% quality loss, 2-3x speedup)
 - File type extractors: per-format (stdlib + tree-sitter for TS/JS)
+
+---
+
+## Update 2026-05-18 — RetrievalBackend abstraction
+
+The vector/text retrieval implementation described above (FaissIndex,
+BM25Index, reciprocal_rank_fusion) is now wrapped behind a
+`RetrievalBackend` composite (VectorIndex / TextIndex / HybridFuser ABCs)
+under `dpc_agent/retrieval/`. Production call-sites use
+`make_backend_for_agent(agent_root)` instead of constructing
+`FaissIndex(...)` / `BM25Index(...)` directly. Native (FAISS + bm25s)
+remains the production default; Grafeo HNSW + BM25 is opt-in via
+per-agent `retrieval_vector` / `retrieval_text` config flags.
+
+See [ADR-024 §Phase 1.6](024-knowledge-graph-infrastructure.md#phase-16-retrieval-backend-abstraction--complete-2026-05-18) for the migration record (sub-phases 1.6a–e,
+commit hashes, known limitations, escape-hatch usage).

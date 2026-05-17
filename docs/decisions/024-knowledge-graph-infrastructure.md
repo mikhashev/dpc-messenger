@@ -218,6 +218,92 @@ Branch: `feature/grafeo-backend`
 - [ ] Property index on `node_id` — Grafeo `create_property_index('Entity', 'node_id')` etc. Not blocking correctness; matters for performance at scale.
 - [ ] `_add_edge_safe` race condition in `KnowledgeGraph` (high-level wrapper, not backend) — flagged by Ark S125; non-blocker for single-threaded agent. Tracked in backlog as GRAFEO-RACE-AWARENESS.
 
+### Phase 1.6: Retrieval Backend Abstraction — COMPLETE (2026-05-18)
+
+Branch: `feature/grafeo-backend` (extends 1.5)
+
+Same ABC-with-mix-and-match pattern as Phase 1.5, applied to the retrieval
+layer (vector + text + fusion) that used to be `FaissIndex` + `BM25Index`
++ `reciprocal_rank_fusion` direct calls. Lets the graph backend (SQLite /
+Grafeo) and the retrieval backend be picked independently — e.g., Grafeo
+graph + Grafeo retrieval, or Grafeo graph + Native retrieval, or any
+mix-and-match between vector / text / fusion channels.
+
+**Decomposition (revised mid-session from original Ark S126 vertical
+1.6a/b/c plan to a horizontal one):**
+- **Phase 1.6a (commit `51df1c7`):** new `dpc_agent/retrieval/` package
+  with three ABCs (`VectorIndex`, `TextIndex`, `HybridFuser`) bundled in
+  a `RetrievalBackend` dataclass. Native wrappers over the existing
+  FAISS / bm25s / RRF code — bit-for-bit identical behavior. 27 contract
+  tests + factory + docstring contracts (thread-safety, state lifecycle,
+  empty-index, concurrent-writers).
+- **Phase 1.6b.1 (commit `fa7fe63`):** migrate 6 production call-sites
+  to the composite (`context.py` Active Recall, `agent_manager._sync_index`
+  startup, `knowledge_service` L6 reindex, three `tools/core.py` sites).
+  NativeRetrieval default → behavior unchanged. `model_swap.py` left
+  unmigrated and later deleted as dead code in 1.6c.
+- **Phase 1.6b.2 (commit `69df5cd`):** Grafeo impls
+  (`GrafeoVectorIndex`, `GrafeoTextIndex`, `GrafeoHybridFuser`). Separate
+  Grafeo DB under `<index_dir>/grafeo/` so the graph and retrieval
+  backends stay independently swappable. Separate node labels
+  (`ChunkVector`, `ChunkText`) — no shared-state coordination between
+  channels. Contract tests parametrized over both backends.
+- **Phase 1.6c (commit `41be8cf`):** singleton `_RetrievalSchema` node
+  on Grafeo carries `model_name` so `needs_rebuild()` works on Grafeo
+  storage the same way it does on FAISS state. `model_swap.py` deleted
+  (0 imports verified). `GrafeoHybridFuser` reclassified from "deferred
+  ABC extension" to "intentional design": routing fusion through
+  Grafeo's native `db.hybrid_search()` would silently drop our
+  `LAYER_WEIGHTS` policy (L1/L5/L6/L7 source priority), so the subclass
+  is intentionally identical to `NativeHybridFuser`.
+- **Phase 1.6d (commit `f0c65ed`):** wired the factory into production.
+  Gap discovered during Mike's live Grafeo opt-in test: factory existed
+  and was tested in 1.6b.2, but all six production call-sites used
+  `make_native_backend()` directly, so config flags had zero effect.
+  Added `make_backend_for_agent(agent_root)` helper that reads
+  `<agent_root>/config.json`, extracts `retrieval_*` keys, delegates to
+  the factory. Six call-sites switched.
+- **Phase 1.6e (commit `357d30e`):** two cosmetic cleanups surfaced
+  during Mike's restart verification. (a) `make_backend_for_agent`
+  `dimensions=None` default now derives from
+  `MemoryConfig.embedding_model` via the embedding-provider singleton —
+  eliminated GRAFEO-X001 "expected 384, found 1024" noise from
+  read-side call-sites that omitted the arg. (b) `context.py` log
+  labels "Active Recall FAISS/BM25" → "Active Recall vector/text" —
+  labels were stale post-1.6b.1 migration and misleading when
+  `retrieval_vector=grafeo`.
+
+**Config schema** (in agent's `~/.dpc/agents/<id>/config.json`, all
+optional, all default to "native"/"custom"):
+
+| Key | Values | Meaning |
+|---|---|---|
+| `retrieval_vector` | `"native"` \| `"grafeo"` | Vector channel backend |
+| `retrieval_text` | `"native"` \| `"grafeo"` | Text/BM25 channel backend |
+| `retrieval_fusion` | `"custom"` \| `"grafeo"` | Fuser implementation (Grafeo currently aliases custom — see 1.6c) |
+
+Unknown values raise `ValueError` — Phase 1.6a's silent native fallback
+was removed in 1.6b.2 to surface typos at startup.
+
+**Status (2026-05-18):**
+- Native default in production
+- Grafeo opt-in via config; live-tested by Mike on `agent_001` —
+  14MB Grafeo WAL with 747 chunks, Active Recall returning 20 vector
+  + 10 text results post-restart
+- 88/88 retrieval-touching tests pass
+- Phase A benchmark report archived at
+  `tasks/adr-024-knowledge-graph/phase-a-benchmark-report.md` (rationale
+  for the abstraction layer + open question on Phase B human grading)
+
+**Known limitations carried forward:**
+- `GrafeoHybridFuser` is bit-for-bit identical to `NativeHybridFuser`
+  by design (see 1.6c reasoning). Switching `retrieval_fusion: "grafeo"`
+  is a no-op today; the slot exists for future layer-weight-aware
+  Grafeo support.
+- Phase B human grading not yet run. Migration default stays Native
+  until a deliberate go/no-go reads the divergent-query relevance
+  judgments. Backlog tracks this as Phase A follow-up.
+
 ### Phase 2: Enrichment — PARTIAL
 - [x] GLiNER entity extraction (operational since S112)
 - [ ] Guided LLM relation extraction (end-to-end verification pending)

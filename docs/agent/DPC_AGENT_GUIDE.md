@@ -296,6 +296,51 @@ Agent profiles define reusable permission templates in `~/.dpc/privacy_rules.jso
 - Custom profiles override specific settings (tools, context access)
 - `inherit_from` field allows chaining profiles (planned feature)
 
+### Retrieval Backend Configuration (ADR-024)
+
+Retrieval backends (vector search, text search, result fusion) and the
+knowledge-graph storage are configured per-agent in
+`~/.dpc/agents/{agent_id}/config.json`. All flags are optional and default
+to the production-validated stack.
+
+| Key | Values | Default | What it switches |
+|-----|--------|---------|------------------|
+| `graph_backend` | `"sqlite"`, `"grafeo"` | `"grafeo"` | Knowledge-graph storage (ADR-024 §1.5) |
+| `retrieval_vector` | `"native"`, `"grafeo"` | `"native"` | Vector similarity search backend (BGE-M3 + FAISS HNSW vs Grafeo HNSW) |
+| `retrieval_text` | `"native"`, `"grafeo"` | `"native"` | Full-text/BM25 backend (bm25s vs Grafeo BM25) |
+| `retrieval_fusion` | `"custom"`, `"grafeo"` | `"custom"` | Result fusion (custom RRF with per-layer weights vs Grafeo native; currently aliases custom — see ADR-024 §1.6c) |
+
+Example — switch the vector channel to Grafeo while keeping text on
+native bm25s (the "escape hatch" combo if Phase B human grading reveals
+text-channel regression on Grafeo):
+
+```json
+{
+  "agent_id": "default",
+  "name": "Ark",
+  "provider_alias": "GLM-5.1",
+  "retrieval_vector": "grafeo",
+  "retrieval_text": "native"
+}
+```
+
+**Operational notes:**
+
+- **Restart required.** Flags are read at agent startup
+  (`_sync_index()`); changes don't take effect until DPC restarts.
+- **Independent flags.** Mix-and-match supported. Unknown values raise
+  `ValueError` at startup so typos fail loudly instead of silently
+  reverting to native.
+- **Reversible without data loss.** Switching to Grafeo creates a fresh
+  index under `<agent_root>/state/memory_index/grafeo/` (full rebuild
+  on first launch, ~1-2 min per 1000 docs on CPU embedding). Native
+  state files (`vectors.faiss`, `bm25/`) are preserved untouched, so
+  rollback = remove the keys + restart.
+- **Embedding model unchanged.** All backends consume vectors produced
+  by the same `MemoryConfig.embedding_model` (BGE-M3 in production).
+  Switching the retrieval backend does *not* re-embed the corpus — it
+  reuses the same vectors in a different storage/search layer.
+
 ### Agent Registry
 
 The agent registry tracks all created agents in `~/.dpc/agents/_registry.json`:

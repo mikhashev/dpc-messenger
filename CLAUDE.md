@@ -362,6 +362,34 @@ D-PC Messenger uses an intelligent 6-tier connection fallback hierarchy for near
 - `dpc_agent/tools/` - Agent tool implementations (shell, editor, browser, etc.)
 - See [docs/agent/DPC_AGENT_GUIDE.md](docs/agent/DPC_AGENT_GUIDE.md) for usage
 
+**Retrieval Backend (`dpc_agent/retrieval/`, ADR-024 §1.6, 2026-05-18):**
+
+Composable abstraction over vector + text + fusion channels. Lets the
+graph backend (SQLite / Grafeo via ADR-024 §1.5) and the retrieval
+backend be picked independently per agent.
+
+- `dpc_agent/retrieval/base.py` — `VectorIndex`, `TextIndex`, `HybridFuser`
+  ABCs + `RetrievalBackend` composite dataclass
+- `dpc_agent/retrieval/native.py` — `NativeVectorIndex` / `NativeTextIndex`
+  / `NativeHybridFuser` wrappers over the existing `FaissIndex` +
+  `BM25Index` + `reciprocal_rank_fusion` code (default in production)
+- `dpc_agent/retrieval/grafeo.py` — `GrafeoVectorIndex` /
+  `GrafeoTextIndex` / `GrafeoHybridFuser` using Grafeo native HNSW + BM25
+  (opt-in via config flag)
+- `dpc_agent/retrieval/factory.py` — `make_backend_for_agent(agent_root)`
+  reads `<agent_root>/config.json` `retrieval_*` keys and dispatches.
+  Production call-sites use this helper, never `FaissIndex(...)` directly.
+
+Per-agent config flags (`~/.dpc/agents/<id>/config.json`, all optional):
+- `retrieval_vector`: `"native"` (default) | `"grafeo"`
+- `retrieval_text`: `"native"` (default) | `"grafeo"`
+- `retrieval_fusion`: `"custom"` (default) | `"grafeo"` (currently aliases
+  custom — Grafeo's native `db.hybrid_search` would drop our LAYER_WEIGHTS
+  policy, see ADR-024 §1.6c)
+
+Rollback: remove the keys + restart; FAISS state at
+`<agent_root>/state/memory_index/{vectors.faiss,bm25/}` is untouched.
+
 **Knowledge & Consensus System (v0.9.0+):**
 - `consensus_manager.py` - Multi-party knowledge voting
   - Devil's advocate mechanism (required dissenter for 3+ participants)
