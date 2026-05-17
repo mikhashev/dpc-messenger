@@ -48,7 +48,10 @@ log = logging.getLogger(__name__)
 @dataclass
 class AgentConfig:
     """Configuration for the DPC agent."""
-    budget_usd: float = 500_000
+    # Dollar budget. None = subscription/unlimited (the default — z.ai is
+    # subscription, paid per API access not per token). Set explicitly only
+    # for pay_per_use providers where the BudgetLimitGuard must enforce a cap.
+    budget_usd: Optional[float] = None
     max_rounds: int = 200
     # Tool control is via firewall (privacy_rules.json), not config
     # Task queue settings
@@ -135,7 +138,7 @@ class DpcAgent:
         self.budget = HybridBudget(
             provider=provider_alias or "default",
             billing_model=self.config.billing_model,
-            budget_usd=self.config.budget_usd,
+            budget_usd=self.config.budget_usd or 0.0,
         )
 
         # Callback set by agent_manager to deliver scheduled task results to Telegram
@@ -233,6 +236,7 @@ class DpcAgent:
             sandbox_read_only=sandbox_ro,
             sandbox_read_write=sandbox_rw,
             embedding_provider=self._embedding_provider,
+            billing_model=self.config.billing_model,
         )
 
         # Store cap_info for agent_manager to include in next request's session_state
@@ -372,15 +376,28 @@ class DpcAgent:
         except Exception as e:
             log.warning("Failed to save task result file: %s", e)
 
-        # Update budget
-        self._update_budget(usage.get("cost", 0))
+        # Update usage stats (tokens for subscription, cost for pay_per_use)
+        self._update_usage_stats(
+            cost=usage.get("cost", 0),
+            total_tokens=usage.get("total_tokens", 0),
+        )
 
         return response
 
-    def _update_budget(self, cost: float) -> None:
-        """Update budget tracking in state file."""
+    def _update_usage_stats(self, cost: float, total_tokens: int) -> None:
+        """Write per-task usage stats to state.json.
+
+        Subscription agents track only `tokens_used_total` (rate/concurrency
+        limits live in budget.py — dollar fields are meaningless here).
+        Pay-per-use agents track `spent_usd` against `budget_usd` so the
+        BudgetLimitGuard can enforce a real cap.
+
+        Auto-migrates old subscription state.json files that still carry
+        stale `spent_usd` / `budget_usd` (left over from when cost was
+        accidentally accumulated as token count).
+        """
         state_path = self.agent_root / "state" / "state.json"
-        state = {}
+        state: Dict[str, Any] = {}
 
         if state_path.exists():
             try:
@@ -388,8 +405,22 @@ class DpcAgent:
             except Exception:
                 log.debug("Failed to read state file", exc_info=True)
 
-        state["spent_usd"] = state.get("spent_usd", 0) + cost
-        state["budget_usd"] = self.config.budget_usd
+        is_subscription = self.config.billing_model == "subscription"
+
+        if is_subscription:
+            # Migration: drop legacy spent_usd / budget_usd keys if present.
+            if "spent_usd" in state or "budget_usd" in state:
+                legacy_spent = state.pop("spent_usd", None)
+                state.pop("budget_usd", None)
+                log.info(
+                    "Migrated subscription state.json: dropped spent_usd=%s, budget_usd",
+                    legacy_spent,
+                )
+            state["tokens_used_total"] = int(state.get("tokens_used_total", 0)) + int(total_tokens)
+        else:
+            state["spent_usd"] = state.get("spent_usd", 0) + cost
+            state["budget_usd"] = self.config.budget_usd
+
         state["last_updated"] = utc_now_iso()
 
         state_path.parent.mkdir(parents=True, exist_ok=True)
@@ -983,13 +1014,10 @@ class DpcAgent:
             except Exception:
                 pass
 
-        return {
+        status: Dict[str, Any] = {
             "agent_root": str(self.agent_root),
-            "budget_usd": self.config.budget_usd,
-            "spent_usd": state.get("spent_usd", 0),
-            "remaining_usd": max(0, self.config.budget_usd - state.get("spent_usd", 0)),
-            "max_rounds": self.config.max_rounds,
             "billing_model": self.config.billing_model,
+            "max_rounds": self.config.max_rounds,
             "tools_available": self.tools.available_tools(),
             "memory_files": {
                 "scratchpad": self.memory.scratchpad_path().exists(),
@@ -1002,3 +1030,12 @@ class DpcAgent:
                 "stats": self.queue.get_stats(),
             },
         }
+        if self.config.billing_model == "subscription":
+            status["tokens_used_total"] = int(state.get("tokens_used_total", 0))
+        else:
+            budget = float(self.config.budget_usd or 0.0)
+            spent = float(state.get("spent_usd", 0))
+            status["budget_usd"] = budget
+            status["spent_usd"] = spent
+            status["remaining_usd"] = max(0.0, budget - spent)
+        return status

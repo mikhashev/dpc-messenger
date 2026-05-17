@@ -86,25 +86,40 @@ def _build_runtime_section(
     agent_root: pathlib.Path,
     task: Dict[str, Any],
     session_state: Optional[Dict[str, Any]] = None,
+    billing_model: str = "subscription",
 ) -> str:
-    """Build the runtime context section."""
+    """Build the runtime context section.
+
+    billing_model is the authoritative source of truth for which budget shape
+    to emit — passed down from AgentConfig so a fresh state.json (empty dict)
+    is correctly classified for pay_per_use agents before the first task has
+    written spent_usd.
+    """
     runtime_data = {
         "utc_now": utc_now_iso(),
         "agent_root": str(agent_root),
         "task": {"id": task.get("id"), "type": task.get("type")},
     }
 
-    # Budget info from agent state
+    # Budget info from agent state. Shape depends on billing model:
+    #   subscription → {"billing": "subscription", "tokens_used_total": N}
+    #   pay_per_use  → {"billing": "pay_per_use", "spent_usd", "total_usd", "remaining_usd"}
     try:
         state_path = agent_root / "state" / "state.json"
-        if state_path.exists():
-            state_data = json.loads(read_text(state_path))
-            spent = float(state_data.get("spent_usd", 0))
-            total = float(state_data.get("budget_usd", 50))
+        state_data = json.loads(read_text(state_path)) if state_path.exists() else {}
+        if billing_model == "subscription":
             runtime_data["budget"] = {
+                "billing": "subscription",
+                "tokens_used_total": int(state_data.get("tokens_used_total", 0)),
+            }
+        else:
+            spent = float(state_data.get("spent_usd", 0))
+            total = float(state_data.get("budget_usd", 0))
+            runtime_data["budget"] = {
+                "billing": "pay_per_use",
                 "spent_usd": spent,
                 "total_usd": total,
-                "remaining_usd": max(0, total - spent),
+                "remaining_usd": max(0.0, total - spent),
             }
     except Exception:
         log.debug("Failed to read budget info", exc_info=True)
@@ -303,6 +318,7 @@ def build_llm_messages(
     sandbox_read_only: Optional[List[str]] = None,
     sandbox_read_write: Optional[List[str]] = None,
     embedding_provider: Optional[Any] = None,
+    billing_model: str = "subscription",
 ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
     """
     Build the full LLM message context for a task.
@@ -467,7 +483,7 @@ def build_llm_messages(
 
     # Dynamic content: changes every request
     dynamic_parts = [
-        _build_runtime_section(agent_root, task, session_state),
+        _build_runtime_section(agent_root, task, session_state, billing_model=billing_model),
     ]
     dynamic_parts.extend(_build_recent_sections(memory, task_id=task.get("id", "")))
 
