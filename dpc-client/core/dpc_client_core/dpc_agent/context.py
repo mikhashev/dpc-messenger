@@ -398,33 +398,30 @@ def build_llm_messages(
         if _query_text:
             try:
                 from .active_recall import get_recall_block
-                from .hybrid_search import reciprocal_rank_fusion
-                from .bm25_index import BM25Index
-                from .faiss_index import FaissIndex
+                from .retrieval import make_native_backend
                 from .memory import EmbeddingProvider
                 import numpy as _np
 
                 _index_dir = agent_root / "state" / "memory_index"
-                _faiss_idx = FaissIndex(_index_dir)
-                _bm25_idx = BM25Index(_index_dir)
+                _backend = make_native_backend(_index_dir)
 
                 _faiss_results = []
                 _q1_results = []
                 _q2_results = []
-                if _faiss_idx.load():
+                if _backend.vector.load():
                     if embedding_provider is None:
                         from .memory import get_embedding_provider
                         embedding_provider = get_embedding_provider(local_files_only=True)
                         log.info("Active Recall: created fallback EmbeddingProvider (local_files_only)")
-                    if _faiss_idx.needs_rebuild(embedding_provider.model_name):
-                        log.info("Active Recall: FAISS index needs rebuild (model changed), skipping search")
+                    if _backend.vector.needs_rebuild(embedding_provider.model_name):
+                        log.info("Active Recall: vector index needs rebuild (model changed), skipping search")
                     else:
                         if _human_text:
                             _q1_vec = _np.array(embedding_provider.embed(_human_text), dtype=_np.float32)
-                            _q1_results = _faiss_idx.search(_q1_vec, FAISS_TOP_K)
+                            _q1_results = _backend.vector.search(_q1_vec, FAISS_TOP_K)
                         if _context_text:
                             _q2_vec = _np.array(embedding_provider.embed(_context_text), dtype=_np.float32)
-                            _q2_results = _faiss_idx.search(_q2_vec, FAISS_TOP_K)
+                            _q2_results = _backend.vector.search(_q2_vec, FAISS_TOP_K)
                         _faiss_results = _q1_results + _q2_results
                     log.debug("Active Recall FAISS: %d results (Q1=%d + Q2=%d) — %s",
                               len(_faiss_results), len(_q1_results), len(_q2_results),
@@ -432,8 +429,8 @@ def build_llm_messages(
 
                 _keyword_results = []
                 _sparse_query = _human_text or _context_text
-                if _bm25_idx.load():
-                    _bm25_results = _bm25_idx.search(_sparse_query, BM25_TOP_K)
+                if _backend.text.load():
+                    _bm25_results = _backend.text.search(_sparse_query, BM25_TOP_K)
                     _keyword_results.extend(_bm25_results)
                     log.debug("Active Recall BM25: %d results — %s", len(_bm25_results),
                               [m.get("source_file", "?") for m, _ in _bm25_results])
@@ -450,7 +447,7 @@ def build_llm_messages(
                 except Exception:
                     log.debug("Active Recall Graph L7: unavailable (cold start or no graph DB)")
 
-                _results = reciprocal_rank_fusion(_faiss_results, _keyword_results, graph_results=_graph_results)
+                _results = _backend.fuser.fuse(_faiss_results, _keyword_results, graph_results=_graph_results)
                 _ctx_ratio = (session_state or {}).get("context_usage_percent", 0) / 100.0
                 _recall = get_recall_block(_results, context_usage_ratio=_ctx_ratio, agent_root=agent_root)
                 if _recall:

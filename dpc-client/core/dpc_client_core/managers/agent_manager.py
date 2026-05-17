@@ -262,20 +262,24 @@ class DpcAgentManager:
                             from pathlib import Path
                             import os
                             from dpc_client_core.dpc_agent.memory import get_embedding_provider
-                            from dpc_client_core.dpc_agent.faiss_index import FaissIndex
-                            from dpc_client_core.dpc_agent.bm25_index import BM25Index
+                            from dpc_client_core.dpc_agent.retrieval import (
+                                TextAddItem, VectorAddItem, make_native_backend,
+                            )
                             from dpc_client_core.dpc_agent.text_extract import extract_text
                             from dpc_client_core.dpc_agent.indexing_pipeline import _extract_heading, _build_doc_text
                             provider = _provider_ref or get_embedding_provider(model_name=_actual_model)
-                            faiss_idx = FaissIndex(index_dir, model_name=_actual_model, dimensions=provider.dimensions)
-                            bm25_idx = BM25Index(index_dir)
+                            backend = make_native_backend(
+                                index_dir,
+                                model_name=_actual_model,
+                                dimensions=provider.dimensions,
+                            )
 
                             count = 0
                             l6_count = 0
                             # Always rebuild L5 agent knowledge (not just on first init)
                             from dpc_client_core.dpc_agent.indexing_pipeline import full_rebuild
                             knowledge_dir = agent_root / "knowledge"
-                            count = full_rebuild(knowledge_dir, provider, faiss_idx, bm25_idx, stop_event=self._stop_event)
+                            count = full_rebuild(knowledge_dir, provider, backend, stop_event=self._stop_event)
 
                             # Collect all extra documents (L6 + EXT) then embed+index in bulk
                             extra_texts = []
@@ -344,8 +348,7 @@ class DpcAgentManager:
                                     pass
 
                             if stored_extra_hash == extra_hash and not needs_full_rebuild and extra_texts:
-                                faiss_idx.load()
-                                bm25_idx.load()
+                                backend.load()
                                 log.info("Extra index unchanged (hash=%s), skipping re-embed of %d docs", extra_hash, len(extra_texts))
                                 extra_texts = []
 
@@ -360,18 +363,22 @@ class DpcAgentManager:
                                     batch_texts = extra_texts[batch_start:batch_start + BATCH_SIZE]
                                     batch_metas = extra_metas[batch_start:batch_start + BATCH_SIZE]
                                     vectors = np.array(provider.embed_batch(batch_texts), dtype=np.float32)
-                                    for vec, meta in zip(vectors, batch_metas):
-                                        faiss_idx.add(vec.reshape(1, -1), [meta])
-                                        indexed += 1
+                                    backend.vector.add([
+                                        VectorAddItem(vector=vec.reshape(1, -1), meta=meta)
+                                        for vec, meta in zip(vectors, batch_metas)
+                                    ])
+                                    indexed += len(batch_texts)
                                 if not self._stop_event.is_set():
-                                    bm25_idx.add(extra_texts, extra_metas)
+                                    backend.text.add([
+                                        TextAddItem(text=t, meta=m)
+                                        for t, m in zip(extra_texts, extra_metas)
+                                    ])
                                     log.info("Bulk indexed %d extra documents (L6: %d, EXT: %d)", len(extra_texts), l6_count, ext_count)
                                 else:
                                     log.info("Extra indexing interrupted by shutdown before BM25")
 
                             if needs_full_rebuild or extra_texts:
-                                faiss_idx.save()
-                                bm25_idx.save()
+                                backend.save()
                                 # Persist extra_hash for staleness detection on next startup
                                 try:
                                     import json as _json3
