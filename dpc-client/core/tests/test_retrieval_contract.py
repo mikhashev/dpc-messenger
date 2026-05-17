@@ -1,8 +1,12 @@
-"""Contract tests for retrieval ABCs (ADR-024 Phase 1.6a).
+"""Contract tests for retrieval ABCs (ADR-024 Phase 1.6).
 
-Tests every Vector/Text/HybridFuser implementation must satisfy.
-Phase 1.6a runs against Native impls only. Phase 1.6b will parametrize
-the same tests against Grafeo impls — same assertions, both backends pass.
+Vector/Text contract tests are parametrized over every concrete impl so
+the same assertions cover Native and Grafeo with one set of expectations.
+Adding a new backend = add it to the fixture params; the whole suite runs
+against it for free.
+
+Phase 1.6a (initial): Native impls.
+Phase 1.6b.2 (this): Grafeo impls join the parameter list.
 """
 
 from __future__ import annotations
@@ -11,6 +15,9 @@ import numpy as np
 import pytest
 
 from dpc_client_core.dpc_agent.retrieval import (
+    GrafeoHybridFuser,
+    GrafeoTextIndex,
+    GrafeoVectorIndex,
     NativeHybridFuser,
     NativeTextIndex,
     NativeVectorIndex,
@@ -22,31 +29,63 @@ from dpc_client_core.dpc_agent.retrieval import (
 
 
 # ─────────────────────────────────────────────────────────────────────────
-# VectorIndex contract
+# Fixtures — one factory per backend kind, parametrized into every test.
 # ─────────────────────────────────────────────────────────────────────────
 
 
-def test_vector_load_missing_returns_false(tmp_path):
+def _make_native_vector(tmp_path, dimensions=4):
+    return NativeVectorIndex(tmp_path / "vec_native", dimensions=dimensions)
+
+
+def _make_grafeo_vector(tmp_path, dimensions=4):
+    return GrafeoVectorIndex(tmp_path / "vec_grafeo", dimensions=dimensions)
+
+
+def _make_native_text(tmp_path):
+    return NativeTextIndex(tmp_path / "txt_native")
+
+
+def _make_grafeo_text(tmp_path):
+    return GrafeoTextIndex(tmp_path / "txt_grafeo")
+
+
+@pytest.fixture(params=["native", "grafeo"])
+def vector_factory(request):
+    """Returns a callable (tmp_path, dimensions=...) -> VectorIndex."""
+    return _make_native_vector if request.param == "native" else _make_grafeo_vector
+
+
+@pytest.fixture(params=["native", "grafeo"])
+def text_factory(request):
+    return _make_native_text if request.param == "native" else _make_grafeo_text
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# VectorIndex contract — runs against both impls
+# ─────────────────────────────────────────────────────────────────────────
+
+
+def test_vector_load_missing_returns_false(tmp_path, vector_factory):
     """Empty index contract: load() on nonexistent dir returns False."""
-    idx = NativeVectorIndex(tmp_path / "missing", dimensions=4)
+    idx = vector_factory(tmp_path)
     assert idx.load() is False
 
 
-def test_vector_empty_search_returns_empty(tmp_path):
+def test_vector_empty_search_returns_empty(tmp_path, vector_factory):
     """Empty index contract: search() on empty index returns [], does NOT raise."""
-    idx = NativeVectorIndex(tmp_path / "vec", dimensions=4)
+    idx = vector_factory(tmp_path)
     query = np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float32)
     assert idx.search(query, top_k=5) == []
 
 
-def test_vector_add_empty_is_noop(tmp_path):
-    idx = NativeVectorIndex(tmp_path / "vec", dimensions=4)
+def test_vector_add_empty_is_noop(tmp_path, vector_factory):
+    idx = vector_factory(tmp_path)
     idx.add([])
     assert idx.total_items == 0
 
 
-def test_vector_add_and_search(tmp_path):
-    idx = NativeVectorIndex(tmp_path / "vec", dimensions=4)
+def test_vector_add_and_search(tmp_path, vector_factory):
+    idx = vector_factory(tmp_path)
     items = [
         VectorAddItem(
             vector=np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float32),
@@ -66,8 +105,8 @@ def test_vector_add_and_search(tmp_path):
     assert results[0][0]["source_file"] == "a.md"
 
 
-def test_vector_remove_by_source(tmp_path):
-    idx = NativeVectorIndex(tmp_path / "vec", dimensions=4)
+def test_vector_remove_by_source(tmp_path, vector_factory):
+    idx = vector_factory(tmp_path)
     idx.add([
         VectorAddItem(
             vector=np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float32),
@@ -83,8 +122,8 @@ def test_vector_remove_by_source(tmp_path):
     assert idx.total_items == 1
 
 
-def test_vector_remove_missing_returns_zero(tmp_path):
-    idx = NativeVectorIndex(tmp_path / "vec", dimensions=4)
+def test_vector_remove_missing_returns_zero(tmp_path, vector_factory):
+    idx = vector_factory(tmp_path)
     idx.add([
         VectorAddItem(
             vector=np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float32),
@@ -94,8 +133,8 @@ def test_vector_remove_missing_returns_zero(tmp_path):
     assert idx.remove_by_source("nonexistent.md") == 0
 
 
-def test_vector_save_load_roundtrip(tmp_path):
-    idx1 = NativeVectorIndex(tmp_path / "vec", model_name="m1", dimensions=4)
+def test_vector_save_load_roundtrip(tmp_path, vector_factory):
+    idx1 = vector_factory(tmp_path)
     idx1.add([
         VectorAddItem(
             vector=np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float32),
@@ -104,20 +143,13 @@ def test_vector_save_load_roundtrip(tmp_path):
     ])
     idx1.save()
 
-    idx2 = NativeVectorIndex(tmp_path / "vec", model_name="m1", dimensions=4)
+    idx2 = vector_factory(tmp_path)
     assert idx2.load() is True
     assert idx2.total_items == 1
 
 
-def test_vector_needs_rebuild_detects_model_change(tmp_path):
-    """Native impl uses FaissIndex.needs_rebuild — detects different model_name."""
-    idx = NativeVectorIndex(tmp_path / "vec", model_name="model-a", dimensions=4)
-    assert idx.needs_rebuild("model-b") is True
-    assert idx.needs_rebuild("model-a") is False
-
-
-def test_vector_clear(tmp_path):
-    idx = NativeVectorIndex(tmp_path / "vec", dimensions=4)
+def test_vector_clear(tmp_path, vector_factory):
+    idx = vector_factory(tmp_path)
     idx.add([
         VectorAddItem(
             vector=np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float32),
@@ -129,29 +161,47 @@ def test_vector_clear(tmp_path):
 
 
 # ─────────────────────────────────────────────────────────────────────────
-# TextIndex contract
+# Backend-specific Vector tests (don't fit the shared contract)
 # ─────────────────────────────────────────────────────────────────────────
 
 
-def test_text_load_missing_returns_false(tmp_path):
-    idx = NativeTextIndex(tmp_path / "missing")
+def test_native_vector_needs_rebuild_detects_model_change(tmp_path):
+    """Native impl tracks embedding-model identifier via FaissIndex header."""
+    idx = NativeVectorIndex(tmp_path / "vec", model_name="model-a", dimensions=4)
+    assert idx.needs_rebuild("model-b") is True
+    assert idx.needs_rebuild("model-a") is False
+
+
+def test_grafeo_vector_needs_rebuild_always_false(tmp_path):
+    """Grafeo doesn't track embedding-model identifier (TODO 1.6c+ Schema node)."""
+    idx = GrafeoVectorIndex(tmp_path / "vec", dimensions=4)
+    assert idx.needs_rebuild("any-model") is False
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# TextIndex contract — runs against both impls
+# ─────────────────────────────────────────────────────────────────────────
+
+
+def test_text_load_missing_returns_false(tmp_path, text_factory):
+    idx = text_factory(tmp_path)
     assert idx.load() is False
 
 
-def test_text_empty_search_returns_empty(tmp_path):
+def test_text_empty_search_returns_empty(tmp_path, text_factory):
     """Empty index contract: search() on empty index returns []."""
-    idx = NativeTextIndex(tmp_path / "txt")
+    idx = text_factory(tmp_path)
     assert idx.search("anything", top_k=5) == []
 
 
-def test_text_add_empty_is_noop(tmp_path):
-    idx = NativeTextIndex(tmp_path / "txt")
+def test_text_add_empty_is_noop(tmp_path, text_factory):
+    idx = text_factory(tmp_path)
     idx.add([])
     assert idx.total_items == 0
 
 
-def test_text_add_and_search(tmp_path):
-    idx = NativeTextIndex(tmp_path / "txt")
+def test_text_add_and_search(tmp_path, text_factory):
+    idx = text_factory(tmp_path)
     idx.add([
         TextAddItem(
             text="grafeo knowledge graph migration",
@@ -170,11 +220,11 @@ def test_text_add_and_search(tmp_path):
     assert "grafeo.md" in sources
 
 
-def test_text_remove_by_source(tmp_path):
-    idx = NativeTextIndex(tmp_path / "txt")
+def test_text_remove_by_source(tmp_path, text_factory):
+    idx = text_factory(tmp_path)
     # Three docs — rebuild after remove leaves a healthy corpus.
-    # Single-doc rebuild after remove can trip an existing bm25s edge case
-    # (empty vocab when tokens are filtered to nothing); not this ABC layer's bug.
+    # Single-doc rebuild after remove can trip the existing bm25s edge case
+    # (empty vocab when tokens are filtered to nothing) for the Native impl.
     idx.add([
         TextAddItem(
             text="Python algorithm optimization profiling",
@@ -194,8 +244,8 @@ def test_text_remove_by_source(tmp_path):
     assert idx.total_items == 2
 
 
-def test_text_remove_missing_returns_zero(tmp_path):
-    idx = NativeTextIndex(tmp_path / "txt")
+def test_text_remove_missing_returns_zero(tmp_path, text_factory):
+    idx = text_factory(tmp_path)
     idx.add([
         TextAddItem(
             text="Python algorithm benchmark",
@@ -205,8 +255,8 @@ def test_text_remove_missing_returns_zero(tmp_path):
     assert idx.remove_by_source("nonexistent.md") == 0
 
 
-def test_text_save_load_roundtrip(tmp_path):
-    idx1 = NativeTextIndex(tmp_path / "txt")
+def test_text_save_load_roundtrip(tmp_path, text_factory):
+    idx1 = text_factory(tmp_path)
     idx1.add([
         TextAddItem(
             text="Python programming optimization tutorial",
@@ -215,13 +265,13 @@ def test_text_save_load_roundtrip(tmp_path):
     ])
     idx1.save()
 
-    idx2 = NativeTextIndex(tmp_path / "txt")
+    idx2 = text_factory(tmp_path)
     assert idx2.load() is True
     assert idx2.total_items == 1
 
 
-def test_text_clear(tmp_path):
-    idx = NativeTextIndex(tmp_path / "txt")
+def test_text_clear(tmp_path, text_factory):
+    idx = text_factory(tmp_path)
     idx.add([
         TextAddItem(
             text="Python algorithm tutorial",
@@ -233,19 +283,22 @@ def test_text_clear(tmp_path):
 
 
 # ─────────────────────────────────────────────────────────────────────────
-# HybridFuser contract
+# HybridFuser contract — Native + Grafeo (Grafeo currently inherits Native math)
 # ─────────────────────────────────────────────────────────────────────────
 
 
-def test_fuser_empty_inputs():
+@pytest.fixture(params=[NativeHybridFuser, GrafeoHybridFuser])
+def fuser(request):
+    return request.param()
+
+
+def test_fuser_empty_inputs(fuser):
     """Empty channels return empty fused list, does NOT raise."""
-    fuser = NativeHybridFuser()
     assert fuser.fuse([], [], None) == []
 
 
-def test_fuser_dedup_by_source():
+def test_fuser_dedup_by_source(fuser):
     """Same source_file across channels collapses to one fused result."""
-    fuser = NativeHybridFuser()
     vector_results = [({"source_file": "a.md", "source_layer": "L5"}, 0.9)]
     text_results = [({"source_file": "a.md", "source_layer": "L5"}, 0.8)]
     results = fuser.fuse(vector_results, text_results)
@@ -253,8 +306,7 @@ def test_fuser_dedup_by_source():
     assert results[0].chunk_meta["source_file"] == "a.md"
 
 
-def test_fuser_merges_three_channels():
-    fuser = NativeHybridFuser()
+def test_fuser_merges_three_channels(fuser):
     vector_results = [({"source_file": "a.md", "source_layer": "L5"}, 0.9)]
     text_results = [({"source_file": "b.md", "source_layer": "L5"}, 0.8)]
     graph_results = [({"source_file": "c.md", "source_layer": "L7"}, 0.7)]
@@ -263,16 +315,13 @@ def test_fuser_merges_three_channels():
     assert sources == {"a.md", "b.md", "c.md"}
 
 
-def test_fuser_layer_weights_applied():
+def test_fuser_layer_weights_applied(fuser):
     """L6 (weight 1.5) ranks above L2 (weight 0.8) at same RRF position."""
-    fuser = NativeHybridFuser()
     vector_results = [
         ({"source_file": "low.md", "source_layer": "L2"}, 0.9),
         ({"source_file": "high.md", "source_layer": "L6"}, 0.9),
     ]
     results = fuser.fuse(vector_results, [])
-    # high.md (L6 weight 1.5) ranked higher despite same vector score.
-    # Position depends on RRF rank, but L6 weight beats L2 weight.
     sources = [r.chunk_meta["source_file"] for r in results]
     assert sources.index("high.md") < sources.index("low.md")
 
@@ -306,13 +355,47 @@ def test_factory_explicit_native(tmp_path):
     assert isinstance(backend.vector, NativeVectorIndex)
 
 
-def test_factory_unknown_falls_back_to_native(tmp_path, caplog):
-    """Phase 1.6a contract: unknown values log warning, return native."""
-    config = {"retrieval_vector": "grafeo"}  # Grafeo not yet wired
-    with caplog.at_level("WARNING"):
-        backend = build_retrieval_backend(tmp_path / "idx", config=config, dimensions=4)
-    assert isinstance(backend.vector, NativeVectorIndex)
-    assert any("not implemented in Phase 1.6a" in rec.message for rec in caplog.records)
+def test_factory_explicit_grafeo(tmp_path):
+    """Phase 1.6b.2: grafeo branches are wired, no fallback."""
+    config = {
+        "retrieval_vector": "grafeo",
+        "retrieval_text": "grafeo",
+        "retrieval_fusion": "grafeo",
+    }
+    backend = build_retrieval_backend(tmp_path / "idx", config=config, dimensions=4)
+    assert isinstance(backend.vector, GrafeoVectorIndex)
+    assert isinstance(backend.text, GrafeoTextIndex)
+    assert isinstance(backend.fuser, GrafeoHybridFuser)
+
+
+def test_factory_mixed_grafeo_vector_native_text(tmp_path):
+    """Mix-and-match: e.g., Grafeo vector + native BM25 while Phase B validates."""
+    config = {"retrieval_vector": "grafeo", "retrieval_text": "native"}
+    backend = build_retrieval_backend(tmp_path / "idx", config=config, dimensions=4)
+    assert isinstance(backend.vector, GrafeoVectorIndex)
+    assert isinstance(backend.text, NativeTextIndex)
+
+
+def test_factory_unknown_raises_value_error(tmp_path):
+    """Phase 1.6b.2 dropped the silent fallback — unknown values must raise."""
+    with pytest.raises(ValueError, match="retrieval_vector"):
+        build_retrieval_backend(
+            tmp_path / "idx",
+            config={"retrieval_vector": "lancedb"},
+            dimensions=4,
+        )
+    with pytest.raises(ValueError, match="retrieval_text"):
+        build_retrieval_backend(
+            tmp_path / "idx",
+            config={"retrieval_text": "elastic"},
+            dimensions=4,
+        )
+    with pytest.raises(ValueError, match="retrieval_fusion"):
+        build_retrieval_backend(
+            tmp_path / "idx",
+            config={"retrieval_fusion": "weighted"},
+            dimensions=4,
+        )
 
 
 def test_backend_composite_load_returns_false_when_both_missing(tmp_path):
