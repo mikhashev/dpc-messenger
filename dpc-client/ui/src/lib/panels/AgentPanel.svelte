@@ -45,7 +45,7 @@
     chatHistories: Writable<Map<string, Message[]>>;
     getPeerDisplayName: (id: string) => string;
     chatWindow: HTMLElement | null;
-    onUpdateTokenUsage: (conversationId: string, usage: { used: number; limit: number; historyTokens?: number; contextEstimated?: number }) => void;
+    onUpdateTokenUsage: (conversationId: string, usage: { used: number; limit: number; historyTokens?: number; tokensAfterLastResponse?: number; tokensAfterLastResponseAt?: string | null }) => void;
     onAgentToast: (message: string, type: 'info' | 'warning' | 'error') => void;
     onRefreshAgents: () => void;
     agentProgressMessage?: string | null;
@@ -285,7 +285,7 @@
   // dependency, causing re-runs on every history change (infinite loop).
   $effect(() => {
     if ($agentHistoryUpdated) {
-      const { conversation_id, messages, tokens_used, token_limit, thinking, context_estimated } = $agentHistoryUpdated;
+      const { conversation_id, messages, tokens_used, token_limit, thinking, tokens_after_last_response, tokens_after_last_response_at } = $agentHistoryUpdated;
 
       untrack(() => {
         // Flush pending buffer and capture accumulated streaming text before overwriting history
@@ -300,13 +300,14 @@
           if (capturedAgentStreaming) clearAgentStreaming();
         }
 
-        // Notify parent to update token usage map (include contextEstimated for Total counter)
+        // Notify parent to update token usage map (include tokensAfterLastResponse for Total counter)
         if (tokens_used !== undefined && token_limit !== undefined && token_limit > 0) {
           onUpdateTokenUsage(conversation_id, {
             used: tokens_used,
             limit: token_limit,
             historyTokens: tokens_used,
-            contextEstimated: context_estimated || 0,
+            tokensAfterLastResponse: tokens_after_last_response || 0,
+            tokensAfterLastResponseAt: tokens_after_last_response_at ?? null,
           });
         }
 
@@ -375,7 +376,7 @@
   $effect(() => {
     if ($agentChatMessage) {
       const { conversation_id, message_id, content, sender_name, sender_node_id, timestamp, role, thinking, streaming_raw,
-              msg_index, context_estimated, history_tokens, tokens_limit } = $agentChatMessage;
+              msg_index, tokens_after_last_response, tokens_after_last_response_at, history_tokens, tokens_limit } = $agentChatMessage;
 
       untrack(() => {
         chatHistories.update(map => {
@@ -398,13 +399,14 @@
           return newMap;
         });
 
-        // Update token usage from CC message (#4: context_estimated stale after CC messages)
-        if (context_estimated && tokens_limit) {
+        // Update token usage from CC message (#4: tokens_after_last_response stale after CC messages)
+        if (tokens_after_last_response && tokens_limit) {
           onUpdateTokenUsage(conversation_id, {
             used: history_tokens || 0,
             limit: tokens_limit,
             historyTokens: history_tokens || 0,
-            contextEstimated: context_estimated,
+            tokensAfterLastResponse: tokens_after_last_response,
+            tokensAfterLastResponseAt: tokens_after_last_response_at ?? null,
           });
         }
 

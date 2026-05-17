@@ -13,7 +13,8 @@
     estimatedTokens = 0,
     showEstimation = false,
     historyTokens = 0,
-    contextEstimated = 0,
+    tokensAfterLastResponse = 0,
+    tokensAfterLastResponseAt = null,
     messageCount = 0,
     enableMarkdown = $bindable(true),
     isExtracting = false,
@@ -35,7 +36,8 @@
     estimatedTokens?: number;
     showEstimation?: boolean;
     historyTokens?: number;
-    contextEstimated?: number;
+    tokensAfterLastResponse?: number;
+    tokensAfterLastResponseAt?: string | null;
     messageCount?: number;
     enableMarkdown?: boolean;
     isExtracting?: boolean;
@@ -62,24 +64,24 @@
     effectiveLimit > 0 ? (totalTokens / effectiveLimit) : 0
   );
 
-  // Three-metric display (shown when context_estimated is available from backend)
-  let showThreeMetrics = $derived(contextEstimated > 0);
-  // historyTokens is a rough chars÷4 estimate; contextEstimated is the actual total from the LLM
+  // Three-metric display (shown when tokensAfterLastResponse is available from backend)
+  let showThreeMetrics = $derived(tokensAfterLastResponse > 0);
+  // historyTokens is a rough chars÷4 estimate; tokensAfterLastResponse is the actual total from the LLM
   // API. Clamp so the estimate never exceeds the measured total (prevents negative staticMemory).
   let effectiveHistoryTokens = $derived(
-    showThreeMetrics ? Math.min(historyTokens, contextEstimated) : historyTokens
+    showThreeMetrics ? Math.min(historyTokens, tokensAfterLastResponse) : historyTokens
   );
-  let staticMemory = $derived(showThreeMetrics ? contextEstimated - effectiveHistoryTokens : 0);
+  let staticMemory = $derived(showThreeMetrics ? tokensAfterLastResponse - effectiveHistoryTokens : 0);
   let dialogAvailable = $derived(showThreeMetrics ? effectiveLimit - staticMemory : effectiveLimit);
   let dialogPercent = $derived(dialogAvailable > 0 ? effectiveHistoryTokens / dialogAvailable : 0);
-  let totalContextPercent = $derived(effectiveLimit > 0 ? contextEstimated / effectiveLimit : 0);
+  let totalContextPercent = $derived(effectiveLimit > 0 ? tokensAfterLastResponse / effectiveLimit : 0);
 
   let dialogWithInput = $derived(showThreeMetrics && showEstimation && estimatedTokens > 0
     ? effectiveHistoryTokens + estimatedTokens
     : effectiveHistoryTokens);
   let totalWithInput = $derived(showThreeMetrics && showEstimation && estimatedTokens > 0
-    ? contextEstimated + estimatedTokens
-    : contextEstimated);
+    ? tokensAfterLastResponse + estimatedTokens
+    : tokensAfterLastResponse);
   let dialogPercentWithInput = $derived(dialogAvailable > 0 ? dialogWithInput / dialogAvailable : 0);
   let totalContextPercentWithInput = $derived(effectiveLimit > 0 ? totalWithInput / effectiveLimit : 0);
 
@@ -110,7 +112,7 @@
       </div>
       <div class="token-row">
         <span class="token-label">Total</span>
-        <span class="token-value">{contextEstimated.toLocaleString()}{#if showEstimation && estimatedTokens > 0} + ~{estimatedTokens.toLocaleString()}{/if} / {effectiveLimit.toLocaleString()}</span>
+        <span class="token-value">{tokensAfterLastResponse.toLocaleString()}{#if showEstimation && estimatedTokens > 0} + ~{estimatedTokens.toLocaleString()}{/if} / {effectiveLimit.toLocaleString()}</span>
         <span class="token-percentage" class:warning={totalContextPercentWithInput >= 0.8}>({Math.round(totalContextPercentWithInput * 100)}%)</span>
       </div>
       <div class="token-row token-row--muted" title="System prompt + contexts + tool schemas">

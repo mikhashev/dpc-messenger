@@ -923,17 +923,14 @@ Respond in JSON format:
                         agent = agent_mgr._agent
                         if agent and hasattr(agent, '_embedding_provider') and agent._embedding_provider:
                             from .dpc_agent.indexing_pipeline import index_single_file
-                            from .dpc_agent.faiss_index import FaissIndex
-                            from .dpc_agent.bm25_index import BM25Index
+                            from .dpc_agent.retrieval import make_backend_for_agent
                             index_dir = agent_mgr.agent_root / "state" / "memory_index"
                             if index_dir.exists():
-                                faiss_idx = FaissIndex(index_dir)
-                                bm25_idx = BM25Index(index_dir)
-                                if faiss_idx.load():
-                                    bm25_idx.load()
-                                    index_single_file(commit_path, agent._embedding_provider, faiss_idx, bm25_idx, source_layer="L6")
-                                    faiss_idx.save()
-                                    bm25_idx.save()
+                                backend = make_backend_for_agent(agent_mgr.agent_root)
+                                if backend.vector.load():
+                                    backend.text.load()
+                                    index_single_file(commit_path, agent._embedding_provider, backend, source_layer="L6")
+                                    backend.save()
                                     logger.info("MEM-3.7: reindexed L6 commit %s for agent %s", commit_path.name, agent_mgr.agent_id)
         except Exception as e:
             logger.warning("MEM-3.7 L6 reindex failed for commit %s: %s", commit.commit_id, e)

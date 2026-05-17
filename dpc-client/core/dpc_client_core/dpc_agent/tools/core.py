@@ -198,18 +198,15 @@ def write_file(ctx: ToolContext, path: str, content: str) -> str:
                 provider = getattr(agent, '_embedding_provider', None) if agent else None
                 if provider:
                     from ..indexing_pipeline import index_single_file
-                    from ..faiss_index import FaissIndex
-                    from ..bm25_index import BM25Index
+                    from ..retrieval import make_backend_for_agent
                     index_dir = ctx.agent_root / "state" / "memory_index"
                     if index_dir.exists():
-                        faiss_idx = FaissIndex(index_dir)
-                        bm25_idx = BM25Index(index_dir)
-                        if faiss_idx.load():
-                            bm25_idx.load()
-                            index_single_file(file_path, provider, faiss_idx, bm25_idx, source_layer="L5")
-                            faiss_idx.save()
-                            bm25_idx.save()
-                            log.info("Incremental reindex: added %s to FAISS+BM25", file_path.name)
+                        backend = make_backend_for_agent(ctx.agent_root)
+                        if backend.vector.load():
+                            backend.text.load()
+                            index_single_file(file_path, provider, backend, source_layer="L5")
+                            backend.save()
+                            log.info("Incremental reindex: added %s to retrieval backend", file_path.name)
             except Exception as e:
                 log.warning("Incremental reindex failed for %s: %s", path, e)
 
@@ -259,23 +256,21 @@ def repo_delete(ctx: ToolContext, path: str, recursive: bool = False) -> str:
         else:
             size = target.stat().st_size
             target.unlink()
-            # Remove from FAISS/BM25 index if knowledge file
+            # Remove from retrieval backend if knowledge file
             if path.startswith("knowledge/") and not path.endswith("_index.md"):
                 try:
-                    from ..faiss_index import FaissIndex
-                    from ..bm25_index import BM25Index
+                    from ..retrieval import make_backend_for_agent
                     index_dir = ctx.agent_root / "state" / "memory_index"
                     if index_dir.exists():
-                        faiss_idx = FaissIndex(index_dir)
-                        bm25_idx = BM25Index(index_dir)
+                        backend = make_backend_for_agent(ctx.agent_root)
                         source_file = Path(path).name
-                        if faiss_idx.load():
-                            faiss_idx.remove_by_source(source_file)
-                            faiss_idx.save()
-                        if bm25_idx.load():
-                            bm25_idx.remove_by_source(source_file)
-                            bm25_idx.save()
-                        log.info("Removed %s from FAISS+BM25 index", source_file)
+                        if backend.vector.load():
+                            backend.vector.remove_by_source(source_file)
+                            backend.vector.save()
+                        if backend.text.load():
+                            backend.text.remove_by_source(source_file)
+                            backend.text.save()
+                        log.info("Removed %s from retrieval backend", source_file)
                 except Exception as e:
                     log.warning("Index cleanup failed for %s: %s", path, e)
             return f"✓ Deleted '{path}' ({size} bytes)"
@@ -661,36 +656,29 @@ def chat_history(ctx: ToolContext, limit: int = 0, offset: int = -1, include_int
 def memory_search(ctx: ToolContext, query: str, top_k: int = 5) -> str:
     """Search across knowledge base using hybrid BM25 + semantic search (ADR-010)."""
     try:
-        from ..hybrid_search import reciprocal_rank_fusion, SearchResult
-        from ..bm25_index import BM25Index
-        from ..faiss_index import FaissIndex
-        from ..memory import EmbeddingProvider
+        from ..retrieval import make_backend_for_agent
         import numpy as np
 
-        knowledge_dir = ctx.agent_root / "knowledge"
-        index_dir = ctx.agent_root / "state" / "memory_index"
+        backend = make_backend_for_agent(ctx.agent_root)
 
-        faiss_idx = FaissIndex(index_dir)
-        bm25_idx = BM25Index(index_dir)
-
-        faiss_results = []
-        if faiss_idx.load():
+        vector_results = []
+        if backend.vector.load():
             try:
                 from dpc_client_core.dpc_agent.memory import get_embedding_provider
                 provider = get_embedding_provider(local_files_only=True)
                 qvec = np.array(provider.embed(query), dtype=np.float32)
-                faiss_results = faiss_idx.search(qvec, top_k)
+                vector_results = backend.vector.search(qvec, top_k)
             except Exception as e:
-                log.warning("FAISS search failed: %s", e)
+                log.warning("Vector search failed: %s", e)
 
-        bm25_results = []
-        if bm25_idx.load():
-            bm25_results = bm25_idx.search(query, top_k)
+        text_results = []
+        if backend.text.load():
+            text_results = backend.text.search(query, top_k)
 
-        if not faiss_results and not bm25_results:
+        if not vector_results and not text_results:
             return "No memory index yet. Index builds automatically at startup when memory is enabled. Try again after restart."
 
-        merged = reciprocal_rank_fusion(faiss_results, bm25_results)
+        merged = backend.fuser.fuse(vector_results, text_results)
         lines = [f"Found {len(merged)} results for '{query}':\n"]
         for i, r in enumerate(merged[:top_k]):
             meta = r.chunk_meta

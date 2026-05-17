@@ -424,13 +424,441 @@ class SQLiteGraphBackend(GraphBackend):
         )
 
 
+# Module-level GrafeoDB connection cache (S125 Level 3 smoke fix).
+#
+# Grafeo's WAL implementation creates a per-file `<db>.wal/wal_NNNNNNNN.log`
+# on first write. Opening a *second* GrafeoDB on the same path within the
+# same process and then issuing a write raises GRAFEO-X003 "file already
+# exists" on Windows — both instances try to create the same WAL segment.
+#
+# SQLite tolerates this pattern (multiple sqlite3.Connection objects on the
+# same file are fine), so the call sites at the time of Phase 1.5 landing
+# instantiate KnowledgeGraph (and thus the backend) ad-hoc in several
+# places: agent_manager.py, sleep_pipeline.py (two spots), context.py
+# (cached). Caching the underlying GrafeoDB by absolute path makes the
+# Grafeo backend equivalent to SQLite under that pattern without auditing
+# every call site.
+#
+# Trade-off: tests that explicitly want a fresh in-memory Grafeo per case
+# pass db_path == ":memory:" and bypass the cache (each call gets its own
+# handle, matching SQLite ":memory:" semantics).
+_grafeo_instance_cache: "Dict[str, Any]" = {}
+
+
+class GrafeoGraphBackend(GraphBackend):
+    """Grafeo-based graph storage (ADR-024 migration).
+
+    Phase 2: implements init_schema, add_node, get_node, node_count with
+    parity tests against SQLiteGraphBackend. Remaining 9 ABC methods still
+    raise NotImplementedError (Phase 2.5+ scope).
+
+    Mapping (D1=A, D2=a per S123 design review):
+    - Grafeo node label = NodeType.value (5 labels: KnowledgeFile, Entity,
+      SessionArchive, Decision, Agent). Each node carries exactly one label.
+    - DPC `node_id` stored as a node property (Grafeo assigns its own
+      internal ID). Lookup by node_id uses MATCH-by-property; a property
+      index on `node_id` is a Phase 2.5 follow-up for scale.
+    - Opaque `properties` JSON blob preserved as a string property — parity
+      with SQLite, no field-collision risk.
+
+    Encryption: deferred. Grafeo Python binding does not expose its Rust
+    encryption feature as of 0.5.42; security docs explicitly state
+    "no encryption at rest" and recommend application-level encryption
+    or OS-level FDE (BitLocker / LUKS / FileVault). DPC currently relies
+    on OS FDE — see ADR-024 for the decision.
+
+    Phase 2 known limitation: add_node uses INSERT only (no upsert).
+    SQLite parity requires INSERT OR REPLACE semantics — deferred to
+    Phase 2.5 once a property index lets us MATCH-and-DELETE efficiently.
+    """
+
+    def __init__(self, db_path: Path):
+        self._db_path = db_path
+        try:
+            import grafeo
+        except ImportError as e:
+            raise ImportError(
+                "GrafeoGraphBackend requires the `grafeo` package. "
+                "Install with: uv sync --extra graph-grafeo"
+            ) from e
+        # `:memory:` always gets a fresh handle — there is no on-disk WAL
+        # to clash with, and parity tests rely on isolation between cases.
+        if str(db_path) == ":memory:":
+            self._db = grafeo.GrafeoDB()
+        else:
+            key = str(db_path.resolve())
+            cached = _grafeo_instance_cache.get(key)
+            if cached is None:
+                db_path.parent.mkdir(parents=True, exist_ok=True)
+                cached = grafeo.GrafeoDB(key)
+                _grafeo_instance_cache[key] = cached
+            self._db = cached
+        self.init_schema()
+
+    def init_schema(self) -> None:
+        # Grafeo LPG is schemaless: labels and properties are defined on
+        # insert. SQLite's init_schema creates explicit tables; the Grafeo
+        # equivalent is a no-op. The method exists to satisfy the ABC
+        # contract and to keep a future-proof hook for property indexes.
+        return
+
+    def add_node(self, node: GraphNode) -> None:
+        # Parity with SQLite INSERT OR REPLACE: MERGE upsert on node_id.
+        # Existing node of matching type has its mutable properties
+        # refreshed; missing node is created with the requested label set.
+        # Caveat: changing node_type (Grafeo label) for an already-stored
+        # node_id is out of contract — MERGE with the new label won't
+        # match the existing differently-labeled node and would create a
+        # sibling. KG / sleep flows never change node_type on the same
+        # node_id, so this is a documented boundary, not a bug.
+        exempt = bool(node.exempt or node.node_type in ALWAYS_EXEMPT)
+        self._db.execute_cypher(
+            f"MERGE (n:{node.node_type.value} {{node_id: $id}}) "
+            "SET n.label = $label, n.source_layer = $sl, "
+            "n.exempt = $ex, n.properties = $props",
+            {
+                "id": node.node_id,
+                "label": node.label,
+                "sl": node.source_layer,
+                "ex": exempt,
+                "props": json.dumps(node.properties, ensure_ascii=False),
+            },
+        )
+
+    def add_edge(self, edge: GraphEdge) -> None:
+        # Grafeo edges link by internal int id, not by string node_id.
+        # Look up int ids first; raise on missing nodes to match SQLite's
+        # FK constraint (PRAGMA foreign_keys=ON in SQLiteGraphBackend).
+        # node_id is the agent's canonical identifier and is unique by
+        # convention (SQLite PRIMARY KEY, Grafeo property index target);
+        # the MATCH cartesian product yields exactly one (sid, tid) pair
+        # when both nodes exist, so LIMIT 1 is correctness-preserving.
+        rows = list(self._db.execute_cypher(
+            "MATCH (s {node_id: $src}), (t {node_id: $tgt}) "
+            "RETURN id(s) AS sid, id(t) AS tid LIMIT 1",
+            {"src": edge.source_id, "tgt": edge.target_id},
+        ))
+        if not rows:
+            raise ValueError(
+                f"add_edge: source or target node not found "
+                f"({edge.source_id} → {edge.target_id})"
+            )
+        sid, tid = rows[0]["sid"], rows[0]["tid"]
+        self._db.create_edge(
+            sid, tid, edge.edge_type.value,
+            {
+                "t_created": edge.t_created,
+                "t_invalidated": edge.t_invalidated,
+                "confidence": edge.confidence,
+                "justification": edge.justification,
+                "edge_weight": edge.edge_weight,
+                "properties": json.dumps(edge.properties, ensure_ascii=False),
+            },
+        )
+
+    def get_node(self, node_id: str) -> Optional[GraphNode]:
+        rows = list(self._db.execute_cypher(
+            "MATCH (n {node_id: $id}) "
+            "RETURN labels(n)[0] AS lbl, n.label AS l, "
+            "n.source_layer AS sl, n.exempt AS ex, n.properties AS props",
+            {"id": node_id},
+        ))
+        if not rows:
+            return None
+        r = rows[0]
+        # D1=A: exactly one label per node, so labels(n)[0] is the node_type.
+        return GraphNode(
+            node_id=node_id,
+            node_type=NodeType(r["lbl"]),
+            label=r["l"],
+            source_layer=r["sl"],
+            exempt=bool(r["ex"]),
+            properties=json.loads(r["props"]) if r["props"] else {},
+        )
+
+    def get_neighbors(self, node_id: str, edge_type: Optional[EdgeType] = None, hops: int = 1) -> List[GraphNode]:
+        # Undirected variable-length match — parity with SQLite's UNION
+        # over outgoing+incoming edges. SQLite's iterative BFS collects
+        # nodes reachable within `hops`; Grafeo's [*1..hops] returns the
+        # same set when paired with DISTINCT.
+        # `edge_type.value` is f-string-interpolated into the query, not
+        # passed as a Cypher parameter — relationship-type tokens are not
+        # parameterizable in Cypher. Safe today because EdgeType is a
+        # closed Enum of identifier-shaped strings; if the enum ever
+        # admits special characters this becomes a query-injection vector.
+        if edge_type:
+            query = (
+                f"MATCH (s {{node_id: $id}})-[r:{edge_type.value}*1..{hops}]-(t) "
+                "WHERE t.node_id <> $id "
+                "RETURN DISTINCT t.node_id AS nid, labels(t)[0] AS lbl, "
+                "t.label AS l, t.source_layer AS sl, t.exempt AS ex, "
+                "t.properties AS props"
+            )
+        else:
+            query = (
+                f"MATCH (s {{node_id: $id}})-[*1..{hops}]-(t) "
+                "WHERE t.node_id <> $id "
+                "RETURN DISTINCT t.node_id AS nid, labels(t)[0] AS lbl, "
+                "t.label AS l, t.source_layer AS sl, t.exempt AS ex, "
+                "t.properties AS props"
+            )
+        rows = list(self._db.execute_cypher(query, {"id": node_id}))
+        return [
+            GraphNode(
+                node_id=r["nid"],
+                node_type=NodeType(r["lbl"]),
+                label=r["l"],
+                source_layer=r["sl"],
+                exempt=bool(r["ex"]),
+                properties=json.loads(r["props"]) if r["props"] else {},
+            )
+            for r in rows
+        ]
+
+    def get_edges(self, node_id: str, direction: str = "both") -> List[GraphEdge]:
+        results: List[GraphEdge] = []
+        if direction in ("out", "both"):
+            for r in self._db.execute_cypher(
+                "MATCH (s {node_id: $id})-[r]->(t) RETURN "
+                "s.node_id AS src, t.node_id AS tgt, type(r) AS et, "
+                "r.t_created AS tc, r.t_invalidated AS ti, r.confidence AS conf, "
+                "r.justification AS j, r.edge_weight AS ew, r.properties AS p",
+                {"id": node_id},
+            ):
+                results.append(self._cypher_row_to_edge(r))
+        if direction in ("in", "both"):
+            for r in self._db.execute_cypher(
+                "MATCH (s)-[r]->(t {node_id: $id}) RETURN "
+                "s.node_id AS src, t.node_id AS tgt, type(r) AS et, "
+                "r.t_created AS tc, r.t_invalidated AS ti, r.confidence AS conf, "
+                "r.justification AS j, r.edge_weight AS ew, r.properties AS p",
+                {"id": node_id},
+            ):
+                results.append(self._cypher_row_to_edge(r))
+        return results
+
+    @staticmethod
+    def _cypher_row_to_edge(r: dict) -> GraphEdge:
+        return GraphEdge(
+            source_id=r["src"],
+            target_id=r["tgt"],
+            edge_type=EdgeType(r["et"]),
+            t_created=r["tc"] or "",
+            t_invalidated=r["ti"],
+            confidence=r["conf"] if r["conf"] is not None else 1.0,
+            justification=r["j"] or "",
+            edge_weight=r["ew"] or "medium",
+            properties=json.loads(r["p"]) if r["p"] else {},
+        )
+
+    def node_count(self) -> int:
+        return self._db.node_count
+
+    def edge_count(self) -> int:
+        return self._db.edge_count
+
+    def close(self) -> None:
+        # Drop from the singleton cache so a subsequent
+        # GrafeoGraphBackend(same_path) gets a fresh handle instead of
+        # the closed one. Only meaningful for on-disk paths — :memory:
+        # never enters the cache.
+        if str(self._db_path) != ":memory:":
+            key = str(Path(self._db_path).resolve())
+            cached = _grafeo_instance_cache.get(key)
+            if cached is self._db:
+                _grafeo_instance_cache.pop(key, None)
+        self._db.close()
+
+    def edge_exists(self, source_id: str, target_id: str, edge_type: EdgeType) -> bool:
+        rows = list(self._db.execute_cypher(
+            "MATCH (s {node_id: $src})-[r]->(t {node_id: $tgt}) "
+            "WHERE type(r) = $et RETURN 1 LIMIT 1",
+            {"src": source_id, "tgt": target_id, "et": edge_type.value},
+        ))
+        return bool(rows)
+
+    def clear_structural_edges(self) -> int:
+        # Parity with SQLite: match structural edges (canonical marker
+        # source=structural) plus legacy auto=true edges with no source
+        # field. Properties is a JSON-encoded string on the edge; we
+        # substring-match the same shapes SQLite does (both spaced and
+        # un-spaced JSON serializations). Grafeo Cypher counts the
+        # matched rows before DELETE consumes them in the same statement.
+        marker_a = '"source": "structural"'
+        marker_b = '"source":"structural"'
+        auto_a = '"auto": true'
+        auto_b = '"auto":true'
+        source_marker = '"source"'
+        rows = list(self._db.execute_cypher(
+            "MATCH ()-[r]->() WHERE "
+            "r.properties CONTAINS $sa OR r.properties CONTAINS $sb OR "
+            "((r.properties CONTAINS $aa OR r.properties CONTAINS $ab) "
+            "AND NOT r.properties CONTAINS $sm) "
+            "DELETE r RETURN count(r) AS deleted",
+            {"sa": marker_a, "sb": marker_b, "aa": auto_a, "ab": auto_b, "sm": source_marker},
+        ))
+        if not rows:
+            return 0
+        deleted = rows[0].get("deleted")
+        return int(deleted) if deleted is not None else 0
+
+    def update_edge_timestamp_for_node(self, node_id: str, field: str, value: str) -> int:
+        # Parity with SQLite: bump t_created or t_invalidated for edges
+        # touching node_id (either endpoint) where the field is currently
+        # empty/null. Undirected MATCH covers both endpoints in one pass.
+        if field == "t_invalidated":
+            empty_clause = "r.t_invalidated IS NULL"
+        elif field == "t_created":
+            # Legacy edges pre-bi-temporal store t_created='' (empty
+            # string). Treat both '' and NULL as "needs backfill".
+            empty_clause = "(r.t_created = '' OR r.t_created IS NULL)"
+        else:
+            raise ValueError(
+                f"Unsupported field: {field!r}. Expected one of: t_invalidated, t_created"
+            )
+        # Field name is f-string-interpolated; safe because the if/elif
+        # above accepts only two whitelist values.
+        rows = list(self._db.execute_cypher(
+            f"MATCH (s {{node_id: $id}})-[r]-() WHERE {empty_clause} "
+            f"SET r.{field} = $val RETURN count(r) AS updated",
+            {"id": node_id, "val": value},
+        ))
+        if not rows:
+            return 0
+        updated = rows[0].get("updated")
+        return int(updated) if updated is not None else 0
+
+    def bulk_upsert_entities_with_mentions(
+        self,
+        entities: List[dict],
+        t_created: str,
+        entity_exempt: bool,
+    ) -> tuple[int, set[str]]:
+        # Three-phase batch (UNWIND) to amortise per-entity round-trips:
+        #   1. MERGE entity nodes (idempotent — matches SQLite INSERT OR IGNORE)
+        #   2. Detect orphan source_ids via single existence query
+        #   3. Find existing MENTIONS edges, CREATE only the new ones
+        # Phase 3 splits read+write rather than MERGE-with-marker because
+        # MERGE's ON CREATE/ON MATCH writes a marker property that would
+        # pollute the edge's persistent properties. Two queries, clean edges.
+        orphan_sources: set = set()
+
+        # Pre-process: build entity + edge batches, dedupe sources.
+        entity_batch: List[dict] = []
+        edge_batch: List[dict] = []
+        seen_sources: set = set()
+        for ent in entities:
+            label = ent.get("entity", "").strip()
+            if not label:
+                continue
+            ent_type = ent.get("type", "concept")
+            source_id = ent.get("source_id", "")
+            score = ent.get("score", 0.0)
+            entity_id = f"e:{label.lower().replace(' ', '_')}"
+            entity_batch.append({"entity_id": entity_id, "label": label})
+            if source_id:
+                seen_sources.add(source_id)
+                edge_batch.append({
+                    "entity_id": entity_id,
+                    "source_id": source_id,
+                    "justification": f"GLiNER extracted ({ent_type}, score={score:.2f})",
+                })
+
+        if not entity_batch:
+            return 0, orphan_sources
+
+        # Phase 1: MERGE entity nodes. ON CREATE sets properties; ON MATCH
+        # is intentionally omitted so existing entities keep their props
+        # (parity with SQLite's INSERT OR IGNORE which preserves rows).
+        list(self._db.execute_cypher(
+            "UNWIND $batch AS row "
+            "MERGE (e:Entity {node_id: row.entity_id}) "
+            "ON CREATE SET e.label = row.label, e.source_layer = 'L7', "
+            "e.exempt = $ex, e.properties = '{}' "
+            "RETURN e.node_id AS nid",
+            {"batch": entity_batch, "ex": entity_exempt},
+        ))
+
+        if not edge_batch:
+            return 0, orphan_sources
+
+        # Phase 2: orphan detection — which source_ids have a node?
+        source_ids = list(seen_sources)
+        existing_sources = {
+            r["existing"]
+            for r in self._db.execute_cypher(
+                "UNWIND $ids AS sid MATCH (s {node_id: sid}) "
+                "RETURN s.node_id AS existing",
+                {"ids": source_ids},
+            )
+        }
+        orphan_sources = set(source_ids) - existing_sources
+        edge_batch = [r for r in edge_batch if r["source_id"] in existing_sources]
+        if not edge_batch:
+            return 0, orphan_sources
+
+        # Phase 3a: which (source, entity) MENTIONS edges already exist?
+        existing_edges: set = set()
+        for r in self._db.execute_cypher(
+            "UNWIND $batch AS row "
+            "MATCH (s {node_id: row.source_id})-[r:MENTIONS]->"
+            "(e {node_id: row.entity_id}) "
+            "RETURN row.source_id AS sid, row.entity_id AS eid",
+            {"batch": edge_batch},
+        ):
+            existing_edges.add((r["sid"], r["eid"]))
+
+        # Phase 3b: CREATE only the new edges. Properties JSON is a
+        # constant string per spec ('{"source": "gliner_ner"}') — embed
+        # via Cypher literal rather than parameter to keep the round-trip
+        # batch-shaped.
+        new_edges = [
+            r for r in edge_batch
+            if (r["source_id"], r["entity_id"]) not in existing_edges
+        ]
+        if new_edges:
+            list(self._db.execute_cypher(
+                "UNWIND $batch AS row "
+                "MATCH (s {node_id: row.source_id}), (e {node_id: row.entity_id}) "
+                "CREATE (s)-[r:MENTIONS {"
+                "t_created: $tc, t_invalidated: null, confidence: 1.0, "
+                "justification: row.justification, edge_weight: 'medium', "
+                "properties: '{\"source\": \"gliner_ner\"}'"
+                "}]->(e) "
+                "RETURN r.t_created AS tc",
+                {"batch": new_edges, "tc": t_created},
+            ))
+
+        return len(new_edges), orphan_sources
+
+
 class KnowledgeGraph:
     """High-level API for the agent knowledge graph."""
 
-    def __init__(self, agent_root: Path):
-        db_path = agent_root / "knowledge_graph.db"
-        self._backend: GraphBackend = SQLiteGraphBackend(db_path)
-        log.info("KnowledgeGraph initialized at %s (%d nodes, %d edges)", db_path, self._backend.node_count(), self._backend.edge_count())
+    def __init__(self, agent_root: Path, backend: Optional[str] = None):
+        # Backend selection (ADR-024 Phase 1.5): explicit `backend` arg
+        # wins (used by tests + integration scripts); otherwise read
+        # [knowledge_graph] backend from settings, defaulting to "sqlite"
+        # until Grafeo migration Level 2 + Level 3 verification close.
+        if backend is None:
+            from dpc_client_core.settings import Settings
+            # Settings takes the DPC home directory; the agent root lives
+            # inside it (~/.dpc/agents/<id>/), so the home is the agent
+            # root's grandparent (parent of `agents/`).
+            dpc_home = agent_root.parent.parent
+            backend = Settings(dpc_home).get_kg_backend()
+        backend = backend.strip().lower()
+
+        if backend == "grafeo":
+            db_path = agent_root / "knowledge_graph.grafeo"
+            self._backend = GrafeoGraphBackend(db_path)
+        else:
+            db_path = agent_root / "knowledge_graph.db"
+            self._backend = SQLiteGraphBackend(db_path)
+        log.info(
+            "KnowledgeGraph initialized at %s [backend=%s] (%d nodes, %d edges)",
+            db_path, backend, self._backend.node_count(), self._backend.edge_count(),
+        )
 
     @property
     def backend(self) -> GraphBackend:

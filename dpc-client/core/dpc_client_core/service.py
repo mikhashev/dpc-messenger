@@ -3675,7 +3675,8 @@ class CoreService:
                         token_stats = data.get("token_stats", {})
                         history_tokens = sum(len(msg.get("content", "") or "") for msg in messages) // 4
                         token_limit = token_stats.get("token_limit", 0) or self._resolve_agent_token_limit(conversation_id)
-                        context_estimated = token_stats.get("context_estimated", 0)
+                        tokens_after_last_response = token_stats.get("tokens_after_last_response", 0)
+                        tokens_after_last_response_at = token_stats.get("tokens_after_last_response_at")
                         return {
                             "status": "success",
                             "messages": messages,
@@ -3683,7 +3684,8 @@ class CoreService:
                             "tokens_used": token_stats.get("current_token_count", history_tokens),
                             "token_limit": token_limit,
                             "history_tokens": history_tokens,
-                            "context_estimated": context_estimated,
+                            "tokens_after_last_response": tokens_after_last_response,
+                            "tokens_after_last_response_at": tokens_after_last_response_at,
                         }
                     except Exception as e:
                         logger.error("Failed to load agent history from disk: %s", e)
@@ -3781,10 +3783,11 @@ class CoreService:
             token_usage = monitor.get_token_usage()
             # history_tokens: dialog-only (chars ÷ 4), same basis as the token counter
             history_tokens = sum(len(msg.get("content", "") or "") for msg in messages) // 4
-            # context_estimated: full LLM context from the last request.
-            # For agent monitors, stored in _last_context_estimated.
+            # tokens_after_last_response: full LLM context measured after the previous response.
+            # For agent monitors, stored in _tokens_after_last_response (one request stale).
             # For local AI monitors, current_token_count = prompt_tokens (already the full context).
-            context_estimated = monitor._last_context_estimated or token_usage.get("tokens_used", 0)
+            tokens_after_last_response = monitor._tokens_after_last_response or token_usage.get("tokens_used", 0)
+            tokens_after_last_response_at = monitor._tokens_after_last_response_at
             # For group chats, current_token_count may be 0 (no LLM calls update it).
             # Use history_tokens as the floor to keep the UI counter accurate.
             tokens_used = token_usage.get("tokens_used", 0)
@@ -3798,7 +3801,8 @@ class CoreService:
                 "tokens_used": tokens_used,
                 "token_limit": token_usage.get("token_limit", 0),
                 "history_tokens": history_tokens,
-                "context_estimated": context_estimated,
+                "tokens_after_last_response": tokens_after_last_response,
+                "tokens_after_last_response_at": tokens_after_last_response_at,
             }
 
         except Exception as e:
@@ -3925,7 +3929,8 @@ class CoreService:
                         "tokens_used": 0,
                         "token_limit": token_limit,
                         "history_tokens": 0,
-                        "context_estimated": 0,
+                        "tokens_after_last_response": 0,
+                        "tokens_after_last_response_at": None,
                     })
                     if not group.is_discord_bridge:
                         asyncio.create_task(self.trigger_group_sleep(conversation_id))
@@ -4153,7 +4158,8 @@ class CoreService:
                 "tokens_used": history_tokens,
                 "token_limit": token_limit,
                 "history_tokens": history_tokens,
-                "context_estimated": 0,
+                "tokens_after_last_response": 0,
+                "tokens_after_last_response_at": None,
             })
             return {
                 "status": "success",
@@ -4161,7 +4167,8 @@ class CoreService:
                 "tokens_used": history_tokens,
                 "token_limit": token_limit,
                 "history_tokens": history_tokens,
-                "context_estimated": 0,
+                "tokens_after_last_response": 0,
+                "tokens_after_last_response_at": None,
             }
         except Exception as e:
             logger.error("Error sending group message: %s", e, exc_info=True)
@@ -4299,17 +4306,19 @@ class CoreService:
         # Relay to P2P peers so remote members see the agent response
         await self._broadcast_to_group(group_id, {"command": "GROUP_TEXT", "payload": payload})
 
-        # Update token count — use agent's context_estimated if available
+        # Update token count — use agent's tokens_after_last_response if available
         history_tokens = sum(len(m.get("content", "") or "") for m in monitor.get_message_history()) // 4
-        context_estimated = getattr(monitor, '_last_context_estimated', 0) or 0
-        monitor.set_token_count(max(history_tokens, context_estimated))
+        tokens_after_last_response = getattr(monitor, '_tokens_after_last_response', 0) or 0
+        tokens_after_last_response_at = getattr(monitor, '_tokens_after_last_response_at', None)
+        monitor.set_token_count(max(history_tokens, tokens_after_last_response))
         token_usage = monitor.get_token_usage()
         await self.local_api.broadcast_event("token_usage_updated", {
             "conversation_id": group_id,
-            "tokens_used": max(history_tokens, context_estimated),
+            "tokens_used": max(history_tokens, tokens_after_last_response),
             "token_limit": token_usage.get("token_limit", 0) or 128000,
             "history_tokens": history_tokens,
-            "context_estimated": context_estimated,
+            "tokens_after_last_response": tokens_after_last_response,
+            "tokens_after_last_response_at": tokens_after_last_response_at,
         })
 
         # Route @mentions from agent messages (enables CC→Ark and Ark→CC communication)
@@ -5620,7 +5629,8 @@ class CoreService:
                         "tokens_used": 0,
                         "token_limit": 128000,
                         "history_tokens": 0,
-                        "context_estimated": 0,
+                        "tokens_after_last_response": 0,
+                        "tokens_after_last_response_at": None,
                         "user_msg_index": user_msg_index,
                     }
                 )
@@ -5678,7 +5688,8 @@ class CoreService:
                     "token_limit": token_limit,
                     "usage_percent": usage_percent,
                     "history_tokens": session_state.get("history_tokens", 0),
-                    "context_estimated": session_state.get("context_estimated", 0),
+                    "tokens_after_last_response": session_state.get("tokens_after_last_response", 0),
+                    "tokens_after_last_response_at": session_state.get("tokens_after_last_response_at"),
                 })
                 logger.warning("Token Warning - %s: %.1f%% of context window used (%d/%d tokens)",
                                conversation_id, usage_percent * 100,
@@ -5718,7 +5729,8 @@ class CoreService:
                     "tokens_used": tokens_used,
                     "token_limit": token_limit,
                     "history_tokens": session_state.get("history_tokens", 0),
-                    "context_estimated": session_state.get("context_estimated", 0),
+                    "tokens_after_last_response": session_state.get("tokens_after_last_response", 0),
+                    "tokens_after_last_response_at": session_state.get("tokens_after_last_response_at"),
                     "thinking": thinking_text,
                     "thinking_tokens": thinking_tokens,
                     "user_msg_index": user_msg_index,
@@ -5844,7 +5856,7 @@ class CoreService:
             )
             monitor.save_history()
 
-            # context_estimated is updated after each LLM response — no additive
+            # tokens_after_last_response is updated after each LLM response — no additive
             # increment here (same fix as agent_manager.py drift removal).
             token_stats = manager.get_session_state(conversation_id)
 
@@ -5863,7 +5875,8 @@ class CoreService:
                     "sender_node_id": "cc",
                     "timestamp": timestamp,
                     "msg_index": monitor.get_last_msg_index(),
-                    "context_estimated": token_stats.get("context_estimated", 0),
+                    "tokens_after_last_response": token_stats.get("tokens_after_last_response", 0),
+                    "tokens_after_last_response_at": token_stats.get("tokens_after_last_response_at"),
                     "history_tokens": token_stats.get("history_tokens", 0),
                     "tokens_limit": token_stats.get("tokens_limit", 128000),
                 })
@@ -6265,9 +6278,10 @@ class CoreService:
                 monitor.set_token_count(result["prompt_tokens"])
 
                 # Compute breakdown for three-metric token display:
-                # - context_estimated = full assembled prompt (system + contexts + history)
+                # - tokens_after_last_response = full assembled prompt (system + contexts + history)
                 # - history_tokens = rough estimate of conversation text only (chars ÷ 4)
-                _context_estimated = result["prompt_tokens"]
+                _tokens_after_last_response = result["prompt_tokens"]
+                _tokens_after_last_response_at = datetime.now(timezone.utc).isoformat()
                 _history_tokens = sum(
                     len(msg.get("content", "")) for msg in message_history
                 ) // 4
@@ -6285,7 +6299,8 @@ class CoreService:
                         "token_limit": current_limit,
                         "usage_percent": current_usage_percent,
                         "history_tokens": _history_tokens,
-                        "context_estimated": _context_estimated,
+                        "tokens_after_last_response": _tokens_after_last_response,
+                        "tokens_after_last_response_at": _tokens_after_last_response_at,
                     })
                     logger.warning("Token Warning - %s: %.1f%% of context window used (%d/%d tokens)",
                                  conversation_id, current_usage_percent * 100,
@@ -6296,7 +6311,8 @@ class CoreService:
                 response_payload["token_limit"] = result.get("model_max_tokens", 0)
                 response_payload["this_query_tokens"] = result["tokens_used"]  # Per-query tokens (for debugging)
                 response_payload["history_tokens"] = _history_tokens
-                response_payload["context_estimated"] = _context_estimated
+                response_payload["tokens_after_last_response"] = _tokens_after_last_response
+                response_payload["tokens_after_last_response_at"] = _tokens_after_last_response_at
 
         except Exception as e:
             logger.error("Error during inference: %s", e, exc_info=True)

@@ -52,7 +52,8 @@
     used: number;
     limit: number;
     historyTokens?: number;
-    contextEstimated?: number;
+    tokensAfterLastResponse?: number;
+    tokensAfterLastResponseAt?: string | null;
   };
 
   type InstructionSets = {
@@ -179,7 +180,8 @@
     used: currentTokenUsage.used,
     limit: currentTokenUsage.limit > 0 ? currentTokenUsage.limit : DEFAULT_TOKEN_LIMIT,
     historyTokens: currentTokenUsage.historyTokens ?? 0,
-    contextEstimated: currentTokenUsage.contextEstimated ?? 0,
+    tokensAfterLastResponse: currentTokenUsage.tokensAfterLastResponse ?? 0,
+    tokensAfterLastResponseAt: currentTokenUsage.tokensAfterLastResponseAt ?? null,
   });
   let estimatedUsage = $derived(estimateConversationUsage(effectiveTokenUsage, currentInput));
   let tokenWarningLevel = $derived(

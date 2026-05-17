@@ -86,25 +86,40 @@ def _build_runtime_section(
     agent_root: pathlib.Path,
     task: Dict[str, Any],
     session_state: Optional[Dict[str, Any]] = None,
+    billing_model: str = "subscription",
 ) -> str:
-    """Build the runtime context section."""
+    """Build the runtime context section.
+
+    billing_model is the authoritative source of truth for which budget shape
+    to emit — passed down from AgentConfig so a fresh state.json (empty dict)
+    is correctly classified for pay_per_use agents before the first task has
+    written spent_usd.
+    """
     runtime_data = {
         "utc_now": utc_now_iso(),
         "agent_root": str(agent_root),
         "task": {"id": task.get("id"), "type": task.get("type")},
     }
 
-    # Budget info from agent state
+    # Budget info from agent state. Shape depends on billing model:
+    #   subscription → {"billing": "subscription", "tokens_used_total": N}
+    #   pay_per_use  → {"billing": "pay_per_use", "spent_usd", "total_usd", "remaining_usd"}
     try:
         state_path = agent_root / "state" / "state.json"
-        if state_path.exists():
-            state_data = json.loads(read_text(state_path))
-            spent = float(state_data.get("spent_usd", 0))
-            total = float(state_data.get("budget_usd", 50))
+        state_data = json.loads(read_text(state_path)) if state_path.exists() else {}
+        if billing_model == "subscription":
             runtime_data["budget"] = {
+                "billing": "subscription",
+                "tokens_used_total": int(state_data.get("tokens_used_total", 0)),
+            }
+        else:
+            spent = float(state_data.get("spent_usd", 0))
+            total = float(state_data.get("budget_usd", 0))
+            runtime_data["budget"] = {
+                "billing": "pay_per_use",
                 "spent_usd": spent,
                 "total_usd": total,
-                "remaining_usd": max(0, total - spent),
+                "remaining_usd": max(0.0, total - spent),
             }
     except Exception:
         log.debug("Failed to read budget info", exc_info=True)
@@ -113,16 +128,20 @@ def _build_runtime_section(
     if session_state:
         token_limit = session_state.get("tokens_limit") or 204800
         history_tokens = session_state.get("history_tokens", 0)
-        context_estimated = session_state.get("context_estimated", 0)
+        tokens_after_last_response = session_state.get("tokens_after_last_response", 0)
+        tokens_after_last_response_at = session_state.get("tokens_after_last_response_at")
         runtime_data["session"] = {
             "messages_count": session_state.get("messages_count", 0),
             "tokens_limit": token_limit,
             # history_tokens: conversation text only (user+assistant ÷4). Matches UI token counter.
             "history_tokens": history_tokens,
             "history_usage_percent": session_state.get("history_usage_percent", 0),
-            # context_estimated: full context from previous request (system+memory+tools+history).
-            # One request stale. Matches "Context size: X%" in dpc-client.log.
-            "context_estimated": context_estimated,
+            # tokens_after_last_response: full LLM context measured AFTER the previous response
+            # (system + memory + tools + history). ONE REQUEST STALE — during the current
+            # request this is a lower bound on actual usage. Pair with *_at timestamp for
+            # freshness. Matches "Context size: X%" in dpc-client.log.
+            "tokens_after_last_response": tokens_after_last_response,
+            "tokens_after_last_response_at": tokens_after_last_response_at,
             "context_usage_percent": session_state.get("context_usage_percent", 0),
         }
 
@@ -299,6 +318,7 @@ def build_llm_messages(
     sandbox_read_only: Optional[List[str]] = None,
     sandbox_read_write: Optional[List[str]] = None,
     embedding_provider: Optional[Any] = None,
+    billing_model: str = "subscription",
 ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
     """
     Build the full LLM message context for a task.
@@ -378,44 +398,40 @@ def build_llm_messages(
         if _query_text:
             try:
                 from .active_recall import get_recall_block
-                from .hybrid_search import reciprocal_rank_fusion
-                from .bm25_index import BM25Index
-                from .faiss_index import FaissIndex
+                from .retrieval import make_backend_for_agent
                 from .memory import EmbeddingProvider
                 import numpy as _np
 
-                _index_dir = agent_root / "state" / "memory_index"
-                _faiss_idx = FaissIndex(_index_dir)
-                _bm25_idx = BM25Index(_index_dir)
+                _backend = make_backend_for_agent(agent_root)
 
                 _faiss_results = []
                 _q1_results = []
                 _q2_results = []
-                if _faiss_idx.load():
+                if _backend.vector.load():
                     if embedding_provider is None:
                         from .memory import get_embedding_provider
                         embedding_provider = get_embedding_provider(local_files_only=True)
                         log.info("Active Recall: created fallback EmbeddingProvider (local_files_only)")
-                    if _faiss_idx.needs_rebuild(embedding_provider.model_name):
-                        log.info("Active Recall: FAISS index needs rebuild (model changed), skipping search")
+                    if _backend.vector.needs_rebuild(embedding_provider.model_name):
+                        log.info("Active Recall: vector index needs rebuild (model changed), skipping search")
                     else:
                         if _human_text:
                             _q1_vec = _np.array(embedding_provider.embed(_human_text), dtype=_np.float32)
-                            _q1_results = _faiss_idx.search(_q1_vec, FAISS_TOP_K)
+                            _q1_results = _backend.vector.search(_q1_vec, FAISS_TOP_K)
                         if _context_text:
                             _q2_vec = _np.array(embedding_provider.embed(_context_text), dtype=_np.float32)
-                            _q2_results = _faiss_idx.search(_q2_vec, FAISS_TOP_K)
+                            _q2_results = _backend.vector.search(_q2_vec, FAISS_TOP_K)
                         _faiss_results = _q1_results + _q2_results
-                    log.debug("Active Recall FAISS: %d results (Q1=%d + Q2=%d) — %s",
+                    log.debug("Active Recall vector: %d results (Q1=%d + Q2=%d) — %s",
                               len(_faiss_results), len(_q1_results), len(_q2_results),
                               [m.get("source_file", "?") for m, _ in _faiss_results])
 
                 _keyword_results = []
                 _sparse_query = _human_text or _context_text
-                if _bm25_idx.load():
-                    _bm25_results = _bm25_idx.search(_sparse_query, BM25_TOP_K)
+                if _backend.text.load():
+                    _bm25_results = _backend.text.search(_sparse_query, BM25_TOP_K)
                     _keyword_results.extend(_bm25_results)
-                    log.debug("Active Recall BM25: %d results — %s", len(_bm25_results),
+                    log.debug("Active Recall text: %d results — %s", len(_bm25_results),
                               [m.get("source_file", "?") for m, _ in _bm25_results])
 
                 _graph_results = []
@@ -430,7 +446,7 @@ def build_llm_messages(
                 except Exception:
                     log.debug("Active Recall Graph L7: unavailable (cold start or no graph DB)")
 
-                _results = reciprocal_rank_fusion(_faiss_results, _keyword_results, graph_results=_graph_results)
+                _results = _backend.fuser.fuse(_faiss_results, _keyword_results, graph_results=_graph_results)
                 _ctx_ratio = (session_state or {}).get("context_usage_percent", 0) / 100.0
                 _recall = get_recall_block(_results, context_usage_ratio=_ctx_ratio, agent_root=agent_root)
                 if _recall:
@@ -463,7 +479,7 @@ def build_llm_messages(
 
     # Dynamic content: changes every request
     dynamic_parts = [
-        _build_runtime_section(agent_root, task, session_state),
+        _build_runtime_section(agent_root, task, session_state, billing_model=billing_model),
     ]
     dynamic_parts.extend(_build_recent_sections(memory, task_id=task.get("id", "")))
 
@@ -659,15 +675,22 @@ Available skills are listed below. Choose the one whose description best matches
 
 Your runtime context includes session metrics:
 - `history_tokens` — conversation messages only (matches UI counter)
-- `context_estimated` — full context size (system + memory + tools + history)
-- `context_usage_percent` — how full your context window is
+- `tokens_after_last_response` — full context size measured AFTER your previous response (system + memory + tools + history)
+- `tokens_after_last_response_at` — ISO 8601 timestamp of when `tokens_after_last_response` was measured
+- `context_usage_percent` — how full your context window is (based on `tokens_after_last_response`)
 
 **Thresholds:**
 - >65%: Start wrapping up open threads, save important insights
 - >85%: Warn the user. Propose knowledge extraction and new session
 - >95%: Strongly recommend immediate session reset
 
-Note: context_estimated is one request stale. Accurate enough for decisions.
+Note: `tokens_after_last_response` is ONE REQUEST STALE by design — it is the
+measurement taken at the end of your previous LLM call, not a live counter for
+the current request. During the current turn, actual context usage is somewhat
+higher (this turn's user message + tool results are not yet included). Treat
+the value as a lower bound on current usage. Use `tokens_after_last_response_at`
+to judge how recent the measurement is — if many tool rounds passed since,
+the live number may be noticeably above this lower bound.
 
 ## Constraints
 

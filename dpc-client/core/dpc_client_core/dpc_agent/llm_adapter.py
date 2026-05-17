@@ -19,6 +19,8 @@ import logging
 import re
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple
 
+from .pricing import compute_cost_usd
+
 if TYPE_CHECKING:
     from ..llm_manager import LLMManager
 
@@ -294,7 +296,7 @@ class DpcLlmAdapter:
                 "prompt_tokens": prompt_tokens,
                 "completion_tokens": completion_tokens,
                 "total_tokens": prompt_tokens + completion_tokens,
-                "cost": prompt_tokens + completion_tokens,
+                "cost": compute_cost_usd(self._provider_alias or "", prompt_tokens, completion_tokens),
             }
 
             return response_msg, usage
@@ -417,7 +419,7 @@ class DpcLlmAdapter:
                 "prompt_tokens": prompt_tokens,
                 "completion_tokens": completion_tokens,
                 "total_tokens": prompt_tokens + completion_tokens,
-                "cost": prompt_tokens + completion_tokens,
+                "cost": compute_cost_usd(self._provider_alias or "", prompt_tokens, completion_tokens),
             }
 
             return response_msg, usage
@@ -495,10 +497,17 @@ class DpcLlmAdapter:
                 "prompt_tokens": prompt_tokens,
                 "completion_tokens": completion_tokens,
                 "total_tokens": prompt_tokens + completion_tokens,
-                "cost": prompt_tokens + completion_tokens,
+                "cost": compute_cost_usd(self._provider_alias or "", prompt_tokens, completion_tokens),
             }
         else:
-            usage.setdefault("cost", usage.get("total_tokens", 0))
+            usage.setdefault(
+                "cost",
+                compute_cost_usd(
+                    self._provider_alias or "",
+                    int(usage.get("prompt_tokens", 0)),
+                    int(usage.get("completion_tokens", 0)),
+                ),
+            )
 
         return response_msg, usage
 
@@ -678,7 +687,7 @@ class DpcLlmAdapter:
                     "prompt_tokens": remote_prompt_tokens,
                     "completion_tokens": remote_response_tokens,
                     "total_tokens": remote_tokens or (remote_prompt_tokens + remote_response_tokens),
-                    "cost": remote_tokens or (remote_prompt_tokens + remote_response_tokens),
+                    "cost": compute_cost_usd(self._provider_alias or "", remote_prompt_tokens, remote_response_tokens),
                 }
             elif self._token_counter:
                 # Count locally using TokenCountManager
@@ -689,15 +698,17 @@ class DpcLlmAdapter:
                     "prompt_tokens": prompt_tokens,
                     "completion_tokens": completion_tokens,
                     "total_tokens": prompt_tokens + completion_tokens,
-                    "cost": prompt_tokens + completion_tokens,
+                    "cost": compute_cost_usd(self._provider_alias or "", prompt_tokens, completion_tokens),
                 }
             else:
                 # Final fallback to character estimation
+                est_prompt_tokens = len(prompt) // 4
+                est_completion_tokens = len(response_text) // 4
                 usage: Dict[str, Any] = {
-                    "prompt_tokens": len(prompt) // 4,
-                    "completion_tokens": len(response_text) // 4,
-                    "total_tokens": (len(prompt) + len(response_text)) // 4,
-                    "cost": (len(prompt) + len(response_text)) // 4,
+                    "prompt_tokens": est_prompt_tokens,
+                    "completion_tokens": est_completion_tokens,
+                    "total_tokens": est_prompt_tokens + est_completion_tokens,
+                    "cost": compute_cost_usd(self._provider_alias or "", est_prompt_tokens, est_completion_tokens),
                 }
 
             return response_msg, usage

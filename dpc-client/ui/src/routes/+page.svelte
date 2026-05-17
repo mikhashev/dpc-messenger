@@ -156,7 +156,7 @@
   // showGroupInviteDialog + pendingGroupInvite moved to GroupPanel.svelte (Step 7)
   let showGroupSettingsDialog = $state(false);  // v0.19.0: group settings/members panel
   // Token tracking state (Phase 2)
-  let tokenUsageMap = $state(new Map<string, {used: number, limit: number, historyTokens?: number, contextEstimated?: number}>());
+  let tokenUsageMap = $state(new Map<string, {used: number, limit: number, historyTokens?: number, tokensAfterLastResponse?: number, tokensAfterLastResponseAt?: string | null}>());
   let showTokenWarning = $state(false);
   let tokenWarningMessage = $state("");
 
@@ -525,7 +525,8 @@
     used: currentTokenUsage.used,
     limit: currentTokenUsage.limit > 0 ? currentTokenUsage.limit : DEFAULT_TOKEN_LIMIT,
     historyTokens: currentTokenUsage.historyTokens ?? 0,
-    contextEstimated: currentTokenUsage.contextEstimated ?? 0,
+    tokensAfterLastResponse: currentTokenUsage.tokensAfterLastResponse ?? 0,
+    tokensAfterLastResponseAt: currentTokenUsage.tokensAfterLastResponseAt ?? null,
   });
 
   // Reactive: Estimate token usage including current input (real-time feedback in SessionControls)
@@ -1007,7 +1008,8 @@
             estimatedTokens={estimatedUsage.estimated}
             showEstimation={estimatedUsage.isEstimated}
             historyTokens={effectiveTokenUsage.historyTokens ?? 0}
-            contextEstimated={effectiveTokenUsage.contextEstimated ?? 0}
+            tokensAfterLastResponse={effectiveTokenUsage.tokensAfterLastResponse ?? 0}
+            tokensAfterLastResponseAt={effectiveTokenUsage.tokensAfterLastResponseAt ?? null}
             messageCount={$chatHistories.get(activeChatId)?.length ?? 0}
             bind:enableMarkdown
             isExtracting={isExtractingKnowledge}

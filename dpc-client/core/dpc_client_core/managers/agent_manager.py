@@ -140,10 +140,8 @@ class DpcAgentManager:
             raise RuntimeError("CoreService does not have llm_manager")
 
         # Build agent config
-        raw_budget = self.config.get("budget_usd", 500_000)
-        budget = raw_budget if raw_budget >= 1000 else 500_000
         agent_config = AgentConfig(
-            budget_usd=budget,
+            budget_usd=self.config.get("budget_usd"),
             max_rounds=self.config.get("max_rounds", 200),
             enable_task_queue=False,
             billing_model=self.config.get("billing_model", "subscription"),
@@ -194,10 +192,8 @@ class DpcAgentManager:
             else None
         )
 
-        raw_budget = self.config.get("budget_usd", 500_000)
-        budget = raw_budget if raw_budget >= 1000 else 500_000
         agent_config = AgentConfig(
-            budget_usd=budget,
+            budget_usd=self.config.get("budget_usd"),
             max_rounds=self.config.get("max_rounds", 200),
             enable_task_queue=self.config.get("enable_task_queue", True),
             billing_model=self.config.get("billing_model", "subscription"),
@@ -266,20 +262,24 @@ class DpcAgentManager:
                             from pathlib import Path
                             import os
                             from dpc_client_core.dpc_agent.memory import get_embedding_provider
-                            from dpc_client_core.dpc_agent.faiss_index import FaissIndex
-                            from dpc_client_core.dpc_agent.bm25_index import BM25Index
+                            from dpc_client_core.dpc_agent.retrieval import (
+                                TextAddItem, VectorAddItem, make_backend_for_agent,
+                            )
                             from dpc_client_core.dpc_agent.text_extract import extract_text
                             from dpc_client_core.dpc_agent.indexing_pipeline import _extract_heading, _build_doc_text
                             provider = _provider_ref or get_embedding_provider(model_name=_actual_model)
-                            faiss_idx = FaissIndex(index_dir, model_name=_actual_model, dimensions=provider.dimensions)
-                            bm25_idx = BM25Index(index_dir)
+                            backend = make_backend_for_agent(
+                                agent_root,
+                                model_name=_actual_model,
+                                dimensions=provider.dimensions,
+                            )
 
                             count = 0
                             l6_count = 0
                             # Always rebuild L5 agent knowledge (not just on first init)
                             from dpc_client_core.dpc_agent.indexing_pipeline import full_rebuild
                             knowledge_dir = agent_root / "knowledge"
-                            count = full_rebuild(knowledge_dir, provider, faiss_idx, bm25_idx, stop_event=self._stop_event)
+                            count = full_rebuild(knowledge_dir, provider, backend, stop_event=self._stop_event)
 
                             # Collect all extra documents (L6 + EXT) then embed+index in bulk
                             extra_texts = []
@@ -348,8 +348,7 @@ class DpcAgentManager:
                                     pass
 
                             if stored_extra_hash == extra_hash and not needs_full_rebuild and extra_texts:
-                                faiss_idx.load()
-                                bm25_idx.load()
+                                backend.load()
                                 log.info("Extra index unchanged (hash=%s), skipping re-embed of %d docs", extra_hash, len(extra_texts))
                                 extra_texts = []
 
@@ -364,18 +363,22 @@ class DpcAgentManager:
                                     batch_texts = extra_texts[batch_start:batch_start + BATCH_SIZE]
                                     batch_metas = extra_metas[batch_start:batch_start + BATCH_SIZE]
                                     vectors = np.array(provider.embed_batch(batch_texts), dtype=np.float32)
-                                    for vec, meta in zip(vectors, batch_metas):
-                                        faiss_idx.add(vec.reshape(1, -1), [meta])
-                                        indexed += 1
+                                    backend.vector.add([
+                                        VectorAddItem(vector=vec.reshape(1, -1), meta=meta)
+                                        for vec, meta in zip(vectors, batch_metas)
+                                    ])
+                                    indexed += len(batch_texts)
                                 if not self._stop_event.is_set():
-                                    bm25_idx.add(extra_texts, extra_metas)
+                                    backend.text.add([
+                                        TextAddItem(text=t, meta=m)
+                                        for t, m in zip(extra_texts, extra_metas)
+                                    ])
                                     log.info("Bulk indexed %d extra documents (L6: %d, EXT: %d)", len(extra_texts), l6_count, ext_count)
                                 else:
                                     log.info("Extra indexing interrupted by shutdown before BM25")
 
                             if needs_full_rebuild or extra_texts:
-                                faiss_idx.save()
-                                bm25_idx.save()
+                                backend.save()
                                 # Persist extra_hash for staleness detection on next startup
                                 try:
                                     import json as _json3
@@ -713,9 +716,10 @@ class DpcAgentManager:
             )
             monitor.save_history()  # Save to disk immediately
 
-            # context_estimated is updated after each LLM response (lines 778-786)
-            # from accurate token counts. No additive increment here — it caused
-            # cumulative drift (63% claimed vs 14% actual after 40 messages).
+            # tokens_after_last_response is updated after each LLM response
+            # (writer below this block) from accurate token counts. No additive
+            # increment here — it caused cumulative drift (63% claimed vs 14% actual
+            # after 40 messages).
 
         agent_display_name = self._agent_display_name or self.agent_id or "DPC Agent"
 
@@ -817,19 +821,25 @@ class DpcAgentManager:
             elif _is_llm_error:
                 log.warning(f"LLM error not saved to history: {response[:100]}")
 
-            # Store full context estimate from this request so next request's session_state
+            # Store full context measurement from this request so next request's session_state
             # can expose it. One request stale, but accurate — context grows incrementally.
             # Prefer accurate token count from LLM adapter (first_prompt_tokens = round-1 context
             # before tool results inflate it); fall back to chars/4 estimate from cap_info.
+            # Value + timestamp updated atomically so freshness is always derivable.
+            new_token_count: Optional[int] = None
             if hasattr(agent, '_last_usage') and agent._last_usage:
                 accurate = (agent._last_usage.get("first_prompt_tokens")
                             or agent._last_usage.get("prompt_tokens", 0))
                 if accurate:
-                    monitor._last_context_estimated = accurate
+                    new_token_count = accurate
                 elif hasattr(agent, '_last_cap_info') and agent._last_cap_info:
-                    monitor._last_context_estimated = agent._last_cap_info.get("estimated_tokens_before", 0)
+                    new_token_count = agent._last_cap_info.get("estimated_tokens_before", 0)
             elif hasattr(agent, '_last_cap_info') and agent._last_cap_info:
-                monitor._last_context_estimated = agent._last_cap_info.get("estimated_tokens_before", 0)
+                new_token_count = agent._last_cap_info.get("estimated_tokens_before", 0)
+
+            if new_token_count is not None:
+                monitor._tokens_after_last_response = new_token_count
+                monitor._tokens_after_last_response_at = utc_now_iso()
 
             # Update token count in monitor after agent response.
             # Count tokens directly from the conversation history (user + assistant messages)
@@ -1049,17 +1059,22 @@ class DpcAgentManager:
         usage = monitor.get_token_usage()
         token_limit = usage.get("token_limit") or config_cw or 204800
         history_tokens = usage.get("tokens_used", 0)
-        context_estimated = monitor._last_context_estimated
+        tokens_after_last_response = monitor._tokens_after_last_response
+        tokens_after_last_response_at = monitor._tokens_after_last_response_at
         return {
             # Conversation history only (user+assistant text ÷ 4).
             # Same basis as the token counter shown in the UI.
             "history_tokens": history_tokens,
             "history_usage_percent": round(history_tokens / token_limit, 4) if token_limit else 0,
-            # Full context estimate from previous request (one request stale).
+            # Full LLM context measured immediately after the previous response.
             # Includes: system prompt + scratchpad + identity + knowledge + tools + history.
+            # ONE REQUEST STALE: updated only after the LLM call completes, so during
+            # the current request this is a lower bound on actual current usage.
+            # Pair with *_at timestamp to compute freshness.
             # This is what the log "Context size: X%" reports.
-            "context_estimated": context_estimated,
-            "context_usage_percent": round(context_estimated / token_limit, 4) if token_limit and context_estimated else 0,
+            "tokens_after_last_response": tokens_after_last_response,
+            "tokens_after_last_response_at": tokens_after_last_response_at,
+            "context_usage_percent": round(tokens_after_last_response / token_limit, 4) if token_limit and tokens_after_last_response else 0,
             "tokens_limit": token_limit,
             "messages_count": len(monitor.message_history),
         }
@@ -1144,7 +1159,8 @@ class DpcAgentManager:
             "initialized": self._agent is not None,
             "agent_root": str(self.agent_root),
             "config": {
-                "budget_usd": self.config.get("budget_usd", 500_000),
+                "budget_usd": self.config.get("budget_usd"),
+                "billing_model": self.config.get("billing_model", "subscription"),
                 "max_rounds": self.config.get("max_rounds", 200),
                 "tools": self.config.get("tools", []),
             },

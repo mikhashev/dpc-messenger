@@ -1060,7 +1060,8 @@ Send a voice message and it will be transcribed and processed\\.
                     "token_limit": token_limit,
                     "usage_percent": usage_percent,
                     "history_tokens": tokens_used,  # for agent, current_token_count = history_tokens
-                    "context_estimated": monitor._last_context_estimated,
+                    "tokens_after_last_response": monitor._tokens_after_last_response,
+                    "tokens_after_last_response_at": monitor._tokens_after_last_response_at,
                 })
                 log.warning(f"[_broadcast_history_to_ui] Token Warning - {conversation_id}: "
                             f"{usage_percent * 100:.1f}% of context window used ({tokens_used}/{token_limit})")
@@ -1083,7 +1084,8 @@ Send a voice message and it will be transcribed and processed\\.
                 "tokens_used": tokens_used,
                 "token_limit": token_limit,
                 "thinking": thinking,
-                "context_estimated": monitor._last_context_estimated,
+                "tokens_after_last_response": monitor._tokens_after_last_response,
+                "tokens_after_last_response_at": monitor._tokens_after_last_response_at,
             })
             log.debug(f"[_broadcast_history_to_ui] Pushed {len(messages)} messages for {conversation_id}")
         except Exception as e:
