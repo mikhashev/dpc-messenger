@@ -198,10 +198,10 @@ def write_file(ctx: ToolContext, path: str, content: str) -> str:
                 provider = getattr(agent, '_embedding_provider', None) if agent else None
                 if provider:
                     from ..indexing_pipeline import index_single_file
-                    from ..retrieval import make_native_backend
+                    from ..retrieval import make_backend_for_agent
                     index_dir = ctx.agent_root / "state" / "memory_index"
                     if index_dir.exists():
-                        backend = make_native_backend(index_dir)
+                        backend = make_backend_for_agent(ctx.agent_root)
                         if backend.vector.load():
                             backend.text.load()
                             index_single_file(file_path, provider, backend, source_layer="L5")
@@ -259,10 +259,10 @@ def repo_delete(ctx: ToolContext, path: str, recursive: bool = False) -> str:
             # Remove from retrieval backend if knowledge file
             if path.startswith("knowledge/") and not path.endswith("_index.md"):
                 try:
-                    from ..retrieval import make_native_backend
+                    from ..retrieval import make_backend_for_agent
                     index_dir = ctx.agent_root / "state" / "memory_index"
                     if index_dir.exists():
-                        backend = make_native_backend(index_dir)
+                        backend = make_backend_for_agent(ctx.agent_root)
                         source_file = Path(path).name
                         if backend.vector.load():
                             backend.vector.remove_by_source(source_file)
@@ -656,11 +656,10 @@ def chat_history(ctx: ToolContext, limit: int = 0, offset: int = -1, include_int
 def memory_search(ctx: ToolContext, query: str, top_k: int = 5) -> str:
     """Search across knowledge base using hybrid BM25 + semantic search (ADR-010)."""
     try:
-        from ..retrieval import make_native_backend
+        from ..retrieval import make_backend_for_agent
         import numpy as np
 
-        index_dir = ctx.agent_root / "state" / "memory_index"
-        backend = make_native_backend(index_dir)
+        backend = make_backend_for_agent(ctx.agent_root)
 
         vector_results = []
         if backend.vector.load():

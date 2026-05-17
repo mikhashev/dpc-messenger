@@ -923,10 +923,10 @@ Respond in JSON format:
                         agent = agent_mgr._agent
                         if agent and hasattr(agent, '_embedding_provider') and agent._embedding_provider:
                             from .dpc_agent.indexing_pipeline import index_single_file
-                            from .dpc_agent.retrieval import make_native_backend
+                            from .dpc_agent.retrieval import make_backend_for_agent
                             index_dir = agent_mgr.agent_root / "state" / "memory_index"
                             if index_dir.exists():
-                                backend = make_native_backend(index_dir)
+                                backend = make_backend_for_agent(agent_mgr.agent_root)
                                 if backend.vector.load():
                                     backend.text.load()
                                     index_single_file(commit_path, agent._embedding_provider, backend, source_layer="L6")

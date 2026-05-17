@@ -263,13 +263,13 @@ class DpcAgentManager:
                             import os
                             from dpc_client_core.dpc_agent.memory import get_embedding_provider
                             from dpc_client_core.dpc_agent.retrieval import (
-                                TextAddItem, VectorAddItem, make_native_backend,
+                                TextAddItem, VectorAddItem, make_backend_for_agent,
                             )
                             from dpc_client_core.dpc_agent.text_extract import extract_text
                             from dpc_client_core.dpc_agent.indexing_pipeline import _extract_heading, _build_doc_text
                             provider = _provider_ref or get_embedding_provider(model_name=_actual_model)
-                            backend = make_native_backend(
-                                index_dir,
+                            backend = make_backend_for_agent(
+                                agent_root,
                                 model_name=_actual_model,
                                 dimensions=provider.dimensions,
                             )

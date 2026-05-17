@@ -398,12 +398,11 @@ def build_llm_messages(
         if _query_text:
             try:
                 from .active_recall import get_recall_block
-                from .retrieval import make_native_backend
+                from .retrieval import make_backend_for_agent
                 from .memory import EmbeddingProvider
                 import numpy as _np
 
-                _index_dir = agent_root / "state" / "memory_index"
-                _backend = make_native_backend(_index_dir)
+                _backend = make_backend_for_agent(agent_root)
 
                 _faiss_results = []
                 _q1_results = []

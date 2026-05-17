@@ -24,6 +24,7 @@ from dpc_client_core.dpc_agent.retrieval import (
     TextAddItem,
     VectorAddItem,
     build_retrieval_backend,
+    make_backend_for_agent,
     make_native_backend,
 )
 
@@ -421,6 +422,87 @@ def test_factory_unknown_raises_value_error(tmp_path):
             config={"retrieval_fusion": "weighted"},
             dimensions=4,
         )
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# make_backend_for_agent — production entry point (Phase 1.6d wiring)
+# ─────────────────────────────────────────────────────────────────────────
+
+
+def test_make_backend_for_agent_no_config_defaults_to_native(tmp_path):
+    """No config.json → empty config → native default."""
+    agent_root = tmp_path / "agent"
+    agent_root.mkdir()
+    backend = make_backend_for_agent(agent_root, dimensions=4)
+    assert isinstance(backend.vector, NativeVectorIndex)
+    assert isinstance(backend.text, NativeTextIndex)
+    assert isinstance(backend.fuser, NativeHybridFuser)
+
+
+def test_make_backend_for_agent_config_without_retrieval_keys(tmp_path):
+    """config.json present but with no retrieval_* keys → native default."""
+    import json as _json
+    agent_root = tmp_path / "agent"
+    agent_root.mkdir()
+    (agent_root / "config.json").write_text(
+        _json.dumps({"name": "Ark", "provider_alias": "GLM-5.1"}),
+        encoding="utf-8",
+    )
+    backend = make_backend_for_agent(agent_root, dimensions=4)
+    assert isinstance(backend.vector, NativeVectorIndex)
+
+
+def test_make_backend_for_agent_config_with_grafeo_keys(tmp_path):
+    """retrieval_vector/text=grafeo in config.json → Grafeo impls picked."""
+    import json as _json
+    agent_root = tmp_path / "agent"
+    agent_root.mkdir()
+    (agent_root / "config.json").write_text(
+        _json.dumps({
+            "name": "Ark",
+            "retrieval_vector": "grafeo",
+            "retrieval_text": "grafeo",
+            "retrieval_fusion": "grafeo",
+        }),
+        encoding="utf-8",
+    )
+    backend = make_backend_for_agent(agent_root, dimensions=4)
+    assert isinstance(backend.vector, GrafeoVectorIndex)
+    assert isinstance(backend.text, GrafeoTextIndex)
+    assert isinstance(backend.fuser, GrafeoHybridFuser)
+
+
+def test_make_backend_for_agent_mixed_config(tmp_path):
+    """Partial override: only vector=grafeo, text and fuser stay native default."""
+    import json as _json
+    agent_root = tmp_path / "agent"
+    agent_root.mkdir()
+    (agent_root / "config.json").write_text(
+        _json.dumps({"retrieval_vector": "grafeo"}),
+        encoding="utf-8",
+    )
+    backend = make_backend_for_agent(agent_root, dimensions=4)
+    assert isinstance(backend.vector, GrafeoVectorIndex)
+    assert isinstance(backend.text, NativeTextIndex)
+    assert isinstance(backend.fuser, NativeHybridFuser)
+
+
+def test_make_backend_for_agent_index_dir_under_state(tmp_path):
+    """Helper derives index_dir = agent_root/state/memory_index automatically."""
+    agent_root = tmp_path / "agent"
+    agent_root.mkdir()
+    backend = make_backend_for_agent(agent_root, dimensions=4)
+    # NativeVectorIndex stores its index_dir on the underlying FaissIndex.
+    assert backend.vector._inner.index_dir == agent_root / "state" / "memory_index"
+
+
+def test_make_backend_for_agent_malformed_config_falls_back(tmp_path):
+    """Unparseable config.json → empty config → native default, no crash."""
+    agent_root = tmp_path / "agent"
+    agent_root.mkdir()
+    (agent_root / "config.json").write_text("{ not valid json", encoding="utf-8")
+    backend = make_backend_for_agent(agent_root, dimensions=4)
+    assert isinstance(backend.vector, NativeVectorIndex)
 
 
 def test_backend_composite_load_returns_false_when_both_missing(tmp_path):
