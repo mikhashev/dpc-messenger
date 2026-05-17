@@ -80,12 +80,14 @@ def _get_gliner_model():
             return _GLINER_MODEL
         try:
             from gliner import GLiNER
+            import torch
         except ImportError:
             log.debug("GLiNER not installed — skip entity extraction (install with: uv sync --extra graph-ner)")
             return None
-        log.info("Loading GLiNER model %s (first use, process-wide singleton)...", GLINER_MODEL_NAME)
-        _GLINER_MODEL = GLiNER.from_pretrained(GLINER_MODEL_NAME)
-        log.info("GLiNER model loaded")
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        log.info("Loading GLiNER model %s on %s (first use, process-wide singleton)...", GLINER_MODEL_NAME, device)
+        _GLINER_MODEL = GLiNER.from_pretrained(GLINER_MODEL_NAME).to(device)
+        log.info("GLiNER model loaded on %s", device)
         return _GLINER_MODEL
 
 
