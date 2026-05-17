@@ -42,7 +42,7 @@
     currentContextHash: string;
     aiChats: Writable<Map<string, any>>;
     onSetChatLoading: (chatId: string, loading: boolean) => void;
-    onUpdateTokenUsage: (chatId: string, usage: { used: number; limit: number; historyTokens?: number; contextEstimated?: number }) => void;
+    onUpdateTokenUsage: (chatId: string, usage: { used: number; limit: number; historyTokens?: number; tokensAfterLastResponse?: number; tokensAfterLastResponseAt?: string | null }) => void;
     onMarkContextSent: (chatId: string, hash: string) => void;
     onAgentToast: (message: string, type: 'info' | 'warning' | 'error') => void;
     getStreamingText: () => string;
@@ -362,7 +362,8 @@
               used: message.payload.tokens_used,
               limit: message.payload.token_limit,
               historyTokens: message.payload.history_tokens ?? 0,
-              contextEstimated: message.payload.context_estimated ?? 0,
+              tokensAfterLastResponse: message.payload.tokens_after_last_response ?? 0,
+              tokensAfterLastResponseAt: message.payload.tokens_after_last_response_at ?? null,
             });
           }
 

@@ -282,7 +282,8 @@ export interface AgentHistoryUpdatedEvent {
     token_limit?: number;
     thinking?: string;
     message_count?: number;
-    context_estimated?: number;
+    tokens_after_last_response?: number;
+    tokens_after_last_response_at?: string | null;
 }
 
 // --- File Transfer Event Payloads ---
@@ -497,8 +498,9 @@ export interface TokenWarningEvent {
     tokens_used: number;
     token_limit: number;
     estimated_tokens?: number;
-    history_tokens?: number;     // Conversation history token count
-    context_estimated?: number;  // Context window estimate from LLM API
+    history_tokens?: number;                // Conversation history token count
+    tokens_after_last_response?: number;    // Full LLM context measured after previous response (one request stale)
+    tokens_after_last_response_at?: string | null;  // ISO 8601 timestamp of last measurement
 }
 
 export interface ExtractionFailureEvent {

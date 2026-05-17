@@ -113,16 +113,20 @@ def _build_runtime_section(
     if session_state:
         token_limit = session_state.get("tokens_limit") or 204800
         history_tokens = session_state.get("history_tokens", 0)
-        context_estimated = session_state.get("context_estimated", 0)
+        tokens_after_last_response = session_state.get("tokens_after_last_response", 0)
+        tokens_after_last_response_at = session_state.get("tokens_after_last_response_at")
         runtime_data["session"] = {
             "messages_count": session_state.get("messages_count", 0),
             "tokens_limit": token_limit,
             # history_tokens: conversation text only (user+assistant ÷4). Matches UI token counter.
             "history_tokens": history_tokens,
             "history_usage_percent": session_state.get("history_usage_percent", 0),
-            # context_estimated: full context from previous request (system+memory+tools+history).
-            # One request stale. Matches "Context size: X%" in dpc-client.log.
-            "context_estimated": context_estimated,
+            # tokens_after_last_response: full LLM context measured AFTER the previous response
+            # (system + memory + tools + history). ONE REQUEST STALE — during the current
+            # request this is a lower bound on actual usage. Pair with *_at timestamp for
+            # freshness. Matches "Context size: X%" in dpc-client.log.
+            "tokens_after_last_response": tokens_after_last_response,
+            "tokens_after_last_response_at": tokens_after_last_response_at,
             "context_usage_percent": session_state.get("context_usage_percent", 0),
         }
 
@@ -659,15 +663,22 @@ Available skills are listed below. Choose the one whose description best matches
 
 Your runtime context includes session metrics:
 - `history_tokens` — conversation messages only (matches UI counter)
-- `context_estimated` — full context size (system + memory + tools + history)
-- `context_usage_percent` — how full your context window is
+- `tokens_after_last_response` — full context size measured AFTER your previous response (system + memory + tools + history)
+- `tokens_after_last_response_at` — ISO 8601 timestamp of when `tokens_after_last_response` was measured
+- `context_usage_percent` — how full your context window is (based on `tokens_after_last_response`)
 
 **Thresholds:**
 - >65%: Start wrapping up open threads, save important insights
 - >85%: Warn the user. Propose knowledge extraction and new session
 - >95%: Strongly recommend immediate session reset
 
-Note: context_estimated is one request stale. Accurate enough for decisions.
+Note: `tokens_after_last_response` is ONE REQUEST STALE by design — it is the
+measurement taken at the end of your previous LLM call, not a live counter for
+the current request. During the current turn, actual context usage is somewhat
+higher (this turn's user message + tool results are not yet included). Treat
+the value as a lower bound on current usage. Use `tokens_after_last_response_at`
+to judge how recent the measurement is — if many tool rounds passed since,
+the live number may be noticeably above this lower bound.
 
 ## Constraints
 

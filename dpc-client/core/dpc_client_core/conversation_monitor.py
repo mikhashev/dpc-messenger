@@ -100,7 +100,12 @@ class ConversationMonitor:
         self.current_token_count: int = 0
         self.token_limit: int = 100000  # Default limit, will be updated per model
         self.token_warning_threshold: float = 0.8  # Warn at 80%
-        self._last_context_estimated: int = 0
+        # tokens_after_last_response: full LLM context measured immediately after
+        # the previous response. Updated AFTER each LLM call completes — so during
+        # the current request, this is ONE REQUEST STALE. Pair with the timestamp
+        # to compute freshness. Lower bound on current; not a live counter.
+        self._tokens_after_last_response: int = 0
+        self._tokens_after_last_response_at: Optional[str] = None
 
         # Conversation history tracking (Phase 7: Conversation History)
         self.message_history: List[Dict[str, str]] = []  # List of {"role": "user/assistant", "content": "..."}
@@ -1710,7 +1715,9 @@ PARTICIPANTS' CULTURAL CONTEXTS:
         self._history_dirty = False
         self.peer_context_hashes = {}
         self.current_token_count = 0
-        self._last_context_estimated = 0  # reset so token counter shows 0 on fresh session
+        # Reset both so token counter shows 0 on fresh session
+        self._tokens_after_last_response = 0
+        self._tokens_after_last_response_at = None
         self.message_buffer = []
         self.knowledge_score = 0.0
         # Clear peer context caches
@@ -2121,7 +2128,8 @@ PARTICIPANTS' CULTURAL CONTEXTS:
                 "token_stats": {
                     "current_token_count": self.current_token_count,
                     "token_limit": self.token_limit,
-                    "context_estimated": self._last_context_estimated,
+                    "tokens_after_last_response": self._tokens_after_last_response,
+                    "tokens_after_last_response_at": self._tokens_after_last_response_at,
                 },
                 "messages": self.message_history
             }
@@ -2234,7 +2242,8 @@ PARTICIPANTS' CULTURAL CONTEXTS:
             if token_stats:
                 self.current_token_count = token_stats.get("current_token_count", self.current_token_count)
                 self.token_limit = token_stats.get("token_limit", self.token_limit)
-                self._last_context_estimated = token_stats.get("context_estimated", 0)
+                self._tokens_after_last_response = token_stats.get("tokens_after_last_response", 0)
+                self._tokens_after_last_response_at = token_stats.get("tokens_after_last_response_at")
 
             # Restore extraction buffers so end_session/extract_knowledge sees historical
             # messages, not only those added in the current in-memory session (S89 regression).

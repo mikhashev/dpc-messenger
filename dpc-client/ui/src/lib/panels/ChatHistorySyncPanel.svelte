@@ -28,7 +28,7 @@
     processedMessageIds: Set<string>;
     chatWindow: HTMLElement | undefined;
     getPeerDisplayName: (id: string) => string;
-    onUpdateTokenUsage: (chatId: string, usage: { used: number; limit: number; historyTokens?: number; contextEstimated?: number }) => void;
+    onUpdateTokenUsage: (chatId: string, usage: { used: number; limit: number; historyTokens?: number; tokensAfterLastResponse?: number; tokensAfterLastResponseAt?: string | null }) => void;
     hasTokenUsage: (chatId: string) => boolean;
     selfNodeId?: string;
   } = $props();
@@ -115,7 +115,8 @@
                   used: result.tokens_used,
                   limit: result.token_limit,
                   historyTokens: result.history_tokens ?? 0,
-                  contextEstimated: result.context_estimated ?? 0,
+                  tokensAfterLastResponse: result.tokens_after_last_response ?? 0,
+                  tokensAfterLastResponseAt: result.tokens_after_last_response_at ?? null,
                 });
               }
 
@@ -162,7 +163,8 @@
                 used: result.tokens_used,
                 limit: result.token_limit,
                 historyTokens: result.history_tokens ?? 0,
-                contextEstimated: result.context_estimated ?? 0,
+                tokensAfterLastResponse: result.tokens_after_last_response ?? 0,
+                tokensAfterLastResponseAt: result.tokens_after_last_response_at ?? null,
               });
               console.log(`[ChatHistory] Token counter refreshed for ${activeChatId.slice(0,20)}: ${result.tokens_used}/${result.token_limit}`);
             }
