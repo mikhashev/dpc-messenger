@@ -904,6 +904,42 @@ DO NOT include any text before or after the JSON. DO NOT use markdown code block
                     return text[start:i + 1]
         return None  # Unbalanced braces
 
+    def _escape_control_chars_in_strings(self, s: str) -> str:
+        """Escape raw \\n / \\r / \\t that appear inside JSON string values.
+
+        LLMs sometimes emit JSON with literal newlines inside string content,
+        which is invalid per RFC 8259. Walk the input char-by-char, track whether
+        we are inside a string, and escape control chars only when inside.
+        """
+        out = []
+        in_string = False
+        escape_next = False
+        for ch in s:
+            if escape_next:
+                out.append(ch)
+                escape_next = False
+                continue
+            if ch == '\\' and in_string:
+                out.append(ch)
+                escape_next = True
+                continue
+            if ch == '"':
+                in_string = not in_string
+                out.append(ch)
+                continue
+            if in_string:
+                if ch == '\n':
+                    out.append('\\n')
+                    continue
+                if ch == '\r':
+                    out.append('\\r')
+                    continue
+                if ch == '\t':
+                    out.append('\\t')
+                    continue
+            out.append(ch)
+        return ''.join(out)
+
     def _repair_json(self, json_str: str) -> str:
         """Attempt to repair common JSON malformations from LLM responses.
 
@@ -912,6 +948,7 @@ DO NOT include any text before or after the JSON. DO NOT use markdown code block
         - Trailing commas
         - Missing commas between array/object elements
         - Markdown code block wrappers
+        - Raw newlines/tabs/CRs inside JSON string values
 
         Args:
             json_str: Potentially malformed JSON string
@@ -924,6 +961,10 @@ DO NOT include any text before or after the JSON. DO NOT use markdown code block
         # Remove markdown code blocks
         json_str = re.sub(r'```(?:json)?\s*', '', json_str)
         json_str = json_str.strip()
+
+        # Escape raw control chars inside string values (LLM emits literal newlines
+        # in multi-line summary/content fields — this is the #1 repair-failure cause).
+        json_str = self._escape_control_chars_in_strings(json_str)
 
         # Fix invalid JSON escape sequences (e.g. \U, \e from Windows paths)
         def _fix_escape(m):
@@ -1102,6 +1143,18 @@ PARTICIPANTS' CULTURAL CONTEXTS:
             # Try to extract and parse JSON from response (with repair attempts)
             import json
             import re
+
+            # Guard: empty/whitespace-only response means the LLM produced no JSON
+            # to parse at all (commonly: thinking-budget exhausted before text
+            # generation started, see DPC chat S133 [B2]). Skip the parse loop
+            # rather than running repair on an empty string and raising a
+            # confusing "Expecting value" error.
+            if not response or not response.strip():
+                logger.warning(
+                    "LLM returned empty response for %s — skipping proposal generation",
+                    self.conversation_id,
+                )
+                raise ValueError("LLM returned empty response (no JSON to parse)")
 
             result = None
             json_str = None
