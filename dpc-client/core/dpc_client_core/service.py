@@ -6513,6 +6513,8 @@ class CoreService:
         budget_usd: float = 50.0,
         max_rounds: int = 200,
         compute_host: str = "",  # Optional remote peer node_id for LLM inference
+        retrieval_vector: str = "",  # "native" | "grafeo" | "" (default native)
+        retrieval_text: str = "",    # "native" | "grafeo" | "" (default native)
     ) -> Dict[str, Any]:
         """Delegates to AgentService."""
         if not self.agent_service:
@@ -6525,6 +6527,8 @@ class CoreService:
             budget_usd=budget_usd,
             max_rounds=max_rounds,
             compute_host=compute_host,
+            retrieval_vector=retrieval_vector,
+            retrieval_text=retrieval_text,
         )
 
     async def list_agents(self) -> Dict[str, Any]:
@@ -6587,6 +6591,8 @@ class CoreService:
         self, agent_id: str = None,
         provider_alias: str = None,
         sleep_provider_alias: str = None,
+        retrieval_vector: str = None,
+        retrieval_text: str = None,
     ) -> Dict[str, Any]:
         """Delegated to AgentService."""
         if not self.agent_service:
@@ -6594,7 +6600,12 @@ class CoreService:
         if agent_id is None:
             agent_id = self._get_default_agent_id()
         return await self.agent_service.save_agent_model_config(
-            agent_id, provider_alias, sleep_provider_alias, self.get_providers_list
+            agent_id,
+            provider_alias=provider_alias,
+            sleep_provider_alias=sleep_provider_alias,
+            retrieval_vector=retrieval_vector,
+            retrieval_text=retrieval_text,
+            providers_getter=self.get_providers_list,
         )
 
     # --- Agent Task Board Methods (v0.20.0) ---

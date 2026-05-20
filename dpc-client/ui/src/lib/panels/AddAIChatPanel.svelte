@@ -68,6 +68,8 @@
   let selectedAgentLLMProvider = $state('');
   let selectedDialogComputeHost = $state('local');
   let availableAgentProfiles = $state<string[]>(['default']);
+  let selectedRetrievalVector = $state<'native' | 'grafeo'>('native');
+  let selectedRetrievalText = $state<'native' | 'grafeo'>('native');
 
   // ---------------------------------------------------------------------------
   // Public API (called from +page.svelte via bind:this)
@@ -159,7 +161,9 @@
           'general',
           50.0, 200,
           selectedDialogComputeHost !== 'local' ? selectedDialogComputeHost : undefined,
-          llmProviderInfo?.context_window
+          llmProviderInfo?.context_window,
+          selectedRetrievalVector,
+          selectedRetrievalText,
         );
         if (result?.status === 'success') {
           console.log('[DPC Agent] Created agent storage:', result.agent_id);
@@ -211,6 +215,8 @@
     newAgentName = '';
     selectedAgentLLMProvider = '';
     selectedDialogComputeHost = 'local';
+    selectedRetrievalVector = 'native';
+    selectedRetrievalText = 'native';
   }
 
   export async function handleDeleteAIChat(chatId: string, ask: any) {
@@ -480,6 +486,28 @@
           </select>
           <p class="dialog-hint" style="font-size: 0.85em; color: #888; margin-top: 4px;">
             Controls what tools and data this agent can access. Configure in Firewall → Agent Profiles.
+          </p>
+        </div>
+
+        <div class="dialog-provider-selector">
+          <label for="new-agent-retrieval-vector">Retrieval Vector Backend:</label>
+          <select id="new-agent-retrieval-vector" bind:value={selectedRetrievalVector}>
+            <option value="native">native (FAISS)</option>
+            <option value="grafeo">grafeo (HNSW)</option>
+          </select>
+          <p class="dialog-hint" style="font-size: 0.85em; color: #888; margin-top: 4px;">
+            Vector search backend for memory retrieval. Switching later requires backend restart and re-indexing.
+          </p>
+        </div>
+
+        <div class="dialog-provider-selector">
+          <label for="new-agent-retrieval-text">Retrieval Text Backend:</label>
+          <select id="new-agent-retrieval-text" bind:value={selectedRetrievalText}>
+            <option value="native">native (BM25)</option>
+            <option value="grafeo">grafeo (BM25)</option>
+          </select>
+          <p class="dialog-hint" style="font-size: 0.85em; color: #888; margin-top: 4px;">
+            Text/keyword search backend. native is the safe default; grafeo is opt-in.
           </p>
         </div>
       {:else}

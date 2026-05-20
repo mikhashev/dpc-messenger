@@ -43,6 +43,8 @@ export async function createAgent(
     maxRounds: number = 200,
     computeHost?: string,
     contextWindow?: number,
+    retrievalVector?: string,
+    retrievalText?: string,
 ): Promise<any> {
     return sendCmd('create_agent', {
         name,
@@ -53,6 +55,8 @@ export async function createAgent(
         max_rounds: maxRounds,
         ...(computeHost ? { compute_host: computeHost } : {}),
         ...(contextWindow ? { context_window: contextWindow } : {}),
+        ...(retrievalVector ? { retrieval_vector: retrievalVector } : {}),
+        ...(retrievalText ? { retrieval_text: retrievalText } : {}),
     });
 }
 

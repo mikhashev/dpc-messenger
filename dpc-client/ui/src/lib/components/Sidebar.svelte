@@ -14,6 +14,8 @@
   let modelConfigSleepProvider = $state('');
   let modelConfigProvidersList = $state<{alias: string, model: string, type: string}[]>([]);
   let modelConfigSaving = $state(false);
+  let modelConfigRetrievalVector = $state<'native' | 'grafeo'>('native');
+  let modelConfigRetrievalText = $state<'native' | 'grafeo'>('native');
 
   // All available agent event types (mirrors EVENT_EMOJIS in agent_telegram_bridge.py)
   const ALL_EVENT_TYPES: { key: string; label: string }[] = [
@@ -157,6 +159,8 @@
       modelConfigProviderAlias = result.provider_alias || '';
       modelConfigSleepProvider = result.sleep_provider_alias || '';
       modelConfigProvidersList = result.providers || [];
+      modelConfigRetrievalVector = (result.retrieval_vector === 'grafeo') ? 'grafeo' : 'native';
+      modelConfigRetrievalText = (result.retrieval_text === 'grafeo') ? 'grafeo' : 'native';
       showModelConfigPopup = true;
     } catch (error) {
       console.error('Failed to load agent model config:', error);
@@ -169,6 +173,8 @@
       await onSaveAgentModelConfig(modelConfigAgentId, {
         provider_alias: modelConfigProviderAlias,
         sleep_provider_alias: modelConfigSleepProvider || null,
+        retrieval_vector: modelConfigRetrievalVector,
+        retrieval_text: modelConfigRetrievalText,
       });
       showModelConfigPopup = false;
     } catch (error) {
@@ -310,7 +316,7 @@
     }) => Promise<void>;
     onUnlinkAgentTelegram?: (agentId: string) => Promise<void>;
     onGetAgentModelConfig: (agentId: string) => Promise<any>;
-    onSaveAgentModelConfig: (agentId: string, config: { provider_alias: string; sleep_provider_alias: string | null }) => Promise<void>;
+    onSaveAgentModelConfig: (agentId: string, config: { provider_alias: string; sleep_provider_alias: string | null; retrieval_vector?: 'native' | 'grafeo'; retrieval_text?: 'native' | 'grafeo' }) => Promise<void>;
   } = $props();
 </script>
 
@@ -824,6 +830,22 @@
           {/each}
         </select>
         <p class="dialog-hint">Model used for sleep consolidation analysis. "Default" uses the global provider.</p>
+
+        <hr class="dialog-divider">
+
+        <label for="retrieval-vector" class="dialog-label" title="Switching requires backend restart and re-indexing.">Retrieval Vector Backend:</label>
+        <select id="retrieval-vector" class="dialog-input" bind:value={modelConfigRetrievalVector}>
+          <option value="native">native (FAISS)</option>
+          <option value="grafeo">grafeo (HNSW)</option>
+        </select>
+        <p class="dialog-hint">Vector search backend for memory retrieval. Switching requires backend restart; old index files remain on disk and are not auto-deleted.</p>
+
+        <label for="retrieval-text" class="dialog-label" title="Switching requires backend restart and re-indexing.">Retrieval Text Backend:</label>
+        <select id="retrieval-text" class="dialog-input" bind:value={modelConfigRetrievalText}>
+          <option value="native">native (BM25)</option>
+          <option value="grafeo">grafeo (BM25)</option>
+        </select>
+        <p class="dialog-hint">Text/keyword search backend. native is the safe default; grafeo is opt-in (parity work in progress).</p>
       </div>
       <div class="dialog-actions">
         <button type="button" class="btn-cancel" onclick={() => showModelConfigPopup = false}>Cancel</button>

@@ -117,6 +117,8 @@ class AgentService:
         budget_usd: float = 50.0,
         max_rounds: int = 200,
         compute_host: str = "",
+        retrieval_vector: str = "",
+        retrieval_text: str = "",
     ) -> Dict[str, Any]:
         """
         Create a new DPC Agent with isolated storage.
@@ -140,6 +142,13 @@ class AgentService:
             agent_id = generate_agent_id(name)
             actual_profile_name = profile_name if profile_name else agent_id
 
+            extras = {}
+            if compute_host:
+                extras["compute_host"] = compute_host
+            if retrieval_vector:
+                extras["retrieval_vector"] = retrieval_vector
+            if retrieval_text:
+                extras["retrieval_text"] = retrieval_text
             config = create_agent_storage(
                 agent_id=agent_id,
                 name=name,
@@ -148,7 +157,7 @@ class AgentService:
                 instruction_set_name=instruction_set_name,
                 budget_usd=budget_usd,
                 max_rounds=max_rounds,
-                **({"compute_host": compute_host} if compute_host else {}),
+                **extras,
             )
 
             self.firewall.create_agent_profile(actual_profile_name, copy_from_global=True)
@@ -781,6 +790,8 @@ class AgentService:
                 "agent_id": agent_id,
                 "provider_alias": config.get("provider_alias"),
                 "sleep_provider_alias": config.get("sleep_provider_alias"),
+                "retrieval_vector": config.get("retrieval_vector", "native"),
+                "retrieval_text": config.get("retrieval_text", "native"),
                 "providers": providers_data.get("providers", []),
                 "default_provider": providers_data.get("default_provider", ""),
             }
@@ -792,9 +803,11 @@ class AgentService:
         self, agent_id: str,
         provider_alias: str = None,
         sleep_provider_alias: str = None,
+        retrieval_vector: str = None,
+        retrieval_text: str = None,
         providers_getter=None,
     ) -> Dict[str, Any]:
-        """Save per-agent model configuration (Main LLM + Sleep LLM)."""
+        """Save per-agent model configuration (Main LLM + Sleep LLM + retrieval backend)."""
         try:
             from dpc_client_core.dpc_agent.utils import load_agent_config, save_agent_config, AgentRegistry
             registry = AgentRegistry()
@@ -806,6 +819,10 @@ class AgentService:
                 registry.update_agent(agent_id, {"provider_alias": provider_alias})
             if sleep_provider_alias is not None:
                 config["sleep_provider_alias"] = sleep_provider_alias
+            if retrieval_vector is not None:
+                config["retrieval_vector"] = retrieval_vector
+            if retrieval_text is not None:
+                config["retrieval_text"] = retrieval_text
             save_agent_config(agent_id, config)
             providers_data = await providers_getter() if providers_getter else {"providers": [], "default_provider": ""}
             return {
@@ -813,6 +830,8 @@ class AgentService:
                 "agent_id": agent_id,
                 "provider_alias": config.get("provider_alias"),
                 "sleep_provider_alias": config.get("sleep_provider_alias"),
+                "retrieval_vector": config.get("retrieval_vector", "native"),
+                "retrieval_text": config.get("retrieval_text", "native"),
                 "providers": providers_data.get("providers", []),
                 "default_provider": providers_data.get("default_provider", ""),
             }
