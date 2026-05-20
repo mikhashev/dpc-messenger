@@ -25,7 +25,8 @@
     sleepAgents = new Map(),
     onNewSession,
     onEndSession,
-    onToggleSleep
+    onToggleSleep,
+    onGroupSleep
   }: {
     showForChatId: string;
     isAIChat: boolean;
@@ -49,6 +50,7 @@
     onNewSession: (chatId: string) => void;
     onEndSession: (chatId: string) => void;
     onToggleSleep?: () => void;
+    onGroupSleep?: () => void;
   } = $props();
 
   // Computed properties
@@ -193,12 +195,22 @@
         🌙 Sleep
       {/if}
     </button>
-  {:else if showForChatId?.startsWith('group-') && sleepAgents.size > 0}
-    <span class="btn-sleep-toggle active" title="Agents are consolidating session data">
-      {#each [...sleepAgents.values()] as sa}
-        <span class="sleep-agent-entry">☀️ {sa.agent_name || sa.agent_id}: {sa.total > 0 ? `${sa.current}/${sa.total}` : ''} {sa.phase === 'synthesizing' ? 'Synthesis' : 'Wakeup'}</span>
-      {/each}
-    </span>
+  {:else if showForChatId?.startsWith('group-') && onGroupSleep}
+    {#if sleepAgents.size > 0}
+      <span class="btn-sleep-toggle active" title="Agents are consolidating session data">
+        {#each [...sleepAgents.values()] as sa}
+          <span class="sleep-agent-entry">☀️ {sa.agent_name || sa.agent_id}: {sa.total > 0 ? `${sa.current}/${sa.total}` : ''} {sa.phase === 'synthesizing' ? 'Synthesis' : 'Wakeup'}</span>
+        {/each}
+      </span>
+    {:else}
+      <button
+        class="btn-sleep-toggle"
+        onclick={() => onGroupSleep?.()}
+        title="Re-run sleep for all agents in this group. Old morning briefs in the chat will be removed and replaced with fresh ones."
+      >
+        🌙 Sleep
+      </button>
+    {/if}
   {/if}
 </div>
 

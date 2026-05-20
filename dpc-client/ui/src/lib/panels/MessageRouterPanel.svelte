@@ -10,6 +10,7 @@
     p2pMessages,
     groupTextReceived,
     groupFileReceived,
+    groupMessageDeleted,
     aiResponseWithImage,
     coreMessages,
   } from '$lib/coreService';
@@ -139,8 +140,11 @@
         chatHistories.update(h => {
           const newMap = new Map(h);
           const hist = newMap.get(msg.group_id) || [];
+          // Preserve backend message_id as the local id when available — enables
+          // group_message_deleted to find this message later (e.g. stale morning
+          // brief cleanup on Sleep button).
           newMap.set(msg.group_id, [...hist, {
-            id: crypto.randomUUID(),
+            id: msg.message_id || crypto.randomUUID(),
             sender: msg.sender_node_id,
             senderName: msg.sender_name,
             text: msg.text,
@@ -162,6 +166,34 @@
           if (firstId) processedMessageIds.delete(firstId);
         }
       }
+    }
+  });
+
+  // Group message deletion routing — backend removes a message from group history
+  // (e.g. trigger_group_sleep replaces stale morning briefs). Filter by ID first;
+  // fall back to sender + content_prefix match for legacy messages whose backend
+  // message_id was never stored on the frontend (added before this change shipped).
+  $effect(() => {
+    if ($groupMessageDeleted) {
+      const evt = $groupMessageDeleted;
+      chatHistories.update(h => {
+        const hist = h.get(evt.group_id);
+        if (!hist) return h;
+        const filtered = hist.filter(m => {
+          if (m.id === evt.message_id) return false;
+          if (evt.content_prefix && evt.sender_name
+              && m.senderName === evt.sender_name
+              && typeof m.text === 'string'
+              && m.text.startsWith(evt.content_prefix)) {
+            return false;
+          }
+          return true;
+        });
+        if (filtered.length === hist.length) return h;
+        const newMap = new Map(h);
+        newMap.set(evt.group_id, filtered);
+        return newMap;
+      });
     }
   });
 

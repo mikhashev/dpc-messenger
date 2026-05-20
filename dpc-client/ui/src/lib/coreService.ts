@@ -124,7 +124,7 @@ import { p2pMessages, unreadMessageCounts } from './services/messaging';
 import { availableProviders, defaultProviders, providersList, peerProviders, aiResponseWithImage, firewallRulesUpdated } from './services/providers';
 import { fileTransferOffer, fileTransferProgress, fileTransferComplete, fileTransferCancelled, activeFileTransfers, filePreparationStarted, filePreparationProgress, filePreparationCompleted } from './services/fileTransfer';
 import { voiceOfferReceived, voiceTranscriptionReceived, voiceTranscriptionComplete, voiceTranscriptionConfig, whisperModelLoadingStarted, whisperModelLoaded, whisperModelLoadingFailed, whisperModelUnloaded, whisperModelDownloadRequired, whisperModelDownloadStarted, whisperModelDownloadCompleted, whisperModelDownloadFailed } from './services/voice';
-import { groupChats, groupTextReceived, groupFileReceived, groupInviteReceived, groupUpdated, groupMemberLeft, groupDeleted, groupHistorySynced, tokenUsageUpdated } from './services/groups';
+import { groupChats, groupTextReceived, groupFileReceived, groupInviteReceived, groupUpdated, groupMemberLeft, groupDeleted, groupHistorySynced, groupMessageDeleted, tokenUsageUpdated } from './services/groups';
 import { agentsList, agentCreated, agentUpdated, agentDeleted, agentProfiles, agentProgress, agentProgressClear, agentTextChunk, agentChatMessage, sleepStateChanged, sleepProgress, sleepAgentStates } from './services/agents';
 import { telegramEnabled, telegramConnected, telegramStatus, telegramError, telegramLinkedChats, telegramMessages, telegramMessageReceived, telegramVoiceReceived, telegramImageReceived, telegramFileReceived, agentTelegramLinked, agentTelegramUnlinked, agentHistoryUpdated } from './services/telegram';
 import { personalContext, contextUpdated, peerContextUpdated, knowledgeCommitProposal, knowledgeCommitResult, extractionFailure, tokenWarning, integrityWarnings } from './services/knowledge';
@@ -138,7 +138,7 @@ export { p2pMessages, unreadMessageCounts };
 export { availableProviders, defaultProviders, providersList, peerProviders, aiResponseWithImage, firewallRulesUpdated };
 export { fileTransferOffer, fileTransferProgress, fileTransferComplete, fileTransferCancelled, activeFileTransfers, filePreparationStarted, filePreparationProgress, filePreparationCompleted };
 export { voiceOfferReceived, voiceTranscriptionReceived, voiceTranscriptionComplete, voiceTranscriptionConfig, whisperModelLoadingStarted, whisperModelLoaded, whisperModelLoadingFailed, whisperModelUnloaded, whisperModelDownloadRequired, whisperModelDownloadStarted, whisperModelDownloadCompleted, whisperModelDownloadFailed };
-export { groupChats, groupTextReceived, groupFileReceived, groupInviteReceived, groupUpdated, groupMemberLeft, groupDeleted, groupHistorySynced, tokenUsageUpdated };
+export { groupChats, groupTextReceived, groupFileReceived, groupInviteReceived, groupUpdated, groupMemberLeft, groupDeleted, groupHistorySynced, groupMessageDeleted, tokenUsageUpdated };
 export { agentsList, agentCreated, agentUpdated, agentDeleted, agentProfiles, agentProgress, agentProgressClear, agentTextChunk, agentChatMessage, sleepStateChanged, sleepProgress, sleepAgentStates };
 export { telegramEnabled, telegramConnected, telegramStatus, telegramError, telegramLinkedChats, telegramMessages, telegramMessageReceived, telegramVoiceReceived, telegramImageReceived, telegramFileReceived, agentTelegramLinked, agentTelegramUnlinked, agentHistoryUpdated };
 export { personalContext, contextUpdated, peerContextUpdated, knowledgeCommitProposal, knowledgeCommitResult, extractionFailure, tokenWarning, integrityWarnings };
@@ -932,6 +932,11 @@ export async function connectToCoreService() {
                 else if (message.event === "group_history_synced") {
                     console.log("Group history synced:", message.payload);
                     groupHistorySynced.set(message.payload);
+                }
+                else if (message.event === "group_message_deleted") {
+                    // Backend removed a message from group history (e.g. stale morning
+                    // brief replaced on Sleep). +page.svelte removes from chatHistories.
+                    groupMessageDeleted.set(message.payload);
                 }
                 else if (message.event === "file_preparation_progress") {
                     // Reset timeout on progress (keepalive mechanism for large file hash computation)

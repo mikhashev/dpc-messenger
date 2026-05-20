@@ -4249,7 +4249,7 @@ class CoreService:
 
     async def send_group_agent_message(
         self, group_id: str, agent_name: str, text: str
-    ) -> None:
+    ) -> Optional[str]:
         """Send a group message attributed to an agent.
 
         The message appears with agent_name as the sender and is marked
@@ -4259,11 +4259,16 @@ class CoreService:
             group_id: Target group ID
             agent_name: Display name (from config.json or CC display name)
             text: Message text
+
+        Returns:
+            The generated message_id (16-char hex), or None if the group was not found.
+            Callers use this to track posted messages for later deletion (e.g. morning
+            brief replacement on Sleep button).
         """
         group = self.group_manager.get_group(group_id)
         if not group:
             logger.warning("send_group_agent_message: group %s not found", group_id)
-            return
+            return None
 
         import uuid
         message_id = uuid.uuid4().hex[:16]
@@ -4334,6 +4339,64 @@ class CoreService:
 
         # Route @mentions from agent messages (enables CC→Ark and Ark→CC communication)
         await self._handle_group_agent_mentions(group_id, text, agent_name)
+
+        return message_id
+
+    async def _delete_group_briefs(self, group_id: str, agent_sender_name: str) -> int:
+        """Delete all morning-brief messages from a given agent in a group chat.
+
+        Used by trigger_group_sleep to clean up stale briefs before posting fresh ones.
+        Identifies briefs by content prefix (constant from _format_morning_brief) so it
+        works for both new briefs (tracked via chat_message_id) and legacy briefs
+        posted before message-id tracking was added.
+
+        Args:
+            group_id: Target group ID
+            agent_sender_name: Display name to match against sender_name in history
+
+        Returns:
+            Number of brief messages deleted.
+        """
+        BRIEF_PREFIX = "**Morning Brief (Sleep Consolidation)**"
+
+        monitor = self._get_or_create_conversation_monitor(group_id)
+        history = monitor.message_history
+        if not history:
+            return 0
+
+        to_delete = [
+            m for m in history
+            if (m.get("sender_name") == agent_sender_name
+                and (m.get("content") or "").startswith(BRIEF_PREFIX))
+        ]
+
+        if not to_delete:
+            return 0
+
+        deleted_ids = []
+        for m in to_delete:
+            mid = m.get("message_id") or m.get("id")
+            if mid:
+                deleted_ids.append(mid)
+
+        # Mutate in place
+        monitor.message_history[:] = [m for m in history if m not in to_delete]
+        monitor.save_history()
+
+        # Notify UI to remove from view. Include sender + content_prefix hint so
+        # frontend can also match by pattern (for legacy briefs whose backend
+        # message_id was never stored on the frontend side).
+        for mid in deleted_ids:
+            await self.local_api.broadcast_event("group_message_deleted", {
+                "group_id": group_id,
+                "message_id": mid,
+                "sender_name": agent_sender_name,
+                "content_prefix": BRIEF_PREFIX,
+            })
+
+        logger.info("Deleted %d brief(s) from group %s for agent %s",
+                    len(to_delete), group_id, agent_sender_name)
+        return len(to_delete)
 
     async def add_group_member(self, group_id: str, node_id: str) -> Dict[str, Any]:
         """Add a member to a group and notify all members.
@@ -6840,6 +6903,15 @@ class CoreService:
             sleep_data = {"agent_id": agent_id, "group_id": group_id, "status": "sleeping"}
             await self.local_api.broadcast_event("sleep_state_changed", sleep_data)
 
+            # Delete stale briefs from this agent BEFORE running new sleep, so the chat
+            # view doesn't accumulate outdated briefs across manual Sleep button presses.
+            # Pattern-match also catches legacy briefs posted before chat_message_id tracking.
+            try:
+                await self._delete_group_briefs(group_id, agent_display_name)
+            except Exception as e:
+                logger.warning("Failed to clean stale briefs for %s in %s: %s",
+                               agent_display_name, group_id, e)
+
             async def _run_group_sleep(aid=agent_id, adir=agent_dir, sp=sleep_provider, dname=agent_display_name):
                 async def _progress(current, total, phase, archive_file):
                     await self.local_api.broadcast_event("sleep_progress", {
@@ -6857,8 +6929,10 @@ class CoreService:
                         brief["group_id"] = group_id
                         brief_path = adir / f"morning_brief_group_{group_id}.json"
                         chat_text = self._format_morning_brief(brief)
-                        await self.send_group_agent_message(group_id, dname, chat_text)
+                        new_msg_id = await self.send_group_agent_message(group_id, dname, chat_text)
                         brief["consumed"] = True
+                        if new_msg_id:
+                            brief["chat_message_id"] = new_msg_id
                         brief_path.write_text(json.dumps(brief, ensure_ascii=False, indent=2), encoding="utf-8")
                     done_data = {"agent_id": aid, "group_id": group_id, "status": "awake",
                                  "result": result.get("status", "unknown"),

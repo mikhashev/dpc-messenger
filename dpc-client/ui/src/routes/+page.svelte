@@ -232,6 +232,17 @@
     sendCommand('toggle_sleep', { agent_id: activeChatId });
   }
 
+  function handleGroupSleep() {
+    if (!activeChatId?.startsWith('group-')) return;
+    const ok = confirm(
+      'Запустить sleep для всех агентов в этой группе?\n\n' +
+      'Старые morning briefs будут удалены из чата, новые опубликованы. ' +
+      'Это запустит полный sleep cycle для каждого агента (может занять несколько минут и токенов).'
+    );
+    if (!ok) return;
+    sendCommand('trigger_group_sleep', { group_id: activeChatId });
+  }
+
   // Reload history when active agent wakes up (side-effect only — isSleeping is derived above)
   $effect(() => {
     const state = $sleepStateChanged;
@@ -1021,6 +1032,7 @@
             onNewSession={handleNewChat}
             onEndSession={handleEndSession}
             onToggleSleep={handleToggleSleep}
+            onGroupSleep={handleGroupSleep}
           />
         {/if}
       </div>
