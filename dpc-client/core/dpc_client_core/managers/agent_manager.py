@@ -1083,31 +1083,46 @@ class DpcAgentManager:
         """
         Reset conversation history for a specific conversation.
 
+        If the monitor is not in memory (e.g. after backend restart, before
+        any message has been sent in this session) but history.json exists
+        on disk, hydrates the monitor first so _archive_current_session can
+        archive before clearing. Without this, the caller's fallback would
+        unlink history.json directly, losing the session.
+
         Args:
             conversation_id: The conversation to reset (e.g., "telegram-12345")
 
         Returns:
-            True if reset was successful, False if conversation not found
+            True if reset was successful, False if no monitor and no history file
         """
         monitor = self._agent_monitors.get(conversation_id)
-        if monitor:
-            preserve, max_sessions = self._get_history_settings()
-            archive_count = monitor.reset_conversation(preserve=preserve, max_sessions=max_sessions)
-            log.info(f"Reset conversation: {conversation_id} (preserve={preserve}, archives={archive_count})")
-            # Broadcast warning if archive is approaching the retention limit (≥80%).
-            # When max_sessions is 0 (unlimited), no limit to approach — skip warning.
-            if preserve and max_sessions > 0 and archive_count >= int(max_sessions * 0.8):
-                import asyncio
-                local_api = getattr(self.service, "local_api", None)
-                if local_api:
-                    asyncio.ensure_future(local_api.broadcast_event("session_archive_warning", {
-                        "conversation_id": conversation_id,
-                        "archive_count": archive_count,
-                        "max_sessions": max_sessions,
-                    }))
-            return True
-        log.debug(f"Conversation not found for reset: {conversation_id}")
-        return False
+        if not monitor:
+            history_path = (
+                pathlib.Path.home() / ".dpc" / "conversations"
+                / conversation_id / "history.json"
+            )
+            if history_path.exists():
+                log.info(f"Hydrating monitor from disk for reset: {conversation_id}")
+                monitor = self._get_or_create_agent_monitor(conversation_id)
+            else:
+                log.debug(f"Conversation not found for reset: {conversation_id}")
+                return False
+
+        preserve, max_sessions = self._get_history_settings()
+        archive_count = monitor.reset_conversation(preserve=preserve, max_sessions=max_sessions)
+        log.info(f"Reset conversation: {conversation_id} (preserve={preserve}, archives={archive_count})")
+        # Broadcast warning if archive is approaching the retention limit (≥80%).
+        # When max_sessions is 0 (unlimited), no limit to approach — skip warning.
+        if preserve and max_sessions > 0 and archive_count >= int(max_sessions * 0.8):
+            import asyncio
+            local_api = getattr(self.service, "local_api", None)
+            if local_api:
+                asyncio.ensure_future(local_api.broadcast_event("session_archive_warning", {
+                    "conversation_id": conversation_id,
+                    "archive_count": archive_count,
+                    "max_sessions": max_sessions,
+                }))
+        return True
 
     def _get_history_settings(self) -> tuple:
         """Return (preserve_on_reset, max_archived_sessions) from firewall config.
