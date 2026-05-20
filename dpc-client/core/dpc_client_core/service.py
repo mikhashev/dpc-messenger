@@ -4052,6 +4052,17 @@ class CoreService:
             self.group_manager.set_node_agents(
                 group_id, self.p2p_manager.node_id, agent_ids or [], agent_names
             )
+            group = self.group_manager.get_group(group_id)
+            if group:
+                await self.local_api.broadcast_event("group_updated", {
+                    "group_id": group.group_id,
+                    "name": group.name,
+                    "topic": group.topic,
+                    "members": group.members,
+                    "agents": group.agents,
+                    "agent_names": group.agent_names,
+                    "version": group.version,
+                })
             return {"status": "success"}
         except Exception as e:
             return {"status": "error", "message": str(e)}
@@ -4373,8 +4384,13 @@ class CoreService:
 
             # Notify local UI to refresh group settings
             await self.local_api.broadcast_event("group_updated", {
-                "group_id": group_id,
-                "group": group.to_dict(),
+                "group_id": group.group_id,
+                "name": group.name,
+                "topic": group.topic,
+                "members": group.members,
+                "agents": group.agents,
+                "agent_names": group.agent_names,
+                "version": group.version,
             })
 
             return {"status": "success", "group": group.to_dict()}
@@ -4398,6 +4414,17 @@ class CoreService:
             await self._broadcast_to_group(group_id, {
                 "command": "GROUP_SYNC",
                 "payload": group.to_dict()
+            })
+
+            # Notify local UI to refresh group settings
+            await self.local_api.broadcast_event("group_updated", {
+                "group_id": group.group_id,
+                "name": group.name,
+                "topic": group.topic,
+                "members": group.members,
+                "agents": group.agents,
+                "agent_names": group.agent_names,
+                "version": group.version,
             })
 
             return {"status": "success", "group": group.to_dict()}
