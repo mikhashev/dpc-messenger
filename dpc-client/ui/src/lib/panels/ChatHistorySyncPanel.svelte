@@ -6,7 +6,7 @@
 <script lang="ts">
   import type { Writable } from 'svelte/store';
   import { connectionStatus, sendCommand } from '$lib/coreService';
-  import { untrack } from 'svelte';
+  import { onMount, untrack } from 'svelte';
 
   // ---------------------------------------------------------------------------
   // Props
@@ -34,10 +34,24 @@
   } = $props();
 
   // ---------------------------------------------------------------------------
+  // Gate history load on selfNodeId arrival (race fix).
+  // Without this, get_conversation_history can fire before nodeStatus arrives,
+  // and own messages get tagged with the literal node_id instead of 'user',
+  // losing the green "me" styling until manual reload.
+  // Fallback: after 3s, load anyway with best-effort (selfNodeId may stay '').
+  // ---------------------------------------------------------------------------
+  let nodeStatusFallbackElapsed = $state(false);
+  onMount(() => {
+    const t = setTimeout(() => { nodeStatusFallbackElapsed = true; }, 3000);
+    return () => clearTimeout(t);
+  });
+  let canLoadHistory = $derived(!!selfNodeId || nodeStatusFallbackElapsed);
+
+  // ---------------------------------------------------------------------------
   // Reactive: Sync chat history from backend when switching to peer chat with no messages (v0.11.2)
   // ---------------------------------------------------------------------------
   $effect(() => {
-    if ($connectionStatus === 'connected' && activeChatId && activeChatId !== 'local_ai' && !activeChatId.startsWith('ai_')) {
+    if ($connectionStatus === 'connected' && canLoadHistory && activeChatId && activeChatId !== 'local_ai' && !activeChatId.startsWith('ai_')) {
       // Check if this peer chat has no messages in frontend
       const currentHistory = $chatHistories.get(activeChatId);
       console.log(`[ChatHistory] Reactive triggered: chatId=${activeChatId.slice(0,20)}, historyLen=${currentHistory?.length || 0}, loading=${loadingHistory.has(activeChatId)}`);
