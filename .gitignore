@@ -142,8 +142,10 @@ security/
 # Internal cron prompt contains team-specific references (Protocol 13, agent
 # name "Ark", absolute user paths). Public template lives at
 # dpc-client/core/cc_cron_prompt_public.md.
-# cc-out.md is the transient outgoing-message buffer CC writes when the bridge
+# cc-out*.md is the transient outgoing-message buffer CC writes when the bridge
 # send command needs a file (markdown with backticks — see --send-file flag in
-# cc_agent_bridge.py).
+# cc_agent_bridge.py). Glob covers cc-out.md plus topic-suffixed variants
+# (cc-out-adr027-review.md, cc-out-completion.md, etc.) that CC uses to stage
+# multiple in-flight responses without overwriting each other.
 cc_cron_prompt.md
-cc-out.md
+cc-out*.md
