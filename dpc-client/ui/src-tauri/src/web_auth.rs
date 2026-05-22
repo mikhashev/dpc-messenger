@@ -37,6 +37,9 @@ use serde::Serialize;
 /// Field names match snake_case per existing DPC conventions.
 /// T4 AuthBrowser converts to Playwright camelCase (httpOnly, sameSite)
 /// at the Python side (see spike/cookie_plant_test.py:normalize_cookie).
+///
+/// `expires` is Unix epoch seconds (NOT milliseconds), matching Playwright
+/// and most cookie-jar conventions. None = session cookie (no expiry).
 #[derive(Debug, Serialize)]
 pub struct Cookie {
     pub name: String,
@@ -76,15 +79,15 @@ pub async fn web_auth_open_login_window(domain: String) -> Result<Vec<Cookie>, S
 /// Check whether cookies exist for the given domain in the vault.
 /// Cheap — does NOT open a WebView window.
 ///
-/// NOT YET IMPLEMENTED — returns AuthStatus with has_cookies=false until
-/// full T2 sub-task lands.
+/// NOT YET IMPLEMENTED — returns Err for consistency with the other
+/// stubs (per Ark review S137: Ok(has_cookies: false) would masquerade
+/// non-impl as valid "no cookies" state).
 #[tauri::command]
 pub async fn web_auth_get_status(domain: String) -> Result<AuthStatus, String> {
-    let _ = domain;
-    Ok(AuthStatus {
-        has_cookies: false,
-        expires: None,
-    })
+    Err(format!(
+        "get_auth_status({}): {}",
+        domain, NOT_IMPLEMENTED_HINT
+    ))
 }
 
 /// Revoke cookies for the given domain in WebView2 storage.
