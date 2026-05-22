@@ -4,6 +4,7 @@
 <script lang="ts">
   import { createEventDispatcher } from 'svelte';
   import { sendCommand, peerProviders } from '$lib/coreService';
+  import { confirmAsync } from '$lib/utils/dialog';
 
   export let open: boolean = false;
 
@@ -179,9 +180,9 @@
     }
   }
 
-  function close() {
+  async function close() {
     if (editMode) {
-      const confirmed = confirm('You have unsaved changes. Discard them and close?');
+      const confirmed = await confirmAsync('You have unsaved changes. Discard them and close?', { kind: 'warning' });
       if (!confirmed) return;
     }
     editMode = false;
@@ -206,10 +207,10 @@
   $: displayConfig = editedConfig || config;
 
   // Delete provider
-  function deleteProvider(index: number) {
+  async function deleteProvider(index: number) {
     if (!editedConfig) return;
     const provider = editedConfig.providers[index];
-    const confirmed = confirm(`Delete provider '${provider.alias}'?`);
+    const confirmed = await confirmAsync(`Delete provider '${provider.alias}'?`, { kind: 'warning' });
     if (confirmed) {
       editedConfig.providers.splice(index, 1);
       // If deleted provider was default, reset default

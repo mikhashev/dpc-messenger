@@ -998,6 +998,7 @@ export async function connectToCoreService() {
                     console.log("[Sleep]", message.payload?.status, message.payload?.agent_id);
                     sleepStateChanged.set(message.payload);
                     const aid = message.payload?.agent_id;
+                    const originChatId = message.payload?.group_id || aid;
                     if (aid) {
                         let aName = aid;
                         agentsList.subscribe(list => { const a = list?.find((x: any) => x.agent_id === aid); if (a?.name) aName = a.name; })();
@@ -1006,7 +1007,7 @@ export async function connectToCoreService() {
                             if (message.payload?.status === "awake") {
                                 nm.delete(aid);
                             } else {
-                                nm.set(aid, { agent_id: aid, agent_name: aName, status: message.payload?.status, current: 0, total: 0, phase: '' });
+                                nm.set(aid, { agent_id: aid, agent_name: aName, origin_chat_id: originChatId, status: message.payload?.status, current: 0, total: 0, phase: '' });
                             }
                             return nm;
                         });
@@ -1018,11 +1019,12 @@ export async function connectToCoreService() {
                 else if (message.event === "sleep_progress") {
                     sleepProgress.set(message.payload);
                     const aid = message.payload?.agent_id;
+                    const originChatId = message.payload?.group_id || aid;
                     if (aid) {
                         sleepAgentStates.update(m => {
                             const nm = new Map(m);
                             const existing = nm.get(aid);
-                            nm.set(aid, { ...existing, agent_id: aid, agent_name: existing?.agent_name || aid, status: 'sleeping', current: message.payload?.current ?? 0, total: message.payload?.total ?? 0, phase: message.payload?.phase ?? '' });
+                            nm.set(aid, { ...existing, agent_id: aid, agent_name: existing?.agent_name || aid, origin_chat_id: existing?.origin_chat_id || originChatId, status: 'sleeping', current: message.payload?.current ?? 0, total: message.payload?.total ?? 0, phase: message.payload?.phase ?? '' });
                             return nm;
                         });
                     }

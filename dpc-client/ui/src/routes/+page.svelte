@@ -5,6 +5,7 @@
   import { onMount } from "svelte";
   import { writable } from "svelte/store";
   import { connectionStatus, nodeStatus, sendCommand, resetReconnection, connectToCoreService, knowledgeCommitProposal, personalContext, tokenWarning, extractionFailure, availableProviders, peerProviders, unreadMessageCounts, resetUnreadCount, setActiveChat, newSessionProposal, proposeNewSession, voteNewSession, defaultProviders, providersList, groupChats, loadGroups, listAgents, agentsList, sleepStateChanged, sleepProgress, sleepAgentStates, tokenUsageUpdated } from "$lib/coreService";
+  import { confirmAsync } from "$lib/utils/dialog";
   import KnowledgeCommitDialog from "$lib/components/KnowledgeCommitDialog.svelte";
   import NewSessionDialog from "$lib/components/NewSessionDialog.svelte";
   import VoteResultDialog from "$lib/components/VoteResultDialog.svelte";
@@ -204,15 +205,23 @@
     localStorage.setItem('enableMarkdown', enableMarkdown.toString());
   });
 
-  // Sleep state (ADR-014) — derived from per-agent store, keyed by activeChatId.
-  // Prevents stale leak across chats when switching between agents (S110 SLEEP-UI-LEAK).
-  let activeAgentSleep = $derived($sleepAgentStates.get(activeChatId));
+  // Sleep state (ADR-014) — derived from per-agent store, scoped by origin chat.
+  // Origin = where sleep was initiated. Backend tags each event with origin
+  // (group_id for group sleep, agent_id for 1:1 sleep). UI shows indicator only
+  // in the chat that started the sleep, not in every other chat that happens to
+  // include the same agent (S136 SLEEP-UI-SCOPE).
+  let activeAgentSleep = $derived.by(() => {
+    const state = $sleepAgentStates.get(activeChatId);
+    if (!state) return undefined;
+    return state.origin_chat_id === activeChatId ? state : undefined;
+  });
   let isSleeping = $derived(activeAgentSleep?.status === 'sleeping');
 
   // Group-scoped sleep view — only show agents that are members of the active
-  // group, not every sleeping agent globally (S111 SLEEP-UI-GROUP-LEAK).
-  // The global $sleepAgentStates Map is unfiltered; passing it directly into
-  // SessionControls leaked agents from 1:1 chats into every group header.
+  // group AND whose sleep originated from this group (not from a 1:1 chat with
+  // the same agent). The global $sleepAgentStates Map is unfiltered; the
+  // membership check alone leaks 1:1 sleeps into group headers (S111 +
+  // S136 SLEEP-UI-SCOPE).
   let groupSleepAgents = $derived.by(() => {
     if (!activeChatId?.startsWith('group-')) return new Map();
     const group = $groupChats.get(activeChatId);
@@ -223,7 +232,9 @@
     }
     const filtered = new Map();
     for (const [aid, state] of $sleepAgentStates) {
-      if (memberAgentIds.has(aid)) filtered.set(aid, state);
+      if (memberAgentIds.has(aid) && state.origin_chat_id === activeChatId) {
+        filtered.set(aid, state);
+      }
     }
     return filtered;
   });
@@ -232,12 +243,13 @@
     sendCommand('toggle_sleep', { agent_id: activeChatId });
   }
 
-  function handleGroupSleep() {
+  async function handleGroupSleep() {
     if (!activeChatId?.startsWith('group-')) return;
-    const ok = confirm(
-      'Запустить sleep для всех агентов в этой группе?\n\n' +
-      'Старые morning briefs будут удалены из чата, новые опубликованы. ' +
-      'Это запустит полный sleep cycle для каждого агента (может занять несколько минут и токенов).'
+    const ok = await confirmAsync(
+      'Run sleep for all agents in this group?\n\n' +
+      'Old morning briefs will be removed from the chat and replaced with fresh ones. ' +
+      'This runs the full sleep cycle for each agent (may take several minutes and tokens).',
+      { kind: 'warning' }
     );
     if (!ok) return;
     sendCommand('trigger_group_sleep', { group_id: activeChatId });

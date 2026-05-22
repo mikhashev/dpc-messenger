@@ -16,6 +16,7 @@
     listAgentProfiles,
     sendCommand,
   } from '$lib/coreService';
+  import { confirmAsync } from '$lib/utils/dialog';
 
   // ---------------------------------------------------------------------------
   // Types
@@ -219,36 +220,21 @@
     selectedRetrievalText = 'native';
   }
 
-  export async function handleDeleteAIChat(chatId: string, ask: any) {
+  export async function handleDeleteAIChat(chatId: string, _ask?: any) {
     if (chatId === 'local_ai') {
-      if (ask) {
-        await ask('Cannot delete the default Local AI chat.', { title: 'D-PC Messenger', kind: 'info' });
-      } else {
-        alert('Cannot delete the default Local AI chat.');
-      }
+      await confirmAsync('Cannot delete the default Local AI chat.', { kind: 'info' });
       return;
     }
 
-    let shouldDelete = false;
-    if (ask) {
-      if (chatId.startsWith('telegram-')) {
-        shouldDelete = await ask(
+    const shouldDelete = chatId.startsWith('telegram-')
+      ? await confirmAsync(
           'Delete this Telegram chat? This will remove the chat history and unlink the Telegram conversation. You can still receive new messages from this contact.',
           { title: 'Confirm Telegram Chat Deletion', kind: 'warning' }
-        );
-      } else {
-        shouldDelete = await ask(
+        )
+      : await confirmAsync(
           'Delete this AI chat? This will permanently remove the chat history.',
           { title: 'Confirm Deletion', kind: 'warning' }
         );
-      }
-    } else {
-      if (chatId.startsWith('telegram-')) {
-        shouldDelete = confirm('Delete this Telegram chat? This will remove the chat history and unlink the Telegram conversation. You can still receive new messages from this contact.');
-      } else {
-        shouldDelete = confirm('Delete this AI chat? This will permanently remove the chat history.');
-      }
-    }
 
     if (!shouldDelete) return;
 

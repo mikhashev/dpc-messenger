@@ -13,6 +13,7 @@
     addGroupMember,
     removeGroupMember,
   } from '$lib/coreService';
+  import { confirmAsync } from '$lib/utils/dialog';
 
   // ---------------------------------------------------------------------------
   // Props
@@ -82,16 +83,11 @@
     }
   }
 
-  export async function handleDeleteGroup(groupId: string, activeChatId: string, ask: any) {
-    let shouldDelete = false;
-    if (ask) {
-      shouldDelete = await ask(
-        'Delete this group chat? This will permanently remove all messages and data for all members.',
-        { title: 'Confirm Group Deletion', kind: 'warning' }
-      );
-    } else {
-      shouldDelete = confirm('Delete this group chat? This will permanently remove all messages and data for all members.');
-    }
+  export async function handleDeleteGroup(groupId: string, activeChatId: string, _ask?: any) {
+    const shouldDelete = await confirmAsync(
+      'Delete this group chat? This will permanently remove all messages and data for all members.',
+      { title: 'Confirm Group Deletion', kind: 'warning' }
+    );
 
     if (!shouldDelete) return;
 

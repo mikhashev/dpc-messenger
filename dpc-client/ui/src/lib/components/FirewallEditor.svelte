@@ -5,6 +5,7 @@
   import { createEventDispatcher } from 'svelte';
   import { sendCommand } from '$lib/coreService';
   import AgentPermissionsPanel from './AgentPermissionsPanel.svelte';
+  import { confirmAsync } from '$lib/utils/dialog';
 
   export let open: boolean = false;
 
@@ -332,9 +333,9 @@
     }
   }
 
-  function close() {
+  async function close() {
     if (editMode) {
-      const confirmed = confirm('You have unsaved changes. Discard them and close?');
+      const confirmed = await confirmAsync('You have unsaved changes. Discard them and close?', { kind: 'warning' });
       if (!confirmed) return;
     }
     editMode = false;

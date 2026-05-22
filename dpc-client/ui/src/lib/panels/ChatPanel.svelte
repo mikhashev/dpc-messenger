@@ -37,6 +37,7 @@
   } from '$lib/coreService';
   import { estimateConversationUsage } from '$lib/tokenEstimator';
   import { showNotificationIfBackground } from '$lib/notificationService';
+  import { confirmAsync } from '$lib/utils/dialog';
   import type { Message, Mention, MessageAttachment } from '$lib/types.js';
 
   type AIChatMeta = {
@@ -373,15 +374,7 @@
   }
 
   async function handleEndSession(conversationId: string) {
-    // window.confirm() is non-blocking in Tauri WebView2 on Windows — see
-    // +page.svelte:handleEndSession comment. Use Tauri ask() with fallback.
-    let proceed: boolean;
-    try {
-      const { ask } = await import('@tauri-apps/plugin-dialog');
-      proceed = await ask('End this conversation session and extract knowledge?', { title: 'dpc-messenger', kind: 'info' });
-    } catch {
-      proceed = window.confirm('End this conversation session and extract knowledge?');
-    }
+    const proceed = await confirmAsync('End this conversation session and extract knowledge?', { kind: 'info' });
     if (proceed) {
       sendCommand('end_conversation_session', { conversation_id: conversationId });
     }
@@ -549,7 +542,7 @@
       // P2P screenshot
       try {
         const imageSizeMB = (imageData.dataUrl.length * 0.75) / (1024 * 1024);
-        if (imageSizeMB > 25 && !window.confirm(`This screenshot is ${imageSizeMB.toFixed(1)} MB. Continue?`)) {
+        if (imageSizeMB > 25 && !(await confirmAsync(`This screenshot is ${imageSizeMB.toFixed(1)} MB. Continue?`))) {
           pendingImage = null;
           return;
         }

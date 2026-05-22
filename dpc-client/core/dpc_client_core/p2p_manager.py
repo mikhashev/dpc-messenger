@@ -1,5 +1,5 @@
-# dpc-client/core/dpc_client_core/p2p_manager_webrtc.py
-# Обновленная версия P2PManager с поддержкой WebRTC
+# dpc-client/core/dpc_client_core/p2p_manager.py
+# P2PManager with WebRTC support
 
 import asyncio
 import ssl
