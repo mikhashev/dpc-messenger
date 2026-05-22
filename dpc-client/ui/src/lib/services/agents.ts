@@ -27,7 +27,7 @@ export const agentChatMessage = writable<Record<string, any> | null>(null);
 // Sleep state (ADR-014)
 export const sleepStateChanged = writable<{ agent_id: string; group_id?: string; status: string; result?: string } | null>(null);
 export const sleepProgress = writable<{ agent_id: string; group_id?: string; current: number; total: number; phase: string } | null>(null);
-export type SleepAgentState = { agent_id: string; agent_name?: string; status: string; current: number; total: number; phase: string };
+export type SleepAgentState = { agent_id: string; agent_name?: string; origin_chat_id?: string; status: string; current: number; total: number; phase: string };
 export const sleepAgentStates = writable<Map<string, SleepAgentState>>(new Map());
 
 // --- Command functions ---
