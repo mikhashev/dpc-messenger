@@ -8,6 +8,10 @@ use tauri::Manager;
 // Audio recording module (Linux workaround for getUserMedia)
 mod audio_recorder;
 
+// Agent web auth — Tauri WebView2 cookie extraction (ADR-027 T2)
+// Scaffold only — commands return TODO until full WebView2 impl lands.
+mod web_auth;
+
 // File metadata helper for dynamic timeout calculation (v0.11.2+)
 #[tauri::command]
 fn get_file_metadata(path: String) -> Result<FileMetadata, String> {
@@ -61,7 +65,10 @@ fn main() {
             get_ws_token,
             audio_recorder::tauri_start_recording,
             audio_recorder::tauri_stop_recording,
-            audio_recorder::tauri_get_recording_status
+            audio_recorder::tauri_get_recording_status,
+            web_auth::web_auth_open_login_window,
+            web_auth::web_auth_get_status,
+            web_auth::web_auth_revoke
         ])
         .setup(|app| {
             #[cfg(debug_assertions)]
