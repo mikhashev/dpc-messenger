@@ -69,7 +69,10 @@ fn main() {
             web_auth::web_auth_open_login_window,
             web_auth::web_auth_get_status,
             web_auth::web_auth_revoke,
-            web_auth::web_auth_open_popup_for_content
+            web_auth::web_auth_open_popup_for_content,
+            web_auth::web_auth_popup_extract_now,
+            web_auth::web_auth_popup_navigate,
+            web_auth::web_auth_popup_close
         ])
         .setup(|app| {
             #[cfg(debug_assertions)]

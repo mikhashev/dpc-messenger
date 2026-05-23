@@ -352,3 +352,98 @@ pub async fn web_auth_open_popup_for_content(
 
     Ok(())
 }
+
+// ─────────────────────────────────────────────────────────────
+// T10 — Agent-orchestrated multi-page popup browsing
+// ─────────────────────────────────────────────────────────────
+//
+// The three commands below extend the T9 popup machinery so an agent
+// can drive a single popup across multiple page loads — extract HTML
+// at any point while the popup is alive (bypassing the Path A race
+// that affects extract-on-close), navigate within the same eTLD+1,
+// and close programmatically when done.
+//
+// Window lookup convention: all three commands key off the popup
+// label `web_auth_popup_{request_id}` set up by
+// `web_auth_open_popup_for_content`. The Python side owns the
+// session state (lifetime cap, concurrency, eTLD+1 enforcement) and
+// these Rust commands stay mechanical.
+//
+// See `tasks/adr-028-agent-web-auth/010-agent-popup-orchestration.md`
+// — decisions locked S143.
+
+fn popup_label(request_id: &str) -> String {
+    format!("web_auth_popup_{}", request_id)
+}
+
+/// T10: explicit HTML extraction trigger.
+/// Calls the injected `__dpc_t9_emit_html__()` while the popup is
+/// still alive — the existing `web_auth_popup_extracted` Tauri event
+/// listener (`coreService.ts`) delivers the payload to the Python
+/// step-3 handler exactly as in the on-close flow, but without the
+/// WebView2 tear-down race.
+#[tauri::command]
+pub async fn web_auth_popup_extract_now(
+    app: AppHandle,
+    request_id: String,
+) -> Result<(), String> {
+    let label = popup_label(&request_id);
+    let popup = app
+        .get_webview_window(&label)
+        .ok_or_else(|| format!("popup window not found: request_id={}", request_id))?;
+    popup
+        .eval("window.__dpc_t9_emit_html__()")
+        .map_err(|e| format!("eval failed: {}", e))
+}
+
+/// T10: navigate the popup to a new URL within the same session.
+/// Same-eTLD+1 enforcement is the Python side's responsibility (see
+/// the matching tool in `browser.py`) — it MUST reject cross-origin
+/// urls before reaching this command. JS-side `window.location.href`
+/// assignment keeps the same WebView instance (same cookie jar, same
+/// init_script — `__dpc_t9_emit_html__` survives navigation).
+#[tauri::command]
+pub async fn web_auth_popup_navigate(
+    app: AppHandle,
+    request_id: String,
+    url: String,
+) -> Result<(), String> {
+    // Validate URL syntax — defence in depth alongside the Python
+    // eTLD+1 check. Rejects javascript:, data:, malformed values.
+    let parsed = Url::parse(&url)
+        .map_err(|e| format!("invalid url '{}': {}", url, e))?;
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return Err(format!(
+            "invalid url scheme '{}' (only http/https allowed)",
+            parsed.scheme()
+        ));
+    }
+    let label = popup_label(&request_id);
+    let popup = app
+        .get_webview_window(&label)
+        .ok_or_else(|| format!("popup window not found: request_id={}", request_id))?;
+    // Use the parsed URL's serialised form to ensure JS-safe quoting;
+    // Url::as_str() returns the canonical form which is safe inside
+    // single quotes (no backslashes or quote characters by spec).
+    let safe_url = parsed.as_str();
+    popup
+        .eval(&format!("window.location.href = '{}'", safe_url))
+        .map_err(|e| format!("eval failed: {}", e))
+}
+
+/// T10: close the popup window programmatically.
+/// Triggers the existing CloseRequested handler — `web_auth_popup_closing`
+/// fires, the vault re-sync extracts cookies via the main window jar,
+/// and the watchdog timer arms in case Path A applies. Same lifecycle
+/// as a user clicking the X button.
+#[tauri::command]
+pub async fn web_auth_popup_close(
+    app: AppHandle,
+    request_id: String,
+) -> Result<(), String> {
+    let label = popup_label(&request_id);
+    let popup = app
+        .get_webview_window(&label)
+        .ok_or_else(|| format!("popup window not found: request_id={}", request_id))?;
+    popup.close().map_err(|e| format!("close failed: {}", e))
+}
