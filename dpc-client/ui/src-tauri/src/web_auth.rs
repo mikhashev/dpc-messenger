@@ -271,6 +271,19 @@ pub async fn web_auth_open_popup_for_content(
     let request_id_for_event = request_id.clone();
     window.on_window_event(move |event| {
         if let WindowEvent::CloseRequested { .. } = event {
+            // Notify the frontend that the popup is closing BEFORE we
+            // try to eval the JS emitter. This decouples "user closed
+            // the window" from "JS ran successfully and emitted" — the
+            // frontend can start a watchdog timer here, and the
+            // listener for `web_auth_popup_extracted` cancels it when
+            // the success/error event actually arrives. Without this,
+            // a torn-down WebView (Path A — eval Ok but JS context
+            // killed before emit) leaves the frontend modal stuck.
+            let _ = app_for_event.emit(
+                "web_auth_popup_closing",
+                serde_json::json!({ "request_id": &request_id_for_event }),
+            );
+
             let app_thread = app_for_event.clone();
             let label_thread = label_for_event.clone();
             let req_id_thread = request_id_for_event.clone();
@@ -279,7 +292,19 @@ pub async fn web_auth_open_popup_for_content(
                     // Fire-and-forget — JS event leaves the popup
                     // process and is delivered to the frontend listener
                     // before the window's resources are released.
-                    let _ = popup.eval("window.__dpc_t9_emit_html__()");
+                    if let Err(e) = popup.eval("window.__dpc_t9_emit_html__()") {
+                        // Path C — eval failed at the Rust↔WebView2
+                        // boundary (WebView already in tear-down).
+                        // Surface so the frontend can clean up without
+                        // waiting for the watchdog timeout.
+                        let _ = app_thread.emit(
+                            "web_auth_popup_extracted",
+                            serde_json::json!({
+                                "request_id": req_id_thread,
+                                "error": format!("eval failed during popup close: {}", e),
+                            }),
+                        );
+                    }
                 } else {
                     let _ = app_thread.emit(
                         "web_auth_popup_extracted",

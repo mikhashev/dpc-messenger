@@ -1137,6 +1137,16 @@ export function resetReconnection() {
 const pendingWebAuthLogins = new Map<string, string>();
 let webAuthListenerInstalled = false;
 
+// ADR-028 T9 bug 1 — Path A defense. When the Rust popup CloseRequested
+// handler fires, it emits `web_auth_popup_closing` and then tries to
+// eval the JS extractor. If the WebView is torn down before the JS
+// runs, no `web_auth_popup_extracted` event ever arrives — the modal
+// would otherwise stay stuck until the 5-minute backend timeout. The
+// closing-event listener arms a short watchdog for each request_id;
+// the extracted listener cancels it on success.
+const popupCloseWatchdogs = new Map<string, ReturnType<typeof setTimeout>>();
+const POPUP_CLOSE_WATCHDOG_MS = 3000;
+
 export function registerPendingWebAuthLogin(agentId: string, domain: string): void {
     const key = domain.toLowerCase();
     // Stale-entry guard (Ark S140 [#82] review): if a previous popup
@@ -1188,6 +1198,38 @@ async function ensureWebAuthListener(): Promise<void> {
             });
         });
 
+        // ADR-028 T9 bug 1 — Path A watchdog. Rust emits this BEFORE
+        // calling popup.eval(). Arm a short timer here; the
+        // `web_auth_popup_extracted` listener below cancels it on
+        // either success or Rust-side eval-error. If neither arrives
+        // (Path A — JS torn down before injected emit runs), the timer
+        // fires, manually forwards an error to backend, and dismisses
+        // the modal so the user is not stuck staring at "browser
+        // window opened" after they already closed it.
+        await listen<{ request_id: string }>('web_auth_popup_closing', (event) => {
+            const payload = event.payload;
+            if (!payload || !payload.request_id) return;
+            const requestId = payload.request_id;
+            // Idempotent: if Rust emits closing twice (shouldn't, but
+            // defensive), the second timer overwrites the first cleanly.
+            const existing = popupCloseWatchdogs.get(requestId);
+            if (existing !== undefined) clearTimeout(existing);
+            const timer = setTimeout(() => {
+                popupCloseWatchdogs.delete(requestId);
+                console.warn(
+                    `[web_auth] popup_extracted did not arrive within ${POPUP_CLOSE_WATCHDOG_MS}ms ` +
+                    `for request_id=${requestId} — assuming Path A (JS torn down before emit), ` +
+                    `closing modal and reporting error to backend`,
+                );
+                sendCommand('web_auth_popup_complete', {
+                    request_id: requestId,
+                    error: 'popup close timeout — JS extraction event did not arrive',
+                });
+                webAuthPopupRequest.set(null);
+            }, POPUP_CLOSE_WATCHDOG_MS);
+            popupCloseWatchdogs.set(requestId, timer);
+        });
+
         // ADR-028 T9: same listener-install gate handles the popup-fallback
         // companion event. Rust `web_auth_open_popup_for_content` emits this
         // when the user closes the popup; the payload already carries
@@ -1204,6 +1246,12 @@ async function ensureWebAuthListener(): Promise<void> {
             if (!payload || !payload.request_id) {
                 console.warn('[web_auth] popup_extracted with no request_id — ignoring');
                 return;
+            }
+            // Cancel any pending Path-A watchdog set by the closing listener.
+            const watchdog = popupCloseWatchdogs.get(payload.request_id);
+            if (watchdog !== undefined) {
+                clearTimeout(watchdog);
+                popupCloseWatchdogs.delete(payload.request_id);
             }
             console.log(
                 '[web_auth] popup_extracted',
