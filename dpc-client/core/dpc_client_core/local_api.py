@@ -150,6 +150,11 @@ ALLOWED_COMMANDS: frozenset = frozenset({
     # Reload from disk
     "reload_personal_context",
     "reload_firewall",
+    # ADR-028 web auth (T8 + Wiring)
+    "web_auth_login_complete",
+    "web_auth_list_domains",
+    "web_auth_add_domain",
+    "web_auth_remove_domain",
 })
 
 
