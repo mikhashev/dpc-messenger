@@ -19,7 +19,7 @@
      * explicit `error: "user_cancelled"` so the agent's Future
      * resolves with AuthRequiredError instead of timing out at 5min.
      */
-    import { webAuthPopupRequest, sendCommand } from '$lib/coreService';
+    import { webAuthPopupRequest, sendCommand, registerPendingWebAuthLogin } from '$lib/coreService';
 
     let opening = $state(false);
     let openError = $state<string | null>(null);
@@ -31,9 +31,15 @@
         openError = null;
         try {
             const { invoke } = await import('@tauri-apps/api/core');
+            // Bug 4 — register pendingMap so the cookie re-extraction
+            // event emitted by Rust on popup close (`web_auth_login_complete`)
+            // can be paired with this agent and forwarded to the Python
+            // vault, keeping it in sync with the live WebView2 cookie jar.
+            registerPendingWebAuthLogin(req.agent_id, req.domain);
             await invoke('web_auth_open_popup_for_content', {
                 url: req.url,
                 requestId: req.request_id,
+                domain: req.domain,
             });
             // Tauri popup is now visible to the user. The store stays set
             // until the extracted-event listener in coreService.ts clears it

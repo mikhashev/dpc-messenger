@@ -224,6 +224,7 @@ pub async fn web_auth_open_popup_for_content(
     app: AppHandle,
     url: String,
     request_id: String,
+    domain: String,
 ) -> Result<(), String> {
     let parsed = Url::parse(&url)
         .map_err(|e| format!("invalid url '{}': {}", url, e))?;
@@ -258,7 +259,7 @@ pub async fn web_auth_open_popup_for_content(
     let window = WebviewWindowBuilder::new(
         &app,
         &label,
-        WebviewUrl::External(parsed),
+        WebviewUrl::External(parsed.clone()),
     )
     .title(format!("DPC — {}", url))
     .inner_size(1000.0, 800.0)
@@ -269,6 +270,8 @@ pub async fn web_auth_open_popup_for_content(
     let app_for_event = app.clone();
     let label_for_event = label.clone();
     let request_id_for_event = request_id.clone();
+    let domain_for_event = domain.clone();
+    let url_for_cookies = parsed;
     window.on_window_event(move |event| {
         if let WindowEvent::CloseRequested { .. } = event {
             // Notify the frontend that the popup is closing BEFORE we
@@ -283,6 +286,35 @@ pub async fn web_auth_open_popup_for_content(
                 "web_auth_popup_closing",
                 serde_json::json!({ "request_id": &request_id_for_event }),
             );
+
+            // Bug 4 — vault re-sync. The WebView2 cookie jar may have
+            // refreshed cookies via ordinary page navigation between
+            // popup open and close (Set-Cookie headers from the site,
+            // session renewals, etc.). The Python vault is a snapshot
+            // taken at T8 login time and never re-syncs — so without
+            // this hook, the agent's auth status report stays stale
+            // even when the site is in fact still authenticated.
+            // Re-using the existing `web_auth_login_complete` event:
+            // the frontend pendingMap (registered by WebAuthPopupRequest
+            // before invoking this command) will pair the cookies with
+            // the originating agent and forward to the Python vault.
+            let cookies_app = app_for_event.clone();
+            let cookies_domain = domain_for_event.clone();
+            let cookies_url = url_for_cookies.clone();
+            std::thread::spawn(move || {
+                let Some(main_win) = cookies_app.get_webview_window("main") else {
+                    return;
+                };
+                let Ok(cookies) = main_win.cookies_for_url(cookies_url) else {
+                    return;
+                };
+                let converted: Vec<Cookie> = cookies.iter().map(convert_cookie).collect();
+                let payload = serde_json::json!({
+                    "domain": cookies_domain,
+                    "cookies": converted,
+                });
+                let _ = cookies_app.emit("web_auth_login_complete", payload);
+            });
 
             let app_thread = app_for_event.clone();
             let label_thread = label_for_event.clone();
