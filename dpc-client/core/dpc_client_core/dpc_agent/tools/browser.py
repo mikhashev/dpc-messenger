@@ -477,10 +477,21 @@ class PendingPopupRequest:
     """One in-flight popup-fallback request. The WS handler for
     `web_auth_popup_complete` reads `expected_url` / `expected_etld1`
     to enforce the Q2 URL-safety check (Ark softer version) before
-    resolving the future with the popup-extracted HTML."""
+    resolving the future with the popup-extracted HTML.
+
+    T10 extension (S143): `keep_open=True` keeps the entry alive after
+    the initial extraction so the agent can call follow-up tools
+    (`popup_extract_now`, `popup_navigate`, `popup_close`) against the
+    same `request_id`. `agent_id` is needed to gate concurrency in
+    Step 4. `opened_at` is the monotonic-clock timestamp at session
+    open; Step 4 uses it for the 30-minute hard cap (Q2).
+    """
     future: asyncio.Future
     expected_url: str
     expected_etld1: str
+    agent_id: str = ""
+    keep_open: bool = False
+    opened_at: float = 0.0
 
 
 # Pending popup requests keyed by request_id. The future is resolved by
@@ -498,6 +509,13 @@ _pending_popup_requests: dict[str, PendingPopupRequest] = {}
 # 5-minute popup timeout per ADR-028 T9 Q4 (Mike + Ark agreed S142).
 _POPUP_TIMEOUT_S = 300
 
+# T10 (S143): per-call timeout for popup_extract_now and friends. The
+# popup is already open and authenticated, so each extraction is just
+# a JS round-trip — 30s is generous. popup_navigate ALSO uses this for
+# the "issue location.href" round-trip; the agent passes wait_seconds
+# separately for the post-navigation settle.
+_POPUP_OPERATION_TIMEOUT_S = 30
+
 
 def get_pending_popup_requests() -> dict[str, PendingPopupRequest]:
     """Accessor used by the Step 3 WS handler to resolve futures by id.
@@ -512,7 +530,8 @@ async def _request_popup_fallback(
     domain: str,
     url: str,
     reason: str = "anti_bot_challenge",
-) -> str:
+    keep_open: bool = False,
+) -> tuple[str, str]:
     """Ask the frontend to open a Tauri WebView popup so the user can
     solve a challenge (Ozon fab_chlg, Cloudflare) or view JS-rendered
     content (YarchePlus orders) for `url`. Awaits the user closing the
@@ -526,10 +545,17 @@ async def _request_popup_fallback(
       - "always_popup" — domain is on the agent's `always_popup`
         whitelist (YarchePlus class — JS-render-only sites)
 
-    Returns raw HTML extracted from the popup (the caller converts to
-    markdown via `_html_to_markdown`). Raises `AuthRequiredError` on
-    timeout, missing dpc_service, or popup_error reported by the
-    frontend.
+    `keep_open=True` (T10) leaves the session entry alive after the
+    initial extraction so the agent can drive follow-up tools
+    (`popup_extract_now`, `popup_navigate`, `popup_close`) against
+    the same `request_id`. Default `keep_open=False` preserves the
+    single-shot legacy contract.
+
+    Returns `(html, request_id)`. The caller converts HTML to markdown
+    via `_html_to_markdown` and surfaces `request_id` only on the
+    `keep_open=True` path so the agent can address follow-up calls.
+    Raises `AuthRequiredError` on timeout, missing dpc_service, or
+    popup_error reported by the frontend.
     """
     dpc_service = getattr(ctx, "dpc_service", None)
     local_api = getattr(dpc_service, "local_api", None) if dpc_service else None
@@ -538,6 +564,7 @@ async def _request_popup_fallback(
             "Popup fallback requires DPC service — unavailable in this context"
         )
 
+    import time
     import uuid
 
     # eTLD+1 used by the Q2 URL-safety check in `web_auth_popup_complete`.
@@ -552,6 +579,9 @@ async def _request_popup_fallback(
         future=future,
         expected_url=url,
         expected_etld1=_wa.resolve_etld1(domain),
+        agent_id=agent_id,
+        keep_open=keep_open,
+        opened_at=time.monotonic(),
     )
 
     try:
@@ -565,17 +595,204 @@ async def _request_popup_fallback(
                 "reason": reason,
             },
         )
-        return await asyncio.wait_for(future, timeout=_POPUP_TIMEOUT_S)
+        html = await asyncio.wait_for(future, timeout=_POPUP_TIMEOUT_S)
+        return html, request_id
     except asyncio.TimeoutError as e:
         raise AuthRequiredError(
             f"Popup fallback timeout ({_POPUP_TIMEOUT_S}s) for {url} — "
             f"user did not complete"
         ) from e
     finally:
-        _pending_popup_requests.pop(request_id, None)
+        # T10: keep_open sessions live past the initial extraction so the
+        # agent can call follow-up tools. They are removed by an explicit
+        # `popup_close()` or by the 30-minute lifetime cap (Step 4).
+        if not keep_open:
+            _pending_popup_requests.pop(request_id, None)
 
 
-async def browse_page(ctx: ToolContext, url: str, size: str = "m", use_auth: Optional[str] = None) -> str:
+# ─────────────────────────────────────────────────────────────
+# T10 — Agent-orchestrated multi-page popup tools (S143)
+# ─────────────────────────────────────────────────────────────
+#
+# Three sibling tools to browse_page(keep_open=True). Each looks up
+# the session by request_id, broadcasts a request event that the
+# frontend forwards to a Tauri command, then either awaits the
+# extracted HTML (popup_extract_now) or returns immediately
+# (popup_navigate, popup_close).
+#
+# Decisions locked S143 — see
+# tasks/adr-028-agent-web-auth/010-agent-popup-orchestration.md
+# (Q4 surfaces, Q5 wait, Q6 errors). Q3 eTLD+1 enforcement and Q7
+# concurrency rejection arrive in Step 4.
+
+
+def _get_local_api(ctx: ToolContext):
+    """Resolve the local-api broadcaster from the agent context.
+
+    Raises AuthRequiredError so the agent sees a uniform Q6 error
+    surface across the four T9/T10 popup tools.
+    """
+    dpc_service = getattr(ctx, "dpc_service", None)
+    local_api = getattr(dpc_service, "local_api", None) if dpc_service else None
+    if local_api is None:
+        raise AuthRequiredError(
+            "Popup tools require DPC service — unavailable in this context"
+        )
+    return local_api
+
+
+def _get_popup_session(request_id: str) -> PendingPopupRequest:
+    """Resolve a live keep_open=True session by request_id.
+
+    Raises AuthRequiredError for the missing-entry case (popup closed
+    by user, backend restart, never opened) — Q6 unified error model.
+    """
+    entry = _pending_popup_requests.get(request_id)
+    if entry is None:
+        raise AuthRequiredError(
+            f"popup session not found (request_id={request_id}) — "
+            f"closed by user, expired, or never opened"
+        )
+    if not entry.keep_open:
+        raise AuthRequiredError(
+            f"popup session is single-shot (request_id={request_id}) — "
+            f"use browse_page(keep_open=True) to open a multi-page session"
+        )
+    return entry
+
+
+async def popup_extract_now(ctx: ToolContext, request_id: str) -> str:
+    """T10: extract HTML from the current popup page without closing it.
+
+    Triggers an explicit eval of the injected `__dpc_t9_emit_html__()`
+    inside the live popup. Avoids the WebView2 tear-down race that
+    affects the extract-on-close path (T9 Bug 5) because the popup is
+    still alive when JS runs.
+
+    Returns the page HTML rendered to markdown. Raises
+    `AuthRequiredError` if the popup is gone (user closed, expired,
+    or never opened).
+    """
+    local_api = _get_local_api(ctx)
+    entry = _get_popup_session(request_id)
+
+    loop = asyncio.get_running_loop()
+    new_future: asyncio.Future = loop.create_future()
+    entry.future = new_future
+
+    await local_api.broadcast_event(
+        "web_auth_popup_extract_request",
+        {"request_id": request_id},
+    )
+    try:
+        html = await asyncio.wait_for(new_future, timeout=_POPUP_OPERATION_TIMEOUT_S)
+    except asyncio.TimeoutError as e:
+        raise AuthRequiredError(
+            f"popup_extract_now timeout ({_POPUP_OPERATION_TIMEOUT_S}s) "
+            f"for request_id={request_id} — popup may have been closed "
+            f"or the frontend extract listener is unresponsive"
+        ) from e
+
+    text = _html_to_markdown(html)
+    return f"Content from popup (markdown, {len(text)} chars, request_id={request_id}):\n\n{text}"
+
+
+async def popup_navigate(
+    ctx: ToolContext,
+    request_id: str,
+    url: str,
+    wait_seconds: int = 3,
+) -> str:
+    """T10: navigate the popup to a new URL within the same session.
+
+    The popup stays open across navigation (same WebView, same cookie
+    jar, init_script `__dpc_t9_emit_html__` survives). The frontend
+    forwards to the `web_auth_popup_navigate` Tauri command which
+    issues a JS `window.location.href = url` assignment.
+
+    `wait_seconds` (Q5) is the post-navigation settle delay before
+    returning, giving JS-heavy SPAs (YarchePlus orders) time to
+    finish rendering before the next `popup_extract_now`.
+
+    Step 4 will harden this with an eTLD+1 check (Q3) that rejects
+    cross-origin navigation. For Step 2 the check is baseline: the
+    Rust command already rejects non-http(s) schemes.
+    """
+    local_api = _get_local_api(ctx)
+    entry = _get_popup_session(request_id)
+
+    # Step 4 will replace this with a strict eTLD+1 check against
+    # `entry.expected_etld1`. The baseline check at least ensures the
+    # URL is parseable so the agent gets a clean error on garbage
+    # input rather than a Rust eval failure.
+    from urllib.parse import urlparse
+
+    parsed = urlparse(url)
+    if parsed.scheme not in ("http", "https"):
+        raise AuthRequiredError(
+            f"popup_navigate rejected url={url!r} — only http/https schemes allowed"
+        )
+
+    # Track the latest URL so the existing Q2 (Ark softer) URL-safety
+    # check in web_auth_popup_complete uses the most recent navigation
+    # target as the expected_url for the next extract round.
+    entry.expected_url = url
+
+    await local_api.broadcast_event(
+        "web_auth_popup_navigate_request",
+        {"request_id": request_id, "url": url},
+    )
+
+    # Q5: settle delay for SPA rendering. Bounded — the agent must not
+    # block forever on a wait. 60s upper limit catches a stuck agent
+    # without making the tool slow for the common 3s case.
+    wait_seconds = max(0, min(int(wait_seconds), 60))
+    if wait_seconds:
+        await asyncio.sleep(wait_seconds)
+
+    return f"Navigated popup to {url} (request_id={request_id}, waited {wait_seconds}s)"
+
+
+async def popup_close(ctx: ToolContext, request_id: str) -> str:
+    """T10: close the popup programmatically.
+
+    Triggers the existing CloseRequested handler — `web_auth_popup_closing`
+    fires, the vault re-sync extracts cookies via the main window jar
+    (Bug 4 hook preserved), and the modal-watchdog timer arms. From the
+    agent's perspective the session is over after this call returns;
+    follow-up `popup_extract_now`/`popup_navigate` will raise
+    AuthRequiredError because the entry is gone.
+    """
+    local_api = _get_local_api(ctx)
+    entry = _get_popup_session(request_id)
+
+    # Cancel any awaiter (e.g. an in-flight popup_extract_now that
+    # raced against this close) so its `asyncio.wait_for` gets a
+    # CancelledError instead of timing out at _POPUP_OPERATION_TIMEOUT_S.
+    if entry.future and not entry.future.done():
+        entry.future.cancel()
+
+    await local_api.broadcast_event(
+        "web_auth_popup_close_request",
+        {"request_id": request_id},
+    )
+
+    # Pop the entry immediately so subsequent tool calls get a clean
+    # AuthRequiredError. The actual popup window closes asynchronously
+    # via the Tauri command — the CloseRequested handler still runs
+    # vault re-sync and the popup_closing/watchdog flow.
+    _pending_popup_requests.pop(request_id, None)
+
+    return f"Closed popup session request_id={request_id}"
+
+
+async def browse_page(
+    ctx: ToolContext,
+    url: str,
+    size: str = "m",
+    use_auth: Optional[str] = None,
+    keep_open: bool = False,
+) -> str:
     """
     Fetch a web page and extract content as structured markdown.
 
@@ -676,8 +893,9 @@ async def browse_page(ctx: ToolContext, url: str, size: str = "m", use_auth: Opt
                     "skipping headless fetch", url, agent_id,
                 )
                 try:
-                    html = await _request_popup_fallback(
-                        ctx, agent_id, use_auth, url, reason="always_popup"
+                    html, popup_request_id = await _request_popup_fallback(
+                        ctx, agent_id, use_auth, url,
+                        reason="always_popup", keep_open=keep_open,
                     )
                 except AuthRequiredError as e:
                     _web_auth_mod.audit_append(
@@ -692,7 +910,15 @@ async def browse_page(ctx: ToolContext, url: str, size: str = "m", use_auth: Opt
                 total = len(text)
                 if max_chars and total > max_chars:
                     text = text[:max_chars] + f"\n\n... (truncated, {total} total chars, use size='l' or 'f' for more)"
-                return f"Content from {url} (markdown, auth={use_auth}, {total} chars):\n\n{text}"
+                # T10: when keep_open=True surface the session request_id
+                # so the agent can call popup_extract_now / popup_navigate /
+                # popup_close against this popup.
+                session_hint = (
+                    f" — session request_id={popup_request_id} (open; close with popup_close)"
+                    if keep_open
+                    else ""
+                )
+                return f"Content from {url} (markdown, auth={use_auth}, {total} chars{session_hint}):\n\n{text}"
 
         try:
             html = await asyncio.to_thread(_auth_browse_html, agent_id, use_auth, url)
@@ -732,14 +958,15 @@ async def browse_page(ctx: ToolContext, url: str, size: str = "m", use_auth: Opt
         # the user already trusted at login). User solves challenge or
         # views JS-rendered content, popup closes, backend gets the
         # rendered HTML back via WS `web_auth_popup_complete` (Step 3).
+        challenge_request_id: Optional[str] = None
         if looks_like_challenge(html):
             log.info(
                 "Anti-bot challenge detected for %s (agent=%s) — "
                 "requesting popup fallback", url, agent_id,
             )
             try:
-                html = await _request_popup_fallback(
-                    ctx, agent_id, use_auth, url
+                html, challenge_request_id = await _request_popup_fallback(
+                    ctx, agent_id, use_auth, url, keep_open=keep_open,
                 )
             except AuthRequiredError as e:
                 _web_auth_mod.audit_append(
@@ -756,7 +983,14 @@ async def browse_page(ctx: ToolContext, url: str, size: str = "m", use_auth: Opt
         total = len(text)
         if max_chars and total > max_chars:
             text = text[:max_chars] + f"\n\n... (truncated, {total} total chars, use size='l' or 'f' for more)"
-        return f"Content from {url} (markdown, auth={use_auth}, {total} chars):\n\n{text}"
+        # T10: surface request_id on the challenge popup-fallback path
+        # too when keep_open=True so the agent can drive follow-up tools.
+        session_hint = (
+            f" — session request_id={challenge_request_id} (open; close with popup_close)"
+            if keep_open and challenge_request_id
+            else ""
+        )
+        return f"Content from {url} (markdown, auth={use_auth}, {total} chars{session_hint}):\n\n{text}"
 
     result = await asyncio.to_thread(_browse_sync, url)
 
@@ -889,7 +1123,7 @@ def get_tools() -> List[ToolEntry]:
             name="browse_page",
             schema={
                 "name": "browse_page",
-                "description": "Fetch a web page and extract content as structured markdown. Preserves headings, lists, tables, and links. Use size presets to control output length: s=5K, m=10K (default), l=25K, f=full. Set use_auth=<domain> to fetch authenticated content using stored cookies (requires prior login via the web-auth UI).",
+                "description": "Fetch a web page and extract content as structured markdown. Preserves headings, lists, tables, and links. Use size presets to control output length: s=5K, m=10K (default), l=25K, f=full. Set use_auth=<domain> to fetch authenticated content using stored cookies (requires prior login via the web-auth UI). Set keep_open=true to leave the popup window open after the initial fetch — the response includes a 'request_id=...' hint you can then pass to popup_extract_now, popup_navigate, or popup_close for multi-page workflows (e.g. drilling from an order list into individual orders without reopening the popup).",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -906,6 +1140,11 @@ def get_tools() -> List[ToolEntry]:
                         "use_auth": {
                             "type": "string",
                             "description": "Optional auth domain (eg 'ozon.ru'). When set, the page is fetched authenticated using cookies from the agent's encrypted vault. The URL must be within the same eTLD+1 as use_auth (subdomains allowed). Returns a re-login prompt if cookies are missing or expired."
+                        },
+                        "keep_open": {
+                            "type": "boolean",
+                            "description": "When true, keep the popup window open after the initial fetch so you can call popup_navigate/popup_extract_now/popup_close against the same session. Use for multi-page authenticated workflows. Default false (single-shot, popup closes automatically).",
+                            "default": False
                         }
                     },
                     "required": ["url"]
@@ -921,6 +1160,79 @@ def get_tools() -> List[ToolEntry]:
             # Anonymous browse_page (without use_auth) returns in <10s so
             # the higher cap doesn't slow that path down.
             timeout_sec=360,
+        ),
+
+        # T10: multi-page popup orchestration siblings. All three look up
+        # the session via request_id obtained from browse_page(keep_open=true).
+        ToolEntry(
+            name="popup_extract_now",
+            schema={
+                "name": "popup_extract_now",
+                "description": "Extract HTML from the currently-open popup session without closing it. Returns the page rendered to markdown. Use after popup_navigate to read the new page, or to re-read the same page after dynamic content updates. Requires a session previously opened via browse_page(keep_open=true).",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "request_id": {
+                            "type": "string",
+                            "description": "Session id returned from browse_page(keep_open=true)"
+                        }
+                    },
+                    "required": ["request_id"]
+                }
+            },
+            handler=popup_extract_now,
+            timeout_sec=45,
+        ),
+
+        ToolEntry(
+            name="popup_navigate",
+            schema={
+                "name": "popup_navigate",
+                "description": "Navigate the popup to a new URL within the same authenticated session. The popup window stays open across navigations (same cookies, same JS state). Pass wait_seconds (default 3) to let JS-heavy SPAs settle before the next popup_extract_now. Must stay within the same eTLD+1 as the original popup session.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "request_id": {
+                            "type": "string",
+                            "description": "Session id returned from browse_page(keep_open=true)"
+                        },
+                        "url": {
+                            "type": "string",
+                            "description": "New URL to load (must match the session's eTLD+1)"
+                        },
+                        "wait_seconds": {
+                            "type": "integer",
+                            "description": "Post-navigation settle delay before returning. 3 seconds is right for most sites; raise for slow SPAs. Capped at 60.",
+                            "default": 3,
+                            "minimum": 0,
+                            "maximum": 60
+                        }
+                    },
+                    "required": ["request_id", "url"]
+                }
+            },
+            handler=popup_navigate,
+            timeout_sec=90,
+        ),
+
+        ToolEntry(
+            name="popup_close",
+            schema={
+                "name": "popup_close",
+                "description": "Close the popup session opened by browse_page(keep_open=true). The popup window goes through its normal close flow — cookies are re-synced to the vault and the session is cleaned up. Call this when you are done with the multi-page workflow.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "request_id": {
+                            "type": "string",
+                            "description": "Session id returned from browse_page(keep_open=true)"
+                        }
+                    },
+                    "required": ["request_id"]
+                }
+            },
+            handler=popup_close,
+            timeout_sec=15,
         ),
 
         ToolEntry(
