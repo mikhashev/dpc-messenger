@@ -593,6 +593,10 @@ async def _request_popup_fallback(
                 "domain": domain,
                 "url": url,
                 "reason": reason,
+                # T10 Q4: forward keep_open so the popup window title can
+                # advertise "Agent active — close to abort" for multi-page
+                # sessions vs the plain "DPC — {url}" for single-shot.
+                "keep_open": keep_open,
             },
         )
         html = await asyncio.wait_for(future, timeout=_POPUP_TIMEOUT_S)

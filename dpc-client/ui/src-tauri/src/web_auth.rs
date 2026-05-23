@@ -225,6 +225,7 @@ pub async fn web_auth_open_popup_for_content(
     url: String,
     request_id: String,
     domain: String,
+    keep_open: bool,
 ) -> Result<(), String> {
     let parsed = Url::parse(&url)
         .map_err(|e| format!("invalid url '{}': {}", url, e))?;
@@ -256,12 +257,21 @@ pub async fn web_auth_open_popup_for_content(
         request_id = request_id
     );
 
+    // T10 Q4: when the agent is driving a multi-page session, the
+    // window title advertises that closing aborts the workflow so the
+    // user understands the popup is not orphaned.
+    let title = if keep_open {
+        format!("Agent active — close to abort — {}", url)
+    } else {
+        format!("DPC — {}", url)
+    };
+
     let window = WebviewWindowBuilder::new(
         &app,
         &label,
         WebviewUrl::External(parsed.clone()),
     )
-    .title(format!("DPC — {}", url))
+    .title(title)
     .inner_size(1000.0, 800.0)
     .initialization_script(&init_script)
     .build()

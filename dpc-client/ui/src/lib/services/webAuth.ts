@@ -26,6 +26,11 @@ export interface WebAuthPopupRequest {
     domain: string;
     url: string;
     reason: string;
+    // T10 Q4 (S143): true when the agent is opening a multi-page
+    // session via browse_page(keep_open=true). Drives the popup
+    // window title ("Agent active — close to abort") and signals
+    // to the user that closing aborts the agent workflow.
+    keep_open?: boolean;
 }
 
 export const webAuthPopupRequest = writable<WebAuthPopupRequest | null>(null);

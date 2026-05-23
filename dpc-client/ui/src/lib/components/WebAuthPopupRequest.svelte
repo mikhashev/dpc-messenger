@@ -40,6 +40,9 @@
                 url: req.url,
                 requestId: req.request_id,
                 domain: req.domain,
+                // T10 Q4: forward keep_open so Rust can render the
+                // "Agent active — close to abort" title for sessions.
+                keepOpen: req.keep_open ?? false,
             });
             // Tauri popup is now visible to the user. The store stays set
             // until the extracted-event listener in coreService.ts clears it

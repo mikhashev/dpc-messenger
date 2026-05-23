@@ -1040,6 +1040,68 @@ export async function connectToCoreService() {
                     console.log("[web_auth] popup_request", message.payload?.url);
                     webAuthPopupRequest.set(message.payload);
                 }
+                else if (message.event === "web_auth_popup_extract_request") {
+                    // ADR-028 T10: agent is driving a keep_open session and
+                    // wants HTML right now. Forward to the Tauri command —
+                    // the existing `web_auth_popup_extracted` Tauri event
+                    // → WS `web_auth_popup_complete` path delivers the HTML
+                    // back to the backend future the agent is awaiting.
+                    const rid = message.payload?.request_id;
+                    if (!rid) {
+                        console.warn('[web_auth] popup_extract_request missing request_id');
+                    } else {
+                        console.log('[web_auth] popup_extract_request', rid);
+                        (async () => {
+                            try {
+                                const { invoke } = await import('@tauri-apps/api/core');
+                                await invoke('web_auth_popup_extract_now', { requestId: rid });
+                            } catch (e) {
+                                console.error('[web_auth] popup_extract_now invoke failed:', e);
+                            }
+                        })();
+                    }
+                }
+                else if (message.event === "web_auth_popup_navigate_request") {
+                    // ADR-028 T10: agent wants the popup to load a new URL
+                    // within the same authenticated session. Backend has
+                    // already done the http/https syntax check; the Rust
+                    // command does the eval of `window.location.href`.
+                    const rid = message.payload?.request_id;
+                    const url = message.payload?.url;
+                    if (!rid || !url) {
+                        console.warn('[web_auth] popup_navigate_request missing request_id/url');
+                    } else {
+                        console.log('[web_auth] popup_navigate_request', rid, url);
+                        (async () => {
+                            try {
+                                const { invoke } = await import('@tauri-apps/api/core');
+                                await invoke('web_auth_popup_navigate', { requestId: rid, url });
+                            } catch (e) {
+                                console.error('[web_auth] popup_navigate invoke failed:', e);
+                            }
+                        })();
+                    }
+                }
+                else if (message.event === "web_auth_popup_close_request") {
+                    // ADR-028 T10: agent is done with the session. Close
+                    // triggers the existing CloseRequested handler (vault
+                    // re-sync, popup_closing watchdog) — no separate
+                    // cleanup needed here.
+                    const rid = message.payload?.request_id;
+                    if (!rid) {
+                        console.warn('[web_auth] popup_close_request missing request_id');
+                    } else {
+                        console.log('[web_auth] popup_close_request', rid);
+                        (async () => {
+                            try {
+                                const { invoke } = await import('@tauri-apps/api/core');
+                                await invoke('web_auth_popup_close', { requestId: rid });
+                            } catch (e) {
+                                console.error('[web_auth] popup_close invoke failed:', e);
+                            }
+                        })();
+                    }
+                }
             } catch (error) {
                 console.error("Error parsing message:", error);
             }
