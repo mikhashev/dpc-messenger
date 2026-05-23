@@ -3503,8 +3503,23 @@ class CoreService:
             return {"status": "error", "message": str(e)}
 
     async def save_firewall_rules(self, rules_dict: Dict[str, Any]) -> Dict[str, Any]:
-        """Save updated firewall rules from UI editor."""
+        """Save updated firewall rules from UI editor.
+
+        Selective merge protects per-agent sub-keys added by other
+        writers (e.g. `web_auth_add_domain` writing to
+        `agent_profiles.<id>.web_auth`) during FirewallEditor's
+        open-but-unsaved window. Without the merge, FirewallEditor
+        saves a stale snapshot and silently wipes those keys.
+
+        Scope: only sub-keys within profiles already present in the
+        incoming payload are preserved. An agent profile missing from
+        the incoming payload is treated as an explicit delete (the
+        editor has a delete-profile UI). New-profile-added-by-another-
+        writer-while-editor-open remains an edge case deferred until
+        optimistic concurrency lands.
+        """
         try:
+            self._merge_unknown_agent_profile_keys(rules_dict)
             success, message, errors = self.firewall.save_rules_from_dict(rules_dict)
 
             if not success:
@@ -3526,6 +3541,54 @@ class CoreService:
         except Exception as e:
             logger.error("Error saving firewall rules: %s", e, exc_info=True)
             return {"status": "error", "message": str(e)}
+
+    def _merge_unknown_agent_profile_keys(self, rules_dict: Dict[str, Any]) -> None:
+        """Mutate `rules_dict` in place: for every agent profile present
+        in both the incoming payload and the on-disk rules, copy any
+        sub-keys that exist on disk but are missing from the incoming
+        snapshot. This protects against the stale-snapshot wipe pattern
+        where FirewallEditor reads rules at open time, another panel
+        (e.g. AgentPermissionsPanel) writes a new sub-key
+        (`web_auth.allowed_domains`) while the editor is open, then
+        editor save would otherwise overwrite the on-disk state with
+        its stale view.
+
+        Profiles missing entirely from `rules_dict` are treated as
+        explicit deletes (FirewallEditor has a delete-profile control)
+        and are NOT re-introduced.
+        """
+        try:
+            current = self.firewall.get_rules_as_dict()
+        except Exception as e:
+            # If the on-disk rules are unreadable for any reason, fall
+            # back to no-merge (the original pass-through behaviour) —
+            # better to write the user's edit than to swallow it.
+            logger.warning(
+                "save_firewall_rules: stale-merge skipped, on-disk rules "
+                "unreadable: %s", e,
+            )
+            return
+
+        current_profiles = current.get("agent_profiles")
+        if not isinstance(current_profiles, dict):
+            return
+        incoming_profiles = rules_dict.get("agent_profiles")
+        if not isinstance(incoming_profiles, dict):
+            return
+
+        for agent_id, current_profile in current_profiles.items():
+            if not isinstance(current_profile, dict):
+                continue
+            if agent_id not in incoming_profiles:
+                # Editor either deleted the profile or never loaded it;
+                # respect the absence either way.
+                continue
+            incoming_profile = incoming_profiles[agent_id]
+            if not isinstance(incoming_profile, dict):
+                continue
+            for key, value in current_profile.items():
+                if key not in incoming_profile:
+                    incoming_profile[key] = value
 
     async def reload_firewall(self) -> Dict[str, Any]:
         """Reload firewall rules from disk."""

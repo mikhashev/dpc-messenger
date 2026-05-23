@@ -277,6 +277,102 @@ def test_remove_domain_accepts_url_form(vault_home):
     assert stub.firewall.get_agent_web_auth_domains("agent_a") == []
 
 
+def test_save_firewall_merge_preserves_web_auth_added_after_load(vault_home):
+    """Bug B regression: FirewallEditor.saveChanges with a stale
+    snapshot must NOT wipe `agent_profiles.<id>.web_auth` that was
+    added to disk by `web_auth_add_domain` between the editor's
+    `loadRules()` and its save.
+
+    Direct unit test of `_merge_unknown_agent_profile_keys` — avoids
+    stubbing the full `save_firewall_rules` glue (notify_peers,
+    llm_manager) since the merge logic is the bug surface.
+    """
+    from dpc_client_core.service import CoreService
+
+    # On-disk state: agent has web_auth (added by AgentPermissionsPanel)
+    stub = _build_stub(vault_home, {"agent_profiles": {
+        "agent_a": {
+            "enabled": True,
+            "tools": {"browse_page": True},
+            "web_auth": {"allowed_domains": ["ozon.ru"]},
+        }
+    }})
+
+    # FirewallEditor's stale snapshot: same agent, no web_auth, tools edited
+    incoming = {"agent_profiles": {
+        "agent_a": {
+            "enabled": True,
+            "tools": {"browse_page": True, "git_commit": False},
+        }
+    }}
+
+    CoreService._merge_unknown_agent_profile_keys(stub, incoming)
+
+    assert "web_auth" in incoming["agent_profiles"]["agent_a"]
+    assert incoming["agent_profiles"]["agent_a"]["web_auth"] == {"allowed_domains": ["ozon.ru"]}
+    # FirewallEditor's edit to tools dict wins (not merged sub-key)
+    assert incoming["agent_profiles"]["agent_a"]["tools"]["git_commit"] is False
+
+
+def test_save_firewall_merge_respects_profile_delete(vault_home):
+    """If FirewallEditor's deleteAgentProfile UI removes a profile,
+    the incoming payload lacks that agent_id entirely. The merge must
+    NOT re-introduce it from disk — that would silently undo deletes.
+    New-agent-added-by-another-writer is the symmetrical case we
+    accept losing as part of MVP scope (deferred to optimistic
+    concurrency)."""
+    from dpc_client_core.service import CoreService
+
+    stub = _build_stub(vault_home, {"agent_profiles": {
+        "agent_a": {"enabled": True, "web_auth": {"allowed_domains": ["ozon.ru"]}},
+        "agent_b": {"enabled": True},
+    }})
+    incoming = {"agent_profiles": {
+        # agent_a deleted by user; agent_b still present
+        "agent_b": {"enabled": True},
+    }}
+
+    CoreService._merge_unknown_agent_profile_keys(stub, incoming)
+
+    assert "agent_a" not in incoming["agent_profiles"]
+    assert "agent_b" in incoming["agent_profiles"]
+
+
+def test_save_firewall_merge_handles_missing_agent_profiles(vault_home):
+    """Edge: incoming has no `agent_profiles` key at all (legacy
+    payload or hand-edited dict). Merge must not crash and not invent
+    the key from disk."""
+    from dpc_client_core.service import CoreService
+
+    stub = _build_stub(vault_home, {"agent_profiles": {
+        "agent_a": {"enabled": True, "web_auth": {"allowed_domains": ["ozon.ru"]}},
+    }})
+    incoming = {"hub": {}}
+
+    CoreService._merge_unknown_agent_profile_keys(stub, incoming)
+
+    assert "agent_profiles" not in incoming
+
+
+def test_save_firewall_merge_skips_when_disk_unreadable(vault_home, monkeypatch):
+    """If `firewall.get_rules_as_dict()` raises (corrupt JSON on disk,
+    permission error, etc.) the merge must silently fall back to no-op
+    rather than block the user's save. Better to write their edit than
+    swallow it."""
+    from dpc_client_core.service import CoreService
+
+    stub = _build_stub(vault_home, {})
+
+    def boom():
+        raise IOError("simulated disk read failure")
+    stub.firewall.get_rules_as_dict = boom
+
+    incoming = {"agent_profiles": {"agent_a": {"enabled": True}}}
+    # No exception — and incoming is left untouched.
+    CoreService._merge_unknown_agent_profile_keys(stub, incoming)
+    assert incoming == {"agent_profiles": {"agent_a": {"enabled": True}}}
+
+
 def test_add_domain_rejects_ipv6_literal(vault_home):
     """IPv6 literals (with/without brackets, with/without scheme) are
     intentionally rejected for MVP — they have no dot so the downstream
