@@ -34,9 +34,9 @@ Three approaches were considered in backlog AGENT-WEB-AUTH:
 Agent: "I need access to ozon.ru. Open login window?"
   ↓ user confirms
 Tauri command: open_login_window("ozon.ru")
-  → WebView2 popup (Windows) / WKWebView (macOS) / WebKitGTK (Linux)
+  → Tauri WebView popup (cross-platform — WebView2/WKWebView/WebKitGTK abstracted by Tauri runtime)
   → user logs in manually
-  → popup closes → cookies extracted via platform API
+  → popup closes → cookies extracted via Tauri native cookies API
   ↓
 Cookies stored in encrypted vault per-agent per-domain
   ↓
@@ -72,32 +72,34 @@ Agent: browse_page(url="https://ozon.ru/my/orders", use_auth="ozon.ru")
 
 ### 3. Cookie Extraction (Tauri Rust)
 
-**Platform-specific implementation, ~200-300 lines:**
+**Tauri 2.x provides native cross-platform cookies API** (discovered during T2 spike, S138 2026-05-23). No per-OS WinRT/WKWebView/WebKitGTK bindings needed — Tauri runtime abstracts the underlying WebView per platform.
 
-| Platform | API | Method |
-|----------|-----|--------|
-| Windows | WebView2 | `CoreWebView2.CookieManager.GetCookiesAsync()` |
-| macOS | WKWebView | `WKHTTPCookieStore.getAllCookies()` |
-| Linux | WebKitGTK | `webkit_cookie_manager_get_cookies()` |
+**API surface** (`tauri::webview::WebviewWindow`, available since Tauri 2.9.5 — our current Cargo.lock pin):
 
-**No existing Tauri plugin** — must be implemented as custom Tauri command.
+```rust
+pub fn cookies(&self) -> Result<Vec<Cookie<'static>>>
+pub fn cookies_for_url(&self, url: Url) -> Result<Vec<Cookie<'static>>>
+pub fn set_cookie(&self, cookie: Cookie<'_>) -> Result<()>
+pub fn delete_cookie(&self, cookie: Cookie<'_>) -> Result<()>
+```
 
-**Tauri command signature:**
+`Cookie` type re-exported from `cookie` crate (transitive dep, no addition to `Cargo.toml` needed).
+
+**Estimated ~50-100 lines Rust total** (down from per-platform ~200-300 estimate).
+
+**Implementation pattern:** close-event + spawn-thread. `on_window_event(WindowEvent::CloseRequested)` spawns a separate thread (avoids Windows deadlock on sync handlers) that calls `cookies_for_url()` and emits the `web_auth_login_complete` Tauri event. Frontend forwards via existing WebSocket to Python vault (T3).
+
+**Tauri command signatures** (already scaffolded at `dpc-client/ui/src-tauri/src/web_auth.rs`):
+
 ```rust
 #[tauri::command]
-async fn open_login_window(domain: String) -> Result<Vec<Cookie>, String> {
-    // Create WebView popup → user logs in → extract cookies → close
-}
+pub async fn web_auth_open_login_window(domain: String) -> Result<Vec<Cookie>, String>;
 
 #[tauri::command]
-async fn get_auth_status(domain: String) -> Result<AuthStatus, String> {
-    // Check if cookies exist and are not expired
-}
+pub async fn web_auth_get_status(domain: String) -> Result<AuthStatus, String>;
 
 #[tauri::command]
-async fn revoke_auth(domain: String) -> Result<(), String> {
-    // Delete cookies for domain
-}
+pub async fn web_auth_revoke(domain: String) -> Result<(), String>;
 ```
 
 ### 4. eTLD+1 Cookie Resolution
@@ -194,7 +196,7 @@ When cookies are expired (checked against `expires` timestamp):
 ## Implementation Phases
 
 ### Phase 1 (MVP)
-1. Rust: `open_login_window` Tauri command (Windows WebView2 only initially)
+1. Rust: `open_login_window` Tauri command (cross-platform via Tauri native cookies API, since 2.9.5)
 2. Rust: DPAPI-encrypted credential vault read/write
 3. Python: `web_auth.py` module — vault access, cookie resolution, eTLD+1 matching
 4. Python: `browser.py` extension — `use_auth` parameter, Camoufox-with-cookies routing
@@ -204,7 +206,6 @@ When cookies are expired (checked against `expires` timestamp):
 8. `privacy_rules.json`: `web_auth` block for agent_001
 
 ### Phase 2 (Future)
-- macOS + Linux cookie extraction
 - Master password encryption option
 - Audit trail UI panel
 - OAuth2 driver for services that support it
@@ -220,7 +221,8 @@ When cookies are expired (checked against `expires` timestamp):
 
 | Risk | Severity | Mitigation |
 |------|----------|------------|
-| Platform-specific cookie extraction (~200-300 lines Rust) | Medium | Windows-first MVP, macOS/Linux in Phase 2 |
+| Tauri cookies API flagged unstable in upstream docs | Low | Currently on Tauri 2.9.5 (API present since this version); monitor 2.10+ changelog; pin to `"2.9"` if breaking change appears |
+| Windows sync deadlock on `cookies()` call | Low | All Tauri commands use `async fn` and close-event handler spawns a separate thread before calling `cookies_for_url()` — pattern documented in T2 impl |
 | Anti-bot evolution may break Camoufox+cookies approach | Medium | Cookie replant + Camoufox profile reset; fallback to re-login |
 | DPAPI same-user attacker can decrypt vault | Low (Alpha) | Acceptable for Alpha; master password option in Phase 2 |
 | eTLD+1 edge cases (co.uk, etc.) | Low | Hardcoded MVP domains; PSL integration Phase 2 |
