@@ -1275,6 +1275,13 @@ export function sendCommand(command: string, payload: any = {}, commandId?: stri
         // load domains" even though backend was returning success.
         const fireAndForgetCommands = new Set<string>([
             'ui_log',  // logging beacon — no semantic response, drop the await
+            // Agent loop response is routed via event stream ($coreMessages →
+            // MessageRouterPanel) rather than the pending-command promise.
+            // ChatPanel calls sendCommand without await, so the unawaited
+            // promise rejected at 60s when popup_fallback waits for user
+            // (up to 5min), surfacing as `Uncaught (in promise) Error:
+            // Command 'execute_ai_query' timed out` in DevTools.
+            'execute_ai_query',
         ]);
         const expectsResponse = !fireAndForgetCommands.has(command);
 
