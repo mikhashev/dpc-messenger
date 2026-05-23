@@ -142,6 +142,7 @@ class ContextFirewall:
             'browse_page': True,
             'fetch_json': True,
             'check_url': True,
+            'list_auth_domains': True,  # Read-only: list own allowed auth domains (ADR-028 T7)
             'search_web': True,
             # Git tools (read-only)
             'git_status': False,
@@ -502,6 +503,22 @@ class ContextFirewall:
             allowed.discard('import_skill_from_agent')
 
         return allowed
+
+    def get_agent_web_auth_domains(self, agent_id: str) -> List[str]:
+        """ADR-028 T7 — return the agent's `web_auth.allowed_domains`
+        whitelist as a normalized (lowercased) list. Empty list when no
+        web_auth block is configured for the agent.
+
+        Used by the `list_auth_domains` tool to enumerate domains an
+        agent can authenticate to, without exposing the rest of the
+        agent's firewall config or other agents' configs.
+        """
+        allowed = self._get_profile_or_global(
+            agent_id, 'web_auth', 'allowed_domains', default=[]
+        )
+        if not isinstance(allowed, list):
+            return []
+        return [d.lower() for d in allowed if isinstance(d, str)]
 
     def is_auth_domain_allowed(self, agent_id: str, domain: str) -> bool:
         """ADR-028 T5 — per-agent + per-domain auth gate for browse_page use_auth.

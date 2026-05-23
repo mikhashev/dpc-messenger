@@ -200,10 +200,20 @@ def audit_append(
     size when known.
 
     Append-only — opens in `'a'` mode each call, no handle kept, no
-    rotation in MVP. File is written by the DPC core process; the
-    agent has no read or write access (path lives under the agent's
-    storage root but is NOT exposed through the sandbox `read_*`
-    extensions — see T5 firewall integration).
+    rotation in MVP.
+
+    Write boundary (per Ark S140 [#64] review): the file is written
+    by the DPC core process via a direct `open(path, 'a')` that
+    bypasses the agent's `file_write` tool and its sandbox extensions
+    — the agent itself cannot append to or truncate this log.
+
+    Read visibility: the file lives under the agent's own storage
+    root (`~/.dpc/agents/{agent_id}/`), which IS readable by the
+    agent's `file_read` tool by default. This is intentional —
+    transparency rather than security boundary. The agent SHOULD be
+    able to introspect its own audit history. Cross-agent isolation
+    is preserved: agent_b's sandbox is rooted at agent_b's directory,
+    so it cannot read agent_a's audit log.
     """
     path = _vault_path(agent_id).parent / "web_audit.jsonl"
     path.parent.mkdir(parents=True, exist_ok=True)
