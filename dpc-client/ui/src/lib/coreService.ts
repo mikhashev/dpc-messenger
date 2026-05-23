@@ -1273,6 +1273,11 @@ export function sendCommand(command: string, payload: any = {}, commandId?: stri
             // Per-agent model config (AGENT-MODEL)
             'get_agent_model_config',
             'save_agent_model_config',
+            // Per-agent web auth (ADR-028 T8)
+            'web_auth_list_domains',
+            'web_auth_add_domain',
+            'web_auth_remove_domain',
+            'web_auth_login_complete',
         ].includes(command);
 
         if (expectsResponse) {
