@@ -35,7 +35,11 @@ async def list_auth_domains(ctx: ToolContext) -> str:
         Plain-text summary, one line per domain, or a helpful message
         when no domains are configured for this agent.
     """
-    # See browser.browse_page docstring for the agent_root.name contract.
+    # Contract: ctx.agent_root is ~/.dpc/agents/{agent_id}/ (see
+    # dpc_agent.utils.get_agent_root). Last path component IS the
+    # agent_id. If the agent storage layout changes, this derivation
+    # must move to a helper there — track via grep on `agent_root.name`.
+    # (Same contract as browser.browse_page use_auth path.)
     agent_id = ctx.agent_root.name
 
     firewall = None
