@@ -129,6 +129,7 @@ import { agentsList, agentCreated, agentUpdated, agentDeleted, agentProfiles, ag
 import { telegramEnabled, telegramConnected, telegramStatus, telegramError, telegramLinkedChats, telegramMessages, telegramMessageReceived, telegramVoiceReceived, telegramImageReceived, telegramFileReceived, agentTelegramLinked, agentTelegramUnlinked, agentHistoryUpdated } from './services/telegram';
 import { personalContext, contextUpdated, peerContextUpdated, knowledgeCommitProposal, knowledgeCommitResult, extractionFailure, tokenWarning, integrityWarnings } from './services/knowledge';
 import { historyRestored, newSessionProposal, newSessionResult, conversationReset, conversationSettings, conversationSettingsChanged, conversationDeleted } from './services/session';
+import { webAuthPopupRequest } from './services/webAuth';
 
 // Re-export all service stores for backward compatibility.
 // NOTE: When adding new UI-reactive fields from privacy_rules.json, add the store in
@@ -143,6 +144,7 @@ export { agentsList, agentCreated, agentUpdated, agentDeleted, agentProfiles, ag
 export { telegramEnabled, telegramConnected, telegramStatus, telegramError, telegramLinkedChats, telegramMessages, telegramMessageReceived, telegramVoiceReceived, telegramImageReceived, telegramFileReceived, agentTelegramLinked, agentTelegramUnlinked, agentHistoryUpdated };
 export { personalContext, contextUpdated, peerContextUpdated, knowledgeCommitProposal, knowledgeCommitResult, extractionFailure, tokenWarning, integrityWarnings };
 export { historyRestored, newSessionProposal, newSessionResult, conversationReset, conversationSettings, conversationSettingsChanged, conversationDeleted };
+export { webAuthPopupRequest };
 
 // Track currently active chat to prevent unread badges on open chats
 let activeChat: string | null = null;
@@ -1029,6 +1031,15 @@ export async function connectToCoreService() {
                         });
                     }
                 }
+                else if (message.event === "web_auth_popup_request") {
+                    // ADR-028 T9: backend agent hit an anti-bot challenge (or
+                    // matched the always_popup whitelist) on an authenticated
+                    // browse and is now awaiting a popup-extracted HTML.
+                    // Surface the prompt — WebAuthPopupRequestPanel binds to
+                    // this store and renders the "Open {domain}" button.
+                    console.log("[web_auth] popup_request", message.payload?.url);
+                    webAuthPopupRequest.set(message.payload);
+                }
             } catch (error) {
                 console.error("Error parsing message:", error);
             }
@@ -1176,8 +1187,41 @@ async function ensureWebAuthListener(): Promise<void> {
                 cookies: payload.cookies || [],
             });
         });
+
+        // ADR-028 T9: same listener-install gate handles the popup-fallback
+        // companion event. Rust `web_auth_open_popup_for_content` emits this
+        // when the user closes the popup; the payload already carries
+        // request_id (closed-over in the init-script JS), so unlike the T8
+        // login flow we don't need a pendingMap to recover the agent — the
+        // Python Step-3 handler resolves the matching Future by id.
+        await listen<{
+            request_id: string;
+            content_html?: string;
+            current_url?: string;
+            error?: string;
+        }>('web_auth_popup_extracted', (event) => {
+            const payload = event.payload;
+            if (!payload || !payload.request_id) {
+                console.warn('[web_auth] popup_extracted with no request_id — ignoring');
+                return;
+            }
+            console.log(
+                '[web_auth] popup_extracted',
+                payload.request_id,
+                payload.error ? `error=${payload.error}` : `bytes=${payload.content_html?.length || 0}`,
+            );
+            sendCommand('web_auth_popup_complete', {
+                request_id: payload.request_id,
+                content_html: payload.content_html,
+                current_url: payload.current_url,
+                error: payload.error,
+            });
+            // Clear the pending-request store so the panel dismisses its UI.
+            webAuthPopupRequest.set(null);
+        });
+
         webAuthListenerInstalled = true;
-        console.log('[web_auth] Tauri event listener installed');
+        console.log('[web_auth] Tauri event listeners installed');
     } catch (e) {
         // Tauri not available (e.g. running outside Tauri shell) — the
         // web-auth flow won't work, but this isn't fatal for the rest
