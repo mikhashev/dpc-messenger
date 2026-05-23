@@ -610,6 +610,11 @@ async def _request_popup_fallback(
         opened_at=time.monotonic(),
     )
 
+    # Bug 7 (S143 manual-test): track whether the initial extraction
+    # actually succeeded. Only successful keep_open sessions stay in
+    # the pending-map; any error path pops the entry so the next
+    # browse_page(keep_open=True) is not blocked by Q7 concurrency.
+    session_alive = False
     try:
         await local_api.broadcast_event(
             "web_auth_popup_request",
@@ -626,6 +631,7 @@ async def _request_popup_fallback(
             },
         )
         html = await asyncio.wait_for(future, timeout=_POPUP_TIMEOUT_S)
+        session_alive = True
         return html, request_id
     except asyncio.TimeoutError as e:
         raise AuthRequiredError(
@@ -633,10 +639,17 @@ async def _request_popup_fallback(
             f"user did not complete"
         ) from e
     finally:
-        # T10: keep_open sessions live past the initial extraction so the
-        # agent can call follow-up tools. They are removed by an explicit
-        # `popup_close()` or by the 30-minute lifetime cap (Step 4).
-        if not keep_open:
+        # T10 + Bug 7: keep only successful keep_open sessions. The
+        # single-shot path (keep_open=False) always pops here, exactly
+        # like the original T9 finally. The keep_open=True path used to
+        # *always* skip the pop — but on error paths (user_cancelled,
+        # popup_close_timeout, AuthRequiredError raised by the WS
+        # handler) the agent received an error string with no
+        # request_id, leaving a zombie entry that Q7 concurrency then
+        # rejected on the next browse_page(keep_open=True). Track
+        # `session_alive` instead: only the success-return branch
+        # flips it, so every error path falls through to the pop.
+        if not (keep_open and session_alive):
             _pending_popup_requests.pop(request_id, None)
 
 
