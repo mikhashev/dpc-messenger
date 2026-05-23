@@ -36,6 +36,8 @@ dependencies = [
     "trafilatura>=1.12,<3.0",
     "stopwordsiso>=0.6",
     "discord.py>=2.7.0,<3.0.0",
+    "keyring>=24.0",
+    "cryptography>=42.0",
 ]
 
 [project.optional-dependencies]
