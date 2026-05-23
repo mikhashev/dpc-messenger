@@ -277,6 +277,26 @@ def test_remove_domain_accepts_url_form(vault_home):
     assert stub.firewall.get_agent_web_auth_domains("agent_a") == []
 
 
+def test_add_domain_rejects_ipv6_literal(vault_home):
+    """IPv6 literals (with/without brackets, with/without scheme) are
+    intentionally rejected for MVP — they have no dot so the downstream
+    hostname check fires. Python's `urlsplit().hostname` strips IPv6
+    brackets automatically, so `http://[::1]:8080` resolves to `::1`
+    which the dot-check rejects. PSL/IPv6 vault keying is Phase 2."""
+    stub = _build_stub(vault_home, {})
+    for ipv6_input in [
+        "http://[::1]:8080",
+        "https://[2001:db8::1]/path",
+        "[::1]:8080",
+    ]:
+        result = _call(stub, "web_auth_add_domain",
+                       agent_id="agent_a", domain=ipv6_input)
+        assert result["status"] == "error", f"{ipv6_input!r} should reject"
+        assert "hostname" in result["message"].lower()
+    # And nothing leaked into the whitelist
+    assert stub.firewall.get_agent_web_auth_domains("agent_a") == []
+
+
 # ─────────────────────────────────────────────────────────────
 # web_auth_remove_domain
 # ─────────────────────────────────────────────────────────────
