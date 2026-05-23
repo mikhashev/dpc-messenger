@@ -457,3 +457,42 @@ pub async fn web_auth_popup_close(
         .ok_or_else(|| format!("popup window not found: request_id={}", request_id))?;
     popup.close().map_err(|e| format!("close failed: {}", e))
 }
+
+/// T10 Step 5 (S143): scroll the popup window programmatically.
+/// Needed for sites with infinite-scroll pagination (YarchePlus orders
+/// list — only the first ~4 entries fit the initial viewport, older
+/// orders are JS-loaded on scroll-to-bottom). The agent calls this
+/// before popup_extract_now to ensure the DOM contains the data it
+/// expects to read.
+///
+/// `direction`:
+///   - `"down"` / `"up"` — relative scroll by `distance_px` pixels
+///   - `"top"` / `"bottom"` — absolute scroll to start/end of document
+/// `distance_px` is ignored for absolute directions.
+#[tauri::command]
+pub async fn web_auth_popup_scroll(
+    app: AppHandle,
+    request_id: String,
+    direction: String,
+    distance_px: i64,
+) -> Result<(), String> {
+    let label = popup_label(&request_id);
+    let popup = app
+        .get_webview_window(&label)
+        .ok_or_else(|| format!("popup window not found: request_id={}", request_id))?;
+    let js = match direction.as_str() {
+        "bottom" => "window.scrollTo(0, document.documentElement.scrollHeight)".to_string(),
+        "top" => "window.scrollTo(0, 0)".to_string(),
+        "down" => format!("window.scrollBy(0, {})", distance_px),
+        "up" => format!("window.scrollBy(0, -{})", distance_px),
+        _ => {
+            return Err(format!(
+                "invalid scroll direction '{}' (allowed: down, up, top, bottom)",
+                direction
+            ))
+        }
+    };
+    popup
+        .eval(&js)
+        .map_err(|e| format!("eval failed: {}", e))
+}

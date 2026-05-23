@@ -1102,6 +1102,32 @@ export async function connectToCoreService() {
                         })();
                     }
                 }
+                else if (message.event === "web_auth_popup_scroll_request") {
+                    // ADR-028 T10 Step 5: agent wants to scroll the popup
+                    // to trigger pagination / lazy loading. Forwards to
+                    // the Rust command which eval()s the appropriate
+                    // scrollBy / scrollTo on the popup's window.
+                    const rid = message.payload?.request_id;
+                    const direction = message.payload?.direction;
+                    const distance = message.payload?.distance_px;
+                    if (!rid || !direction) {
+                        console.warn('[web_auth] popup_scroll_request missing request_id/direction');
+                    } else {
+                        console.log('[web_auth] popup_scroll_request', rid, direction, distance);
+                        (async () => {
+                            try {
+                                const { invoke } = await import('@tauri-apps/api/core');
+                                await invoke('web_auth_popup_scroll', {
+                                    requestId: rid,
+                                    direction,
+                                    distancePx: typeof distance === 'number' ? distance : 1000,
+                                });
+                            } catch (e) {
+                                console.error('[web_auth] popup_scroll invoke failed:', e);
+                            }
+                        })();
+                    }
+                }
             } catch (error) {
                 console.error("Error parsing message:", error);
             }

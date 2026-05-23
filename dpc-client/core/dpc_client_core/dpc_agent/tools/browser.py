@@ -822,6 +822,64 @@ async def popup_navigate(
     return f"Navigated popup to {url} (request_id={request_id}, waited {wait_seconds}s)"
 
 
+async def popup_scroll(
+    ctx: ToolContext,
+    request_id: str,
+    direction: str = "down",
+    distance_px: int = 1000,
+    settle_seconds: int = 1,
+) -> str:
+    """T10 Step 5: scroll the popup so JS-paginated lists load more content.
+
+    YarchePlus orders class — the initial DOM only contains ~4 visible
+    orders, scrolling to the bottom triggers a JS XHR that appends
+    older ones. `popup_extract_now` only sees the currently-rendered
+    DOM, so an agent that wants the full list must scroll first.
+
+    `direction`:
+      - `"down"` / `"up"` — relative scroll by `distance_px` pixels
+      - `"top"` / `"bottom"` — absolute scroll to start/end of document
+        (`distance_px` ignored)
+
+    `settle_seconds` is the post-scroll wait — gives the site time to
+    fetch + render newly-appended content before the next extract.
+    Capped at 30s. Default 1s covers the common XHR case.
+    """
+    local_api = _get_local_api(ctx)
+    entry = _get_popup_session(request_id)
+
+    if direction not in ("down", "up", "top", "bottom"):
+        raise AuthRequiredError(
+            f"popup_scroll: invalid direction {direction!r} "
+            f"(allowed: down, up, top, bottom)"
+        )
+
+    distance_px = max(0, int(distance_px))
+    await local_api.broadcast_event(
+        "web_auth_popup_scroll_request",
+        {
+            "request_id": request_id,
+            "direction": direction,
+            "distance_px": distance_px,
+        },
+    )
+
+    settle_seconds = max(0, min(int(settle_seconds), 30))
+    if settle_seconds:
+        await asyncio.sleep(settle_seconds)
+
+    # entry still alive; popup_extract_now after this call sees the
+    # updated DOM. Touch entry to silence "unused" lint warnings —
+    # session lifetime check already happened in _get_popup_session.
+    _ = entry
+    return (
+        f"Scrolled popup {direction} "
+        f"(request_id={request_id}, distance={distance_px}px, "
+        f"settled {settle_seconds}s) — call popup_extract_now next "
+        f"to read the updated DOM"
+    )
+
+
 async def popup_close(ctx: ToolContext, request_id: str) -> str:
     """T10: close the popup programmatically.
 
@@ -1302,6 +1360,45 @@ def get_tools() -> List[ToolEntry]:
             },
             handler=popup_close,
             timeout_sec=15,
+        ),
+
+        ToolEntry(
+            name="popup_scroll",
+            schema={
+                "name": "popup_scroll",
+                "description": "Scroll the popup window programmatically so JS-paginated lists load more content. Many sites only render a few items initially and fetch more via XHR on scroll-to-bottom (YarchePlus orders list is a typical example). Use 'bottom' to trigger 'load more', then call popup_extract_now to read the updated DOM. Repeat as needed until extract returns no new items.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "request_id": {
+                            "type": "string",
+                            "description": "Session id returned from browse_page(keep_open=true)"
+                        },
+                        "direction": {
+                            "type": "string",
+                            "description": "Scroll direction. 'down'/'up' = relative by distance_px. 'top'/'bottom' = absolute to start/end of document (distance_px ignored).",
+                            "enum": ["down", "up", "top", "bottom"],
+                            "default": "down"
+                        },
+                        "distance_px": {
+                            "type": "integer",
+                            "description": "Pixels to scroll for 'down'/'up'. Ignored for 'top'/'bottom'.",
+                            "default": 1000,
+                            "minimum": 0
+                        },
+                        "settle_seconds": {
+                            "type": "integer",
+                            "description": "Post-scroll wait in seconds — gives XHR-loaded content time to render before the next popup_extract_now. Capped at 30.",
+                            "default": 1,
+                            "minimum": 0,
+                            "maximum": 30
+                        }
+                    },
+                    "required": ["request_id"]
+                }
+            },
+            handler=popup_scroll,
+            timeout_sec=45,
         ),
 
         ToolEntry(

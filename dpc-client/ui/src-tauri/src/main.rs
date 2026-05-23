@@ -72,7 +72,8 @@ fn main() {
             web_auth::web_auth_open_popup_for_content,
             web_auth::web_auth_popup_extract_now,
             web_auth::web_auth_popup_navigate,
-            web_auth::web_auth_popup_close
+            web_auth::web_auth_popup_close,
+            web_auth::web_auth_popup_scroll
         ])
         .setup(|app| {
             #[cfg(debug_assertions)]
