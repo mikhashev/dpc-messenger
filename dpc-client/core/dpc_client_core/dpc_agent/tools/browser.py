@@ -17,6 +17,7 @@ import html as html_module
 import logging
 import re
 import ssl
+from dataclasses import dataclass
 from html.parser import HTMLParser
 from io import StringIO
 from typing import Any, Dict, List, Optional
@@ -470,9 +471,20 @@ def _auth_browse(agent_id: str, domain: str, url: str) -> str:
 # ADR-028 T9 — Popup fallback (caller side)
 # ─────────────────────────────────────────────────────────────
 
-# Pending popup requests keyed by request_id. The async Future is
-# resolved by the local-api WS handler for `web_auth_popup_complete`
-# (Step 3) when the frontend reports back with the popup-extracted HTML.
+@dataclass
+class PendingPopupRequest:
+    """One in-flight popup-fallback request. The WS handler for
+    `web_auth_popup_complete` reads `expected_url` / `expected_etld1`
+    to enforce the Q2 URL-safety check (Ark softer version) before
+    resolving the future with the popup-extracted HTML."""
+    future: asyncio.Future
+    expected_url: str
+    expected_etld1: str
+
+
+# Pending popup requests keyed by request_id. The future is resolved by
+# the local-api WS handler for `web_auth_popup_complete` (Step 3) when
+# the frontend reports back with the popup-extracted HTML.
 # Ephemeral by design (Q3 decision S142): backend restart loses pending
 # requests, frontend popups become orphaned, user retries.
 #
@@ -480,13 +492,13 @@ def _auth_browse(agent_id: str, domain: str, url: str) -> str:
 # event loop and from the WS handler running on the same loop. DPC has
 # a single event loop; if a future deployment multiplexes loops, this
 # dict needs an asyncio.Lock or per-loop registries.
-_pending_popup_requests: dict[str, asyncio.Future] = {}
+_pending_popup_requests: dict[str, PendingPopupRequest] = {}
 
 # 5-minute popup timeout per ADR-028 T9 Q4 (Mike + Ark agreed S142).
 _POPUP_TIMEOUT_S = 300
 
 
-def get_pending_popup_requests() -> dict[str, asyncio.Future]:
+def get_pending_popup_requests() -> dict[str, PendingPopupRequest]:
     """Accessor used by the Step 3 WS handler to resolve futures by id.
     Module-level dict is the source of truth; this returns the live ref
     (mutation is intentional)."""
@@ -516,10 +528,19 @@ async def _request_popup_fallback(
 
     import uuid
 
+    # eTLD+1 used by the Q2 URL-safety check in `web_auth_popup_complete`.
+    # Lazy import to keep this module importable when web_auth (which
+    # owns the ETLD1_MAP / resolver) isn't wired in unit tests.
+    from dpc_client_core import web_auth as _wa
+
     request_id = uuid.uuid4().hex[:12]
     loop = asyncio.get_running_loop()
     future: asyncio.Future = loop.create_future()
-    _pending_popup_requests[request_id] = future
+    _pending_popup_requests[request_id] = PendingPopupRequest(
+        future=future,
+        expected_url=url,
+        expected_etld1=_wa.resolve_etld1(domain),
+    )
 
     try:
         await local_api.broadcast_event(

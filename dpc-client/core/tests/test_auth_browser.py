@@ -370,8 +370,11 @@ def test_request_popup_fallback_happy_path_resolves_with_html(tmp_path):
             await asyncio.sleep(0)
             pending = mod.get_pending_popup_requests()
             assert len(pending) == 1, "exactly one request registered"
-            (request_id, fut), = pending.items()
-            fut.set_result("<html><body>popup html</body></html>")
+            (request_id, entry), = pending.items()
+            # Sanity-check the PendingPopupRequest the caller registered.
+            assert entry.expected_url == "https://ozon.ru/my"
+            assert entry.expected_etld1 == "ozon.ru"
+            entry.future.set_result("<html><body>popup html</body></html>")
 
         resolver = asyncio.create_task(_resolve_later())
         out = await mod._request_popup_fallback(
