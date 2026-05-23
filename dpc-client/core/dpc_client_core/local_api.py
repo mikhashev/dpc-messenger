@@ -328,6 +328,15 @@ class LocalApiServer:
                             result = await handler_method(**payload)
                             response = {"id": command_id, "command": command, "status": "OK", "payload": result}
                             await websocket.send(json.dumps(response))
+                            # Mike S141: pair every "Executing command" with a
+                            # "Response sent" so the request → response chain
+                            # is greppable. Past Bug A class (sendCommand
+                            # fire-and-forget instead of Promise) hid silent
+                            # backend success behind UI error toasts; with
+                            # this pair anyone diagnosing "command sent but
+                            # UI shows error" can confirm in one grep whether
+                            # backend actually answered.
+                            logger.debug("Response sent for '%s' (id=%s)", command, command_id)
 
                     else:
                         raise ValueError(f"Unknown or non-async command: {command}")

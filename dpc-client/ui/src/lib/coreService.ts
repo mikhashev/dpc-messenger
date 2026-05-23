@@ -1206,79 +1206,33 @@ export function sendCommand(command: string, payload: any = {}, commandId?: stri
             payload
         };
 
-        // For commands that expect a response, return a Promise
-        const expectsResponse = [
-            'get_personal_context',
-            'save_personal_context',
-            'reload_personal_context',
-            'get_instructions',
-            'save_instructions',
-            'reload_instructions',
-            'get_firewall_rules',
-            'save_firewall_rules',
-            'reload_firewall',
-            'validate_firewall_rules',
-            'get_providers_config',
-            'save_providers_config',
-            'get_default_providers',  // Dual provider system
-            'get_providers_list',     // Dual provider system
-            'query_ollama_model_info',
-            'send_file',
-            'send_p2p_image',  // Screenshot sending
-            'send_image',  // Vision analysis (clipboard paste)
-            'accept_file_transfer',
-            'cancel_file_transfer',
-            'get_conversation_history',  // v0.11.2 - backend→frontend sync
-            'connect_to_peer',  // v0.12.0 - async connection with error handling
-            'connect_via_dht',   // v0.12.0 - async connection with error handling
-            'get_wizard_template',  // AI wizard - load wizard configuration
-            'ai_assisted_instruction_creation',  // AI wizard - generate instruction set (local)
-            'ai_assisted_instruction_creation_remote',  // AI wizard - generate instruction set (remote)
-            'get_available_templates',  // Template import - list templates
-            'import_instruction_template',  // Template import - import template
-            'create_instruction_set',  // Instruction management
-            'delete_instruction_set',  // Instruction management
-            'rename_instruction_set',  // Instruction management
-            'set_default_instruction_set',  // Instruction management
-            'get_instruction_set',  // Instruction management
-            'transcribe_audio',  // v0.13.1 - voice message transcription
-            'get_voice_transcription_config',  // v0.13.2 - auto-transcription config
-            'save_voice_transcription_config',  // v0.13.2 - auto-transcription config
-            'set_conversation_transcription',  // v0.13.2 - per-conversation transcription control
-            'get_conversation_transcription',  // v0.13.2 - per-conversation transcription control
-            'prepare_agent',  // Pre-initialize DPC Agent and Telegram bridge
-            'query_remote_providers',  // v0.18.0 - fetch available providers from remote peer
-            'get_groups',  // v0.19.0 - group chat management
-            'create_group_chat',  // v0.19.0 - group chat creation
-            'leave_group',  // v0.19.0 - leave group
-            'delete_group',  // v0.19.0 - delete group
-            'get_conversation_settings',  // v0.21.0 - per-conversation settings
-            'set_conversation_persist_history',  // v0.21.0 - toggle history persistence
-            'delete_conversation',  // v0.21.0 - delete entire conversation
-            'create_agent',  // DPC Agent isolation - create agent with isolated storage
-            'list_agents',  // DPC Agent isolation - list all agents
-            'get_agent_config',  // DPC Agent isolation - get agent configuration
-            'update_agent_config',  // DPC Agent isolation - update agent configuration
-            'delete_agent',  // DPC Agent isolation - delete agent
-            'list_agent_profiles',  // DPC Agent isolation - list permission profiles
-            'get_agent_permissions',  // Agent permissions transparency (v0.22.0)
-            // Agent Task Board (v0.20.0)
-            'get_agent_tasks',
-            'get_agent_learning',
-            'get_agent_task_result',
-            'schedule_agent_task',
-            // Session archive (S25 Batch 1.1 fix)
-            'get_session_archive_info',
-            'clear_session_archives',
-            // Per-agent model config (AGENT-MODEL)
-            'get_agent_model_config',
-            'save_agent_model_config',
-            // Per-agent web auth (ADR-028 T8)
-            'web_auth_list_domains',
-            'web_auth_add_domain',
-            'web_auth_remove_domain',
-            'web_auth_login_complete',
-        ].includes(command);
+        // Default = Promise. The backend's local_api dispatcher ALWAYS
+        // sends a {status, payload} response after handler completes
+        // (local_api.py:328-330), so any command we send is awaitable.
+        // The previous design used an `expectsResponse` allowlist with
+        // default = boolean — but missing entries silently failed when
+        // callers `await`-ed them (the await resolved to `true`, not the
+        // backend response, and callers fell into their error branch).
+        //
+        // Inverted to fail-safe: forgetting to register a new command
+        // means the caller correctly gets a Promise. The only commands
+        // that opt out are true fire-and-forget logging signals that
+        // a caller would never await. Keep this list minimal — when in
+        // doubt, leave the command off so it defaults to Promise.
+        //
+        // Tradeoff accepted: if a caller does NOT `await` a Promise-
+        // returning command, the returned Promise is dropped without
+        // a handler. The browser may log an unhandled rejection if the
+        // command times out (60s) — visible noise rather than silent
+        // failure, which matches our preferred debugging stance.
+        //
+        // Origin: Mike S141 / Bug A — `web_auth_*` commands were missing
+        // from the old allowlist and the UI displayed "failed to add /
+        // load domains" even though backend was returning success.
+        const fireAndForgetCommands = new Set<string>([
+            'ui_log',  // logging beacon — no semantic response, drop the await
+        ]);
+        const expectsResponse = !fireAndForgetCommands.has(command);
 
         if (expectsResponse) {
             return new Promise((resolve, reject) => {
