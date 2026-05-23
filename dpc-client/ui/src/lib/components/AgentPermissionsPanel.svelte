@@ -399,7 +399,10 @@
   });
 
   function formatExpiry(unix: number | null): string {
-    if (unix === null || unix === undefined) return 'session-only';
+    // Some cookie frameworks emit `expires: 0` as a session-cookie
+    // sentinel (Ark S140 [#89] review). Treat the same as null so the
+    // UI doesn't show "expired" for a cookie that's really session-only.
+    if (unix === null || unix === undefined || unix === 0) return 'session-only';
     const ms = unix * 1000;
     const now = Date.now();
     if (ms <= now) return 'expired';
