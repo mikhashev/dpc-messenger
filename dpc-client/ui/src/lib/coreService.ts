@@ -1209,6 +1209,21 @@ let webAuthListenerInstalled = false;
 const popupCloseWatchdogs = new Map<string, ReturnType<typeof setTimeout>>();
 const POPUP_CLOSE_WATCHDOG_MS = 3000;
 
+/**
+ * Bug 6 (S143): cancel an armed popup-close watchdog for a given
+ * request_id. Used by the WebAuthPopupRequest modal Cancel button to
+ * prevent a double `web_auth_popup_complete` round (Cancel resolves
+ * the backend future, then the watchdog would fire a second one and
+ * crash the handler with InvalidStateError on the already-done future).
+ */
+export function cancelPopupCloseWatchdog(requestId: string): void {
+    const timer = popupCloseWatchdogs.get(requestId);
+    if (timer !== undefined) {
+        clearTimeout(timer);
+        popupCloseWatchdogs.delete(requestId);
+    }
+}
+
 export function registerPendingWebAuthLogin(agentId: string, domain: string): void {
     const key = domain.toLowerCase();
     // Stale-entry guard (Ark S140 [#82] review): if a previous popup

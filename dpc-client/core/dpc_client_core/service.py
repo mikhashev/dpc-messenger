@@ -3848,6 +3848,23 @@ class CoreService:
             )
             return {"status": "orphan", "request_id": request_id}
 
+        # Bug 6 (S143 manual-test): when the modal-Cancel race and the
+        # popup-close watchdog both fire for the same request_id, the
+        # first call resolves entry.future and the second hits an
+        # already-done future. Without this guard `set_exception` /
+        # `set_result` would raise asyncio.InvalidStateError and crash
+        # the WS dispatcher. The entry is still in the map because the
+        # agent's awaiting coroutine has not yet had a chance to run
+        # its `finally:` pop (race between the WS handler turning over
+        # and the agent's `wait_for` resuming).
+        if entry.future.done():
+            logger.info(
+                "web_auth_popup_complete: future already resolved for "
+                "request_id=%s — ignoring duplicate (error=%r, has_html=%s)",
+                request_id, error, bool(content_html),
+            )
+            return {"status": "duplicate", "request_id": request_id}
+
         if error:
             entry.future.set_exception(
                 _browser.AuthRequiredError(f"Popup error: {error}")

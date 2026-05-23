@@ -19,7 +19,12 @@
      * explicit `error: "user_cancelled"` so the agent's Future
      * resolves with AuthRequiredError instead of timing out at 5min.
      */
-    import { webAuthPopupRequest, sendCommand, registerPendingWebAuthLogin } from '$lib/coreService';
+    import {
+        webAuthPopupRequest,
+        sendCommand,
+        registerPendingWebAuthLogin,
+        cancelPopupCloseWatchdog,
+    } from '$lib/coreService';
 
     let opening = $state(false);
     let openError = $state<string | null>(null);
@@ -56,6 +61,15 @@
     function handleCancel() {
         const req = $webAuthPopupRequest;
         if (!req) return;
+        // Bug 6 (S143): if the popup is already open the close-event
+        // watchdog timer may be armed. Cancel it before sending the
+        // user_cancelled WS message — otherwise the watchdog fires
+        // ~3s later, sends a second `web_auth_popup_complete`, and
+        // crashes the backend handler on the already-done Future
+        // (asyncio.InvalidStateError). Belt-and-suspenders with the
+        // backend `entry.future.done()` guard, but earlier in the
+        // pipeline.
+        cancelPopupCloseWatchdog(req.request_id);
         // Tell the backend handler to resolve the pending Future with an
         // explicit cancellation error rather than waiting out the 5-min
         // timeout — the agent gets a clean AuthRequiredError immediately.
