@@ -981,6 +981,41 @@ class CoreService:
         # Shutdown LLMManager (close async HTTP clients to prevent event loop errors)
         await self.llm_manager.shutdown()
 
+        # S144 SHUTDOWN-PIPE-DRAIN: close any AuthBrowser (Camoufox)
+        # subprocesses still alive. Without this they keep stdin/stdout
+        # IOCP overlapped reads pending and the ProactorEventLoop logs
+        # "IocpProactor overlapped#=1 ... running for Ns" indefinitely
+        # after every other component reports clean stop. Each close is
+        # synchronous (Playwright sync_api over a subprocess pipe), so
+        # we offload to a thread + bound each by 5s so a hung browser
+        # cannot stall the whole shutdown.
+        #
+        # Import is lazy so the dpc_agent.tools chain stays optional
+        # for unit-test contexts that don't wire CoreService end-to-end.
+        try:
+            from .dpc_agent.tools import browser as _browser_mod
+            live_browsers = list(_browser_mod.get_active_camoufox_browsers())
+            if live_browsers:
+                logger.info(
+                    "Closing %d live Camoufox browser(s) during shutdown",
+                    len(live_browsers),
+                )
+                for browser in live_browsers:
+                    try:
+                        await asyncio.wait_for(
+                            asyncio.to_thread(browser.close),
+                            timeout=5.0,
+                        )
+                    except asyncio.TimeoutError:
+                        logger.warning(
+                            "Camoufox browser close timed out after 5s — "
+                            "subprocess pipe may remain pending"
+                        )
+                    except Exception as e:
+                        logger.warning("Camoufox browser close failed: %s", e)
+        except Exception as e:
+            logger.error("Camoufox shutdown sweep failed: %s", e, exc_info=True)
+
         # Shutdown core components
         await self.p2p_manager.shutdown_all()
         await self.local_api.stop()

@@ -327,6 +327,29 @@ def _domain_matches(url: str, etld1: str) -> bool:
     return host == etld1 or host.endswith("." + etld1)
 
 
+# S144 SHUTDOWN-PIPE-DRAIN: process-wide registry of live AuthBrowser
+# (Camoufox) instances. Populated by `__enter__` / `_open`, drained by
+# `close()` / `__exit__`. CoreService.shutdown() iterates and closes
+# remaining entries so Camoufox subprocesses are not left holding IOCP
+# overlapped reads when the asyncio loop tears down (the symptom was
+# Mike's "IocpProactor overlapped#=1 ... running for 159s" log after
+# every clean shutdown that followed a popup-fallback session).
+#
+# Set semantics (not list): tools that legitimately spawn nested
+# AuthBrowser contexts will register both, and removing the inner one
+# via `discard` is a no-op for the outer. Mutated from worker threads
+# via _auth_browse_html / _auth_browse — Python's `set` is thread-safe
+# for add/discard against single elements per the GIL contract; no
+# Lock needed.
+_active_camoufox_browsers: set["AuthBrowser"] = set()
+
+
+def get_active_camoufox_browsers() -> set["AuthBrowser"]:
+    """Accessor for CoreService.shutdown() — returns the live set
+    (mutation is intentional). Defensive copy is the caller's job."""
+    return _active_camoufox_browsers
+
+
 class AuthBrowser:
     """Restricted Camoufox wrapper for authenticated reads (ADR-028 T4).
 
@@ -391,6 +414,10 @@ class AuthBrowser:
         self._context = self._browser.new_context()
         self._context.add_cookies(_to_playwright_cookies(self._cookies))
         self._page = self._context.new_page()
+        # S144 SHUTDOWN-PIPE-DRAIN: register the live instance so
+        # CoreService.shutdown can close any orphaned Camoufox
+        # subprocesses before the asyncio loop tears down.
+        _active_camoufox_browsers.add(self)
 
     def goto(self, url: str) -> None:
         """Navigate to URL. URL eTLD+1 must match the auth domain or be
@@ -434,6 +461,9 @@ class AuthBrowser:
                 self._browser = None
                 self._context = None
                 self._page = None
+        # Deregister even when already closed — discard is a no-op
+        # for missing entries, so double-close stays cheap.
+        _active_camoufox_browsers.discard(self)
 
 
 def _html_to_markdown(html: str) -> str:

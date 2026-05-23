@@ -75,6 +75,38 @@ fn main() {
             web_auth::web_auth_popup_close,
             web_auth::web_auth_popup_scroll
         ])
+        .on_window_event(|window, event| {
+            // S144 SHUTDOWN-PIPE-DRAIN fix.
+            //
+            // When the user closes the main app window, every web_auth popup
+            // (login + popup_for_content) that's still open needs to close too
+            // — otherwise its WebView2 child process keeps holding the IPC
+            // pipe to the dying parent. On Windows that surface as the
+            // Python backend's `IocpProactor overlapped#=1` log spinning for
+            // ~2-3 minutes after every other component reports clean stop.
+            //
+            // The popup-window labels we issue all start with `web_auth_`
+            // (`web_auth_{domain.replace('.','_')}` for login, and
+            // `web_auth_popup_{request_id}` for popup_for_content). Anything
+            // else (notably the `main` window itself) is left untouched —
+            // Tauri's normal close flow handles main last after this callback
+            // returns.
+            //
+            // .close() is fire-and-forget; we don't await it. Popups close
+            // asynchronously while main proceeds with its own teardown,
+            // which is the order we want (popups gone first so their IPC
+            // pipes flush before the parent process exits).
+            if let tauri::WindowEvent::CloseRequested { .. } = event {
+                if window.label() == "main" {
+                    let app = window.app_handle();
+                    for (label, popup) in app.webview_windows() {
+                        if label != "main" && label.starts_with("web_auth_") {
+                            let _ = popup.close();
+                        }
+                    }
+                }
+            }
+        })
         .setup(|app| {
             #[cfg(debug_assertions)]
             {
