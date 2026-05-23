@@ -183,8 +183,8 @@ def test_browse_page_audit_on_auth_required(vault_home):
 
 
 def test_browse_page_audit_on_success(vault_home):
-    """Patch _auth_browse to simulate a successful Camoufox render →
-    audit status=200, bytes=len(content)."""
+    """Patch _auth_browse_html to simulate a successful Camoufox render →
+    audit status=200, bytes=len(markdown after trafilatura)."""
     from dpc_client_core import web_auth
     from dpc_client_core.dpc_agent.tools import browser as browser_mod
 
@@ -196,23 +196,25 @@ def test_browse_page_audit_on_success(vault_home):
     agent_root.mkdir(parents=True, exist_ok=True)
     ctx = _make_ctx(agent_root, firewall=fw)
 
-    original = browser_mod._auth_browse
-    browser_mod._auth_browse = lambda *args, **kwargs: "rendered markdown content"
+    raw_html = "<html><body><h1>Title</h1><p>Body text</p></body></html>"
+    expected_markdown = browser_mod._html_to_markdown(raw_html)
+    original = browser_mod._auth_browse_html
+    browser_mod._auth_browse_html = lambda *args, **kwargs: raw_html
     try:
         asyncio.run(browser_mod.browse_page(
             ctx, url="https://ozon.ru/my", use_auth="ozon.ru"
         ))
     finally:
-        browser_mod._auth_browse = original
+        browser_mod._auth_browse_html = original
 
     entries = _read_audit(vault_home, "agent_a")
     assert len(entries) == 1
     assert entries[0]["status"] == 200
-    assert entries[0]["bytes"] == len("rendered markdown content")
+    assert entries[0]["bytes"] == len(expected_markdown)
 
 
 def test_browse_page_audit_on_browser_error(vault_home):
-    """Patch _auth_browse to raise RuntimeError → audit 'browser_error'."""
+    """Patch _auth_browse_html to raise RuntimeError → audit 'browser_error'."""
     from dpc_client_core import web_auth
     from dpc_client_core.dpc_agent.tools import browser as browser_mod
 
@@ -227,14 +229,14 @@ def test_browse_page_audit_on_browser_error(vault_home):
     def _raise_runtime(*a, **kw):
         raise RuntimeError("simulated browser crash")
 
-    original = browser_mod._auth_browse
-    browser_mod._auth_browse = _raise_runtime
+    original = browser_mod._auth_browse_html
+    browser_mod._auth_browse_html = _raise_runtime
     try:
         asyncio.run(browser_mod.browse_page(
             ctx, url="https://ozon.ru/my", use_auth="ozon.ru"
         ))
     finally:
-        browser_mod._auth_browse = original
+        browser_mod._auth_browse_html = original
 
     entries = _read_audit(vault_home, "agent_a")
     assert len(entries) == 1

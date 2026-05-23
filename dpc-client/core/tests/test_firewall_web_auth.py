@@ -207,7 +207,7 @@ def _make_ctx_with_firewall(agent_root: Path, firewall):
 
 def test_browse_page_firewall_denial_returns_warning(vault_home, fresh_cookies):
     """browse_page(use_auth=...) with firewall denial returns ⚠️ message
-    and does NOT call _auth_browse (no Camoufox launch attempt)."""
+    and does NOT call the authenticated browse path (no Camoufox launch)."""
     from dpc_client_core import web_auth
     from dpc_client_core.dpc_agent.tools import browser as browser_mod
 
@@ -219,15 +219,15 @@ def test_browse_page_firewall_denial_returns_warning(vault_home, fresh_cookies):
     agent_root.mkdir(parents=True, exist_ok=True)
     ctx = _make_ctx_with_firewall(agent_root, fw)
 
-    # Sentinel: if _auth_browse runs the firewall failed to block.
+    # Sentinel: if _auth_browse_html runs the firewall failed to block.
     called = {"value": False}
-    original = browser_mod._auth_browse
+    original = browser_mod._auth_browse_html
 
     def _sentinel(*args, **kwargs):
         called["value"] = True
-        return "should not see this"
+        return "<html><body>should not see this</body></html>"
 
-    browser_mod._auth_browse = _sentinel
+    browser_mod._auth_browse_html = _sentinel
     try:
         out = asyncio.run(
             browser_mod.browse_page(
@@ -235,16 +235,17 @@ def test_browse_page_firewall_denial_returns_warning(vault_home, fresh_cookies):
             )
         )
     finally:
-        browser_mod._auth_browse = original
+        browser_mod._auth_browse_html = original
 
-    assert called["value"] is False, "firewall failed to block _auth_browse"
+    assert called["value"] is False, "firewall failed to block _auth_browse_html"
     assert out.startswith("⚠️")
     assert "agent_a" in out
     assert "allowed_domains" in out
 
 
 def test_browse_page_firewall_pass_proceeds_to_auth_browse(vault_home, fresh_cookies):
-    """browse_page(use_auth=...) with firewall passing reaches _auth_browse."""
+    """browse_page(use_auth=...) with firewall passing reaches the
+    authenticated browse path (_auth_browse_html after T9 split)."""
     from dpc_client_core import web_auth
     from dpc_client_core.dpc_agent.tools import browser as browser_mod
 
@@ -257,15 +258,15 @@ def test_browse_page_firewall_pass_proceeds_to_auth_browse(vault_home, fresh_coo
     ctx = _make_ctx_with_firewall(agent_root, fw)
 
     captured = {"called": False}
-    original = browser_mod._auth_browse
+    original = browser_mod._auth_browse_html
 
     def _sentinel(agent_id, domain, url):
         captured["called"] = True
         captured["agent_id"] = agent_id
         captured["domain"] = domain
-        return "stub-page-content"
+        return "<html><body>stub-page-content</body></html>"
 
-    browser_mod._auth_browse = _sentinel
+    browser_mod._auth_browse_html = _sentinel
     try:
         out = asyncio.run(
             browser_mod.browse_page(
@@ -273,7 +274,7 @@ def test_browse_page_firewall_pass_proceeds_to_auth_browse(vault_home, fresh_coo
             )
         )
     finally:
-        browser_mod._auth_browse = original
+        browser_mod._auth_browse_html = original
 
     assert captured["called"] is True
     assert captured["agent_id"] == "agent_a"

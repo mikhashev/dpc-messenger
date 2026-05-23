@@ -404,29 +404,23 @@ class AuthBrowser:
             )
         self._page.goto(url, wait_until="networkidle", timeout=30000)
 
-    def get_page_content(self) -> str:
-        """Return the current page as markdown via trafilatura. Same
-        extraction pipeline as the anonymous browse path.
+    def get_page_html(self) -> str:
+        """Return the raw HTML of the current page. Used by T9 challenge
+        detection before trafilatura conversion — markdown extraction
+        strips the very script/meta tokens (`fab_chlg_`, `g-recaptcha`,
+        etc.) the heuristic looks for.
 
-        Note: `page.content()` and `trafilatura.extract()` are called
-        without explicit timeouts — a hung render or pathological HTML
-        could block. The framework-level tool timeout (60s for
-        browse_page) is the backstop. Phase 2 may add an explicit
-        per-call timeout if observed in practice."""
+        Note: `page.content()` is called without an explicit timeout —
+        the framework-level tool timeout (60s for browse_page) is the
+        backstop."""
         if self._page is None:
             raise RuntimeError("AuthBrowser not opened — use as context manager")
-        html = self._page.content()
-        import trafilatura
+        return self._page.content()
 
-        text = trafilatura.extract(
-            html,
-            output_format="markdown",
-            include_formatting=True,
-            include_links=True,
-            include_tables=True,
-            favor_recall=True,
-        )
-        return text or ""
+    def get_page_content(self) -> str:
+        """Return the current page as markdown via trafilatura. Same
+        extraction pipeline as the anonymous browse path."""
+        return _html_to_markdown(self.get_page_html())
 
     def close(self) -> None:
         """Release browser resources. Safe to call multiple times."""
@@ -440,11 +434,107 @@ class AuthBrowser:
                 self._page = None
 
 
-def _auth_browse(agent_id: str, domain: str, url: str) -> str:
-    """Sync helper used from the async browse_page via asyncio.to_thread."""
+def _html_to_markdown(html: str) -> str:
+    """Trafilatura HTML→markdown conversion. Extracted so AuthBrowser and
+    the T9 popup-fallback path share one conversion pipeline."""
+    import trafilatura
+
+    return trafilatura.extract(
+        html,
+        output_format="markdown",
+        include_formatting=True,
+        include_links=True,
+        include_tables=True,
+        favor_recall=True,
+    ) or ""
+
+
+def _auth_browse_html(agent_id: str, domain: str, url: str) -> str:
+    """Sync helper returning RAW HTML (no trafilatura). T9 needs the
+    pre-conversion HTML for `looks_like_challenge()` detection."""
     with AuthBrowser(agent_id=agent_id, domain=domain) as ab:
         ab.goto(url)
-        return ab.get_page_content()
+        return ab.get_page_html()
+
+
+def _auth_browse(agent_id: str, domain: str, url: str) -> str:
+    """Sync helper used from the async browse_page via asyncio.to_thread.
+
+    Kept as a thin wrapper around `_auth_browse_html` + `_html_to_markdown`
+    so existing tests that patch `_auth_browse` directly continue to work
+    even after T9 split the raw-HTML and markdown stages."""
+    return _html_to_markdown(_auth_browse_html(agent_id, domain, url))
+
+
+# ─────────────────────────────────────────────────────────────
+# ADR-028 T9 — Popup fallback (caller side)
+# ─────────────────────────────────────────────────────────────
+
+# Pending popup requests keyed by request_id. The async Future is
+# resolved by the local-api WS handler for `web_auth_popup_complete`
+# (Step 3) when the frontend reports back with the popup-extracted HTML.
+# Ephemeral by design (Q3 decision S142): backend restart loses pending
+# requests, frontend popups become orphaned, user retries.
+_pending_popup_requests: dict[str, asyncio.Future] = {}
+
+# 5-minute popup timeout per ADR-028 T9 Q4 (Mike + Ark agreed S142).
+_POPUP_TIMEOUT_S = 300
+
+
+def get_pending_popup_requests() -> dict[str, asyncio.Future]:
+    """Accessor used by the Step 3 WS handler to resolve futures by id.
+    Module-level dict is the source of truth; this returns the live ref
+    (mutation is intentional)."""
+    return _pending_popup_requests
+
+
+async def _request_popup_fallback(
+    ctx: ToolContext, agent_id: str, domain: str, url: str
+) -> str:
+    """Ask the frontend to open a Tauri WebView popup so the user can
+    solve a challenge (Ozon fab_chlg, Cloudflare) or view JS-rendered
+    content (YarchePlus orders) for `url`. Awaits the user closing the
+    popup; the backend WS handler `web_auth_popup_complete` (Step 3)
+    resolves the future with the extracted HTML.
+
+    Returns raw HTML extracted from the popup (the caller converts to
+    markdown via `_html_to_markdown`). Raises `AuthRequiredError` on
+    timeout, missing dpc_service, or popup_error reported by the
+    frontend.
+    """
+    dpc_service = getattr(ctx, "dpc_service", None)
+    local_api = getattr(dpc_service, "local_api", None) if dpc_service else None
+    if local_api is None:
+        raise AuthRequiredError(
+            "Popup fallback requires DPC service — unavailable in this context"
+        )
+
+    import uuid
+
+    request_id = uuid.uuid4().hex[:12]
+    loop = asyncio.get_running_loop()
+    future: asyncio.Future = loop.create_future()
+    _pending_popup_requests[request_id] = future
+
+    try:
+        await local_api.broadcast_event(
+            "web_auth_popup_request",
+            {
+                "request_id": request_id,
+                "agent_id": agent_id,
+                "domain": domain,
+                "url": url,
+                "reason": "anti_bot_challenge",
+            },
+        )
+        return await asyncio.wait_for(future, timeout=_POPUP_TIMEOUT_S)
+    except asyncio.TimeoutError as e:
+        raise AuthRequiredError(
+            f"Popup fallback timeout ({_POPUP_TIMEOUT_S}s) for {url} — "
+            f"user did not complete"
+        ) from e
+    finally:
+        _pending_popup_requests.pop(request_id, None)
 
 
 async def browse_page(ctx: ToolContext, url: str, size: str = "m", use_auth: Optional[str] = None) -> str:
@@ -506,7 +596,7 @@ async def browse_page(ctx: ToolContext, url: str, size: str = "m", use_auth: Opt
             )
 
         try:
-            text = await asyncio.to_thread(_auth_browse, agent_id, use_auth, url)
+            html = await asyncio.to_thread(_auth_browse_html, agent_id, use_auth, url)
         except AuthRequiredError as e:
             _web_auth_mod.audit_append(
                 agent_id, use_auth, url, status="auth_required"
@@ -538,6 +628,27 @@ async def browse_page(ctx: ToolContext, url: str, size: str = "m", use_auth: Opt
             )
             return f"⚠️ Camoufox browser failed: {e}"
 
+        # T9 challenge detection: if Camoufox got back an anti-bot stub,
+        # hand off to the Tauri WebView popup (T2 cookie jar / fingerprint
+        # the user already trusted at login). User solves challenge or
+        # views JS-rendered content, popup closes, backend gets the
+        # rendered HTML back via WS `web_auth_popup_complete` (Step 3).
+        if looks_like_challenge(html):
+            log.info(
+                "Anti-bot challenge detected for %s (agent=%s) — "
+                "requesting popup fallback", url, agent_id,
+            )
+            try:
+                html = await _request_popup_fallback(
+                    ctx, agent_id, use_auth, url
+                )
+            except AuthRequiredError as e:
+                _web_auth_mod.audit_append(
+                    agent_id, use_auth, url, status="popup_timeout"
+                )
+                return f"⚠️ {e}"
+
+        text = _html_to_markdown(html)
         # Success path — record byte size for cost / quota tracking.
         _web_auth_mod.audit_append(
             agent_id, use_auth, url, status=200, bytes_size=len(text)
