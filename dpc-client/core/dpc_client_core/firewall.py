@@ -503,6 +503,49 @@ class ContextFirewall:
 
         return allowed
 
+    def is_auth_domain_allowed(self, agent_id: str, domain: str) -> bool:
+        """ADR-028 T5 — per-agent + per-domain auth gate for browse_page use_auth.
+
+        Returns True only when BOTH conditions hold:
+          1. `domain`'s eTLD+1 is in the agent's
+             `agent_profiles.{agent_id}.web_auth.allowed_domains` whitelist
+          2. The agent has non-expired cookies for the domain in the vault
+             (T3 web_auth.py)
+
+        Empty whitelist (default for new agents) = no auth access.
+        Hot-reloads with the rest of `privacy_rules.json` — no separate
+        parse step needed, the helper traverses agent_profiles each call.
+
+        Cross-ref: tasks/adr-028-agent-web-auth/005-firewall-domain-gating.md
+        """
+        import time as _time
+
+        # late import to avoid circular at module load time (web_auth has no
+        # firewall dep; firewall has no web_auth dep at import scope)
+        from . import web_auth
+
+        allowed = self._get_profile_or_global(
+            agent_id, 'web_auth', 'allowed_domains', default=[]
+        )
+        if not isinstance(allowed, list) or not allowed:
+            return False
+
+        etld1 = web_auth.resolve_etld1(domain)
+        if etld1 not in allowed:
+            return False
+
+        status = web_auth.get_auth_status(agent_id, domain)
+        if not status.get("has_cookies"):
+            return False
+        # status["expires"] is the earliest non-None cookie expiry (Unix
+        # epoch seconds); None means all cookies are session-only, which
+        # is treated as not-expired here (out-of-band signal handles real
+        # expiry — HTTP 401, login redirect — at the browse layer).
+        expires = status.get("expires")
+        if expires is not None and expires <= int(_time.time()):
+            return False
+        return True
+
     def list_agent_profiles(self) -> List[str]:
         """
         List available agent permission profiles.

@@ -440,6 +440,24 @@ async def browse_page(ctx: ToolContext, url: str, size: str = "m", use_auth: Opt
         # agent_id. If the agent storage layout changes, this derivation
         # must move to a helper there — track via grep on `agent_root.name`.
         agent_id = ctx.agent_root.name
+
+        # ADR-028 T5: per-agent + per-domain auth gate. Reject before
+        # opening Camoufox if the agent's web_auth.allowed_domains
+        # whitelist doesn't permit this domain, or if no cookies are in
+        # the vault. firewall is None in pure-unit-test contexts (no
+        # dpc_service wired) — those tests bypass the gate by design.
+        firewall = None
+        dpc_service = getattr(ctx, "dpc_service", None)
+        if dpc_service is not None:
+            firewall = getattr(dpc_service, "firewall", None)
+        if firewall is not None and not firewall.is_auth_domain_allowed(agent_id, use_auth):
+            return (
+                f"⚠️ Domain '{use_auth}' is not authorized for agent "
+                f"'{agent_id}'. Add it to privacy_rules.json under "
+                f"agent_profiles.{agent_id}.web_auth.allowed_domains, "
+                f"then re-login via the web-auth UI."
+            )
+
         try:
             text = await asyncio.to_thread(_auth_browse, agent_id, use_auth, url)
         except (AuthRequiredError, AuthExpiredError) as e:
