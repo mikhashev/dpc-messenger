@@ -3603,24 +3603,35 @@ class CoreService:
 
     async def web_auth_add_domain(self, agent_id: str, domain: str) -> Dict[str, Any]:
         """Append `domain` to the agent's `web_auth.allowed_domains`
-        whitelist in privacy_rules.json. eTLD+1 normalization (lowercase)
-        applied before storing; duplicate entries are silently coalesced.
+        whitelist in privacy_rules.json. URL-or-hostname input is
+        normalized to eTLD+1 before storing (so `https://www.ozon.ru/`,
+        `www.ozon.ru`, and `ozon.ru` all land as `ozon.ru` — matching
+        what `firewall.is_authenticated` resolves at read time).
+        Duplicate entries are silently coalesced.
 
         Saves through firewall.save_rules_from_dict so all existing
         validation + hot-reload + UI broadcast machinery runs.
         """
+        from . import web_auth as _wa
+
         try:
             if not agent_id or not domain or not isinstance(domain, str):
                 return {"status": "error", "message": "agent_id and domain required"}
-            domain_norm = domain.strip().lower()
-            if not domain_norm:
+            raw = domain.strip().lower()
+            if not raw:
                 return {"status": "error", "message": "domain must be non-empty"}
-            # Minimum hostname sanity (Ark S140 [#82] review): UI lets
-            # the user type anything, so reject obviously-not-a-domain
-            # input here. Full PSL/IDN validation is Phase 2.
-            if " " in domain_norm or "." not in domain_norm:
+            # Reject inputs that obviously cannot be a hostname before
+            # URL parsing — keeps the rejection message specific.
+            if " " in raw:
                 return {"status": "error",
-                        "message": "domain must be a valid hostname (contain a dot, no spaces)"}
+                        "message": "domain must be a valid hostname (no spaces)"}
+            # URL→hostname→eTLD+1 so a user pasting `https://www.ozon.ru/`
+            # in the UI lands the same vault key as `browse_page` requests
+            # at read time. Phase 2 (PSL/IDN) is still the followup.
+            domain_norm = _wa.resolve_etld1(raw)
+            if not domain_norm or "." not in domain_norm:
+                return {"status": "error",
+                        "message": "domain must be a valid hostname (contain a dot)"}
 
             rules = self.firewall.get_rules_as_dict()
             profiles = rules.setdefault("agent_profiles", {})
@@ -3655,13 +3666,20 @@ class CoreService:
     ) -> Dict[str, Any]:
         """Remove `domain` from the agent's whitelist AND revoke any
         cookies for that domain in the vault — keeping orphan cookies
-        after the user revoked authorization would be a privacy bug."""
+        after the user revoked authorization would be a privacy bug.
+
+        Same URL→eTLD+1 normalization as `web_auth_add_domain` so a
+        user pasting a URL into the remove flow hits the same vault
+        key that was written by the add flow."""
         from . import web_auth as _wa
 
         try:
             if not agent_id or not domain or not isinstance(domain, str):
                 return {"status": "error", "message": "agent_id and domain required"}
-            domain_norm = domain.strip().lower()
+            raw = domain.strip().lower()
+            if not raw:
+                return {"status": "error", "message": "domain must be non-empty"}
+            domain_norm = _wa.resolve_etld1(raw)
             if not domain_norm:
                 return {"status": "error", "message": "domain must be non-empty"}
 

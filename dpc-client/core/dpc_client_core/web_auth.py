@@ -27,6 +27,7 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 import keyring
 from cryptography.fernet import Fernet, InvalidToken
@@ -49,9 +50,43 @@ ETLD1_MAP = {
 }
 
 
+def _extract_hostname(raw: str) -> str:
+    """Extract bare lowercase hostname from user-typed input.
+
+    Accepts bare hostnames (`ozon.ru`, `www.ozon.ru`) and full URLs
+    (`https://www.ozon.ru/`, `http://ozon.ru:8080/path`). Strips
+    scheme, port, path, query, fragment. Returns empty string when the
+    input cannot be parsed to a hostname (e.g. `javascript:alert(1)`,
+    `http://`, `://garbage`).
+    """
+    if not raw:
+        return ""
+    s = raw.strip().lower()
+    if not s:
+        return ""
+    # urlsplit needs a scheme to populate `.hostname`; for bare hostname
+    # input prepend `//` to coerce the rest into the authority slot.
+    if "://" not in s:
+        s = "//" + s
+    try:
+        parts = urlsplit(s)
+    except ValueError:
+        return ""
+    return parts.hostname or ""
+
+
 def resolve_etld1(domain: str) -> str:
-    """Map a hostname to its eTLD+1 vault key."""
-    return ETLD1_MAP.get(domain.lower(), domain.lower())
+    """Map a hostname or URL to its eTLD+1 vault key.
+
+    Robust to URL inputs (strips scheme, port, path) so the same key
+    falls out whether the caller passes `ozon.ru`, `www.ozon.ru`, or
+    `https://www.ozon.ru/orders`. Empty input → empty result so callers
+    can reject it.
+    """
+    hostname = _extract_hostname(domain)
+    if not hostname:
+        return ""
+    return ETLD1_MAP.get(hostname, hostname)
 
 
 def _vault_path(agent_id: str) -> Path:

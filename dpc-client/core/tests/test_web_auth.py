@@ -115,6 +115,57 @@ def test_etld1_resolution_unknown_domain_passthrough(vault_home, sample_cookies)
     assert web_auth.load_cookies("agent_a", "unmapped.example") == sample_cookies
 
 
+def test_resolve_etld1_accepts_full_urls():
+    """User pastes a URL in the UI; resolve_etld1 must strip scheme,
+    port, path and still arrive at the same vault key.
+
+    Mike S141 surface: agent sees `failed to add domain` for
+    `https://www.ozon.ru/` because pre-fix the literal URL string was
+    being stored and read-side hostname compare never matched.
+    """
+    from dpc_client_core import web_auth
+
+    assert web_auth.resolve_etld1("https://www.ozon.ru/") == "ozon.ru"
+    assert web_auth.resolve_etld1("http://ozon.ru:8080/my/orders") == "ozon.ru"
+    assert web_auth.resolve_etld1("www.ozon.ru") == "ozon.ru"
+    assert web_auth.resolve_etld1("ozon.ru") == "ozon.ru"
+    assert web_auth.resolve_etld1("OZON.RU") == "ozon.ru"
+    # Unmapped host but valid URL — eTLD+1 unknown so the bare
+    # hostname is the vault key.
+    assert web_auth.resolve_etld1("https://example.com/path") == "example.com"
+
+
+def test_resolve_etld1_empty_or_hostnameless_input():
+    """Inputs that yield no hostname after parsing → empty string so
+    callers can reject. `javascript:alert(1)` is NOT in this bucket —
+    urlsplit treats `javascript` as the host-like part of the authority
+    when no `//` is present; the downstream dot-check (`add_domain`
+    requires a `.` in the result) is what rejects it as a real domain.
+    """
+    from dpc_client_core import web_auth
+
+    assert web_auth.resolve_etld1("") == ""
+    assert web_auth.resolve_etld1("   ") == ""
+    # scheme-only URLs: urlsplit returns no hostname.
+    assert web_auth.resolve_etld1("http://") == ""
+    assert web_auth.resolve_etld1("https://") == ""
+    # Bare token with no dot: parses to a hostname-like string but the
+    # add_domain caller rejects via dot-check, not here.
+    assert web_auth.resolve_etld1("javascript:alert(1)") == "javascript"
+    assert web_auth.resolve_etld1("localhost") == "localhost"
+
+
+def test_etld1_resolution_via_url_reaches_existing_jar(vault_home, sample_cookies):
+    """Read-side: agent calling load_cookies with a full URL hits the
+    same jar written under the eTLD+1 key. This is the bug Mike caught
+    end-to-end: cookies were unreachable if URL ever entered the lookup."""
+    from dpc_client_core import web_auth
+
+    web_auth.save_cookies("agent_a", "ozon.ru", sample_cookies)
+    assert web_auth.load_cookies("agent_a", "https://www.ozon.ru/orders") == sample_cookies
+    assert web_auth.load_cookies("agent_a", "http://login.ozon.ru:443") == sample_cookies
+
+
 def test_get_auth_status_empty(vault_home):
     from dpc_client_core import web_auth
 

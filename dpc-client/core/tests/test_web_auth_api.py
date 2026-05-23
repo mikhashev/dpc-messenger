@@ -222,6 +222,61 @@ def test_add_domain_rejects_obviously_invalid_hostnames(vault_home):
         assert "hostname" in result["message"].lower()
 
 
+def test_add_domain_normalizes_url_to_etld1(vault_home):
+    """Mike S141 surface: user pastes `https://www.ozon.ru/` into the
+    Web Authentication panel; the entry must land as `ozon.ru` so the
+    read-side hostname compare in `firewall.is_authenticated` matches
+    when the agent calls `browse_page(use_auth='ozon.ru')`.
+
+    Pre-fix the literal URL string was stored and matching always failed.
+    """
+    cases = [
+        ("https://www.ozon.ru/", "ozon.ru"),
+        ("http://ozon.ru:8080/my/orders", "ozon.ru"),
+        ("www.ozon.ru", "ozon.ru"),
+        ("OZON.RU", "ozon.ru"),
+        ("  Https://Login.Ozon.RU/path  ", "ozon.ru"),
+    ]
+    for raw, expected in cases:
+        stub = _build_stub(vault_home, {})
+        result = _call(stub, "web_auth_add_domain",
+                       agent_id="agent_a", domain=raw)
+        assert result["status"] == "success", f"{raw!r} → {result}"
+        assert result["domain"] == expected, f"{raw!r} → {result}"
+        assert expected in stub.firewall.get_agent_web_auth_domains("agent_a")
+
+
+def test_add_domain_url_then_bare_is_duplicate(vault_home):
+    """Adding `https://www.ozon.ru/` then `ozon.ru` (or vice versa)
+    must be detected as the same entry — both normalize to the same
+    eTLD+1 key. Without the fix this would silently create two
+    entries pointing at the same logical site, only one of which
+    matched at read time."""
+    stub = _build_stub(vault_home, {})
+    _call(stub, "web_auth_add_domain",
+          agent_id="agent_a", domain="https://www.ozon.ru/")
+    stub.local_api.events.clear()
+    result = _call(stub, "web_auth_add_domain",
+                   agent_id="agent_a", domain="ozon.ru")
+    assert result["status"] == "success"
+    assert "already" in result.get("message", "").lower()
+    assert stub.firewall.get_agent_web_auth_domains("agent_a") == ["ozon.ru"]
+
+
+def test_remove_domain_accepts_url_form(vault_home):
+    """`web_auth_remove_domain` must accept the same URL forms as
+    `add_domain` so a user pasting `https://www.ozon.ru/` into a
+    remove confirmation hits the existing `ozon.ru` whitelist entry."""
+    stub = _build_stub(vault_home, {"agent_profiles": {
+        "agent_a": {"web_auth": {"allowed_domains": ["ozon.ru"]}}
+    }})
+    result = _call(stub, "web_auth_remove_domain",
+                   agent_id="agent_a", domain="https://www.ozon.ru/")
+    assert result["status"] == "success"
+    assert result["removed_from_whitelist"] is True
+    assert stub.firewall.get_agent_web_auth_domains("agent_a") == []
+
+
 # ─────────────────────────────────────────────────────────────
 # web_auth_remove_domain
 # ─────────────────────────────────────────────────────────────
