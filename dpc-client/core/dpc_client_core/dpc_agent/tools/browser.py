@@ -366,7 +366,13 @@ class AuthBrowser:
 
     def get_page_content(self) -> str:
         """Return the current page as markdown via trafilatura. Same
-        extraction pipeline as the anonymous browse path."""
+        extraction pipeline as the anonymous browse path.
+
+        Note: `page.content()` and `trafilatura.extract()` are called
+        without explicit timeouts — a hung render or pathological HTML
+        could block. The framework-level tool timeout (60s for
+        browse_page) is the backstop. Phase 2 may add an explicit
+        per-call timeout if observed in practice."""
         if self._page is None:
             raise RuntimeError("AuthBrowser not opened — use as context manager")
         html = self._page.content()
@@ -429,6 +435,10 @@ async def browse_page(ctx: ToolContext, url: str, size: str = "m", use_auth: Opt
         Page content as markdown
     """
     if use_auth:
+        # Contract: ctx.agent_root is ~/.dpc/agents/{agent_id}/ (see
+        # dpc_agent.utils.get_agent_root). Last path component IS the
+        # agent_id. If the agent storage layout changes, this derivation
+        # must move to a helper there — track via grep on `agent_root.name`.
         agent_id = ctx.agent_root.name
         try:
             text = await asyncio.to_thread(_auth_browse, agent_id, use_auth, url)
@@ -441,6 +451,12 @@ async def browse_page(ctx: ToolContext, url: str, size: str = "m", use_auth: Opt
                 "⚠️ Camoufox browser is not installed. Run "
                 "`uv sync --extra browser` in dpc-client/core to enable."
             )
+        except (RuntimeError, OSError) as e:
+            # Camoufox launch / browser-binary failure / page load timeout
+            # — surface to the agent as a single warning rather than a raw
+            # stack trace. Common cases: missing browser binary, network
+            # timeout (goto's 30s default), page render hang.
+            return f"⚠️ Camoufox browser failed: {e}"
         max_chars = _SIZE_PRESETS.get(size, _SIZE_PRESETS["m"])
         total = len(text)
         if max_chars and total > max_chars:
