@@ -22,6 +22,45 @@ if os.environ.get("HF_HUB_ENABLE_HF_TRANSFER") == "1":
             "(hf_transfer package not installed)"
         )
 
+# S144 — HF offline mode guard. Same constraint as the fast-transfer block
+# above: must run BEFORE any import that pulls in huggingface_hub, since
+# HF_HUB_OFFLINE is read at huggingface_hub import time.
+#
+# When [hf] offline_mode = true in ~/.dpc/config.ini, set HF_HUB_OFFLINE=1
+# so transformers / sentence-transformers / gliner read cached models from
+# disk without ETag-refresh HEAD requests to huggingface.co. Default off
+# so first-time users still download models normally; flip to true after
+# the BGE-M3 / GLiNER / Whisper models are cached locally if the per-startup
+# HF HEAD-request noise in dpc-client.log bothers you.
+#
+# Risk when on: a missing-cache load raises OSError("We couldn't connect to
+# huggingface.co") instead of silently downloading. Acceptable for the
+# explicit-opt-in use case (Mike's machine has all needed models cached
+# at S144 time — bge-m3 4.4GB, gliner_multi-v2.1 2.2GB, whisper-large-v3
+# -turbo 1.5GB). Per-call-site local_files_only=True wrappers stay as
+# defense-in-depth where they exist (whisper_provider, token_count_manager).
+import configparser as _hf_configparser
+from pathlib import Path as _HFPath
+_hf_cfg = _hf_configparser.ConfigParser(inline_comment_prefixes=('#',))
+_hf_cfg_path = _HFPath.home() / ".dpc" / "config.ini"
+if _hf_cfg_path.exists():
+    try:
+        _hf_cfg.read(_hf_cfg_path, encoding="utf-8")
+    except _hf_configparser.Error:
+        pass  # malformed config — proceed without the offline opt-in
+try:
+    _hf_offline = _hf_cfg.getboolean("hf", "offline_mode", fallback=False)
+except (ValueError, _hf_configparser.Error):
+    _hf_offline = False
+if _hf_offline:
+    # setdefault so an explicit HF_HUB_OFFLINE env var still wins.
+    os.environ.setdefault("HF_HUB_OFFLINE", "1")
+    print(
+        "[startup] HF_HUB_OFFLINE=1 (from [hf] offline_mode=true) — "
+        "transformers/sentence-transformers/gliner will skip HF Hub HEAD "
+        "requests and read directly from ~/.cache/huggingface/"
+    )
+
 import platform  # Import the platform module to check the OS
 import subprocess
 import sys

@@ -436,6 +436,23 @@ class Settings:
         value = self.get('knowledge', 'cultural_perspectives_enabled', 'false')
         return value.lower() in ('true', '1', 'yes')
 
+    def get_hf_offline_mode(self) -> bool:
+        """Check if HuggingFace Hub offline mode is enabled (S144).
+
+        When true, run_service.py sets HF_HUB_OFFLINE=1 BEFORE any
+        huggingface_hub import so transformers / sentence-transformers /
+        gliner skip ETag-refresh HEAD requests on cached models. This
+        getter exists for symmetry — the env var is set in
+        run_service.py at startup, not via this method, because Settings
+        is loaded after the import chain that imports huggingface_hub.
+
+        Default false: first-time installs need the network to download
+        BGE-M3 / GLiNER / Whisper. Flip to true after caches are warm
+        to remove the per-startup HF HEAD-request log noise.
+        """
+        value = self.get('hf', 'offline_mode', 'false')
+        return value.lower() in ('true', '1', 'yes')
+
     def get_kg_backend(self) -> str:
         """Knowledge graph backend selection (ADR-024 Phase 1.5).
 
