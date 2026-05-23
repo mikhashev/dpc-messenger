@@ -232,6 +232,46 @@ def _browse_with_camoufox(url: str) -> Optional[str]:
 
 
 # ─────────────────────────────────────────────────────────────
+# ADR-028 T9 — Anti-bot challenge detection
+# ─────────────────────────────────────────────────────────────
+
+# Markers of common anti-bot challenge / interstitial pages. The lowercase
+# check below makes these case-insensitive. Add new markers conservatively
+# — every entry is a potential false-positive surface for legitimate pages
+# that happen to mention the marker string in body text.
+ANTI_BOT_PATTERNS: tuple[str, ...] = (
+    "fab_chlg_",            # Ozon
+    "__cf_chl_",            # Cloudflare challenge
+    "g-recaptcha",          # Google reCAPTCHA widget
+    "_incapsula_resource",  # Imperva / Incapsula
+    "px-captcha",           # PerimeterX
+)
+
+
+def looks_like_challenge(html: str) -> bool:
+    """Heuristic: does this HTML look like an anti-bot challenge page?
+
+    Challenge pages share two traits we can cheaply test for:
+      1. They are small — typically a stub that bootstraps a JS challenge,
+         not a full content page. We cap at 50 KB to avoid scanning real
+         page bodies that just happen to mention a challenge framework
+         in passing (e.g. a blog post about reCAPTCHA).
+      2. They contain a known vendor marker near the top of the document.
+
+    Returns True only when both conditions hold on the first 10 KB.
+
+    False positives are possible — a small page mentioning ``g-recaptcha``
+    in body text would trigger. Acceptable for MVP per ADR-028 T9; the
+    fallback is a popup the user actively closes, so a false trigger
+    costs one human interaction, not a wrong result.
+    """
+    if not html or len(html) > 50_000:
+        return False
+    sample = html[:10_000].lower()
+    return any(p in sample for p in ANTI_BOT_PATTERNS)
+
+
+# ─────────────────────────────────────────────────────────────
 # ADR-028 T4 — AuthBrowser (authenticated read-only Camoufox)
 # ─────────────────────────────────────────────────────────────
 

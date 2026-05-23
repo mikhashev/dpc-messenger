@@ -10,11 +10,13 @@ Tests cover:
 
 import pytest
 from dpc_client_core.dpc_agent.tools.browser import (
+    ANTI_BOT_PATTERNS,
     _extract_text,
     _fetch_url,
     browse_page,
-    fetch_json,
     check_url,
+    fetch_json,
+    looks_like_challenge,
 )
 
 
@@ -286,3 +288,79 @@ class TestFetchJSON:
 
         result = fetch_json(ctx, "http://example.com/api")
         assert "Invalid JSON" in result
+
+
+class TestLooksLikeChallenge:
+    """ADR-028 T9 — anti-bot challenge page heuristic."""
+
+    def test_ozon_fab_chlg_marker(self):
+        # Ozon's interstitial — small stub script + fab_chlg_* token.
+        html = (
+            "<html><head><title>Ozon</title></head><body>"
+            "<script src=\"/_assets/fab_chlg_loader.js\"></script>"
+            "</body></html>"
+        )
+        assert looks_like_challenge(html) is True
+
+    def test_cloudflare_chl_marker(self):
+        html = (
+            "<html><body><div id=\"cf-wrapper\">"
+            "<script>window.__cf_chl_opt={...}</script></div></body></html>"
+        )
+        assert looks_like_challenge(html) is True
+
+    def test_recaptcha_marker(self):
+        html = (
+            "<html><body><div class=\"g-recaptcha\" "
+            "data-sitekey=\"abc\"></div></body></html>"
+        )
+        assert looks_like_challenge(html) is True
+
+    def test_clean_page_short(self):
+        # Real page content, no challenge markers — must NOT trigger.
+        html = (
+            "<html><body><h1>Welcome to Wikipedia</h1>"
+            "<p>The free encyclopedia anyone can edit.</p></body></html>"
+        )
+        assert looks_like_challenge(html) is False
+
+    def test_clean_page_no_markers(self):
+        # Logged-in Ozon home page (after challenge cleared) — large
+        # body, no challenge tokens at the top. Must NOT trigger.
+        body = "<p>Order #123 · 2 809 руб · доставлено</p>" * 50
+        html = f"<html><body>{body}</body></html>"
+        assert looks_like_challenge(html) is False
+
+    def test_empty_html(self):
+        assert looks_like_challenge("") is False
+
+    def test_none_safe(self):
+        # Defensive: callers may pass None when the upstream fetch failed.
+        assert looks_like_challenge(None) is False  # type: ignore[arg-type]
+
+    def test_large_page_skipped(self):
+        # Full content pages can legitimately mention a marker in body
+        # text (e.g. a blog post about reCAPTCHA). Size cap is the
+        # cheap guard against that false-positive class.
+        big_body = "g-recaptcha is a widget. " * 5_000  # > 50 KB
+        html = f"<html><body>{big_body}</body></html>"
+        assert looks_like_challenge(html) is False
+
+    def test_case_insensitive(self):
+        # Vendors do not promise lowercase markers across versions.
+        html = "<html><body><script>__CF_CHL_OPT={}</script></body></html>"
+        assert looks_like_challenge(html) is True
+
+    def test_marker_only_in_tail_not_triggered(self):
+        # Marker buried > 10 KB from the start does not trigger — keeps
+        # the heuristic O(10 KB) regardless of page size.
+        prefix = "<html><body>" + ("a" * 11_000)
+        html = prefix + "<div class=\"g-recaptcha\"></div></body></html>"
+        assert looks_like_challenge(html) is False
+
+    def test_all_patterns_covered(self):
+        # Sanity: every entry in ANTI_BOT_PATTERNS triggers when present
+        # near the top — catches accidental typos when adding new markers.
+        for marker in ANTI_BOT_PATTERNS:
+            html = f"<html><body><script>{marker}_x</script></body></html>"
+            assert looks_like_challenge(html) is True, f"marker {marker!r} not detected"
