@@ -190,3 +190,108 @@ pub async fn web_auth_revoke(
     }
     Ok(())
 }
+
+/// ADR-028 T9 — popup fallback for anti-bot challenge sites + JS-rendered
+/// content (YarchePlus orders class).
+///
+/// Opens a Tauri WebView popup at `url` using the shared WebView2 cookie
+/// jar (same one populated by `web_auth_open_login_window` at T8 login).
+/// When the user closes the popup, a JS function injected at create-time
+/// captures `document.documentElement.outerHTML` + `window.location.href`
+/// and emits the Tauri event `web_auth_popup_extracted` with payload
+/// `{request_id, content_html, current_url}` — or `{request_id, error}`
+/// on failure. The frontend listener forwards via WebSocket
+/// `web_auth_popup_complete` to the Python Step 3 handler.
+///
+/// ## Two-step IPC pattern (T9 spec constraint)
+///
+/// `webview.eval()` in Tauri 2 returns `Result<()>`, NOT the JS value
+/// (intentional design — eval is fire-and-forget). To get HTML back to
+/// Rust/Python we cannot use `eval(...).then(html => ...)` — instead:
+///   1. inject a JS function `__dpc_t9_emit_html__()` at popup create
+///   2. on CloseRequested, spawn a thread that calls `eval("__dpc_t9_emit_html__()")`
+///   3. the JS function emits a Tauri event with the captured payload
+///   4. frontend's existing Tauri event listener catches it
+///
+/// The spawn-thread on close matches the working T2 pattern (avoids the
+/// Windows sync-handler deadlock flagged in Tauri docs). There is a
+/// race: window may already be torn down by the time the thread runs
+/// eval. In that case the no-window branch emits an `error` payload so
+/// the Step 3 handler surfaces `AuthRequiredError` cleanly rather than
+/// timing out at the 5-min wait.
+#[tauri::command]
+pub async fn web_auth_open_popup_for_content(
+    app: AppHandle,
+    url: String,
+    request_id: String,
+) -> Result<(), String> {
+    let parsed = Url::parse(&url)
+        .map_err(|e| format!("invalid url '{}': {}", url, e))?;
+    let label = format!("web_auth_popup_{}", request_id);
+
+    // Injected at create-time so it survives intra-popup navigation
+    // (Tauri's `initialization_script` runs before every page script,
+    // including after the user clicks links inside the popup). The
+    // request_id is closed over so the same popup can never resolve
+    // a different request even if the JS were called externally.
+    let init_script = format!(
+        r#"
+        window.__dpc_t9_request_id__ = "{request_id}";
+        window.__dpc_t9_emit_html__ = function() {{
+            try {{
+                window.__TAURI__.event.emit("web_auth_popup_extracted", {{
+                    request_id: window.__dpc_t9_request_id__,
+                    content_html: document.documentElement.outerHTML,
+                    current_url: window.location.href
+                }});
+            }} catch (e) {{
+                window.__TAURI__.event.emit("web_auth_popup_extracted", {{
+                    request_id: window.__dpc_t9_request_id__,
+                    error: String(e)
+                }});
+            }}
+        }};
+        "#,
+        request_id = request_id
+    );
+
+    let window = WebviewWindowBuilder::new(
+        &app,
+        &label,
+        WebviewUrl::External(parsed),
+    )
+    .title(format!("DPC — {}", url))
+    .inner_size(1000.0, 800.0)
+    .initialization_script(&init_script)
+    .build()
+    .map_err(|e| e.to_string())?;
+
+    let app_for_event = app.clone();
+    let label_for_event = label.clone();
+    let request_id_for_event = request_id.clone();
+    window.on_window_event(move |event| {
+        if let WindowEvent::CloseRequested { .. } = event {
+            let app_thread = app_for_event.clone();
+            let label_thread = label_for_event.clone();
+            let req_id_thread = request_id_for_event.clone();
+            std::thread::spawn(move || {
+                if let Some(popup) = app_thread.get_webview_window(&label_thread) {
+                    // Fire-and-forget — JS event leaves the popup
+                    // process and is delivered to the frontend listener
+                    // before the window's resources are released.
+                    let _ = popup.eval("window.__dpc_t9_emit_html__()");
+                } else {
+                    let _ = app_thread.emit(
+                        "web_auth_popup_extracted",
+                        serde_json::json!({
+                            "request_id": req_id_thread,
+                            "error": "popup window closed before extraction",
+                        }),
+                    );
+                }
+            });
+        }
+    });
+
+    Ok(())
+}

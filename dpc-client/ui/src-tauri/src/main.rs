@@ -68,7 +68,8 @@ fn main() {
             audio_recorder::tauri_get_recording_status,
             web_auth::web_auth_open_login_window,
             web_auth::web_auth_get_status,
-            web_auth::web_auth_revoke
+            web_auth::web_auth_revoke,
+            web_auth::web_auth_open_popup_for_content
         ])
         .setup(|app| {
             #[cfg(debug_assertions)]
