@@ -280,3 +280,143 @@ def test_browse_page_firewall_pass_proceeds_to_auth_browse(vault_home, fresh_coo
     assert captured["agent_id"] == "agent_a"
     assert captured["domain"] == "ozon.ru"
     assert "stub-page-content" in out
+
+
+# ─────────────────────────────────────────────────────────────
+# T9 always_popup (YarchePlus variant C)
+# ─────────────────────────────────────────────────────────────
+
+
+def test_get_agent_always_popup_domains_empty_default(vault_home):
+    """Missing always_popup field → empty list (the headless-fetch path
+    is the default — only opt in by listing the domain)."""
+    rules = {"agent_profiles": {"agent_a": {"web_auth": {"allowed_domains": ["ozon.ru"]}}}}
+    fw = _make_firewall(vault_home, rules)
+    assert fw.get_agent_always_popup_domains("agent_a") == []
+
+
+def test_get_agent_always_popup_domains_normalizes_case(vault_home):
+    """Mixed-case entries from hand-edited rules are lowercased — the
+    eTLD+1 returned by resolve_etld1 is already lowercased on the
+    caller side, so the comparison stays case-insensitive."""
+    rules = {
+        "agent_profiles": {
+            "agent_a": {"web_auth": {
+                "allowed_domains": ["yarcheplus.ru"],
+                "always_popup": ["YarchePlus.RU", "Ozon.ru"],
+            }}
+        }
+    }
+    fw = _make_firewall(vault_home, rules)
+    assert fw.get_agent_always_popup_domains("agent_a") == [
+        "yarcheplus.ru", "ozon.ru",
+    ]
+
+
+def test_browse_page_always_popup_bypasses_headless(vault_home, fresh_cookies):
+    """Domain on always_popup whitelist → browse_page skips _auth_browse_html
+    entirely and calls _request_popup_fallback directly with reason
+    'always_popup'."""
+    from dpc_client_core import web_auth
+    from dpc_client_core.dpc_agent.tools import browser as browser_mod
+
+    rules = {
+        "agent_profiles": {
+            "agent_a": {"web_auth": {
+                "allowed_domains": ["yarcheplus.ru"],
+                "always_popup": ["yarcheplus.ru"],
+            }}
+        }
+    }
+    fw = _make_firewall(vault_home, rules)
+    web_auth.save_cookies("agent_a", "yarcheplus.ru", fresh_cookies)
+    agent_root = vault_home / "agents" / "agent_a"
+    agent_root.mkdir(parents=True, exist_ok=True)
+    ctx = _make_ctx_with_firewall(agent_root, fw)
+
+    # Sentinel: if _auth_browse_html runs the always_popup shortcut
+    # failed to take effect.
+    headless_called = {"value": False}
+    original_html = browser_mod._auth_browse_html
+    browser_mod._auth_browse_html = lambda *a, **kw: (
+        headless_called.__setitem__("value", True),
+        "<html><body>SHOULD NOT BE FETCHED</body></html>",
+    )[1]
+
+    # Sentinel: _request_popup_fallback must be called with reason='always_popup'.
+    popup_captured = {"called": False}
+    original_popup = browser_mod._request_popup_fallback
+
+    async def _fake_popup(ctx, agent_id, domain, url, reason="anti_bot_challenge"):
+        popup_captured["called"] = True
+        popup_captured["agent_id"] = agent_id
+        popup_captured["domain"] = domain
+        popup_captured["url"] = url
+        popup_captured["reason"] = reason
+        return "<html><body><h1>YarchePlus orders rendered</h1></body></html>"
+
+    browser_mod._request_popup_fallback = _fake_popup
+    try:
+        out = asyncio.run(
+            browser_mod.browse_page(
+                ctx,
+                url="https://yarcheplus.ru/profile/orders/group/16659751",
+                use_auth="yarcheplus.ru",
+            )
+        )
+    finally:
+        browser_mod._auth_browse_html = original_html
+        browser_mod._request_popup_fallback = original_popup
+
+    assert headless_called["value"] is False, (
+        "always_popup hit should skip _auth_browse_html headless fetch"
+    )
+    assert popup_captured["called"] is True
+    assert popup_captured["reason"] == "always_popup"
+    assert popup_captured["url"].endswith("/16659751")
+    assert "YarchePlus orders rendered" in out
+
+
+def test_browse_page_always_popup_miss_falls_through_to_headless(
+    vault_home, fresh_cookies
+):
+    """Domain NOT on always_popup whitelist → browse_page proceeds to
+    the normal _auth_browse_html headless fetch (existing T9 happy path)."""
+    from dpc_client_core import web_auth
+    from dpc_client_core.dpc_agent.tools import browser as browser_mod
+
+    rules = {
+        "agent_profiles": {
+            "agent_a": {"web_auth": {
+                "allowed_domains": ["ozon.ru"],
+                "always_popup": ["yarcheplus.ru"],  # different domain
+            }}
+        }
+    }
+    fw = _make_firewall(vault_home, rules)
+    web_auth.save_cookies("agent_a", "ozon.ru", fresh_cookies)
+    agent_root = vault_home / "agents" / "agent_a"
+    agent_root.mkdir(parents=True, exist_ok=True)
+    ctx = _make_ctx_with_firewall(agent_root, fw)
+
+    headless_called = {"value": False}
+    original_html = browser_mod._auth_browse_html
+
+    def _sentinel(agent_id, domain, url):
+        headless_called["value"] = True
+        return "<html><body>ozon orders headless OK</body></html>"
+
+    browser_mod._auth_browse_html = _sentinel
+    try:
+        out = asyncio.run(
+            browser_mod.browse_page(
+                ctx, url="https://ozon.ru/my/orders", use_auth="ozon.ru"
+            )
+        )
+    finally:
+        browser_mod._auth_browse_html = original_html
+
+    assert headless_called["value"] is True, (
+        "always_popup miss should reach the normal headless fetch"
+    )
+    assert "ozon orders headless OK" in out

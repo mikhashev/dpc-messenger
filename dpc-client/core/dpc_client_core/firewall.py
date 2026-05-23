@@ -520,6 +520,27 @@ class ContextFirewall:
             return []
         return [d.lower() for d in allowed if isinstance(d, str)]
 
+    def get_agent_always_popup_domains(self, agent_id: str) -> List[str]:
+        """ADR-028 T9 (YarchePlus variant C) — domains that always go via
+        the popup fallback rather than the headless Camoufox fetch, even
+        when `looks_like_challenge` returns False.
+
+        Used for sites whose pages render their useful content via
+        client-side JS that headless browsers can't see (YarchePlus
+        order detail, similar). `agent_profiles.{agent_id}.web_auth.always_popup`
+        is a list of eTLD+1 strings; entries here MUST also be in
+        `allowed_domains` — `is_auth_domain_allowed` is still the
+        gate, this only changes the fetch path.
+
+        Empty list when no web_auth block is configured.
+        """
+        always = self._get_profile_or_global(
+            agent_id, 'web_auth', 'always_popup', default=[]
+        )
+        if not isinstance(always, list):
+            return []
+        return [d.lower() for d in always if isinstance(d, str)]
+
     def is_auth_domain_allowed(self, agent_id: str, domain: str) -> bool:
         """ADR-028 T5 — per-agent + per-domain auth gate for browse_page use_auth.
 

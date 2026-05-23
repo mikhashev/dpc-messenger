@@ -506,13 +506,24 @@ def get_pending_popup_requests() -> dict[str, PendingPopupRequest]:
 
 
 async def _request_popup_fallback(
-    ctx: ToolContext, agent_id: str, domain: str, url: str
+    ctx: ToolContext,
+    agent_id: str,
+    domain: str,
+    url: str,
+    reason: str = "anti_bot_challenge",
 ) -> str:
     """Ask the frontend to open a Tauri WebView popup so the user can
     solve a challenge (Ozon fab_chlg, Cloudflare) or view JS-rendered
     content (YarchePlus orders) for `url`. Awaits the user closing the
     popup; the backend WS handler `web_auth_popup_complete` (Step 3)
     resolves the future with the extracted HTML.
+
+    `reason` is forwarded to the frontend so the popup-request panel
+    can render context-appropriate copy:
+      - "anti_bot_challenge" — Camoufox got a challenge stub
+        (`looks_like_challenge` triggered)
+      - "always_popup" — domain is on the agent's `always_popup`
+        whitelist (YarchePlus class — JS-render-only sites)
 
     Returns raw HTML extracted from the popup (the caller converts to
     markdown via `_html_to_markdown`). Raises `AuthRequiredError` on
@@ -550,7 +561,7 @@ async def _request_popup_fallback(
                 "agent_id": agent_id,
                 "domain": domain,
                 "url": url,
-                "reason": "anti_bot_challenge",
+                "reason": reason,
             },
         )
         return await asyncio.wait_for(future, timeout=_POPUP_TIMEOUT_S)
@@ -620,6 +631,38 @@ async def browse_page(ctx: ToolContext, url: str, size: str = "m", use_auth: Opt
                 f"agent_profiles.{agent_id}.web_auth.allowed_domains, "
                 f"then re-login via the web-auth UI."
             )
+
+        # T9 always_popup (YarchePlus variant C): skip Camoufox entirely
+        # for sites whose interesting content only renders under a real
+        # browser (JS-only order pages, client-rendered SPAs). The user
+        # already authorized this exact domain via allowed_domains, so
+        # the firewall check above is the security boundary; this just
+        # decides headless vs popup at fetch time.
+        if firewall is not None:
+            use_auth_etld1 = _web_auth_mod.resolve_etld1(use_auth)
+            if use_auth_etld1 in firewall.get_agent_always_popup_domains(agent_id):
+                log.info(
+                    "always_popup whitelist hit for %s (agent=%s) — "
+                    "skipping headless fetch", url, agent_id,
+                )
+                try:
+                    html = await _request_popup_fallback(
+                        ctx, agent_id, use_auth, url, reason="always_popup"
+                    )
+                except AuthRequiredError as e:
+                    _web_auth_mod.audit_append(
+                        agent_id, use_auth, url, status="popup_timeout"
+                    )
+                    return f"⚠️ {e}"
+                text = _html_to_markdown(html)
+                _web_auth_mod.audit_append(
+                    agent_id, use_auth, url, status=200, bytes_size=len(text)
+                )
+                max_chars = _SIZE_PRESETS.get(size, _SIZE_PRESETS["m"])
+                total = len(text)
+                if max_chars and total > max_chars:
+                    text = text[:max_chars] + f"\n\n... (truncated, {total} total chars, use size='l' or 'f' for more)"
+                return f"Content from {url} (markdown, auth={use_auth}, {total} chars):\n\n{text}"
 
         try:
             html = await asyncio.to_thread(_auth_browse_html, agent_id, use_auth, url)
