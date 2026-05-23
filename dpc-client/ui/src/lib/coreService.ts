@@ -1128,6 +1128,41 @@ export async function connectToCoreService() {
                         })();
                     }
                 }
+                else if (message.event === "web_auth_popup_force_close") {
+                    // S144 fix (T10-FRONTEND-CLEANUP-ON-TIMEOUT): backend
+                    // hit an error path on a popup-fallback session (timeout,
+                    // unexpected failure). Without this, the modal + the
+                    // Tauri popup window stay visible indefinitely from the
+                    // user's perspective even though the agent already saw
+                    // the error and moved on. Close both surfaces here so
+                    // the user is not left staring at a stranded popup.
+                    const rid = message.payload?.request_id;
+                    const reason = message.payload?.reason;
+                    if (!rid) {
+                        console.warn('[web_auth] popup_force_close missing request_id');
+                    } else {
+                        console.log('[web_auth] popup_force_close', rid, `reason=${reason}`);
+                        // Cancel any armed watchdog so it doesn't fire after cleanup.
+                        cancelPopupCloseWatchdog(rid);
+                        // Dismiss the in-app modal so the user is unblocked
+                        // immediately. webAuthPopupRequest holds at most one
+                        // outstanding request at a time (Q3 sequential).
+                        webAuthPopupRequest.set(null);
+                        // Best-effort: ask Rust to close the popup window if
+                        // one was opened. Swallow the no-window case since
+                        // the user may have already closed it manually.
+                        (async () => {
+                            try {
+                                const { invoke } = await import('@tauri-apps/api/core');
+                                await invoke('web_auth_popup_close', { requestId: rid });
+                            } catch (e) {
+                                // Window-not-found is expected when the user
+                                // never clicked Open or already closed it.
+                                console.log('[web_auth] popup_force_close: nothing to close', e);
+                            }
+                        })();
+                    }
+                }
             } catch (error) {
                 console.error("Error parsing message:", error);
             }

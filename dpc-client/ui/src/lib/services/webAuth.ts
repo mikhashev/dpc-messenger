@@ -31,6 +31,11 @@ export interface WebAuthPopupRequest {
     // window title ("Agent active — close to abort") and signals
     // to the user that closing aborts the agent workflow.
     keep_open?: boolean;
+    // S144 T10 fix: post-page-load settle delay before the frontend
+    // auto-triggers `web_auth_popup_extract_now` on the keep_open=true
+    // path (replaces the broken "wait for user to close popup" Path A
+    // semantics on T10 sessions). Ignored when keep_open is false.
+    wait_seconds?: number;
 }
 
 export const webAuthPopupRequest = writable<WebAuthPopupRequest | null>(null);

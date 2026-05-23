@@ -539,6 +539,7 @@ async def _request_popup_fallback(
     url: str,
     reason: str = "anti_bot_challenge",
     keep_open: bool = False,
+    wait_seconds: int = 3,
 ) -> tuple[str, str]:
     """Ask the frontend to open a Tauri WebView popup so the user can
     solve a challenge (Ozon fab_chlg, Cloudflare) or view JS-rendered
@@ -553,11 +554,19 @@ async def _request_popup_fallback(
       - "always_popup" — domain is on the agent's `always_popup`
         whitelist (YarchePlus class — JS-render-only sites)
 
-    `keep_open=True` (T10) leaves the session entry alive after the
-    initial extraction so the agent can drive follow-up tools
-    (`popup_extract_now`, `popup_navigate`, `popup_close`) against
-    the same `request_id`. Default `keep_open=False` preserves the
-    single-shot legacy contract.
+    `keep_open=True` (T10) switches semantics so the popup stays alive
+    after the initial extraction. The frontend auto-triggers a JS
+    `__dpc_t9_emit_html__()` after `wait_seconds` instead of waiting
+    for the user to close the window (S144 fix — Path A semantics for
+    a Path B session was the root cause of the 300s timeout that
+    surfaced in Mike's manual test). After auto-extract the agent can
+    drive follow-up tools (`popup_extract_now`, `popup_navigate`,
+    `popup_close`) against the same `request_id`.
+
+    `wait_seconds` (Q5 spec) is the post-page-load settle delay before
+    the frontend auto-extracts on the keep_open=True path. Ignored on
+    keep_open=False (which still waits for the user to close the
+    popup, same as the original T9 contract). Capped at 60.
 
     Returns `(html, request_id)`. The caller converts HTML to markdown
     via `_html_to_markdown` and surfaces `request_id` only on the
@@ -610,6 +619,13 @@ async def _request_popup_fallback(
         opened_at=time.monotonic(),
     )
 
+    # S144 fix: keep_open=True uses a shorter timeout because the frontend
+    # auto-extracts after wait_seconds (no waiting on the user to close).
+    # ~60s buffers the wait_seconds (max 60) + page-load + JS round-trip
+    # without making the agent wait 5 min when the frontend silently fails.
+    wait_seconds = max(0, min(int(wait_seconds), 60))
+    initial_timeout = (wait_seconds + 30) if keep_open else _POPUP_TIMEOUT_S
+
     # Bug 7 (S143 manual-test): track whether the initial extraction
     # actually succeeded. Only successful keep_open sessions stay in
     # the pending-map; any error path pops the entry so the next
@@ -628,15 +644,35 @@ async def _request_popup_fallback(
                 # advertise "Agent active — close to abort" for multi-page
                 # sessions vs the plain "DPC — {url}" for single-shot.
                 "keep_open": keep_open,
+                # S144 T10 fix: frontend schedules an auto-extract after
+                # wait_seconds when keep_open=true. Ignored on the
+                # single-shot path (existing close-to-extract semantics).
+                "wait_seconds": wait_seconds,
             },
         )
-        html = await asyncio.wait_for(future, timeout=_POPUP_TIMEOUT_S)
+        html = await asyncio.wait_for(future, timeout=initial_timeout)
         session_alive = True
         return html, request_id
     except asyncio.TimeoutError as e:
+        # S144 fix #2 (T10-FRONTEND-CLEANUP-ON-TIMEOUT): tell the frontend
+        # to dismiss the modal and close the popup window. Bug 7 (S143)
+        # closed the backend-side leak in `_pending_popup_requests`, but
+        # the frontend still had the modal + popup window stuck because
+        # no cleanup event was broadcast on error paths.
+        try:
+            await local_api.broadcast_event(
+                "web_auth_popup_force_close",
+                {"request_id": request_id, "reason": "timeout"},
+            )
+        except Exception:
+            pass  # best-effort; do not mask the AuthRequiredError below
         raise AuthRequiredError(
-            f"Popup fallback timeout ({_POPUP_TIMEOUT_S}s) for {url} — "
+            f"Popup fallback timeout ({initial_timeout}s) for {url} — "
             f"user did not complete"
+            if not keep_open
+            else f"Popup auto-extract timeout ({initial_timeout}s) for "
+            f"{url} — frontend did not produce HTML within "
+            f"wait_seconds={wait_seconds}s + 30s grace"
         ) from e
     finally:
         # T10 + Bug 7: keep only successful keep_open sessions. The
@@ -932,6 +968,7 @@ async def browse_page(
     size: str = "m",
     use_auth: Optional[str] = None,
     keep_open: bool = False,
+    wait_seconds: int = 3,
 ) -> str:
     """
     Fetch a web page and extract content as structured markdown.
@@ -955,6 +992,14 @@ async def browse_page(
             agent's encrypted vault (ADR-028). The URL must be within
             the same eTLD+1 as use_auth (subdomains allowed). Returns a
             re-login prompt if cookies are missing or expired.
+        keep_open: When true, leave the popup open after the initial
+            fetch so subsequent popup_extract_now / popup_navigate /
+            popup_close tools can drive it. The response includes a
+            `request_id=...` hint.
+        wait_seconds: Post-page-load settle delay before the frontend
+            auto-extracts on the keep_open=True popup path. Default 3
+            covers most SPAs; raise for slow JS render. Ignored when
+            keep_open=False (Path A waits for user close). Capped at 60.
 
     Returns:
         Page content as markdown
@@ -1036,6 +1081,7 @@ async def browse_page(
                     html, popup_request_id = await _request_popup_fallback(
                         ctx, agent_id, use_auth, url,
                         reason="always_popup", keep_open=keep_open,
+                        wait_seconds=wait_seconds,
                     )
                 except AuthRequiredError as e:
                     _web_auth_mod.audit_append(
@@ -1107,6 +1153,7 @@ async def browse_page(
             try:
                 html, challenge_request_id = await _request_popup_fallback(
                     ctx, agent_id, use_auth, url, keep_open=keep_open,
+                    wait_seconds=wait_seconds,
                 )
             except AuthRequiredError as e:
                 _web_auth_mod.audit_append(
@@ -1285,6 +1332,13 @@ def get_tools() -> List[ToolEntry]:
                             "type": "boolean",
                             "description": "When true, keep the popup window open after the initial fetch so you can call popup_navigate/popup_extract_now/popup_close against the same session. Use for multi-page authenticated workflows. Default false (single-shot, popup closes automatically).",
                             "default": False
+                        },
+                        "wait_seconds": {
+                            "type": "integer",
+                            "description": "Post-page-load settle delay before the popup auto-extracts on the keep_open=true path. 3s is right for most SPAs; raise for slow JS render. Ignored when keep_open=false. Capped at 60.",
+                            "default": 3,
+                            "minimum": 0,
+                            "maximum": 60
                         }
                     },
                     "required": ["url"]

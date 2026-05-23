@@ -28,6 +28,10 @@
 
     let opening = $state(false);
     let openError = $state<string | null>(null);
+    // S144 T10 fix: auto-extract timer for the keep_open=true path. Stored
+    // so handleCancel can clear it before sending user_cancelled — same
+    // race-defence pattern as cancelPopupCloseWatchdog (Bug 6).
+    let autoExtractTimer: ReturnType<typeof setTimeout> | null = null;
 
     async function handleOpen() {
         const req = $webAuthPopupRequest;
@@ -49,6 +53,30 @@
                 // "Agent active — close to abort" title for sessions.
                 keepOpen: req.keep_open ?? false,
             });
+            // S144 fix (T10-KEEPOPEN-NO-AUTO-EXTRACT): on the keep_open=true
+            // path the user is NOT supposed to close the popup — that was the
+            // old Path A flow which made browse_page(keep_open=true) time out
+            // at 300s. Instead, wait `wait_seconds` for the page to settle,
+            // then auto-trigger the same `web_auth_popup_extract_now` Tauri
+            // command an agent would have called for subsequent reads. The
+            // backend resolves the in-flight future with the HTML (same path
+            // the popup_extract_now tool uses) and browse_page returns. The
+            // popup window stays open (eval-only, no close) so the agent can
+            // drive popup_navigate / popup_extract_now / popup_close next.
+            if (req.keep_open) {
+                const waitMs = Math.max(0, Math.min(req.wait_seconds ?? 3, 60)) * 1000;
+                autoExtractTimer = setTimeout(async () => {
+                    autoExtractTimer = null;
+                    try {
+                        const { invoke: invokeExtract } = await import('@tauri-apps/api/core');
+                        await invokeExtract('web_auth_popup_extract_now', {
+                            requestId: req.request_id,
+                        });
+                    } catch (e) {
+                        console.error('[web_auth] keep_open auto-extract failed:', e);
+                    }
+                }, waitMs);
+            }
             // Tauri popup is now visible to the user. The store stays set
             // until the extracted-event listener in coreService.ts clears it
             // (success path) — keeping the "Открыто, закройте окно" overlay.
@@ -70,6 +98,13 @@
         // backend `entry.future.done()` guard, but earlier in the
         // pipeline.
         cancelPopupCloseWatchdog(req.request_id);
+        // S144 fix: same race-defence for the keep_open=true auto-extract
+        // timer set up in handleOpen — if Cancel beats the timer, we want
+        // the agent to see `user_cancelled` rather than a stale extract.
+        if (autoExtractTimer !== null) {
+            clearTimeout(autoExtractTimer);
+            autoExtractTimer = null;
+        }
         // Tell the backend handler to resolve the pending Future with an
         // explicit cancellation error rather than waiting out the 5-min
         // timeout — the agent gets a clean AuthRequiredError immediately.
@@ -101,12 +136,22 @@
             {/if}
 
             {#if !opening}
-                <p class="popup-hint">
-                    A browser window will open. <strong>Wait for the page to
-                    fully load</strong>, then <strong>close the browser
-                    window</strong> (X button in the top-right corner) — the
-                    page content will be sent back to the agent automatically.
-                </p>
+                {#if $webAuthPopupRequest.keep_open}
+                    <p class="popup-hint">
+                        A browser window will open and the agent will drive it
+                        across one or more pages.
+                        <strong>Do not close the window</strong> — the agent will
+                        close it when finished. Click <strong>Cancel</strong> to
+                        abort the workflow.
+                    </p>
+                {:else}
+                    <p class="popup-hint">
+                        A browser window will open. <strong>Wait for the page to
+                        fully load</strong>, then <strong>close the browser
+                        window</strong> (X button in the top-right corner) — the
+                        page content will be sent back to the agent automatically.
+                    </p>
+                {/if}
                 <div class="popup-actions">
                     <button class="popup-btn-primary" onclick={handleOpen}>
                         Open {$webAuthPopupRequest.domain}
@@ -116,15 +161,27 @@
                     </button>
                 </div>
             {:else}
-                <p class="popup-status">
-                    🌐 Browser window opened.<br>
-                    <strong>1.</strong> Wait until the page finishes
-                    loading.<br>
-                    <strong>2.</strong> Close the browser window (X in the
-                    top-right corner).<br>
-                    The page content will be sent back to the agent
-                    automatically — you do not need to copy anything.
-                </p>
+                {#if $webAuthPopupRequest.keep_open}
+                    <p class="popup-status">
+                        🌐 Browser window opened — <strong>agent is
+                        browsing</strong>.<br>
+                        The popup will stay open while the agent reads pages.
+                        <strong>Do not close it</strong> — the agent will close
+                        the popup itself when done.<br>
+                        Click <strong>Cancel request</strong> to abort the
+                        agent workflow.
+                    </p>
+                {:else}
+                    <p class="popup-status">
+                        🌐 Browser window opened.<br>
+                        <strong>1.</strong> Wait until the page finishes
+                        loading.<br>
+                        <strong>2.</strong> Close the browser window (X in the
+                        top-right corner).<br>
+                        The page content will be sent back to the agent
+                        automatically — you do not need to copy anything.
+                    </p>
+                {/if}
                 <div class="popup-actions">
                     <button class="popup-btn-secondary" onclick={handleCancel}>
                         Cancel request
