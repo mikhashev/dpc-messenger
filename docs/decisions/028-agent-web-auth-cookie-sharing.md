@@ -1,4 +1,4 @@
-# ADR-027: Agent Web Authentication via Cookie Sharing
+# ADR-028: Agent Web Authentication via Cookie Sharing
 
 **Status:** Accepted
 **Date:** 2026-05-22

@@ -8,8 +8,8 @@ use tauri::Manager;
 // Audio recording module (Linux workaround for getUserMedia)
 mod audio_recorder;
 
-// Agent web auth — Tauri WebView2 cookie extraction (ADR-027 T2)
-// Scaffold only — commands return TODO until full WebView2 impl lands.
+// Agent web auth — Tauri WebView cookie extraction (ADR-028 T2)
+// Cross-platform via Tauri 2 native cookies API (since 2.9.5).
 mod web_auth;
 
 // File metadata helper for dynamic timeout calculation (v0.11.2+)

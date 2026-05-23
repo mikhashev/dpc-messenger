@@ -1,4 +1,4 @@
-// ADR-027 T2 — Tauri WebView cookie extraction (cross-platform)
+// ADR-028 T2 — Tauri WebView cookie extraction (cross-platform)
 //
 // Uses Tauri 2.x native `WebviewWindow::cookies_for_url()` and friends —
 // no per-OS WinRT / WKWebView / WebKitGTK bindings. API available since
@@ -14,7 +14,7 @@
 //     {domain, cookies}; frontend forwards via existing WebSocket to
 //     Python vault (T3).
 //
-// See ADR-027 + tasks/adr-027-agent-web-auth/002-tauri-webview2-cookies.md.
+// See ADR-028 + tasks/adr-028-agent-web-auth/002-tauri-webview2-cookies.md.
 
 use serde::Serialize;
 use tauri::{
