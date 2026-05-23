@@ -102,35 +102,34 @@ pub async fn web_auth_open_login_window(
     // cookies_for_url() avoids the Windows sync-handler deadlock flagged
     // in Tauri docs (WebView2 limitation).
     //
-    // Race-condition note (Ark review S140): the spawned thread reaches
-    // for `get_webview_window(&label)` AFTER CloseRequested has fired,
-    // so there is a narrow window where the WebviewWindow may already
-    // be destroyed before the thread runs. Tauri's contract is that
-    // CloseRequested fires BEFORE destruction (the close is cancelable
-    // from the handler), so in practice the window handle is still
-    // valid when the thread starts; but the `get_webview_window` lookup
-    // returns Option<_> and we early-return None — if a future Tauri
-    // release tightens timing such that destroy runs concurrently with
-    // our thread spawn, this code degrades to "popup closes silently
-    // without emitting cookies" rather than crashing. The user sees no
-    // login_complete event and can retry. Phase 2 follow-up: capture
-    // cookies synchronously in the handler via a oneshot channel into
-    // the spawned thread, eliminating the lookup race.
+    // Cookie lookup target: MAIN window, not the popup.
+    //
+    // First pass (S140) extracted cookies from the popup window itself via
+    // `get_webview_window(&label)`. Mike S141 empirical test showed the
+    // popup window handle is already gone by the time the spawned thread
+    // runs — `get_webview_window` returns None and the thread early-returns
+    // silently without emitting cookies. The ui.log line
+    // `[web_auth] Tauri event listener installed` appears but no
+    // `[web_auth] received login_complete` ever follows.
+    //
+    // Switching to the MAIN window's cookie store works because on
+    // Windows WebView2 the cookie jar is process-wide — the same
+    // pattern is already used by `web_auth_get_status` and
+    // `web_auth_revoke` below. The popup's URL/origin determines which
+    // cookies are returned, so we still get only the login site's jar.
     let app_for_event = app.clone();
     let domain_for_event = domain.clone();
-    let label_for_event = label.clone();
     let url_for_event = url.clone();
     window.on_window_event(move |event| {
         if let WindowEvent::CloseRequested { .. } = event {
             let app_thread = app_for_event.clone();
             let domain_thread = domain_for_event.clone();
-            let label_thread = label_for_event.clone();
             let url_thread = url_for_event.clone();
             std::thread::spawn(move || {
-                let Some(win) = app_thread.get_webview_window(&label_thread) else {
+                let Some(main_win) = app_thread.get_webview_window("main") else {
                     return;
                 };
-                let Ok(cookies) = win.cookies_for_url(url_thread) else {
+                let Ok(cookies) = main_win.cookies_for_url(url_thread) else {
                     return;
                 };
                 let converted: Vec<Cookie> = cookies.iter().map(convert_cookie).collect();
