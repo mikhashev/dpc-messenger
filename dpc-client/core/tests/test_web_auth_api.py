@@ -277,11 +277,11 @@ def test_remove_domain_accepts_url_form(vault_home):
     assert stub.firewall.get_agent_web_auth_domains("agent_a") == []
 
 
-def test_save_firewall_merge_preserves_web_auth_added_after_load(vault_home):
-    """Bug B regression: FirewallEditor.saveChanges with a stale
-    snapshot must NOT wipe `agent_profiles.<id>.web_auth` that was
-    added to disk by `web_auth_add_domain` between the editor's
-    `loadRules()` and its save.
+def test_save_firewall_merge_preserves_web_auth_absent_from_incoming(vault_home):
+    """Bug B regression — absent-key case: FirewallEditor.saveChanges
+    with a stale snapshot must NOT wipe `agent_profiles.<id>.web_auth`
+    when the key is missing entirely from the incoming payload (the
+    editor never loaded the just-added key).
 
     Direct unit test of `_merge_unknown_agent_profile_keys` — avoids
     stubbing the full `save_firewall_rules` glue (notify_peers,
@@ -312,6 +312,83 @@ def test_save_firewall_merge_preserves_web_auth_added_after_load(vault_home):
     assert incoming["agent_profiles"]["agent_a"]["web_auth"] == {"allowed_domains": ["ozon.ru"]}
     # FirewallEditor's edit to tools dict wins (not merged sub-key)
     assert incoming["agent_profiles"]["agent_a"]["tools"]["git_commit"] is False
+
+
+def test_save_firewall_merge_force_preserves_web_auth_with_stale_contents(vault_home):
+    """Mike S141 regression — present-key-with-stale-contents case:
+    FirewallEditor opens, loads `web_auth = {allowed_domains: ['ozon.ru']}`.
+    AgentPermissionsPanel adds `yarcheplus.ru` (web_auth now has both
+    domains on disk). FirewallEditor save ships the stale snapshot
+    `web_auth = {allowed_domains: ['ozon.ru']}` — the key is present
+    in incoming but the contents are stale.
+
+    Naive "preserve missing keys" merge skips this case because the
+    key IS present. Fix: force-preserve `web_auth` from disk because
+    only `web_auth_add_domain`/`web_auth_remove_domain` are
+    authoritative owners — FirewallEditor never had write authority
+    over this key in the first place.
+    """
+    from dpc_client_core.service import CoreService
+
+    # On-disk state: agent has BOTH domains in web_auth (the latest
+    # truth after a recent add_domain call).
+    stub = _build_stub(vault_home, {"agent_profiles": {
+        "agent_a": {
+            "enabled": True,
+            "tools": {"browse_page": True},
+            "web_auth": {"allowed_domains": ["ozon.ru", "yarcheplus.ru"]},
+        }
+    }})
+
+    # FirewallEditor stale snapshot: still only has ozon.ru in web_auth
+    # because user opened the editor BEFORE yarcheplus.ru was added.
+    incoming = {"agent_profiles": {
+        "agent_a": {
+            "enabled": True,
+            "tools": {"browse_page": True, "git_commit": False},
+            "web_auth": {"allowed_domains": ["ozon.ru"]},  # ← stale
+        }
+    }}
+
+    CoreService._merge_unknown_agent_profile_keys(stub, incoming)
+
+    # Disk wins for web_auth — both domains preserved despite stale incoming
+    assert incoming["agent_profiles"]["agent_a"]["web_auth"] == {
+        "allowed_domains": ["ozon.ru", "yarcheplus.ru"]
+    }
+    # Other keys merge normally — tools edit by the editor wins
+    assert incoming["agent_profiles"]["agent_a"]["tools"]["git_commit"] is False
+
+
+def test_save_firewall_merge_force_preserves_web_auth_when_disk_removed(vault_home):
+    """Symmetric to the above: if web_auth was REMOVED on disk
+    (web_auth_remove_domain wiped the last entry, key now absent on
+    disk), a stale FirewallEditor snapshot that still has web_auth must
+    NOT resurrect the removed domains. Backend-owned key, disk truth.
+    """
+    from dpc_client_core.service import CoreService
+
+    # On-disk: web_auth removed (e.g. all domains revoked)
+    stub = _build_stub(vault_home, {"agent_profiles": {
+        "agent_a": {
+            "enabled": True,
+            # no web_auth key — removed
+        }
+    }})
+
+    # FirewallEditor stale snapshot still has web_auth from before remove
+    incoming = {"agent_profiles": {
+        "agent_a": {
+            "enabled": True,
+            "web_auth": {"allowed_domains": ["ozon.ru"]},  # ← stale, should be wiped
+        }
+    }}
+
+    CoreService._merge_unknown_agent_profile_keys(stub, incoming)
+
+    # web_auth absent from incoming because disk had no web_auth — no
+    # accidental zombie domains.
+    assert "web_auth" not in incoming["agent_profiles"]["agent_a"]
 
 
 def test_save_firewall_merge_respects_profile_delete(vault_home):

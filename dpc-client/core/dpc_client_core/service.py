@@ -14,6 +14,22 @@ from typing import Dict, Any, List, Optional
 
 logger = logging.getLogger(__name__)
 
+
+# Per-agent profile keys owned by dedicated backend commands, not by
+# FirewallEditor. When FirewallEditor saves a stale snapshot of one of
+# these keys, the on-disk version always wins — the editor never had
+# authoritative ownership of the field. Used by
+# `CoreService._merge_unknown_agent_profile_keys`.
+#
+# Mike S141 regression: FirewallEditor `save_firewall_rules` shipped
+# `web_auth = {allowed_domains: ['ozon.ru']}` (stale snapshot from
+# editor open time) ~3s after a successful login_complete added cookies
+# for `yarcheplus.ru`. Without force-preserve, the absent-key merge
+# skipped the wipe because the `web_auth` key WAS present in incoming,
+# just with stale contents — `yarcheplus.ru` silently disappeared from
+# the whitelist.
+_BACKEND_OWNED_PROFILE_KEYS = frozenset({"web_auth"})
+
 from .__version__ import __version__
 from .firewall import ContextFirewall
 from .hub_client import HubClient
@@ -3544,14 +3560,15 @@ class CoreService:
 
     def _merge_unknown_agent_profile_keys(self, rules_dict: Dict[str, Any]) -> None:
         """Mutate `rules_dict` in place: for every agent profile present
-        in both the incoming payload and the on-disk rules, copy any
-        sub-keys that exist on disk but are missing from the incoming
-        snapshot. This protects against the stale-snapshot wipe pattern
-        where FirewallEditor reads rules at open time, another panel
-        (e.g. AgentPermissionsPanel) writes a new sub-key
-        (`web_auth.allowed_domains`) while the editor is open, then
-        editor save would otherwise overwrite the on-disk state with
-        its stale view.
+        in both the incoming payload and the on-disk rules, reconcile
+        sub-keys against the stale-snapshot wipe pattern. Two rules:
+
+        1. Sub-keys in `_BACKEND_OWNED_PROFILE_KEYS` — disk version
+           ALWAYS wins (FirewallEditor never had authoritative ownership
+           of `web_auth`; only `web_auth_add_domain`/`remove_domain` do).
+        2. Sub-keys missing entirely from the incoming snapshot — copy
+           from disk (covers other panels writing sub-keys during the
+           editor's open-but-unsaved window).
 
         Profiles missing entirely from `rules_dict` are treated as
         explicit deletes (FirewallEditor has a delete-profile control)
@@ -3587,8 +3604,20 @@ class CoreService:
             if not isinstance(incoming_profile, dict):
                 continue
             for key, value in current_profile.items():
-                if key not in incoming_profile:
+                if key in _BACKEND_OWNED_PROFILE_KEYS:
+                    # Disk wins regardless of what FirewallEditor shipped;
+                    # the key is not the editor's to write.
                     incoming_profile[key] = value
+                elif key not in incoming_profile:
+                    incoming_profile[key] = value
+            # Zombie-wipe pass: a backend-owned key that exists on
+            # incoming but was removed from disk must NOT resurrect
+            # (e.g. last web_auth domain was revoked via
+            # web_auth_remove_domain, then FirewallEditor saved a
+            # stale snapshot that still has web_auth in it).
+            for key in _BACKEND_OWNED_PROFILE_KEYS:
+                if key not in current_profile and key in incoming_profile:
+                    del incoming_profile[key]
 
     async def reload_firewall(self) -> Dict[str, Any]:
         """Reload firewall rules from disk."""
