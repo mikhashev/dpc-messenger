@@ -231,7 +231,177 @@ def _browse_with_camoufox(url: str) -> Optional[str]:
         return None
 
 
-async def browse_page(ctx: ToolContext, url: str, size: str = "m") -> str:
+# ─────────────────────────────────────────────────────────────
+# ADR-028 T4 — AuthBrowser (authenticated read-only Camoufox)
+# ─────────────────────────────────────────────────────────────
+
+
+class AuthRequiredError(Exception):
+    """Raised when no cookies exist for the requested domain in the
+    agent's vault. Surfaced to the agent as a re-login prompt."""
+
+
+class AuthExpiredError(Exception):
+    """Raised when cookies exist but have expired. Surfaced to the agent
+    as a re-login prompt."""
+
+
+def _to_playwright_cookies(cookies: list[dict]) -> list[dict]:
+    """Convert DPC snake_case Cookie dicts → Playwright camelCase format.
+
+    Mirrors the T1 spike `normalize_cookie()` output:
+      httponly → httpOnly, samesite → sameSite. expires stays as Unix
+      epoch seconds (Playwright accepts numeric). Empty samesite is
+      omitted rather than passed as None (Playwright rejects None)."""
+    out = []
+    for c in cookies:
+        pc = {
+            "name": c["name"],
+            "value": c["value"],
+            "domain": c.get("domain") or "",
+            "path": c.get("path") or "/",
+            "secure": bool(c.get("secure", False)),
+            "httpOnly": bool(c.get("httponly", False)),
+        }
+        if c.get("expires") is not None:
+            pc["expires"] = c["expires"]
+        if c.get("samesite"):
+            pc["sameSite"] = c["samesite"]
+        out.append(pc)
+    return out
+
+
+def _domain_matches(url: str, etld1: str) -> bool:
+    """Check whether URL host is the same eTLD+1 as `etld1` (or a
+    subdomain of it). Prevents leaking cookies to unrelated hosts that
+    happen to embed the auth-domain string in their URL (path / query
+    params / fragments)."""
+    from urllib.parse import urlparse
+
+    host = urlparse(url).hostname
+    if not host:
+        return False
+    host = host.lower()
+    etld1 = etld1.lower()
+    return host == etld1 or host.endswith("." + etld1)
+
+
+class AuthBrowser:
+    """Restricted Camoufox wrapper for authenticated reads (ADR-028 T4).
+
+    Exposes ONLY navigation + content reading — no `click`, `fill`,
+    `evaluate`, or any other interactive method. This is tool-level
+    enforcement of READ-only access per ADR-028 Phase 1; WRITE
+    permissions are explicitly out of scope until Phase 3.
+
+    Cookies are loaded from the agent's encrypted vault (T3
+    `web_auth.py`) at construction time. Two failure modes:
+
+      AuthRequiredError — no cookies for the domain. User must log in
+        via the Tauri WebView popup (T2) before this works.
+      AuthExpiredError — cookies present but expired. Same fix as
+        AuthRequiredError — user re-logs in.
+
+    Use as a context manager so the Camoufox browser is always closed:
+
+        with AuthBrowser(agent_id="agent_001", domain="ozon.ru") as ab:
+            ab.goto("https://ozon.ru/my/orders")
+            html = ab.get_page_content()
+    """
+
+    def __init__(self, agent_id: str, domain: str):
+        from dpc_client_core import web_auth
+
+        self._agent_id = agent_id
+        self._domain = domain.lower()
+        self._etld1 = web_auth.resolve_etld1(self._domain)
+        cookies = web_auth.load_cookies(agent_id, domain)
+        if cookies is None:
+            raise AuthRequiredError(
+                f"No cookies for {domain} (agent={agent_id}) — re-login required"
+            )
+        if web_auth.is_expired(cookies):
+            raise AuthExpiredError(
+                f"Cookies for {domain} expired (agent={agent_id}) — re-login required"
+            )
+        self._cookies = cookies
+        self._cm = None
+        self._browser = None
+        self._context = None
+        self._page = None
+
+    def __enter__(self):
+        self._open()
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        self.close()
+        return False
+
+    @property
+    def domain(self) -> str:
+        return self._domain
+
+    def _open(self) -> None:
+        from camoufox.sync_api import Camoufox
+
+        self._cm = Camoufox(headless=True)
+        self._browser = self._cm.__enter__()
+        self._context = self._browser.new_context()
+        self._context.add_cookies(_to_playwright_cookies(self._cookies))
+        self._page = self._context.new_page()
+
+    def goto(self, url: str) -> None:
+        """Navigate to URL. URL eTLD+1 must match the auth domain or be
+        a subdomain — otherwise raises ValueError without making any
+        network request. This prevents the agent from accidentally (or
+        adversarially) leaking auth cookies to an unrelated origin."""
+        if self._page is None:
+            raise RuntimeError("AuthBrowser not opened — use as context manager")
+        if not _domain_matches(url, self._etld1):
+            raise ValueError(
+                f"URL {url!r} is outside auth domain {self._etld1!r}"
+            )
+        self._page.goto(url, wait_until="networkidle", timeout=30000)
+
+    def get_page_content(self) -> str:
+        """Return the current page as markdown via trafilatura. Same
+        extraction pipeline as the anonymous browse path."""
+        if self._page is None:
+            raise RuntimeError("AuthBrowser not opened — use as context manager")
+        html = self._page.content()
+        import trafilatura
+
+        text = trafilatura.extract(
+            html,
+            output_format="markdown",
+            include_formatting=True,
+            include_links=True,
+            include_tables=True,
+            favor_recall=True,
+        )
+        return text or ""
+
+    def close(self) -> None:
+        """Release browser resources. Safe to call multiple times."""
+        if self._cm is not None:
+            try:
+                self._cm.__exit__(None, None, None)
+            finally:
+                self._cm = None
+                self._browser = None
+                self._context = None
+                self._page = None
+
+
+def _auth_browse(agent_id: str, domain: str, url: str) -> str:
+    """Sync helper used from the async browse_page via asyncio.to_thread."""
+    with AuthBrowser(agent_id=agent_id, domain=domain) as ab:
+        ab.goto(url)
+        return ab.get_page_content()
+
+
+async def browse_page(ctx: ToolContext, url: str, size: str = "m", use_auth: Optional[str] = None) -> str:
     """
     Fetch a web page and extract content as structured markdown.
 
@@ -246,13 +416,37 @@ async def browse_page(ctx: ToolContext, url: str, size: str = "m") -> str:
       f = full content (no truncation)
 
     Args:
-        ctx: Tool context (unused, but required for tool interface)
+        ctx: Tool context (agent_root used to derive agent_id when use_auth set)
         url: URL to fetch
         size: Size preset (s/m/l/f)
+        use_auth: If set, fetch the page authenticated for this domain.
+            Routes through restricted AuthBrowser with cookies from the
+            agent's encrypted vault (ADR-028). The URL must be within
+            the same eTLD+1 as use_auth (subdomains allowed). Returns a
+            re-login prompt if cookies are missing or expired.
 
     Returns:
         Page content as markdown
     """
+    if use_auth:
+        agent_id = ctx.agent_root.name
+        try:
+            text = await asyncio.to_thread(_auth_browse, agent_id, use_auth, url)
+        except (AuthRequiredError, AuthExpiredError) as e:
+            return f"⚠️ {e}"
+        except ValueError as e:
+            return f"⚠️ {e}"
+        except ImportError:
+            return (
+                "⚠️ Camoufox browser is not installed. Run "
+                "`uv sync --extra browser` in dpc-client/core to enable."
+            )
+        max_chars = _SIZE_PRESETS.get(size, _SIZE_PRESETS["m"])
+        total = len(text)
+        if max_chars and total > max_chars:
+            text = text[:max_chars] + f"\n\n... (truncated, {total} total chars, use size='l' or 'f' for more)"
+        return f"Content from {url} (markdown, auth={use_auth}, {total} chars):\n\n{text}"
+
     result = await asyncio.to_thread(_browse_sync, url)
 
     if not result.get("success", False) and "error" in result:
@@ -384,7 +578,7 @@ def get_tools() -> List[ToolEntry]:
             name="browse_page",
             schema={
                 "name": "browse_page",
-                "description": "Fetch a web page and extract content as structured markdown. Preserves headings, lists, tables, and links. Use size presets to control output length: s=5K, m=10K (default), l=25K, f=full.",
+                "description": "Fetch a web page and extract content as structured markdown. Preserves headings, lists, tables, and links. Use size presets to control output length: s=5K, m=10K (default), l=25K, f=full. Set use_auth=<domain> to fetch authenticated content using stored cookies (requires prior login via the web-auth UI).",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -397,6 +591,10 @@ def get_tools() -> List[ToolEntry]:
                             "description": "Output size preset: s (5K summary), m (10K default), l (25K deep), f (full)",
                             "default": "m",
                             "enum": ["s", "m", "l", "f"]
+                        },
+                        "use_auth": {
+                            "type": "string",
+                            "description": "Optional auth domain (eg 'ozon.ru'). When set, the page is fetched authenticated using cookies from the agent's encrypted vault. The URL must be within the same eTLD+1 as use_auth (subdomains allowed). Returns a re-login prompt if cookies are missing or expired."
                         }
                     },
                     "required": ["url"]
