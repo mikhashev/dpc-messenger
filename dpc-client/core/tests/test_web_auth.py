@@ -182,6 +182,26 @@ def test_is_expired_with_future_cookie():
     assert web_auth.is_expired(cookies) is False
 
 
+def test_invalid_token_recovery(vault_home, sample_cookies):
+    """If the keyring entry is wiped (or rotated) while the on-disk
+    vault still exists, the next load should NOT crash with
+    InvalidToken. Instead the module should start fresh: a new key is
+    generated, the un-decryptable blob is treated as empty, and the
+    next save overwrites it."""
+    from dpc_client_core import web_auth
+    import keyring
+
+    web_auth.save_cookies("agent_a", "ozon.ru", sample_cookies)
+    # Wipe the keyring entry — on next access a new key will be generated
+    # but the on-disk vault was encrypted with the old key.
+    keyring.delete_password(web_auth.SERVICE, "agent_a")
+    # load_cookies must not raise. Stale vault is silently dropped.
+    assert web_auth.load_cookies("agent_a", "ozon.ru") is None
+    # A subsequent save with the new key works end-to-end.
+    web_auth.save_cookies("agent_a", "ozon.ru", sample_cookies)
+    assert web_auth.load_cookies("agent_a", "ozon.ru") == sample_cookies
+
+
 def test_vault_file_not_plaintext(vault_home, sample_cookies):
     from dpc_client_core import web_auth
 

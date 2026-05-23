@@ -49,7 +49,7 @@ Agent: browse_page(url="https://ozon.ru/my/orders", use_auth="ozon.ru")
 
 ### 2. Cookie Storage (Credential Vault)
 
-**Location:** `~/.dpc/agents/{agent_id}/web_credentials.json`
+**Location:** `~/.dpc/agents/{agent_id}/web_credentials.enc` (encrypted blob, not JSON)
 
 **Format:**
 ```json

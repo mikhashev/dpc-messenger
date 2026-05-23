@@ -101,6 +101,21 @@ pub async fn web_auth_open_login_window(
     // close-event + spawn-thread pattern: spawning a thread before calling
     // cookies_for_url() avoids the Windows sync-handler deadlock flagged
     // in Tauri docs (WebView2 limitation).
+    //
+    // Race-condition note (Ark review S140): the spawned thread reaches
+    // for `get_webview_window(&label)` AFTER CloseRequested has fired,
+    // so there is a narrow window where the WebviewWindow may already
+    // be destroyed before the thread runs. Tauri's contract is that
+    // CloseRequested fires BEFORE destruction (the close is cancelable
+    // from the handler), so in practice the window handle is still
+    // valid when the thread starts; but the `get_webview_window` lookup
+    // returns Option<_> and we early-return None — if a future Tauri
+    // release tightens timing such that destroy runs concurrently with
+    // our thread spawn, this code degrades to "popup closes silently
+    // without emitting cookies" rather than crashing. The user sees no
+    // login_complete event and can retry. Phase 2 follow-up: capture
+    // cookies synchronously in the handler via a oneshot channel into
+    // the spawned thread, eliminating the lookup race.
     let app_for_event = app.clone();
     let domain_for_event = domain.clone();
     let label_for_event = label.clone();

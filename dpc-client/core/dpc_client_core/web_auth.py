@@ -59,10 +59,6 @@ def _vault_path(agent_id: str) -> Path:
     return home / "agents" / agent_id / "web_credentials.enc"
 
 
-def _service_key(agent_id: str) -> str:
-    return f"{SERVICE}:{agent_id}"
-
-
 def _get_or_create_key(agent_id: str) -> bytes:
     """Return the per-agent Fernet key, generating + persisting if missing."""
     stored = keyring.get_password(SERVICE, agent_id)
@@ -121,8 +117,13 @@ def save_cookies(agent_id: str, domain: str, cookies: list[dict]) -> None:
 
 def load_cookies(agent_id: str, domain: str) -> list[dict] | None:
     """Return cookies for the eTLD+1 of `domain`, or None if no jar
-    exists. Updates last_used_at as a side effect so audit + UI can
-    show recency."""
+    exists.
+
+    Side effect: writes the vault back with an updated last_used_at
+    timestamp so audit + UI can show recency. This is a read-on-disk +
+    write-on-disk op, not a pure read — acceptable in a single-process
+    desktop context but worth flagging if the vault ever moves to a
+    shared store (e.g. multi-agent service mode in a future phase)."""
     key = resolve_etld1(domain)
     vault = _load_vault(agent_id)
     entry = vault["domains"].get(key)
