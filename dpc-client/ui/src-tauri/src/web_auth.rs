@@ -1,37 +1,25 @@
-// ADR-027 T2 — Tauri WebView2 cookie extraction
+// ADR-027 T2 — Tauri WebView cookie extraction (cross-platform)
 //
-// SCAFFOLD ONLY (S137): Cookie / AuthStatus types defined, 3 Tauri commands
-// registered, but actual WebView2 cookie extraction is NOT implemented yet.
-// All commands return `Err("TODO: ...")` until the full implementation
-// sub-task lands.
+// Uses Tauri 2.x native `WebviewWindow::cookies_for_url()` and friends —
+// no per-OS WinRT / WKWebView / WebKitGTK bindings. API available since
+// Tauri 2.9.5 (our current Cargo.lock pin).
 //
-// Reason for scaffolding: full WebView2 / CoreWebView2.CookieManager
-// integration is ~200-300 lines of WinRT bindings that needs deliberate
-// implementation + testing. Scaffolding proves the module structure compiles
-// + commands are registered, so the frontend (T8) can wire against real
-// signatures without waiting for the WinRT work to finish.
+// Implementation pattern: close-event + spawn-thread.
+//   - open_login_window spawns a Tauri WebView popup
+//   - on WindowEvent::CloseRequested, a separate thread is spawned that
+//     calls cookies_for_url(); spawning avoids the Windows sync-handler
+//     deadlock flagged in Tauri docs.
+//   - extracted cookies converted to our snake_case Cookie struct and
+//     emitted via Tauri event `web_auth_login_complete` with payload
+//     {domain, cookies}; frontend forwards via existing WebSocket to
+//     Python vault (T3).
 //
-// Done criteria for scaffold:
-//   - Cookie struct serializes via serde
-//   - AuthStatus struct serializes via serde
-//   - 3 Tauri commands present with correct signatures
-//   - `cargo check` passes
-//
-// Next sub-task (full T2 implementation):
-//   - Add `webview2-com` Cargo dep (or use Tauri's WebviewWindow API if it
-//     exposes cookies natively — Tauri 2 docs suggest checking
-//     `WebviewWindow::cookies()` if available)
-//   - Implement `open_login_window` to spawn a WebViewWindow popup, wait
-//     for it to close, enumerate cookies via CoreWebView2.CookieManager
-//   - Implement `get_auth_status` / `revoke_auth`
-//   - Emit Tauri event `web_auth_login_complete` so frontend can forward
-//     to Python via existing WebSocket (local_api.py command
-//     `web_auth_login_complete`)
-//
-// See tasks/adr-027-agent-web-auth/002-tauri-webview2-cookies.md
-// for the full task spec.
+// See ADR-027 + tasks/adr-027-agent-web-auth/002-tauri-webview2-cookies.md.
 
 use serde::Serialize;
+use tauri::{
+    AppHandle, Emitter, Manager, Url, WebviewUrl, WebviewWindowBuilder, WindowEvent,
+};
 
 /// HTTP cookie format on the wire to Python.
 /// Field names match snake_case per existing DPC conventions.
@@ -40,7 +28,7 @@ use serde::Serialize;
 ///
 /// `expires` is Unix epoch seconds (NOT milliseconds), matching Playwright
 /// and most cookie-jar conventions. None = session cookie (no expiry).
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Clone)]
 pub struct Cookie {
     pub name: String,
     pub value: String,
@@ -52,51 +40,139 @@ pub struct Cookie {
     pub samesite: Option<String>,
 }
 
-/// Status of cookie vault for a given domain.
-/// Returned by get_auth_status (cheap check, no WebView interaction).
+/// Status of cookies in the Tauri runtime store for a domain.
+/// Returned by get_status (cheap check, no WebView popup).
+///
+/// Note: this is Tauri runtime store state, NOT the encrypted
+/// Python-side vault (T3). For vault state, ask Python via WebSocket.
 #[derive(Debug, Serialize)]
 pub struct AuthStatus {
     pub has_cookies: bool,
     pub expires: Option<i64>,
 }
 
-const NOT_IMPLEMENTED_HINT: &str =
-    "T2 WebView2 cookie extraction is scaffolded but not yet implemented. \
-     Full implementation tracked in tasks/adr-027-agent-web-auth/002-tauri-webview2-cookies.md.";
-
-/// Open a Tauri WebView popup at the given domain, wait for user to log in,
-/// extract cookies via CoreWebView2.CookieManager, return them.
-///
-/// NOT YET IMPLEMENTED — returns Err with TODO until full T2 sub-task lands.
-#[tauri::command]
-pub async fn web_auth_open_login_window(domain: String) -> Result<Vec<Cookie>, String> {
-    Err(format!(
-        "open_login_window({}): {}",
-        domain, NOT_IMPLEMENTED_HINT
-    ))
+fn convert_cookie(c: &tauri::webview::Cookie<'_>) -> Cookie {
+    Cookie {
+        name: c.name().to_string(),
+        value: c.value().to_string(),
+        domain: c.domain().unwrap_or("").to_string(),
+        path: c.path().unwrap_or("/").to_string(),
+        expires: c.expires_datetime().map(|dt| dt.unix_timestamp()),
+        secure: c.secure().unwrap_or(false),
+        httponly: c.http_only().unwrap_or(false),
+        samesite: c.same_site().map(|s| s.to_string()),
+    }
 }
 
-/// Check whether cookies exist for the given domain in the vault.
-/// Cheap — does NOT open a WebView window.
-///
-/// NOT YET IMPLEMENTED — returns Err for consistency with the other
-/// stubs (per Ark review S137: Ok(has_cookies: false) would masquerade
-/// non-impl as valid "no cookies" state).
-#[tauri::command]
-pub async fn web_auth_get_status(domain: String) -> Result<AuthStatus, String> {
-    Err(format!(
-        "get_auth_status({}): {}",
-        domain, NOT_IMPLEMENTED_HINT
-    ))
+fn label_for(domain: &str) -> String {
+    format!("web_auth_{}", domain.replace('.', "_"))
 }
 
-/// Revoke cookies for the given domain in WebView2 storage.
+fn parse_domain_url(domain: &str) -> Result<Url, String> {
+    Url::parse(&format!("https://{}", domain))
+        .map_err(|e| format!("invalid domain '{}': {}", domain, e))
+}
+
+/// Open a Tauri WebView popup at the given domain for the user to log in.
+/// When the user closes the popup, cookies for the domain are read from
+/// the Tauri runtime cookie store and emitted as the
+/// `web_auth_login_complete` Tauri event with payload {domain, cookies}.
 ///
-/// NOT YET IMPLEMENTED — returns Err with TODO until full T2 sub-task lands.
+/// Returns Ok(()) immediately after the popup is built — the actual
+/// cookie delivery is asynchronous via the Tauri event.
 #[tauri::command]
-pub async fn web_auth_revoke(domain: String) -> Result<(), String> {
-    Err(format!(
-        "revoke_auth({}): {}",
-        domain, NOT_IMPLEMENTED_HINT
-    ))
+pub async fn web_auth_open_login_window(
+    app: AppHandle,
+    domain: String,
+) -> Result<(), String> {
+    let url = parse_domain_url(&domain)?;
+    let label = label_for(&domain);
+
+    let window = WebviewWindowBuilder::new(
+        &app,
+        &label,
+        WebviewUrl::External(url.clone()),
+    )
+    .title(format!("Login — {}", domain))
+    .inner_size(900.0, 700.0)
+    .build()
+    .map_err(|e| e.to_string())?;
+
+    // close-event + spawn-thread pattern: spawning a thread before calling
+    // cookies_for_url() avoids the Windows sync-handler deadlock flagged
+    // in Tauri docs (WebView2 limitation).
+    let app_for_event = app.clone();
+    let domain_for_event = domain.clone();
+    let label_for_event = label.clone();
+    let url_for_event = url.clone();
+    window.on_window_event(move |event| {
+        if let WindowEvent::CloseRequested { .. } = event {
+            let app_thread = app_for_event.clone();
+            let domain_thread = domain_for_event.clone();
+            let label_thread = label_for_event.clone();
+            let url_thread = url_for_event.clone();
+            std::thread::spawn(move || {
+                let Some(win) = app_thread.get_webview_window(&label_thread) else {
+                    return;
+                };
+                let Ok(cookies) = win.cookies_for_url(url_thread) else {
+                    return;
+                };
+                let converted: Vec<Cookie> = cookies.iter().map(convert_cookie).collect();
+                let payload = serde_json::json!({
+                    "domain": domain_thread,
+                    "cookies": converted,
+                });
+                let _ = app_thread.emit("web_auth_login_complete", payload);
+            });
+        }
+    });
+
+    Ok(())
+}
+
+/// Check whether cookies exist for the given domain in the Tauri runtime
+/// cookie store. Cheap — does NOT open a WebView popup.
+#[tauri::command]
+pub async fn web_auth_get_status(
+    app: AppHandle,
+    domain: String,
+) -> Result<AuthStatus, String> {
+    let url = parse_domain_url(&domain)?;
+    let main = app
+        .get_webview_window("main")
+        .ok_or_else(|| "main window not found".to_string())?;
+    let cookies = main
+        .cookies_for_url(url)
+        .map_err(|e| format!("cookies_for_url failed: {}", e))?;
+    let earliest_expiry = cookies
+        .iter()
+        .filter_map(|c| c.expires_datetime().map(|dt| dt.unix_timestamp()))
+        .min();
+    Ok(AuthStatus {
+        has_cookies: !cookies.is_empty(),
+        expires: earliest_expiry,
+    })
+}
+
+/// Revoke (delete) all cookies for the given domain from the Tauri
+/// runtime cookie store. Vault deletion is a separate Python-side
+/// concern (T3).
+#[tauri::command]
+pub async fn web_auth_revoke(
+    app: AppHandle,
+    domain: String,
+) -> Result<(), String> {
+    let url = parse_domain_url(&domain)?;
+    let main = app
+        .get_webview_window("main")
+        .ok_or_else(|| "main window not found".to_string())?;
+    let cookies = main
+        .cookies_for_url(url)
+        .map_err(|e| format!("cookies_for_url failed: {}", e))?;
+    for cookie in cookies {
+        main.delete_cookie(cookie)
+            .map_err(|e| format!("delete_cookie failed: {}", e))?;
+    }
+    Ok(())
 }
