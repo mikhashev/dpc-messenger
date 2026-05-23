@@ -529,9 +529,13 @@ class ContextFirewall:
         )
         if not isinstance(allowed, list) or not allowed:
             return False
+        # Normalize whitelist to lowercase — privacy_rules.json may
+        # have been hand-edited with mixed case (e.g. "Ozon.RU"), and
+        # resolve_etld1 already lowercases the requested domain.
+        allowed_lower = [d.lower() for d in allowed if isinstance(d, str)]
 
         etld1 = web_auth.resolve_etld1(domain)
-        if etld1 not in allowed:
+        if etld1 not in allowed_lower:
             return False
 
         status = web_auth.get_auth_status(agent_id, domain)

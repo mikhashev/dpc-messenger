@@ -163,6 +163,20 @@ def test_per_agent_isolation(vault_home, fresh_cookies):
 # ─────────────────────────────────────────────────────────────
 
 
+def test_whitelist_case_insensitive(vault_home, fresh_cookies):
+    """Hand-edited privacy_rules.json may have mixed-case entries like
+    'Ozon.RU'. The whitelist comparison must be case-insensitive — the
+    requested domain is already lowercased by resolve_etld1, the
+    whitelist is now also normalized before the `in` check."""
+    from dpc_client_core import web_auth
+
+    rules = {"agent_profiles": {"agent_a": {"web_auth": {"allowed_domains": ["Ozon.RU"]}}}}
+    fw = _make_firewall(vault_home, rules)
+    web_auth.save_cookies("agent_a", "ozon.ru", fresh_cookies)
+    assert fw.is_auth_domain_allowed("agent_a", "ozon.ru") is True
+    assert fw.is_auth_domain_allowed("agent_a", "www.ozon.ru") is True
+
+
 def test_subdomain_admitted_via_etld1(vault_home, fresh_cookies):
     """Whitelist contains the eTLD+1 'ozon.ru'. Requesting 'www.ozon.ru'
     or 'login.ozon.ru' should resolve to the same eTLD+1 and pass."""
