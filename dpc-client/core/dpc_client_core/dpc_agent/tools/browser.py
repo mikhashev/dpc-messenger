@@ -516,6 +516,14 @@ _POPUP_TIMEOUT_S = 300
 # separately for the post-navigation settle.
 _POPUP_OPERATION_TIMEOUT_S = 30
 
+# T10 Q2 (S143): hard cap on how long a single keep_open session can
+# stay alive before the framework forces a cleanup. Picked at 30 min
+# to match the popup-prompt UX expectation (long but not "forever") —
+# prevents an agent stuck in a loop from leaving the popup window
+# open indefinitely and confusing the user. Tools that look up an
+# expired session raise `AuthRequiredError("session expired")`.
+_POPUP_SESSION_MAX_AGE_S = 30 * 60
+
 
 def get_pending_popup_requests() -> dict[str, PendingPopupRequest]:
     """Accessor used by the Step 3 WS handler to resolve futures by id.
@@ -571,6 +579,24 @@ async def _request_popup_fallback(
     # Lazy import to keep this module importable when web_auth (which
     # owns the ETLD1_MAP / resolver) isn't wired in unit tests.
     from dpc_client_core import web_auth as _wa
+
+    # T10 Q7 concurrency: only one keep_open session may be active
+    # at a time, system-wide. Reject before allocating a request_id
+    # or broadcasting so the existing session is undisturbed.
+    if keep_open:
+        for existing_id, existing in _pending_popup_requests.items():
+            if existing.keep_open:
+                age = time.monotonic() - existing.opened_at
+                if age <= _POPUP_SESSION_MAX_AGE_S:
+                    raise AuthRequiredError(
+                        f"another popup session is already active "
+                        f"(request_id={existing_id}, age={int(age)}s) — "
+                        f"close it with popup_close before opening a new one"
+                    )
+                # Expired sister entry — clean it up and proceed.
+                if existing.future and not existing.future.done():
+                    existing.future.cancel()
+                _pending_popup_requests.pop(existing_id, None)
 
     request_id = uuid.uuid4().hex[:12]
     loop = asyncio.get_running_loop()
@@ -650,7 +676,17 @@ def _get_popup_session(request_id: str) -> PendingPopupRequest:
 
     Raises AuthRequiredError for the missing-entry case (popup closed
     by user, backend restart, never opened) — Q6 unified error model.
+
+    Q2 enforcement: if the session has been alive longer than
+    `_POPUP_SESSION_MAX_AGE_S` (30 min), pop the entry, cancel any
+    in-flight future, and raise so the agent stops extending the
+    session. The actual popup window is closed by the frontend on
+    the next manual close or by the user — we don't drive close
+    from here because the framework Promise we'd need is awkward to
+    spin up off a sync helper.
     """
+    import time
+
     entry = _pending_popup_requests.get(request_id)
     if entry is None:
         raise AuthRequiredError(
@@ -661,6 +697,20 @@ def _get_popup_session(request_id: str) -> PendingPopupRequest:
         raise AuthRequiredError(
             f"popup session is single-shot (request_id={request_id}) — "
             f"use browse_page(keep_open=True) to open a multi-page session"
+        )
+    age = time.monotonic() - entry.opened_at
+    if age > _POPUP_SESSION_MAX_AGE_S:
+        # Eject the expired session synchronously so subsequent tool
+        # calls (and the orchestrator) see a clean state. Cancelling
+        # the future unblocks any awaiter so it raises CancelledError
+        # rather than waiting out _POPUP_OPERATION_TIMEOUT_S.
+        if entry.future and not entry.future.done():
+            entry.future.cancel()
+        _pending_popup_requests.pop(request_id, None)
+        raise AuthRequiredError(
+            f"popup session expired (request_id={request_id}, "
+            f"age={int(age)}s, max={_POPUP_SESSION_MAX_AGE_S}s) — "
+            f"open a new session via browse_page(keep_open=True)"
         )
     return entry
 
@@ -725,16 +775,31 @@ async def popup_navigate(
     local_api = _get_local_api(ctx)
     entry = _get_popup_session(request_id)
 
-    # Step 4 will replace this with a strict eTLD+1 check against
-    # `entry.expected_etld1`. The baseline check at least ensures the
-    # URL is parseable so the agent gets a clean error on garbage
-    # input rather than a Rust eval failure.
+    # Q3 same-eTLD+1 enforcement: the popup is sitting on top of the
+    # user's authenticated cookie jar for `entry.expected_etld1`. An
+    # agent that navigates to evil.com would carry no auth there, but
+    # could exfiltrate authenticated content to evil.com by abusing
+    # link rels or similar. Cheap defence: reject any URL whose
+    # eTLD+1 doesn't match the originating session.
     from urllib.parse import urlparse
+    from dpc_client_core import web_auth as _wa
 
     parsed = urlparse(url)
     if parsed.scheme not in ("http", "https"):
         raise AuthRequiredError(
             f"popup_navigate rejected url={url!r} — only http/https schemes allowed"
+        )
+    if not parsed.hostname:
+        raise AuthRequiredError(
+            f"popup_navigate rejected url={url!r} — missing host"
+        )
+    target_etld1 = _wa.resolve_etld1(parsed.hostname)
+    if not target_etld1 or target_etld1 != entry.expected_etld1:
+        raise AuthRequiredError(
+            f"popup_navigate cross-origin rejected "
+            f"(target={target_etld1 or parsed.hostname}, "
+            f"session={entry.expected_etld1}) — agent may only navigate "
+            f"within the same site that opened the popup"
         )
 
     # Track the latest URL so the existing Q2 (Ark softer) URL-safety
