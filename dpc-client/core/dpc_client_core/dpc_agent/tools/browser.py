@@ -475,6 +475,11 @@ def _auth_browse(agent_id: str, domain: str, url: str) -> str:
 # (Step 3) when the frontend reports back with the popup-extracted HTML.
 # Ephemeral by design (Q3 decision S142): backend restart loses pending
 # requests, frontend popups become orphaned, user retries.
+#
+# Thread-safety: the dict is mutated from coroutines on the CoreService
+# event loop and from the WS handler running on the same loop. DPC has
+# a single event loop; if a future deployment multiplexes loops, this
+# dict needs an asyncio.Lock or per-loop registries.
 _pending_popup_requests: dict[str, asyncio.Future] = {}
 
 # 5-minute popup timeout per ADR-028 T9 Q4 (Mike + Ark agreed S142).
