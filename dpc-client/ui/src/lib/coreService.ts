@@ -1127,7 +1127,25 @@ const pendingWebAuthLogins = new Map<string, string>();
 let webAuthListenerInstalled = false;
 
 export function registerPendingWebAuthLogin(agentId: string, domain: string): void {
-    pendingWebAuthLogins.set(domain.toLowerCase(), agentId);
+    const key = domain.toLowerCase();
+    // Stale-entry guard (Ark S140 [#82] review): if a previous popup
+    // for this domain never produced an event (user closed without
+    // logging in, site crashed, browser hung), the old (agent_id,
+    // domain) pair would still sit in the Map. Without overwriting,
+    // a subsequent login for a DIFFERENT agent on the same domain
+    // would route the new cookies to the OLD agent — privacy leak.
+    // Overwrite-with-warning is the minimum defense; full TTL is a
+    // Phase 2 nicety.
+    const previous = pendingWebAuthLogins.get(key);
+    if (previous && previous !== agentId) {
+        console.warn(
+            `[web_auth] overwriting pending login for ${key} — ` +
+            `previous agent=${previous} did not complete login. ` +
+            `Cookies from a future event for this domain will now be ` +
+            `attributed to agent=${agentId}.`
+        );
+    }
+    pendingWebAuthLogins.set(key, agentId);
 }
 
 async function ensureWebAuthListener(): Promise<void> {

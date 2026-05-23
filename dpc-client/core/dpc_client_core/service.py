@@ -3615,6 +3615,12 @@ class CoreService:
             domain_norm = domain.strip().lower()
             if not domain_norm:
                 return {"status": "error", "message": "domain must be non-empty"}
+            # Minimum hostname sanity (Ark S140 [#82] review): UI lets
+            # the user type anything, so reject obviously-not-a-domain
+            # input here. Full PSL/IDN validation is Phase 2.
+            if " " in domain_norm or "." not in domain_norm:
+                return {"status": "error",
+                        "message": "domain must be a valid hostname (contain a dot, no spaces)"}
 
             rules = self.firewall.get_rules_as_dict()
             profiles = rules.setdefault("agent_profiles", {})

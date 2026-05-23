@@ -211,6 +211,17 @@ def test_add_domain_validates_inputs(vault_home):
         assert result["status"] == "error"
 
 
+def test_add_domain_rejects_obviously_invalid_hostnames(vault_home):
+    """Ark S140 [#82] review: UI input is user-typed, so reject things
+    that can't be hostnames (no dot, contains spaces)."""
+    stub = _build_stub(vault_home, {})
+    for bad in ["not-a-domain", "ozon ru", "javascript:alert(1)", "single-token"]:
+        result = _call(stub, "web_auth_add_domain",
+                       agent_id="agent_a", domain=bad)
+        assert result["status"] == "error", f"should reject {bad!r}"
+        assert "hostname" in result["message"].lower()
+
+
 # ─────────────────────────────────────────────────────────────
 # web_auth_remove_domain
 # ─────────────────────────────────────────────────────────────
