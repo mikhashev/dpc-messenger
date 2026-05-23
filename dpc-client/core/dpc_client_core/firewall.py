@@ -588,6 +588,45 @@ class ContextFirewall:
             return False
         return True
 
+    def get_auth_denial_reason(self, agent_id: str, domain: str) -> Optional[str]:
+        """ADR-028 — diagnose WHY `is_auth_domain_allowed` returns False.
+
+        Returns one of:
+          - `None` — domain is allowed (auth would succeed)
+          - `"not_in_whitelist"` — domain not in agent's allowed_domains
+          - `"cookies_missing"` — domain whitelisted but no cookies in vault
+          - `"cookies_expired"` — domain whitelisted, cookies present but past expiry
+
+        Used by `browse_page` to produce a denial message that points the
+        user at the right action (add the domain vs re-login) instead of
+        a generic "not authorized" that conflates both.
+
+        Mirrors the conditions in `is_auth_domain_allowed` — the two
+        methods must agree, otherwise the UI advice will mislead.
+        """
+        import time as _time
+
+        from . import web_auth
+
+        allowed = self._get_profile_or_global(
+            agent_id, 'web_auth', 'allowed_domains', default=[]
+        )
+        if not isinstance(allowed, list) or not allowed:
+            return "not_in_whitelist"
+        allowed_lower = [d.lower() for d in allowed if isinstance(d, str)]
+
+        etld1 = web_auth.resolve_etld1(domain)
+        if etld1 not in allowed_lower:
+            return "not_in_whitelist"
+
+        status = web_auth.get_auth_status(agent_id, domain)
+        if not status.get("has_cookies"):
+            return "cookies_missing"
+        expires = status.get("expires")
+        if expires is not None and expires <= int(_time.time()):
+            return "cookies_expired"
+        return None
+
     def list_agent_profiles(self) -> List[str]:
         """
         List available agent permission profiles.

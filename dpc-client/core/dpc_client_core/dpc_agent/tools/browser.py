@@ -412,8 +412,9 @@ class AuthBrowser:
         etc.) the heuristic looks for.
 
         Note: `page.content()` is called without an explicit timeout —
-        the framework-level tool timeout (60s for browse_page) is the
-        backstop."""
+        the framework-level tool timeout (see registry.py — currently
+        360s for browse_page to accommodate T9 popup interaction) is
+        the backstop."""
         if self._page is None:
             raise RuntimeError("AuthBrowser not opened — use as context manager")
         return self._page.content()
@@ -622,14 +623,43 @@ async def browse_page(ctx: ToolContext, url: str, size: str = "m", use_auth: Opt
         from dpc_client_core import web_auth as _web_auth_mod
 
         if firewall is not None and not firewall.is_auth_domain_allowed(agent_id, use_auth):
+            # Per-reason guidance instead of one generic message — Mike
+            # S142 caught the old phrasing conflating "add to whitelist"
+            # and "re-login" when the actual fix depends on which check
+            # failed. get_auth_denial_reason mirrors the conditions in
+            # is_auth_domain_allowed so the advice always matches reality.
+            reason = firewall.get_auth_denial_reason(agent_id, use_auth)
             _web_auth_mod.audit_append(
-                agent_id, use_auth, url, status="firewall_denied"
+                agent_id, use_auth, url,
+                status=f"firewall_denied:{reason or 'unknown'}",
             )
+            if reason == "not_in_whitelist":
+                return (
+                    f"⚠️ Domain '{use_auth}' is not in agent '{agent_id}''s "
+                    f"authorized list. Add it to "
+                    f"agent_profiles.{agent_id}.web_auth.allowed_domains in "
+                    f"privacy_rules.json (UI: AgentPermissionsPanel → Web "
+                    f"Authentication → '+ Add'), then log in via the popup."
+                )
+            if reason == "cookies_missing":
+                return (
+                    f"⚠️ Agent '{agent_id}' has no saved login for "
+                    f"'{use_auth}'. Open AgentPermissionsPanel → Web "
+                    f"Authentication and click 'Login' next to '{use_auth}' "
+                    f"to authenticate."
+                )
+            if reason == "cookies_expired":
+                return (
+                    f"⚠️ Saved login for '{use_auth}' has expired for "
+                    f"agent '{agent_id}'. Open AgentPermissionsPanel → Web "
+                    f"Authentication and click 'Re-login' next to "
+                    f"'{use_auth}' to refresh cookies."
+                )
+            # Belt-and-suspenders: keep the original generic phrasing for
+            # any future denial reason we forget to map here.
             return (
                 f"⚠️ Domain '{use_auth}' is not authorized for agent "
-                f"'{agent_id}'. Add it to privacy_rules.json under "
-                f"agent_profiles.{agent_id}.web_auth.allowed_domains, "
-                f"then re-login via the web-auth UI."
+                f"'{agent_id}'. Check the Web Authentication settings."
             )
 
         # T9 always_popup (YarchePlus variant C): skip Camoufox entirely
@@ -882,7 +912,15 @@ def get_tools() -> List[ToolEntry]:
                 }
             },
             handler=browse_page,
-            timeout_sec=60,
+            # 60s is too tight for the use_auth path: that goes through
+            # Camoufox launch + goto (30s wait_until=networkidle) + optional
+            # T9 popup-fallback (5min user-interaction timeout per Q4) +
+            # trafilatura conversion. Worst case: ~5min popup + 30s
+            # Camoufox + small overhead. 360s gives a 30s buffer over the
+            # 5-min popup deadline so the user always has the full 5 min.
+            # Anonymous browse_page (without use_auth) returns in <10s so
+            # the higher cap doesn't slow that path down.
+            timeout_sec=360,
         ),
 
         ToolEntry(

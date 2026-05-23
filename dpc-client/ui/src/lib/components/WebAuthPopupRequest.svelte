@@ -78,6 +78,12 @@
             {/if}
 
             {#if !opening}
+                <p class="popup-hint">
+                    A browser window will open. <strong>Wait for the page to
+                    fully load</strong>, then <strong>close the browser
+                    window</strong> (X button in the top-right corner) — the
+                    page content will be sent back to the agent automatically.
+                </p>
                 <div class="popup-actions">
                     <button class="popup-btn-primary" onclick={handleOpen}>
                         Open {$webAuthPopupRequest.domain}
@@ -88,7 +94,13 @@
                 </div>
             {:else}
                 <p class="popup-status">
-                    Browser window opened — close it when you are done.
+                    🌐 Browser window opened.<br>
+                    <strong>1.</strong> Wait until the page finishes
+                    loading.<br>
+                    <strong>2.</strong> Close the browser window (X in the
+                    top-right corner).<br>
+                    The page content will be sent back to the agent
+                    automatically — you do not need to copy anything.
                 </p>
                 <div class="popup-actions">
                     <button class="popup-btn-secondary" onclick={handleCancel}>
@@ -158,6 +170,17 @@
         padding: 8px 12px;
         border-radius: 4px;
         margin: 0 0 12px 0;
+        line-height: 1.5;
+    }
+
+    .popup-hint {
+        background: rgba(44, 82, 130, 0.06);
+        padding: 10px 12px;
+        border-left: 3px solid #3182ce;
+        border-radius: 4px;
+        margin: 0 0 16px 0;
+        font-size: 0.92em;
+        line-height: 1.5;
     }
 
     .popup-actions {

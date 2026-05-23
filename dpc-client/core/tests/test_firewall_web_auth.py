@@ -192,6 +192,92 @@ def test_subdomain_admitted_via_etld1(vault_home, fresh_cookies):
 
 
 # ─────────────────────────────────────────────────────────────
+# T9 (S142) — denial reason diagnostic (per-cause UX messages)
+# ─────────────────────────────────────────────────────────────
+
+
+def test_denial_reason_not_in_whitelist_empty(vault_home):
+    """Empty allowed_domains → 'not_in_whitelist' regardless of cookies."""
+    fw = _make_firewall(
+        vault_home,
+        {"agent_profiles": {"agent_a": {"web_auth": {"allowed_domains": []}}}},
+    )
+    assert fw.get_auth_denial_reason("agent_a", "ozon.ru") == "not_in_whitelist"
+
+
+def test_denial_reason_not_in_whitelist_other_domain(vault_home, fresh_cookies):
+    """Domain not in (non-empty) whitelist → 'not_in_whitelist' even with
+    cookies in the vault."""
+    from dpc_client_core import web_auth
+
+    fw = _make_firewall(
+        vault_home,
+        {"agent_profiles": {"agent_a": {"web_auth": {"allowed_domains": ["ozon.ru"]}}}},
+    )
+    web_auth.save_cookies("agent_a", "yandex.ru", fresh_cookies)
+    assert fw.get_auth_denial_reason("agent_a", "yandex.ru") == "not_in_whitelist"
+
+
+def test_denial_reason_cookies_missing(vault_home):
+    """Domain whitelisted but no cookies in vault → 'cookies_missing' —
+    points the user at the Login button instead of the whitelist."""
+    fw = _make_firewall(
+        vault_home,
+        {"agent_profiles": {"agent_a": {"web_auth": {"allowed_domains": ["ozon.ru"]}}}},
+    )
+    assert fw.get_auth_denial_reason("agent_a", "ozon.ru") == "cookies_missing"
+
+
+def test_denial_reason_cookies_expired(vault_home, expired_cookies):
+    """Domain whitelisted, cookies present but past expiry →
+    'cookies_expired' — points the user at Re-login, not the whitelist
+    (the Mike S142 [#49] case that motivated this method)."""
+    from dpc_client_core import web_auth
+
+    fw = _make_firewall(
+        vault_home,
+        {"agent_profiles": {"agent_a": {"web_auth": {"allowed_domains": ["ozon.ru"]}}}},
+    )
+    web_auth.save_cookies("agent_a", "ozon.ru", expired_cookies)
+    assert fw.get_auth_denial_reason("agent_a", "ozon.ru") == "cookies_expired"
+
+
+def test_denial_reason_none_when_allowed(vault_home, fresh_cookies):
+    """Happy path: whitelist match + fresh cookies → None (no denial)."""
+    from dpc_client_core import web_auth
+
+    fw = _make_firewall(
+        vault_home,
+        {"agent_profiles": {"agent_a": {"web_auth": {"allowed_domains": ["ozon.ru"]}}}},
+    )
+    web_auth.save_cookies("agent_a", "ozon.ru", fresh_cookies)
+    assert fw.get_auth_denial_reason("agent_a", "ozon.ru") is None
+
+
+def test_denial_reason_matches_is_auth_domain_allowed(vault_home, fresh_cookies, expired_cookies):
+    """Invariant: get_auth_denial_reason returns None iff
+    is_auth_domain_allowed returns True. The two methods MUST agree —
+    otherwise the UI advice will mislead."""
+    from dpc_client_core import web_auth
+
+    fw = _make_firewall(
+        vault_home,
+        {"agent_profiles": {"agent_a": {"web_auth": {"allowed_domains": ["ozon.ru"]}}}},
+    )
+    # Case 1: empty vault — both reject
+    assert fw.is_auth_domain_allowed("agent_a", "ozon.ru") is False
+    assert fw.get_auth_denial_reason("agent_a", "ozon.ru") is not None
+    # Case 2: fresh cookies — both accept
+    web_auth.save_cookies("agent_a", "ozon.ru", fresh_cookies)
+    assert fw.is_auth_domain_allowed("agent_a", "ozon.ru") is True
+    assert fw.get_auth_denial_reason("agent_a", "ozon.ru") is None
+    # Case 3: replace with expired cookies — both reject
+    web_auth.save_cookies("agent_a", "ozon.ru", expired_cookies)
+    assert fw.is_auth_domain_allowed("agent_a", "ozon.ru") is False
+    assert fw.get_auth_denial_reason("agent_a", "ozon.ru") == "cookies_expired"
+
+
+# ─────────────────────────────────────────────────────────────
 # Browse_page integration: firewall denial returns warning
 # ─────────────────────────────────────────────────────────────
 
@@ -241,6 +327,60 @@ def test_browse_page_firewall_denial_returns_warning(vault_home, fresh_cookies):
     assert out.startswith("⚠️")
     assert "agent_a" in out
     assert "allowed_domains" in out
+
+
+def test_browse_page_denial_message_says_relogin_for_expired_cookies(
+    vault_home, expired_cookies
+):
+    """S142 [#49] regression: when blocked by expired cookies, the
+    user-facing message must say 'Re-login' (not 'add to allowed_domains'
+    — the domain IS in the whitelist, the problem is the vault). Mike
+    was misled by the old generic 'not authorized' phrasing into
+    thinking the whitelist needed editing."""
+    from dpc_client_core import web_auth
+    from dpc_client_core.dpc_agent.tools import browser as browser_mod
+
+    rules = {"agent_profiles": {"agent_a": {"web_auth": {"allowed_domains": ["ozon.ru"]}}}}
+    fw = _make_firewall(vault_home, rules)
+    web_auth.save_cookies("agent_a", "ozon.ru", expired_cookies)
+    agent_root = vault_home / "agents" / "agent_a"
+    agent_root.mkdir(parents=True, exist_ok=True)
+    ctx = _make_ctx_with_firewall(agent_root, fw)
+
+    out = asyncio.run(
+        browser_mod.browse_page(
+            ctx, url="https://ozon.ru/my/orders", use_auth="ozon.ru"
+        )
+    )
+
+    assert out.startswith("⚠️")
+    assert "expired" in out.lower()
+    assert "re-login" in out.lower()
+    # And the message MUST NOT redirect the user to the whitelist —
+    # that's what made Mike edit allowed_domains when he didn't need to.
+    assert "allowed_domains" not in out
+
+
+def test_browse_page_denial_message_says_login_for_missing_cookies(vault_home):
+    """Domain whitelisted but no cookies in vault → message points at
+    'Login' (first-time auth), not 'Re-login' (refresh expired)."""
+    from dpc_client_core.dpc_agent.tools import browser as browser_mod
+
+    rules = {"agent_profiles": {"agent_a": {"web_auth": {"allowed_domains": ["ozon.ru"]}}}}
+    fw = _make_firewall(vault_home, rules)
+    agent_root = vault_home / "agents" / "agent_a"
+    agent_root.mkdir(parents=True, exist_ok=True)
+    ctx = _make_ctx_with_firewall(agent_root, fw)
+
+    out = asyncio.run(
+        browser_mod.browse_page(
+            ctx, url="https://ozon.ru/my/orders", use_auth="ozon.ru"
+        )
+    )
+
+    assert out.startswith("⚠️")
+    assert "no saved login" in out.lower()
+    assert "click 'login'" in out.lower()
 
 
 def test_browse_page_firewall_pass_proceeds_to_auth_browse(vault_home, fresh_cookies):

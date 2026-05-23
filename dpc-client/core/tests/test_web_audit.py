@@ -160,7 +160,10 @@ def test_browse_page_audit_on_firewall_denied(vault_home):
     ))
     entries = _read_audit(vault_home, "agent_a")
     assert len(entries) == 1
-    assert entries[0]["status"] == "firewall_denied"
+    # Status now carries the denial reason after the S142 UX fix —
+    # was "firewall_denied", now "firewall_denied:<reason>" where
+    # <reason> is one of not_in_whitelist|cookies_missing|cookies_expired.
+    assert entries[0]["status"].startswith("firewall_denied")
     assert entries[0]["domain"] == "ozon.ru"
 
 
