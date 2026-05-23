@@ -182,6 +182,48 @@ def revoke(agent_id: str, domain: str) -> None:
         _save_vault(agent_id, vault)
 
 
+def audit_append(
+    agent_id: str,
+    domain: str,
+    url: str,
+    status: int | str,
+    bytes_size: int | None = None,
+) -> None:
+    """ADR-028 T6 — append a JSONL entry to the per-agent audit log.
+
+    Path: ~/.dpc/agents/{agent_id}/web_audit.jsonl
+
+    Called by `browse_page` (T4) after every authenticated request,
+    success OR failure. `status` is the HTTP status integer on success,
+    or a string token on failure (`auth_required`, `expired`,
+    `firewall_denied`, `error`). `bytes_size` is the response body
+    size when known.
+
+    Append-only — opens in `'a'` mode each call, no handle kept, no
+    rotation in MVP. File is written by the DPC core process; the
+    agent has no read or write access (path lives under the agent's
+    storage root but is NOT exposed through the sandbox `read_*`
+    extensions — see T5 firewall integration).
+    """
+    path = _vault_path(agent_id).parent / "web_audit.jsonl"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    entry: dict[str, Any] = {
+        "timestamp": _now_iso(),
+        "agent_id": agent_id,
+        "domain": domain,
+        "url": url,
+        "status": status,
+    }
+    if bytes_size is not None:
+        entry["bytes"] = bytes_size
+    line = json.dumps(entry, ensure_ascii=False) + "\n"
+    # 'a' mode is atomic for small writes on POSIX + Windows (single
+    # write() syscall under the OS buffer flush). For audit entries
+    # which are one short JSON line each, no separate lock is needed.
+    with open(path, "a", encoding="utf-8") as f:
+        f.write(line)
+
+
 def is_expired(cookies: list[dict]) -> bool:
     """True if any cookie with an `expires` field has elapsed.
     Session cookies (expires=None) are treated as not-expired here —

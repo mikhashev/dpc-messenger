@@ -450,7 +450,14 @@ async def browse_page(ctx: ToolContext, url: str, size: str = "m", use_auth: Opt
         dpc_service = getattr(ctx, "dpc_service", None)
         if dpc_service is not None:
             firewall = getattr(dpc_service, "firewall", None)
+        # ADR-028 T6 audit hook: import lazily so the tool module stays
+        # importable even when web_auth.py is unavailable in tests.
+        from dpc_client_core import web_auth as _web_auth_mod
+
         if firewall is not None and not firewall.is_auth_domain_allowed(agent_id, use_auth):
+            _web_auth_mod.audit_append(
+                agent_id, use_auth, url, status="firewall_denied"
+            )
             return (
                 f"⚠️ Domain '{use_auth}' is not authorized for agent "
                 f"'{agent_id}'. Add it to privacy_rules.json under "
@@ -460,11 +467,23 @@ async def browse_page(ctx: ToolContext, url: str, size: str = "m", use_auth: Opt
 
         try:
             text = await asyncio.to_thread(_auth_browse, agent_id, use_auth, url)
-        except (AuthRequiredError, AuthExpiredError) as e:
+        except AuthRequiredError as e:
+            _web_auth_mod.audit_append(
+                agent_id, use_auth, url, status="auth_required"
+            )
+            return f"⚠️ {e}"
+        except AuthExpiredError as e:
+            _web_auth_mod.audit_append(agent_id, use_auth, url, status="expired")
             return f"⚠️ {e}"
         except ValueError as e:
+            _web_auth_mod.audit_append(
+                agent_id, use_auth, url, status="domain_mismatch"
+            )
             return f"⚠️ {e}"
         except ImportError:
+            _web_auth_mod.audit_append(
+                agent_id, use_auth, url, status="camoufox_missing"
+            )
             return (
                 "⚠️ Camoufox browser is not installed. Run "
                 "`uv sync --extra browser` in dpc-client/core to enable."
@@ -474,7 +493,15 @@ async def browse_page(ctx: ToolContext, url: str, size: str = "m", use_auth: Opt
             # — surface to the agent as a single warning rather than a raw
             # stack trace. Common cases: missing browser binary, network
             # timeout (goto's 30s default), page render hang.
+            _web_auth_mod.audit_append(
+                agent_id, use_auth, url, status="browser_error"
+            )
             return f"⚠️ Camoufox browser failed: {e}"
+
+        # Success path — record byte size for cost / quota tracking.
+        _web_auth_mod.audit_append(
+            agent_id, use_auth, url, status=200, bytes_size=len(text)
+        )
         max_chars = _SIZE_PRESETS.get(size, _SIZE_PRESETS["m"])
         total = len(text)
         if max_chars and total > max_chars:
