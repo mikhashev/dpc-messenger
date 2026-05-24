@@ -487,15 +487,42 @@ fn extract_html_via_webview2(
                 }
             };
 
-            let js = "JSON.stringify({\
+            // IIFE try/catch so the expression always evaluates to a STRING
+            // even if the inner JS throws (CSP block, undefined access on a
+            // partially-loaded page, etc.). Without this wrap WebView2
+            // catches the exception and returns the literal value `null`
+            // with HRESULT=S_OK, which our outer Rust parse can't tell
+            // apart from a legitimate JS null result — diagnostic info lost.
+            // S145 follow-up: first runtime test on YarchePlus returned
+            // exactly `null`; without the catch we couldn't see WHY.
+            let js = "(function(){try{return JSON.stringify({\
                 content_html: document.documentElement.outerHTML, \
                 current_url: window.location.href\
-            })";
+            });}catch(e){return JSON.stringify({\
+                error: 'js_exception', \
+                name: String(e && e.name), \
+                message: String(e && e.message), \
+                stack: String(e && e.stack)\
+            });}})()";
 
             let app_for_handler = app_for_callback.clone();
             let request_id_for_handler = request_id_for_callback.clone();
             let handler = ExecuteScriptCompletedHandler::create(Box::new(
                 move |hr, json_encoded| {
+                    // S145 diagnostic: log raw ExecuteScript output so any
+                    // subsequent unexpected `null` / unwrap-shape result
+                    // can be debugged from the Tauri dev console without
+                    // a second round of patch+rebuild. Truncated to keep
+                    // the log line readable when HTML is the payload.
+                    let raw_preview: String = if json_encoded.len() > 300 {
+                        format!("{}…({}b total)", &json_encoded[..300], json_encoded.len())
+                    } else {
+                        json_encoded.clone()
+                    };
+                    eprintln!(
+                        "[web_auth] ExecuteScript callback for {}: hr={:?} raw={}",
+                        request_id_for_handler, hr, raw_preview
+                    );
                     let payload = if hr.is_ok() && !json_encoded.is_empty() {
                         // WebView2 hands us the JS expression value
                         // JSON-encoded — so for `JSON.stringify({...})`
