@@ -904,6 +904,7 @@ dependencies = [
  "tauri-plugin-fs",
  "tauri-plugin-notification",
  "tauri-plugin-opener",
+ "tokio",
  "wav",
  "webview2-com",
  "windows 0.61.3",
