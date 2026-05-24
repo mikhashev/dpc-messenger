@@ -31,3 +31,17 @@ cpal = "0.15"
 wav = "1.0"                # WAV file format (simple, no complex codecs)
 byteorder = "1.4"          # Little-endian byte order for WAV files
 
+# T10 popup HTML extraction on Windows (S145, ADR-028).
+# Tauri's `WebviewWindow::eval()` is fire-and-forget — it cannot read a JS
+# expression's return value, and `window.__TAURI__.event.emit()` from popup
+# JS is not available on external URLs (Tauri 2 security default), so the
+# previous extract-via-JS-emit path silently dies on yarcheplus.ru / ozon.ru.
+# `webview2-com` lets us call WebView2's native `ExecuteScript` (which DOES
+# return a Promise<string>) directly, bypassing the broken JS bridge.
+# Pinned to the same version Tauri 2 already pulls in (Cargo.lock).
+[target.'cfg(target_os = "windows")'.dependencies]
+webview2-com = "0.38"
+# HSTRING for ExecuteScript call. Same major as webview2-com 0.38's
+# transitive pin (Cargo.lock: windows 0.61.3).
+windows = { version = "0.61", features = [] }
+

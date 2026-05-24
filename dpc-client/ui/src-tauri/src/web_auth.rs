@@ -387,11 +387,34 @@ fn popup_label(request_id: &str) -> String {
 }
 
 /// T10: explicit HTML extraction trigger.
-/// Calls the injected `__dpc_t9_emit_html__()` while the popup is
-/// still alive — the existing `web_auth_popup_extracted` Tauri event
-/// listener (`coreService.ts`) delivers the payload to the Python
-/// step-3 handler exactly as in the on-close flow, but without the
-/// WebView2 tear-down race.
+///
+/// Reads the popup's `document.documentElement.outerHTML` and emits
+/// `web_auth_popup_extracted` from the main app handle — the existing
+/// `coreService.ts` listener forwards the payload to the Python
+/// step-3 handler exactly as in the on-close flow.
+///
+/// S145 (ADR-028): the previous implementation called the injected
+/// `__dpc_t9_emit_html__()` JS function and relied on its
+/// `window.__TAURI__.event.emit(...)` to bubble the result back. That
+/// silently failed on external URLs (yarcheplus.ru, ozon.ru) because
+/// Tauri 2 does not inject `window.__TAURI__` into webviews loading
+/// non-app origins — the JS function's outer `try` AND the catch-block
+/// fallback both die on `Cannot read 'event' of undefined`. Tauri's
+/// own `WebviewWindow::eval()` is fire-and-forget (returns
+/// `Result<(), Error>`, never a JS value), so we cannot route the
+/// extraction through the high-level Tauri API either.
+///
+/// Fix: on Windows, use `with_webview` to drop down to the native
+/// WebView2 `ICoreWebView2::ExecuteScript` API, which DOES return the
+/// JS expression's value as a JSON-encoded string via callback. We
+/// then emit `web_auth_popup_extracted` from the main `AppHandle`
+/// (where `__TAURI__` is fine — it's the app's own webview, not the
+/// popup), preserving the existing event contract.
+///
+/// Linux/macOS: not yet implemented (backlog item — needs WebKitGTK
+/// `webkit_web_view_run_javascript` and WKWebView
+/// `evaluateJavaScript:completionHandler:` respectively). Returns
+/// `Err` with a clear message so the caller can surface it.
 #[tauri::command]
 pub async fn web_auth_popup_extract_now(
     app: AppHandle,
@@ -401,9 +424,152 @@ pub async fn web_auth_popup_extract_now(
     let popup = app
         .get_webview_window(&label)
         .ok_or_else(|| format!("popup window not found: request_id={}", request_id))?;
+
+    #[cfg(target_os = "windows")]
+    {
+        extract_html_via_webview2(&app, &popup, request_id)
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = (&popup, &app); // suppress unused warnings on non-Windows
+        Err(format!(
+            "web_auth_popup_extract_now: HTML extraction not yet implemented \
+             on this platform (request_id={}). See ADR-028 T10 backlog.",
+            request_id
+        ))
+    }
+}
+
+/// Windows-only: extract popup HTML via native WebView2 `ExecuteScript`
+/// and emit `web_auth_popup_extracted` on the main app handle.
+///
+/// `ExecuteScript` returns the JS expression value JSON-encoded — so a
+/// JS string `"foo"` comes back as the 5-byte Rust string `"\"foo\""`.
+/// We wrap the extraction in `JSON.stringify({html, url})` so the
+/// callback receives one well-formed JSON-encoded object string.
+///
+/// `with_webview` returns synchronously; the ExecuteScript callback
+/// fires later on the main thread. The Tauri command returns `Ok(())`
+/// immediately — the frontend's `await invoke()` resolves before the
+/// extraction finishes, but it doesn't matter because the frontend
+/// only cares about the `web_auth_popup_extracted` event that fires
+/// when the callback emits it.
+#[cfg(target_os = "windows")]
+fn extract_html_via_webview2(
+    app: &AppHandle,
+    popup: &tauri::WebviewWindow,
+    request_id: String,
+) -> Result<(), String> {
+    use webview2_com::ExecuteScriptCompletedHandler;
+    use windows::core::HSTRING;
+
+    let app_for_callback = app.clone();
+    let request_id_for_callback = request_id.clone();
+
     popup
-        .eval("window.__dpc_t9_emit_html__()")
-        .map_err(|e| format!("eval failed: {}", e))
+        .with_webview(move |webview| {
+            // SAFETY: webview2-com COM pointers are valid for the lifetime
+            // of the popup window; the closure only runs while the popup
+            // is alive (Tauri schedules it on the popup's UI thread).
+            let core_webview2 = unsafe { webview.controller().CoreWebView2() };
+            let core_webview2 = match core_webview2 {
+                Ok(cv) => cv,
+                Err(e) => {
+                    let _ = app_for_callback.emit(
+                        "web_auth_popup_extracted",
+                        serde_json::json!({
+                            "request_id": &request_id_for_callback,
+                            "error": format!("CoreWebView2() failed: {}", e),
+                        }),
+                    );
+                    return;
+                }
+            };
+
+            let js = "JSON.stringify({\
+                content_html: document.documentElement.outerHTML, \
+                current_url: window.location.href\
+            })";
+
+            let app_for_handler = app_for_callback.clone();
+            let request_id_for_handler = request_id_for_callback.clone();
+            let handler = ExecuteScriptCompletedHandler::create(Box::new(
+                move |hr, json_encoded| {
+                    let payload = if hr.is_ok() && !json_encoded.is_empty() {
+                        // WebView2 hands us the JS expression value
+                        // JSON-encoded — so for `JSON.stringify({...})`
+                        // we receive a JSON-encoded string whose inner
+                        // value is the JSON of our object. Unwrap once.
+                        match serde_json::from_str::<String>(&json_encoded) {
+                            Ok(inner_json) => match serde_json::from_str::<
+                                serde_json::Value,
+                            >(
+                                &inner_json
+                            ) {
+                                Ok(obj) => {
+                                    let mut out = serde_json::json!({
+                                        "request_id": &request_id_for_handler,
+                                    });
+                                    if let serde_json::Value::Object(map) = obj {
+                                        for (k, v) in map {
+                                            out[k] = v;
+                                        }
+                                    }
+                                    out
+                                }
+                                Err(e) => serde_json::json!({
+                                    "request_id": &request_id_for_handler,
+                                    "error": format!(
+                                        "inner JSON parse failed: {}",
+                                        e
+                                    ),
+                                }),
+                            },
+                            Err(e) => serde_json::json!({
+                                "request_id": &request_id_for_handler,
+                                "error": format!(
+                                    "outer JSON parse failed: {} (raw={})",
+                                    e,
+                                    if json_encoded.len() > 200 {
+                                        &json_encoded[..200]
+                                    } else {
+                                        &json_encoded
+                                    }
+                                ),
+                            }),
+                        }
+                    } else {
+                        serde_json::json!({
+                            "request_id": &request_id_for_handler,
+                            "error": format!(
+                                "ExecuteScript failed: hr={:?}, empty={}",
+                                hr,
+                                json_encoded.is_empty()
+                            ),
+                        })
+                    };
+                    let _ = app_for_handler.emit("web_auth_popup_extracted", payload);
+                    Ok(())
+                },
+            ));
+
+            unsafe {
+                if let Err(e) = core_webview2.ExecuteScript(&HSTRING::from(js), &handler)
+                {
+                    let _ = app_for_callback.emit(
+                        "web_auth_popup_extracted",
+                        serde_json::json!({
+                            "request_id": &request_id_for_callback,
+                            "error": format!("ExecuteScript call failed: {}", e),
+                        }),
+                    );
+                }
+            }
+        })
+        .map_err(|e| format!("with_webview failed: {}", e))?;
+
+    Ok(())
 }
 
 /// T10: navigate the popup to a new URL within the same session.

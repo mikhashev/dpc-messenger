@@ -905,6 +905,8 @@ dependencies = [
  "tauri-plugin-notification",
  "tauri-plugin-opener",
  "wav",
+ "webview2-com",
+ "windows 0.61.3",
 ]
 
 [[package]]
