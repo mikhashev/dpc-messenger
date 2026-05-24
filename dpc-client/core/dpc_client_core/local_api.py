@@ -6,6 +6,7 @@ import logging
 import os
 import secrets
 import stat
+import weakref
 from pathlib import Path
 from typing import TYPE_CHECKING
 import websockets
@@ -194,6 +195,16 @@ class LocalApiServer:
         self.port = port
         self.server = None
         self._clients = set()
+        # Per-client send lock — serializes concurrent client.send() calls
+        # on the same WebSocket connection. Prevents WS frame interleaving
+        # when broadcast_event / send_response_to_all / inline _handler sends
+        # overlap (S145: agent_progress fire-and-forget create_task pattern
+        # produced 558 corrupted frames in 50ms during browse_page start,
+        # eating web_auth_popup_request → T10 modal never appeared).
+        # WeakKeyDictionary so abnormal disconnects (where _unregister
+        # doesn't run) don't leak Lock objects — entries vanish as soon as
+        # the WebSocketServerProtocol is garbage-collected.
+        self._client_locks: "weakref.WeakKeyDictionary" = weakref.WeakKeyDictionary()
         self._auth_token: str = ""
 
     def _generate_and_persist_auth_token(self) -> None:
@@ -268,11 +279,30 @@ class LocalApiServer:
 
     async def _register(self, websocket: WebSocketServerProtocol):
         self._clients.add(websocket)
+        self._client_locks[websocket] = asyncio.Lock()
         logger.info("UI client connected: %s", websocket.remote_address)
 
     async def _unregister(self, websocket: WebSocketServerProtocol):
         self._clients.remove(websocket)
+        self._client_locks.pop(websocket, None)
         logger.info("UI client disconnected: %s", websocket.remote_address)
+
+    async def _send_locked(self, client: WebSocketServerProtocol, message: str) -> None:
+        """Send a message to a registered client under its per-client lock.
+
+        Acquiring the lock before send() serializes concurrent send paths
+        (multiple broadcast_event coroutines, inline command responses)
+        so two frames never interleave their bytes on the wire.
+        """
+        lock = self._client_locks.get(client)
+        if lock is None:
+            # Client was unregistered between gather setup and send dispatch,
+            # or send was called before registration (auth-response path).
+            # No lock to acquire — fall through to a direct send.
+            await client.send(message)
+            return
+        async with lock:
+            await client.send(message)
 
     async def _handler(self, websocket: WebSocketServerProtocol):
         if not await self._authenticate(websocket):
@@ -302,7 +332,7 @@ class LocalApiServer:
                         # Sanitize surrogates — emojis from JS UTF-16 can produce lone surrogates
                         safe_msg = msg.encode("utf-8", errors="replace").decode("utf-8")
                         log_fn("[%s] %s", context, safe_msg)
-                        await websocket.send(json.dumps({"id": command_id, "command": command, "status": "OK", "payload": {}}))
+                        await self._send_locked(websocket, json.dumps({"id": command_id, "command": command, "status": "OK", "payload": {}}))
                         continue
 
                     handler_method = getattr(self.core_service, command, None)
@@ -328,7 +358,7 @@ class LocalApiServer:
                             # For short tasks, await the result and send it back
                             result = await handler_method(**payload)
                             response = {"id": command_id, "command": command, "status": "OK", "payload": result}
-                            await websocket.send(json.dumps(response))
+                            await self._send_locked(websocket, json.dumps(response))
                             # Mike S141: pair every "Executing command" with a
                             # "Response sent" so the request → response chain
                             # is greppable. Past Bug A class (sendCommand
@@ -354,7 +384,7 @@ class LocalApiServer:
                         "payload": {"message": str(e)}
                     }
                     try:
-                        await websocket.send(json.dumps(error_response))
+                        await self._send_locked(websocket, json.dumps(error_response))
                     except:
                         pass
         except websockets.exceptions.ConnectionClosed:
@@ -387,12 +417,16 @@ class LocalApiServer:
             logger.info("Local API Server stopped")
 
     async def broadcast_event(self, event_name: str, payload: dict):
-        if not self._clients: 
+        if not self._clients:
             return
         message = json.dumps({"event": event_name, "payload": payload})
-        # Send to all clients, but don't fail if one client is disconnected
+        # Send to all clients under per-client locks, but don't fail if one
+        # client is disconnected. Locking is required because fire-and-forget
+        # broadcast callers (e.g. agent_manager._emit_progress) create
+        # concurrent broadcast_event coroutines that would otherwise interleave
+        # WS frame bytes on the same client connection.
         results = await asyncio.gather(
-            *(client.send(message) for client in self._clients),
+            *(self._send_locked(client, message) for client in self._clients),
             return_exceptions=True
         )
         # Log any errors but don't crash
@@ -406,9 +440,9 @@ class LocalApiServer:
             return
         response = {"id": command_id, "command": command, "status": status, "payload": payload}
         message = json.dumps(response)
-        # Send to all clients, but don't fail if one client is disconnected
+        # Per-client locks (see broadcast_event for rationale).
         results = await asyncio.gather(
-            *(client.send(message) for client in self._clients),
+            *(self._send_locked(client, message) for client in self._clients),
             return_exceptions=True
         )
         # Log any errors but don't crash
