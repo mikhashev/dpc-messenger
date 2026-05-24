@@ -623,7 +623,7 @@ async def _request_popup_fallback(
     # at a time, system-wide. Reject before allocating a request_id
     # or broadcasting so the existing session is undisturbed.
     if keep_open:
-        for existing_id, existing in _pending_popup_requests.items():
+        for existing_id, existing in list(_pending_popup_requests.items()):
             if existing.keep_open:
                 age = time.monotonic() - existing.opened_at
                 if age <= _POPUP_SESSION_MAX_AGE_S:

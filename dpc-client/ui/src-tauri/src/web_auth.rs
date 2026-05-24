@@ -646,7 +646,8 @@ fn run_final_extract(app: &AppHandle, popup: &tauri::WebviewWindow, request_id: 
         let handler = ExecuteScriptCompletedHandler::create(Box::new(
             move |hr, json_encoded| {
                 let raw_preview: String = if json_encoded.len() > 300 {
-                    format!("{}…({}b total)", &json_encoded[..300], json_encoded.len())
+                    let truncated: String = json_encoded.chars().take(300).collect();
+                    format!("{}…({}b total)", truncated, json_encoded.len())
                 } else {
                     json_encoded.clone()
                 };
