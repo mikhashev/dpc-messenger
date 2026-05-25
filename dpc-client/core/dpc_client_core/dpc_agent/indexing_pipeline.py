@@ -60,8 +60,16 @@ def index_single_file(
     embedding_provider,
     backend: RetrievalBackend,
     source_layer: str = "L5",
+    source_file_key: "str | None" = None,
 ) -> int:
-    """Extract, embed, and index a single file as one document. Returns 1 if indexed, 0 if skipped."""
+    """Extract, embed, and index a single file as one document. Returns 1 if indexed, 0 if skipped.
+
+    source_file_key lets the caller pin the key/display string used as
+    `meta["source_file"]` (matters for `remove_by_source` lookups and for
+    avoiding cross-layer basename collisions in the index). Defaults to
+    `path.name` for backward compat — production callers pass the layer-
+    prefixed relative posix key from `_sync_index`.
+    """
     text = extract_text(path)
     if not text:
         return 0
@@ -70,7 +78,7 @@ def index_single_file(
     doc_text = _build_doc_text(path.name, heading, text)
 
     meta = {
-        "source_file": path.name,
+        "source_file": source_file_key or path.name,
         "heading": heading,
         "source_layer": source_layer,
         "char_count": len(text),
@@ -112,7 +120,7 @@ def full_rebuild(
         file_meta = read_file_meta(knowledge_dir, f.name)
         all_doc_texts.append(doc_text)
         all_metas.append({
-            "source_file": f.name,
+            "source_file": f.relative_to(knowledge_dir).as_posix(),
             "heading": heading,
             "source_layer": file_meta.source_layer,
             "char_count": len(text),

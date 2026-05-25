@@ -196,7 +196,15 @@ def write_file(ctx: ToolContext, path: str, content: str) -> str:
                         backend = make_backend_for_agent(ctx.agent_root)
                         if backend.vector.load():
                             backend.text.load()
-                            index_single_file(file_path, provider, backend, source_layer="L5")
+                            # L5 key shape must match agent_manager._sync_index
+                            # (base = agent_root/knowledge) so incremental adds line up
+                            # with full-rebuild keys.
+                            _knowledge_dir = ctx.agent_root / "knowledge"
+                            try:
+                                _l5_key = file_path.relative_to(_knowledge_dir).as_posix()
+                            except ValueError:
+                                _l5_key = file_path.name
+                            index_single_file(file_path, provider, backend, source_layer="L5", source_file_key=_l5_key)
                             backend.save()
                             log.info("Incremental reindex: added %s to retrieval backend", file_path.name)
             except Exception as e:

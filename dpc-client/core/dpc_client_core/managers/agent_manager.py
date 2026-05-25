@@ -294,6 +294,13 @@ class DpcAgentManager:
                             if _stored_model != _actual_model:
                                 log.info("Memory index model changed (%s -> %s), forcing rebuild", _stored_model, _actual_model)
                                 needs_full_rebuild = True
+                            # Key format migration: pre-fix metas used basenames; new
+                            # format uses per-layer relative posix keys. Force rebuild
+                            # once when an older meta lacks the version marker.
+                            _stored_key_fmt = _meta.get("header", {}).get("key_format", "")
+                            if _stored_key_fmt != "layer_relative_posix_v1":
+                                log.info("Memory index key format outdated (%r), forcing rebuild", _stored_key_fmt)
+                                needs_full_rebuild = True
                         except Exception:
                             needs_full_rebuild = True
 
@@ -338,9 +345,10 @@ class DpcAgentManager:
                                     heading = _extract_heading(text)
                                     doc_text = _build_doc_text(f.name, heading, text)
                                     file_meta = read_file_meta(knowledge_dir, f.name)
+                                    key = f.relative_to(knowledge_dir).as_posix()
                                     collected.append((
-                                        f.name, doc_text,
-                                        {"source_file": f.name, "heading": heading,
+                                        key, doc_text,
+                                        {"source_file": key, "heading": heading,
                                          "source_layer": file_meta.source_layer,
                                          "char_count": len(text), "text": text[:500]},
                                         "L5",
@@ -360,9 +368,10 @@ class DpcAgentManager:
                                             continue
                                         heading = _extract_heading(text)
                                         doc_text = _build_doc_text(f.name, heading, text)
+                                        key = f"L6/{f.relative_to(l6_dir).as_posix()}"
                                         collected.append((
-                                            f.name, doc_text,
-                                            {"source_file": f.name, "heading": heading,
+                                            key, doc_text,
+                                            {"source_file": key, "heading": heading,
                                              "source_layer": "L6", "char_count": len(text),
                                              "text": text[:500]},
                                             "L6",
@@ -376,6 +385,7 @@ class DpcAgentManager:
                                     indexed_list = self.firewall._get_profile_or_global(self.agent_id, 'sandbox_extensions', 'indexed_paths', default=[]) if self.agent_id else []
                                     excluded_dirs = self.firewall._get_profile_or_global(self.agent_id, 'sandbox_extensions', 'excluded_dirs', default=None) if self.agent_id else None
                                     ext_files = collect_extended_files(ext_paths, indexed_paths=indexed_list, excluded_dirs=excluded_dirs, allowed_extensions=RECALL_EXTENSIONS) if indexed_list else []
+                                    indexed_path_objs = [Path(ip) for ip in indexed_list]
                                     for f in ext_files:
                                         if self._stop_event.is_set():
                                             return
@@ -384,9 +394,21 @@ class DpcAgentManager:
                                             continue
                                         heading = _extract_heading(text)
                                         doc_text = _build_doc_text(f.name, heading, text)
+                                        # Find longest matching indexed_path so relative_to gives the
+                                        # shortest portable suffix. Fallback to bare name if no match
+                                        # (shouldn't happen — collect_extended_files only yields files
+                                        # inside indexed_paths — but defends against config drift).
+                                        rel = None
+                                        for ip in sorted(indexed_path_objs, key=lambda p: len(p.parts), reverse=True):
+                                            try:
+                                                rel = f.relative_to(ip).as_posix()
+                                                break
+                                            except ValueError:
+                                                continue
+                                        key = f"EXT/{rel}" if rel else f"EXT/{f.name}"
                                         collected.append((
-                                            f.name, doc_text,
-                                            {"source_file": f.name, "heading": heading,
+                                            key, doc_text,
+                                            {"source_file": key, "heading": heading,
                                              "source_layer": "EXT", "char_count": len(text),
                                              "text": text[:500]},
                                             "EXT",
@@ -472,7 +494,11 @@ class DpcAgentManager:
                                     # header.model_name is read at startup to detect
                                     # model swap → forced full rebuild. Must persist on
                                     # save or every restart trips the mismatch check.
-                                    _md.setdefault("header", {})["model_name"] = _actual_model
+                                    # header.key_format pins the file_hashes key schema
+                                    # (per-layer relative posix). Bump when key shape changes.
+                                    _hdr = _md.setdefault("header", {})
+                                    _hdr["model_name"] = _actual_model
+                                    _hdr["key_format"] = "layer_relative_posix_v1"
                                     _md["file_hashes"] = new_hashes
                                     _md.pop("extra_hash", None)
                                     meta_path.write_text(

@@ -929,7 +929,11 @@ Respond in JSON format:
                                 backend = make_backend_for_agent(agent_mgr.agent_root)
                                 if backend.vector.load():
                                     backend.text.load()
-                                    index_single_file(commit_path, agent._embedding_provider, backend, source_layer="L6")
+                                    # L6 key shape must match agent_manager._sync_index
+                                    # (l6_dir = dpc_home / "knowledge") so this incremental
+                                    # add doesn't collide with the full-rebuild path.
+                                    _l6_key = f"L6/{commit_path.relative_to(self.dpc_home_dir / 'knowledge').as_posix()}"
+                                    index_single_file(commit_path, agent._embedding_provider, backend, source_layer="L6", source_file_key=_l6_key)
                                     backend.save()
                                     logger.info("MEM-3.7: reindexed L6 commit %s for agent %s", commit_path.name, agent_mgr.agent_id)
         except Exception as e:
