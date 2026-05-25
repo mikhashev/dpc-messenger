@@ -469,6 +469,10 @@ class DpcAgentManager:
                                 backend.save()
                                 try:
                                     _md = old_meta if isinstance(old_meta, dict) else {}
+                                    # header.model_name is read at startup to detect
+                                    # model swap → forced full rebuild. Must persist on
+                                    # save or every restart trips the mismatch check.
+                                    _md.setdefault("header", {})["model_name"] = _actual_model
                                     _md["file_hashes"] = new_hashes
                                     _md.pop("extra_hash", None)
                                     meta_path.write_text(
