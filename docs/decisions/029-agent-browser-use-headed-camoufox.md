@@ -185,7 +185,8 @@ How to verify the decision was implemented correctly:
 
 | Task | Status | Commit |
 |------|--------|--------|
-| ADR-029 draft + review | Done (S146-S147) | `48ebb44` (first cut) + restore-to-template (S147) |
+| ADR-029 draft (first cut) | Done (S147) | `48ebb44` |
+| ADR-029 restore to TEMPLATE.md compliance | Done (S147) | `0078b12` |
 | Task decomposition | Done (S147) | `tasks/adr-029-headed-camoufox/` (8 files: overview + 7 tasks, gitignored) |
 | Task 0 — remove T10 popup code | Pending | — |
 | Task 1 — extend AuthBrowser | Pending | — |
