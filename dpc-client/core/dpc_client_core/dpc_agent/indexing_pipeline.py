@@ -75,10 +75,11 @@ def index_single_file(
         return 0
 
     heading = _extract_heading(text)
-    doc_text = _build_doc_text(path.name, heading, text)
+    _src = source_file_key or path.name
+    doc_text = _build_doc_text(_src, heading, text)
 
     meta = {
-        "source_file": source_file_key or path.name,
+        "source_file": _src,
         "heading": heading,
         "source_layer": source_layer,
         "char_count": len(text),
@@ -116,11 +117,12 @@ def full_rebuild(
         if not text:
             continue
         heading = _extract_heading(text)
-        doc_text = _build_doc_text(f.name, heading, text)
+        _src = f.relative_to(knowledge_dir).as_posix()
+        doc_text = _build_doc_text(_src, heading, text)
         file_meta = read_file_meta(knowledge_dir, f.name)
         all_doc_texts.append(doc_text)
         all_metas.append({
-            "source_file": f.relative_to(knowledge_dir).as_posix(),
+            "source_file": _src,
             "heading": heading,
             "source_layer": file_meta.source_layer,
             "char_count": len(text),

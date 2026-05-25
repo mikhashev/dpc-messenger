@@ -343,9 +343,9 @@ class DpcAgentManager:
                                     if not text:
                                         continue
                                     heading = _extract_heading(text)
-                                    doc_text = _build_doc_text(f.name, heading, text)
                                     file_meta = read_file_meta(knowledge_dir, f.name)
                                     key = f.relative_to(knowledge_dir).as_posix()
+                                    doc_text = _build_doc_text(key, heading, text)
                                     collected.append((
                                         key, doc_text,
                                         {"source_file": key, "heading": heading,
@@ -367,8 +367,8 @@ class DpcAgentManager:
                                         if not text:
                                             continue
                                         heading = _extract_heading(text)
-                                        doc_text = _build_doc_text(f.name, heading, text)
                                         key = f"L6/{f.relative_to(l6_dir).as_posix()}"
+                                        doc_text = _build_doc_text(key, heading, text)
                                         collected.append((
                                             key, doc_text,
                                             {"source_file": key, "heading": heading,
@@ -393,7 +393,6 @@ class DpcAgentManager:
                                         if not text:
                                             continue
                                         heading = _extract_heading(text)
-                                        doc_text = _build_doc_text(f.name, heading, text)
                                         # Find longest matching indexed_path so relative_to gives the
                                         # shortest portable suffix. Fallback to bare name if no match
                                         # (shouldn't happen — collect_extended_files only yields files
@@ -406,6 +405,7 @@ class DpcAgentManager:
                                             except ValueError:
                                                 continue
                                         key = f"EXT/{rel}" if rel else f"EXT/{f.name}"
+                                        doc_text = _build_doc_text(key, heading, text)
                                         collected.append((
                                             key, doc_text,
                                             {"source_file": key, "heading": heading,
