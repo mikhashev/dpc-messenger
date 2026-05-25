@@ -350,45 +350,79 @@ def get_active_camoufox_browsers() -> set["AuthBrowser"]:
     return _active_camoufox_browsers
 
 
+# ADR-029 Task 002: dict registry for stateful per-agent sessions.
+# Parallel to _active_camoufox_browsers (set), which keeps the S144
+# shutdown defense — set tracks ALL live AuthBrowser instances
+# regardless of mode; dict is the lookup path for the keep_open=True
+# stateful flow.
+_active_browser_sessions: dict[str, "AuthBrowser"] = {}
+
+
+def get_active_browser_sessions() -> dict[str, "AuthBrowser"]:
+    """Accessor for browse_page handler — returns the live dict
+    (mutation is intentional). Used by _get_or_create_session."""
+    return _active_browser_sessions
+
+
 class AuthBrowser:
-    """Restricted Camoufox wrapper for authenticated reads (ADR-028 T4).
+    """Restricted Camoufox wrapper for authenticated browser sessions
+    (ADR-028 T4, extended for ADR-029 Task 002).
 
-    Exposes ONLY navigation + content reading — no `click`, `fill`,
-    `evaluate`, or any other interactive method. This is tool-level
-    enforcement of READ-only access per ADR-028 Phase 1; WRITE
-    permissions are explicitly out of scope until Phase 3.
+    Two operating modes:
 
-    Cookies are loaded from the agent's encrypted vault (T3
-    `web_auth.py`) at construction time. Two failure modes:
+    1. **Single-shot (ADR-028)** — context manager around one `navigate`
+       + content read for the headless `browse_page` path:
 
-      AuthRequiredError — no cookies for the domain. User must log in
-        via the Tauri WebView popup (T2) before this works.
-      AuthExpiredError — cookies present but expired. Same fix as
-        AuthRequiredError — user re-logs in.
+           with AuthBrowser(agent_id="agent_001", domains=["ozon.ru"]) as ab:
+               ab.navigate("https://ozon.ru/my/orders")
+               html = ab.get_page_html()
 
-    Use as a context manager so the Camoufox browser is always closed:
+    2. **Stateful session (ADR-029)** — long-lived per-agent session
+       supporting interactive methods (scroll, click, fill, etc.) in
+       headed Camoufox. Created via `_get_or_create_session(agent_id)`
+       from `browse_page(keep_open=True)`; lives in
+       `_active_browser_sessions` until explicit close or shutdown.
 
-        with AuthBrowser(agent_id="agent_001", domain="ozon.ru") as ab:
-            ab.goto("https://ozon.ru/my/orders")
-            html = ab.get_page_content()
+    Cookies for every domain in `domains` are loaded lazily from the
+    encrypted vault (T3 `web_auth.py`) at `_open()` time. Two failure
+    modes (raised at first navigate that touches a missing/expired
+    domain — not at construction):
+
+      AuthRequiredError — no cookies for a needed domain. User logs
+        in via the Tauri WebView popup (T2) before this works.
+      AuthExpiredError — cookies present but expired. Same fix.
+
+    Domain restriction is currently enforced at `navigate()` against
+    `self._etld1s`. ADR-029 Task 003 replaces that check with a
+    Playwright route handler that intercepts EVERY request (including
+    redirects, XHR, etc.) — see 003-domain-restriction.md.
     """
 
-    def __init__(self, agent_id: str, domain: str):
+    def __init__(
+        self,
+        agent_id: str,
+        domains: list[str] | None = None,
+        *,
+        headed: bool = False,
+        domain: str | None = None,
+    ):
         from dpc_client_core import web_auth
 
         self._agent_id = agent_id
-        self._domain = domain.lower()
-        self._etld1 = web_auth.resolve_etld1(self._domain)
-        cookies = web_auth.load_cookies(agent_id, domain)
-        if cookies is None:
-            raise AuthRequiredError(
-                f"No cookies for {domain} (agent={agent_id}) — re-login required"
-            )
-        if web_auth.is_expired(cookies):
-            raise AuthExpiredError(
-                f"Cookies for {domain} expired (agent={agent_id}) — re-login required"
-            )
-        self._cookies = cookies
+        self._headed = headed
+        # Normalize: accept either `domains=[...]` (new multi-domain) or
+        # `domain="..."` (legacy single-domain). Both produce a list.
+        if domain is not None and domains is None:
+            domains = [domain]
+        elif domain is not None and domains is not None:
+            raise ValueError("AuthBrowser: pass `domains` or `domain`, not both")
+        domains = domains or []
+        self._domains = [d.lower() for d in domains]
+        self._etld1s = {web_auth.resolve_etld1(d) for d in self._domains}
+        # Backward-compat single-domain alias used by ADR-028 callers.
+        self._domain = self._domains[0] if self._domains else None
+        self._etld1 = next(iter(self._etld1s), None)
+        self._cookies_loaded = False
         self._cm = None
         self._browser = None
         self._context = None
@@ -403,53 +437,169 @@ class AuthBrowser:
         return False
 
     @property
-    def domain(self) -> str:
+    def domain(self) -> str | None:
         return self._domain
+
+    @property
+    def domains(self) -> list[str]:
+        return list(self._domains)
+
+    @property
+    def headed(self) -> bool:
+        return self._headed
+
+    def start(self) -> None:
+        """Explicit lifecycle entry — open the browser without context
+        manager. Idempotent: no-op if already open. Used by the stateful
+        session path where the caller does not own a `with` block."""
+        if self._page is None:
+            self._open()
+
+    def _load_all_cookies(self) -> list[dict]:
+        """Merge cookies for every configured domain. Raises
+        AuthRequiredError / AuthExpiredError on first missing or expired
+        domain so the caller can surface a re-login prompt for the
+        specific eTLD+1 that needs attention."""
+        from dpc_client_core import web_auth
+
+        all_cookies: list[dict] = []
+        for d in self._domains:
+            cookies = web_auth.load_cookies(self._agent_id, d)
+            if cookies is None:
+                raise AuthRequiredError(
+                    f"No cookies for {d} (agent={self._agent_id}) — re-login required"
+                )
+            if web_auth.is_expired(cookies):
+                raise AuthExpiredError(
+                    f"Cookies for {d} expired (agent={self._agent_id}) — re-login required"
+                )
+            all_cookies.extend(cookies)
+        self._cookies_loaded = True
+        return all_cookies
 
     def _open(self) -> None:
         from camoufox.sync_api import Camoufox
 
-        self._cm = Camoufox(headless=True)
+        self._cm = Camoufox(headless=not self._headed)
         self._browser = self._cm.__enter__()
         self._context = self._browser.new_context()
-        self._context.add_cookies(_to_playwright_cookies(self._cookies))
+        if self._domains:
+            self._context.add_cookies(_to_playwright_cookies(self._load_all_cookies()))
         self._page = self._context.new_page()
-        # S144 SHUTDOWN-PIPE-DRAIN: register the live instance so
-        # CoreService.shutdown can close any orphaned Camoufox
-        # subprocesses before the asyncio loop tears down.
+        # S144 SHUTDOWN-PIPE-DRAIN: register so CoreService.shutdown can
+        # close orphaned Camoufox subprocesses before the loop tears down.
         _active_camoufox_browsers.add(self)
 
-    def goto(self, url: str) -> None:
-        """Navigate to URL. URL eTLD+1 must match the auth domain or be
-        a subdomain — otherwise raises ValueError without making any
-        network request. This prevents the agent from accidentally (or
-        adversarially) leaking auth cookies to an unrelated origin."""
+    def _require_open(self) -> None:
         if self._page is None:
-            raise RuntimeError("AuthBrowser not opened — use as context manager")
-        if not _domain_matches(url, self._etld1):
-            raise ValueError(
-                f"URL {url!r} is outside auth domain {self._etld1!r}"
+            raise RuntimeError(
+                "AuthBrowser not opened — use as context manager or call start()"
             )
+
+    def _check_domain(self, url: str) -> None:
+        """Pre-navigation domain gate. Allows any eTLD+1 in self._etld1s
+        (multi-domain), preserving the original single-domain check when
+        the session was opened with one domain. ADR-029 Task 003 will
+        replace this with a Playwright route handler so the gate also
+        catches in-page redirects + XHR."""
+        if not self._etld1s:
+            return  # session opened without any auth domain (rare; tests)
+        for etld1 in self._etld1s:
+            if _domain_matches(url, etld1):
+                return
+        raise ValueError(
+            f"URL {url!r} is outside auth domains {sorted(self._etld1s)!r}"
+        )
+
+    def navigate(self, url: str) -> None:
+        """Navigate to URL. URL eTLD+1 must match one of the session's
+        auth domains; ADR-029 Task 003 will harden via a route handler.
+
+        Replaces ADR-028 `goto()` — kept as an alias for back-compat."""
+        self._require_open()
+        self._check_domain(url)
         self._page.goto(url, wait_until="networkidle", timeout=30000)
 
-    def get_page_html(self) -> str:
-        """Return the raw HTML of the current page. Used by T9 challenge
-        detection before trafilatura conversion — markdown extraction
-        strips the very script/meta tokens (`fab_chlg_`, `g-recaptcha`,
-        etc.) the heuristic looks for.
+    # ADR-028 back-compat alias. Single-shot consumers
+    # (_browse_with_camoufox / _auth_browse_html) call goto(); keep the
+    # name working so the diff stays small.
+    goto = navigate
 
-        Note: `page.content()` is called without an explicit timeout —
-        the framework-level tool timeout (see registry.py — currently
-        360s for browse_page to accommodate T9 popup interaction) is
-        the backstop."""
-        if self._page is None:
-            raise RuntimeError("AuthBrowser not opened — use as context manager")
+    def get_page_html(self) -> str:
+        """Return raw HTML of the current page. Used by T9 challenge
+        detection before trafilatura conversion."""
+        self._require_open()
         return self._page.content()
 
     def get_page_content(self) -> str:
-        """Return the current page as markdown via trafilatura. Same
-        extraction pipeline as the anonymous browse path."""
+        """Return current page as markdown via trafilatura."""
         return _html_to_markdown(self.get_page_html())
+
+    # ─────────────────────────────────────────────────────────
+    # ADR-029 Task 002 interactive methods (Playwright wrappers)
+    # ─────────────────────────────────────────────────────────
+
+    def scroll(self, direction: str = "down", amount: int = 500) -> None:
+        """Scroll vertically. direction: 'up' or 'down'."""
+        self._require_open()
+        delta = -amount if direction == "up" else amount
+        self._page.mouse.wheel(0, delta)
+
+    def click(self, selector: str, timeout: int = 30000) -> None:
+        """Click an element matching the Playwright selector."""
+        self._require_open()
+        self._page.click(selector, timeout=timeout)
+
+    def fill(self, selector: str, text: str) -> None:
+        """Fill an input element matching the Playwright selector."""
+        self._require_open()
+        self._page.fill(selector, text)
+
+    def screenshot(
+        self, full_page: bool = False, save_to: str | None = None
+    ) -> bytes | str:
+        """Capture a screenshot of the current page.
+
+        Returns PNG bytes by default (spec line 108). When `save_to` is
+        given, writes the image to that path and returns the path
+        instead — escape hatch for large full-page screenshots that
+        cause memory pressure in the agent loop."""
+        self._require_open()
+        if save_to:
+            self._page.screenshot(full_page=full_page, path=save_to)
+            return save_to
+        return self._page.screenshot(full_page=full_page)
+
+    def wait_for(self, selector: str, timeout: int = 30000) -> None:
+        """Wait for an element to become visible."""
+        self._require_open()
+        self._page.wait_for_selector(selector, timeout=timeout)
+
+    def extract(self) -> str:
+        """Return the full HTML of the current page (alias for
+        get_page_html, exposed under the ADR-029 method name)."""
+        return self.get_page_html()
+
+    def switch_tab(self, index: int):
+        """Switch the active page to the tab at `index` in the current
+        context. The new tab persists across subsequent calls (spec
+        Q2 default = persist, matches user mental model)."""
+        self._require_open()
+        pages = self._context.pages
+        if index < 0 or index >= len(pages):
+            raise IndexError(
+                f"switch_tab: index {index} out of range "
+                f"(context has {len(pages)} page(s))"
+            )
+        self._page = pages[index]
+        return self._page
+
+    def wait_for_popup(self, timeout: int = 30000):
+        """Wait for a site-opened popup (window.open / target=_blank)
+        and return the new Page. Use `switch_tab` afterwards to make
+        the popup the active page."""
+        self._require_open()
+        return self._page.wait_for_event("popup", timeout=timeout)
 
     def close(self) -> None:
         """Release browser resources. Safe to call multiple times."""
@@ -461,9 +611,30 @@ class AuthBrowser:
                 self._browser = None
                 self._context = None
                 self._page = None
-        # Deregister even when already closed — discard is a no-op
-        # for missing entries, so double-close stays cheap.
         _active_camoufox_browsers.discard(self)
+        # Deregister from the stateful session dict — the dict only
+        # tracks sessions opened via _get_or_create_session, but
+        # discarding an unknown key is cheap.
+        _active_browser_sessions.pop(self._agent_id, None)
+
+
+def _get_or_create_session(
+    agent_id: str, domains: list[str], headed: bool
+) -> AuthBrowser:
+    """Return an existing AuthBrowser for this agent or create one.
+
+    Ark's D2 duplicate-open guard: a second `browser_*` tool call on
+    the same agent reuses the live session instead of opening a second
+    Camoufox subprocess. Domains/headed args apply only when a NEW
+    session is created — switching modes mid-flight requires explicit
+    `browser_close` first."""
+    existing = _active_browser_sessions.get(agent_id)
+    if existing is not None and existing._page is not None:
+        return existing
+    session = AuthBrowser(agent_id=agent_id, domains=domains, headed=headed)
+    session.start()
+    _active_browser_sessions[agent_id] = session
+    return session
 
 
 def _html_to_markdown(html: str) -> str:
@@ -626,6 +797,7 @@ async def browse_page(
     url: str,
     size: str = "m",
     use_auth: Optional[str] = None,
+    keep_open: bool = False,
 ) -> str:
     """
     Fetch a web page and extract content as structured markdown.
@@ -747,7 +919,28 @@ async def browse_page(
                 return f"Content from {url} (markdown, auth={use_auth}, {total} chars):\n\n{text}"
 
         try:
-            html = await asyncio.to_thread(_auth_browse_html, agent_id, use_auth, url)
+            if keep_open:
+                # ADR-029 Task 002: stateful headed session — page stays
+                # open after returning, agent calls browser_* tools for
+                # subsequent actions. Cookies for every allowed domain
+                # load up-front (D1 multi-domain context).
+                allowed = (
+                    firewall.get_agent_web_auth_domains(agent_id)
+                    if firewall is not None
+                    else [use_auth]
+                )
+                headed = (
+                    firewall.get_browser_headed(agent_id)
+                    if firewall is not None
+                    else True
+                )
+                session = await asyncio.to_thread(
+                    _get_or_create_session, agent_id, list(allowed), headed
+                )
+                await asyncio.to_thread(session.navigate, url)
+                html = await asyncio.to_thread(session.get_page_html)
+            else:
+                html = await asyncio.to_thread(_auth_browse_html, agent_id, use_auth, url)
         except AuthRequiredError as e:
             _web_auth_mod.audit_append(
                 agent_id, use_auth, url, status="auth_required"

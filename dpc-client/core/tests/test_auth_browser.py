@@ -95,19 +95,23 @@ def expired_cookies():
 # ─────────────────────────────────────────────────────────────
 
 
-def test_auth_required_when_no_cookies(vault_home):
+def test_auth_required_raised_on_load(vault_home):
+    """ADR-029: cookies load lazily in `_load_all_cookies` (called from
+    `_open()`), not at construction. AuthRequiredError fires when the
+    browser is opened for a domain with no stored cookies."""
     from dpc_client_core.dpc_agent.tools.browser import (
         AuthBrowser,
         AuthRequiredError,
     )
 
+    ab = AuthBrowser(agent_id="agent_a", domain="ozon.ru")
     with pytest.raises(AuthRequiredError) as exc:
-        AuthBrowser(agent_id="agent_a", domain="ozon.ru")
+        ab._load_all_cookies()
     assert "ozon.ru" in str(exc.value)
     assert "re-login" in str(exc.value).lower()
 
 
-def test_auth_expired_when_cookies_old(vault_home, expired_cookies):
+def test_auth_expired_raised_on_load(vault_home, expired_cookies):
     from dpc_client_core import web_auth
     from dpc_client_core.dpc_agent.tools.browser import (
         AuthBrowser,
@@ -115,23 +119,24 @@ def test_auth_expired_when_cookies_old(vault_home, expired_cookies):
     )
 
     web_auth.save_cookies("agent_a", "ozon.ru", expired_cookies)
+    ab = AuthBrowser(agent_id="agent_a", domain="ozon.ru")
     with pytest.raises(AuthExpiredError) as exc:
-        AuthBrowser(agent_id="agent_a", domain="ozon.ru")
+        ab._load_all_cookies()
     assert "ozon.ru" in str(exc.value)
     assert "expired" in str(exc.value).lower()
 
 
-def test_construction_succeeds_with_fresh_cookies(vault_home, fresh_cookies):
-    """AuthBrowser must not touch Camoufox during __init__. We verify by
-    *not* calling __enter__ — construction alone should not import or
-    launch Camoufox. If it does, this test would either ImportError or
-    spawn a real browser."""
-    from dpc_client_core import web_auth
+def test_construction_is_lazy(vault_home):
+    """ADR-029: AuthBrowser construction does no I/O — no keyring read,
+    no Camoufox import, no browser launch. Verifies the lazy contract
+    that makes per-agent session registry safe to instantiate."""
     from dpc_client_core.dpc_agent.tools.browser import AuthBrowser
 
-    web_auth.save_cookies("agent_a", "ozon.ru", fresh_cookies)
     ab = AuthBrowser(agent_id="agent_a", domain="ozon.ru")
     assert ab.domain == "ozon.ru"
+    assert ab.domains == ["ozon.ru"]
+    assert ab._page is None
+    assert ab._cookies_loaded is False
 
 
 # ─────────────────────────────────────────────────────────────
@@ -139,25 +144,26 @@ def test_construction_succeeds_with_fresh_cookies(vault_home, fresh_cookies):
 # ─────────────────────────────────────────────────────────────
 
 
-def test_authbrowser_surface_is_read_only(vault_home, fresh_cookies):
-    """Tool-level READ-only enforcement per ADR-028. The class must NOT
-    expose Playwright/Camoufox methods that allow input or arbitrary
-    code execution. Public surface is locked to navigation + reading."""
-    from dpc_client_core import web_auth
+def test_authbrowser_public_surface(vault_home):
+    """ADR-029 Task 002 introduces interactive methods (scroll, click,
+    fill, etc.) — the ADR-028 read-only restriction is intentionally
+    lifted for the headed-session flow. Track the new contract here so
+    future accidental removals or unintended additions are caught."""
     from dpc_client_core.dpc_agent.tools.browser import AuthBrowser
 
-    web_auth.save_cookies("agent_a", "ozon.ru", fresh_cookies)
     ab = AuthBrowser(agent_id="agent_a", domain="ozon.ru")
     public = {n for n in dir(ab) if not n.startswith("_")}
-    # Allowed surface
-    expected = {"goto", "get_page_content", "close", "domain"}
-    assert expected.issubset(public), f"missing methods: {expected - public}"
-    # Forbidden surface (Playwright/Camoufox interactive API)
-    forbidden = {
-        "click", "fill", "type", "press", "evaluate", "evaluate_handle",
-        "add_init_script", "expose_function", "set_content", "wait_for_function",
-        "page", "context", "browser", "request",
+    # Allowed surface — read methods + ADR-029 interactive methods
+    expected = {
+        "goto", "navigate", "get_page_html", "get_page_content",
+        "close", "domain", "domains", "headed", "start",
+        "scroll", "click", "fill", "screenshot", "wait_for",
+        "extract", "switch_tab", "wait_for_popup",
     }
+    assert expected.issubset(public), f"missing methods: {expected - public}"
+    # Still forbidden — direct Playwright handles (these are the leaky
+    # primitives that would bypass our domain gate and tool-level audit)
+    forbidden = {"page", "context", "browser", "request"}
     leaked = forbidden & public
     assert not leaked, f"forbidden methods exposed: {leaked}"
 
@@ -210,6 +216,88 @@ def test_goto_rejects_off_domain_url(vault_home, fresh_cookies):
     with pytest.raises(ValueError) as exc:
         ab.goto("https://yandex.ru/search")
     assert "outside auth domain" in str(exc.value)
+
+
+# ─────────────────────────────────────────────────────────────
+# ADR-029 Task 002 — multi-domain init + session registry + headed
+# ─────────────────────────────────────────────────────────────
+
+
+def test_multi_domain_constructor(vault_home):
+    from dpc_client_core.dpc_agent.tools.browser import AuthBrowser
+
+    ab = AuthBrowser(
+        agent_id="agent_a", domains=["ozon.ru", "yandex.ru"], headed=True
+    )
+    assert set(ab.domains) == {"ozon.ru", "yandex.ru"}
+    assert ab.headed is True
+    assert ab.domain == "ozon.ru"  # back-compat scalar = first
+
+
+def test_constructor_rejects_both_domain_and_domains(vault_home):
+    from dpc_client_core.dpc_agent.tools.browser import AuthBrowser
+
+    with pytest.raises(ValueError, match="domains.*or.*domain"):
+        AuthBrowser(agent_id="agent_a", domain="ozon.ru", domains=["yandex.ru"])
+
+
+def test_multi_domain_check_allows_any_etld1(vault_home):
+    from dpc_client_core.dpc_agent.tools.browser import AuthBrowser
+
+    ab = AuthBrowser(agent_id="agent_a", domains=["ozon.ru", "yandex.ru"])
+    ab._page = object()
+    # Both allowed, no exception
+    ab._check_domain("https://ozon.ru/orders")
+    ab._check_domain("https://www.yandex.ru/search")
+    # Off-domain still rejected
+    with pytest.raises(ValueError, match="outside auth domains"):
+        ab._check_domain("https://attacker.com/")
+
+
+def test_session_registry_reuse(vault_home, fresh_cookies):
+    """Ark D2 duplicate-open guard: second _get_or_create_session call
+    for the same agent reuses the live session instead of creating a
+    fresh Camoufox subprocess."""
+    from dpc_client_core import web_auth
+    from dpc_client_core.dpc_agent.tools.browser import (
+        AuthBrowser,
+        _active_browser_sessions,
+        get_active_browser_sessions,
+    )
+
+    web_auth.save_cookies("agent_a", "ozon.ru", fresh_cookies)
+    # Stub a live session so the guard sees `_page is not None`
+    stub = AuthBrowser(agent_id="agent_a", domains=["ozon.ru"])
+    stub._page = object()  # masquerade as opened without launching Camoufox
+    _active_browser_sessions["agent_a"] = stub
+    try:
+        assert get_active_browser_sessions()["agent_a"] is stub
+        # Cleanup also wipes the dict entry
+        stub.close()
+        assert "agent_a" not in _active_browser_sessions
+    finally:
+        _active_browser_sessions.pop("agent_a", None)
+
+
+def test_screenshot_save_to_returns_path(vault_home, tmp_path):
+    """Q1 escape hatch: passing save_to writes to disk and returns the
+    path (string), not bytes. Verified without launching Camoufox by
+    stubbing the page object."""
+    from dpc_client_core.dpc_agent.tools.browser import AuthBrowser
+
+    ab = AuthBrowser(agent_id="agent_a", domain="ozon.ru")
+    target = tmp_path / "shot.png"
+    calls: list[dict] = []
+
+    class StubPage:
+        def screenshot(self, **kwargs):
+            calls.append(kwargs)
+            return b"PNG-bytes"
+
+    ab._page = StubPage()
+    result = ab.screenshot(full_page=True, save_to=str(target))
+    assert result == str(target)
+    assert calls[0]["path"] == str(target)
 
 
 # ─────────────────────────────────────────────────────────────

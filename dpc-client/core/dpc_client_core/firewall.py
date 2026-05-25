@@ -514,6 +514,16 @@ class ContextFirewall:
 
         return allowed
 
+    def get_browser_headed(self, agent_id: str) -> bool:
+        """ADR-029 Task 002 — return the agent's `browser.headed` toggle.
+
+        Default `True` (visible Firefox window) for desktop deployment;
+        `False` opt-in for server / CI where no display is available."""
+        value = self._get_profile_or_global(
+            agent_id, 'browser', 'headed', default=True
+        )
+        return bool(value)
+
     def get_agent_web_auth_domains(self, agent_id: str) -> List[str]:
         """ADR-028 T7 — return the agent's `web_auth.allowed_domains`
         whitelist as a normalized (lowercased) list. Empty list when no
