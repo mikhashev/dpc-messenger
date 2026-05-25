@@ -75,6 +75,8 @@ class DpcAgentManager:
         # Telegram bridge for notifications
         self._telegram_bridge = None
 
+        self._memory_indexes_initialized = False
+
         # Eagerly load display name from config.json
         self._agent_display_name = self._load_display_name()
 
@@ -220,7 +222,48 @@ class DpcAgentManager:
             await self._agent.start_task_processor()
             log.info("Task processor started")
 
-        # Initialize memory system (ADR-010)
+        if getattr(self.service, "skip_knowledge_index", False):
+            log.info(
+                "Memory init deferred for agent %s (--skip-knowledge-index); "
+                "first agent prompt will trigger lazy init",
+                self.agent_id or "singleton",
+            )
+        else:
+            await self._init_memory_indexes()
+
+        # Initialize Telegram bridge for agent notifications
+        await self._start_telegram_bridge()
+
+        # Wire Telegram send-back so scheduled tasks can deliver their results
+        self._agent._telegram_send_fn = self._deliver_telegram_result
+
+        # Check for unconsumed morning brief from sleep pipeline (ADR-014)
+        try:
+            import json as _json
+            _conv_dir = pathlib.Path.home() / ".dpc" / "conversations" / self.agent_id
+            _brief_path = _conv_dir / "morning_brief.json"
+            if _brief_path.exists():
+                _brief = _json.loads(_brief_path.read_text(encoding="utf-8"))
+                if not _brief.get("consumed", False):
+                    from dpc_client_core.service import CoreService
+                    chat_text = CoreService._format_morning_brief(_brief)
+                    monitor = self._get_or_create_agent_monitor(self.agent_id)
+                    if monitor:
+                        from datetime import datetime, timezone
+                        monitor.add_message("assistant", chat_text, sender_name=self._agent_display_name or self.agent_id, timestamp=datetime.now(timezone.utc).isoformat())
+                        monitor.save_history()
+                        _brief["consumed"] = True
+                        _brief_path.write_text(_json.dumps(_brief, ensure_ascii=False, indent=2), encoding="utf-8")
+                        log.info("Morning brief posted to chat for %s", self.agent_id)
+        except Exception as e:
+            log.debug("Morning brief startup check skipped: %s", e)
+
+        log.info("DpcAgent started successfully")
+
+    async def _init_memory_indexes(self) -> None:
+        """Build FAISS/BM25/extended-paths/knowledge-graph indexes (ADR-010)."""
+        if self._memory_indexes_initialized:
+            return
         try:
             from dpc_client_core.dpc_agent.memory_config import get_memory_config
             from dpc_client_core.dpc_agent.model_download import notify_download_needed
@@ -420,35 +463,7 @@ class DpcAgentManager:
                 log.info("Memory system initialized (model=%s, active_recall=%s)", _actual_model, mem_cfg.active_recall)
         except Exception as e:
             log.warning("Memory system init skipped: %s", e)
-
-        # Initialize Telegram bridge for agent notifications
-        await self._start_telegram_bridge()
-
-        # Wire Telegram send-back so scheduled tasks can deliver their results
-        self._agent._telegram_send_fn = self._deliver_telegram_result
-
-        # Check for unconsumed morning brief from sleep pipeline (ADR-014)
-        try:
-            import json as _json
-            _conv_dir = pathlib.Path.home() / ".dpc" / "conversations" / self.agent_id
-            _brief_path = _conv_dir / "morning_brief.json"
-            if _brief_path.exists():
-                _brief = _json.loads(_brief_path.read_text(encoding="utf-8"))
-                if not _brief.get("consumed", False):
-                    from dpc_client_core.service import CoreService
-                    chat_text = CoreService._format_morning_brief(_brief)
-                    monitor = self._get_or_create_agent_monitor(self.agent_id)
-                    if monitor:
-                        from datetime import datetime, timezone
-                        monitor.add_message("assistant", chat_text, sender_name=self._agent_display_name or self.agent_id, timestamp=datetime.now(timezone.utc).isoformat())
-                        monitor.save_history()
-                        _brief["consumed"] = True
-                        _brief_path.write_text(_json.dumps(_brief, ensure_ascii=False, indent=2), encoding="utf-8")
-                        log.info("Morning brief posted to chat for %s", self.agent_id)
-        except Exception as e:
-            log.debug("Morning brief startup check skipped: %s", e)
-
-        log.info("DpcAgent started successfully")
+        self._memory_indexes_initialized = True
 
     def sync_firewall_settings(self) -> None:
         """Re-read settings from firewall after UI save."""
@@ -683,6 +698,10 @@ class DpcAgentManager:
             Agent's response text
         """
         import uuid
+
+        if not self._memory_indexes_initialized:
+            log.info("Lazy memory init triggered by first prompt for agent %s", self.agent_id or "singleton")
+            await self._init_memory_indexes()
 
         # Generate task ID for this request
         task_id = f"chat-{uuid.uuid4().hex[:8]}"

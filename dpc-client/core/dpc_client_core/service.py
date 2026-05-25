@@ -675,6 +675,8 @@ class CoreService:
             try:
                 agent_id = agent_dir.name
                 profile = self.firewall.get_agent_profile_settings(agent_id) if self.firewall else {}
+                if profile is None:
+                    continue
                 memory_cfg = profile.get("memory", {})
                 if not memory_cfg.get("enabled", False):
                     continue
