@@ -226,10 +226,6 @@ CORE_TOOL_NAMES = {
     "get_dpc_context",
     # Browser tools (safe, read-only)
     "browse_page", "fetch_json", "check_url", "search_web",
-    # T10: multi-page popup orchestration siblings (read-only, gated by
-    # the same authenticated session that browse_page(keep_open=true)
-    # opened). No new permission surface — popup is already trusted.
-    "popup_extract_now", "popup_navigate", "popup_close", "popup_scroll",
     # Messaging tools (agent-to-user communication)
     "send_user_message",
     # Skill router (Read phase of Memento-Skills loop)

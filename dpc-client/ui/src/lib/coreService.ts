@@ -1040,102 +1040,14 @@ export async function connectToCoreService() {
                     console.log("[web_auth] popup_request", message.payload?.url);
                     webAuthPopupRequest.set(message.payload);
                 }
-                else if (message.event === "web_auth_popup_extract_request") {
-                    // ADR-028 T10: agent is driving a keep_open session and
-                    // wants HTML right now. Forward to the Tauri command —
-                    // the existing `web_auth_popup_extracted` Tauri event
-                    // → WS `web_auth_popup_complete` path delivers the HTML
-                    // back to the backend future the agent is awaiting.
-                    const rid = message.payload?.request_id;
-                    if (!rid) {
-                        console.warn('[web_auth] popup_extract_request missing request_id');
-                    } else {
-                        console.log('[web_auth] popup_extract_request', rid);
-                        (async () => {
-                            try {
-                                const { invoke } = await import('@tauri-apps/api/core');
-                                await invoke('web_auth_popup_extract_now', { requestId: rid });
-                            } catch (e) {
-                                console.error('[web_auth] popup_extract_now invoke failed:', e);
-                            }
-                        })();
-                    }
-                }
-                else if (message.event === "web_auth_popup_navigate_request") {
-                    // ADR-028 T10: agent wants the popup to load a new URL
-                    // within the same authenticated session. Backend has
-                    // already done the http/https syntax check; the Rust
-                    // command does the eval of `window.location.href`.
-                    const rid = message.payload?.request_id;
-                    const url = message.payload?.url;
-                    if (!rid || !url) {
-                        console.warn('[web_auth] popup_navigate_request missing request_id/url');
-                    } else {
-                        console.log('[web_auth] popup_navigate_request', rid, url);
-                        (async () => {
-                            try {
-                                const { invoke } = await import('@tauri-apps/api/core');
-                                await invoke('web_auth_popup_navigate', { requestId: rid, url });
-                            } catch (e) {
-                                console.error('[web_auth] popup_navigate invoke failed:', e);
-                            }
-                        })();
-                    }
-                }
-                else if (message.event === "web_auth_popup_close_request") {
-                    // ADR-028 T10: agent is done with the session. Close
-                    // triggers the existing CloseRequested handler (vault
-                    // re-sync, popup_closing watchdog) — no separate
-                    // cleanup needed here.
-                    const rid = message.payload?.request_id;
-                    if (!rid) {
-                        console.warn('[web_auth] popup_close_request missing request_id');
-                    } else {
-                        console.log('[web_auth] popup_close_request', rid);
-                        (async () => {
-                            try {
-                                const { invoke } = await import('@tauri-apps/api/core');
-                                await invoke('web_auth_popup_close', { requestId: rid });
-                            } catch (e) {
-                                console.error('[web_auth] popup_close invoke failed:', e);
-                            }
-                        })();
-                    }
-                }
-                else if (message.event === "web_auth_popup_scroll_request") {
-                    // ADR-028 T10 Step 5: agent wants to scroll the popup
-                    // to trigger pagination / lazy loading. Forwards to
-                    // the Rust command which eval()s the appropriate
-                    // scrollBy / scrollTo on the popup's window.
-                    const rid = message.payload?.request_id;
-                    const direction = message.payload?.direction;
-                    const distance = message.payload?.distance_px;
-                    if (!rid || !direction) {
-                        console.warn('[web_auth] popup_scroll_request missing request_id/direction');
-                    } else {
-                        console.log('[web_auth] popup_scroll_request', rid, direction, distance);
-                        (async () => {
-                            try {
-                                const { invoke } = await import('@tauri-apps/api/core');
-                                await invoke('web_auth_popup_scroll', {
-                                    requestId: rid,
-                                    direction,
-                                    distancePx: typeof distance === 'number' ? distance : 1000,
-                                });
-                            } catch (e) {
-                                console.error('[web_auth] popup_scroll invoke failed:', e);
-                            }
-                        })();
-                    }
-                }
                 else if (message.event === "web_auth_popup_force_close") {
-                    // S144 fix (T10-FRONTEND-CLEANUP-ON-TIMEOUT): backend
-                    // hit an error path on a popup-fallback session (timeout,
-                    // unexpected failure). Without this, the modal + the
-                    // Tauri popup window stay visible indefinitely from the
-                    // user's perspective even though the agent already saw
-                    // the error and moved on. Close both surfaces here so
-                    // the user is not left staring at a stranded popup.
+                    // T10-FRONTEND-CLEANUP-ON-TIMEOUT: backend hit an error
+                    // path on a popup-fallback session (timeout, unexpected
+                    // failure). Without this, the modal + the Tauri popup
+                    // window stay visible indefinitely from the user's
+                    // perspective even though the agent already saw the
+                    // error and moved on. Close both surfaces here so the
+                    // user is not left staring at a stranded popup.
                     const rid = message.payload?.request_id;
                     const reason = message.payload?.reason;
                     if (!rid) {
@@ -1148,16 +1060,17 @@ export async function connectToCoreService() {
                         // immediately. webAuthPopupRequest holds at most one
                         // outstanding request at a time (Q3 sequential).
                         webAuthPopupRequest.set(null);
-                        // Best-effort: ask Rust to close the popup window if
-                        // one was opened. Swallow the no-window case since
-                        // the user may have already closed it manually.
+                        // Best-effort: close the popup window via Tauri's
+                        // WebviewWindow API. The popup window label matches
+                        // the backend convention `web_auth_popup_{request_id}`.
                         (async () => {
                             try {
-                                const { invoke } = await import('@tauri-apps/api/core');
-                                await invoke('web_auth_popup_close', { requestId: rid });
+                                const { WebviewWindow } = await import('@tauri-apps/api/webviewWindow');
+                                const popup = await WebviewWindow.getByLabel(`web_auth_popup_${rid}`);
+                                if (popup) {
+                                    await popup.close();
+                                }
                             } catch (e) {
-                                // Window-not-found is expected when the user
-                                // never clicked Open or already closed it.
                                 console.log('[web_auth] popup_force_close: nothing to close', e);
                             }
                         })();
