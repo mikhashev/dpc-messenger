@@ -142,6 +142,12 @@ class DpcAgentProvider(AIProvider):
             manager = self.get_manager(agent_id)
             # Ensure the manager is started (lazy initialization)
             if manager._agent is None:
+                skip_flag = getattr(self._service, "skip_knowledge_index", False) if self._service else False
+                if skip_flag:
+                    logger.info(
+                        f"Lazy index rebuild triggered by first prompt for '{agent_id}' "
+                        f"(--skip-knowledge-index was set at startup; ~2 min expected)"
+                    )
                 await manager.start()
                 logger.info(f"DpcAgentProvider '{self.alias}': Per-agent manager started for '{agent_id}'")
             return manager

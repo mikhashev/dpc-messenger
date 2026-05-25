@@ -130,8 +130,10 @@ class CoreService:
     The main orchestrating class for the D-PC client's backend.
     Manages all sub-components and the application's lifecycle.
     """
-    def __init__(self):
+    def __init__(self, skip_knowledge_index: bool = False):
         logger.info("Initializing D-PC Core Service")
+
+        self.skip_knowledge_index = skip_knowledge_index
 
         DPC_HOME_DIR.mkdir(exist_ok=True)
 
@@ -647,6 +649,12 @@ class CoreService:
 
     async def _eager_agent_index_rebuild(self):
         """Scan all agents with memory.enabled=true and trigger index rebuild on startup."""
+        if self.skip_knowledge_index:
+            logger.info(
+                "Skipping eager agent index rebuild (--skip-knowledge-index flag). "
+                "First prompt to any agent will trigger lazy index init (~2 min expected)."
+            )
+            return
         from pathlib import Path
         import json as _json
         agents_dir = Path.home() / ".dpc" / "agents"

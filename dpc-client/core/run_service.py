@@ -61,6 +61,7 @@ if _hf_offline:
         "requests and read directly from ~/.cache/huggingface/"
     )
 
+import argparse
 import platform  # Import the platform module to check the OS
 import subprocess
 import sys
@@ -219,12 +220,34 @@ def dependency_setup():
         pass
 
 
+def _parse_args():
+    """Parse CLI flags. Env var DPC_SKIP_KNOWLEDGE_INDEX=1 is also honored."""
+    parser = argparse.ArgumentParser(
+        prog="run_service.py",
+        description="D-PC Messenger Core Service",
+    )
+    parser.add_argument(
+        "--skip-knowledge-index",
+        action="store_true",
+        default=os.environ.get("DPC_SKIP_KNOWLEDGE_INDEX") == "1",
+        help=(
+            "Skip eager agent memory index rebuild on startup. "
+            "Useful for rapid dev restarts — first prompt to any agent will "
+            "trigger lazy index init (~2 min for agents with large knowledge "
+            "bases). Default: off. Env var: DPC_SKIP_KNOWLEDGE_INDEX=1."
+        ),
+    )
+    return parser.parse_args()
+
+
 async def main():
     """Main entrypoint to start and run the Core Service."""
+    args = _parse_args()
+
     # GPU status check (ADR-012)
     dependency_setup()
 
-    service = CoreService()
+    service = CoreService(skip_knowledge_index=args.skip_knowledge_index)
 
     # Setup logging infrastructure before service starts
     setup_logging(service.settings)
