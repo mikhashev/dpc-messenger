@@ -298,18 +298,22 @@ class DpcAgentManager:
                             needs_full_rebuild = True
 
                     def _sync_index():
-                        """Runs in thread executor to avoid blocking the event loop."""
+                        """Per-file hash incremental indexing in thread executor."""
+                        nonlocal needs_full_rebuild
                         try:
                             import numpy as np
                             import hashlib
+                            import time
                             from pathlib import Path
                             import os
                             from dpc_client_core.dpc_agent.memory import get_embedding_provider
                             from dpc_client_core.dpc_agent.retrieval import (
                                 TextAddItem, VectorAddItem, make_backend_for_agent,
                             )
-                            from dpc_client_core.dpc_agent.text_extract import extract_text
-                            from dpc_client_core.dpc_agent.indexing_pipeline import _extract_heading, _build_doc_text
+                            from dpc_client_core.dpc_agent.text_extract import extract_text, is_binary
+                            from dpc_client_core.dpc_agent.indexing_pipeline import (
+                                _extract_heading, _build_doc_text, _BACKFILL_SKIP, read_file_meta,
+                            )
                             provider = _provider_ref or get_embedding_provider(model_name=_actual_model)
                             backend = make_backend_for_agent(
                                 agent_root,
@@ -317,37 +321,54 @@ class DpcAgentManager:
                                 dimensions=provider.dimensions,
                             )
 
-                            count = 0
-                            l6_count = 0
-                            # Always rebuild L5 agent knowledge (not just on first init)
-                            from dpc_client_core.dpc_agent.indexing_pipeline import full_rebuild
                             knowledge_dir = agent_root / "knowledge"
-                            count = full_rebuild(knowledge_dir, provider, backend, stop_event=self._stop_event)
 
-                            # Collect all extra documents (L6 + EXT) then embed+index in bulk
-                            extra_texts = []
-                            extra_metas = []
+                            collected: list = []
+                            l5_count = l6_count = ext_count = 0
 
-                            # L6: human knowledge (always re-index, not just on full rebuild)
+                            if knowledge_dir.is_dir():
+                                for f in sorted(knowledge_dir.iterdir()):
+                                    if self._stop_event.is_set():
+                                        return
+                                    if not f.is_file() or f.name in _BACKFILL_SKIP or is_binary(f):
+                                        continue
+                                    text = extract_text(f)
+                                    if not text:
+                                        continue
+                                    heading = _extract_heading(text)
+                                    doc_text = _build_doc_text(f.name, heading, text)
+                                    file_meta = read_file_meta(knowledge_dir, f.name)
+                                    collected.append((
+                                        f.name, doc_text,
+                                        {"source_file": f.name, "heading": heading,
+                                         "source_layer": file_meta.source_layer,
+                                         "char_count": len(text), "text": text[:500]},
+                                        "L5",
+                                    ))
+                                    l5_count += 1
+
                             if self.firewall and self.firewall.can_agent_access_context('knowledge', profile_name=self.agent_id):
                                 l6_dir = Path(os.environ.get("DPC_HOME", Path.home() / ".dpc")) / "knowledge"
                                 if l6_dir.is_dir():
                                     for f in sorted(l6_dir.iterdir()):
-                                        if f.suffix == ".md" and f.is_file():
-                                            text = extract_text(f)
-                                            if text:
-                                                heading = _extract_heading(text)
-                                                doc_text = _build_doc_text(f.name, heading, text)
-                                                extra_texts.append(doc_text)
-                                                extra_metas.append({"source_file": f.name, "heading": heading,
-                                                                    "source_layer": "L6", "char_count": len(text),
-                                                                    "text": text[:500]})
-                                                l6_count += 1
-                                    if l6_count:
-                                        log.info("L6 human knowledge collected: %d documents from %s", l6_count, l6_dir)
+                                        if self._stop_event.is_set():
+                                            return
+                                        if f.suffix != ".md" or not f.is_file():
+                                            continue
+                                        text = extract_text(f)
+                                        if not text:
+                                            continue
+                                        heading = _extract_heading(text)
+                                        doc_text = _build_doc_text(f.name, heading, text)
+                                        collected.append((
+                                            f.name, doc_text,
+                                            {"source_file": f.name, "heading": heading,
+                                             "source_layer": "L6", "char_count": len(text),
+                                             "text": text[:500]},
+                                            "L6",
+                                        ))
+                                        l6_count += 1
 
-                            # MEM-3.10: always re-index extended paths on startup
-                            ext_count = 0
                             if self.firewall:
                                 try:
                                     from dpc_client_core.dpc_agent.extended_paths_index import collect_extended_files, RECALL_EXTENSIONS
@@ -355,87 +376,115 @@ class DpcAgentManager:
                                     indexed_list = self.firewall._get_profile_or_global(self.agent_id, 'sandbox_extensions', 'indexed_paths', default=[]) if self.agent_id else []
                                     excluded_dirs = self.firewall._get_profile_or_global(self.agent_id, 'sandbox_extensions', 'excluded_dirs', default=None) if self.agent_id else None
                                     ext_files = collect_extended_files(ext_paths, indexed_paths=indexed_list, excluded_dirs=excluded_dirs, allowed_extensions=RECALL_EXTENSIONS) if indexed_list else []
-                                    if ext_files:
-                                        for f in ext_files:
-                                            text = extract_text(f)
-                                            if text:
-                                                heading = _extract_heading(text)
-                                                doc_text = _build_doc_text(f.name, heading, text)
-                                                extra_texts.append(doc_text)
-                                                extra_metas.append({"source_file": f.name, "heading": heading,
-                                                                    "source_layer": "EXT", "char_count": len(text),
-                                                                    "text": text[:500]})
-                                                ext_count += 1
-                                    elif indexed_list:
+                                    for f in ext_files:
+                                        if self._stop_event.is_set():
+                                            return
+                                        text = extract_text(f)
+                                        if not text:
+                                            continue
+                                        heading = _extract_heading(text)
+                                        doc_text = _build_doc_text(f.name, heading, text)
+                                        collected.append((
+                                            f.name, doc_text,
+                                            {"source_file": f.name, "heading": heading,
+                                             "source_layer": "EXT", "char_count": len(text),
+                                             "text": text[:500]},
+                                            "EXT",
+                                        ))
+                                        ext_count += 1
+                                    if not ext_files and indexed_list:
                                         log.info("Extended paths: %d paths configured but 0 text files found", len(indexed_list))
                                 except Exception as e:
                                     log.debug("Extended paths indexing skipped: %s", e)
 
-                            # Hash-based staleness check: skip re-embedding if sources AND content unchanged
-                            source_fingerprint = hashlib.sha256(
-                                "\n".join(sorted(m.get("source_file", "") for m in extra_metas)).encode()
-                            ).hexdigest()[:16]
-                            content_fingerprint = hashlib.sha256(
-                                "\n".join(extra_texts).encode()
-                            ).hexdigest()[:16]
-                            extra_hash = f"{l6_count}:{ext_count}:{source_fingerprint}:{content_fingerprint}"
-
-                            stored_extra_hash = ""
+                            import json as _json
                             meta_path = index_dir / "index_meta.json"
-                            if meta_path.exists() and not needs_full_rebuild:
+                            old_meta: dict = {}
+                            if meta_path.exists():
                                 try:
-                                    import json as _json2
-                                    _stored = _json2.loads(meta_path.read_text(encoding="utf-8"))
-                                    stored_extra_hash = _stored.get("extra_hash", "")
+                                    old_meta = _json.loads(meta_path.read_text(encoding="utf-8"))
                                 except Exception:
-                                    pass
+                                    old_meta = {}
+                            old_hashes: dict = old_meta.get("file_hashes", {}) if isinstance(old_meta, dict) else {}
 
-                            if stored_extra_hash == extra_hash and not needs_full_rebuild and extra_texts:
-                                backend.load()
-                                log.info("Extra index unchanged (hash=%s), skipping re-embed of %d docs", extra_hash, len(extra_texts))
-                                extra_texts = []
+                            # Legacy pool-hash meta: no per-file map, force clear to avoid duplicates
+                            if not old_hashes and ("extra_hash" in old_meta or meta_path.exists()):
+                                needs_full_rebuild = True
 
-                            # Embed + index extra documents in batches
-                            BATCH_SIZE = 4
-                            if extra_texts:
-                                indexed = 0
-                                for batch_start in range(0, len(extra_texts), BATCH_SIZE):
-                                    if self._stop_event.is_set():
-                                        log.info("Extra indexing interrupted by shutdown at batch %d/%d", batch_start, len(extra_texts))
-                                        break
-                                    batch_texts = extra_texts[batch_start:batch_start + BATCH_SIZE]
-                                    batch_metas = extra_metas[batch_start:batch_start + BATCH_SIZE]
-                                    vectors = np.array(provider.embed_batch(batch_texts), dtype=np.float32)
-                                    backend.vector.add([
-                                        VectorAddItem(vector=vec.reshape(1, -1), meta=meta)
-                                        for vec, meta in zip(vectors, batch_metas)
-                                    ])
-                                    indexed += len(batch_texts)
-                                if not self._stop_event.is_set():
-                                    backend.text.add([
-                                        TextAddItem(text=t, meta=m)
-                                        for t, m in zip(extra_texts, extra_metas)
-                                    ])
-                                    log.info("Bulk indexed %d extra documents (L6: %d, EXT: %d)", len(extra_texts), l6_count, ext_count)
+                            new_hashes: dict = {}
+                            to_embed: list = []   # (source_file, doc_text, meta)
+                            unchanged: list = []
+                            for source_file, doc_text, meta, _layer in collected:
+                                h = hashlib.sha256(doc_text.encode()).hexdigest()[:16]
+                                new_hashes[source_file] = h
+                                if not needs_full_rebuild and old_hashes.get(source_file) == h:
+                                    unchanged.append(source_file)
                                 else:
-                                    log.info("Extra indexing interrupted by shutdown before BM25")
+                                    to_embed.append((source_file, doc_text, meta))
+                            removed_files = [f for f in old_hashes if f not in new_hashes]
 
-                            if needs_full_rebuild or extra_texts:
-                                backend.save()
-                                # Persist extra_hash for staleness detection on next startup
-                                try:
-                                    import json as _json3
-                                    _mp = index_dir / "index_meta.json"
-                                    _md = _json3.loads(_mp.read_text(encoding="utf-8")) if _mp.exists() else {}
-                                    _md["extra_hash"] = extra_hash
-                                    _mp.write_text(_json3.dumps(_md, ensure_ascii=False, indent=2), encoding="utf-8")
-                                except Exception as _e:
-                                    log.debug("Failed to save extra_hash: %s", _e)
+                            t_start = time.monotonic()
+
                             if needs_full_rebuild:
-                                total = count + l6_count + ext_count
-                                log.info("Memory index built: %d documents (L5: %d, L6: %d, EXT: %d)", total, count, l6_count, ext_count)
-                            elif ext_count > 0:
-                                log.info("Extended paths re-indexed on startup: %d documents", ext_count)
+                                backend.vector.clear()
+                                backend.text.clear()
+                            else:
+                                backend.load()
+                                # remove_by_source kills all rows for source_file, must precede add for modified entries
+                                modified_or_removed = [f for f, _, _ in to_embed if f in old_hashes] + removed_files
+                                if modified_or_removed:
+                                    for sf in modified_or_removed:
+                                        backend.vector.remove_by_source(sf)
+                                        backend.text.remove_by_source(sf)
+
+                            BATCH_SIZE = 8
+                            embedded = 0
+                            if to_embed:
+                                if hasattr(backend.text, "begin_batch"):
+                                    backend.text.begin_batch()
+                                try:
+                                    for batch_start in range(0, len(to_embed), BATCH_SIZE):
+                                        if self._stop_event.is_set():
+                                            log.info("Per-file indexing interrupted by shutdown at batch %d/%d", batch_start, len(to_embed))
+                                            break
+                                        batch = to_embed[batch_start:batch_start + BATCH_SIZE]
+                                        batch_texts = [t for _, t, _ in batch]
+                                        batch_metas = [m for _, _, m in batch]
+                                        vectors = np.array(provider.embed_batch(batch_texts), dtype=np.float32)
+                                        backend.vector.add([
+                                            VectorAddItem(vector=vec.reshape(1, -1), meta=meta)
+                                            for vec, meta in zip(vectors, batch_metas)
+                                        ])
+                                        backend.text.add([
+                                            TextAddItem(text=t, meta=m)
+                                            for t, m in zip(batch_texts, batch_metas)
+                                        ])
+                                        embedded += len(batch)
+                                finally:
+                                    if hasattr(backend.text, "end_batch"):
+                                        backend.text.end_batch()
+
+                            # meta save last = commit point for crash safety
+                            if to_embed or removed_files or needs_full_rebuild:
+                                backend.save()
+                                try:
+                                    _md = old_meta if isinstance(old_meta, dict) else {}
+                                    _md["file_hashes"] = new_hashes
+                                    _md.pop("extra_hash", None)
+                                    meta_path.write_text(
+                                        _json.dumps(_md, ensure_ascii=False, indent=2),
+                                        encoding="utf-8",
+                                    )
+                                except Exception as _e:
+                                    log.debug("Failed to save file_hashes meta: %s", _e)
+
+                            elapsed = time.monotonic() - t_start
+                            log.info(
+                                "Per-file index update: %d unchanged, %d modified+new, %d removed → re-embed %d docs (%.1fs) [L5:%d L6:%d EXT:%d]",
+                                len(unchanged), len(to_embed), len(removed_files),
+                                embedded, elapsed, l5_count, l6_count, ext_count,
+                            )
+
                             # ADR-024: Build knowledge graph (nodes + structural edges)
                             try:
                                 from dpc_client_core.dpc_agent.knowledge_graph import KnowledgeGraph
@@ -450,16 +499,23 @@ class DpcAgentManager:
                             except Exception as e:
                                 log.warning("Knowledge graph build failed (non-fatal): %s", e)
 
+                            # Release embedding activations; singleton model stays loaded
+                            try:
+                                import torch
+                                if torch.cuda.is_available():
+                                    torch.cuda.empty_cache()
+                            except Exception:
+                                pass
+
                         except Exception as e:
                             log.warning("Background memory indexing failed: %s", e)
 
-                    if needs_full_rebuild or (self.firewall and self.firewall._get_profile_or_global(self.agent_id, 'sandbox_extensions', 'indexed_paths', default=[])):
-                        loop = asyncio.get_event_loop()
-                        loop.run_in_executor(None, _sync_index)
-                        if needs_full_rebuild:
-                            log.info("Memory: first-use index rebuild started in thread")
-                        else:
-                            log.info("Memory: extended paths re-index started in thread")
+                    loop = asyncio.get_event_loop()
+                    loop.run_in_executor(None, _sync_index)
+                    log.info(
+                        "Memory: %s index update started in thread",
+                        "first-use" if needs_full_rebuild else "per-file",
+                    )
                 log.info("Memory system initialized (model=%s, active_recall=%s)", _actual_model, mem_cfg.active_recall)
         except Exception as e:
             log.warning("Memory system init skipped: %s", e)
