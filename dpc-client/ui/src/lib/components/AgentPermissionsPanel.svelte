@@ -29,11 +29,10 @@
     {
       name: 'File Operations',
       tools: [
-        { key: 'read_file', label: 'Read Files', desc: 'Read files from agent sandbox' },
-        { key: 'write_file', label: 'Write Files', desc: 'Write files to agent sandbox' },
-        { key: 'repo_list', label: 'List Files', desc: 'List directory contents' },
+        { key: 'read_file', label: 'Read Files', desc: 'Read files from sandbox or absolute extended paths' },
+        { key: 'write_file', label: 'Write Files', desc: 'Write files to sandbox or absolute extended paths' },
+        { key: 'list_dir', label: 'List Directory', desc: 'List sandbox or absolute extended path contents' },
         { key: 'repo_delete', label: 'Delete Files', desc: 'Delete files/directories in sandbox' },
-        { key: 'extended_path_list', label: 'Extended List', desc: 'List directories in custom paths' },
         { key: 'list_extended_sandbox_paths', label: 'List Extended Paths', desc: 'View configured extended paths' },
       ]
     },

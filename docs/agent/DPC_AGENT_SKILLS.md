@@ -191,7 +191,7 @@ if rounds >= 5 AND skill was used:
 
 The agent can read this file directly:
 ```json
-{"name": "repo_read", "arguments": {"path": "skills/_stats.json"}}
+{"name": "read_file", "arguments": {"path": "skills/_stats.json"}}
 ```
 
 ---
@@ -222,7 +222,7 @@ The agent can read this file directly:
 
 The agent can list its skills:
 ```json
-{"name": "repo_list", "arguments": {"path": "skills"}}
+{"name": "list_dir", "arguments": {"path": "skills"}}
 ```
 
 ---
@@ -232,7 +232,7 @@ The agent can list its skills:
 | Skill | Trigger phrases | Key tools |
 |-------|----------------|-----------|
 | `skill-creator` | "learn from this task", "remember this strategy", "improve how I handle..." | `update_scratchpad`, `repo_write_commit` |
-| `code-analysis` | "analyze", "review", "find bugs", "understand code" | `repo_read`, `repo_list`, `search_in_file`, `search_files` |
+| `code-analysis` | "analyze", "review", "find bugs", "understand code" | `read_file`, `list_dir`, `search_in_file`, `search_files` |
 | `knowledge-extraction` | "remember this", "save that", "extract knowledge", "commit this" | `extract_knowledge`, `knowledge_write` |
 | `p2p-research` | "ask Alice", "check with peer", "distributed", "peer GPU" | `send_user_message`, `extended_path_read` |
 | `web-research` | "find", "look up", "research online", "check current facts" | `search_web`, `browse_page` |
@@ -294,16 +294,16 @@ The agent can inspect its own skill system:
 
 ```
 # Read a specific skill
-repo_read("skills/code-analysis/SKILL.md")
+read_file("skills/code-analysis/SKILL.md")
 
 # Check skill performance stats
-repo_read("skills/_stats.json")
+read_file("skills/_stats.json")
 
 # List all skills
-repo_list("skills/")
+list_dir("skills/")
 
 # Check pending improvements (shadow mode queue)
-repo_read("skills/pending_improvements.jsonl")
+read_file("skills/pending_improvements.jsonl")
 ```
 
 The system is designed so the agent actively contributes to its own skill improvement via `skill-creator` and the reflection loop.

@@ -187,10 +187,11 @@ class ContextFirewall:
 
         # Parse tool permissions from config — defaults come from the
         # registry (ToolEntry.default_enabled) and were seeded above.
-        # Legacy tool name mapping (S31: 6 tools merged into read_file/write_file)
+        # Legacy tool name mapping (S31: 6 tools merged into read_file/write_file; S149: 3 list tools merged into list_dir)
         _legacy_tool_map = {
             'read_file': ['repo_read', 'extended_path_read', 'drive_read'],
             'write_file': ['repo_write_commit', 'extended_path_write', 'drive_write'],
+            'list_dir': ['repo_list', 'extended_path_list', 'drive_list'],
         }
         registry_defaults = self._get_registered_tool_defaults()
         tools = dpc_agent.get('tools', {})
@@ -784,7 +785,7 @@ class ContextFirewall:
                 'tools': {
                     'read_file': True,
                     'write_file': False,
-                    'repo_list': True,
+                    'list_dir': True,
                     'repo_delete': False,
                     'update_scratchpad': True,
                     'browse_page': True,
@@ -1745,9 +1746,9 @@ class ContextFirewall:
                         else:
                             # All valid tool names
                             valid_tools = {
-                                # File operations (unified S31)
-                                'read_file', 'write_file', 'repo_list', 'repo_delete',
-                                'drive_list',
+                                # File operations (unified S31 + S149)
+                                'read_file', 'write_file', 'list_dir', 'repo_delete',
+                                'list_extended_sandbox_paths',
                                 # Memory/identity
                                 'update_scratchpad', 'update_identity', 'chat_history',
                                 # Knowledge
@@ -1767,9 +1768,6 @@ class ContextFirewall:
                                 'schedule_task', 'get_task_status',
                                 # Search tools (v0.16.0+)
                                 'search_files', 'search_in_file',
-                                # Extended sandbox tools (v0.16.0+ — read/write merged into read_file/write_file S31)
-                                'extended_path_list',
-                                'list_extended_sandbox_paths',
                                 # Messaging tools (v0.18.0+)
                                 'send_user_message',
                                 # Knowledge tools (v0.18.0+)
@@ -1784,9 +1782,10 @@ class ContextFirewall:
                                 'list_my_tools', 'list_my_skills',
                                 # Memory search (ADR-010)
                                 'memory_search',
-                                # Legacy aliases (S31 migration — accepted but mapped to read_file/write_file)
+                                # Legacy aliases (S31 → read_file/write_file; S149 → list_dir)
                                 'repo_read', 'repo_write_commit', 'drive_read', 'drive_write',
                                 'extended_path_read', 'extended_path_write',
+                                'repo_list', 'drive_list', 'extended_path_list',
                             }
                             for tool_name, tool_enabled in tools.items():
                                 if tool_name.startswith('_'):
@@ -1837,8 +1836,8 @@ class ContextFirewall:
                                 else:
                                     # Use the same valid tools as dpc_agent
                                     valid_tools = {
-                                        'read_file', 'write_file', 'repo_list', 'repo_delete',
-                                        'drive_list',
+                                        'read_file', 'write_file', 'list_dir', 'repo_delete',
+                                        'list_extended_sandbox_paths',
                                         'update_scratchpad', 'update_identity', 'chat_history',
                                         'knowledge_list',
                                         'get_task_board',
@@ -1850,8 +1849,6 @@ class ContextFirewall:
                                         'run_shell',
                                         'schedule_task', 'get_task_status',
                                         'search_files', 'search_in_file',
-                                        'extended_path_list',
-                                        'list_extended_sandbox_paths',
                                         'send_user_message',
                                         'deduplicate_identity',
                                         'register_task_type', 'list_task_types', 'unregister_task_type',
@@ -1863,9 +1860,10 @@ class ContextFirewall:
                                         'list_my_tools', 'list_my_skills',
                                         # Memory search (ADR-010)
                                         'memory_search',
-                                        # Legacy aliases (S31 migration)
+                                        # Legacy aliases (S31 → read_file/write_file; S149 → list_dir)
                                         'repo_read', 'repo_write_commit', 'drive_read', 'drive_write',
                                         'extended_path_read', 'extended_path_write',
+                                        'repo_list', 'drive_list', 'extended_path_list',
                                     }
                                     for tool_name, tool_enabled in tools.items():
                                         if tool_name.startswith('_'):

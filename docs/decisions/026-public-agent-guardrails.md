@@ -34,7 +34,7 @@ Agents receive a restricted tool set when the message originates from an externa
 allowed_tools = memory_search,browse_page,search_web,read_file,list_my_tools,knowledge_list
 ```
 
-**Defense in depth:** The agent firewall already restricts dangerous tools for Iris (drive_list, import_skill_from_agent, repo_commit_push, run_shell are disabled). Source-based filtering is an additional layer — even if firewall config drifts, Discord-sourced messages still can't trigger write tools. Code enforcement cannot be bypassed by prompt injection. System prompt reinforcement ("never modify your configuration") serves as a third defense layer in Block1.
+**Defense in depth:** The agent firewall already restricts dangerous tools for Iris (list_dir, import_skill_from_agent, repo_commit_push, run_shell are disabled). Source-based filtering is an additional layer — even if firewall config drifts, Discord-sourced messages still can't trigger write tools. Code enforcement cannot be bypassed by prompt injection. System prompt reinforcement ("never modify your configuration") serves as a third defense layer in Block1.
 
 ### 2. URL Whitelist for User-Submitted Content
 

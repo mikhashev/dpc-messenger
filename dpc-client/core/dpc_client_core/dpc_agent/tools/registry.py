@@ -209,11 +209,9 @@ class ToolEntry:
 
 # Core tools that are always available
 CORE_TOOL_NAMES = {
-    # File operations (sandboxed)
-    "repo_read", "repo_list", "repo_write_commit", "repo_delete",
-    "drive_read", "drive_list", "drive_write",
-    # Extended sandbox (v0.16.0+)
-    "extended_path_read", "extended_path_list", "extended_path_write", "list_extended_sandbox_paths",
+    # File operations (sandboxed + extended)
+    "read_file", "write_file", "list_dir", "repo_delete",
+    "list_extended_sandbox_paths",
     # Search tools (v0.16.0+)
     "search_files", "search_in_file",
     # Memory/identity

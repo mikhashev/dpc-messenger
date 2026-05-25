@@ -323,7 +323,7 @@ metadata:
   execution_mode: knowledge
   required_tools:
     - update_scratchpad
-    - drive_write
+    - write_file
   required_permissions: []
   agent_profiles:
     - default
@@ -335,7 +335,7 @@ metadata:
 ## Strategy
 
 1. Identify the task class — what general type of problem is this? (code analysis, research, writing, etc.)
-2. If improving an existing skill: load the current SKILL.md with `drive_read`, review it, then write an improved version.
+2. If improving an existing skill: load the current SKILL.md with `read_file`, review it, then write an improved version.
 3. If creating a new skill:
    a. Choose a kebab-case name (e.g. `code-analysis`, `web-research`)
    b. Write the frontmatter using **exactly this structure** (provenance and sharing must be nested dicts):
@@ -369,7 +369,7 @@ metadata:
       ---
       ```
    c. Write the body: Strategy (numbered steps), When to Use, When NOT to Use, Examples, Common Failures
-   d. Save to `{{skills_dir}}/{{name}}/SKILL.md` using `drive_write`
+   d. Save to `{{skills_dir}}/{{name}}/SKILL.md` using `write_file`
 4. The description field is the most important — it must be specific enough for the LLM router to pick this skill correctly.
 5. **Critical**: `provenance` and `sharing` must always be YAML dicts (indented key-value pairs), never plain strings. A plain string will silently break skill loading.
 
@@ -390,7 +390,7 @@ metadata:
 
 Creating a new skill after a successful code review:
 ```
-1. Reflect: "I always start with repo_list, then search_in_file for patterns..."
+1. Reflect: "I always start with list_dir, then search_in_file for patterns..."
 2. Name the skill: "code-analysis"
 3. Write SKILL.md with these steps as the Strategy section
 4. Save to skills/code-analysis/SKILL.md
@@ -433,8 +433,8 @@ sharing:
 metadata:
   execution_mode: knowledge
   required_tools:
-    - repo_read
-    - repo_list
+    - read_file
+    - list_dir
     - search_files
     - search_in_file
   required_permissions: []
@@ -450,9 +450,9 @@ metadata:
 ## Strategy
 
 1. **Establish scope**: What exactly needs to be analyzed? (file, module, function, pattern?)
-2. **Start broad**: Use `repo_list` to understand directory structure before diving in.
+2. **Start broad**: Use `list_dir` to understand directory structure before diving in.
 3. **Find entry points**: Search for the main class/function with `search_in_file`.
-4. **Read key files**: Use `repo_read` to read identified files. Start with the most relevant.
+4. **Read key files**: Use `read_file` to read identified files. Start with the most relevant.
 5. **Trace call graphs**: Follow function calls — if X calls Y, read Y too.
 6. **Search for patterns**: Use `search_files` with regex to find all usages of a symbol.
 7. **Synthesize**: After reading, explain architecture, data flow, or issues found.
@@ -474,9 +474,9 @@ metadata:
 
 Analyzing a module's architecture:
 ```
-1. repo_list("dpc_agent/") → understand what files exist
+1. list_dir("dpc_agent/") → understand what files exist
 2. search_in_file("agent.py", "class DpcAgent") → find the main class
-3. repo_read("agent.py") → read the full class
+3. read_file("agent.py") → read the full class
 4. search_in_file("agent.py", "def ") → list all methods
 5. Follow imports → read Memory, ToolRegistry, etc.
 ```
@@ -484,7 +484,7 @@ Analyzing a module's architecture:
 ## Common Failures
 
 - **Reading too much at once**: Read entry point first, then follow references
-- **Missing the bigger picture**: Always start with repo_list before reading files
+- **Missing the bigger picture**: Always start with list_dir before reading files
 - **Ignoring imports**: The import section reveals the dependency graph
 - **Not searching for usages**: A class definition alone doesn't show how it's used
 

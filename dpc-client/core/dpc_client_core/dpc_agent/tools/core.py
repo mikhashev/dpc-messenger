@@ -102,65 +102,57 @@ def repo_read(ctx: ToolContext, path: str, offset: int | None = None, limit: int
     return read_file(ctx, path, offset=offset, limit=limit)
 
 
-def repo_list(ctx: ToolContext, path: str = ".", recursive: bool = False) -> str:
+def list_dir(ctx: ToolContext, path: str = ".", recursive: bool = False) -> str:
     """
-    List files in the agent sandbox.
+    List files in a directory. Relative paths list the agent sandbox,
+    absolute paths are checked against firewall (sandbox_extensions).
 
     Args:
         ctx: Tool context
-        path: Directory path relative to agent root
+        path: Relative path (sandbox) or absolute path (firewall-checked)
         recursive: List recursively
 
     Returns:
-        List of files/directories
+        Directory listing
     """
     try:
-        dir_path = ctx.repo_path(path)
+        import os
+        if os.path.isabs(path):
+            dir_path = ctx.validate_extended_path(path, require_write=False)
+        else:
+            dir_path = ctx.repo_path(path)
 
         if not dir_path.exists():
             return f"⚠️ Directory not found: {path}"
-
         if not dir_path.is_dir():
             return f"⚠️ Not a directory: {path}"
 
         items = []
-
         if recursive:
             for item in dir_path.rglob("*"):
-                rel_path = item.relative_to(dir_path)
+                rel = item.relative_to(dir_path)
                 if item.is_dir():
-                    items.append(f"[DIR]  {rel_path}/")
+                    items.append(f"📁 {rel}/")
                 else:
                     size = item.stat().st_size
-                    items.append(f"[FILE] {rel_path} ({size} bytes)")
+                    items.append(f"📄 {rel} ({size:,} bytes)")
         else:
             for item in sorted(dir_path.iterdir()):
-                name = item.name
                 if item.is_dir():
-                    items.append(f"[DIR]  {name}/")
+                    items.append(f"📁 {item.name}/")
                 else:
                     size = item.stat().st_size
-                    items.append(f"[FILE] {name} ({size} bytes)")
+                    items.append(f"📄 {item.name} ({size:,} bytes)")
 
         if not items:
-            return f"Empty directory: {path}"
+            return f"Directory '{path}' is empty"
 
-        return f"Contents of {path}:\n" + "\n".join(items)
+        return "\n".join(items[:200]) + (f"\n\n... ({len(items)} total items)" if len(items) > 200 else "")
 
     except PermissionError as e:
-        return f"⚠️ Sandbox violation: {e}"
+        return f"⚠️ Access denied: {e}"
     except Exception as e:
         return f"⚠️ Error listing directory: {e}"
-
-
-def drive_read(ctx: ToolContext, path: str, offset: int | None = None, limit: int | None = None) -> str:
-    """Legacy alias for read_file."""
-    return read_file(ctx, path, offset=offset, limit=limit)
-
-
-def drive_list(ctx: ToolContext, path: str = ".", recursive: bool = False) -> str:
-    """Alias for repo_list (compatibility with Ouroboros tools)."""
-    return repo_list(ctx, path, recursive)
 
 
 def write_file(ctx: ToolContext, path: str, content: str) -> str:
@@ -220,11 +212,6 @@ def write_file(ctx: ToolContext, path: str, content: str) -> str:
 
 # Legacy alias
 def repo_write(ctx: ToolContext, path: str, content: str) -> str:
-    return write_file(ctx, path, content)
-
-
-def drive_write(ctx: ToolContext, path: str, content: str) -> str:
-    """Legacy alias for write_file."""
     return write_file(ctx, path, content)
 
 
@@ -1239,55 +1226,6 @@ def extended_path_read(ctx: ToolContext, path: str, offset: int | None = None, l
         return f"⚠️ Error reading file: {e}"
 
 
-def extended_path_list(ctx: ToolContext, path: str, recursive: bool = False) -> str:
-    """
-    List files in an extended sandbox directory.
-
-    Args:
-        ctx: Tool context
-        path: Absolute directory path (must be in extended sandbox)
-        recursive: If True, list recursively
-
-    Returns:
-        Directory listing
-    """
-    try:
-        dir_path = ctx.validate_extended_path(path, require_write=False)
-
-        if not dir_path.exists():
-            return f"⚠️ Directory not found: {path}"
-
-        if not dir_path.is_dir():
-            return f"⚠️ Not a directory: {path}"
-
-        items = []
-        if recursive:
-            for item in dir_path.rglob("*"):
-                rel = item.relative_to(dir_path)
-                if item.is_dir():
-                    items.append(f"📁 {rel}/")
-                else:
-                    size = item.stat().st_size
-                    items.append(f"📄 {rel} ({size:,} bytes)")
-        else:
-            for item in sorted(dir_path.iterdir()):
-                if item.is_dir():
-                    items.append(f"📁 {item.name}/")
-                else:
-                    size = item.stat().st_size
-                    items.append(f"📄 {item.name} ({size:,} bytes)")
-
-        if not items:
-            return f"Directory '{path}' is empty"
-
-        return "\n".join(items[:200]) + (f"\n\n... ({len(items)} total items)" if len(items) > 200 else "")
-
-    except PermissionError as e:
-        return f"⚠️ Access denied: {e}"
-    except Exception as e:
-        return f"⚠️ Error listing directory: {e}"
-
-
 def extended_path_write(ctx: ToolContext, path: str, content: str) -> str:
     """
     Write a file to an extended sandbox path (outside ~/.dpc/agent/).
@@ -1617,16 +1555,16 @@ def get_tools() -> List[ToolEntry]:
         ),
 
         ToolEntry(
-            name="repo_list",
+            name="list_dir",
             schema={
-                "name": "repo_list",
-                "description": "List files in a directory within the agent sandbox",
+                "name": "list_dir",
+                "description": "List files in a directory. Relative paths list the agent sandbox; absolute paths are checked against firewall (sandbox_extensions). Use recursive=true to descend.",
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "path": {
                             "type": "string",
-                            "description": "Directory path (default: root)",
+                            "description": "Relative path (sandbox, default '.') or absolute path (firewall-checked)",
                             "default": "."
                         },
                         "recursive": {
@@ -1638,36 +1576,9 @@ def get_tools() -> List[ToolEntry]:
                     "required": []
                 }
             },
-            handler=repo_list,
+            handler=list_dir,
             timeout_sec=30,
             default_enabled=True,
-        ),
-
-        ToolEntry(
-            name="drive_list",
-            schema={
-                "name": "drive_list",
-                "description": "List files in the agent sandbox (alias for repo_list)",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "path": {
-                            "type": "string",
-                            "description": "Directory path (default: root)",
-                            "default": "."
-                        },
-                        "recursive": {
-                            "type": "boolean",
-                            "description": "List recursively",
-                            "default": False
-                        }
-                    },
-                    "required": []
-                }
-            },
-            handler=drive_list,
-            timeout_sec=30,
-            default_enabled=False,
         ),
 
         ToolEntry(
@@ -2038,33 +1949,7 @@ def get_tools() -> List[ToolEntry]:
             default_enabled=True,
         ),
 
-        # Extended sandbox tools (v0.16.0+ — read/write merged into read_file/write_file in S31)
-        ToolEntry(
-            name="extended_path_list",
-            schema={
-                "name": "extended_path_list",
-                "description": "List files in an extended sandbox directory",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "path": {
-                            "type": "string",
-                            "description": "Absolute directory path"
-                        },
-                        "recursive": {
-                            "type": "boolean",
-                            "description": "List recursively",
-                            "default": False
-                        }
-                    },
-                    "required": ["path"]
-                }
-            },
-            handler=extended_path_list,
-            timeout_sec=30,
-            default_enabled=False,
-        ),
-
+        # Extended sandbox tools (v0.16.0+ — read/write/list merged into read_file/write_file/list_dir)
         ToolEntry(
             name="list_extended_sandbox_paths",
             schema={

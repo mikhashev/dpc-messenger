@@ -27,7 +27,7 @@ class DpcAgentProvider(AIProvider):
     {
         "alias": "dpc_agent",
         "type": "dpc_agent",
-        "tools": ["repo_read", "repo_list", "web_search", "update_scratchpad"],
+        "tools": ["read_file", "list_dir", "web_search", "update_scratchpad"],
         "budget_usd": 50,
         "max_rounds": 200,
         "context_window": 200000
