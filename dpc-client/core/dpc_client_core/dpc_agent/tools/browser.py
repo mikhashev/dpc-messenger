@@ -520,10 +520,12 @@ class AuthBrowser:
         self._check_domain(url)
         self._page.goto(url, wait_until="networkidle", timeout=30000)
 
-    # ADR-028 back-compat alias. Single-shot consumers
-    # (_browse_with_camoufox / _auth_browse_html) call goto(); keep the
-    # name working so the diff stays small.
-    goto = navigate
+    def goto(self, url: str) -> None:
+        """ADR-028 back-compat alias for `navigate()`. Single-shot
+        consumers (_browse_with_camoufox / _auth_browse_html) call
+        goto(); proper wrapper (not class-level assignment) so subclass
+        overrides of navigate() are honored."""
+        return self.navigate(url)
 
     def get_page_html(self) -> str:
         """Return raw HTML of the current page. Used by T9 challenge
@@ -560,10 +562,11 @@ class AuthBrowser:
     ) -> bytes | str:
         """Capture a screenshot of the current page.
 
-        Returns PNG bytes by default (spec line 108). When `save_to` is
-        given, writes the image to that path and returns the path
-        instead — escape hatch for large full-page screenshots that
-        cause memory pressure in the agent loop."""
+        Returns PNG bytes by default. When `save_to` is given, writes
+        the image to that path and returns the path string instead —
+        escape hatch for large full-page screenshots that cause memory
+        pressure in the agent loop. Caller owns cleanup of the saved
+        file; AuthBrowser does not track or auto-remove it on close."""
         self._require_open()
         if save_to:
             self._page.screenshot(full_page=full_page, path=save_to)
