@@ -18,6 +18,12 @@
   export let archiveInfo: { count: number; max_sessions: number; archive_path: string; sessions: any[] } | null = null;
   export let conversationId: string = '';  // agent_id used as conversation_id for archive commands
 
+  // Backend-discovered registry tools (populated on mount via list_all_tools).
+  // Lets the panel surface tools that exist in code but aren't in any
+  // hardcoded category below — closes the AGENT-TOOL-FIREWALL-DEFAULT-DRIFT
+  // gap from S145 backlog (Mike picked Option 2 in S147 chat).
+  let allRegisteredTools: Array<{name: string; description: string; default_enabled: boolean; is_restricted: boolean}> = [];
+
   // Tool definitions by category
   const toolCategories = [
     {
@@ -110,6 +116,18 @@
       ]
     },
   ];
+
+  // Set of every tool key already rendered by the hardcoded categories.
+  // Anything in allRegisteredTools NOT in this set is shown in a separate
+  // "Other Registered Tools" section so new ToolEntry registrations
+  // never go invisible (the S145 lesson — see AGENT-TOOL-FIREWALL-DEFAULT-DRIFT).
+  const hardcodedToolKeys: Set<string> = new Set(
+    toolCategories.flatMap(cat => cat.tools.map((t: { key: string }) => t.key))
+  );
+
+  // Derived: tools known to the backend registry but not in any hardcoded category.
+  // Reactive — repopulates when allRegisteredTools arrives from list_all_tools.
+  $: unmanagedTools = allRegisteredTools.filter(t => !hardcodedToolKeys.has(t.name));
 
   // Helper to get sandbox extensions safely
   function getSandboxExtensions(settings: any, type: 'read_only' | 'read_write'): string[] {
@@ -389,6 +407,28 @@
       }
     };
     window.addEventListener('message', _webAuthMessageHandler);
+
+    // Query the backend for the full ToolRegistry list. Backend restart
+    // is what brings new ToolEntry registrations into the registry, so
+    // a single startup-time fetch is sufficient (no live reactive sync
+    // — Mike's S147 simplification).
+    (async () => {
+      try {
+        const result = sendCommand('list_all_tools', {});
+        if (result === false) {
+          // Socket not open yet — graceful skip; AgentPermissionsPanel
+          // remounts after connection, the next mount will retry.
+          return;
+        }
+        const resp = await (result as Promise<any>);
+        if (resp?.status === 'success' && Array.isArray(resp.tools)) {
+          allRegisteredTools = resp.tools;
+        }
+      } catch (e) {
+        console.warn('[AgentPermissionsPanel] list_all_tools failed:', e);
+        // Graceful fallback — panel works without the dynamic section.
+      }
+    })();
   });
 
   onDestroy(() => {
@@ -789,6 +829,71 @@
             {/each}
           </div>
         {/each}
+
+        <!--
+          Unmanaged tools — anything in the ToolRegistry not covered by
+          the hardcoded categories above. New ToolEntry registrations
+          land here automatically after backend restart so they're never
+          invisible. Toggling them writes to privacy_rules.json via the
+          same editSettings.tools path; on next save they're "managed".
+          Backlog: AGENT-TOOL-FIREWALL-DEFAULT-DRIFT.
+        -->
+        {#if unmanagedTools.length > 0}
+          <h5 style="margin-top: 1rem; margin-bottom: 0.5rem; color: var(--text-secondary);">
+            Other Registered Tools
+            <span class="help-text-small" style="font-weight: normal;">
+              ({unmanagedTools.length} discovered from backend registry, not in categories above)
+            </span>
+          </h5>
+          <div class="notification-events">
+            {#each unmanagedTools as tool}
+              <div class="notification-event-item">
+                {#if editMode && editSettings?.tools}
+                  <label for="agent-tool-{tool.name}">
+                    <input
+                      type="checkbox"
+                      id="agent-tool-{tool.name}"
+                      bind:checked={editSettings.tools[tool.name]}
+                    />
+                    <div>
+                      <span class="event-name" style={tool.is_restricted ? 'color: var(--danger);' : ''}>
+                        {tool.name}
+                        {#if tool.default_enabled}
+                          <span class="help-text-small" style="font-weight: normal; margin-left: 0.5rem;">(recommended: on)</span>
+                        {/if}
+                        {#if !(tool.name in (editSettings?.tools ?? {}))}
+                          <span class="help-text-small" style="font-weight: normal; margin-left: 0.5rem; color: var(--text-secondary);" title="Not in privacy_rules.json yet — toggle to persist">⚠ unmanaged</span>
+                        {/if}
+                      </span>
+                      <p class="help-text-small" style="margin: 0;">{tool.description || 'No description'}</p>
+                    </div>
+                  </label>
+                {:else}
+                  <label for="agent-tool-{tool.name}">
+                    <input
+                      type="checkbox"
+                      id="agent-tool-{tool.name}"
+                      checked={displaySettings?.tools?.[tool.name] ?? false}
+                      disabled
+                    />
+                    <div>
+                      <span class="event-name" style={tool.is_restricted ? 'color: var(--danger);' : ''}>
+                        {tool.name}
+                        {#if tool.default_enabled}
+                          <span class="help-text-small" style="font-weight: normal; margin-left: 0.5rem;">(recommended: on)</span>
+                        {/if}
+                        {#if !(tool.name in (displaySettings?.tools ?? {}))}
+                          <span class="help-text-small" style="font-weight: normal; margin-left: 0.5rem; color: var(--text-secondary);" title="Not in privacy_rules.json yet — toggle to persist">⚠ unmanaged</span>
+                        {/if}
+                      </span>
+                      <p class="help-text-small" style="margin: 0;">{tool.description || 'No description'}</p>
+                    </div>
+                  </label>
+                {/if}
+              </div>
+            {/each}
+          </div>
+        {/if}
 
         {#if !isGlobal}
           <!-- Sandbox Path Configuration (per-agent) -->

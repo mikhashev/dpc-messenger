@@ -3540,6 +3540,44 @@ class CoreService:
             except Exception as e:
                 logger.error(f"Failed to broadcast transcription to {node_id}: {e}")
 
+    async def list_all_tools(self) -> Dict[str, Any]:
+        """Enumerate every registered agent tool for the UI.
+
+        AgentPermissionsPanel uses this to render the full set of tools
+        the registry knows about (across all agents — registry is shared
+        at module discovery time). Tools not yet in privacy_rules.json
+        show up as "unmanaged" so the user can flip them on/off without
+        editing JSON by hand.
+
+        Backlog ref: AGENT-TOOL-FIREWALL-DEFAULT-DRIFT (Mike picked
+        Option 2 — UI auto-detection — in S147 chat).
+        """
+        try:
+            from .dpc_agent.tools.registry import (
+                ToolRegistry,
+                CORE_TOOL_NAMES,
+                RESTRICTED_TOOL_NAMES,
+            )
+            registry = ToolRegistry()
+            tools = []
+            for entry in registry._entries.values():
+                description = entry.schema.get("description", "") if isinstance(entry.schema, dict) else ""
+                is_core = entry.name in CORE_TOOL_NAMES
+                is_restricted = entry.name in RESTRICTED_TOOL_NAMES
+                tools.append({
+                    "name": entry.name,
+                    "description": description,
+                    "is_core": is_core,
+                    "is_restricted": is_restricted,
+                    # Default recommendation: core-but-not-restricted on, everything else off.
+                    "default_enabled": is_core and not is_restricted,
+                })
+            tools.sort(key=lambda t: t["name"])
+            return {"status": "success", "tools": tools}
+        except Exception as e:
+            logger.error("Error listing all tools: %s", e, exc_info=True)
+            return {"status": "error", "message": str(e)}
+
     async def get_firewall_rules(self) -> Dict[str, Any]:
         """Get current firewall rules as JSON dict for editor."""
         try:

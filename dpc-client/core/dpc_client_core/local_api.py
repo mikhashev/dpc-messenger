@@ -70,6 +70,7 @@ ALLOWED_COMMANDS: frozenset = frozenset({
     # Firewall
     "get_firewall_rules",
     "save_firewall_rules",
+    "list_all_tools",
     "get_cc_config",
     # AI queries
     "execute_ai_query",
