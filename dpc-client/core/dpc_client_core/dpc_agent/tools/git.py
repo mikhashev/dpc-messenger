@@ -549,6 +549,7 @@ def get_tools() -> List[ToolEntry]:
             },
             handler=git_status,
             timeout_sec=30,
+            default_enabled=False,
         ),
 
         ToolEntry(
@@ -586,6 +587,7 @@ def get_tools() -> List[ToolEntry]:
             },
             handler=git_diff,
             timeout_sec=30,
+            default_enabled=False,
         ),
 
         ToolEntry(
@@ -635,6 +637,7 @@ def get_tools() -> List[ToolEntry]:
             },
             handler=git_log,
             timeout_sec=30,
+            default_enabled=False,
         ),
 
         ToolEntry(
@@ -661,6 +664,7 @@ def get_tools() -> List[ToolEntry]:
             },
             handler=git_add,
             timeout_sec=30,
+            default_enabled=False,
         ),
 
         ToolEntry(
@@ -697,6 +701,7 @@ def get_tools() -> List[ToolEntry]:
             },
             handler=git_commit,
             timeout_sec=30,
+            default_enabled=False,
         ),
 
         ToolEntry(
@@ -729,6 +734,7 @@ def get_tools() -> List[ToolEntry]:
             },
             handler=git_branch,
             timeout_sec=30,
+            default_enabled=False,
         ),
 
         ToolEntry(
@@ -750,6 +756,7 @@ def get_tools() -> List[ToolEntry]:
             },
             handler=git_init,
             timeout_sec=30,
+            default_enabled=False,
         ),
 
         ToolEntry(
@@ -792,6 +799,7 @@ def get_tools() -> List[ToolEntry]:
             },
             handler=git_checkout,
             timeout_sec=30,
+            default_enabled=False,
         ),
 
         ToolEntry(
@@ -822,6 +830,7 @@ def get_tools() -> List[ToolEntry]:
             },
             handler=git_merge,
             timeout_sec=30,
+            default_enabled=False,
         ),
 
         ToolEntry(
@@ -851,6 +860,7 @@ def get_tools() -> List[ToolEntry]:
             },
             handler=git_tag,
             timeout_sec=30,
+            default_enabled=False,
         ),
 
         ToolEntry(
@@ -891,6 +901,7 @@ def get_tools() -> List[ToolEntry]:
             },
             handler=git_reset,
             timeout_sec=30,
+            default_enabled=False,
         ),
 
         ToolEntry(
@@ -916,5 +927,6 @@ def get_tools() -> List[ToolEntry]:
             },
             handler=git_snapshot,
             timeout_sec=30,
+            default_enabled=False,
         ),
     ]

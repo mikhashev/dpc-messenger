@@ -379,6 +379,7 @@ def get_tools() -> List[ToolEntry]:
             },
             handler=read_session_archive,
             timeout_sec=30,
+            default_enabled=True,
         ),
         ToolEntry(
             name="read_session_detail",
@@ -439,6 +440,7 @@ def get_tools() -> List[ToolEntry]:
             },
             handler=read_session_detail,
             timeout_sec=30,
+            default_enabled=True,
         ),
         ToolEntry(
             name="search_session_archives",
@@ -490,5 +492,6 @@ def get_tools() -> List[ToolEntry]:
             },
             handler=search_session_archives,
             timeout_sec=60,
+            default_enabled=True,
         ),
     ]

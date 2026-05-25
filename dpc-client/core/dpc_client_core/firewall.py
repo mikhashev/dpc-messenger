@@ -96,97 +96,106 @@ class ContextFirewall:
         logger.debug("Notification settings updated: enabled=%s, events=%s",
                      self.notifications_enabled, self.notification_events)
 
+    def _get_registered_tool_defaults(self) -> Dict[str, bool]:
+        """Read canonical tool defaults from the ToolEntry registry.
+
+        Single source of truth for `default_enabled` per tool: each
+        ToolEntry declares it explicitly at registration. Replaces the
+        old hardcoded `all_tools_defaults` dict that used to drift from
+        the actual registered tools (e.g. popup_* tools added without
+        firewall defaults — see AGENT-TOOL-FIREWALL-DEFAULT-DRIFT).
+        """
+        try:
+            from .dpc_agent.tools.registry import ToolRegistry
+            registry = ToolRegistry()
+            return {
+                entry.name: entry.default_enabled
+                for entry in registry._entries.values()
+            }
+        except Exception as e:
+            logger.error("Failed to load ToolRegistry defaults: %s", e, exc_info=True)
+            return {}
+
+    def _seed_missing_tools_into_rules(self) -> bool:
+        """Auto-add tools from ToolRegistry that are absent from privacy_rules.
+
+        Walks the global `dpc_agent.tools` block and every
+        `agent_profiles.<id>.tools` override; for any tool present in
+        the registry but missing from that dict, injects the canonical
+        default from ToolEntry.default_enabled. Existing user values
+        are NEVER touched — only the *missing* keys are seeded.
+
+        Per-agent profiles are only seeded when they already define a
+        `tools` block (the user has opted into per-agent overrides);
+        no profile or tools block is auto-created.
+
+        Returns True iff self.rules was modified, signalling the caller
+        to persist the file. Drives the closing fix for the dual-source
+        drift (old code maintained two dicts in this file that fell out
+        of sync; now only the registry decides which keys exist).
+        """
+        registry_defaults = self._get_registered_tool_defaults()
+        if not registry_defaults:
+            return False
+        modified = False
+
+        dpc_agent = self.rules.setdefault('dpc_agent', {})
+        tools = dpc_agent.setdefault('tools', {})
+        for name, default in registry_defaults.items():
+            if name not in tools:
+                tools[name] = default
+                modified = True
+                logger.info(
+                    "Seeded missing tool default into dpc_agent.tools: %s=%s",
+                    name, default,
+                )
+
+        for profile_name, profile in self.rules.get('agent_profiles', {}).items():
+            if not isinstance(profile, dict):
+                continue
+            profile_tools = profile.get('tools')
+            if profile_tools is None:
+                continue
+            for name, default in registry_defaults.items():
+                if name not in profile_tools:
+                    profile_tools[name] = default
+                    modified = True
+                    logger.info(
+                        "Seeded missing tool default into agent_profiles.%s.tools: %s=%s",
+                        profile_name, name, default,
+                    )
+
+        return modified
+
     def _parse_dpc_agent_settings(self):
         """Parse DPC agent settings from the config."""
+        # First, auto-seed any tools that landed in ToolRegistry after this
+        # privacy_rules.json was created. Persists to disk on first run if
+        # anything was added. Single source of truth: ToolEntry.default_enabled.
+        if self._seed_missing_tools_into_rules():
+            try:
+                self.access_file_path.write_text(json.dumps(self.rules, indent=2))
+                logger.info("Persisted seeded tool defaults to %s", self.access_file_path)
+            except Exception as e:
+                logger.error("Failed to persist seeded defaults: %s", e, exc_info=True)
+
         dpc_agent = self.rules.get('dpc_agent', {})
         self.dpc_agent_enabled = dpc_agent.get('enabled', True)
         self.dpc_agent_personal_context_access = dpc_agent.get('personal_context_access', True)
         self.dpc_agent_device_context_access = dpc_agent.get('device_context_access', True)
         self.dpc_agent_human_knowledge_access = dpc_agent.get('human_knowledge_access', True)
 
-        # All available tools with their default values.
-        # True = enabled by default, False = disabled by default (security).
-        # When adding a new tool: add it here with default enabled/disabled.
-        all_tools_defaults = {
-            # File operations (unified read_file/write_file — S31)
-            'read_file': True,   # Read from sandbox or firewall-checked extended paths
-            'write_file': False,  # Write to sandbox or firewall-checked extended paths
-            'repo_list': True,
-            'repo_delete': False,  # Can delete files/directories in sandbox
-            'drive_list': False,
-            'search_files': True,  # Safe - read-only search
-            'search_in_file': True,  # Safe - read-only search
-            # Extended sandbox (v0.16.0+)
-            'extended_path_list': False,
-            'list_extended_sandbox_paths': True,  # Safe - just lists config
-            # Memory/identity
-            'update_scratchpad': True,
-            'update_identity': True,
-            'chat_history': True,
-            'deduplicate_identity': True,
-            # Knowledge
-            'knowledge_list': True,
-            'get_task_board': True,  # Read task history + learning progress
-            # Memento-Skills tools (v0.20.0+)
-            'execute_skill': True,  # Load skill strategy by name
-            # Inter-agent skill sharing tools (v0.21.0+)
-            'list_local_agents': True,  # Read-only: list registered agents
-            'list_agent_skills': True,  # Read-only: list another agent's skills
-            'import_skill_from_agent': False,  # Opt-in: needs accept_peer_skills
-            # Self-introspection tools
-            'list_my_tools': True,  # Read-only: list own available tools
-            'list_my_skills': True,  # Read-only: list own installed skills
-            # DPC integration
-            'get_dpc_context': True,
-            # Web tools
-            'browse_page': True,
-            'fetch_json': True,
-            'check_url': True,
-            'list_auth_domains': True,  # Read-only: list own allowed auth domains (ADR-028 T7)
-            'search_web': True,
-            # Git tools (read-only)
-            'git_status': False,
-            'git_diff': False,
-            'git_log': False,
-            'git_branch': False,
-            # Git tools (modify files / history)
-            'git_add': False,
-            'git_commit': False,
-            'git_init': False,
-            'git_checkout': False,
-            'git_merge': False,
-            'git_tag': False,
-            'git_reset': False,
-            'git_snapshot': False,
-            'repo_commit_push': False,  # Can push to remote
-            # Restricted tools (security sensitive)
-            'run_shell': False,
-            # Task queue tools (v0.16.0+)
-            'schedule_task': True,  # Safe, just scheduling
-            'get_task_status': True,  # Read-only
-            # Messaging tools (v0.18.0+)
-            'send_user_message': True,  # Agent-initiated Telegram messages
-            # Task type management tools (v0.18.0+)
-            'register_task_type': True,
-            'list_task_types': True,  # Read-only
-            'unregister_task_type': True,
-            # Session archive tools (v0.22.0+ - read-only access to own history)
-            'read_session_archive': True,  # Read session summaries
-            'read_session_detail': True,  # Read session messages
-            'search_session_archives': True,  # Search across session archives
-            # Memory search (ADR-010)
-            'memory_search': True,  # Hybrid BM25 + semantic search across agent knowledge
-        }
-
-        # Parse tool permissions from config, using defaults for missing tools
+        # Parse tool permissions from config — defaults come from the
+        # registry (ToolEntry.default_enabled) and were seeded above.
         # Legacy tool name mapping (S31: 6 tools merged into read_file/write_file)
         _legacy_tool_map = {
             'read_file': ['repo_read', 'extended_path_read', 'drive_read'],
             'write_file': ['repo_write_commit', 'extended_path_write', 'drive_write'],
         }
+        registry_defaults = self._get_registered_tool_defaults()
         tools = dpc_agent.get('tools', {})
         self.dpc_agent_tools: Dict[str, bool] = {}
-        for tool_name, default_enabled in all_tools_defaults.items():
+        for tool_name, default_enabled in registry_defaults.items():
             if tool_name in tools:
                 self.dpc_agent_tools[tool_name] = tools.get(tool_name, default_enabled)
             elif tool_name in _legacy_tool_map:
@@ -911,53 +920,12 @@ class ContextFirewall:
                     }
                 },
                 "dpc_agent": {
-                    "_comment": "DPC Agent permissions - Control what the embedded AI agent can access",
+                    "_comment": "DPC Agent permissions - Control what the embedded AI agent can access. Tools dict is populated automatically from the ToolEntry registry on first load (see _seed_missing_tools_into_rules) — single source of truth is ToolEntry.default_enabled per registration.",
                     "enabled": True,
                     "personal_context_access": True,
                     "device_context_access": True,
                     "human_knowledge_access": True,
-                    "tools": {
-                        "_comment": "Enable/disable individual tools. True=allowed, False=blocked",
-                        "read_file": True,
-                        "write_file": False,
-                        "repo_list": True,
-                        "repo_delete": False,
-                        "drive_list": False,
-                        "update_scratchpad": True,
-                        "update_identity": True,
-                        "chat_history": True,
-                        "knowledge_list": True,
-                        "get_task_board": True,
-                        "get_dpc_context": True,
-                        "browse_page": True,
-                        "fetch_json": True,
-                        "check_url": True,
-                        "search_web": True,
-                        "git_status": False,
-                        "git_diff": False,
-                        "git_log": False,
-                        "git_add": False,
-                        "git_commit": False,
-                        "git_branch": False,
-                        "git_init": False,
-                        "git_checkout": False,
-                        "git_merge": False,
-                        "git_tag": False,
-                        "git_reset": False,
-                        "git_snapshot": False,
-                        "repo_commit_push": False,
-                        "run_shell": False,
-                        "_comment_task": "Task queue tools - safe scheduling and status checks",
-                        "schedule_task": True,
-                        "get_task_status": True,
-                        "_comment_skills": "Skill and introspection tools",
-                        "execute_skill": True,
-                        "list_local_agents": True,
-                        "list_agent_skills": True,
-                        "import_skill_from_agent": False,
-                        "list_my_tools": True,
-                        "list_my_skills": True
-                    }
+                    "tools": {}
                 },
                 "file_transfer": {
                     "_comment": "File transfer permissions (v0.11.0+). Configure per-group or per-node settings.",

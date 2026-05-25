@@ -1384,6 +1384,7 @@ def get_tools() -> List[ToolEntry]:
             # Anonymous browse_page (without use_auth) returns in <10s so
             # the higher cap doesn't slow that path down.
             timeout_sec=360,
+            default_enabled=True,
         ),
 
         # T10: multi-page popup orchestration siblings. All three look up
@@ -1406,6 +1407,7 @@ def get_tools() -> List[ToolEntry]:
             },
             handler=popup_extract_now,
             timeout_sec=45,
+            default_enabled=True,
         ),
 
         ToolEntry(
@@ -1437,6 +1439,7 @@ def get_tools() -> List[ToolEntry]:
             },
             handler=popup_navigate,
             timeout_sec=90,
+            default_enabled=True,
         ),
 
         ToolEntry(
@@ -1457,6 +1460,7 @@ def get_tools() -> List[ToolEntry]:
             },
             handler=popup_close,
             timeout_sec=15,
+            default_enabled=True,
         ),
 
         ToolEntry(
@@ -1496,6 +1500,7 @@ def get_tools() -> List[ToolEntry]:
             },
             handler=popup_scroll,
             timeout_sec=45,
+            default_enabled=True,
         ),
 
         ToolEntry(
@@ -1516,6 +1521,7 @@ def get_tools() -> List[ToolEntry]:
             },
             handler=fetch_json,
             timeout_sec=30,
+            default_enabled=True,
         ),
 
 
@@ -1537,6 +1543,7 @@ def get_tools() -> List[ToolEntry]:
             },
             handler=check_url,
             timeout_sec=15,
+            default_enabled=True,
         ),
 
         ToolEntry(
@@ -1569,5 +1576,6 @@ def get_tools() -> List[ToolEntry]:
             },
             handler=search_web_ddgs,
             timeout_sec=30,
+            default_enabled=True,
         ),
     ]

@@ -103,5 +103,6 @@ def get_tools() -> List[ToolEntry]:
             },
             handler=list_auth_domains,
             timeout_sec=5,
+            default_enabled=True,
         ),
     ]

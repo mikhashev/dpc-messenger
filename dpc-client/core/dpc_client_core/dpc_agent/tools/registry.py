@@ -189,7 +189,14 @@ class ToolContext:
 
 @dataclass
 class ToolEntry:
-    """Single tool descriptor: name, schema, handler, metadata."""
+    """Single tool descriptor: name, schema, handler, metadata.
+
+    default_enabled is the canonical default for this tool in
+    privacy_rules.json. Single source of truth — firewall.py reads
+    this when seeding new privacy_rules.json files and when merging
+    missing tools into existing files at startup. fail-closed (False)
+    by default; flip to True explicitly for safe-by-default tools.
+    """
 
     name: str
     schema: Dict[str, Any]  # OpenAI function schema
@@ -197,6 +204,7 @@ class ToolEntry:
     is_code_tool: bool = False  # Tools that modify code
     timeout_sec: int = 120
     is_core: bool = True  # Core tools loaded by default
+    default_enabled: bool = False  # Canonical default for privacy_rules.json (fail-closed)
 
 
 # Core tools that are always available
@@ -439,4 +447,5 @@ class ToolRegistry:
                 is_code_tool=entry.is_code_tool,
                 timeout_sec=entry.timeout_sec,
                 is_core=entry.is_core,
+                default_enabled=entry.default_enabled,
             )

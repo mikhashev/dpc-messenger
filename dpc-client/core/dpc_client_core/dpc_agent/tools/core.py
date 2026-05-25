@@ -1613,6 +1613,7 @@ def get_tools() -> List[ToolEntry]:
             },
             handler=read_file,
             timeout_sec=30,
+            default_enabled=True,
         ),
 
         ToolEntry(
@@ -1639,6 +1640,7 @@ def get_tools() -> List[ToolEntry]:
             },
             handler=repo_list,
             timeout_sec=30,
+            default_enabled=True,
         ),
 
         ToolEntry(
@@ -1665,6 +1667,7 @@ def get_tools() -> List[ToolEntry]:
             },
             handler=drive_list,
             timeout_sec=30,
+            default_enabled=False,
         ),
 
         ToolEntry(
@@ -1690,6 +1693,7 @@ def get_tools() -> List[ToolEntry]:
             },
             handler=repo_delete,
             timeout_sec=30,
+            default_enabled=False,
         ),
 
         ToolEntry(
@@ -1715,6 +1719,7 @@ def get_tools() -> List[ToolEntry]:
             handler=write_file,
             timeout_sec=30,
             is_code_tool=True,
+            default_enabled=False,
         ),
 
         # Memory tools
@@ -1742,6 +1747,7 @@ def get_tools() -> List[ToolEntry]:
             },
             handler=update_scratchpad,
             timeout_sec=10,
+            default_enabled=True,
         ),
 
         ToolEntry(
@@ -1787,6 +1793,7 @@ def get_tools() -> List[ToolEntry]:
             },
             handler=update_identity,
             timeout_sec=10,
+            default_enabled=True,
         ),
 
         ToolEntry(
@@ -1802,6 +1809,7 @@ def get_tools() -> List[ToolEntry]:
             },
             handler=deduplicate_identity,
             timeout_sec=10,
+            default_enabled=True,
         ),
 
         ToolEntry(
@@ -1830,6 +1838,7 @@ def get_tools() -> List[ToolEntry]:
             },
             handler=chat_history,
             timeout_sec=10,
+            default_enabled=True,
         ),
 
         # Knowledge tools (knowledge_read/knowledge_write removed — use read_file/write_file)
@@ -1846,6 +1855,7 @@ def get_tools() -> List[ToolEntry]:
             },
             handler=knowledge_list,
             timeout_sec=10,
+            default_enabled=True,
         ),
 
         ToolEntry(
@@ -1868,6 +1878,7 @@ def get_tools() -> List[ToolEntry]:
             },
             handler=get_task_board,
             timeout_sec=15,
+            default_enabled=True,
         ),
 
         # extract_knowledge + get_proposal_result removed (ADR-009, S34)
@@ -1893,6 +1904,7 @@ def get_tools() -> List[ToolEntry]:
             },
             handler=get_dpc_context,
             timeout_sec=10,
+            default_enabled=True,
         ),
 
         # Task queue tools
@@ -1930,6 +1942,7 @@ def get_tools() -> List[ToolEntry]:
             },
             handler=schedule_task,
             timeout_sec=10,
+            default_enabled=True,
         ),
 
         ToolEntry(
@@ -1950,6 +1963,7 @@ def get_tools() -> List[ToolEntry]:
             },
             handler=get_task_status,
             timeout_sec=10,
+            default_enabled=True,
         ),
 
         # Task type management tools
@@ -1984,6 +1998,7 @@ def get_tools() -> List[ToolEntry]:
             },
             handler=register_task_type,
             timeout_sec=10,
+            default_enabled=True,
         ),
 
         ToolEntry(
@@ -1999,6 +2014,7 @@ def get_tools() -> List[ToolEntry]:
             },
             handler=list_task_types,
             timeout_sec=5,
+            default_enabled=True,
         ),
 
         ToolEntry(
@@ -2019,6 +2035,7 @@ def get_tools() -> List[ToolEntry]:
             },
             handler=unregister_task_type,
             timeout_sec=5,
+            default_enabled=True,
         ),
 
         # Extended sandbox tools (v0.16.0+ — read/write merged into read_file/write_file in S31)
@@ -2045,6 +2062,7 @@ def get_tools() -> List[ToolEntry]:
             },
             handler=extended_path_list,
             timeout_sec=30,
+            default_enabled=False,
         ),
 
         ToolEntry(
@@ -2060,6 +2078,7 @@ def get_tools() -> List[ToolEntry]:
             },
             handler=list_extended_sandbox_paths,
             timeout_sec=5,
+            default_enabled=True,
         ),
 
         # Search tools (v0.16.0+)
@@ -2098,6 +2117,7 @@ def get_tools() -> List[ToolEntry]:
             },
             handler=search_files,
             timeout_sec=60,
+            default_enabled=True,
         ),
 
         ToolEntry(
@@ -2129,6 +2149,7 @@ def get_tools() -> List[ToolEntry]:
             },
             handler=search_in_file,
             timeout_sec=30,
+            default_enabled=True,
         ),
 
         # Memory search (ADR-010)
@@ -2156,6 +2177,7 @@ def get_tools() -> List[ToolEntry]:
             },
             handler=memory_search,
             timeout_sec=60,
+            default_enabled=True,
         ),
 
     ]

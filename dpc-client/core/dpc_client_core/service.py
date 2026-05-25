@@ -3569,8 +3569,8 @@ class CoreService:
                     "description": description,
                     "is_core": is_core,
                     "is_restricted": is_restricted,
-                    # Default recommendation: core-but-not-restricted on, everything else off.
-                    "default_enabled": is_core and not is_restricted,
+                    # Canonical default from ToolEntry.default_enabled (single source of truth).
+                    "default_enabled": entry.default_enabled,
                 })
             tools.sort(key=lambda t: t["name"])
             return {"status": "success", "tools": tools}

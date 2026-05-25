@@ -1167,6 +1167,12 @@ Access control file format (`~/.dpc/privacy_rules.json`):
 }
 ```
 
+**Adding a new agent tool — `default_enabled` is required (S148):**
+
+The canonical default for whether an agent tool is enabled in `privacy_rules.json` lives on `ToolEntry.default_enabled` (single source of truth). When you register a new `ToolEntry` in any `dpc_agent/tools/*.py` module, you **must** pass `default_enabled=True|False` explicitly — there is no derived fallback. `True` = safe-by-default (read-only introspection, sandbox-confined reads, etc.); `False` = opt-in (anything destructive, network-egress, restricted, or that touches user-visible state outside the sandbox). The field defaults to `False` (fail-closed) if omitted, so a forgotten tool will be invisible to agents until the user toggles it on in the UI.
+
+On startup, `firewall.py:_seed_missing_tools_into_rules()` walks the registry and auto-adds any tool absent from `dpc_agent.tools` (global) or each `agent_profiles.<id>.tools` block with the registered `default_enabled`. Existing user values are never overwritten. This eliminates the historical drift where new tools landed in code but stayed invisible until manually added to firewall defaults (AGENT-TOOL-FIREWALL-DEFAULT-DRIFT, closed S148).
+
 ---
 
 ## Debugging Tips

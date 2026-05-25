@@ -258,6 +258,7 @@ def get_tools() -> "List[ToolEntry]":
             handler=_list_my_tools,
             is_core=True,
             timeout_sec=5,
+            default_enabled=True,
         ),
         ToolEntry(
             name="list_my_skills",
@@ -273,6 +274,7 @@ def get_tools() -> "List[ToolEntry]":
             handler=_list_my_skills,
             is_core=True,
             timeout_sec=5,
+            default_enabled=True,
         ),
         ToolEntry(
             name="list_local_agents",
@@ -287,6 +289,7 @@ def get_tools() -> "List[ToolEntry]":
             handler=_list_local_agents,
             is_core=True,
             timeout_sec=5,
+            default_enabled=True,
         ),
         ToolEntry(
             name="list_agent_skills",
@@ -314,6 +317,7 @@ def get_tools() -> "List[ToolEntry]":
             handler=_list_agent_skills,
             is_core=True,
             timeout_sec=5,
+            default_enabled=True,
         ),
         ToolEntry(
             name="import_skill_from_agent",
@@ -343,6 +347,7 @@ def get_tools() -> "List[ToolEntry]":
             handler=_import_skill_from_agent,
             is_core=False,  # Restricted by default — needs accept_peer_skills
             timeout_sec=10,
+            default_enabled=False,
         ),
         ToolEntry(
             name="execute_skill",
@@ -372,5 +377,6 @@ def get_tools() -> "List[ToolEntry]":
             handler=_execute_skill,
             is_core=True,
             timeout_sec=5,
+            default_enabled=True,
         ),
     ]
