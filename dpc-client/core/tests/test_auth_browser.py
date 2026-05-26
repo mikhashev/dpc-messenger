@@ -1000,6 +1000,67 @@ def test_open_falls_back_to_vault_when_state_corrupt(vault_home, monkeypatch, fr
 
 
 # ─────────────────────────────────────────────────────────────
+# ADR-029 Task 004 follow-up — _auth_browse_html passes headed
+# ─────────────────────────────────────────────────────────────
+
+
+def test_auth_browse_html_defaults_to_headed_true(vault_home, monkeypatch):
+    """auth path implies user-visible interaction (CAPTCHA, login follow-up)
+    — _auth_browse_html defaults headed=True and forwards to AuthBrowser."""
+    from dpc_client_core.dpc_agent.tools import browser as mod
+
+    captured: dict = {}
+
+    class _StubAB:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def goto(self, url):
+            pass
+
+        def get_page_html(self):
+            return "<html></html>"
+
+    monkeypatch.setattr(mod, "AuthBrowser", _StubAB)
+    mod._auth_browse_html("agent_a", "ozon.ru", "https://ozon.ru/")
+    assert captured.get("headed") is True
+
+
+def test_auth_browse_html_respects_headed_false_override(vault_home, monkeypatch):
+    """Caller can opt headless (e.g. CI / scripted scrape) by passing
+    headed=False explicitly."""
+    from dpc_client_core.dpc_agent.tools import browser as mod
+
+    captured: dict = {}
+
+    class _StubAB:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def goto(self, url):
+            pass
+
+        def get_page_html(self):
+            return ""
+
+    monkeypatch.setattr(mod, "AuthBrowser", _StubAB)
+    mod._auth_browse_html("agent_a", "ozon.ru", "https://ozon.ru/", headed=False)
+    assert captured.get("headed") is False
+
+
+# ─────────────────────────────────────────────────────────────
 # Cookie format conversion (snake_case → Playwright camelCase)
 # ─────────────────────────────────────────────────────────────
 
@@ -1085,7 +1146,7 @@ def test_browse_page_use_auth_rejects_off_domain_url(vault_home, fresh_cookies):
     # _auth_browse_html (raw HTML before trafilatura).
     import dpc_client_core.dpc_agent.tools.browser as mod
 
-    def _raise_domain_mismatch(agent_id, domain, url):
+    def _raise_domain_mismatch(agent_id, domain, url, headed=True):
         raise ValueError(f"URL {url!r} is outside auth domain 'ozon.ru'")
 
     original = mod._auth_browse_html

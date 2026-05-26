@@ -807,21 +807,22 @@ def _html_to_markdown(html: str) -> str:
     ) or ""
 
 
-def _auth_browse_html(agent_id: str, domain: str, url: str) -> str:
-    """Sync helper returning RAW HTML (no trafilatura). T9 needs the
-    pre-conversion HTML for `looks_like_challenge()` detection."""
-    with AuthBrowser(agent_id=agent_id, domain=domain) as ab:
+def _auth_browse_html(
+    agent_id: str, domain: str, url: str, headed: bool = True
+) -> str:
+    """Sync helper returning RAW HTML. T9 needs the pre-conversion HTML
+    for `looks_like_challenge()` detection."""
+    with AuthBrowser(agent_id=agent_id, domain=domain, headed=headed) as ab:
         ab.goto(url)
         return ab.get_page_html()
 
 
-def _auth_browse(agent_id: str, domain: str, url: str) -> str:
-    """Sync helper used from the async browse_page via asyncio.to_thread.
-
-    Kept as a thin wrapper around `_auth_browse_html` + `_html_to_markdown`
-    so existing tests that patch `_auth_browse` directly continue to work
-    even after T9 split the raw-HTML and markdown stages."""
-    return _html_to_markdown(_auth_browse_html(agent_id, domain, url))
+def _auth_browse(
+    agent_id: str, domain: str, url: str, headed: bool = True
+) -> str:
+    """Wrapper around `_auth_browse_html` + `_html_to_markdown`. Kept so
+    existing tests that patch `_auth_browse` directly continue to work."""
+    return _html_to_markdown(_auth_browse_html(agent_id, domain, url, headed))
 
 
 # ─────────────────────────────────────────────────────────────
@@ -1084,18 +1085,15 @@ async def browse_page(
                     if firewall is not None
                     else [use_auth]
                 )
-                headed = (
-                    firewall.get_browser_headed(agent_id)
-                    if firewall is not None
-                    else True
-                )
                 session = await asyncio.to_thread(
-                    _get_or_create_session, agent_id, list(allowed), headed
+                    _get_or_create_session, agent_id, list(allowed), True
                 )
                 await asyncio.to_thread(session.navigate, url)
                 html = await asyncio.to_thread(session.get_page_html)
             else:
-                html = await asyncio.to_thread(_auth_browse_html, agent_id, use_auth, url)
+                html = await asyncio.to_thread(
+                    _auth_browse_html, agent_id, use_auth, url, True
+                )
         except AuthRequiredError as e:
             _web_auth_mod.audit_append(
                 agent_id, use_auth, url, status="auth_required"
