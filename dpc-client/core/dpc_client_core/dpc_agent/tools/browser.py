@@ -637,6 +637,45 @@ _SCROLL_VIEWPORT_JS = """
 """
 
 
+_DETECT_SCROLLABLE_CONTAINERS_JS = """
+() => {
+  const results = [];
+  const all = document.querySelectorAll('*');
+  for (const el of all) {
+    const s = window.getComputedStyle(el);
+    const ov = s.overflowY;
+    if ((ov === 'auto' || ov === 'scroll' || ov === 'overlay')
+        && el.scrollHeight > el.clientHeight + 20) {
+      const tag = el.tagName.toLowerCase();
+      const id = el.id ? ('#' + el.id) : '';
+      const cls = el.className && typeof el.className === 'string'
+        ? ('.' + el.className.trim().split(/\\s+/).filter(Boolean).slice(0, 3).join('.'))
+        : '';
+      const selector = tag + id + cls;
+      const children = el.children;
+      let childTag = '', childCls = '';
+      if (children.length > 0) {
+        const fc = children[0];
+        childTag = fc.tagName.toLowerCase();
+        const fcCls = fc.className && typeof fc.className === 'string'
+          ? ('.' + fc.className.trim().split(/\\s+/).filter(Boolean).slice(0, 2).join('.'))
+          : '';
+        childCls = childTag + fcCls;
+      }
+      results.push({
+        container: selector,
+        itemCount: children.length,
+        itemSelector: childCls,
+        scrollHeight: el.scrollHeight,
+        clientHeight: el.clientHeight,
+      });
+    }
+  }
+  return results;
+}
+"""
+
+
 _A11Y_INTERACTIVE_ROLES: frozenset[str] = frozenset({
     "button", "link", "textbox", "checkbox", "combobox",
     "menuitem", "tab", "searchbox",
@@ -1460,6 +1499,122 @@ class AuthBrowser:
         )
         return tree_text, refs
 
+    def detect_scrollable_containers(self) -> list[dict]:
+        """Detect scrollable containers on the page and return CSS hints."""
+        self._require_open()
+        try:
+            return self._page.evaluate(_DETECT_SCROLLABLE_CONTAINERS_JS) or []
+        except Exception:
+            return []
+
+    def collect(
+        self,
+        container: str,
+        item_selector: str,
+        extract: list[str],
+        max_scrolls: int = 30,
+        scroll_pause_ms: int = 1000,
+        dedup_by: str = "text",
+    ) -> dict:
+        """Scroll a container and collect all matching items.
+
+        Scrolls the container, extracts items matching item_selector,
+        deduplicates by dedup_by key, repeats until no new items appear
+        or max_scrolls is reached. Returns {items: [...], total, scrolls_done}.
+        """
+        self._require_open()
+        import time as _time
+
+        _COLLECT_ITEMS_JS = """
+        ({container, itemSelector, extractAttrs, dedupKey}) => {
+          const ct = document.querySelector(container);
+          if (!ct) return {error: 'container not found: ' + container};
+          const els = ct.querySelectorAll(itemSelector);
+          const items = [];
+          for (const el of els) {
+            const item = {};
+            for (const attr of extractAttrs) {
+              if (attr === 'text') {
+                item.text = el.textContent.trim().replace(/\\s+/g, ' ');
+              } else if (attr === 'href') {
+                const a = el.tagName === 'A' ? el : el.querySelector('a');
+                item.href = a ? a.href : '';
+              } else if (attr === 'html') {
+                item.html = el.innerHTML;
+              } else {
+                item[attr] = el.getAttribute(attr) || '';
+              }
+            }
+            items.push(item);
+          }
+          return {items, containerScrollHeight: ct.scrollHeight, containerClientHeight: ct.clientHeight};
+        }
+        """
+
+        _SCROLL_CONTAINER_JS = """
+        ({container, amount}) => {
+          const ct = document.querySelector(container);
+          if (!ct) return {scrolled: 0};
+          const before = ct.scrollTop;
+          ct.scrollBy({top: amount, behavior: 'instant'});
+          const after = ct.scrollTop;
+          return {scrolled: after - before, scrollTop: after, scrollHeight: ct.scrollHeight};
+        }
+        """
+
+        all_items: list[dict] = []
+        seen_keys: set[str] = set()
+        scrolls_done = 0
+        url = self._page.url
+
+        for _ in range(max_scrolls + 1):
+            result = self._page.evaluate(_COLLECT_ITEMS_JS, {
+                "container": container,
+                "itemSelector": item_selector,
+                "extractAttrs": extract or ["text"],
+                "dedupKey": dedup_by,
+            })
+            if isinstance(result, dict) and "error" in result:
+                self._audit_action("collect", url, "failed", error=result["error"])
+                return {"error": result["error"], "items": [], "total": 0, "scrolls_done": scrolls_done}
+
+            new_count = 0
+            for item in (result or {}).get("items", []):
+                key = item.get(dedup_by, str(item))
+                if key and key not in seen_keys:
+                    seen_keys.add(key)
+                    all_items.append(item)
+                    new_count += 1
+
+            if scrolls_done > 0 and new_count == 0:
+                break
+
+            scroll_result = self._page.evaluate(_SCROLL_CONTAINER_JS, {
+                "container": container,
+                "amount": 800,
+            })
+            scrolled = (scroll_result or {}).get("scrolled", 0)
+            if scrolled == 0:
+                break
+
+            scrolls_done += 1
+            _time.sleep(scroll_pause_ms / 1000.0)
+
+        dupes = len(seen_keys) - len(all_items) if len(seen_keys) != len(all_items) else 0
+        self._audit_action(
+            "collect", url, "ok",
+            container=container, item_selector=item_selector,
+            total=len(all_items), scrolls=scrolls_done,
+        )
+        result_dict: dict = {
+            "items": all_items,
+            "total": len(all_items),
+            "scrolls_done": scrolls_done,
+        }
+        if dupes > 0:
+            result_dict["warning"] = f"{dupes} duplicates detected, consider specifying unique attribute for dedup_by"
+        return result_dict
+
     def _resolve_ref(self, ref_or_selector: str):
         """Map a `@eN` ref against the last snapshot to a Playwright
         locator; fall back to treating the string as a CSS selector.
@@ -2155,10 +2310,26 @@ def _get_session_or_error(agent_id: str) -> Optional["AuthBrowser"]:
     return session
 
 
-async def browser_snapshot(ctx: ToolContext) -> str:
+def _format_scrollable_hints(containers: list[dict]) -> str:
+    """Format detected scrollable containers as CSS hints for the agent."""
+    if not containers:
+        return ""
+    lines = ["\n\n📋 Scrollable containers detected (use with browser_collect):"]
+    for c in containers:
+        item_hint = ""
+        if c.get("itemSelector"):
+            item_hint = f", items: \"{c['itemSelector']}\""
+        lines.append(
+            f"  • \"{c['container']}\" ({c.get('itemCount', '?')} children{item_hint})"
+        )
+    return "\n".join(lines)
+
+
+async def browser_snapshot(ctx: ToolContext, raw: bool = False) -> str:
     """Return the current page's accessibility-tree snapshot tagged
     with @eN ref ids. Routes oversized snapshots through the per-agent
-    summarization config (LLM if configured, else line truncate)."""
+    summarization config (LLM if configured, else line truncate).
+    When raw=True, skip summarization and return the full tree."""
     agent_id = ctx.agent_root.name
     session = _get_session_or_error(agent_id)
     if session is None:
@@ -2169,7 +2340,17 @@ async def browser_snapshot(ctx: ToolContext) -> str:
             tree, _refs = await _run_in_session(session, "a11y_snapshot")
         except Exception as e:
             return f"⚠️ Snapshot failed: {type(e).__name__}: {e}"
-    return await _maybe_summarize_snapshot(tree, ctx, agent_id)
+        try:
+            containers = await _run_in_session(
+                session, "detect_scrollable_containers",
+            )
+        except Exception:
+            containers = []
+    css_hints = _format_scrollable_hints(containers)
+    if raw:
+        return tree + css_hints
+    summarized = await _maybe_summarize_snapshot(tree, ctx, agent_id)
+    return summarized + css_hints
 
 
 async def browser_navigate(ctx: ToolContext, url: str) -> str:
@@ -2337,6 +2518,43 @@ async def browser_switch_tab(ctx: ToolContext, index: int) -> str:
     return f"Switched to tab {index} ({url})"
 
 
+async def browser_collect(
+    ctx: ToolContext,
+    container: str,
+    item_selector: str,
+    extract: list[str] | None = None,
+    max_scrolls: int = 30,
+    scroll_pause_ms: int = 1000,
+    dedup_by: str = "text",
+) -> str:
+    """Scroll a container and collect all matching items via CSS selectors.
+    Returns a JSON summary with all extracted items, deduped and guarded."""
+    agent_id = ctx.agent_root.name
+    session = _get_session_or_error(agent_id)
+    if session is None:
+        return _NO_SESSION_MSG
+    lock = _get_session_lock(agent_id)
+    async with lock:
+        try:
+            result = await _run_in_session(
+                session, "collect",
+                container, item_selector, extract or ["text"],
+                max_scrolls, scroll_pause_ms, dedup_by,
+            )
+        except Exception as e:
+            return f"⚠️ Collect failed: {type(e).__name__}: {e}"
+    import json as _json
+    if isinstance(result, dict) and result.get("error"):
+        return f"⚠️ {result['error']}"
+    total = result.get("total", 0)
+    scrolls = result.get("scrolls_done", 0)
+    header = f"Collected {total} items ({scrolls} scrolls)"
+    if result.get("warning"):
+        header += f"\n⚠️ {result['warning']}"
+    items_json = _json.dumps(result.get("items", []), ensure_ascii=False, indent=2)
+    return f"{header}\n\n{items_json}"
+
+
 async def browser_close(ctx: ToolContext) -> str:
     """Close the active browser session and free Camoufox resources."""
     agent_id = ctx.agent_root.name
@@ -2480,10 +2698,16 @@ def get_tools() -> List[ToolEntry]:
             name="browser_snapshot",
             schema={
                 "name": "browser_snapshot",
-                "description": "Return the current page's accessibility-tree snapshot annotated with @eN ref IDs on every interactive element. Primary inspection surface for the agent — pass refs back to browser_click / browser_fill / browser_wait_for. Snapshots above the agent's configured threshold are summarized via the agent's snapshot summarization LLM (falls back to line-based truncation).",
+                "description": "Return the current page's accessibility-tree snapshot annotated with @eN ref IDs on every interactive element. Primary inspection surface for the agent — pass refs back to browser_click / browser_fill / browser_wait_for. Snapshots above the agent's configured threshold are summarized via the agent's snapshot summarization LLM (falls back to line-based truncation). Set raw=true to skip summarization and return the full unsummarized tree (useful for large lists where summarization loses items).",
                 "parameters": {
                     "type": "object",
-                    "properties": {},
+                    "properties": {
+                        "raw": {
+                            "type": "boolean",
+                            "description": "Skip LLM summarization, return full accessibility tree as-is",
+                            "default": False,
+                        },
+                    },
                 },
             },
             handler=browser_snapshot,
@@ -2631,6 +2855,52 @@ def get_tools() -> List[ToolEntry]:
             },
             handler=browser_switch_tab,
             timeout_sec=10,
+            default_enabled=False,
+        ),
+
+        ToolEntry(
+            name="browser_collect",
+            schema={
+                "name": "browser_collect",
+                "description": "Scroll a container and collect all matching items. Use CSS selectors for container and items (discover them from browser_snapshot's scrollable-container hints or browser_extract's raw HTML). Scrolls the container, extracts items matching item_selector, deduplicates, and repeats until no new items appear or max_scrolls is reached. Returns JSON array of all collected items. Ideal for infinite-scroll lists (orders, search results, product catalogs).",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "container": {
+                            "type": "string",
+                            "description": "CSS selector of the scrollable container element",
+                        },
+                        "item_selector": {
+                            "type": "string",
+                            "description": "CSS selector for individual items within the container",
+                        },
+                        "extract": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "Attributes to extract from each item: 'text' (textContent), 'href' (link URL), 'html' (innerHTML), or any data-* / HTML attribute name",
+                            "default": ["text"],
+                        },
+                        "max_scrolls": {
+                            "type": "integer",
+                            "description": "Maximum scroll iterations before stopping",
+                            "default": 30,
+                        },
+                        "scroll_pause_ms": {
+                            "type": "integer",
+                            "description": "Milliseconds to wait between scrolls for content to load",
+                            "default": 1000,
+                        },
+                        "dedup_by": {
+                            "type": "string",
+                            "description": "Which extracted attribute to use for deduplication",
+                            "default": "text",
+                        },
+                    },
+                    "required": ["container", "item_selector"],
+                },
+            },
+            handler=browser_collect,
+            timeout_sec=120,
             default_enabled=False,
         ),
 
