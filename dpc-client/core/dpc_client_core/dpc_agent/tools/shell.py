@@ -42,6 +42,8 @@ def run_shell(ctx: ToolContext, command: str, timeout: int = 120, cwd: str = "")
             shell=True,
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=timeout,
             cwd=working_dir,
             env={**os.environ, "PYTHONIOENCODING": "utf-8"},
