@@ -1019,10 +1019,18 @@ class CoreService:
                     except asyncio.TimeoutError:
                         logger.warning(
                             "Camoufox browser close timed out after 5s — "
-                            "subprocess pipe may remain pending"
+                            "forcing executor shutdown so the process can exit"
                         )
+                        try:
+                            browser._shutdown_executor()
+                        except Exception:
+                            pass
                     except Exception as e:
                         logger.warning("Camoufox browser close failed: %s", e)
+                        try:
+                            browser._shutdown_executor()
+                        except Exception:
+                            pass
         except Exception as e:
             logger.error("Camoufox shutdown sweep failed: %s", e, exc_info=True)
 

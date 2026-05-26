@@ -470,6 +470,25 @@ def get_active_browser_sessions() -> dict[str, "AuthBrowser"]:
 _session_locks: dict[str, asyncio.Lock] = {}
 
 
+class _DaemonThreadPoolExecutor(ThreadPoolExecutor):
+    """ThreadPoolExecutor whose worker threads are daemon.
+
+    Stdlib ThreadPoolExecutor creates non-daemon workers, so a worker
+    stuck in a blocking call (e.g. Playwright IPC after the Camoufox
+    subprocess has crashed) keeps the Python interpreter alive even
+    after `sys.exit` / Ctrl+C, forcing the user to kill the process
+    via the OS. Marking the worker daemon lets Python exit cleanly
+    while leaving the stuck IPC for the OS to reap."""
+
+    def _adjust_thread_count(self) -> None:
+        super()._adjust_thread_count()
+        for thread in list(self._threads):
+            try:
+                thread.daemon = True
+            except RuntimeError:
+                pass
+
+
 def _get_session_lock(agent_id: str) -> asyncio.Lock:
     """Return (creating if missing) a per-agent asyncio.Lock used by
     every `browser_*` tool handler to serialize concurrent calls
@@ -841,9 +860,14 @@ class AuthBrowser:
         for one AuthBrowser through one dedicated executor keeps every
         Playwright op on the same thread for the lifetime of the
         session, eliminating the `cannot switch to a different thread`
-        error surfaced in S155."""
+        error surfaced in S155.
+
+        The executor is built with `_DaemonThreadPoolExecutor` so the
+        worker thread is daemon — if a Playwright IPC call hangs after
+        Camoufox crashed, Python can still exit cleanly instead of
+        waiting indefinitely for a thread that will never complete."""
         if self._executor is None:
-            self._executor = ThreadPoolExecutor(
+            self._executor = _DaemonThreadPoolExecutor(
                 max_workers=1,
                 thread_name_prefix=f"camoufox-{self._agent_id}",
             )
@@ -852,7 +876,7 @@ class AuthBrowser:
     def _shutdown_executor(self) -> None:
         if self._executor is not None:
             try:
-                self._executor.shutdown(wait=False)
+                self._executor.shutdown(wait=False, cancel_futures=True)
             except Exception:
                 pass
             self._executor = None
@@ -1441,18 +1465,42 @@ class AuthBrowser:
         return self._page.locator(ref_or_selector)
 
     def close(self) -> None:
-        """Release browser resources. Safe to call multiple times."""
-        # Audit before teardown nulls _page. Skip when already disconnected.
-        if not self._disconnected:
-            url = ""
-            if self._page is not None:
-                try:
-                    url = self._page.url
-                except Exception:
-                    pass
-            self._audit_action("close", url, "ok")
+        """Release browser resources. Safe to call multiple times.
 
-        if self._disconnected:
+        Idempotent + race-tolerant: every Playwright call is guarded
+        by a fresh `_disconnected` check so a disconnect event firing
+        mid-close skips the doomed IPC (the failure mode behind the
+        S155 Ctrl+C hang). Registry / lock / executor teardown always
+        runs in the finally block so a stuck close() never leaves
+        orphan threads keeping the Python process alive."""
+        try:
+            if not self._disconnected:
+                url = ""
+                if self._page is not None:
+                    try:
+                        url = self._page.url
+                    except Exception:
+                        pass
+                self._audit_action("close", url, "ok")
+            if self._disconnected:
+                return
+            if self._context is not None and not self._disconnected:
+                try:
+                    self._save_storage_state()
+                except Exception as exc:
+                    log.warning(
+                        "storage_state save during close failed for agent=%s: %s",
+                        self._agent_id, exc,
+                    )
+            if self._cm is not None and not self._disconnected:
+                try:
+                    self._cm.__exit__(None, None, None)
+                except Exception as exc:
+                    log.warning(
+                        "Camoufox __exit__ failed for agent=%s: %s",
+                        self._agent_id, exc,
+                    )
+        finally:
             self._cm = None
             self._browser = None
             self._context = None
@@ -1461,21 +1509,6 @@ class AuthBrowser:
             _active_browser_sessions.pop(self._agent_id, None)
             _session_locks.pop(self._agent_id, None)
             self._shutdown_executor()
-            return
-        if self._context is not None:
-            self._save_storage_state()
-        if self._cm is not None:
-            try:
-                self._cm.__exit__(None, None, None)
-            finally:
-                self._cm = None
-                self._browser = None
-                self._context = None
-                self._page = None
-        _active_camoufox_browsers.discard(self)
-        _active_browser_sessions.pop(self._agent_id, None)
-        _session_locks.pop(self._agent_id, None)
-        self._shutdown_executor()
 
     def _on_browser_disconnected(self, *args: Any) -> None:
         """Fired by Playwright when the browser process detaches."""
