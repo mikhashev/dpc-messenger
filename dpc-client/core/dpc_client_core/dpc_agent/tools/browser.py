@@ -17,6 +17,7 @@ import html as html_module
 import json
 import logging
 import os
+import platform
 import re
 import ssl
 from dataclasses import dataclass
@@ -208,6 +209,25 @@ def _browse_sync(url: str) -> Dict[str, Any]:
     return result
 
 
+_CAMOUFOX_OS_MAP = {"Windows": "windows", "Darwin": "macos", "Linux": "linux"}
+
+
+def _camoufox_launch_kwargs() -> Dict[str, Any]:
+    """Anti-fingerprint hardening shared by every Camoufox call site.
+
+    Why: defaults pass only `headless`; sites that aggressively fingerprint
+    Firefox-based automation (x.com class) flag the resulting inconsistencies.
+    `humanize` adds human-like cursor latency, `geoip` derives timezone/locale
+    from public IP, `os` declares the real host platform so the spoofed
+    fingerprint matches the TLS / network stack.
+    """
+    kwargs: Dict[str, Any] = {"humanize": True, "geoip": True}
+    cam_os = _CAMOUFOX_OS_MAP.get(platform.system())
+    if cam_os:
+        kwargs["os"] = cam_os
+    return kwargs
+
+
 def _browse_with_camoufox(url: str) -> Optional[str]:
     try:
         from camoufox.sync_api import Camoufox
@@ -215,7 +235,7 @@ def _browse_with_camoufox(url: str) -> Optional[str]:
         return None
 
     try:
-        with Camoufox(headless=True) as browser:
+        with Camoufox(headless=True, **_camoufox_launch_kwargs()) as browser:
             page = browser.new_page()
             page.goto(url, wait_until="networkidle", timeout=30000)
             html = page.content()
@@ -507,7 +527,7 @@ class AuthBrowser:
     def _open(self) -> None:
         from camoufox.sync_api import Camoufox
 
-        self._cm = Camoufox(headless=not self._headed)
+        self._cm = Camoufox(headless=not self._headed, **_camoufox_launch_kwargs())
         self._browser = self._cm.__enter__()
 
         state_path = self._state_path()
