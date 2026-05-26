@@ -1347,7 +1347,7 @@ def get_tools() -> List[ToolEntry]:
             name="browse_page",
             schema={
                 "name": "browse_page",
-                "description": "Fetch a web page and extract content as structured markdown. Preserves headings, lists, tables, and links. Use size presets to control output length: s=5K, m=10K (default), l=25K, f=full. Set use_auth=<domain> to fetch authenticated content using stored cookies (requires prior login via the web-auth UI).",
+                "description": "Fetch a web page and extract content as structured markdown. Preserves headings, lists, tables, and links. Use size presets to control output length: s=5K, m=10K (default), l=25K, f=full. Set use_auth=<domain> to fetch authenticated content using stored cookies (requires prior login via the web-auth UI). Set keep_open=true to leave the headed Camoufox window open after returning (auth path only) — useful for visual debugging and Task 002 stateful interactive flows.",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -1364,6 +1364,11 @@ def get_tools() -> List[ToolEntry]:
                         "use_auth": {
                             "type": "string",
                             "description": "Optional auth domain (eg 'example.com'). When set, the page is fetched authenticated using cookies from the agent's encrypted vault. The URL must be within the same eTLD+1 as use_auth (subdomains allowed). Returns a re-login prompt if cookies are missing or expired."
+                        },
+                        "keep_open": {
+                            "type": "boolean",
+                            "description": "When true, leave the headed Camoufox window open after the fetch returns (only effective on the use_auth path; ignored for anonymous fetches). The session is reused on subsequent browse_page calls for the same agent, so opening one site and then another navigates the same window. Window stays open until DPC restart or until the next browse_page call replaces it. Use for visual debugging or as the foundation for Task 002 interactive flows.",
+                            "default": False
                         }
                     },
                     "required": ["url"]
