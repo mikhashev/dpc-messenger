@@ -14,12 +14,15 @@ from __future__ import annotations
 
 import asyncio
 import html as html_module
+import json
 import logging
+import os
 import re
 import ssl
 from dataclasses import dataclass
 from html.parser import HTMLParser
 from io import StringIO
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from .registry import ToolEntry, ToolContext
@@ -312,6 +315,28 @@ def _to_playwright_cookies(cookies: list[dict]) -> list[dict]:
     return out
 
 
+def _from_playwright_cookies(cookies: list[dict]) -> list[dict]:
+    """Reverse of `_to_playwright_cookies`: Playwright camelCase →
+    DPC snake_case format the vault writes. Used by ADR-029 Task 004
+    when syncing the close-time `storage_state` back to vault."""
+    out = []
+    for c in cookies:
+        sc = {
+            "name": c["name"],
+            "value": c["value"],
+            "domain": c.get("domain") or "",
+            "path": c.get("path") or "/",
+            "secure": bool(c.get("secure", False)),
+            "httponly": bool(c.get("httpOnly", False)),
+        }
+        if c.get("expires") is not None:
+            sc["expires"] = c["expires"]
+        if c.get("sameSite"):
+            sc["samesite"] = c["sameSite"]
+        out.append(sc)
+    return out
+
+
 def _domain_matches(url: str, etld1: str) -> bool:
     """Check whether URL host is the same eTLD+1 as `etld1` (or a
     subdomain of it). Prevents leaking cookies to unrelated hosts that
@@ -427,9 +452,6 @@ class AuthBrowser:
         self._browser = None
         self._context = None
         self._page = None
-        # ADR-029 Task 003 — observable counter of route-handler aborts;
-        # incremented by `_on_domain_blocked`. Task 005 will extend the
-        # hook into a real audit event; counter stays for test visibility.
         self._domain_blocks = 0
 
     def __enter__(self):
@@ -486,49 +508,88 @@ class AuthBrowser:
 
         self._cm = Camoufox(headless=not self._headed)
         self._browser = self._cm.__enter__()
-        self._context = self._browser.new_context()
-        # ADR-029 Task 003: install route handler BEFORE first navigation so
-        # every request (page, XHR, fetch, redirect chain) is gated by the
-        # eTLD+1 whitelist. Order vs add_cookies is irrelevant (cookies
-        # attach to the context, route handler attaches to the dispatcher),
-        # but registering routes first matches the spec.
+
+        state_path = self._state_path()
+        context_kwargs: dict = {}
+        used_state = False
+        if state_path.exists():
+            try:
+                json.loads(state_path.read_text(encoding="utf-8"))
+                context_kwargs["storage_state"] = str(state_path)
+                used_state = True
+            except (json.JSONDecodeError, OSError) as e:
+                log.warning(
+                    "storage_state parse error at %s, falling back to vault: %s",
+                    state_path, e,
+                )
+
+        self._context = self._browser.new_context(**context_kwargs)
         self._install_domain_route_handler()
-        if self._domains:
-            self._context.add_cookies(_to_playwright_cookies(self._load_all_cookies()))
+
+        if not used_state and self._domains:
+            self._inject_vault_cookies()
+
         self._page = self._context.new_page()
-        # S144 SHUTDOWN-PIPE-DRAIN: register so CoreService.shutdown can
-        # close orphaned Camoufox subprocesses before the loop tears down.
         _active_camoufox_browsers.add(self)
 
-    def _install_domain_route_handler(self) -> None:
-        """ADR-029 Task 003 — register a Playwright route handler on the
-        active context that aborts any request whose eTLD+1 is not in the
-        session's whitelist (`self._etld1s`).
+    def _state_path(self) -> Path:
+        home = Path(os.environ.get("DPC_HOME", Path.home() / ".dpc"))
+        return home / "agents" / self._agent_id / "browser_state.json"
 
-        Empty whitelist = abort everything (fail-closed). The eTLD+1 list
-        is derived at __init__ from the caller-supplied `domains`, which
-        in turn come from `firewall.get_agent_web_auth_domains()` for the
-        `_get_or_create_session` path. No fresh firewall lookup here —
-        the route handler trusts the constructor's view (lifetime of the
-        session is short enough that mid-session whitelist edits are
-        handled by closing + reopening).
-        """
+    def _inject_vault_cookies(self) -> None:
+        self._context.add_cookies(_to_playwright_cookies(self._load_all_cookies()))
+
+    def _sync_cookies_to_vault(self, cookies: list[dict]) -> None:
+        if not cookies or not self._etld1s:
+            return
+        from dpc_client_core import web_auth
+
+        by_etld1: dict[str, list[dict]] = {}
+        for c in cookies:
+            raw = (c.get("domain") or "").lstrip(".").lower()
+            if not raw:
+                continue
+            matched = None
+            for allowed in self._etld1s:
+                if raw == allowed or raw.endswith("." + allowed):
+                    matched = allowed
+                    break
+            if matched is None:
+                continue
+            by_etld1.setdefault(matched, []).append(c)
+
+        snake = {d: _from_playwright_cookies(items) for d, items in by_etld1.items()}
+        for domain, items in snake.items():
+            web_auth.save_cookies(self._agent_id, domain, items)
+
+    def _save_storage_state(self) -> None:
         if self._context is None:
-            return  # defensive — _open() always sets it before calling us
+            return
+        try:
+            state_path = self._state_path()
+            state_path.parent.mkdir(parents=True, exist_ok=True)
+            # os.replace is atomic on Windows + POSIX — guards against torn writes.
+            tmp_path = state_path.with_suffix(".json.tmp")
+            self._context.storage_state(path=str(tmp_path))
+            os.replace(tmp_path, state_path)
+            state = json.loads(state_path.read_text(encoding="utf-8"))
+            self._sync_cookies_to_vault(state.get("cookies", []))
+        except Exception as e:
+            log.warning(
+                "storage_state save failed for agent=%s: %s",
+                self._agent_id, e,
+            )
+
+    def _install_domain_route_handler(self) -> None:
+        if self._context is None:
+            return
         self._context.route("**/*", self._domain_route_gate)
 
     def _domain_route_gate(self, route) -> None:
-        """Per-request gate invoked by Playwright for every outbound
-        request on the context. Continues when the request URL's host
-        matches one of the whitelisted eTLD+1s (or is a subdomain of
-        one), aborts otherwise. Non-HTTP schemes (about:, data:,
-        blob:) short-circuit to continue — they do not trigger
-        network requests outside the browser process."""
         try:
             url = route.request.url
         except Exception:
-            # Defensive — if Playwright surfaces an unexpected route shape,
-            # fail-closed rather than fail-open.
+            # Unknown Route shape — fail-closed rather than let request through.
             try:
                 route.abort()
             except Exception:
@@ -543,7 +604,6 @@ class AuthBrowser:
             return
 
         if not self._etld1s:
-            # Fail-closed: empty whitelist means no domains authorized.
             self._on_domain_blocked(url, "")
             try:
                 route.abort()
@@ -551,10 +611,6 @@ class AuthBrowser:
                 pass
             return
 
-        # Match request host against whitelist via _domain_matches —
-        # same helper navigate() / _check_domain use, so the route gate
-        # and the pre-navigation gate agree on what counts as in-domain
-        # (host equals an eTLD+1, or is a subdomain of one).
         from urllib.parse import urlparse
 
         host = (urlparse(url).hostname or "").lower()
@@ -573,11 +629,7 @@ class AuthBrowser:
             pass
 
     def _on_domain_blocked(self, url: str, etld1: str) -> None:
-        """Audit hook fired on every request the route gate aborts.
-        Task 005 wires the real audit-trail emission here; for Task 003
-        it is a stub plus a hit counter to make blocks observable in
-        tests and logs.
-        """
+        # Task 005 will swap this stub for real audit emission.
         self._domain_blocks += 1
 
     def _require_open(self) -> None:
@@ -699,6 +751,9 @@ class AuthBrowser:
 
     def close(self) -> None:
         """Release browser resources. Safe to call multiple times."""
+        # storage_state() needs a live context — save before teardown.
+        if self._context is not None:
+            self._save_storage_state()
         if self._cm is not None:
             try:
                 self._cm.__exit__(None, None, None)
@@ -708,9 +763,6 @@ class AuthBrowser:
                 self._context = None
                 self._page = None
         _active_camoufox_browsers.discard(self)
-        # Deregister from the stateful session dict — the dict only
-        # tracks sessions opened via _get_or_create_session, but
-        # discarding an unknown key is cheap.
         _active_browser_sessions.pop(self._agent_id, None)
 
 

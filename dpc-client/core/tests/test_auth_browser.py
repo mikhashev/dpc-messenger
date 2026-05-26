@@ -16,6 +16,7 @@ guard logic that surrounds the browser:
 from __future__ import annotations
 
 import asyncio
+import json
 import time
 import types
 from pathlib import Path
@@ -474,6 +475,374 @@ def test_route_gate_resilient_to_broken_request(vault_home):
     ab._domain_route_gate(route)
     assert route.aborted is True
     assert route.continued is False
+
+
+# ─────────────────────────────────────────────────────────────
+# ADR-029 Task 004 — storage_state + vault hybrid persistence
+# ─────────────────────────────────────────────────────────────
+
+
+class _FakeStateContext:
+    """Mock of Playwright BrowserContext that captures storage_state()
+    + add_cookies() calls and writes JSON when storage_state(path=...)
+    is invoked. Combined with _FakeRoute/_FakeContext above this gives
+    us enough surface to drive AuthBrowser through _open/close without
+    a real Camoufox binary."""
+
+    def __init__(self, on_storage_state=None):
+        self.added: list[list[dict]] = []
+        self.routes: list[tuple[str, object]] = []
+        self.pages: list[object] = []
+        self._on_storage_state = on_storage_state
+        self.closed = False
+        self.storage_state_calls: list[str] = []
+
+    def add_cookies(self, cookies: list[dict]) -> None:
+        self.added.append(list(cookies))
+
+    def route(self, pattern: str, handler) -> None:
+        self.routes.append((pattern, handler))
+
+    def new_page(self):
+        page = object()
+        self.pages.append(page)
+        return page
+
+    def storage_state(self, path: str | None = None) -> dict | None:
+        self.storage_state_calls.append(path or "<no-path>")
+        if self._on_storage_state is not None:
+            self._on_storage_state(path)
+        return None
+
+    def close(self) -> None:
+        self.closed = True
+
+
+def test_from_playwright_cookies_roundtrip(vault_home):
+    """camelCase Playwright cookie → snake_case vault cookie →
+    re-converted back to camelCase preserves all fields."""
+    from dpc_client_core.dpc_agent.tools.browser import (
+        _from_playwright_cookies,
+        _to_playwright_cookies,
+    )
+
+    src = [
+        {
+            "name": "session_id", "value": "abc",
+            "domain": ".ozon.ru", "path": "/",
+            "secure": True, "httpOnly": True, "sameSite": "Lax",
+            "expires": 1735689600,
+        },
+    ]
+    snake = _from_playwright_cookies(src)
+    assert snake[0]["httponly"] is True
+    assert snake[0]["samesite"] == "Lax"
+    assert snake[0]["expires"] == 1735689600
+    assert "httpOnly" not in snake[0]
+    # And back — should match Playwright shape modulo defaulting
+    rt = _to_playwright_cookies(snake)
+    assert rt[0]["httpOnly"] is True
+    assert rt[0]["sameSite"] == "Lax"
+    assert rt[0]["expires"] == 1735689600
+
+
+def test_state_path_uses_dpc_home(vault_home):
+    """`_state_path` resolves to ~/.dpc/agents/<id>/browser_state.json
+    under the DPC_HOME env override (set by vault_home fixture)."""
+    from dpc_client_core.dpc_agent.tools.browser import AuthBrowser
+
+    ab = AuthBrowser(agent_id="agent_a", domain="ozon.ru")
+    state = ab._state_path()
+    expected = vault_home / "agents" / "agent_a" / "browser_state.json"
+    assert state == expected
+
+
+def test_inject_vault_cookies_calls_add_cookies(vault_home, fresh_cookies):
+    """`_inject_vault_cookies` reads vault via _load_all_cookies and
+    pushes the camelCase-converted cookies into the active context."""
+    from dpc_client_core import web_auth
+    from dpc_client_core.dpc_agent.tools.browser import AuthBrowser
+
+    web_auth.save_cookies("agent_a", "ozon.ru", fresh_cookies)
+    ab = AuthBrowser(agent_id="agent_a", domain="ozon.ru")
+    ab._context = _FakeStateContext()
+    ab._inject_vault_cookies()
+    assert len(ab._context.added) == 1
+    assert ab._context.added[0][0]["name"] == "session_id"
+    assert ab._context.added[0][0]["httpOnly"] is True  # camelCase converted
+
+
+def test_sync_cookies_to_vault_groups_and_filters(vault_home):
+    """Group Playwright cookies by eTLD+1, save each group, drop cookies
+    whose domain is outside the session whitelist."""
+    from dpc_client_core import web_auth
+    from dpc_client_core.dpc_agent.tools.browser import AuthBrowser
+
+    ab = AuthBrowser(agent_id="agent_a", domains=["ozon.ru"])
+    state_cookies = [
+        {
+            "name": "a", "value": "1", "domain": ".ozon.ru", "path": "/",
+            "secure": True, "httpOnly": False, "sameSite": "Lax",
+            "expires": 1735689600,
+        },
+        {
+            "name": "b", "value": "2", "domain": "www.ozon.ru", "path": "/",
+            "secure": True, "httpOnly": True, "sameSite": "Lax",
+            "expires": 1735689600,
+        },
+        {
+            # Outside whitelist — must NOT land in vault even if route
+            # handler missed it.
+            "name": "leak", "value": "3", "domain": ".google.com", "path": "/",
+            "secure": True, "httpOnly": True,
+        },
+    ]
+    ab._sync_cookies_to_vault(state_cookies)
+    saved = web_auth.load_cookies("agent_a", "ozon.ru")
+    assert saved is not None
+    names = sorted(c["name"] for c in saved)
+    assert names == ["a", "b"]
+    # google.com cookie not saved anywhere
+    assert web_auth.load_cookies("agent_a", "google.com") is None
+
+
+def test_sync_cookies_to_vault_empty_input_no_op(vault_home):
+    from dpc_client_core import web_auth
+    from dpc_client_core.dpc_agent.tools.browser import AuthBrowser
+
+    ab = AuthBrowser(agent_id="agent_a", domains=["ozon.ru"])
+    ab._sync_cookies_to_vault([])  # must not raise
+    assert web_auth.load_cookies("agent_a", "ozon.ru") is None
+
+
+def test_save_storage_state_writes_atomically_and_syncs_vault(vault_home):
+    """`_save_storage_state` writes to a `.tmp` sibling then os.replaces,
+    final file exists, vault has the synced cookies."""
+    from dpc_client_core import web_auth
+    from dpc_client_core.dpc_agent.tools.browser import AuthBrowser
+
+    ab = AuthBrowser(agent_id="agent_a", domains=["ozon.ru"])
+
+    def _write_state(path: str):
+        Path(path).write_text(
+            json.dumps({
+                "cookies": [
+                    {
+                        "name": "s", "value": "v", "domain": ".ozon.ru",
+                        "path": "/", "secure": True, "httpOnly": True,
+                        "sameSite": "Lax", "expires": 1735689600,
+                    },
+                ],
+                "origins": [],
+            }),
+            encoding="utf-8",
+        )
+
+    ab._context = _FakeStateContext(on_storage_state=_write_state)
+    ab._save_storage_state()
+
+    state_path = ab._state_path()
+    assert state_path.exists()
+    # tmp was os.replaced — no .tmp leftover
+    assert not state_path.with_suffix(".json.tmp").exists()
+    saved = web_auth.load_cookies("agent_a", "ozon.ru")
+    assert saved is not None
+    assert saved[0]["name"] == "s"
+    assert saved[0]["httponly"] is True  # snake_case vault format
+
+
+def test_save_storage_state_swallows_errors(vault_home, caplog):
+    """`_save_storage_state` must not raise on context errors — close()
+    relies on this so subprocess cleanup runs to completion."""
+    import logging as _logging
+    from dpc_client_core.dpc_agent.tools.browser import AuthBrowser
+
+    ab = AuthBrowser(agent_id="agent_a", domains=["ozon.ru"])
+
+    class _BrokenContext:
+        def storage_state(self, path=None):
+            raise RuntimeError("context already closed")
+
+    ab._context = _BrokenContext()
+    with caplog.at_level(_logging.WARNING):
+        ab._save_storage_state()  # must not raise
+    assert any(
+        "storage_state save failed" in rec.getMessage()
+        for rec in caplog.records
+    )
+
+
+def test_save_storage_state_no_op_when_context_none(vault_home):
+    from dpc_client_core.dpc_agent.tools.browser import AuthBrowser
+
+    ab = AuthBrowser(agent_id="agent_a", domains=["ozon.ru"])
+    assert ab._context is None
+    ab._save_storage_state()  # must not raise
+    assert not ab._state_path().exists()
+
+
+def test_close_triggers_save_when_context_live(vault_home):
+    """close() must call _save_storage_state before tearing down so
+    Playwright storage_state() has a live context to read from."""
+    from dpc_client_core.dpc_agent.tools.browser import AuthBrowser
+
+    ab = AuthBrowser(agent_id="agent_a", domains=["ozon.ru"])
+    saved: list[bool] = []
+
+    def _record_save():
+        saved.append(ab._context is not None)
+
+    # Stub _save_storage_state to record when it was called relative to cm
+    original = ab._save_storage_state
+    ab._save_storage_state = _record_save
+    ab._context = _FakeStateContext()
+
+    # No Camoufox cm — close should still call save (early branch)
+    ab.close()
+    assert saved == [True]
+
+
+def test_open_uses_storage_state_when_file_valid(vault_home, monkeypatch):
+    """When `browser_state.json` exists + parses, _open() passes
+    `storage_state=<path>` to new_context() and skips the vault
+    injection path."""
+    from dpc_client_core.dpc_agent.tools.browser import AuthBrowser
+
+    # Pre-create the state file
+    state_dir = vault_home / "agents" / "agent_a"
+    state_dir.mkdir(parents=True, exist_ok=True)
+    state_path = state_dir / "browser_state.json"
+    state_path.write_text(json.dumps({"cookies": [], "origins": []}), encoding="utf-8")
+
+    new_context_kwargs: list[dict] = []
+    injected: list[int] = []
+
+    class _StubBrowser:
+        def new_context(self, **kwargs):
+            new_context_kwargs.append(dict(kwargs))
+            return _FakeStateContext()
+
+    class _StubCm:
+        def __enter__(self):
+            return _StubBrowser()
+
+        def __exit__(self, *args):
+            return False
+
+    # Patch Camoufox to return our stub instead of launching a real browser
+    import dpc_client_core.dpc_agent.tools.browser as mod
+    monkeypatch.setattr(
+        "camoufox.sync_api.Camoufox", lambda **kw: _StubCm(),
+        raising=False,
+    )
+    # Patch _inject_vault_cookies so we can detect if it was called
+    original = AuthBrowser._inject_vault_cookies
+    AuthBrowser._inject_vault_cookies = lambda self: injected.append(1)
+    try:
+        ab = AuthBrowser(agent_id="agent_a", domains=["ozon.ru"])
+        ab._open()
+    finally:
+        AuthBrowser._inject_vault_cookies = original
+        # Best-effort cleanup of process-wide registry the stub joined
+        from dpc_client_core.dpc_agent.tools.browser import _active_camoufox_browsers
+        _active_camoufox_browsers.discard(ab)
+
+    assert len(new_context_kwargs) == 1
+    assert new_context_kwargs[0].get("storage_state") == str(state_path)
+    assert injected == []  # vault path NOT taken when state file used
+
+
+def test_open_falls_back_to_vault_when_state_missing(vault_home, monkeypatch, fresh_cookies):
+    """No state file → new_context() called with no storage_state kwarg,
+    vault injection path is taken."""
+    from dpc_client_core import web_auth
+    from dpc_client_core.dpc_agent.tools.browser import AuthBrowser
+
+    web_auth.save_cookies("agent_a", "ozon.ru", fresh_cookies)
+
+    new_context_kwargs: list[dict] = []
+    injected: list[int] = []
+
+    class _StubBrowser:
+        def new_context(self, **kwargs):
+            new_context_kwargs.append(dict(kwargs))
+            return _FakeStateContext()
+
+    class _StubCm:
+        def __enter__(self):
+            return _StubBrowser()
+
+        def __exit__(self, *args):
+            return False
+
+    monkeypatch.setattr(
+        "camoufox.sync_api.Camoufox", lambda **kw: _StubCm(),
+        raising=False,
+    )
+    original = AuthBrowser._inject_vault_cookies
+    AuthBrowser._inject_vault_cookies = lambda self: injected.append(1)
+    try:
+        ab = AuthBrowser(agent_id="agent_a", domains=["ozon.ru"])
+        ab._open()
+    finally:
+        AuthBrowser._inject_vault_cookies = original
+        from dpc_client_core.dpc_agent.tools.browser import _active_camoufox_browsers
+        _active_camoufox_browsers.discard(ab)
+
+    assert len(new_context_kwargs) == 1
+    assert "storage_state" not in new_context_kwargs[0]
+    assert injected == [1]
+
+
+def test_open_falls_back_to_vault_when_state_corrupt(vault_home, monkeypatch, fresh_cookies, caplog):
+    """Corrupt JSON in browser_state.json → warning logged, fallback to
+    vault, next close will overwrite the file."""
+    import logging as _logging
+    from dpc_client_core import web_auth
+    from dpc_client_core.dpc_agent.tools.browser import AuthBrowser
+
+    web_auth.save_cookies("agent_a", "ozon.ru", fresh_cookies)
+
+    state_dir = vault_home / "agents" / "agent_a"
+    state_dir.mkdir(parents=True, exist_ok=True)
+    (state_dir / "browser_state.json").write_text("not-valid-json{", encoding="utf-8")
+
+    new_context_kwargs: list[dict] = []
+    injected: list[int] = []
+
+    class _StubBrowser:
+        def new_context(self, **kwargs):
+            new_context_kwargs.append(dict(kwargs))
+            return _FakeStateContext()
+
+    class _StubCm:
+        def __enter__(self):
+            return _StubBrowser()
+
+        def __exit__(self, *args):
+            return False
+
+    monkeypatch.setattr(
+        "camoufox.sync_api.Camoufox", lambda **kw: _StubCm(),
+        raising=False,
+    )
+    original = AuthBrowser._inject_vault_cookies
+    AuthBrowser._inject_vault_cookies = lambda self: injected.append(1)
+    try:
+        ab = AuthBrowser(agent_id="agent_a", domains=["ozon.ru"])
+        with caplog.at_level(_logging.WARNING):
+            ab._open()
+    finally:
+        AuthBrowser._inject_vault_cookies = original
+        from dpc_client_core.dpc_agent.tools.browser import _active_camoufox_browsers
+        _active_camoufox_browsers.discard(ab)
+
+    assert "storage_state" not in new_context_kwargs[0]
+    assert injected == [1]
+    assert any(
+        "storage_state parse error" in rec.getMessage()
+        for rec in caplog.records
+    )
 
 
 # ─────────────────────────────────────────────────────────────
