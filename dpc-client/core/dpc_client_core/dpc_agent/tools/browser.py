@@ -427,6 +427,10 @@ class AuthBrowser:
         self._browser = None
         self._context = None
         self._page = None
+        # ADR-029 Task 003 — observable counter of route-handler aborts;
+        # incremented by `_on_domain_blocked`. Task 005 will extend the
+        # hook into a real audit event; counter stays for test visibility.
+        self._domain_blocks = 0
 
     def __enter__(self):
         self._open()
@@ -483,12 +487,98 @@ class AuthBrowser:
         self._cm = Camoufox(headless=not self._headed)
         self._browser = self._cm.__enter__()
         self._context = self._browser.new_context()
+        # ADR-029 Task 003: install route handler BEFORE first navigation so
+        # every request (page, XHR, fetch, redirect chain) is gated by the
+        # eTLD+1 whitelist. Order vs add_cookies is irrelevant (cookies
+        # attach to the context, route handler attaches to the dispatcher),
+        # but registering routes first matches the spec.
+        self._install_domain_route_handler()
         if self._domains:
             self._context.add_cookies(_to_playwright_cookies(self._load_all_cookies()))
         self._page = self._context.new_page()
         # S144 SHUTDOWN-PIPE-DRAIN: register so CoreService.shutdown can
         # close orphaned Camoufox subprocesses before the loop tears down.
         _active_camoufox_browsers.add(self)
+
+    def _install_domain_route_handler(self) -> None:
+        """ADR-029 Task 003 — register a Playwright route handler on the
+        active context that aborts any request whose eTLD+1 is not in the
+        session's whitelist (`self._etld1s`).
+
+        Empty whitelist = abort everything (fail-closed). The eTLD+1 list
+        is derived at __init__ from the caller-supplied `domains`, which
+        in turn come from `firewall.get_agent_web_auth_domains()` for the
+        `_get_or_create_session` path. No fresh firewall lookup here —
+        the route handler trusts the constructor's view (lifetime of the
+        session is short enough that mid-session whitelist edits are
+        handled by closing + reopening).
+        """
+        if self._context is None:
+            return  # defensive — _open() always sets it before calling us
+        self._context.route("**/*", self._domain_route_gate)
+
+    def _domain_route_gate(self, route) -> None:
+        """Per-request gate invoked by Playwright for every outbound
+        request on the context. Continues when the request URL's host
+        matches one of the whitelisted eTLD+1s (or is a subdomain of
+        one), aborts otherwise. Non-HTTP schemes (about:, data:,
+        blob:) short-circuit to continue — they do not trigger
+        network requests outside the browser process."""
+        try:
+            url = route.request.url
+        except Exception:
+            # Defensive — if Playwright surfaces an unexpected route shape,
+            # fail-closed rather than fail-open.
+            try:
+                route.abort()
+            except Exception:
+                pass
+            return
+
+        if not url.startswith(("http://", "https://")):
+            try:
+                route.continue_()
+            except Exception:
+                pass
+            return
+
+        if not self._etld1s:
+            # Fail-closed: empty whitelist means no domains authorized.
+            self._on_domain_blocked(url, "")
+            try:
+                route.abort()
+            except Exception:
+                pass
+            return
+
+        # Match request host against whitelist via _domain_matches —
+        # same helper navigate() / _check_domain use, so the route gate
+        # and the pre-navigation gate agree on what counts as in-domain
+        # (host equals an eTLD+1, or is a subdomain of one).
+        from urllib.parse import urlparse
+
+        host = (urlparse(url).hostname or "").lower()
+        for allowed in self._etld1s:
+            if _domain_matches(url, allowed):
+                try:
+                    route.continue_()
+                except Exception:
+                    pass
+                return
+
+        self._on_domain_blocked(url, host)
+        try:
+            route.abort()
+        except Exception:
+            pass
+
+    def _on_domain_blocked(self, url: str, etld1: str) -> None:
+        """Audit hook fired on every request the route gate aborts.
+        Task 005 wires the real audit-trail emission here; for Task 003
+        it is a stub plus a hit counter to make blocks observable in
+        tests and logs.
+        """
+        self._domain_blocks += 1
 
     def _require_open(self) -> None:
         if self._page is None:
@@ -497,11 +587,12 @@ class AuthBrowser:
             )
 
     def _check_domain(self, url: str) -> None:
-        """Pre-navigation domain gate. Allows any eTLD+1 in self._etld1s
-        (multi-domain), preserving the original single-domain check when
-        the session was opened with one domain. ADR-029 Task 003 will
-        replace this with a Playwright route handler so the gate also
-        catches in-page redirects + XHR."""
+        """Pre-navigation fail-fast gate. Cheaper than waiting for the
+        Playwright route handler to abort (no browser round-trip) and
+        gives a clean ValueError for off-domain navigate() calls. The
+        route handler installed in `_install_domain_route_handler` is
+        the authoritative gate that also catches in-page redirects and
+        XHR — this method is the convenience layer in front of it."""
         if not self._etld1s:
             return  # session opened without any auth domain (rare; tests)
         for etld1 in self._etld1s:
@@ -513,7 +604,9 @@ class AuthBrowser:
 
     def navigate(self, url: str) -> None:
         """Navigate to URL. URL eTLD+1 must match one of the session's
-        auth domains; ADR-029 Task 003 will harden via a route handler.
+        auth domains; in-page redirects and XHR are gated by the
+        Playwright route handler installed at session open
+        (ADR-029 Task 003).
 
         Replaces ADR-028 `goto()` — kept as an alias for back-compat."""
         self._require_open()

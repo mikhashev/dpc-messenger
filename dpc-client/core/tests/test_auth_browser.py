@@ -301,6 +301,182 @@ def test_screenshot_save_to_returns_path(vault_home, tmp_path):
 
 
 # ─────────────────────────────────────────────────────────────
+# ADR-029 Task 003 — Playwright route handler (domain restriction)
+# ─────────────────────────────────────────────────────────────
+
+
+class _FakeRoute:
+    """Minimal Playwright Route stub — exposes `request.url`, records
+    whether continue_ or abort was called. Mirrors only the surface our
+    `_domain_route_gate` touches."""
+
+    def __init__(self, url: str):
+        self.request = types.SimpleNamespace(url=url)
+        self.continued = False
+        self.aborted = False
+
+    def continue_(self):
+        self.continued = True
+
+    def abort(self):
+        self.aborted = True
+
+
+class _FakeContext:
+    """Captures the route handler installed by `_install_domain_route_handler`
+    so we can invoke it with fake routes."""
+
+    def __init__(self):
+        self.registered: list[tuple[str, object]] = []
+
+    def route(self, pattern: str, handler):
+        self.registered.append((pattern, handler))
+
+
+def test_install_route_handler_registers_catch_all(vault_home):
+    """`_install_domain_route_handler` must register a `**/*` route on
+    the context so EVERY request (page + XHR + redirects) goes through
+    the gate."""
+    from dpc_client_core.dpc_agent.tools.browser import AuthBrowser
+
+    ab = AuthBrowser(agent_id="agent_a", domains=["ozon.ru"])
+    ab._context = _FakeContext()
+    ab._install_domain_route_handler()
+    assert len(ab._context.registered) == 1
+    pattern, _handler = ab._context.registered[0]
+    assert pattern == "**/*"
+
+
+def test_route_gate_allows_in_domain(vault_home):
+    from dpc_client_core.dpc_agent.tools.browser import AuthBrowser
+
+    ab = AuthBrowser(agent_id="agent_a", domains=["ozon.ru"])
+    route = _FakeRoute("https://ozon.ru/my/orders")
+    ab._domain_route_gate(route)
+    assert route.continued is True
+    assert route.aborted is False
+    assert ab._domain_blocks == 0
+
+
+def test_route_gate_allows_subdomain(vault_home):
+    """Subdomain CDN of an allowed eTLD+1 must pass — page-asset case
+    from spec (cdn.shop.example.com when shop.example.com whitelisted)."""
+    from dpc_client_core.dpc_agent.tools.browser import AuthBrowser
+
+    ab = AuthBrowser(agent_id="agent_a", domains=["ozon.ru"])
+    route = _FakeRoute("https://cdn.ozon.ru/static/lib.js")
+    ab._domain_route_gate(route)
+    assert route.continued is True
+    assert route.aborted is False
+
+
+def test_route_gate_blocks_off_domain(vault_home):
+    from dpc_client_core.dpc_agent.tools.browser import AuthBrowser
+
+    ab = AuthBrowser(agent_id="agent_a", domains=["ozon.ru"])
+    route = _FakeRoute("https://googletagmanager.com/gtm.js?id=GTM-XXX")
+    ab._domain_route_gate(route)
+    assert route.aborted is True
+    assert route.continued is False
+    assert ab._domain_blocks == 1
+
+
+def test_route_gate_blocks_lookalike(vault_home):
+    """Adversarial host that contains the whitelisted eTLD+1 as a
+    substring (notozon.ru, fake-ozon.ru) must be aborted — eTLD+1
+    resolution, not substring match."""
+    from dpc_client_core.dpc_agent.tools.browser import AuthBrowser
+
+    ab = AuthBrowser(agent_id="agent_a", domains=["ozon.ru"])
+    for hostile in (
+        "https://notozon.ru/payload",
+        "https://fake-ozon.ru/payload",
+        "https://attacker.com/?ref=ozon.ru",
+    ):
+        route = _FakeRoute(hostile)
+        ab._domain_route_gate(route)
+        assert route.aborted is True, hostile
+        assert route.continued is False, hostile
+    assert ab._domain_blocks == 3
+
+
+def test_route_gate_multi_domain(vault_home):
+    from dpc_client_core.dpc_agent.tools.browser import AuthBrowser
+
+    ab = AuthBrowser(agent_id="agent_a", domains=["ozon.ru", "yandex.ru"])
+    for ok in (
+        "https://ozon.ru/orders",
+        "https://www.yandex.ru/search",
+        "https://api.ozon.ru/v2/x",
+    ):
+        route = _FakeRoute(ok)
+        ab._domain_route_gate(route)
+        assert route.continued is True, ok
+    route = _FakeRoute("https://google.com/search")
+    ab._domain_route_gate(route)
+    assert route.aborted is True
+    assert ab._domain_blocks == 1
+
+
+def test_route_gate_fail_closed_when_empty(vault_home):
+    """Empty whitelist → every request aborted (no domains authorized)."""
+    from dpc_client_core.dpc_agent.tools.browser import AuthBrowser
+
+    ab = AuthBrowser(agent_id="agent_a", domains=[])
+    route = _FakeRoute("https://ozon.ru/my")
+    ab._domain_route_gate(route)
+    assert route.aborted is True
+    assert route.continued is False
+    assert ab._domain_blocks == 1
+
+
+def test_route_gate_allows_non_http_schemes(vault_home):
+    """data:, about:, blob: URIs do not trigger external network
+    requests — short-circuit ALLOW per spec."""
+    from dpc_client_core.dpc_agent.tools.browser import AuthBrowser
+
+    ab = AuthBrowser(agent_id="agent_a", domains=["ozon.ru"])
+    for uri in (
+        "data:text/html,<html><body>x</body></html>",
+        "about:blank",
+        "blob:https://ozon.ru/abc-123",
+    ):
+        route = _FakeRoute(uri)
+        ab._domain_route_gate(route)
+        assert route.continued is True, uri
+        assert route.aborted is False, uri
+    assert ab._domain_blocks == 0
+
+
+def test_route_gate_resilient_to_broken_request(vault_home):
+    """Defensive: if Playwright surfaces an unexpected Route shape
+    where .request.url raises, the gate aborts (fail-closed) instead
+    of letting the request through."""
+    from dpc_client_core.dpc_agent.tools.browser import AuthBrowser
+
+    class _BrokenRoute:
+        def __init__(self):
+            self.aborted = False
+            self.continued = False
+
+        @property
+        def request(self):
+            raise RuntimeError("broken playwright route")
+
+        def abort(self):
+            self.aborted = True
+
+        def continue_(self):
+            self.continued = True
+
+    ab = AuthBrowser(agent_id="agent_a", domains=["ozon.ru"])
+    route = _BrokenRoute()
+    ab._domain_route_gate(route)
+    assert route.aborted is True
+    assert route.continued is False
+
+
+# ─────────────────────────────────────────────────────────────
 # Cookie format conversion (snake_case → Playwright camelCase)
 # ─────────────────────────────────────────────────────────────
 
