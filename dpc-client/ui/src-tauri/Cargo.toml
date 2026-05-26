@@ -42,7 +42,7 @@ tokio = { version = "1", features = ["time"] }
 # Tauri's `WebviewWindow::eval()` is fire-and-forget — it cannot read a JS
 # expression's return value, and `window.__TAURI__.event.emit()` from popup
 # JS is not available on external URLs (Tauri 2 security default), so the
-# previous extract-via-JS-emit path silently dies on yarcheplus.ru / ozon.ru.
+# previous extract-via-JS-emit path silently dies on example.org / example.com.
 # `webview2-com` lets us call WebView2's native `ExecuteScript` (which DOES
 # return a Promise<string>) directly, bypassing the broken JS bridge.
 # Pinned to the same version Tauri 2 already pulls in (Cargo.lock).

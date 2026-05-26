@@ -22,11 +22,11 @@ logger = logging.getLogger(__name__)
 # `CoreService._merge_unknown_agent_profile_keys`.
 #
 # Mike S141 regression: FirewallEditor `save_firewall_rules` shipped
-# `web_auth = {allowed_domains: ['ozon.ru']}` (stale snapshot from
+# `web_auth = {allowed_domains: ['example.com']}` (stale snapshot from
 # editor open time) ~3s after a successful login_complete added cookies
-# for `yarcheplus.ru`. Without force-preserve, the absent-key merge
+# for `example.org`. Without force-preserve, the absent-key merge
 # skipped the wipe because the `web_auth` key WAS present in incoming,
-# just with stale contents — `yarcheplus.ru` silently disappeared from
+# just with stale contents — `example.org` silently disappeared from
 # the whitelist.
 _BACKEND_OWNED_PROFILE_KEYS = frozenset({"web_auth"})
 
@@ -3779,8 +3779,8 @@ class CoreService:
     async def web_auth_add_domain(self, agent_id: str, domain: str) -> Dict[str, Any]:
         """Append `domain` to the agent's `web_auth.allowed_domains`
         whitelist in privacy_rules.json. URL-or-hostname input is
-        normalized to eTLD+1 before storing (so `https://www.ozon.ru/`,
-        `www.ozon.ru`, and `ozon.ru` all land as `ozon.ru` — matching
+        normalized to eTLD+1 before storing (so `https://www.example.com/`,
+        `www.example.com`, and `example.com` all land as `example.com` — matching
         what `firewall.is_authenticated` resolves at read time).
         Duplicate entries are silently coalesced.
 
@@ -3800,7 +3800,7 @@ class CoreService:
             if " " in raw:
                 return {"status": "error",
                         "message": "domain must be a valid hostname (no spaces)"}
-            # URL→hostname→eTLD+1 so a user pasting `https://www.ozon.ru/`
+            # URL→hostname→eTLD+1 so a user pasting `https://www.example.com/`
             # in the UI lands the same vault key as `browse_page` requests
             # at read time. Phase 2 (PSL/IDN) is still the followup.
             domain_norm = _wa.resolve_etld1(raw)

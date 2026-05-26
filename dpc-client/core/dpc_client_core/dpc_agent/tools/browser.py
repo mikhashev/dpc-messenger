@@ -241,7 +241,7 @@ def _browse_with_camoufox(url: str) -> Optional[str]:
 # — every entry is a potential false-positive surface for legitimate pages
 # that happen to mention the marker string in body text.
 ANTI_BOT_PATTERNS: tuple[str, ...] = (
-    "fab_chlg_",            # Ozon
+    "fab_chlg_",            # example.com marketplace marker
     "__cf_chl_",            # Cloudflare challenge
     "g-recaptcha",          # Google reCAPTCHA widget
     "_incapsula_resource",  # Imperva / Incapsula
@@ -373,8 +373,8 @@ class AuthBrowser:
     1. **Single-shot (ADR-028)** — context manager around one `navigate`
        + content read for the headless `browse_page` path:
 
-           with AuthBrowser(agent_id="agent_001", domains=["ozon.ru"]) as ab:
-               ab.navigate("https://ozon.ru/my/orders")
+           with AuthBrowser(agent_id="agent_001", domains=["example.com"]) as ab:
+               ab.navigate("https://example.com/my/orders")
                html = ab.get_page_html()
 
     2. **Stateful session (ADR-029)** — long-lived per-agent session
@@ -721,8 +721,8 @@ async def _request_popup_fallback(
     reason: str = "anti_bot_challenge",
 ) -> str:
     """Ask the frontend to open a Tauri WebView popup so the user can
-    solve a challenge (Ozon fab_chlg, Cloudflare) or view JS-rendered
-    content (YarchePlus orders) for `url`. Awaits the user closing the
+    solve a challenge (example.com fab_chlg, Cloudflare) or view JS-rendered
+    content (example.org orders) for `url`. Awaits the user closing the
     popup; the backend WS handler `web_auth_popup_complete` resolves
     the future with the extracted HTML.
 
@@ -731,7 +731,7 @@ async def _request_popup_fallback(
       - "anti_bot_challenge" — Camoufox got a challenge stub
         (`looks_like_challenge` triggered)
       - "always_popup" — domain is on the agent's `always_popup`
-        whitelist (YarchePlus class — JS-render-only sites)
+        whitelist (example.org class — JS-render-only sites)
 
     Returns the popup-extracted HTML. The caller converts to markdown
     via `_html_to_markdown`. Raises `AuthRequiredError` on timeout,
@@ -888,7 +888,7 @@ async def browse_page(
                 f"'{agent_id}'. Check the Web Authentication settings."
             )
 
-        # T9 always_popup (YarchePlus variant C): skip Camoufox entirely
+        # T9 always_popup (example.org variant C): skip Camoufox entirely
         # for sites whose interesting content only renders under a real
         # browser (JS-only order pages, client-rendered SPAs). The user
         # already authorized this exact domain via allowed_domains, so
@@ -1153,7 +1153,7 @@ def get_tools() -> List[ToolEntry]:
                         },
                         "use_auth": {
                             "type": "string",
-                            "description": "Optional auth domain (eg 'ozon.ru'). When set, the page is fetched authenticated using cookies from the agent's encrypted vault. The URL must be within the same eTLD+1 as use_auth (subdomains allowed). Returns a re-login prompt if cookies are missing or expired."
+                            "description": "Optional auth domain (eg 'example.com'). When set, the page is fetched authenticated using cookies from the agent's encrypted vault. The URL must be within the same eTLD+1 as use_auth (subdomains allowed). Returns a re-login prompt if cookies are missing or expired."
                         }
                     },
                     "required": ["url"]

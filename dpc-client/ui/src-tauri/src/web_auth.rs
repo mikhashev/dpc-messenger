@@ -192,7 +192,7 @@ pub async fn web_auth_revoke(
 }
 
 /// ADR-028 T9 — popup fallback for anti-bot challenge sites + JS-rendered
-/// content (YarchePlus orders class).
+/// content (example.org orders class).
 ///
 /// Opens a Tauri WebView popup at `url` using the shared WebView2 cookie
 /// jar (same one populated by `web_auth_open_login_window` at T8 login).

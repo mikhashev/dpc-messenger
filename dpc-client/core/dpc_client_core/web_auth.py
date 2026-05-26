@@ -38,23 +38,23 @@ SERVICE = "dpc-web-auth"
 
 # eTLD+1 resolution map. Hardcoded MVP coverage; Phase 2 wires in the
 # Mozilla Public Suffix List for general resolution. When an agent
-# requests use_auth="ozon.ru" we map subdomains to the same jar.
+# requests use_auth="example.com" we map subdomains to the same jar.
 ETLD1_MAP = {
-    "ozon.ru": "ozon.ru",
-    "www.ozon.ru": "ozon.ru",
-    "login.ozon.ru": "ozon.ru",
-    "api.ozon.ru": "ozon.ru",
-    "yarcheplus.ru": "yarcheplus.ru",
-    "www.yarcheplus.ru": "yarcheplus.ru",
-    "lk.yarcheplus.ru": "yarcheplus.ru",
+    "example.com": "example.com",
+    "www.example.com": "example.com",
+    "login.example.com": "example.com",
+    "api.example.com": "example.com",
+    "example.org": "example.org",
+    "www.example.org": "example.org",
+    "lk.example.org": "example.org",
 }
 
 
 def _extract_hostname(raw: str) -> str:
     """Extract bare lowercase hostname from user-typed input.
 
-    Accepts bare hostnames (`ozon.ru`, `www.ozon.ru`) and full URLs
-    (`https://www.ozon.ru/`, `http://ozon.ru:8080/path`). Strips
+    Accepts bare hostnames (`example.com`, `www.example.com`) and full URLs
+    (`https://www.example.com/`, `http://example.com:8080/path`). Strips
     scheme, port, path, query, fragment. Returns empty string when the
     input cannot be parsed to a hostname (e.g. `javascript:alert(1)`,
     `http://`, `://garbage`).
@@ -79,8 +79,8 @@ def resolve_etld1(domain: str) -> str:
     """Map a hostname or URL to its eTLD+1 vault key.
 
     Robust to URL inputs (strips scheme, port, path) so the same key
-    falls out whether the caller passes `ozon.ru`, `www.ozon.ru`, or
-    `https://www.ozon.ru/orders`. Empty input → empty result so callers
+    falls out whether the caller passes `example.com`, `www.example.com`, or
+    `https://www.example.com/orders`. Empty input → empty result so callers
     can reject it.
     """
     hostname = _extract_hostname(domain)

@@ -1134,7 +1134,7 @@
                 <input
                   type="text"
                   class="path-input"
-                  placeholder="e.g. ozon.ru"
+                  placeholder="e.g. example.com"
                   bind:value={newWebAuthDomain}
                   on:keydown={(e) => { if (e.key === 'Enter') { e.preventDefault(); addWebAuthDomain(); } }}
                 />

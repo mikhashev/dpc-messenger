@@ -541,12 +541,12 @@ class ContextFirewall:
         return [d.lower() for d in allowed if isinstance(d, str)]
 
     def get_agent_always_popup_domains(self, agent_id: str) -> List[str]:
-        """ADR-028 T9 (YarchePlus variant C) — domains that always go via
+        """ADR-028 T9 (example.org variant C) — domains that always go via
         the popup fallback rather than the headless Camoufox fetch, even
         when `looks_like_challenge` returns False.
 
         Used for sites whose pages render their useful content via
-        client-side JS that headless browsers can't see (YarchePlus
+        client-side JS that headless browsers can't see (example.org
         order detail, similar). `agent_profiles.{agent_id}.web_auth.always_popup`
         is a list of eTLD+1 strings; entries here MUST also be in
         `allowed_domains` — `is_auth_domain_allowed` is still the
@@ -588,7 +588,7 @@ class ContextFirewall:
         if not isinstance(allowed, list) or not allowed:
             return False
         # Normalize whitelist to lowercase — privacy_rules.json may
-        # have been hand-edited with mixed case (e.g. "Ozon.RU"), and
+        # have been hand-edited with mixed case (e.g. "Example.COM"), and
         # resolve_etld1 already lowercases the requested domain.
         allowed_lower = [d.lower() for d in allowed if isinstance(d, str)]
 
