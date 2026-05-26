@@ -131,8 +131,8 @@ Option A keeps the broken popup pipeline alive; Option C adds a second LLM in th
 
 Decomposition under [`tasks/adr-029-headed-camoufox/`](../../tasks/adr-029-headed-camoufox/) (7 task files + overview, gitignored). Execution order locked S147 (Mike: order B / safety-first).
 
-| Order | Task | Description | Depends on |
-|-------|------|-------------|------------|
+| Execution Order | Task | Description | Depends on |
+|-----------------|------|-------------|------------|
 | 0 | Remove popup code | Delete `popup_*` tools, Rust handlers, frontend `keep_open=true` paths | — |
 | 1 | Extend AuthBrowser | Add headed mode, navigation, click, type, scroll, screenshot, extract, close methods + `browser.headed` config | Task 0 |
 | 2 | Domain restriction | Playwright `context.route("**/*")` with eTLD+1 gate, fail-closed empty whitelist | Task 1 |
@@ -187,8 +187,8 @@ How to verify the decision was implemented correctly:
 
 ## Implementation Status
 
-| Task | Status | Commit |
-|------|--------|--------|
+| ADR Task | Status | Commit |
+|----------|--------|--------|
 | ADR-029 draft (first cut) | Done (S147) | `48ebb44` |
 | ADR-029 restore to TEMPLATE.md compliance | Done (S147) | `0078b12` |
 | Task decomposition | Done (S147) | `tasks/adr-029-headed-camoufox/` (8 files: overview + 7 tasks, gitignored) |
@@ -196,7 +196,7 @@ How to verify the decision was implemented correctly:
 | Task 1 — extend AuthBrowser | Done | `b36af15` + review fix `a1597aa` |
 | Task 2 — storage_state + vault hybrid | Done | `967164f` |
 | Task 3 — domain restriction (eTLD+1) | Done | `83353ac` |
-| Task 4 — audit trail extension | Pending | — |
+| Task 4 — audit trail extension | Done | `50e52dd` |
 | Task 5 — agent tool registry rewire | Pending | — |
 | Task 6 — interrupt mechanism (Stop button) | Pending | — |
 
