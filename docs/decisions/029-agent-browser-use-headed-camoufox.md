@@ -188,10 +188,10 @@ How to verify the decision was implemented correctly:
 | ADR-029 draft (first cut) | Done (S147) | `48ebb44` |
 | ADR-029 restore to TEMPLATE.md compliance | Done (S147) | `0078b12` |
 | Task decomposition | Done (S147) | `tasks/adr-029-headed-camoufox/` (8 files: overview + 7 tasks, gitignored) |
-| Task 0 — remove T10 popup code | Pending | — |
-| Task 1 — extend AuthBrowser | Pending | — |
-| Task 2 — domain restriction (eTLD+1) | Pending | — |
-| Task 3 — storage_state + vault hybrid | Pending | — |
+| Task 0 — remove T10 popup code | Done | `d5b171b` |
+| Task 1 — extend AuthBrowser | Done | `b36af15` + review fix `a1597aa` |
+| Task 2 — storage_state + vault hybrid | Done | `967164f` |
+| Task 3 — domain restriction (eTLD+1) | Done | `83353ac` |
 | Task 4 — audit trail extension | Pending | — |
 | Task 5 — agent tool registry rewire | Pending | — |
 | Task 6 — interrupt mechanism (Stop button) | Pending | — |
