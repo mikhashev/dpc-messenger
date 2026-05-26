@@ -506,7 +506,9 @@ class AuthBrowser:
             self._open()
 
     def _load_all_cookies(
-        self, domains: Optional[list[str]] = None
+        self,
+        domains: Optional[list[str]] = None,
+        skip_missing: bool = False,
     ) -> list[dict]:
         """Merge cookies for every configured domain. Raises
         AuthRequiredError / AuthExpiredError on first missing or expired
@@ -514,7 +516,10 @@ class AuthBrowser:
         specific eTLD+1 that needs attention.
 
         `domains` overrides `self._domains` — used by `_open()` to load
-        only domains absent from storage_state.
+        a subset of domains. `skip_missing=True` swallows missing/expired
+        vault entries (used at session-open where storage_state may cover
+        the gap); default `False` keeps the strict re-login surface for
+        any explicit single-domain call.
         """
         from dpc_client_core import web_auth
 
@@ -523,10 +528,16 @@ class AuthBrowser:
         for d in target:
             cookies = web_auth.load_cookies(self._agent_id, d)
             if cookies is None:
+                if skip_missing:
+                    log.debug("vault: no cookies for %s, skipping", d)
+                    continue
                 raise AuthRequiredError(
                     f"No cookies for {d} (agent={self._agent_id}) — re-login required"
                 )
             if web_auth.is_expired(cookies):
+                if skip_missing:
+                    log.debug("vault: cookies for %s expired, skipping", d)
+                    continue
                 raise AuthExpiredError(
                     f"Cookies for {d} expired (agent={self._agent_id}) — re-login required"
                 )
@@ -542,17 +553,10 @@ class AuthBrowser:
 
         state_path = self._state_path()
         context_kwargs: dict = {}
-        used_state = False
-        present_domains: set[str] = set()
         if state_path.exists():
             try:
-                raw = json.loads(state_path.read_text(encoding="utf-8"))
+                json.loads(state_path.read_text(encoding="utf-8"))
                 context_kwargs["storage_state"] = str(state_path)
-                used_state = True
-                present_domains = {
-                    (c.get("domain") or "").lstrip(".").lower()
-                    for c in raw.get("cookies", [])
-                }
             except (json.JSONDecodeError, OSError) as e:
                 log.warning(
                     "storage_state parse error at %s, falling back to vault: %s",
@@ -562,23 +566,20 @@ class AuthBrowser:
         self._context = self._browser.new_context(**context_kwargs)
         self._install_domain_route_handler()
 
-        # storage_state only carries cookies for domains visited in the
-        # previous session (Task 003 domain gate). For every configured
-        # domain absent from storage_state, top up from vault so multi-
-        # domain agents don't lose auth on the second session.
+        # Vault is the canonical source for cookies; storage_state is kept
+        # only for localStorage/sessionStorage and as a starting point for
+        # cookies the browser may have rotated mid-session. After loading
+        # storage_state, always overlay vault cookies for every configured
+        # domain: add_cookies() replaces by name+domain+path, so vault
+        # entries win on conflict and storage_state-only cookies survive.
+        # skip_missing=True keeps the open path tolerant of domains whose
+        # vault entries are absent/expired — storage_state still covers
+        # them, and any genuine re-login need surfaces on the first
+        # request that hits a protected resource.
         if self._domains:
-            if used_state:
-                missing = [
-                    d for d in self._domains
-                    if not any(
-                        p == d or p.endswith("." + d)
-                        for p in present_domains
-                    )
-                ]
-            else:
-                missing = list(self._domains)
-            if missing:
-                self._inject_vault_cookies(domains=missing)
+            self._inject_vault_cookies(
+                domains=list(self._domains), skip_missing=True
+            )
 
         self._page = self._context.new_page()
         _active_camoufox_browsers.add(self)
@@ -588,10 +589,14 @@ class AuthBrowser:
         return home / "agents" / self._agent_id / "browser_state.json"
 
     def _inject_vault_cookies(
-        self, domains: Optional[list[str]] = None
+        self,
+        domains: Optional[list[str]] = None,
+        skip_missing: bool = False,
     ) -> None:
         self._context.add_cookies(
-            _to_playwright_cookies(self._load_all_cookies(domains=domains))
+            _to_playwright_cookies(
+                self._load_all_cookies(domains=domains, skip_missing=skip_missing)
+            )
         )
 
     def _sync_cookies_to_vault(self, cookies: list[dict]) -> None:
