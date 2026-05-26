@@ -520,6 +520,98 @@ def _build_a11y_tree(root: dict) -> tuple[str, dict]:
     return "\n".join(lines), refs
 
 
+SNAPSHOT_SUMMARIZE_THRESHOLD = 8000
+
+
+def _truncate_snapshot(
+    snapshot_text: str, max_chars: int = SNAPSHOT_SUMMARIZE_THRESHOLD,
+) -> str:
+    """Phase 1 summarization: cut a snapshot at line boundaries so
+    accessibility-tree entries are never split mid-line, then append a
+    short marker telling the agent how many lines were dropped. No-op
+    when `snapshot_text` already fits under `max_chars`."""
+    if len(snapshot_text) <= max_chars:
+        return snapshot_text
+    lines = snapshot_text.split("\n")
+    result: list[str] = []
+    chars = 0
+    reserve = 80
+    for line in lines:
+        if chars + len(line) + 1 > max_chars - reserve:
+            break
+        result.append(line)
+        chars += len(line) + 1
+    remaining = len(lines) - len(result)
+    if remaining > 0:
+        result.append(
+            f"\n[... {remaining} more lines truncated, "
+            "use browser_snapshot for full content]"
+        )
+    return "\n".join(result)
+
+
+_LLM_EXTRACT_WITH_TASK = (
+    "You are a content extractor for a browser automation agent.\n\n"
+    "The user's task is: {user_task}\n\n"
+    "Given the following page snapshot (accessibility tree representation), "
+    "extract and summarize the most relevant information for completing "
+    "this task. Focus on:\n"
+    "1. Interactive elements (buttons, links, inputs) that might be needed\n"
+    "2. Text content relevant to the task "
+    "(prices, descriptions, headings, important info)\n"
+    "3. Navigation structure if relevant\n\n"
+    "Keep ref IDs (like @e5) for interactive elements so the agent "
+    "can use them.\n\n"
+    "Page Snapshot:\n{snapshot}\n\n"
+    "Provide a concise summary that preserves actionable information "
+    "and relevant content."
+)
+
+_LLM_EXTRACT_NO_TASK = (
+    "Summarize this page snapshot, preserving:\n"
+    "1. All interactive elements with their ref IDs (like @e5)\n"
+    "2. Key text content and headings\n"
+    "3. Important information visible on the page\n\n"
+    "Page Snapshot:\n{snapshot}\n\n"
+    "Provide a concise summary focused on interactive elements and "
+    "key content."
+)
+
+
+async def _llm_summarize_snapshot(
+    snapshot_text: str,
+    user_task: str | None,
+    llm_manager: Any,
+    provider_alias: str | None = None,
+    max_chars: int = SNAPSHOT_SUMMARIZE_THRESHOLD,
+) -> str:
+    """Phase 2 summarization: route an oversized snapshot + the agent's
+    current task through the LLM Manager (same path Sleep Consolidation
+    uses) so an auxiliary model can extract just the task-relevant
+    elements. Falls back to `_truncate_snapshot` when llm_manager is
+    None, when the auxiliary call raises, or when the model returns an
+    empty string. No-op when `snapshot_text` already fits under
+    `max_chars`."""
+    if len(snapshot_text) <= max_chars:
+        return snapshot_text
+    if llm_manager is None:
+        return _truncate_snapshot(snapshot_text, max_chars)
+    if user_task:
+        prompt = _LLM_EXTRACT_WITH_TASK.format(
+            user_task=user_task, snapshot=snapshot_text,
+        )
+    else:
+        prompt = _LLM_EXTRACT_NO_TASK.format(snapshot=snapshot_text)
+    try:
+        response = await llm_manager.query(
+            prompt, provider_alias=provider_alias,
+        )
+        extracted = (response or "").strip()
+        return extracted or _truncate_snapshot(snapshot_text, max_chars)
+    except Exception:
+        return _truncate_snapshot(snapshot_text, max_chars)
+
+
 class AuthBrowser:
     """Restricted Camoufox wrapper for authenticated browser sessions
     (ADR-028 T4, extended for ADR-029 Task 002).
