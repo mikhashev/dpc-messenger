@@ -1513,7 +1513,7 @@ class AuthBrowser:
         item_selector: str,
         extract: list[str],
         max_scrolls: int = 30,
-        scroll_pause_ms: int = 1000,
+        scroll_pause_ms: int = 3000,
         dedup_by: str = "text",
     ) -> dict:
         """Scroll a container and collect all matching items.
@@ -1559,6 +1559,7 @@ class AuthBrowser:
         (containerSel) => {
           const ct = document.querySelector(containerSel);
           if (!ct) return null;
+          ct.scrollIntoView({block: 'center', inline: 'center'});
           const rect = ct.getBoundingClientRect();
           return {
             centerX: Math.round(rect.left + rect.width / 2),
@@ -1604,8 +1605,29 @@ class AuthBrowser:
                     dupes_skipped += 1
 
             if scrolls_done > 0 and new_count == 0:
-                break
+                found_on_retry = False
+                for _retry in range(7):
+                    _time.sleep(scroll_pause_ms / 1000.0)
+                    retry = self._page.evaluate(_COLLECT_ITEMS_JS, {
+                        "containerSel": container,
+                        "itemSelector": item_selector,
+                        "extractAttrs": extract or ["text"],
+                    })
+                    for item in (retry or {}).get("items", []):
+                        key = item.get(dedup_by, str(item))
+                        if key and key not in seen_keys:
+                            seen_keys.add(key)
+                            all_items.append(item)
+                            found_on_retry = True
+                    if found_on_retry:
+                        break
+                if not found_on_retry:
+                    break
 
+            scroll_info = self._page.evaluate(_FIND_SCROLL_CENTER_JS, container)
+            if scroll_info:
+                center_x = scroll_info["centerX"]
+                center_y = scroll_info["centerY"]
             try:
                 self._page.mouse.move(center_x, center_y)
                 self._page.mouse.wheel(0, 800)
@@ -2901,8 +2923,8 @@ def get_tools() -> List[ToolEntry]:
                         },
                         "scroll_pause_ms": {
                             "type": "integer",
-                            "description": "Milliseconds to wait between scrolls for content to load",
-                            "default": 1000,
+                            "description": "Milliseconds to wait between scrolls for content to load (slow infinite-scroll sites may need 3000-5000)",
+                            "default": 3000,
                         },
                         "dedup_by": {
                             "type": "string",
