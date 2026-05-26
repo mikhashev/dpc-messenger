@@ -481,6 +481,104 @@ def _get_session_lock(agent_id: str) -> asyncio.Lock:
     return lock
 
 
+_A11Y_DOM_SNAPSHOT_JS = """
+() => {
+  const TAG_TO_ROLE = {
+    'a': 'link', 'button': 'button',
+    'input': 'textbox', 'textarea': 'textbox',
+    'select': 'combobox', 'option': 'option',
+    'h1': 'heading', 'h2': 'heading', 'h3': 'heading',
+    'h4': 'heading', 'h5': 'heading', 'h6': 'heading',
+    'nav': 'navigation', 'main': 'main', 'header': 'banner',
+    'footer': 'contentinfo', 'aside': 'complementary',
+    'form': 'form', 'section': 'region',
+    'ul': 'list', 'ol': 'list', 'li': 'listitem',
+    'table': 'table', 'tr': 'row', 'td': 'cell', 'th': 'columnheader',
+    'img': 'img',
+  };
+  function getRole(el) {
+    const r = el.getAttribute('role');
+    if (r) return r;
+    const tag = el.tagName.toLowerCase();
+    if (tag === 'input') {
+      const t = (el.getAttribute('type') || 'text').toLowerCase();
+      if (t === 'checkbox') return 'checkbox';
+      if (t === 'radio') return 'radio';
+      if (t === 'button' || t === 'submit' || t === 'reset') return 'button';
+      if (t === 'search') return 'searchbox';
+      return 'textbox';
+    }
+    return TAG_TO_ROLE[tag] || '';
+  }
+  function getName(el) {
+    const aria = el.getAttribute('aria-label');
+    if (aria) return aria.trim().slice(0, 200);
+    const labelledby = el.getAttribute('aria-labelledby');
+    if (labelledby) {
+      const ref = document.getElementById(labelledby);
+      if (ref) return (ref.textContent || '').trim().slice(0, 200);
+    }
+    const placeholder = el.getAttribute('placeholder');
+    if (placeholder) return placeholder.trim().slice(0, 200);
+    const alt = el.getAttribute('alt');
+    if (alt) return alt.trim().slice(0, 200);
+    const title = el.getAttribute('title');
+    if (title) return title.trim().slice(0, 200);
+    const tag = el.tagName.toLowerCase();
+    if (tag === 'a' || tag === 'button' ||
+        tag === 'h1' || tag === 'h2' || tag === 'h3' ||
+        tag === 'h4' || tag === 'h5' || tag === 'h6' ||
+        tag === 'label' || tag === 'option') {
+      const txt = (el.innerText || el.textContent || '').trim();
+      return txt.slice(0, 200);
+    }
+    return '';
+  }
+  function getValue(el) {
+    const tag = el.tagName.toLowerCase();
+    if (tag === 'input' || tag === 'textarea' || tag === 'select') {
+      return (el.value || '').toString().slice(0, 200);
+    }
+    return '';
+  }
+  function isHidden(el) {
+    if (el.getAttribute('aria-hidden') === 'true') return true;
+    if (el.hidden) return true;
+    const style = window.getComputedStyle(el);
+    if (!style) return false;
+    if (style.display === 'none') return true;
+    if (style.visibility === 'hidden') return true;
+    return false;
+  }
+  let nodeCount = 0;
+  const MAX_NODES = 3000;
+  function walk(el) {
+    if (!el || el.nodeType !== 1) return null;
+    if (nodeCount >= MAX_NODES) return null;
+    if (isHidden(el)) return null;
+    nodeCount += 1;
+    const role = getRole(el);
+    const name = getName(el);
+    const value = getValue(el);
+    const children = [];
+    for (const child of el.children) {
+      const sub = walk(child);
+      if (sub) children.push(sub);
+    }
+    if (!role && !name && children.length === 0) return null;
+    return {
+      role: role || 'generic',
+      name: name,
+      value: value,
+      hidden: false,
+      children: children,
+    };
+  }
+  return walk(document.body) || {role: 'generic', name: '', children: []};
+}
+"""
+
+
 _A11Y_INTERACTIVE_ROLES: frozenset[str] = frozenset({
     "button", "link", "textbox", "checkbox", "combobox",
     "menuitem", "tab", "searchbox",
@@ -1236,7 +1334,7 @@ class AuthBrowser:
         self._require_open()
         url = self._page.url
         try:
-            raw = self._page.accessibility.snapshot()
+            raw = self._page.evaluate(_A11Y_DOM_SNAPSHOT_JS)
             tree_text, refs = _build_a11y_tree(raw) if raw else ("", {})
             self._last_refs = refs
         except Exception as exc:
