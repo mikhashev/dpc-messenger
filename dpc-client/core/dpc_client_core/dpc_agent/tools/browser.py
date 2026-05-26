@@ -217,11 +217,14 @@ def _camoufox_launch_kwargs() -> Dict[str, Any]:
 
     Why: defaults pass only `headless`; sites that aggressively fingerprint
     Firefox-based automation (x.com class) flag the resulting inconsistencies.
-    `humanize` adds human-like cursor latency, `geoip` derives timezone/locale
-    from public IP, `os` declares the real host platform so the spoofed
-    fingerprint matches the TLS / network stack.
+    `humanize` adds human-like cursor latency, `os` declares the real host
+    platform so the spoofed fingerprint matches the TLS / network stack.
+
+    `geoip=True` would also help (timezone/locale from IP) but requires the
+    optional `camoufox[geoip]` extra (~50 MB GeoLite2 DB). Skipped here to
+    keep the install lightweight; add the extra and re-enable if needed.
     """
-    kwargs: Dict[str, Any] = {"humanize": True, "geoip": True}
+    kwargs: Dict[str, Any] = {"humanize": True}
     cam_os = _CAMOUFOX_OS_MAP.get(platform.system())
     if cam_os:
         kwargs["os"] = cam_os
