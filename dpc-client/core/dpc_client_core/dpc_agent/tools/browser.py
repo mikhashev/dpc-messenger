@@ -529,6 +529,7 @@ class AuthBrowser:
         self._context = None
         self._page = None
         self._domain_blocks = 0
+        self._disconnected = False
 
     def __enter__(self):
         self._open()
@@ -602,6 +603,13 @@ class AuthBrowser:
 
         self._cm = Camoufox(headless=not self._headed, **_camoufox_launch_kwargs())
         self._browser = self._cm.__enter__()
+        try:
+            self._browser.on("disconnected", self._on_browser_disconnected)
+        except Exception as e:
+            log.debug(
+                "attach disconnect listener failed (agent=%s): %s",
+                self._agent_id, e,
+            )
 
         state_path = self._state_path()
         context_kwargs: dict = {}
@@ -871,7 +879,14 @@ class AuthBrowser:
 
     def close(self) -> None:
         """Release browser resources. Safe to call multiple times."""
-        # storage_state() needs a live context — save before teardown.
+        if self._disconnected:
+            self._cm = None
+            self._browser = None
+            self._context = None
+            self._page = None
+            _active_camoufox_browsers.discard(self)
+            _active_browser_sessions.pop(self._agent_id, None)
+            return
         if self._context is not None:
             self._save_storage_state()
         if self._cm is not None:
@@ -882,6 +897,18 @@ class AuthBrowser:
                 self._browser = None
                 self._context = None
                 self._page = None
+        _active_camoufox_browsers.discard(self)
+        _active_browser_sessions.pop(self._agent_id, None)
+
+    def _on_browser_disconnected(self, *args: Any) -> None:
+        """Fired by Playwright when the browser process detaches."""
+        if self._disconnected:
+            return
+        self._disconnected = True
+        log.info(
+            "Camoufox browser disconnected (agent=%s) — removed from active set",
+            self._agent_id,
+        )
         _active_camoufox_browsers.discard(self)
         _active_browser_sessions.pop(self._agent_id, None)
 
