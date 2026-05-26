@@ -626,9 +626,12 @@ _SCROLL_VIEWPORT_JS = """
   const clsPart = scroller.className && typeof scroller.className === 'string'
     ? ('.' + scroller.className.trim().split(/\\s+/).slice(0, 2).join('.'))
     : '';
+  const rect = scroller.getBoundingClientRect();
   return {
     scrolled: after - before,
     target: tag + idPart + clsPart,
+    centerX: Math.round(rect.left + rect.width / 2),
+    centerY: Math.round(rect.top + rect.height / 2),
   };
 }
 """
@@ -1238,8 +1241,12 @@ class AuthBrowser:
     def scroll(self, direction: str = "down", amount: int = 500) -> None:
         """Scroll vertically by `amount` pixels. Finds the nearest
         scrollable container under the viewport center (modal/popup
-        aware) and calls scrollBy on it; falls back to the document
-        scrolling element when nothing scrollable is hit."""
+        aware), moves the cursor to its center, dispatches a real
+        mouse wheel (so listeners on `wheel` / IntersectionObserver
+        infinite-scroll triggers fire just like a human action), then
+        also calls scrollBy as a guaranteed-position fallback. Falls
+        back to the document scrolling element when nothing scrollable
+        is hit."""
         self._require_open()
         url = self._page.url
         delta = -amount if direction == "up" else amount
@@ -1254,10 +1261,20 @@ class AuthBrowser:
             raise
         scrolled = (result or {}).get("scrolled", 0)
         target = (result or {}).get("target", "")
+        center_x = (result or {}).get("centerX")
+        center_y = (result or {}).get("centerY")
+        wheel_ok = False
+        if center_x is not None and center_y is not None:
+            try:
+                self._page.mouse.move(center_x, center_y)
+                self._page.mouse.wheel(0, delta)
+                wheel_ok = True
+            except Exception as exc:
+                log.debug("mouse wheel dispatch failed: %s", exc)
         self._audit_action(
             "scroll", url, "ok",
             direction=direction, amount=amount,
-            scrolled=scrolled, target=target,
+            scrolled=scrolled, target=target, wheel_ok=wheel_ok,
         )
 
     def click(self, ref_or_selector: str, timeout: int = 30000) -> None:
