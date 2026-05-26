@@ -302,12 +302,26 @@ def log_browser_action(
 
 
 def is_expired(cookies: list[dict]) -> bool:
-    """True if any cookie with an `expires` field has elapsed.
-    Session cookies (expires=None or expires<=0) are treated as
-    not-expired here."""
+    """True if ALL cookies with an `expires` field have elapsed.
+    Returns False if at least one non-session cookie is still valid —
+    the server will refresh short-lived tokens (CSRF, session) when
+    presented with a valid long-lived auth cookie."""
     now = time.time()
+    has_any_expiring = False
     for c in cookies:
         exp = c.get("expires")
-        if exp is not None and exp > 0 and exp <= now:
-            return True
-    return False
+        if exp is not None and exp > 0:
+            has_any_expiring = True
+            if exp > now:
+                return False
+    return has_any_expiring
+
+
+def filter_expired(cookies: list[dict]) -> list[dict]:
+    """Remove cookies whose `expires` has elapsed. Session cookies
+    (expires=None or expires<=0) are kept."""
+    now = time.time()
+    return [
+        c for c in cookies
+        if not (c.get("expires") is not None and c["expires"] > 0 and c["expires"] <= now)
+    ]

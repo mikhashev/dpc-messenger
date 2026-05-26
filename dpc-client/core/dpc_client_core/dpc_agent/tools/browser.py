@@ -992,14 +992,15 @@ class AuthBrowser:
                 raise AuthRequiredError(
                     f"No cookies for {d} (agent={self._agent_id}) — re-login required"
                 )
-            if web_auth.is_expired(cookies):
+            filtered = web_auth.filter_expired(cookies)
+            if not filtered:
                 if skip_missing:
-                    log.debug("vault: cookies for %s expired, skipping", d)
+                    log.debug("vault: all cookies for %s expired, skipping", d)
                     continue
                 raise AuthExpiredError(
                     f"Cookies for {d} expired (agent={self._agent_id}) — re-login required"
                 )
-            all_cookies.extend(cookies)
+            all_cookies.extend(filtered)
         self._cookies_loaded = True
         return all_cookies
 
