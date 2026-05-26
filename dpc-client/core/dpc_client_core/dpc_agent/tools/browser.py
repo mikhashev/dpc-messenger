@@ -220,11 +220,23 @@ def _camoufox_launch_kwargs() -> Dict[str, Any]:
     `humanize` adds human-like cursor latency, `os` declares the real host
     platform so the spoofed fingerprint matches the TLS / network stack.
 
+    `firefox_user_prefs` disables Firefox 109+ bounce-tracker protection,
+    which classifies sites like x.com as redirect trackers and auto-purges
+    their state every 3600 s without user activation — that fights the
+    site's own session/storage management and can leave the client-side
+    router half-loaded. Orthogonal to Camoufox stealth (which targets
+    fingerprinting), so safe to disable for the agent profile.
+
     `geoip=True` would also help (timezone/locale from IP) but requires the
     optional `camoufox[geoip]` extra (~50 MB GeoLite2 DB). Skipped here to
     keep the install lightweight; add the extra and re-enable if needed.
     """
-    kwargs: Dict[str, Any] = {"humanize": True}
+    kwargs: Dict[str, Any] = {
+        "humanize": True,
+        "firefox_user_prefs": {
+            "privacy.bounceTrackingProtection.mode": 0,
+        },
+    }
     cam_os = _CAMOUFOX_OS_MAP.get(platform.system())
     if cam_os:
         kwargs["os"] = cam_os
@@ -233,9 +245,9 @@ def _camoufox_launch_kwargs() -> Dict[str, Any]:
 
 def _attach_page_diagnostics(page, agent_id: str = "<anonymous>") -> None:
     """Surface Camoufox-side runtime events into dpc-client.log so anti-bot
-    stubs, stalled JS challenges, or page-level exceptions are visible from
-    the log without rerunning the call. Pure side-channel observability —
-    no impact on extraction or auth flow.
+    stubs, stalled JS challenges, page-level exceptions, or failed network
+    requests are visible from the log without rerunning the call. Pure
+    side-channel observability — no impact on extraction or auth flow.
     """
     def _on_console(msg) -> None:
         try:
@@ -252,9 +264,20 @@ def _attach_page_diagnostics(page, agent_id: str = "<anonymous>") -> None:
         except Exception:
             pass
 
+    def _on_requestfailed(request) -> None:
+        try:
+            failure = request.failure or "unknown"
+            log.warning(
+                "camoufox.requestfailed[agent=%s] %s %s — %s",
+                agent_id, request.method, request.url, failure,
+            )
+        except Exception:
+            pass
+
     try:
         page.on("console", _on_console)
         page.on("pageerror", _on_pageerror)
+        page.on("requestfailed", _on_requestfailed)
     except Exception as e:
         log.debug("attach diagnostics failed: %s", e)
 
