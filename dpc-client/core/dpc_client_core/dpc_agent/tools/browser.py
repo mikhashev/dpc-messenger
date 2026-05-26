@@ -231,6 +231,34 @@ def _camoufox_launch_kwargs() -> Dict[str, Any]:
     return kwargs
 
 
+def _attach_page_diagnostics(page, agent_id: str = "<anonymous>") -> None:
+    """Surface Camoufox-side runtime events into dpc-client.log so anti-bot
+    stubs, stalled JS challenges, or page-level exceptions are visible from
+    the log without rerunning the call. Pure side-channel observability —
+    no impact on extraction or auth flow.
+    """
+    def _on_console(msg) -> None:
+        try:
+            log.info(
+                "camoufox.console[agent=%s,type=%s] %s",
+                agent_id, msg.type, msg.text,
+            )
+        except Exception:
+            pass
+
+    def _on_pageerror(err) -> None:
+        try:
+            log.warning("camoufox.pageerror[agent=%s] %s", agent_id, err)
+        except Exception:
+            pass
+
+    try:
+        page.on("console", _on_console)
+        page.on("pageerror", _on_pageerror)
+    except Exception as e:
+        log.debug("attach diagnostics failed: %s", e)
+
+
 def _browse_with_camoufox(url: str) -> Optional[str]:
     try:
         from camoufox.sync_api import Camoufox
@@ -240,6 +268,7 @@ def _browse_with_camoufox(url: str) -> Optional[str]:
     try:
         with Camoufox(headless=True, **_camoufox_launch_kwargs()) as browser:
             page = browser.new_page()
+            _attach_page_diagnostics(page)
             page.goto(url, wait_until="networkidle", timeout=30000)
             html = page.content()
 
@@ -582,6 +611,7 @@ class AuthBrowser:
             )
 
         self._page = self._context.new_page()
+        _attach_page_diagnostics(self._page, agent_id=self._agent_id)
         _active_camoufox_browsers.add(self)
 
     def _state_path(self) -> Path:
