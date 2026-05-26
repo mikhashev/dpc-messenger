@@ -1268,6 +1268,10 @@ class AuthBrowser:
         except Exception as exc:
             snapshot_audit["snapshot_error"] = type(exc).__name__
         self._audit_action("navigate", url, "ok", **snapshot_audit)
+        try:
+            self._save_storage_state()
+        except Exception as exc:
+            log.debug("post-navigate cookie writeback failed: %s", exc)
         return snapshot_text
 
     def goto(self, url: str) -> str:
