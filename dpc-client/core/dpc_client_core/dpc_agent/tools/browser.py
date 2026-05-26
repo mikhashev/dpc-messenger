@@ -2232,7 +2232,7 @@ def get_tools() -> List[ToolEntry]:
             },
             handler=browser_snapshot,
             timeout_sec=60,
-            default_enabled=True,
+            default_enabled=False,
         ),
 
         ToolEntry(
@@ -2250,7 +2250,7 @@ def get_tools() -> List[ToolEntry]:
             },
             handler=browser_navigate,
             timeout_sec=60,
-            default_enabled=True,
+            default_enabled=False,
         ),
 
         ToolEntry(
@@ -2268,7 +2268,7 @@ def get_tools() -> List[ToolEntry]:
             },
             handler=browser_scroll,
             timeout_sec=15,
-            default_enabled=True,
+            default_enabled=False,
         ),
 
         ToolEntry(
@@ -2287,7 +2287,7 @@ def get_tools() -> List[ToolEntry]:
             },
             handler=browser_click,
             timeout_sec=45,
-            default_enabled=True,
+            default_enabled=False,
         ),
 
         ToolEntry(
@@ -2306,7 +2306,7 @@ def get_tools() -> List[ToolEntry]:
             },
             handler=browser_fill,
             timeout_sec=30,
-            default_enabled=True,
+            default_enabled=False,
         ),
 
         ToolEntry(
@@ -2325,7 +2325,7 @@ def get_tools() -> List[ToolEntry]:
             },
             handler=browser_wait_for,
             timeout_sec=45,
-            default_enabled=True,
+            default_enabled=False,
         ),
 
         ToolEntry(
@@ -2340,7 +2340,7 @@ def get_tools() -> List[ToolEntry]:
             },
             handler=browser_extract,
             timeout_sec=30,
-            default_enabled=True,
+            default_enabled=False,
         ),
 
         ToolEntry(
@@ -2357,7 +2357,7 @@ def get_tools() -> List[ToolEntry]:
             },
             handler=browser_screenshot,
             timeout_sec=30,
-            default_enabled=True,
+            default_enabled=False,
         ),
 
         ToolEntry(
@@ -2375,7 +2375,7 @@ def get_tools() -> List[ToolEntry]:
             },
             handler=browser_switch_tab,
             timeout_sec=10,
-            default_enabled=True,
+            default_enabled=False,
         ),
 
         ToolEntry(
@@ -2390,6 +2390,6 @@ def get_tools() -> List[ToolEntry]:
             },
             handler=browser_close,
             timeout_sec=30,
-            default_enabled=True,
+            default_enabled=False,
         ),
     ]
