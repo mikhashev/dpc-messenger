@@ -580,6 +580,41 @@ _A11Y_DOM_SNAPSHOT_JS = """
 """
 
 
+_SCROLL_VIEWPORT_JS = """
+(delta) => {
+  const x = window.innerWidth / 2;
+  const y = window.innerHeight / 2;
+  let el = document.elementFromPoint(x, y);
+  let scroller = null;
+  while (el && el !== document.body) {
+    const s = window.getComputedStyle(el);
+    const overflowY = s.overflowY;
+    if ((overflowY === 'auto' || overflowY === 'scroll' || overflowY === 'overlay')
+        && el.scrollHeight > el.clientHeight) {
+      scroller = el;
+      break;
+    }
+    el = el.parentElement;
+  }
+  if (!scroller) {
+    scroller = document.scrollingElement || document.documentElement;
+  }
+  const before = scroller.scrollTop;
+  scroller.scrollBy({top: delta, behavior: 'instant'});
+  const after = scroller.scrollTop;
+  const tag = scroller.tagName.toLowerCase();
+  const idPart = scroller.id ? ('#' + scroller.id) : '';
+  const clsPart = scroller.className && typeof scroller.className === 'string'
+    ? ('.' + scroller.className.trim().split(/\\s+/).slice(0, 2).join('.'))
+    : '';
+  return {
+    scrolled: after - before,
+    target: tag + idPart + clsPart,
+  };
+}
+"""
+
+
 _A11Y_INTERACTIVE_ROLES: frozenset[str] = frozenset({
     "button", "link", "textbox", "checkbox", "combobox",
     "menuitem", "tab", "searchbox",
@@ -1177,12 +1212,15 @@ class AuthBrowser:
     # ─────────────────────────────────────────────────────────
 
     def scroll(self, direction: str = "down", amount: int = 500) -> None:
-        """Scroll vertically. direction: 'up' or 'down'."""
+        """Scroll vertically by `amount` pixels. Finds the nearest
+        scrollable container under the viewport center (modal/popup
+        aware) and calls scrollBy on it; falls back to the document
+        scrolling element when nothing scrollable is hit."""
         self._require_open()
         url = self._page.url
         delta = -amount if direction == "up" else amount
         try:
-            self._page.mouse.wheel(0, delta)
+            result = self._page.evaluate(_SCROLL_VIEWPORT_JS, delta)
         except Exception as exc:
             self._audit_action(
                 "scroll", url, "failed",
@@ -1190,8 +1228,12 @@ class AuthBrowser:
                 error=type(exc).__name__,
             )
             raise
+        scrolled = (result or {}).get("scrolled", 0)
+        target = (result or {}).get("target", "")
         self._audit_action(
-            "scroll", url, "ok", direction=direction, amount=amount,
+            "scroll", url, "ok",
+            direction=direction, amount=amount,
+            scrolled=scrolled, target=target,
         )
 
     def click(self, ref_or_selector: str, timeout: int = 30000) -> None:
