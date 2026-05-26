@@ -568,12 +568,19 @@ class AuthBrowser:
         try:
             state_path = self._state_path()
             state_path.parent.mkdir(parents=True, exist_ok=True)
-            # os.replace is atomic on Windows + POSIX — guards against torn writes.
             tmp_path = state_path.with_suffix(".json.tmp")
-            self._context.storage_state(path=str(tmp_path))
+            state = self._context.storage_state(path=str(tmp_path))
             os.replace(tmp_path, state_path)
-            state = json.loads(state_path.read_text(encoding="utf-8"))
-            self._sync_cookies_to_vault(state.get("cookies", []))
+            if os.name == "posix":
+                try:
+                    os.chmod(state_path, 0o600)
+                except OSError as chmod_err:
+                    log.warning(
+                        "storage_state chmod failed for agent=%s: %s",
+                        self._agent_id, chmod_err,
+                    )
+            if state is not None:
+                self._sync_cookies_to_vault(state.get("cookies", []))
         except Exception as e:
             log.warning(
                 "storage_state save failed for agent=%s: %s",

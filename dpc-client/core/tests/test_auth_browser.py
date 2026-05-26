@@ -511,7 +511,10 @@ class _FakeStateContext:
     def storage_state(self, path: str | None = None) -> dict | None:
         self.storage_state_calls.append(path or "<no-path>")
         if self._on_storage_state is not None:
-            self._on_storage_state(path)
+            # Real Playwright returns the state dict; allow the test
+            # callback to return one too so we can exercise the
+            # return-value path that skips the read-back.
+            return self._on_storage_state(path)
         return None
 
     def close(self) -> None:
@@ -623,20 +626,20 @@ def test_save_storage_state_writes_atomically_and_syncs_vault(vault_home):
 
     ab = AuthBrowser(agent_id="agent_a", domains=["ozon.ru"])
 
+    state_dict = {
+        "cookies": [
+            {
+                "name": "s", "value": "v", "domain": ".ozon.ru",
+                "path": "/", "secure": True, "httpOnly": True,
+                "sameSite": "Lax", "expires": 1735689600,
+            },
+        ],
+        "origins": [],
+    }
+
     def _write_state(path: str):
-        Path(path).write_text(
-            json.dumps({
-                "cookies": [
-                    {
-                        "name": "s", "value": "v", "domain": ".ozon.ru",
-                        "path": "/", "secure": True, "httpOnly": True,
-                        "sameSite": "Lax", "expires": 1735689600,
-                    },
-                ],
-                "origins": [],
-            }),
-            encoding="utf-8",
-        )
+        Path(path).write_text(json.dumps(state_dict), encoding="utf-8")
+        return state_dict
 
     ab._context = _FakeStateContext(on_storage_state=_write_state)
     ab._save_storage_state()
@@ -649,6 +652,157 @@ def test_save_storage_state_writes_atomically_and_syncs_vault(vault_home):
     assert saved is not None
     assert saved[0]["name"] == "s"
     assert saved[0]["httponly"] is True  # snake_case vault format
+
+
+def test_save_storage_state_uses_return_value_not_disk_read(vault_home, monkeypatch):
+    """ADR-029 Task 004 follow-up — `_save_storage_state` consumes the
+    dict returned by `storage_state(path=...)` instead of reading the
+    file back. Verified by stubbing read_text to raise: the save still
+    completes and vault sync runs from the in-memory dict."""
+    from dpc_client_core import web_auth
+    from dpc_client_core.dpc_agent.tools import browser as mod
+    from dpc_client_core.dpc_agent.tools.browser import AuthBrowser
+
+    ab = AuthBrowser(agent_id="agent_a", domains=["ozon.ru"])
+    state_dict = {
+        "cookies": [
+            {
+                "name": "s", "value": "v", "domain": ".ozon.ru",
+                "path": "/", "secure": True, "httpOnly": True,
+                "expires": 1735689600,
+            },
+        ],
+        "origins": [],
+    }
+
+    def _write_state(path: str):
+        Path(path).write_text("not-used-because-we-return-dict", encoding="utf-8")
+        return state_dict
+
+    # Make Path.read_text raise so a regression (reading the file back)
+    # would fail loudly instead of silently passing on disk content.
+    original_read = Path.read_text
+
+    def _no_read(self, *args, **kwargs):
+        raise AssertionError(f"unexpected read_text on {self}")
+
+    monkeypatch.setattr(Path, "read_text", _no_read)
+    try:
+        ab._context = _FakeStateContext(on_storage_state=_write_state)
+        ab._save_storage_state()
+    finally:
+        monkeypatch.setattr(Path, "read_text", original_read)
+
+    saved = web_auth.load_cookies("agent_a", "ozon.ru")
+    assert saved is not None and saved[0]["name"] == "s"
+
+
+def _patch_browser_os(monkeypatch, name: str, chmod_handler):
+    """Replace the `os` reference inside the browser module with a
+    SimpleNamespace fake so `os.name` / `os.chmod` patches stay scoped
+    to browser.py and don't bleed into web_auth.py (where the real
+    `Path.home()` would crash if we forced os.name='posix' on a
+    Windows host — eager default in `_vault_path` triggers PosixPath
+    construction)."""
+    import os as real_os
+    from dpc_client_core.dpc_agent.tools import browser as mod
+
+    fake_os = types.SimpleNamespace(
+        name=name,
+        chmod=chmod_handler,
+        replace=real_os.replace,
+        environ=real_os.environ,
+    )
+    monkeypatch.setattr(mod, "os", fake_os)
+
+
+def test_save_storage_state_chmod_on_posix(vault_home, monkeypatch):
+    """ADR-029 Task 004 follow-up — restrict `browser_state.json` to
+    owner (0o600) on POSIX so other users on the machine can't read
+    plaintext session cookies."""
+    from dpc_client_core.dpc_agent.tools.browser import AuthBrowser
+
+    ab = AuthBrowser(agent_id="agent_a", domains=["ozon.ru"])
+    state_dict = {"cookies": [], "origins": []}
+
+    def _write_state(path: str):
+        Path(path).write_text(json.dumps(state_dict), encoding="utf-8")
+        return state_dict
+
+    chmod_calls: list[tuple[str, int]] = []
+
+    def _capture_chmod(path, mode):
+        chmod_calls.append((str(path), mode))
+
+    _patch_browser_os(monkeypatch, "posix", _capture_chmod)
+
+    ab._context = _FakeStateContext(on_storage_state=_write_state)
+    ab._save_storage_state()
+
+    state_path = ab._state_path()
+    assert chmod_calls == [(str(state_path), 0o600)]
+
+
+def test_save_storage_state_no_chmod_on_non_posix(vault_home, monkeypatch):
+    """`os.chmod(_, 0o600)` is POSIX-only — must not run on Windows
+    (where NTFS ACLs inherit from the parent dir)."""
+    from dpc_client_core.dpc_agent.tools.browser import AuthBrowser
+
+    ab = AuthBrowser(agent_id="agent_a", domains=["ozon.ru"])
+
+    def _write_state(path: str):
+        Path(path).write_text(json.dumps({"cookies": [], "origins": []}), encoding="utf-8")
+        return {"cookies": [], "origins": []}
+
+    chmod_called: list = []
+
+    def _record_chmod(path, mode):
+        chmod_called.append((path, mode))
+
+    _patch_browser_os(monkeypatch, "nt", _record_chmod)
+
+    ab._context = _FakeStateContext(on_storage_state=_write_state)
+    ab._save_storage_state()
+
+    assert chmod_called == []
+
+
+def test_save_storage_state_swallows_chmod_oserror(vault_home, monkeypatch, caplog):
+    """A failing `os.chmod` (e.g. filesystem doesn't support it — FAT32
+    USB drive) must not break the save flow. Vault sync still happens,
+    warning is logged."""
+    import logging as _logging
+    from dpc_client_core import web_auth
+    from dpc_client_core.dpc_agent.tools.browser import AuthBrowser
+
+    ab = AuthBrowser(agent_id="agent_a", domains=["ozon.ru"])
+    state_dict = {
+        "cookies": [
+            {"name": "x", "value": "y", "domain": ".ozon.ru", "path": "/",
+             "secure": False, "httpOnly": False, "expires": 1735689600},
+        ],
+        "origins": [],
+    }
+
+    def _write_state(path: str):
+        Path(path).write_text(json.dumps(state_dict), encoding="utf-8")
+        return state_dict
+
+    def _raise_chmod(path, mode):
+        raise OSError("filesystem does not support chmod")
+
+    _patch_browser_os(monkeypatch, "posix", _raise_chmod)
+
+    ab._context = _FakeStateContext(on_storage_state=_write_state)
+    with caplog.at_level(_logging.WARNING):
+        ab._save_storage_state()
+
+    saved = web_auth.load_cookies("agent_a", "ozon.ru")
+    assert saved is not None and saved[0]["name"] == "x"
+    assert any(
+        "storage_state chmod failed" in rec.getMessage()
+        for rec in caplog.records
+    )
 
 
 def test_save_storage_state_swallows_errors(vault_home, caplog):
