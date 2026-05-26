@@ -16,6 +16,7 @@ browser.py) and the receiver side (Step 3, service.py).
 """
 from __future__ import annotations
 
+from .conftest import TEST_DOMAIN, TEST_DOMAIN_WWW, TEST_DOMAIN_URL
 import asyncio
 import logging
 
@@ -89,7 +90,7 @@ def test_orphan_request_returns_ok_and_does_not_raise(caplog):
     caplog.set_level(logging.WARNING)
     out = asyncio.run(
         handler(svc, request_id="missing-id", content_html="<html/>",
-                current_url="https://ozon.ru/my")
+                current_url=f"https://{TEST_DOMAIN}/my")
     )
     assert out["status"] == "orphan"
     assert out["request_id"] == "missing-id"
@@ -105,7 +106,7 @@ def test_error_payload_resolves_with_auth_required_exception():
     svc = _make_service_stub()
 
     async def _run():
-        fut = _register_pending("req-1", "https://ozon.ru/my", "ozon.ru")
+        fut = _register_pending("req-1", f"https://{TEST_DOMAIN}/my", f"{TEST_DOMAIN}")
         out = await handler(
             svc, request_id="req-1", error="popup_crashed"
         )
@@ -124,10 +125,10 @@ def test_missing_content_html_resolves_with_auth_required():
     svc = _make_service_stub()
 
     async def _run():
-        fut = _register_pending("req-2", "https://ozon.ru/my", "ozon.ru")
+        fut = _register_pending("req-2", f"https://{TEST_DOMAIN}/my", f"{TEST_DOMAIN}")
         out = await handler(
             svc, request_id="req-2",
-            content_html=None, current_url="https://ozon.ru/my"
+            content_html=None, current_url=f"https://{TEST_DOMAIN}/my"
         )
         assert out["status"] == "no_content"
         with pytest.raises(_browser.AuthRequiredError, match="no content_html"):
@@ -144,7 +145,7 @@ def test_domain_mismatch_rejects_with_auth_required():
     svc = _make_service_stub()
 
     async def _run():
-        fut = _register_pending("req-3", "https://ozon.ru/my", "ozon.ru")
+        fut = _register_pending("req-3", f"https://{TEST_DOMAIN}/my", f"{TEST_DOMAIN}")
         out = await handler(
             svc, request_id="req-3",
             content_html="<html/>", current_url="https://attacker.com/leak"
@@ -163,11 +164,11 @@ def test_path_mismatch_within_domain_accepts_with_warning(caplog):
     caplog.set_level(logging.WARNING)
 
     async def _run():
-        fut = _register_pending("req-4", "https://ozon.ru/my/orders", "ozon.ru")
+        fut = _register_pending("req-4", f"https://{TEST_DOMAIN}/my/orders", f"{TEST_DOMAIN}")
         out = await handler(
             svc, request_id="req-4",
             content_html="<html><body>category page</body></html>",
-            current_url="https://ozon.ru/category/electronics",
+            current_url=f"https://{TEST_DOMAIN}/category/electronics",
         )
         assert out["status"] == "ok"
         assert out["bytes"] == len("<html><body>category page</body></html>")
@@ -187,8 +188,8 @@ def test_exact_url_match_accepts_silently(caplog):
     caplog.set_level(logging.WARNING)
 
     async def _run():
-        url = "https://ozon.ru/my/orders"
-        fut = _register_pending("req-5", url, "ozon.ru")
+        url = f"https://{TEST_DOMAIN}/my/orders"
+        fut = _register_pending("req-5", url, f"{TEST_DOMAIN}")
         out = await handler(
             svc, request_id="req-5",
             content_html="<html><body>my orders</body></html>",

@@ -12,6 +12,7 @@ broadcast) and call the unbound CoreService coroutines on it.
 """
 from __future__ import annotations
 
+from .conftest import TEST_DOMAIN, TEST_DOMAIN_WWW, TEST_DOMAIN_URL
 import asyncio
 import json
 import time
@@ -84,7 +85,7 @@ def _call(stub, method_name: str, **kwargs):
 
 def _fresh_cookies():
     future = int(time.time()) + 3600
-    return [{"name": "session_id", "value": "abc", "domain": ".ozon.ru",
+    return [{"name": "session_id", "value": "abc", "domain": f".{TEST_DOMAIN}",
              "path": "/", "expires": future, "secure": True,
              "httponly": True, "samesite": "Lax"}]
 
@@ -100,23 +101,23 @@ def test_login_complete_persists_and_broadcasts(vault_home):
     stub = _build_stub(vault_home, {})
     cookies = _fresh_cookies()
     result = _call(stub, "web_auth_login_complete",
-                   agent_id="agent_a", domain="ozon.ru", cookies=cookies)
+                   agent_id="agent_a", domain=f"{TEST_DOMAIN}", cookies=cookies)
     assert result["status"] == "success"
     assert result["cookies_count"] == 1
     # Cookies actually landed in vault
-    assert web_auth.load_cookies("agent_a", "ozon.ru") == cookies
+    assert web_auth.load_cookies("agent_a", f"{TEST_DOMAIN}") == cookies
     # Status broadcast fired
     assert ("web_auth_status_changed", {
-        "agent_id": "agent_a", "domain": "ozon.ru", "has_cookies": True
+        "agent_id": "agent_a", "domain": f"{TEST_DOMAIN}", "has_cookies": True
     }) in stub.local_api.events
 
 
 def test_login_complete_validates_inputs(vault_home):
     stub = _build_stub(vault_home, {})
     bad_cases = [
-        {"agent_id": "", "domain": "ozon.ru", "cookies": []},
+        {"agent_id": "", "domain": f"{TEST_DOMAIN}", "cookies": []},
         {"agent_id": "agent_a", "domain": "", "cookies": []},
-        {"agent_id": "agent_a", "domain": "ozon.ru", "cookies": "not-a-list"},
+        {"agent_id": "agent_a", "domain": f"{TEST_DOMAIN}", "cookies": "not-a-list"},
     ]
     for case in bad_cases:
         result = _call(stub, "web_auth_login_complete", **case)
@@ -139,26 +140,26 @@ def test_list_domains_returns_status_per_domain(vault_home):
     from dpc_client_core import web_auth
 
     stub = _build_stub(vault_home, {"agent_profiles": {
-        "agent_a": {"web_auth": {"allowed_domains": ["ozon.ru", "yarcheplus.ru"]}}
+        "agent_a": {"web_auth": {"allowed_domains": [f"{TEST_DOMAIN}", "yarcheplus.ru"]}}
     }})
-    web_auth.save_cookies("agent_a", "ozon.ru", _fresh_cookies())
+    web_auth.save_cookies("agent_a", f"{TEST_DOMAIN}", _fresh_cookies())
 
     result = _call(stub, "web_auth_list_domains", agent_id="agent_a")
     assert result["status"] == "success"
     by_domain = {d["domain"]: d for d in result["domains"]}
-    assert by_domain["ozon.ru"]["has_cookies"] is True
-    assert by_domain["ozon.ru"]["expires"] is not None
+    assert by_domain[f"{TEST_DOMAIN}"]["has_cookies"] is True
+    assert by_domain[f"{TEST_DOMAIN}"]["expires"] is not None
     assert by_domain["yarcheplus.ru"]["has_cookies"] is False
 
 
 def test_list_domains_per_agent_isolation(vault_home):
     stub = _build_stub(vault_home, {"agent_profiles": {
-        "agent_a": {"web_auth": {"allowed_domains": ["ozon.ru"]}},
+        "agent_a": {"web_auth": {"allowed_domains": [f"{TEST_DOMAIN}"]}},
         "agent_b": {"web_auth": {"allowed_domains": ["yarcheplus.ru"]}},
     }})
     result_a = _call(stub, "web_auth_list_domains", agent_id="agent_a")
     domains_a = {d["domain"] for d in result_a["domains"]}
-    assert domains_a == {"ozon.ru"}
+    assert domains_a == {f"{TEST_DOMAIN}"}
     assert "yarcheplus.ru" not in domains_a
 
 
@@ -170,33 +171,33 @@ def test_list_domains_per_agent_isolation(vault_home):
 def test_add_domain_appends_to_whitelist(vault_home):
     stub = _build_stub(vault_home, {})
     result = _call(stub, "web_auth_add_domain",
-                   agent_id="agent_a", domain="ozon.ru")
+                   agent_id="agent_a", domain=f"{TEST_DOMAIN}")
     assert result["status"] == "success"
     # Round-trip via firewall confirms write
-    assert "ozon.ru" in stub.firewall.get_agent_web_auth_domains("agent_a")
+    assert f"{TEST_DOMAIN}" in stub.firewall.get_agent_web_auth_domains("agent_a")
     # Broadcast fired
     assert ("web_auth_domains_changed", {
-        "agent_id": "agent_a", "action": "added", "domain": "ozon.ru"
+        "agent_id": "agent_a", "action": "added", "domain": f"{TEST_DOMAIN}"
     }) in stub.local_api.events
 
 
 def test_add_domain_normalizes_case_and_trims(vault_home):
     stub = _build_stub(vault_home, {})
     result = _call(stub, "web_auth_add_domain",
-                   agent_id="agent_a", domain="  Ozon.RU  ")
+                   agent_id="agent_a", domain=f"  {TEST_DOMAIN.title()}  ")
     assert result["status"] == "success"
-    assert result["domain"] == "ozon.ru"
-    assert "ozon.ru" in stub.firewall.get_agent_web_auth_domains("agent_a")
+    assert result["domain"] == f"{TEST_DOMAIN}"
+    assert f"{TEST_DOMAIN}" in stub.firewall.get_agent_web_auth_domains("agent_a")
 
 
 def test_add_domain_duplicate_silent(vault_home):
     """Adding the same domain twice is a no-op rather than an error —
     matches the idempotent-write spirit of the firewall save path."""
     stub = _build_stub(vault_home, {})
-    _call(stub, "web_auth_add_domain", agent_id="agent_a", domain="ozon.ru")
+    _call(stub, "web_auth_add_domain", agent_id="agent_a", domain=f"{TEST_DOMAIN}")
     stub.local_api.events.clear()
     result = _call(stub, "web_auth_add_domain",
-                   agent_id="agent_a", domain="ozon.ru")
+                   agent_id="agent_a", domain=f"{TEST_DOMAIN}")
     assert result["status"] == "success"
     assert "already" in result.get("message", "").lower()
     # No duplicate broadcast
@@ -226,16 +227,16 @@ def test_add_domain_normalizes_url_to_etld1(vault_home):
     """Mike S141 surface: user pastes `https://www.ozon.ru/` into the
     Web Authentication panel; the entry must land as `ozon.ru` so the
     read-side hostname compare in `firewall.is_authenticated` matches
-    when the agent calls `browse_page(use_auth='ozon.ru')`.
+    when the agent calls `browse_page(use_auth=f'{TEST_DOMAIN}')`.
 
     Pre-fix the literal URL string was stored and matching always failed.
     """
     cases = [
-        ("https://www.ozon.ru/", "ozon.ru"),
-        ("http://ozon.ru:8080/my/orders", "ozon.ru"),
-        ("www.ozon.ru", "ozon.ru"),
-        ("OZON.RU", "ozon.ru"),
-        ("  Https://Login.Ozon.RU/path  ", "ozon.ru"),
+        (f"https://www.{TEST_DOMAIN}/", f"{TEST_DOMAIN}"),
+        (f"http://{TEST_DOMAIN}:8080/my/orders", f"{TEST_DOMAIN}"),
+        (f"www.{TEST_DOMAIN}", f"{TEST_DOMAIN}"),
+        (TEST_DOMAIN.upper(), f"{TEST_DOMAIN}"),
+        (f"  Https://Login.{TEST_DOMAIN.title()}/path  ", f"{TEST_DOMAIN}"),
     ]
     for raw, expected in cases:
         stub = _build_stub(vault_home, {})
@@ -254,13 +255,13 @@ def test_add_domain_url_then_bare_is_duplicate(vault_home):
     matched at read time."""
     stub = _build_stub(vault_home, {})
     _call(stub, "web_auth_add_domain",
-          agent_id="agent_a", domain="https://www.ozon.ru/")
+          agent_id="agent_a", domain=f"https://www.{TEST_DOMAIN}/")
     stub.local_api.events.clear()
     result = _call(stub, "web_auth_add_domain",
-                   agent_id="agent_a", domain="ozon.ru")
+                   agent_id="agent_a", domain=f"{TEST_DOMAIN}")
     assert result["status"] == "success"
     assert "already" in result.get("message", "").lower()
-    assert stub.firewall.get_agent_web_auth_domains("agent_a") == ["ozon.ru"]
+    assert stub.firewall.get_agent_web_auth_domains("agent_a") == [f"{TEST_DOMAIN}"]
 
 
 def test_remove_domain_accepts_url_form(vault_home):
@@ -268,10 +269,10 @@ def test_remove_domain_accepts_url_form(vault_home):
     `add_domain` so a user pasting `https://www.ozon.ru/` into a
     remove confirmation hits the existing `ozon.ru` whitelist entry."""
     stub = _build_stub(vault_home, {"agent_profiles": {
-        "agent_a": {"web_auth": {"allowed_domains": ["ozon.ru"]}}
+        "agent_a": {"web_auth": {"allowed_domains": [f"{TEST_DOMAIN}"]}}
     }})
     result = _call(stub, "web_auth_remove_domain",
-                   agent_id="agent_a", domain="https://www.ozon.ru/")
+                   agent_id="agent_a", domain=f"https://www.{TEST_DOMAIN}/")
     assert result["status"] == "success"
     assert result["removed_from_whitelist"] is True
     assert stub.firewall.get_agent_web_auth_domains("agent_a") == []
@@ -294,7 +295,7 @@ def test_save_firewall_merge_preserves_web_auth_absent_from_incoming(vault_home)
         "agent_a": {
             "enabled": True,
             "tools": {"browse_page": True},
-            "web_auth": {"allowed_domains": ["ozon.ru"]},
+            "web_auth": {"allowed_domains": [f"{TEST_DOMAIN}"]},
         }
     }})
 
@@ -309,17 +310,17 @@ def test_save_firewall_merge_preserves_web_auth_absent_from_incoming(vault_home)
     CoreService._merge_unknown_agent_profile_keys(stub, incoming)
 
     assert "web_auth" in incoming["agent_profiles"]["agent_a"]
-    assert incoming["agent_profiles"]["agent_a"]["web_auth"] == {"allowed_domains": ["ozon.ru"]}
+    assert incoming["agent_profiles"]["agent_a"]["web_auth"] == {"allowed_domains": [f"{TEST_DOMAIN}"]}
     # FirewallEditor's edit to tools dict wins (not merged sub-key)
     assert incoming["agent_profiles"]["agent_a"]["tools"]["git_commit"] is False
 
 
 def test_save_firewall_merge_force_preserves_web_auth_with_stale_contents(vault_home):
     """Mike S141 regression — present-key-with-stale-contents case:
-    FirewallEditor opens, loads `web_auth = {allowed_domains: ['ozon.ru']}`.
+    FirewallEditor opens, loads `web_auth = {allowed_domains: [f'{TEST_DOMAIN}']}`.
     AgentPermissionsPanel adds `yarcheplus.ru` (web_auth now has both
     domains on disk). FirewallEditor save ships the stale snapshot
-    `web_auth = {allowed_domains: ['ozon.ru']}` — the key is present
+    `web_auth = {allowed_domains: [f'{TEST_DOMAIN}']}` — the key is present
     in incoming but the contents are stale.
 
     Naive "preserve missing keys" merge skips this case because the
@@ -336,7 +337,7 @@ def test_save_firewall_merge_force_preserves_web_auth_with_stale_contents(vault_
         "agent_a": {
             "enabled": True,
             "tools": {"browse_page": True},
-            "web_auth": {"allowed_domains": ["ozon.ru", "yarcheplus.ru"]},
+            "web_auth": {"allowed_domains": [f"{TEST_DOMAIN}", "yarcheplus.ru"]},
         }
     }})
 
@@ -346,7 +347,7 @@ def test_save_firewall_merge_force_preserves_web_auth_with_stale_contents(vault_
         "agent_a": {
             "enabled": True,
             "tools": {"browse_page": True, "git_commit": False},
-            "web_auth": {"allowed_domains": ["ozon.ru"]},  # ← stale
+            "web_auth": {"allowed_domains": [f"{TEST_DOMAIN}"]},  # ← stale
         }
     }}
 
@@ -354,7 +355,7 @@ def test_save_firewall_merge_force_preserves_web_auth_with_stale_contents(vault_
 
     # Disk wins for web_auth — both domains preserved despite stale incoming
     assert incoming["agent_profiles"]["agent_a"]["web_auth"] == {
-        "allowed_domains": ["ozon.ru", "yarcheplus.ru"]
+        "allowed_domains": [f"{TEST_DOMAIN}", "yarcheplus.ru"]
     }
     # Other keys merge normally — tools edit by the editor wins
     assert incoming["agent_profiles"]["agent_a"]["tools"]["git_commit"] is False
@@ -380,7 +381,7 @@ def test_save_firewall_merge_force_preserves_web_auth_when_disk_removed(vault_ho
     incoming = {"agent_profiles": {
         "agent_a": {
             "enabled": True,
-            "web_auth": {"allowed_domains": ["ozon.ru"]},  # ← stale, should be wiped
+            "web_auth": {"allowed_domains": [f"{TEST_DOMAIN}"]},  # ← stale, should be wiped
         }
     }}
 
@@ -401,7 +402,7 @@ def test_save_firewall_merge_respects_profile_delete(vault_home):
     from dpc_client_core.service import CoreService
 
     stub = _build_stub(vault_home, {"agent_profiles": {
-        "agent_a": {"enabled": True, "web_auth": {"allowed_domains": ["ozon.ru"]}},
+        "agent_a": {"enabled": True, "web_auth": {"allowed_domains": [f"{TEST_DOMAIN}"]}},
         "agent_b": {"enabled": True},
     }})
     incoming = {"agent_profiles": {
@@ -422,7 +423,7 @@ def test_save_firewall_merge_handles_missing_agent_profiles(vault_home):
     from dpc_client_core.service import CoreService
 
     stub = _build_stub(vault_home, {"agent_profiles": {
-        "agent_a": {"enabled": True, "web_auth": {"allowed_domains": ["ozon.ru"]}},
+        "agent_a": {"enabled": True, "web_auth": {"allowed_domains": [f"{TEST_DOMAIN}"]}},
     }})
     incoming = {"hub": {}}
 
@@ -482,22 +483,22 @@ def test_remove_domain_strips_and_revokes_cookies(vault_home):
     from dpc_client_core import web_auth
 
     stub = _build_stub(vault_home, {"agent_profiles": {
-        "agent_a": {"web_auth": {"allowed_domains": ["ozon.ru"]}}
+        "agent_a": {"web_auth": {"allowed_domains": [f"{TEST_DOMAIN}"]}}
     }})
-    web_auth.save_cookies("agent_a", "ozon.ru", _fresh_cookies())
-    assert web_auth.load_cookies("agent_a", "ozon.ru") is not None
+    web_auth.save_cookies("agent_a", f"{TEST_DOMAIN}", _fresh_cookies())
+    assert web_auth.load_cookies("agent_a", f"{TEST_DOMAIN}") is not None
 
     result = _call(stub, "web_auth_remove_domain",
-                   agent_id="agent_a", domain="ozon.ru")
+                   agent_id="agent_a", domain=f"{TEST_DOMAIN}")
     assert result["status"] == "success"
     assert result["removed_from_whitelist"] is True
     # Whitelist updated
-    assert "ozon.ru" not in stub.firewall.get_agent_web_auth_domains("agent_a")
+    assert f"{TEST_DOMAIN}" not in stub.firewall.get_agent_web_auth_domains("agent_a")
     # Cookies revoked
-    assert web_auth.load_cookies("agent_a", "ozon.ru") is None
+    assert web_auth.load_cookies("agent_a", f"{TEST_DOMAIN}") is None
     # Broadcast fired
     assert ("web_auth_domains_changed", {
-        "agent_id": "agent_a", "action": "removed", "domain": "ozon.ru"
+        "agent_id": "agent_a", "action": "removed", "domain": f"{TEST_DOMAIN}"
     }) in stub.local_api.events
 
 
@@ -505,7 +506,7 @@ def test_remove_domain_not_in_whitelist_noop(vault_home):
     """Removing a domain that's not in the whitelist returns success
     with removed_from_whitelist=False and emits no broadcast."""
     stub = _build_stub(vault_home, {"agent_profiles": {
-        "agent_a": {"web_auth": {"allowed_domains": ["ozon.ru"]}}
+        "agent_a": {"web_auth": {"allowed_domains": [f"{TEST_DOMAIN}"]}}
     }})
     result = _call(stub, "web_auth_remove_domain",
                    agent_id="agent_a", domain="yandex.ru")

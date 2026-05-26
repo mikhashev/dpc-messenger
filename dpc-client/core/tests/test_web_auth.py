@@ -11,6 +11,7 @@ Covers:
 """
 from __future__ import annotations
 
+from .conftest import TEST_DOMAIN, TEST_DOMAIN_WWW, TEST_DOMAIN_URL
 import json
 import time
 
@@ -57,7 +58,7 @@ def sample_cookies():
         {
             "name": "session_id",
             "value": "abc123",
-            "domain": ".ozon.ru",
+            "domain": f".{TEST_DOMAIN}",
             "path": "/",
             "expires": future,
             "secure": True,
@@ -67,7 +68,7 @@ def sample_cookies():
         {
             "name": "csrf",
             "value": "xyz789",
-            "domain": "ozon.ru",
+            "domain": f"{TEST_DOMAIN}",
             "path": "/",
             "expires": None,
             "secure": True,
@@ -80,8 +81,8 @@ def sample_cookies():
 def test_round_trip_preserves_cookies(vault_home, sample_cookies):
     from dpc_client_core import web_auth
 
-    web_auth.save_cookies("agent_a", "ozon.ru", sample_cookies)
-    loaded = web_auth.load_cookies("agent_a", "ozon.ru")
+    web_auth.save_cookies("agent_a", f"{TEST_DOMAIN}", sample_cookies)
+    loaded = web_auth.load_cookies("agent_a", f"{TEST_DOMAIN}")
     assert loaded == sample_cookies
 
 
@@ -94,17 +95,17 @@ def test_load_missing_returns_none(vault_home):
 def test_per_agent_isolation(vault_home, sample_cookies):
     from dpc_client_core import web_auth
 
-    web_auth.save_cookies("agent_a", "ozon.ru", sample_cookies)
-    assert web_auth.load_cookies("agent_b", "ozon.ru") is None
+    web_auth.save_cookies("agent_a", f"{TEST_DOMAIN}", sample_cookies)
+    assert web_auth.load_cookies("agent_b", f"{TEST_DOMAIN}") is None
     assert web_auth.list_domains("agent_b") == []
 
 
 def test_etld1_resolution_subdomain(vault_home, sample_cookies):
     from dpc_client_core import web_auth
 
-    web_auth.save_cookies("agent_a", "ozon.ru", sample_cookies)
-    assert web_auth.load_cookies("agent_a", "www.ozon.ru") == sample_cookies
-    assert web_auth.load_cookies("agent_a", "login.ozon.ru") == sample_cookies
+    web_auth.save_cookies("agent_a", f"{TEST_DOMAIN}", sample_cookies)
+    assert web_auth.load_cookies("agent_a", f"www.{TEST_DOMAIN}") == sample_cookies
+    assert web_auth.load_cookies("agent_a", f"login.{TEST_DOMAIN}") == sample_cookies
 
 
 def test_etld1_resolution_unknown_domain_passthrough(vault_home, sample_cookies):
@@ -125,11 +126,11 @@ def test_resolve_etld1_accepts_full_urls():
     """
     from dpc_client_core import web_auth
 
-    assert web_auth.resolve_etld1("https://www.ozon.ru/") == "ozon.ru"
-    assert web_auth.resolve_etld1("http://ozon.ru:8080/my/orders") == "ozon.ru"
-    assert web_auth.resolve_etld1("www.ozon.ru") == "ozon.ru"
-    assert web_auth.resolve_etld1("ozon.ru") == "ozon.ru"
-    assert web_auth.resolve_etld1("OZON.RU") == "ozon.ru"
+    assert web_auth.resolve_etld1(f"https://www.{TEST_DOMAIN}/") == f"{TEST_DOMAIN}"
+    assert web_auth.resolve_etld1(f"http://{TEST_DOMAIN}:8080/my/orders") == f"{TEST_DOMAIN}"
+    assert web_auth.resolve_etld1(f"www.{TEST_DOMAIN}") == f"{TEST_DOMAIN}"
+    assert web_auth.resolve_etld1(f"{TEST_DOMAIN}") == f"{TEST_DOMAIN}"
+    assert web_auth.resolve_etld1(TEST_DOMAIN.upper()) == f"{TEST_DOMAIN}"
     # Unmapped host but valid URL — eTLD+1 unknown so the bare
     # hostname is the vault key.
     assert web_auth.resolve_etld1("https://example.com/path") == "example.com"
@@ -161,23 +162,23 @@ def test_etld1_resolution_via_url_reaches_existing_jar(vault_home, sample_cookie
     end-to-end: cookies were unreachable if URL ever entered the lookup."""
     from dpc_client_core import web_auth
 
-    web_auth.save_cookies("agent_a", "ozon.ru", sample_cookies)
-    assert web_auth.load_cookies("agent_a", "https://www.ozon.ru/orders") == sample_cookies
-    assert web_auth.load_cookies("agent_a", "http://login.ozon.ru:443") == sample_cookies
+    web_auth.save_cookies("agent_a", f"{TEST_DOMAIN}", sample_cookies)
+    assert web_auth.load_cookies("agent_a", f"https://www.{TEST_DOMAIN}/orders") == sample_cookies
+    assert web_auth.load_cookies("agent_a", f"http://login.{TEST_DOMAIN}:443") == sample_cookies
 
 
 def test_get_auth_status_empty(vault_home):
     from dpc_client_core import web_auth
 
-    status = web_auth.get_auth_status("agent_a", "ozon.ru")
+    status = web_auth.get_auth_status("agent_a", f"{TEST_DOMAIN}")
     assert status == {"has_cookies": False, "expires": None, "authenticated_at": None}
 
 
 def test_get_auth_status_populated(vault_home, sample_cookies):
     from dpc_client_core import web_auth
 
-    web_auth.save_cookies("agent_a", "ozon.ru", sample_cookies)
-    status = web_auth.get_auth_status("agent_a", "ozon.ru")
+    web_auth.save_cookies("agent_a", f"{TEST_DOMAIN}", sample_cookies)
+    status = web_auth.get_auth_status("agent_a", f"{TEST_DOMAIN}")
     assert status["has_cookies"] is True
     assert status["expires"] == sample_cookies[0]["expires"]
     assert status["authenticated_at"] is not None
@@ -186,11 +187,11 @@ def test_get_auth_status_populated(vault_home, sample_cookies):
 def test_list_domains(vault_home, sample_cookies):
     from dpc_client_core import web_auth
 
-    web_auth.save_cookies("agent_a", "ozon.ru", sample_cookies)
+    web_auth.save_cookies("agent_a", f"{TEST_DOMAIN}", sample_cookies)
     web_auth.save_cookies("agent_a", "yarcheplus.ru", sample_cookies)
     domains = web_auth.list_domains("agent_a")
     domain_names = {d["domain"] for d in domains}
-    assert domain_names == {"ozon.ru", "yarcheplus.ru"}
+    assert domain_names == {f"{TEST_DOMAIN}", "yarcheplus.ru"}
     for entry in domains:
         assert entry["has_cookies"] is True
         assert entry["authenticated_at"] is not None
@@ -199,9 +200,9 @@ def test_list_domains(vault_home, sample_cookies):
 def test_revoke_removes_jar(vault_home, sample_cookies):
     from dpc_client_core import web_auth
 
-    web_auth.save_cookies("agent_a", "ozon.ru", sample_cookies)
-    web_auth.revoke("agent_a", "ozon.ru")
-    assert web_auth.load_cookies("agent_a", "ozon.ru") is None
+    web_auth.save_cookies("agent_a", f"{TEST_DOMAIN}", sample_cookies)
+    web_auth.revoke("agent_a", f"{TEST_DOMAIN}")
+    assert web_auth.load_cookies("agent_a", f"{TEST_DOMAIN}") is None
 
 
 def test_revoke_missing_silent(vault_home):
@@ -244,11 +245,11 @@ def test_get_auth_status_ignores_playwright_session_marker(vault_home):
     from dpc_client_core import web_auth
 
     future = int(time.time()) + 3600
-    web_auth.save_cookies("agent_a", "ozon.ru", [
-        {"name": "lang", "value": "en", "domain": ".ozon.ru", "expires": -1},
-        {"name": "auth", "value": "t", "domain": ".ozon.ru", "expires": future},
+    web_auth.save_cookies("agent_a", f"{TEST_DOMAIN}", [
+        {"name": "lang", "value": "en", "domain": f".{TEST_DOMAIN}", "expires": -1},
+        {"name": "auth", "value": "t", "domain": f".{TEST_DOMAIN}", "expires": future},
     ])
-    status = web_auth.get_auth_status("agent_a", "ozon.ru")
+    status = web_auth.get_auth_status("agent_a", f"{TEST_DOMAIN}")
     assert status["has_cookies"] is True
     assert status["expires"] == future
 
@@ -262,28 +263,28 @@ def test_invalid_token_recovery(vault_home, sample_cookies):
     from dpc_client_core import web_auth
     import keyring
 
-    web_auth.save_cookies("agent_a", "ozon.ru", sample_cookies)
+    web_auth.save_cookies("agent_a", f"{TEST_DOMAIN}", sample_cookies)
     # Wipe the keyring entry — on next access a new key will be generated
     # but the on-disk vault was encrypted with the old key.
     keyring.delete_password(web_auth.SERVICE, "agent_a")
     # load_cookies must not raise. Stale vault is silently dropped.
-    assert web_auth.load_cookies("agent_a", "ozon.ru") is None
+    assert web_auth.load_cookies("agent_a", f"{TEST_DOMAIN}") is None
     # A subsequent save with the new key works end-to-end.
-    web_auth.save_cookies("agent_a", "ozon.ru", sample_cookies)
-    assert web_auth.load_cookies("agent_a", "ozon.ru") == sample_cookies
+    web_auth.save_cookies("agent_a", f"{TEST_DOMAIN}", sample_cookies)
+    assert web_auth.load_cookies("agent_a", f"{TEST_DOMAIN}") == sample_cookies
 
 
 def test_vault_file_not_plaintext(vault_home, sample_cookies):
     from dpc_client_core import web_auth
 
-    web_auth.save_cookies("agent_a", "ozon.ru", sample_cookies)
+    web_auth.save_cookies("agent_a", f"{TEST_DOMAIN}", sample_cookies)
     vault_file = vault_home / "agents" / "agent_a" / "web_credentials.enc"
     assert vault_file.exists()
     raw = vault_file.read_bytes()
     # plaintext markers from sample_cookies must not appear in ciphertext
     assert b"session_id" not in raw
     assert b"abc123" not in raw
-    assert b".ozon.ru" not in raw
+    assert f".{TEST_DOMAIN}".encode() not in raw
     # cannot be parsed as JSON either
     with pytest.raises(json.JSONDecodeError):
         json.loads(raw)

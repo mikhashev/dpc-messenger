@@ -15,6 +15,7 @@ guard logic that surrounds the browser:
 """
 from __future__ import annotations
 
+from .conftest import TEST_DOMAIN, TEST_DOMAIN_WWW, TEST_DOMAIN_URL
 import asyncio
 import json
 import time
@@ -64,7 +65,7 @@ def fresh_cookies():
         {
             "name": "session_id",
             "value": "abc",
-            "domain": ".ozon.ru",
+            "domain": f".{TEST_DOMAIN}",
             "path": "/",
             "expires": future,
             "secure": True,
@@ -81,7 +82,7 @@ def expired_cookies():
         {
             "name": "session_id",
             "value": "abc",
-            "domain": ".ozon.ru",
+            "domain": f".{TEST_DOMAIN}",
             "path": "/",
             "expires": past,
             "secure": True,
@@ -105,10 +106,10 @@ def test_auth_required_raised_on_load(vault_home):
         AuthRequiredError,
     )
 
-    ab = AuthBrowser(agent_id="agent_a", domain="ozon.ru")
+    ab = AuthBrowser(agent_id="agent_a", domain=f"{TEST_DOMAIN}")
     with pytest.raises(AuthRequiredError) as exc:
         ab._load_all_cookies()
-    assert "ozon.ru" in str(exc.value)
+    assert f"{TEST_DOMAIN}" in str(exc.value)
     assert "re-login" in str(exc.value).lower()
 
 
@@ -119,11 +120,11 @@ def test_auth_expired_raised_on_load(vault_home, expired_cookies):
         AuthExpiredError,
     )
 
-    web_auth.save_cookies("agent_a", "ozon.ru", expired_cookies)
-    ab = AuthBrowser(agent_id="agent_a", domain="ozon.ru")
+    web_auth.save_cookies("agent_a", f"{TEST_DOMAIN}", expired_cookies)
+    ab = AuthBrowser(agent_id="agent_a", domain=f"{TEST_DOMAIN}")
     with pytest.raises(AuthExpiredError) as exc:
         ab._load_all_cookies()
-    assert "ozon.ru" in str(exc.value)
+    assert f"{TEST_DOMAIN}" in str(exc.value)
     assert "expired" in str(exc.value).lower()
 
 
@@ -133,9 +134,9 @@ def test_construction_is_lazy(vault_home):
     that makes per-agent session registry safe to instantiate."""
     from dpc_client_core.dpc_agent.tools.browser import AuthBrowser
 
-    ab = AuthBrowser(agent_id="agent_a", domain="ozon.ru")
-    assert ab.domain == "ozon.ru"
-    assert ab.domains == ["ozon.ru"]
+    ab = AuthBrowser(agent_id="agent_a", domain=f"{TEST_DOMAIN}")
+    assert ab.domain == f"{TEST_DOMAIN}"
+    assert ab.domains == [f"{TEST_DOMAIN}"]
     assert ab._page is None
     assert ab._cookies_loaded is False
 
@@ -152,7 +153,7 @@ def test_authbrowser_public_surface(vault_home):
     future accidental removals or unintended additions are caught."""
     from dpc_client_core.dpc_agent.tools.browser import AuthBrowser
 
-    ab = AuthBrowser(agent_id="agent_a", domain="ozon.ru")
+    ab = AuthBrowser(agent_id="agent_a", domain=f"{TEST_DOMAIN}")
     public = {n for n in dir(ab) if not n.startswith("_")}
     # Allowed surface — read methods + ADR-029 interactive methods
     expected = {
@@ -176,24 +177,24 @@ def test_authbrowser_public_surface(vault_home):
 
 @pytest.mark.parametrize("url,etld1,expected", [
     # Same domain
-    ("https://ozon.ru/path", "ozon.ru", True),
+    (f"https://{TEST_DOMAIN}/path", f"{TEST_DOMAIN}", True),
     # Subdomain
-    ("https://www.ozon.ru/path", "ozon.ru", True),
-    ("https://login.ozon.ru/oauth", "ozon.ru", True),
-    ("https://api.ozon.ru/v2/orders", "ozon.ru", True),
+    (f"https://www.{TEST_DOMAIN}/path", f"{TEST_DOMAIN}", True),
+    (f"https://login.{TEST_DOMAIN}/oauth", f"{TEST_DOMAIN}", True),
+    (f"https://api.{TEST_DOMAIN}/v2/orders", f"{TEST_DOMAIN}", True),
     # Different TLD
-    ("https://ozon.com/path", "ozon.ru", False),
+    ("https://ozon.com/path", f"{TEST_DOMAIN}", False),
     # Different domain
-    ("https://yandex.ru/", "ozon.ru", False),
+    ("https://yandex.ru/", f"{TEST_DOMAIN}", False),
     # Adversarial — auth domain in path/query, not host
-    ("https://attacker.com/?ref=ozon.ru", "ozon.ru", False),
-    ("https://attacker.com/ozon.ru/page", "ozon.ru", False),
+    (f"https://attacker.com/?ref={TEST_DOMAIN}", f"{TEST_DOMAIN}", False),
+    (f"https://attacker.com/{TEST_DOMAIN}/page", f"{TEST_DOMAIN}", False),
     # Adversarial — auth domain as suffix-LIKE but not subdomain
-    ("https://notozon.ru/", "ozon.ru", False),
-    ("https://fake-ozon.ru/", "ozon.ru", False),
+    (f"https://not{TEST_DOMAIN}/", f"{TEST_DOMAIN}", False),
+    (f"https://fake-{TEST_DOMAIN}/", f"{TEST_DOMAIN}", False),
     # Malformed
-    ("not-a-url", "ozon.ru", False),
-    ("", "ozon.ru", False),
+    ("not-a-url", f"{TEST_DOMAIN}", False),
+    ("", f"{TEST_DOMAIN}", False),
 ])
 def test_domain_matches(url, etld1, expected):
     from dpc_client_core.dpc_agent.tools.browser import _domain_matches
@@ -210,8 +211,8 @@ def test_goto_rejects_off_domain_url(vault_home, fresh_cookies):
     from dpc_client_core import web_auth
     from dpc_client_core.dpc_agent.tools.browser import AuthBrowser
 
-    web_auth.save_cookies("agent_a", "ozon.ru", fresh_cookies)
-    ab = AuthBrowser(agent_id="agent_a", domain="ozon.ru")
+    web_auth.save_cookies("agent_a", f"{TEST_DOMAIN}", fresh_cookies)
+    ab = AuthBrowser(agent_id="agent_a", domain=f"{TEST_DOMAIN}")
     # Inject a stub _page so the not-opened guard does NOT trip first
     ab._page = object()
     with pytest.raises(ValueError) as exc:
@@ -228,27 +229,27 @@ def test_multi_domain_constructor(vault_home):
     from dpc_client_core.dpc_agent.tools.browser import AuthBrowser
 
     ab = AuthBrowser(
-        agent_id="agent_a", domains=["ozon.ru", "yandex.ru"], headed=True
+        agent_id="agent_a", domains=[f"{TEST_DOMAIN}", "yandex.ru"], headed=True
     )
-    assert set(ab.domains) == {"ozon.ru", "yandex.ru"}
+    assert set(ab.domains) == {f"{TEST_DOMAIN}", "yandex.ru"}
     assert ab.headed is True
-    assert ab.domain == "ozon.ru"  # back-compat scalar = first
+    assert ab.domain == f"{TEST_DOMAIN}"  # back-compat scalar = first
 
 
 def test_constructor_rejects_both_domain_and_domains(vault_home):
     from dpc_client_core.dpc_agent.tools.browser import AuthBrowser
 
     with pytest.raises(ValueError, match="domains.*or.*domain"):
-        AuthBrowser(agent_id="agent_a", domain="ozon.ru", domains=["yandex.ru"])
+        AuthBrowser(agent_id="agent_a", domain=f"{TEST_DOMAIN}", domains=["yandex.ru"])
 
 
 def test_multi_domain_check_allows_any_etld1(vault_home):
     from dpc_client_core.dpc_agent.tools.browser import AuthBrowser
 
-    ab = AuthBrowser(agent_id="agent_a", domains=["ozon.ru", "yandex.ru"])
+    ab = AuthBrowser(agent_id="agent_a", domains=[f"{TEST_DOMAIN}", "yandex.ru"])
     ab._page = object()
     # Both allowed, no exception
-    ab._check_domain("https://ozon.ru/orders")
+    ab._check_domain(f"https://{TEST_DOMAIN}/orders")
     ab._check_domain("https://www.yandex.ru/search")
     # Off-domain still rejected
     with pytest.raises(ValueError, match="outside auth domains"):
@@ -266,9 +267,9 @@ def test_session_registry_reuse(vault_home, fresh_cookies):
         get_active_browser_sessions,
     )
 
-    web_auth.save_cookies("agent_a", "ozon.ru", fresh_cookies)
+    web_auth.save_cookies("agent_a", f"{TEST_DOMAIN}", fresh_cookies)
     # Stub a live session so the guard sees `_page is not None`
-    stub = AuthBrowser(agent_id="agent_a", domains=["ozon.ru"])
+    stub = AuthBrowser(agent_id="agent_a", domains=[f"{TEST_DOMAIN}"])
     stub._page = object()  # masquerade as opened without launching Camoufox
     _active_browser_sessions["agent_a"] = stub
     try:
@@ -286,7 +287,7 @@ def test_screenshot_save_to_returns_path(vault_home, tmp_path):
     stubbing the page object."""
     from dpc_client_core.dpc_agent.tools.browser import AuthBrowser
 
-    ab = AuthBrowser(agent_id="agent_a", domain="ozon.ru")
+    ab = AuthBrowser(agent_id="agent_a", domain=f"{TEST_DOMAIN}")
     target = tmp_path / "shot.png"
     calls: list[dict] = []
 
@@ -340,7 +341,7 @@ def test_install_route_handler_registers_catch_all(vault_home):
     the gate."""
     from dpc_client_core.dpc_agent.tools.browser import AuthBrowser
 
-    ab = AuthBrowser(agent_id="agent_a", domains=["ozon.ru"])
+    ab = AuthBrowser(agent_id="agent_a", domains=[f"{TEST_DOMAIN}"])
     ab._context = _FakeContext()
     ab._install_domain_route_handler()
     assert len(ab._context.registered) == 1
@@ -351,8 +352,8 @@ def test_install_route_handler_registers_catch_all(vault_home):
 def test_route_gate_allows_in_domain(vault_home):
     from dpc_client_core.dpc_agent.tools.browser import AuthBrowser
 
-    ab = AuthBrowser(agent_id="agent_a", domains=["ozon.ru"])
-    route = _FakeRoute("https://ozon.ru/my/orders")
+    ab = AuthBrowser(agent_id="agent_a", domains=[f"{TEST_DOMAIN}"])
+    route = _FakeRoute(f"https://{TEST_DOMAIN}/my/orders")
     ab._domain_route_gate(route)
     assert route.continued is True
     assert route.aborted is False
@@ -364,8 +365,8 @@ def test_route_gate_allows_subdomain(vault_home):
     from spec (cdn.shop.example.com when shop.example.com whitelisted)."""
     from dpc_client_core.dpc_agent.tools.browser import AuthBrowser
 
-    ab = AuthBrowser(agent_id="agent_a", domains=["ozon.ru"])
-    route = _FakeRoute("https://cdn.ozon.ru/static/lib.js")
+    ab = AuthBrowser(agent_id="agent_a", domains=[f"{TEST_DOMAIN}"])
+    route = _FakeRoute(f"https://cdn.{TEST_DOMAIN}/static/lib.js")
     ab._domain_route_gate(route)
     assert route.continued is True
     assert route.aborted is False
@@ -374,7 +375,7 @@ def test_route_gate_allows_subdomain(vault_home):
 def test_route_gate_blocks_off_domain(vault_home):
     from dpc_client_core.dpc_agent.tools.browser import AuthBrowser
 
-    ab = AuthBrowser(agent_id="agent_a", domains=["ozon.ru"])
+    ab = AuthBrowser(agent_id="agent_a", domains=[f"{TEST_DOMAIN}"])
     route = _FakeRoute("https://googletagmanager.com/gtm.js?id=GTM-XXX")
     ab._domain_route_gate(route)
     assert route.aborted is True
@@ -388,11 +389,11 @@ def test_route_gate_blocks_lookalike(vault_home):
     resolution, not substring match."""
     from dpc_client_core.dpc_agent.tools.browser import AuthBrowser
 
-    ab = AuthBrowser(agent_id="agent_a", domains=["ozon.ru"])
+    ab = AuthBrowser(agent_id="agent_a", domains=[f"{TEST_DOMAIN}"])
     for hostile in (
-        "https://notozon.ru/payload",
-        "https://fake-ozon.ru/payload",
-        "https://attacker.com/?ref=ozon.ru",
+        f"https://not{TEST_DOMAIN}/payload",
+        f"https://fake-{TEST_DOMAIN}/payload",
+        f"https://attacker.com/?ref={TEST_DOMAIN}",
     ):
         route = _FakeRoute(hostile)
         ab._domain_route_gate(route)
@@ -404,11 +405,11 @@ def test_route_gate_blocks_lookalike(vault_home):
 def test_route_gate_multi_domain(vault_home):
     from dpc_client_core.dpc_agent.tools.browser import AuthBrowser
 
-    ab = AuthBrowser(agent_id="agent_a", domains=["ozon.ru", "yandex.ru"])
+    ab = AuthBrowser(agent_id="agent_a", domains=[f"{TEST_DOMAIN}", "yandex.ru"])
     for ok in (
-        "https://ozon.ru/orders",
+        f"https://{TEST_DOMAIN}/orders",
         "https://www.yandex.ru/search",
-        "https://api.ozon.ru/v2/x",
+        f"https://api.{TEST_DOMAIN}/v2/x",
     ):
         route = _FakeRoute(ok)
         ab._domain_route_gate(route)
@@ -424,7 +425,7 @@ def test_route_gate_fail_closed_when_empty(vault_home):
     from dpc_client_core.dpc_agent.tools.browser import AuthBrowser
 
     ab = AuthBrowser(agent_id="agent_a", domains=[])
-    route = _FakeRoute("https://ozon.ru/my")
+    route = _FakeRoute(f"https://{TEST_DOMAIN}/my")
     ab._domain_route_gate(route)
     assert route.aborted is True
     assert route.continued is False
@@ -436,11 +437,11 @@ def test_route_gate_allows_non_http_schemes(vault_home):
     requests — short-circuit ALLOW per spec."""
     from dpc_client_core.dpc_agent.tools.browser import AuthBrowser
 
-    ab = AuthBrowser(agent_id="agent_a", domains=["ozon.ru"])
+    ab = AuthBrowser(agent_id="agent_a", domains=[f"{TEST_DOMAIN}"])
     for uri in (
         "data:text/html,<html><body>x</body></html>",
         "about:blank",
-        "blob:https://ozon.ru/abc-123",
+        f"blob:https://{TEST_DOMAIN}/abc-123",
     ):
         route = _FakeRoute(uri)
         ab._domain_route_gate(route)
@@ -470,7 +471,7 @@ def test_route_gate_resilient_to_broken_request(vault_home):
         def continue_(self):
             self.continued = True
 
-    ab = AuthBrowser(agent_id="agent_a", domains=["ozon.ru"])
+    ab = AuthBrowser(agent_id="agent_a", domains=[f"{TEST_DOMAIN}"])
     route = _BrokenRoute()
     ab._domain_route_gate(route)
     assert route.aborted is True
@@ -546,7 +547,7 @@ def test_from_playwright_cookies_roundtrip(vault_home):
     src = [
         {
             "name": "session_id", "value": "abc",
-            "domain": ".ozon.ru", "path": "/",
+            "domain": f".{TEST_DOMAIN}", "path": "/",
             "secure": True, "httpOnly": True, "sameSite": "Lax",
             "expires": 1735689600,
         },
@@ -568,7 +569,7 @@ def test_state_path_uses_dpc_home(vault_home):
     under the DPC_HOME env override (set by vault_home fixture)."""
     from dpc_client_core.dpc_agent.tools.browser import AuthBrowser
 
-    ab = AuthBrowser(agent_id="agent_a", domain="ozon.ru")
+    ab = AuthBrowser(agent_id="agent_a", domain=f"{TEST_DOMAIN}")
     state = ab._state_path()
     expected = vault_home / "agents" / "agent_a" / "browser_state.json"
     assert state == expected
@@ -580,8 +581,8 @@ def test_inject_vault_cookies_calls_add_cookies(vault_home, fresh_cookies):
     from dpc_client_core import web_auth
     from dpc_client_core.dpc_agent.tools.browser import AuthBrowser
 
-    web_auth.save_cookies("agent_a", "ozon.ru", fresh_cookies)
-    ab = AuthBrowser(agent_id="agent_a", domain="ozon.ru")
+    web_auth.save_cookies("agent_a", f"{TEST_DOMAIN}", fresh_cookies)
+    ab = AuthBrowser(agent_id="agent_a", domain=f"{TEST_DOMAIN}")
     ab._context = _FakeStateContext()
     ab._inject_vault_cookies()
     assert len(ab._context.added) == 1
@@ -595,15 +596,15 @@ def test_sync_cookies_to_vault_groups_and_filters(vault_home):
     from dpc_client_core import web_auth
     from dpc_client_core.dpc_agent.tools.browser import AuthBrowser
 
-    ab = AuthBrowser(agent_id="agent_a", domains=["ozon.ru"])
+    ab = AuthBrowser(agent_id="agent_a", domains=[f"{TEST_DOMAIN}"])
     state_cookies = [
         {
-            "name": "a", "value": "1", "domain": ".ozon.ru", "path": "/",
+            "name": "a", "value": "1", "domain": f".{TEST_DOMAIN}", "path": "/",
             "secure": True, "httpOnly": False, "sameSite": "Lax",
             "expires": 1735689600,
         },
         {
-            "name": "b", "value": "2", "domain": "www.ozon.ru", "path": "/",
+            "name": "b", "value": "2", "domain": f"www.{TEST_DOMAIN}", "path": "/",
             "secure": True, "httpOnly": True, "sameSite": "Lax",
             "expires": 1735689600,
         },
@@ -615,7 +616,7 @@ def test_sync_cookies_to_vault_groups_and_filters(vault_home):
         },
     ]
     ab._sync_cookies_to_vault(state_cookies)
-    saved = web_auth.load_cookies("agent_a", "ozon.ru")
+    saved = web_auth.load_cookies("agent_a", f"{TEST_DOMAIN}")
     assert saved is not None
     names = sorted(c["name"] for c in saved)
     assert names == ["a", "b"]
@@ -627,9 +628,9 @@ def test_sync_cookies_to_vault_empty_input_no_op(vault_home):
     from dpc_client_core import web_auth
     from dpc_client_core.dpc_agent.tools.browser import AuthBrowser
 
-    ab = AuthBrowser(agent_id="agent_a", domains=["ozon.ru"])
+    ab = AuthBrowser(agent_id="agent_a", domains=[f"{TEST_DOMAIN}"])
     ab._sync_cookies_to_vault([])  # must not raise
-    assert web_auth.load_cookies("agent_a", "ozon.ru") is None
+    assert web_auth.load_cookies("agent_a", f"{TEST_DOMAIN}") is None
 
 
 def test_save_storage_state_writes_atomically_and_syncs_vault(vault_home):
@@ -638,12 +639,12 @@ def test_save_storage_state_writes_atomically_and_syncs_vault(vault_home):
     from dpc_client_core import web_auth
     from dpc_client_core.dpc_agent.tools.browser import AuthBrowser
 
-    ab = AuthBrowser(agent_id="agent_a", domains=["ozon.ru"])
+    ab = AuthBrowser(agent_id="agent_a", domains=[f"{TEST_DOMAIN}"])
 
     state_dict = {
         "cookies": [
             {
-                "name": "s", "value": "v", "domain": ".ozon.ru",
+                "name": "s", "value": "v", "domain": f".{TEST_DOMAIN}",
                 "path": "/", "secure": True, "httpOnly": True,
                 "sameSite": "Lax", "expires": 1735689600,
             },
@@ -662,7 +663,7 @@ def test_save_storage_state_writes_atomically_and_syncs_vault(vault_home):
     assert state_path.exists()
     # tmp was os.replaced — no .tmp leftover
     assert not state_path.with_suffix(".json.tmp").exists()
-    saved = web_auth.load_cookies("agent_a", "ozon.ru")
+    saved = web_auth.load_cookies("agent_a", f"{TEST_DOMAIN}")
     assert saved is not None
     assert saved[0]["name"] == "s"
     assert saved[0]["httponly"] is True  # snake_case vault format
@@ -677,11 +678,11 @@ def test_save_storage_state_uses_return_value_not_disk_read(vault_home, monkeypa
     from dpc_client_core.dpc_agent.tools import browser as mod
     from dpc_client_core.dpc_agent.tools.browser import AuthBrowser
 
-    ab = AuthBrowser(agent_id="agent_a", domains=["ozon.ru"])
+    ab = AuthBrowser(agent_id="agent_a", domains=[f"{TEST_DOMAIN}"])
     state_dict = {
         "cookies": [
             {
-                "name": "s", "value": "v", "domain": ".ozon.ru",
+                "name": "s", "value": "v", "domain": f".{TEST_DOMAIN}",
                 "path": "/", "secure": True, "httpOnly": True,
                 "expires": 1735689600,
             },
@@ -707,7 +708,7 @@ def test_save_storage_state_uses_return_value_not_disk_read(vault_home, monkeypa
     finally:
         monkeypatch.setattr(Path, "read_text", original_read)
 
-    saved = web_auth.load_cookies("agent_a", "ozon.ru")
+    saved = web_auth.load_cookies("agent_a", f"{TEST_DOMAIN}")
     assert saved is not None and saved[0]["name"] == "s"
 
 
@@ -736,7 +737,7 @@ def test_save_storage_state_chmod_on_posix(vault_home, monkeypatch):
     plaintext session cookies."""
     from dpc_client_core.dpc_agent.tools.browser import AuthBrowser
 
-    ab = AuthBrowser(agent_id="agent_a", domains=["ozon.ru"])
+    ab = AuthBrowser(agent_id="agent_a", domains=[f"{TEST_DOMAIN}"])
     state_dict = {"cookies": [], "origins": []}
 
     def _write_state(path: str):
@@ -762,7 +763,7 @@ def test_save_storage_state_no_chmod_on_non_posix(vault_home, monkeypatch):
     (where NTFS ACLs inherit from the parent dir)."""
     from dpc_client_core.dpc_agent.tools.browser import AuthBrowser
 
-    ab = AuthBrowser(agent_id="agent_a", domains=["ozon.ru"])
+    ab = AuthBrowser(agent_id="agent_a", domains=[f"{TEST_DOMAIN}"])
 
     def _write_state(path: str):
         Path(path).write_text(json.dumps({"cookies": [], "origins": []}), encoding="utf-8")
@@ -789,10 +790,10 @@ def test_save_storage_state_swallows_chmod_oserror(vault_home, monkeypatch, capl
     from dpc_client_core import web_auth
     from dpc_client_core.dpc_agent.tools.browser import AuthBrowser
 
-    ab = AuthBrowser(agent_id="agent_a", domains=["ozon.ru"])
+    ab = AuthBrowser(agent_id="agent_a", domains=[f"{TEST_DOMAIN}"])
     state_dict = {
         "cookies": [
-            {"name": "x", "value": "y", "domain": ".ozon.ru", "path": "/",
+            {"name": "x", "value": "y", "domain": f".{TEST_DOMAIN}", "path": "/",
              "secure": False, "httpOnly": False, "expires": 1735689600},
         ],
         "origins": [],
@@ -811,7 +812,7 @@ def test_save_storage_state_swallows_chmod_oserror(vault_home, monkeypatch, capl
     with caplog.at_level(_logging.WARNING):
         ab._save_storage_state()
 
-    saved = web_auth.load_cookies("agent_a", "ozon.ru")
+    saved = web_auth.load_cookies("agent_a", f"{TEST_DOMAIN}")
     assert saved is not None and saved[0]["name"] == "x"
     assert any(
         "storage_state chmod failed" in rec.getMessage()
@@ -825,7 +826,7 @@ def test_save_storage_state_swallows_errors(vault_home, caplog):
     import logging as _logging
     from dpc_client_core.dpc_agent.tools.browser import AuthBrowser
 
-    ab = AuthBrowser(agent_id="agent_a", domains=["ozon.ru"])
+    ab = AuthBrowser(agent_id="agent_a", domains=[f"{TEST_DOMAIN}"])
 
     class _BrokenContext:
         def storage_state(self, path=None):
@@ -843,7 +844,7 @@ def test_save_storage_state_swallows_errors(vault_home, caplog):
 def test_save_storage_state_no_op_when_context_none(vault_home):
     from dpc_client_core.dpc_agent.tools.browser import AuthBrowser
 
-    ab = AuthBrowser(agent_id="agent_a", domains=["ozon.ru"])
+    ab = AuthBrowser(agent_id="agent_a", domains=[f"{TEST_DOMAIN}"])
     assert ab._context is None
     ab._save_storage_state()  # must not raise
     assert not ab._state_path().exists()
@@ -854,7 +855,7 @@ def test_close_triggers_save_when_context_live(vault_home):
     Playwright storage_state() has a live context to read from."""
     from dpc_client_core.dpc_agent.tools.browser import AuthBrowser
 
-    ab = AuthBrowser(agent_id="agent_a", domains=["ozon.ru"])
+    ab = AuthBrowser(agent_id="agent_a", domains=[f"{TEST_DOMAIN}"])
     saved: list[bool] = []
 
     def _record_save():
@@ -907,7 +908,7 @@ def test_open_uses_storage_state_when_file_valid(vault_home, monkeypatch):
     original = AuthBrowser._inject_vault_cookies
     AuthBrowser._inject_vault_cookies = lambda self: injected.append(1)
     try:
-        ab = AuthBrowser(agent_id="agent_a", domains=["ozon.ru"])
+        ab = AuthBrowser(agent_id="agent_a", domains=[f"{TEST_DOMAIN}"])
         ab._open()
     finally:
         AuthBrowser._inject_vault_cookies = original
@@ -926,7 +927,7 @@ def test_open_falls_back_to_vault_when_state_missing(vault_home, monkeypatch, fr
     from dpc_client_core import web_auth
     from dpc_client_core.dpc_agent.tools.browser import AuthBrowser
 
-    web_auth.save_cookies("agent_a", "ozon.ru", fresh_cookies)
+    web_auth.save_cookies("agent_a", f"{TEST_DOMAIN}", fresh_cookies)
 
     new_context_kwargs: list[dict] = []
     injected: list[int] = []
@@ -950,7 +951,7 @@ def test_open_falls_back_to_vault_when_state_missing(vault_home, monkeypatch, fr
     original = AuthBrowser._inject_vault_cookies
     AuthBrowser._inject_vault_cookies = lambda self: injected.append(1)
     try:
-        ab = AuthBrowser(agent_id="agent_a", domains=["ozon.ru"])
+        ab = AuthBrowser(agent_id="agent_a", domains=[f"{TEST_DOMAIN}"])
         ab._open()
     finally:
         AuthBrowser._inject_vault_cookies = original
@@ -969,7 +970,7 @@ def test_open_falls_back_to_vault_when_state_corrupt(vault_home, monkeypatch, fr
     from dpc_client_core import web_auth
     from dpc_client_core.dpc_agent.tools.browser import AuthBrowser
 
-    web_auth.save_cookies("agent_a", "ozon.ru", fresh_cookies)
+    web_auth.save_cookies("agent_a", f"{TEST_DOMAIN}", fresh_cookies)
 
     state_dir = vault_home / "agents" / "agent_a"
     state_dir.mkdir(parents=True, exist_ok=True)
@@ -997,7 +998,7 @@ def test_open_falls_back_to_vault_when_state_corrupt(vault_home, monkeypatch, fr
     original = AuthBrowser._inject_vault_cookies
     AuthBrowser._inject_vault_cookies = lambda self: injected.append(1)
     try:
-        ab = AuthBrowser(agent_id="agent_a", domains=["ozon.ru"])
+        ab = AuthBrowser(agent_id="agent_a", domains=[f"{TEST_DOMAIN}"])
         with caplog.at_level(_logging.WARNING):
             ab._open()
     finally:
@@ -1042,7 +1043,7 @@ def test_auth_browse_html_defaults_to_headed_true(vault_home, monkeypatch):
             return "<html></html>"
 
     monkeypatch.setattr(mod, "AuthBrowser", _StubAB)
-    mod._auth_browse_html("agent_a", "ozon.ru", "https://ozon.ru/")
+    mod._auth_browse_html("agent_a", f"{TEST_DOMAIN}", f"https://{TEST_DOMAIN}/")
     assert captured.get("headed") is True
 
 
@@ -1070,7 +1071,7 @@ def test_auth_browse_html_respects_headed_false_override(vault_home, monkeypatch
             return ""
 
     monkeypatch.setattr(mod, "AuthBrowser", _StubAB)
-    mod._auth_browse_html("agent_a", "ozon.ru", "https://ozon.ru/", headed=False)
+    mod._auth_browse_html("agent_a", f"{TEST_DOMAIN}", f"https://{TEST_DOMAIN}/", headed=False)
     assert captured.get("headed") is False
 
 
@@ -1085,7 +1086,7 @@ def test_to_playwright_cookies_renames_keys():
     src = [
         {
             "name": "s", "value": "v",
-            "domain": ".ozon.ru", "path": "/",
+            "domain": f".{TEST_DOMAIN}", "path": "/",
             "expires": 123, "secure": True,
             "httponly": True, "samesite": "Lax",
         }
@@ -1104,7 +1105,7 @@ def test_to_playwright_cookies_omits_session_expires():
     None for `expires`, so the key must be omitted entirely."""
     from dpc_client_core.dpc_agent.tools.browser import _to_playwright_cookies
 
-    src = [{"name": "s", "value": "v", "domain": ".ozon.ru", "expires": None}]
+    src = [{"name": "s", "value": "v", "domain": f".{TEST_DOMAIN}", "expires": None}]
     out = _to_playwright_cookies(src)
     assert "expires" not in out[0]
 
@@ -1112,7 +1113,7 @@ def test_to_playwright_cookies_omits_session_expires():
 def test_to_playwright_cookies_omits_empty_samesite():
     from dpc_client_core.dpc_agent.tools.browser import _to_playwright_cookies
 
-    src = [{"name": "s", "value": "v", "domain": ".ozon.ru", "samesite": None}]
+    src = [{"name": "s", "value": "v", "domain": f".{TEST_DOMAIN}", "samesite": None}]
     out = _to_playwright_cookies(src)
     assert "sameSite" not in out[0]
 
@@ -1137,10 +1138,10 @@ def test_browse_page_use_auth_returns_relogin_when_vault_empty(vault_home):
     agent_root.mkdir(parents=True, exist_ok=True)
     ctx = _make_ctx(agent_root)
     out = asyncio.run(
-        browse_page(ctx, url="https://ozon.ru/my/orders", use_auth="ozon.ru")
+        browse_page(ctx, url=f"https://{TEST_DOMAIN}/my/orders", use_auth=f"{TEST_DOMAIN}")
     )
     assert out.startswith("⚠️")
-    assert "ozon.ru" in out
+    assert f"{TEST_DOMAIN}" in out
     assert "re-login" in out.lower()
 
 
@@ -1152,7 +1153,7 @@ def test_browse_page_use_auth_rejects_off_domain_url(vault_home, fresh_cookies):
 
     agent_root = vault_home / "agents" / "agent_a"
     agent_root.mkdir(parents=True, exist_ok=True)
-    web_auth.save_cookies("agent_a", "ozon.ru", fresh_cookies)
+    web_auth.save_cookies("agent_a", f"{TEST_DOMAIN}", fresh_cookies)
     ctx = _make_ctx(agent_root)
     # Patch _auth_browse_html to simulate AuthBrowser raising ValueError
     # from the domain check (we can't open Camoufox in the test runner).
@@ -1161,13 +1162,13 @@ def test_browse_page_use_auth_rejects_off_domain_url(vault_home, fresh_cookies):
     import dpc_client_core.dpc_agent.tools.browser as mod
 
     def _raise_domain_mismatch(agent_id, domain, url, headed=True):
-        raise ValueError(f"URL {url!r} is outside auth domain 'ozon.ru'")
+        raise ValueError(f"URL {url!r} is outside auth domain f'{TEST_DOMAIN}'")
 
     original = mod._auth_browse_html
     mod._auth_browse_html = _raise_domain_mismatch
     try:
         out = asyncio.run(
-            browse_page(ctx, url="https://yandex.ru/search", use_auth="ozon.ru")
+            browse_page(ctx, url="https://yandex.ru/search", use_auth=f"{TEST_DOMAIN}")
         )
     finally:
         mod._auth_browse_html = original
@@ -1211,7 +1212,7 @@ def test_request_popup_fallback_without_dpc_service_raises():
     async def _run():
         with pytest.raises(mod.AuthRequiredError, match="DPC service"):
             await mod._request_popup_fallback(
-                ctx, "agent_a", "ozon.ru", "https://ozon.ru/my"
+                ctx, "agent_a", f"{TEST_DOMAIN}", f"https://{TEST_DOMAIN}/my"
             )
 
     asyncio.run(_run())
@@ -1234,13 +1235,13 @@ def test_request_popup_fallback_happy_path_resolves_with_html(tmp_path):
             assert len(pending) == 1, "exactly one request registered"
             (request_id, entry), = pending.items()
             # Sanity-check the PendingPopupRequest the caller registered.
-            assert entry.expected_url == "https://ozon.ru/my"
-            assert entry.expected_etld1 == "ozon.ru"
+            assert entry.expected_url == f"https://{TEST_DOMAIN}/my"
+            assert entry.expected_etld1 == f"{TEST_DOMAIN}"
             entry.future.set_result("<html><body>popup html</body></html>")
 
         resolver = asyncio.create_task(_resolve_later())
         out = await mod._request_popup_fallback(
-            ctx, "agent_a", "ozon.ru", "https://ozon.ru/my"
+            ctx, "agent_a", f"{TEST_DOMAIN}", f"https://{TEST_DOMAIN}/my"
         )
         await resolver
         return out
@@ -1253,8 +1254,8 @@ def test_request_popup_fallback_happy_path_resolves_with_html(tmp_path):
     name, payload = api.events[0]
     assert name == "web_auth_popup_request"
     assert payload["agent_id"] == "agent_a"
-    assert payload["domain"] == "ozon.ru"
-    assert payload["url"] == "https://ozon.ru/my"
+    assert payload["domain"] == f"{TEST_DOMAIN}"
+    assert payload["url"] == f"https://{TEST_DOMAIN}/my"
     assert payload["reason"] == "anti_bot_challenge"
     assert "request_id" in payload and payload["request_id"]
 
@@ -1274,7 +1275,7 @@ def test_request_popup_fallback_timeout_raises_auth_required(tmp_path, monkeypat
     async def _run():
         with pytest.raises(mod.AuthRequiredError, match="timeout"):
             await mod._request_popup_fallback(
-                ctx, "agent_a", "ozon.ru", "https://ozon.ru/my"
+                ctx, "agent_a", f"{TEST_DOMAIN}", f"https://{TEST_DOMAIN}/my"
             )
 
     asyncio.run(_run())
@@ -1287,7 +1288,7 @@ def test_browse_page_challenge_triggers_popup_fallback(vault_home, fresh_cookies
     from dpc_client_core import web_auth
     from dpc_client_core.dpc_agent.tools import browser as mod
 
-    web_auth.save_cookies("agent_a", "ozon.ru", fresh_cookies)
+    web_auth.save_cookies("agent_a", f"{TEST_DOMAIN}", fresh_cookies)
     agent_root = vault_home / "agents" / "agent_a"
     agent_root.mkdir(parents=True, exist_ok=True)
     api = _FakeLocalApi()
@@ -1306,15 +1307,15 @@ def test_browse_page_challenge_triggers_popup_fallback(vault_home, fresh_cookies
     async def _fake_popup(ctx, agent_id, domain, url):
         # Verify the caller passes through the right identifiers.
         assert agent_id == "agent_a"
-        assert domain == "ozon.ru"
-        assert url == "https://ozon.ru/my/orders"
+        assert domain == f"{TEST_DOMAIN}"
+        assert url == f"https://{TEST_DOMAIN}/my/orders"
         return popup_html
 
     mod._request_popup_fallback = _fake_popup
     try:
         out = asyncio.run(
             mod.browse_page(
-                ctx, url="https://ozon.ru/my/orders", use_auth="ozon.ru"
+                ctx, url=f"https://{TEST_DOMAIN}/my/orders", use_auth=f"{TEST_DOMAIN}"
             )
         )
     finally:
@@ -1332,7 +1333,7 @@ def test_browse_page_challenge_popup_timeout_returns_warning(vault_home, fresh_c
     from dpc_client_core import web_auth
     from dpc_client_core.dpc_agent.tools import browser as mod
 
-    web_auth.save_cookies("agent_a", "ozon.ru", fresh_cookies)
+    web_auth.save_cookies("agent_a", f"{TEST_DOMAIN}", fresh_cookies)
     agent_root = vault_home / "agents" / "agent_a"
     agent_root.mkdir(parents=True, exist_ok=True)
     api = _FakeLocalApi()
@@ -1347,14 +1348,14 @@ def test_browse_page_challenge_popup_timeout_returns_warning(vault_home, fresh_c
 
     async def _timeout_popup(ctx, agent_id, domain, url):
         raise mod.AuthRequiredError(
-            "Popup fallback timeout (300s) for https://ozon.ru/my — "
+            f"Popup fallback timeout (300s) for https://{TEST_DOMAIN}/my — "
             "user did not complete"
         )
 
     mod._request_popup_fallback = _timeout_popup
     try:
         out = asyncio.run(
-            mod.browse_page(ctx, url="https://ozon.ru/my", use_auth="ozon.ru")
+            mod.browse_page(ctx, url=f"https://{TEST_DOMAIN}/my", use_auth=f"{TEST_DOMAIN}")
         )
     finally:
         mod._auth_browse_html = original_html

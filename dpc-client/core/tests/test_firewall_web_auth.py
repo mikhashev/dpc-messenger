@@ -8,11 +8,12 @@ Covers the firewall layer that gates `browse_page(use_auth=...)`:
   - Whitelist OK + cookies present + not expired → allowed
   - Whitelist OK + cookies present + expired → denied
   - Per-agent isolation (agent_a allowed, agent_b denied)
-  - eTLD+1 normalization (whitelist 'ozon.ru' admits 'www.ozon.ru')
+  - eTLD+1 normalization (whitelist f'{TEST_DOMAIN}' admits f'www.{TEST_DOMAIN}')
   - browse_page integration: firewall denial returns ⚠️ before browser launch
 """
 from __future__ import annotations
 
+from .conftest import TEST_DOMAIN, TEST_DOMAIN_WWW, TEST_DOMAIN_URL
 import asyncio
 import json
 import time
@@ -55,7 +56,7 @@ def vault_home(tmp_path, monkeypatch):
 def fresh_cookies():
     future = int(time.time()) + 3600
     return [
-        {"name": "session_id", "value": "abc", "domain": ".ozon.ru",
+        {"name": "session_id", "value": "abc", "domain": f".{TEST_DOMAIN}",
          "path": "/", "expires": future, "secure": True,
          "httponly": True, "samesite": "Lax"},
     ]
@@ -65,7 +66,7 @@ def fresh_cookies():
 def expired_cookies():
     past = int(time.time()) - 3600
     return [
-        {"name": "session_id", "value": "abc", "domain": ".ozon.ru",
+        {"name": "session_id", "value": "abc", "domain": f".{TEST_DOMAIN}",
          "path": "/", "expires": past, "secure": True,
          "httponly": True, "samesite": "Lax"},
     ]
@@ -87,19 +88,19 @@ def _make_firewall(tmp_path: Path, rules: dict):
 
 def test_no_agent_profile_denies(vault_home):
     fw = _make_firewall(vault_home, {"agent_profiles": {}})
-    assert fw.is_auth_domain_allowed("agent_a", "ozon.ru") is False
+    assert fw.is_auth_domain_allowed("agent_a", f"{TEST_DOMAIN}") is False
 
 
 def test_empty_whitelist_denies(vault_home):
     rules = {"agent_profiles": {"agent_a": {"web_auth": {"allowed_domains": []}}}}
     fw = _make_firewall(vault_home, rules)
-    assert fw.is_auth_domain_allowed("agent_a", "ozon.ru") is False
+    assert fw.is_auth_domain_allowed("agent_a", f"{TEST_DOMAIN}") is False
 
 
 def test_domain_not_in_whitelist_denies(vault_home, fresh_cookies):
     from dpc_client_core import web_auth
 
-    rules = {"agent_profiles": {"agent_a": {"web_auth": {"allowed_domains": ["ozon.ru"]}}}}
+    rules = {"agent_profiles": {"agent_a": {"web_auth": {"allowed_domains": [f"{TEST_DOMAIN}"]}}}}
     fw = _make_firewall(vault_home, rules)
     web_auth.save_cookies("agent_a", "yandex.ru", fresh_cookies)
     assert fw.is_auth_domain_allowed("agent_a", "yandex.ru") is False
@@ -111,27 +112,27 @@ def test_domain_not_in_whitelist_denies(vault_home, fresh_cookies):
 
 
 def test_whitelisted_but_no_cookies_denies(vault_home):
-    rules = {"agent_profiles": {"agent_a": {"web_auth": {"allowed_domains": ["ozon.ru"]}}}}
+    rules = {"agent_profiles": {"agent_a": {"web_auth": {"allowed_domains": [f"{TEST_DOMAIN}"]}}}}
     fw = _make_firewall(vault_home, rules)
-    assert fw.is_auth_domain_allowed("agent_a", "ozon.ru") is False
+    assert fw.is_auth_domain_allowed("agent_a", f"{TEST_DOMAIN}") is False
 
 
 def test_whitelisted_and_fresh_cookies_allows(vault_home, fresh_cookies):
     from dpc_client_core import web_auth
 
-    rules = {"agent_profiles": {"agent_a": {"web_auth": {"allowed_domains": ["ozon.ru"]}}}}
+    rules = {"agent_profiles": {"agent_a": {"web_auth": {"allowed_domains": [f"{TEST_DOMAIN}"]}}}}
     fw = _make_firewall(vault_home, rules)
-    web_auth.save_cookies("agent_a", "ozon.ru", fresh_cookies)
-    assert fw.is_auth_domain_allowed("agent_a", "ozon.ru") is True
+    web_auth.save_cookies("agent_a", f"{TEST_DOMAIN}", fresh_cookies)
+    assert fw.is_auth_domain_allowed("agent_a", f"{TEST_DOMAIN}") is True
 
 
 def test_whitelisted_but_expired_cookies_denies(vault_home, expired_cookies):
     from dpc_client_core import web_auth
 
-    rules = {"agent_profiles": {"agent_a": {"web_auth": {"allowed_domains": ["ozon.ru"]}}}}
+    rules = {"agent_profiles": {"agent_a": {"web_auth": {"allowed_domains": [f"{TEST_DOMAIN}"]}}}}
     fw = _make_firewall(vault_home, rules)
-    web_auth.save_cookies("agent_a", "ozon.ru", expired_cookies)
-    assert fw.is_auth_domain_allowed("agent_a", "ozon.ru") is False
+    web_auth.save_cookies("agent_a", f"{TEST_DOMAIN}", expired_cookies)
+    assert fw.is_auth_domain_allowed("agent_a", f"{TEST_DOMAIN}") is False
 
 
 # ─────────────────────────────────────────────────────────────
@@ -146,16 +147,16 @@ def test_per_agent_isolation(vault_home, fresh_cookies):
 
     rules = {
         "agent_profiles": {
-            "agent_a": {"web_auth": {"allowed_domains": ["ozon.ru"]}},
+            "agent_a": {"web_auth": {"allowed_domains": [f"{TEST_DOMAIN}"]}},
             "agent_b": {"web_auth": {"allowed_domains": []}},
         }
     }
     fw = _make_firewall(vault_home, rules)
-    web_auth.save_cookies("agent_a", "ozon.ru", fresh_cookies)
-    web_auth.save_cookies("agent_b", "ozon.ru", fresh_cookies)
+    web_auth.save_cookies("agent_a", f"{TEST_DOMAIN}", fresh_cookies)
+    web_auth.save_cookies("agent_b", f"{TEST_DOMAIN}", fresh_cookies)
 
-    assert fw.is_auth_domain_allowed("agent_a", "ozon.ru") is True
-    assert fw.is_auth_domain_allowed("agent_b", "ozon.ru") is False
+    assert fw.is_auth_domain_allowed("agent_a", f"{TEST_DOMAIN}") is True
+    assert fw.is_auth_domain_allowed("agent_b", f"{TEST_DOMAIN}") is False
 
 
 # ─────────────────────────────────────────────────────────────
@@ -170,25 +171,25 @@ def test_whitelist_case_insensitive(vault_home, fresh_cookies):
     whitelist is now also normalized before the `in` check."""
     from dpc_client_core import web_auth
 
-    rules = {"agent_profiles": {"agent_a": {"web_auth": {"allowed_domains": ["Ozon.RU"]}}}}
+    rules = {"agent_profiles": {"agent_a": {"web_auth": {"allowed_domains": [TEST_DOMAIN.title()]}}}}
     fw = _make_firewall(vault_home, rules)
-    web_auth.save_cookies("agent_a", "ozon.ru", fresh_cookies)
-    assert fw.is_auth_domain_allowed("agent_a", "ozon.ru") is True
-    assert fw.is_auth_domain_allowed("agent_a", "www.ozon.ru") is True
+    web_auth.save_cookies("agent_a", f"{TEST_DOMAIN}", fresh_cookies)
+    assert fw.is_auth_domain_allowed("agent_a", f"{TEST_DOMAIN}") is True
+    assert fw.is_auth_domain_allowed("agent_a", f"www.{TEST_DOMAIN}") is True
 
 
 def test_subdomain_admitted_via_etld1(vault_home, fresh_cookies):
-    """Whitelist contains the eTLD+1 'ozon.ru'. Requesting 'www.ozon.ru'
-    or 'login.ozon.ru' should resolve to the same eTLD+1 and pass."""
+    """Whitelist contains the eTLD+1 f'{TEST_DOMAIN}'. Requesting f'www.{TEST_DOMAIN}'
+    or f'login.{TEST_DOMAIN}' should resolve to the same eTLD+1 and pass."""
     from dpc_client_core import web_auth
 
-    rules = {"agent_profiles": {"agent_a": {"web_auth": {"allowed_domains": ["ozon.ru"]}}}}
+    rules = {"agent_profiles": {"agent_a": {"web_auth": {"allowed_domains": [f"{TEST_DOMAIN}"]}}}}
     fw = _make_firewall(vault_home, rules)
     # Cookies saved under the root domain (T3 already resolves eTLD+1)
-    web_auth.save_cookies("agent_a", "ozon.ru", fresh_cookies)
+    web_auth.save_cookies("agent_a", f"{TEST_DOMAIN}", fresh_cookies)
 
-    assert fw.is_auth_domain_allowed("agent_a", "www.ozon.ru") is True
-    assert fw.is_auth_domain_allowed("agent_a", "login.ozon.ru") is True
+    assert fw.is_auth_domain_allowed("agent_a", f"www.{TEST_DOMAIN}") is True
+    assert fw.is_auth_domain_allowed("agent_a", f"login.{TEST_DOMAIN}") is True
 
 
 # ─────────────────────────────────────────────────────────────
@@ -202,7 +203,7 @@ def test_denial_reason_not_in_whitelist_empty(vault_home):
         vault_home,
         {"agent_profiles": {"agent_a": {"web_auth": {"allowed_domains": []}}}},
     )
-    assert fw.get_auth_denial_reason("agent_a", "ozon.ru") == "not_in_whitelist"
+    assert fw.get_auth_denial_reason("agent_a", f"{TEST_DOMAIN}") == "not_in_whitelist"
 
 
 def test_denial_reason_not_in_whitelist_other_domain(vault_home, fresh_cookies):
@@ -212,7 +213,7 @@ def test_denial_reason_not_in_whitelist_other_domain(vault_home, fresh_cookies):
 
     fw = _make_firewall(
         vault_home,
-        {"agent_profiles": {"agent_a": {"web_auth": {"allowed_domains": ["ozon.ru"]}}}},
+        {"agent_profiles": {"agent_a": {"web_auth": {"allowed_domains": [f"{TEST_DOMAIN}"]}}}},
     )
     web_auth.save_cookies("agent_a", "yandex.ru", fresh_cookies)
     assert fw.get_auth_denial_reason("agent_a", "yandex.ru") == "not_in_whitelist"
@@ -223,9 +224,9 @@ def test_denial_reason_cookies_missing(vault_home):
     points the user at the Login button instead of the whitelist."""
     fw = _make_firewall(
         vault_home,
-        {"agent_profiles": {"agent_a": {"web_auth": {"allowed_domains": ["ozon.ru"]}}}},
+        {"agent_profiles": {"agent_a": {"web_auth": {"allowed_domains": [f"{TEST_DOMAIN}"]}}}},
     )
-    assert fw.get_auth_denial_reason("agent_a", "ozon.ru") == "cookies_missing"
+    assert fw.get_auth_denial_reason("agent_a", f"{TEST_DOMAIN}") == "cookies_missing"
 
 
 def test_denial_reason_cookies_expired(vault_home, expired_cookies):
@@ -236,10 +237,10 @@ def test_denial_reason_cookies_expired(vault_home, expired_cookies):
 
     fw = _make_firewall(
         vault_home,
-        {"agent_profiles": {"agent_a": {"web_auth": {"allowed_domains": ["ozon.ru"]}}}},
+        {"agent_profiles": {"agent_a": {"web_auth": {"allowed_domains": [f"{TEST_DOMAIN}"]}}}},
     )
-    web_auth.save_cookies("agent_a", "ozon.ru", expired_cookies)
-    assert fw.get_auth_denial_reason("agent_a", "ozon.ru") == "cookies_expired"
+    web_auth.save_cookies("agent_a", f"{TEST_DOMAIN}", expired_cookies)
+    assert fw.get_auth_denial_reason("agent_a", f"{TEST_DOMAIN}") == "cookies_expired"
 
 
 def test_denial_reason_none_when_allowed(vault_home, fresh_cookies):
@@ -248,10 +249,10 @@ def test_denial_reason_none_when_allowed(vault_home, fresh_cookies):
 
     fw = _make_firewall(
         vault_home,
-        {"agent_profiles": {"agent_a": {"web_auth": {"allowed_domains": ["ozon.ru"]}}}},
+        {"agent_profiles": {"agent_a": {"web_auth": {"allowed_domains": [f"{TEST_DOMAIN}"]}}}},
     )
-    web_auth.save_cookies("agent_a", "ozon.ru", fresh_cookies)
-    assert fw.get_auth_denial_reason("agent_a", "ozon.ru") is None
+    web_auth.save_cookies("agent_a", f"{TEST_DOMAIN}", fresh_cookies)
+    assert fw.get_auth_denial_reason("agent_a", f"{TEST_DOMAIN}") is None
 
 
 def test_denial_reason_matches_is_auth_domain_allowed(vault_home, fresh_cookies, expired_cookies):
@@ -262,19 +263,19 @@ def test_denial_reason_matches_is_auth_domain_allowed(vault_home, fresh_cookies,
 
     fw = _make_firewall(
         vault_home,
-        {"agent_profiles": {"agent_a": {"web_auth": {"allowed_domains": ["ozon.ru"]}}}},
+        {"agent_profiles": {"agent_a": {"web_auth": {"allowed_domains": [f"{TEST_DOMAIN}"]}}}},
     )
     # Case 1: empty vault — both reject
-    assert fw.is_auth_domain_allowed("agent_a", "ozon.ru") is False
-    assert fw.get_auth_denial_reason("agent_a", "ozon.ru") is not None
+    assert fw.is_auth_domain_allowed("agent_a", f"{TEST_DOMAIN}") is False
+    assert fw.get_auth_denial_reason("agent_a", f"{TEST_DOMAIN}") is not None
     # Case 2: fresh cookies — both accept
-    web_auth.save_cookies("agent_a", "ozon.ru", fresh_cookies)
-    assert fw.is_auth_domain_allowed("agent_a", "ozon.ru") is True
-    assert fw.get_auth_denial_reason("agent_a", "ozon.ru") is None
+    web_auth.save_cookies("agent_a", f"{TEST_DOMAIN}", fresh_cookies)
+    assert fw.is_auth_domain_allowed("agent_a", f"{TEST_DOMAIN}") is True
+    assert fw.get_auth_denial_reason("agent_a", f"{TEST_DOMAIN}") is None
     # Case 3: replace with expired cookies — both reject
-    web_auth.save_cookies("agent_a", "ozon.ru", expired_cookies)
-    assert fw.is_auth_domain_allowed("agent_a", "ozon.ru") is False
-    assert fw.get_auth_denial_reason("agent_a", "ozon.ru") == "cookies_expired"
+    web_auth.save_cookies("agent_a", f"{TEST_DOMAIN}", expired_cookies)
+    assert fw.is_auth_domain_allowed("agent_a", f"{TEST_DOMAIN}") is False
+    assert fw.get_auth_denial_reason("agent_a", f"{TEST_DOMAIN}") == "cookies_expired"
 
 
 # ─────────────────────────────────────────────────────────────
@@ -299,7 +300,7 @@ def test_browse_page_firewall_denial_returns_warning(vault_home, fresh_cookies):
 
     rules = {"agent_profiles": {"agent_a": {"web_auth": {"allowed_domains": []}}}}
     fw = _make_firewall(vault_home, rules)
-    web_auth.save_cookies("agent_a", "ozon.ru", fresh_cookies)
+    web_auth.save_cookies("agent_a", f"{TEST_DOMAIN}", fresh_cookies)
 
     agent_root = vault_home / "agents" / "agent_a"
     agent_root.mkdir(parents=True, exist_ok=True)
@@ -317,7 +318,7 @@ def test_browse_page_firewall_denial_returns_warning(vault_home, fresh_cookies):
     try:
         out = asyncio.run(
             browser_mod.browse_page(
-                ctx, url="https://ozon.ru/my/orders", use_auth="ozon.ru"
+                ctx, url=f"https://{TEST_DOMAIN}/my/orders", use_auth=f"{TEST_DOMAIN}"
             )
         )
     finally:
@@ -340,16 +341,16 @@ def test_browse_page_denial_message_says_relogin_for_expired_cookies(
     from dpc_client_core import web_auth
     from dpc_client_core.dpc_agent.tools import browser as browser_mod
 
-    rules = {"agent_profiles": {"agent_a": {"web_auth": {"allowed_domains": ["ozon.ru"]}}}}
+    rules = {"agent_profiles": {"agent_a": {"web_auth": {"allowed_domains": [f"{TEST_DOMAIN}"]}}}}
     fw = _make_firewall(vault_home, rules)
-    web_auth.save_cookies("agent_a", "ozon.ru", expired_cookies)
+    web_auth.save_cookies("agent_a", f"{TEST_DOMAIN}", expired_cookies)
     agent_root = vault_home / "agents" / "agent_a"
     agent_root.mkdir(parents=True, exist_ok=True)
     ctx = _make_ctx_with_firewall(agent_root, fw)
 
     out = asyncio.run(
         browser_mod.browse_page(
-            ctx, url="https://ozon.ru/my/orders", use_auth="ozon.ru"
+            ctx, url=f"https://{TEST_DOMAIN}/my/orders", use_auth=f"{TEST_DOMAIN}"
         )
     )
 
@@ -366,7 +367,7 @@ def test_browse_page_denial_message_says_login_for_missing_cookies(vault_home):
     'Login' (first-time auth), not 'Re-login' (refresh expired)."""
     from dpc_client_core.dpc_agent.tools import browser as browser_mod
 
-    rules = {"agent_profiles": {"agent_a": {"web_auth": {"allowed_domains": ["ozon.ru"]}}}}
+    rules = {"agent_profiles": {"agent_a": {"web_auth": {"allowed_domains": [f"{TEST_DOMAIN}"]}}}}
     fw = _make_firewall(vault_home, rules)
     agent_root = vault_home / "agents" / "agent_a"
     agent_root.mkdir(parents=True, exist_ok=True)
@@ -374,7 +375,7 @@ def test_browse_page_denial_message_says_login_for_missing_cookies(vault_home):
 
     out = asyncio.run(
         browser_mod.browse_page(
-            ctx, url="https://ozon.ru/my/orders", use_auth="ozon.ru"
+            ctx, url=f"https://{TEST_DOMAIN}/my/orders", use_auth=f"{TEST_DOMAIN}"
         )
     )
 
@@ -389,9 +390,9 @@ def test_browse_page_firewall_pass_proceeds_to_auth_browse(vault_home, fresh_coo
     from dpc_client_core import web_auth
     from dpc_client_core.dpc_agent.tools import browser as browser_mod
 
-    rules = {"agent_profiles": {"agent_a": {"web_auth": {"allowed_domains": ["ozon.ru"]}}}}
+    rules = {"agent_profiles": {"agent_a": {"web_auth": {"allowed_domains": [f"{TEST_DOMAIN}"]}}}}
     fw = _make_firewall(vault_home, rules)
-    web_auth.save_cookies("agent_a", "ozon.ru", fresh_cookies)
+    web_auth.save_cookies("agent_a", f"{TEST_DOMAIN}", fresh_cookies)
 
     agent_root = vault_home / "agents" / "agent_a"
     agent_root.mkdir(parents=True, exist_ok=True)
@@ -410,7 +411,7 @@ def test_browse_page_firewall_pass_proceeds_to_auth_browse(vault_home, fresh_coo
     try:
         out = asyncio.run(
             browser_mod.browse_page(
-                ctx, url="https://ozon.ru/my/orders", use_auth="ozon.ru"
+                ctx, url=f"https://{TEST_DOMAIN}/my/orders", use_auth=f"{TEST_DOMAIN}"
             )
         )
     finally:
@@ -418,7 +419,7 @@ def test_browse_page_firewall_pass_proceeds_to_auth_browse(vault_home, fresh_coo
 
     assert captured["called"] is True
     assert captured["agent_id"] == "agent_a"
-    assert captured["domain"] == "ozon.ru"
+    assert captured["domain"] == f"{TEST_DOMAIN}"
     assert "stub-page-content" in out
 
 
@@ -430,7 +431,7 @@ def test_browse_page_firewall_pass_proceeds_to_auth_browse(vault_home, fresh_coo
 def test_get_agent_always_popup_domains_empty_default(vault_home):
     """Missing always_popup field → empty list (the headless-fetch path
     is the default — only opt in by listing the domain)."""
-    rules = {"agent_profiles": {"agent_a": {"web_auth": {"allowed_domains": ["ozon.ru"]}}}}
+    rules = {"agent_profiles": {"agent_a": {"web_auth": {"allowed_domains": [f"{TEST_DOMAIN}"]}}}}
     fw = _make_firewall(vault_home, rules)
     assert fw.get_agent_always_popup_domains("agent_a") == []
 
@@ -443,13 +444,13 @@ def test_get_agent_always_popup_domains_normalizes_case(vault_home):
         "agent_profiles": {
             "agent_a": {"web_auth": {
                 "allowed_domains": ["yarcheplus.ru"],
-                "always_popup": ["YarchePlus.RU", "Ozon.ru"],
+                "always_popup": ["YarchePlus.RU", TEST_DOMAIN.title()],
             }}
         }
     }
     fw = _make_firewall(vault_home, rules)
     assert fw.get_agent_always_popup_domains("agent_a") == [
-        "yarcheplus.ru", "ozon.ru",
+        "yarcheplus.ru", f"{TEST_DOMAIN}",
     ]
 
 
@@ -528,13 +529,13 @@ def test_browse_page_always_popup_miss_falls_through_to_headless(
     rules = {
         "agent_profiles": {
             "agent_a": {"web_auth": {
-                "allowed_domains": ["ozon.ru"],
+                "allowed_domains": [f"{TEST_DOMAIN}"],
                 "always_popup": ["yarcheplus.ru"],  # different domain
             }}
         }
     }
     fw = _make_firewall(vault_home, rules)
-    web_auth.save_cookies("agent_a", "ozon.ru", fresh_cookies)
+    web_auth.save_cookies("agent_a", f"{TEST_DOMAIN}", fresh_cookies)
     agent_root = vault_home / "agents" / "agent_a"
     agent_root.mkdir(parents=True, exist_ok=True)
     ctx = _make_ctx_with_firewall(agent_root, fw)
@@ -550,7 +551,7 @@ def test_browse_page_always_popup_miss_falls_through_to_headless(
     try:
         out = asyncio.run(
             browser_mod.browse_page(
-                ctx, url="https://ozon.ru/my/orders", use_auth="ozon.ru"
+                ctx, url=f"https://{TEST_DOMAIN}/my/orders", use_auth=f"{TEST_DOMAIN}"
             )
         )
     finally:

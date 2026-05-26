@@ -12,6 +12,7 @@ Coverage:
 """
 from __future__ import annotations
 
+from .conftest import TEST_DOMAIN, TEST_DOMAIN_WWW, TEST_DOMAIN_URL
 import asyncio
 import json
 import time
@@ -63,13 +64,13 @@ def _read_audit(home: Path, agent_id: str) -> list[dict]:
 def test_audit_append_creates_file_and_entry(vault_home):
     from dpc_client_core import web_auth
 
-    web_auth.audit_append("agent_a", "ozon.ru", "https://ozon.ru/my", status=200, bytes_size=1234)
+    web_auth.audit_append("agent_a", f"{TEST_DOMAIN}", f"https://{TEST_DOMAIN}/my", status=200, bytes_size=1234)
     entries = _read_audit(vault_home, "agent_a")
     assert len(entries) == 1
     e = entries[0]
     assert e["agent_id"] == "agent_a"
-    assert e["domain"] == "ozon.ru"
-    assert e["url"] == "https://ozon.ru/my"
+    assert e["domain"] == f"{TEST_DOMAIN}"
+    assert e["url"] == f"https://{TEST_DOMAIN}/my"
     assert e["status"] == 200
     assert e["bytes"] == 1234
     assert e["timestamp"].endswith("Z")
@@ -78,7 +79,7 @@ def test_audit_append_creates_file_and_entry(vault_home):
 def test_audit_append_omits_bytes_when_none(vault_home):
     from dpc_client_core import web_auth
 
-    web_auth.audit_append("agent_a", "ozon.ru", "https://ozon.ru/x", status="auth_required")
+    web_auth.audit_append("agent_a", f"{TEST_DOMAIN}", f"https://{TEST_DOMAIN}/x", status="auth_required")
     entries = _read_audit(vault_home, "agent_a")
     assert entries[0]["status"] == "auth_required"
     assert "bytes" not in entries[0]
@@ -87,15 +88,15 @@ def test_audit_append_omits_bytes_when_none(vault_home):
 def test_audit_append_is_append_only(vault_home):
     from dpc_client_core import web_auth
 
-    web_auth.audit_append("agent_a", "ozon.ru", "https://ozon.ru/a", status=200)
-    web_auth.audit_append("agent_a", "ozon.ru", "https://ozon.ru/b", status=200)
-    web_auth.audit_append("agent_a", "ozon.ru", "https://ozon.ru/c", status="expired")
+    web_auth.audit_append("agent_a", f"{TEST_DOMAIN}", f"https://{TEST_DOMAIN}/a", status=200)
+    web_auth.audit_append("agent_a", f"{TEST_DOMAIN}", f"https://{TEST_DOMAIN}/b", status=200)
+    web_auth.audit_append("agent_a", f"{TEST_DOMAIN}", f"https://{TEST_DOMAIN}/c", status="expired")
     entries = _read_audit(vault_home, "agent_a")
     assert len(entries) == 3
     assert [e["url"] for e in entries] == [
-        "https://ozon.ru/a",
-        "https://ozon.ru/b",
-        "https://ozon.ru/c",
+        f"https://{TEST_DOMAIN}/a",
+        f"https://{TEST_DOMAIN}/b",
+        f"https://{TEST_DOMAIN}/c",
     ]
 
 
@@ -104,12 +105,12 @@ def test_audit_per_agent_isolation(vault_home):
     [#54] per-agent requirement applied to audit trail."""
     from dpc_client_core import web_auth
 
-    web_auth.audit_append("agent_a", "ozon.ru", "https://ozon.ru/a", status=200)
-    web_auth.audit_append("agent_b", "ozon.ru", "https://ozon.ru/b", status=200)
+    web_auth.audit_append("agent_a", f"{TEST_DOMAIN}", f"https://{TEST_DOMAIN}/a", status=200)
+    web_auth.audit_append("agent_b", f"{TEST_DOMAIN}", f"https://{TEST_DOMAIN}/b", status=200)
     a_entries = _read_audit(vault_home, "agent_a")
     b_entries = _read_audit(vault_home, "agent_b")
-    assert len(a_entries) == 1 and a_entries[0]["url"] == "https://ozon.ru/a"
-    assert len(b_entries) == 1 and b_entries[0]["url"] == "https://ozon.ru/b"
+    assert len(a_entries) == 1 and a_entries[0]["url"] == f"https://{TEST_DOMAIN}/a"
+    assert len(b_entries) == 1 and b_entries[0]["url"] == f"https://{TEST_DOMAIN}/b"
 
 
 # ─────────────────────────────────────────────────────────────
@@ -138,7 +139,7 @@ def _make_ctx(agent_root: Path, firewall=None):
 
 def _fresh_cookies():
     future = int(time.time()) + 3600
-    return [{"name": "s", "value": "v", "domain": ".ozon.ru", "path": "/",
+    return [{"name": "s", "value": "v", "domain": f".{TEST_DOMAIN}", "path": "/",
              "expires": future, "secure": True, "httponly": True,
              "samesite": "Lax"}]
 
@@ -149,14 +150,14 @@ def test_browse_page_audit_on_firewall_denied(vault_home):
 
     rules = {"agent_profiles": {"agent_a": {"web_auth": {"allowed_domains": []}}}}
     fw = _make_firewall(vault_home, rules)
-    web_auth.save_cookies("agent_a", "ozon.ru", _fresh_cookies())
+    web_auth.save_cookies("agent_a", f"{TEST_DOMAIN}", _fresh_cookies())
 
     agent_root = vault_home / "agents" / "agent_a"
     agent_root.mkdir(parents=True, exist_ok=True)
     ctx = _make_ctx(agent_root, firewall=fw)
 
     asyncio.run(browser_mod.browse_page(
-        ctx, url="https://ozon.ru/my", use_auth="ozon.ru"
+        ctx, url=f"https://{TEST_DOMAIN}/my", use_auth=f"{TEST_DOMAIN}"
     ))
     entries = _read_audit(vault_home, "agent_a")
     assert len(entries) == 1
@@ -164,7 +165,7 @@ def test_browse_page_audit_on_firewall_denied(vault_home):
     # was "firewall_denied", now "firewall_denied:<reason>" where
     # <reason> is one of not_in_whitelist|cookies_missing|cookies_expired.
     assert entries[0]["status"].startswith("firewall_denied")
-    assert entries[0]["domain"] == "ozon.ru"
+    assert entries[0]["domain"] == f"{TEST_DOMAIN}"
 
 
 def test_browse_page_audit_on_auth_required(vault_home):
@@ -178,7 +179,7 @@ def test_browse_page_audit_on_auth_required(vault_home):
     ctx = _make_ctx(agent_root)
 
     asyncio.run(browser_mod.browse_page(
-        ctx, url="https://ozon.ru/my", use_auth="ozon.ru"
+        ctx, url=f"https://{TEST_DOMAIN}/my", use_auth=f"{TEST_DOMAIN}"
     ))
     entries = _read_audit(vault_home, "agent_a")
     assert len(entries) == 1
@@ -191,9 +192,9 @@ def test_browse_page_audit_on_success(vault_home):
     from dpc_client_core import web_auth
     from dpc_client_core.dpc_agent.tools import browser as browser_mod
 
-    rules = {"agent_profiles": {"agent_a": {"web_auth": {"allowed_domains": ["ozon.ru"]}}}}
+    rules = {"agent_profiles": {"agent_a": {"web_auth": {"allowed_domains": [f"{TEST_DOMAIN}"]}}}}
     fw = _make_firewall(vault_home, rules)
-    web_auth.save_cookies("agent_a", "ozon.ru", _fresh_cookies())
+    web_auth.save_cookies("agent_a", f"{TEST_DOMAIN}", _fresh_cookies())
 
     agent_root = vault_home / "agents" / "agent_a"
     agent_root.mkdir(parents=True, exist_ok=True)
@@ -205,7 +206,7 @@ def test_browse_page_audit_on_success(vault_home):
     browser_mod._auth_browse_html = lambda *args, **kwargs: raw_html
     try:
         asyncio.run(browser_mod.browse_page(
-            ctx, url="https://ozon.ru/my", use_auth="ozon.ru"
+            ctx, url=f"https://{TEST_DOMAIN}/my", use_auth=f"{TEST_DOMAIN}"
         ))
     finally:
         browser_mod._auth_browse_html = original
@@ -221,9 +222,9 @@ def test_browse_page_audit_on_browser_error(vault_home):
     from dpc_client_core import web_auth
     from dpc_client_core.dpc_agent.tools import browser as browser_mod
 
-    rules = {"agent_profiles": {"agent_a": {"web_auth": {"allowed_domains": ["ozon.ru"]}}}}
+    rules = {"agent_profiles": {"agent_a": {"web_auth": {"allowed_domains": [f"{TEST_DOMAIN}"]}}}}
     fw = _make_firewall(vault_home, rules)
-    web_auth.save_cookies("agent_a", "ozon.ru", _fresh_cookies())
+    web_auth.save_cookies("agent_a", f"{TEST_DOMAIN}", _fresh_cookies())
 
     agent_root = vault_home / "agents" / "agent_a"
     agent_root.mkdir(parents=True, exist_ok=True)
@@ -236,7 +237,7 @@ def test_browse_page_audit_on_browser_error(vault_home):
     browser_mod._auth_browse_html = _raise_runtime
     try:
         asyncio.run(browser_mod.browse_page(
-            ctx, url="https://ozon.ru/my", use_auth="ozon.ru"
+            ctx, url=f"https://{TEST_DOMAIN}/my", use_auth=f"{TEST_DOMAIN}"
         ))
     finally:
         browser_mod._auth_browse_html = original

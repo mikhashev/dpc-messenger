@@ -47,6 +47,11 @@ ETLD1_MAP = {
     "example.org": "example.org",
     "www.example.org": "example.org",
     "lk.example.org": "example.org",
+    "wikipedia.org": "wikipedia.org",
+    "www.wikipedia.org": "wikipedia.org",
+    "en.wikipedia.org": "wikipedia.org",
+    "ru.wikipedia.org": "wikipedia.org",
+    "login.wikipedia.org": "wikipedia.org",
 }
 
 

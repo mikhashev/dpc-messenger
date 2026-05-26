@@ -11,6 +11,7 @@ Coverage:
 """
 from __future__ import annotations
 
+from .conftest import TEST_DOMAIN, TEST_DOMAIN_WWW, TEST_DOMAIN_URL
 import asyncio
 import json
 import time
@@ -69,7 +70,7 @@ def _make_ctx(agent_root: Path, firewall=None):
 
 def _fresh_cookies():
     future = int(time.time()) + 3600
-    return [{"name": "s", "value": "v", "domain": ".ozon.ru", "path": "/",
+    return [{"name": "s", "value": "v", "domain": f".{TEST_DOMAIN}", "path": "/",
              "expires": future, "secure": True, "httponly": True,
              "samesite": "Lax"}]
 
@@ -97,14 +98,14 @@ def test_no_domains_configured_returns_helpful_message(vault_home):
 def test_whitelist_no_cookies_returns_not_logged_in(vault_home):
     from dpc_client_core.dpc_agent.tools.web_auth_tools import list_auth_domains
 
-    rules = {"agent_profiles": {"agent_a": {"web_auth": {"allowed_domains": ["ozon.ru", "yarcheplus.ru"]}}}}
+    rules = {"agent_profiles": {"agent_a": {"web_auth": {"allowed_domains": [f"{TEST_DOMAIN}", "yarcheplus.ru"]}}}}
     fw = _make_firewall(vault_home, rules)
     agent_root = vault_home / "agents" / "agent_a"
     agent_root.mkdir(parents=True, exist_ok=True)
     ctx = _make_ctx(agent_root, fw)
 
     out = asyncio.run(list_auth_domains(ctx))
-    assert "ozon.ru" in out
+    assert f"{TEST_DOMAIN}" in out
     assert "yarcheplus.ru" in out
     assert out.count("not logged in") == 2
 
@@ -113,9 +114,9 @@ def test_whitelist_with_cookies_returns_authenticated_status(vault_home):
     from dpc_client_core import web_auth
     from dpc_client_core.dpc_agent.tools.web_auth_tools import list_auth_domains
 
-    rules = {"agent_profiles": {"agent_a": {"web_auth": {"allowed_domains": ["ozon.ru", "yarcheplus.ru"]}}}}
+    rules = {"agent_profiles": {"agent_a": {"web_auth": {"allowed_domains": [f"{TEST_DOMAIN}", "yarcheplus.ru"]}}}}
     fw = _make_firewall(vault_home, rules)
-    web_auth.save_cookies("agent_a", "ozon.ru", _fresh_cookies())
+    web_auth.save_cookies("agent_a", f"{TEST_DOMAIN}", _fresh_cookies())
 
     agent_root = vault_home / "agents" / "agent_a"
     agent_root.mkdir(parents=True, exist_ok=True)
@@ -123,7 +124,7 @@ def test_whitelist_with_cookies_returns_authenticated_status(vault_home):
 
     out = asyncio.run(list_auth_domains(ctx))
     # ozon.ru has cookies → authenticated
-    assert "ozon.ru: authenticated" in out
+    assert f"{TEST_DOMAIN}: authenticated" in out
     # yarcheplus.ru in whitelist but no cookies → not logged in
     assert "yarcheplus.ru: not logged in" in out
 
@@ -135,12 +136,12 @@ def test_session_only_cookies_reported_as_session(vault_home):
     from dpc_client_core.dpc_agent.tools.web_auth_tools import list_auth_domains
 
     session_cookies = [{
-        "name": "s", "value": "v", "domain": ".ozon.ru", "path": "/",
+        "name": "s", "value": "v", "domain": f".{TEST_DOMAIN}", "path": "/",
         "expires": None, "secure": True, "httponly": True, "samesite": "Lax"
     }]
-    rules = {"agent_profiles": {"agent_a": {"web_auth": {"allowed_domains": ["ozon.ru"]}}}}
+    rules = {"agent_profiles": {"agent_a": {"web_auth": {"allowed_domains": [f"{TEST_DOMAIN}"]}}}}
     fw = _make_firewall(vault_home, rules)
-    web_auth.save_cookies("agent_a", "ozon.ru", session_cookies)
+    web_auth.save_cookies("agent_a", f"{TEST_DOMAIN}", session_cookies)
 
     agent_root = vault_home / "agents" / "agent_a"
     agent_root.mkdir(parents=True, exist_ok=True)
@@ -162,7 +163,7 @@ def test_per_agent_isolation(vault_home):
     from dpc_client_core.dpc_agent.tools.web_auth_tools import list_auth_domains
 
     rules = {"agent_profiles": {
-        "agent_a": {"web_auth": {"allowed_domains": ["ozon.ru"]}},
+        "agent_a": {"web_auth": {"allowed_domains": [f"{TEST_DOMAIN}"]}},
         "agent_b": {"web_auth": {"allowed_domains": ["yarcheplus.ru"]}},
     }}
     fw = _make_firewall(vault_home, rules)
@@ -172,7 +173,7 @@ def test_per_agent_isolation(vault_home):
     ctx_a = _make_ctx(agent_root_a, fw)
 
     out_a = asyncio.run(list_auth_domains(ctx_a))
-    assert "ozon.ru" in out_a
+    assert f"{TEST_DOMAIN}" in out_a
     assert "yarcheplus.ru" not in out_a, "agent_a leaked agent_b's whitelist"
 
 
@@ -225,10 +226,10 @@ def test_list_auth_domains_in_firewall_defaults(vault_home):
 def test_get_agent_web_auth_domains_normalizes_case(vault_home):
     """firewall.get_agent_web_auth_domains lowercases whitelist entries,
     matching the existing case-insensitive lookup contract from T5."""
-    rules = {"agent_profiles": {"agent_a": {"web_auth": {"allowed_domains": ["Ozon.RU", "YARCHEPLUS.ru"]}}}}
+    rules = {"agent_profiles": {"agent_a": {"web_auth": {"allowed_domains": [TEST_DOMAIN.title()]}}}}
     fw = _make_firewall(vault_home, rules)
     domains = fw.get_agent_web_auth_domains("agent_a")
-    assert domains == ["ozon.ru", "yarcheplus.ru"]
+    assert domains == [f"{TEST_DOMAIN}"]
 
 
 def test_get_agent_web_auth_domains_empty_when_no_profile(vault_home):
