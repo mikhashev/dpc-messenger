@@ -1573,6 +1573,8 @@ class AuthBrowser:
         seen_keys: set[str] = set()
         dupes_skipped = 0
         scrolls_done = 0
+        consecutive_empty = 0
+        max_consecutive_empty = 10
         url = self._page.url
 
         for _ in range(max_scrolls + 1):
@@ -1595,24 +1597,11 @@ class AuthBrowser:
                 else:
                     dupes_skipped += 1
 
-            if scrolls_done > 0 and new_count == 0:
-                found_on_retry = False
-                for _retry in range(7):
-                    _time.sleep(scroll_pause_ms / 1000.0)
-                    retry = self._page.evaluate(_COLLECT_ITEMS_JS, {
-                        "containerSel": container,
-                        "itemSelector": item_selector,
-                        "extractAttrs": extract or ["text"],
-                    })
-                    for item in (retry or {}).get("items", []):
-                        key = item.get(dedup_by, str(item))
-                        if key and key not in seen_keys:
-                            seen_keys.add(key)
-                            all_items.append(item)
-                            found_on_retry = True
-                    if found_on_retry:
-                        break
-                if not found_on_retry:
+            if new_count > 0:
+                consecutive_empty = 0
+            elif scrolls_done > 0:
+                consecutive_empty += 1
+                if consecutive_empty >= max_consecutive_empty:
                     break
 
             try:
