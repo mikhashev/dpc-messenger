@@ -110,6 +110,9 @@ Option A keeps the broken popup pipeline alive; Option C adds a second LLM in th
 4. **Storage state persistence** — Playwright `context.storage_state()` saved to disk as fast-restore cache. Vault stores encrypted backup. No auto-expiry (Q3 decision).
 5. **Audit trail** — All browser actions logged with action type, URL, selector, timestamp. Privacy: `fill` logs `text_length`, not content; `screenshot` logs `byte_size`, not pixels.
 6. **Interrupt mechanism** — Stop button in chat panel (appears only when browser session live). Halts current tool call + prevents next steps; Firefox window stays alive for user inspection (Q1 decision, S147).
+7. **Ref-based interaction (S154)** — agent operates over an accessibility-tree snapshot (`page.accessibility.snapshot()`) annotated with ref IDs (`@e1`, `@e2`, …). Tools like `browser_click` / `browser_fill` accept `ref` and the backend resolves it via Playwright's accessibility-aware locators (`get_by_role`). CSS selector remains as a fallback. Replaces raw HTML extraction as the primary interaction surface; HTML/markdown extraction stays available for read-only summarisation.
+8. **Auto-snapshot after navigate (S154)** — `browser_navigate` returns the post-navigation a11y snapshot inline, eliminating the round-trip `navigate` → separate `browser_snapshot` call. Reduces tool-call count per page-transition by one.
+9. **Snapshot summarisation (S154)** — when a raw snapshot exceeds a configurable size threshold, route the snapshot through the LLM Manager for task-aware summarisation (same infrastructure already used by the sleep-consolidation pipeline). Phase 1 may start with a heuristic viewport-based truncation; Phase 2 swaps in the LLM-based filter when needed.
 
 ### Retained from T10
 
@@ -135,7 +138,7 @@ Decomposition under [`tasks/adr-029-headed-camoufox/`](../../tasks/adr-029-heade
 | 2 | Domain restriction | Playwright `context.route("**/*")` with eTLD+1 gate, fail-closed empty whitelist | Task 1 |
 | 3 | Storage state | Load/save `storage_state`, vault sync, no auto-expiry | Task 1 |
 | 4 | Audit trail | Structured log of browser actions, privacy-preserving field filtering | Task 1 |
-| 5 | Tool registry | Register 9 `browser_*` tools + firewall defaults in one commit | Task 1, 2, 3 |
+| 5 | Tool registry | Register 9 `browser_*` tools + firewall defaults; **accessibility-tree snapshot + ref-based interaction + auto-snapshot after navigate + LLM-Manager-routed summarization** for snapshots beyond a size threshold (S154 decision matrix) | Task 1, 2, 3 |
 | 6 | Interrupt mechanism | Stop button + agent inbox check between browser steps | Task 1 |
 
 ## Consequences
@@ -180,6 +183,7 @@ How to verify the decision was implemented correctly:
 - **Q1 — Human intervention model:** ~~deferred to Phase 2~~ **RESOLVED S147 (Mike):** Phase 1, variant A — Stop button in chat panel (visible only when browser session live). Halts current tool call + prevents next steps; Firefox window stays alive for user inspection. No resume/abort/state-machine in v1. Decomposed as Task 6.
 - **Q2 — Headless server deployment:** if DPC ever runs on a headless server, headless mode + Xvfb is the path. Not in v1 scope. — @Mike to confirm if/when server deployment is on the roadmap
 - **Q3 — Cleanup cadence for `storage_state` files:** ~~@CC to decide during implementation~~ **RESOLVED S147 (CC):** No auto-expiry. Vault is canonical encrypted backup; `storage_state` is a fast-restore cache. Stale cache worst case = re-login popup, which is the same recovery path users already trigger when cookies legitimately expire server-side. TTL adds complexity without payoff.
+- **Q4 — Session adoption across DPC restart:** **DEFERRED post-Task 6 (S154, Mike [#28] + Ark [#37]).** Hermes implements session adoption via Camoufox-as-separate-daemon, which survives Hermes Python restart. Our `AuthBrowser` owns the Camoufox subprocess directly, so a DPC restart kills the browser. Three architectural options exist (detached subprocess, persistent CDP context, Node.js sidecar) and the choice needs its own discussion. v1 ships without session adoption — each `browse_page(keep_open=True)` is a fresh session. See `ideas/dpc-research/hermes-browser-patterns.md` §Pattern 2 for the option matrix.
 
 ## Implementation Status
 
@@ -216,3 +220,4 @@ Workflow roles per Protocol 13:
 - [Camoufox](https://github.com/daijro/camoufox) — anti-detect Playwright Firefox fork (already in use as `AuthBrowser`)
 - backlog `AGENT-TOOL-FIREWALL-DEFAULT-DRIFT` — same firewall-sync lesson applies to new `browser_*` tools (Task 5)
 - backlog `T10-PATH-A-CLOSE-EXTRACTION`, `T10-POPUP-EXTRACT-LINUX-MACOS` — both close as moot once Task 0 lands
+- [Hermes browser patterns research note](../../ideas/dpc-research/hermes-browser-patterns.md) — accessibility-tree + auto-snapshot + summarisation + session-adoption analysis from upstream `NousResearch/hermes-agent`, source of the S154 decision matrix referenced in Task 5 and Q4
