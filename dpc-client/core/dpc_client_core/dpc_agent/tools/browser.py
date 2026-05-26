@@ -493,8 +493,21 @@ def _get_session_lock(agent_id: str) -> asyncio.Lock:
     """Return (creating if missing) a per-agent asyncio.Lock used by
     every `browser_*` tool handler to serialize concurrent calls
     against the same AuthBrowser instance (ADR-029 Task 006 §Failure
-    handling)."""
+    handling). Recreates the lock if the current event loop differs
+    from the one the lock was created on (happens when registry.py
+    execute() runs in a fresh loop via run_until_complete)."""
     lock = _session_locks.get(agent_id)
+    try:
+        current_loop = asyncio.get_running_loop()
+    except RuntimeError:
+        current_loop = None
+    if lock is not None and current_loop is not None:
+        try:
+            lock_loop = lock._loop  # type: ignore[attr-defined]
+            if lock_loop is not current_loop:
+                lock = None
+        except AttributeError:
+            pass
     if lock is None:
         lock = asyncio.Lock()
         _session_locks[agent_id] = lock
