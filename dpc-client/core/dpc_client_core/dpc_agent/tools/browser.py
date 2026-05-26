@@ -20,6 +20,7 @@ import os
 import platform
 import re
 import ssl
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from html.parser import HTMLParser
@@ -792,6 +793,34 @@ class AuthBrowser:
         self._domain_blocks = 0
         self._disconnected = False
         self._last_refs: dict[str, dict] = {}
+        self._executor: Optional[ThreadPoolExecutor] = None
+
+    def _get_executor(self) -> ThreadPoolExecutor:
+        """Lazy single-worker executor pinned to this AuthBrowser.
+
+        Playwright sync API objects (Page, BrowserContext, Browser) are
+        thread-affine — every call must come from the thread that owns
+        the connection. The agent loop is async, so direct calls would
+        cross threads via `asyncio.to_thread` (which uses the default
+        pool and hands out arbitrary workers). Routing every sync call
+        for one AuthBrowser through one dedicated executor keeps every
+        Playwright op on the same thread for the lifetime of the
+        session, eliminating the `cannot switch to a different thread`
+        error surfaced in S155."""
+        if self._executor is None:
+            self._executor = ThreadPoolExecutor(
+                max_workers=1,
+                thread_name_prefix=f"camoufox-{self._agent_id}",
+            )
+        return self._executor
+
+    def _shutdown_executor(self) -> None:
+        if self._executor is not None:
+            try:
+                self._executor.shutdown(wait=False)
+            except Exception:
+                pass
+            self._executor = None
 
     def __enter__(self):
         self._open()
@@ -1389,6 +1418,7 @@ class AuthBrowser:
             _active_camoufox_browsers.discard(self)
             _active_browser_sessions.pop(self._agent_id, None)
             _session_locks.pop(self._agent_id, None)
+            self._shutdown_executor()
             return
         if self._context is not None:
             self._save_storage_state()
@@ -1403,6 +1433,7 @@ class AuthBrowser:
         _active_camoufox_browsers.discard(self)
         _active_browser_sessions.pop(self._agent_id, None)
         _session_locks.pop(self._agent_id, None)
+        self._shutdown_executor()
 
     def _on_browser_disconnected(self, *args: Any) -> None:
         """Fired by Playwright when the browser process detaches."""
@@ -1416,6 +1447,7 @@ class AuthBrowser:
         _active_camoufox_browsers.discard(self)
         _active_browser_sessions.pop(self._agent_id, None)
         _session_locks.pop(self._agent_id, None)
+        self._shutdown_executor()
 
 
 def _get_or_create_session(
@@ -1427,12 +1459,46 @@ def _get_or_create_session(
     the same agent reuses the live session instead of opening a second
     Camoufox subprocess. Domains/headed args apply only when a NEW
     session is created — switching modes mid-flight requires explicit
-    `browser_close` first."""
+    `browser_close` first.
+
+    Sync entry point — caller MUST be already running in the session's
+    own thread (or this is the first call and the new session's
+    executor is fresh). Async callers should use
+    `_get_or_create_session_async` instead."""
     existing = _active_browser_sessions.get(agent_id)
     if existing is not None and existing._page is not None:
         return existing
     session = AuthBrowser(agent_id=agent_id, domains=domains, headed=headed)
     session.start()
+    _active_browser_sessions[agent_id] = session
+    return session
+
+
+async def _run_in_session(
+    session: "AuthBrowser", method_name: str, *args: Any, **kwargs: Any,
+) -> Any:
+    """Invoke a sync AuthBrowser method on the session's dedicated
+    single-worker thread. Required because Playwright sync API objects
+    (Page, Context, Browser) are thread-affine; every call must come
+    from the thread that owns the connection."""
+    loop = asyncio.get_running_loop()
+    method = getattr(session, method_name)
+    return await loop.run_in_executor(
+        session._get_executor(), lambda: method(*args, **kwargs),
+    )
+
+
+async def _get_or_create_session_async(
+    agent_id: str, domains: list[str], headed: bool,
+) -> "AuthBrowser":
+    """Async wrapper around `_get_or_create_session` that pins the
+    initial `start()` to the new session's executor, so every later
+    `_run_in_session` call lands on the same thread."""
+    existing = _active_browser_sessions.get(agent_id)
+    if existing is not None and existing._page is not None:
+        return existing
+    session = AuthBrowser(agent_id=agent_id, domains=domains, headed=headed)
+    await _run_in_session(session, "start")
     _active_browser_sessions[agent_id] = session
     return session
 
@@ -1730,11 +1796,11 @@ async def browse_page(
                     if firewall is not None
                     else [use_auth]
                 )
-                session = await asyncio.to_thread(
-                    _get_or_create_session, agent_id, list(allowed), True
+                session = await _get_or_create_session_async(
+                    agent_id, list(allowed), True,
                 )
-                await asyncio.to_thread(session.navigate, url)
-                html = await asyncio.to_thread(session.get_page_html)
+                await _run_in_session(session, "navigate", url)
+                html = await _run_in_session(session, "get_page_html")
             else:
                 html = await asyncio.to_thread(
                     _auth_browse_html, agent_id, use_auth, url, True
@@ -2008,7 +2074,7 @@ async def browser_snapshot(ctx: ToolContext) -> str:
     lock = _get_session_lock(agent_id)
     async with lock:
         try:
-            tree, _refs = await asyncio.to_thread(session.a11y_snapshot)
+            tree, _refs = await _run_in_session(session, "a11y_snapshot")
         except Exception as e:
             return f"⚠️ Snapshot failed: {type(e).__name__}: {e}"
     return await _maybe_summarize_snapshot(tree, ctx, agent_id)
@@ -2024,7 +2090,7 @@ async def browser_navigate(ctx: ToolContext, url: str) -> str:
     lock = _get_session_lock(agent_id)
     async with lock:
         try:
-            snapshot = await asyncio.to_thread(session.navigate, url)
+            snapshot = await _run_in_session(session, "navigate", url)
         except ValueError as e:
             return f"⚠️ Domain blocked: {e}"
         except Exception as e:
@@ -2046,7 +2112,7 @@ async def browser_scroll(
     lock = _get_session_lock(agent_id)
     async with lock:
         try:
-            await asyncio.to_thread(session.scroll, direction, amount)
+            await _run_in_session(session, "scroll", direction, amount)
         except Exception as e:
             return f"⚠️ Scroll failed: {type(e).__name__}: {e}"
     return f"Scrolled {direction} by {amount}px"
@@ -2063,7 +2129,7 @@ async def browser_click(
     lock = _get_session_lock(agent_id)
     async with lock:
         try:
-            await asyncio.to_thread(session.click, ref_or_selector, timeout)
+            await _run_in_session(session, "click", ref_or_selector, timeout)
         except ValueError as e:
             return f"⚠️ {e}"
         except Exception as e:
@@ -2082,7 +2148,7 @@ async def browser_fill(
     lock = _get_session_lock(agent_id)
     async with lock:
         try:
-            await asyncio.to_thread(session.fill, ref_or_selector, text)
+            await _run_in_session(session, "fill", ref_or_selector, text)
         except ValueError as e:
             return f"⚠️ {e}"
         except Exception as e:
@@ -2101,8 +2167,8 @@ async def browser_wait_for(
     lock = _get_session_lock(agent_id)
     async with lock:
         try:
-            await asyncio.to_thread(
-                session.wait_for, ref_or_selector, timeout,
+            await _run_in_session(
+                session, "wait_for", ref_or_selector, timeout,
             )
         except ValueError as e:
             return f"⚠️ {e}"
@@ -2121,7 +2187,7 @@ async def browser_extract(ctx: ToolContext) -> str:
     lock = _get_session_lock(agent_id)
     async with lock:
         try:
-            html = await asyncio.to_thread(session.extract)
+            html = await _run_in_session(session, "extract")
         except Exception as e:
             return f"⚠️ Extract failed: {type(e).__name__}: {e}"
     return html
@@ -2143,8 +2209,8 @@ async def browser_screenshot(
     lock = _get_session_lock(agent_id)
     async with lock:
         try:
-            await asyncio.to_thread(
-                session.screenshot, full_page, str(path),
+            await _run_in_session(
+                session, "screenshot", full_page, str(path),
             )
         except Exception as e:
             return f"⚠️ Screenshot failed: {type(e).__name__}: {e}"
@@ -2169,7 +2235,7 @@ async def browser_switch_tab(ctx: ToolContext, index: int) -> str:
     lock = _get_session_lock(agent_id)
     async with lock:
         try:
-            new_page = await asyncio.to_thread(session.switch_tab, index)
+            new_page = await _run_in_session(session, "switch_tab", index)
         except Exception as e:
             return f"⚠️ Switch tab failed: {type(e).__name__}: {e}"
     try:
@@ -2188,7 +2254,7 @@ async def browser_close(ctx: ToolContext) -> str:
     lock = _get_session_lock(agent_id)
     async with lock:
         try:
-            await asyncio.to_thread(session.close)
+            await _run_in_session(session, "close")
         except Exception as e:
             return f"⚠️ Close failed: {type(e).__name__}: {e}"
     _session_locks.pop(agent_id, None)

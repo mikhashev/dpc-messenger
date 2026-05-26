@@ -1013,7 +1013,7 @@ class CoreService:
                 for browser in live_browsers:
                     try:
                         await asyncio.wait_for(
-                            asyncio.to_thread(browser.close),
+                            _browser_mod._run_in_session(browser, "close"),
                             timeout=5.0,
                         )
                     except asyncio.TimeoutError:
