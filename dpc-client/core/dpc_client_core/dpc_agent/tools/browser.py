@@ -465,6 +465,53 @@ def get_active_browser_sessions() -> dict[str, "AuthBrowser"]:
     return _active_browser_sessions
 
 
+_A11Y_INTERACTIVE_ROLES: frozenset[str] = frozenset({
+    "button", "link", "textbox", "checkbox", "combobox",
+    "menuitem", "tab", "searchbox",
+})
+_A11Y_SKIP_WRAPPER_ROLES: frozenset[str] = frozenset({
+    "generic", "presentation", "none",
+})
+
+
+def _build_a11y_tree(root: dict) -> tuple[str, dict]:
+    """Render `root` (Playwright accessibility snapshot) as
+    (tree_text, refs_map). Hidden + aria-hidden nodes are dropped;
+    nameless wrapper roles (`generic`/`presentation`/`none`) collapse
+    into their children to keep the tree readable for the agent."""
+    refs: dict[str, dict] = {}
+    counter = [0]
+    lines: list[str] = []
+
+    def walk(node: dict, depth: int) -> None:
+        if not node or node.get("hidden"):
+            return
+        role = node.get("role", "")
+        name = node.get("name", "")
+        children = node.get("children", []) or []
+        if role in _A11Y_SKIP_WRAPPER_ROLES and not name:
+            for child in children:
+                walk(child, depth)
+            return
+        ref_tag = ""
+        if role in _A11Y_INTERACTIVE_ROLES:
+            counter[0] += 1
+            ref = f"@e{counter[0]}"
+            refs[ref] = {"role": role, "name": name}
+            ref_tag = f" [{ref}]"
+        indent = "  " * depth
+        line = f"{indent}- {role}"
+        if name:
+            line += f' "{name}"'
+        line += ref_tag
+        lines.append(line)
+        for child in children:
+            walk(child, depth + 1)
+
+    walk(root, 0)
+    return "\n".join(lines), refs
+
+
 class AuthBrowser:
     """Restricted Camoufox wrapper for authenticated browser sessions
     (ADR-028 T4, extended for ADR-029 Task 002).
@@ -530,6 +577,7 @@ class AuthBrowser:
         self._page = None
         self._domain_blocks = 0
         self._disconnected = False
+        self._last_refs: dict[str, dict] = {}
 
     def __enter__(self):
         self._open()
@@ -1032,6 +1080,54 @@ class AuthBrowser:
         the popup the active page."""
         self._require_open()
         return self._page.wait_for_event("popup", timeout=timeout)
+
+    def a11y_snapshot(self) -> tuple[str, dict]:
+        """Build an accessibility-tree snapshot of the current page.
+
+        Returns (tree_text, refs) where tree_text is an indented textual
+        representation tagged with `@eN` ids on interactive nodes, and
+        refs maps each `@eN` to a {role, name} dict. The result is
+        cached on `self._last_refs` so subsequent `click`/`fill`/
+        `wait_for` calls can resolve refs against the same snapshot.
+        Refs are NOT stable across snapshots — a fresh call rebuilds
+        the map from scratch."""
+        self._require_open()
+        url = self._page.url
+        try:
+            raw = self._page.accessibility.snapshot()
+            tree_text, refs = _build_a11y_tree(raw) if raw else ("", {})
+            self._last_refs = refs
+        except Exception as exc:
+            self._audit_action(
+                "snapshot", url, "failed", error=type(exc).__name__,
+            )
+            raise
+        self._audit_action(
+            "snapshot", url, "ok",
+            node_count=len(refs), char_count=len(tree_text),
+        )
+        return tree_text, refs
+
+    def _resolve_ref(self, ref_or_selector: str):
+        """Map a `@eN` ref against the last snapshot to a Playwright
+        locator; fall back to treating the string as a CSS selector.
+
+        Raises ValueError for `@eN` refs missing from `_last_refs` so
+        the caller can prompt the agent to take a new snapshot."""
+        self._require_open()
+        if ref_or_selector.startswith("@e"):
+            node = self._last_refs.get(ref_or_selector)
+            if node is None:
+                raise ValueError(
+                    f"unknown ref {ref_or_selector!r} — "
+                    "call a11y_snapshot() to refresh"
+                )
+            role = node.get("role", "")
+            name = node.get("name", "")
+            if name:
+                return self._page.get_by_role(role, name=name)
+            return self._page.get_by_role(role)
+        return self._page.locator(ref_or_selector)
 
     def close(self) -> None:
         """Release browser resources. Safe to call multiple times."""
