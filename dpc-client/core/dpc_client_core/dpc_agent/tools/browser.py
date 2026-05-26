@@ -1513,7 +1513,7 @@ class AuthBrowser:
         item_selector: str,
         extract: list[str],
         max_scrolls: int = 30,
-        scroll_pause_ms: int = 3000,
+        scroll_pause_ms: int = 5000,
         dedup_by: str = "text",
     ) -> dict:
         """Scroll a container and collect all matching items.
@@ -2895,8 +2895,8 @@ def get_tools() -> List[ToolEntry]:
                         },
                         "scroll_pause_ms": {
                             "type": "integer",
-                            "description": "Milliseconds to wait between scrolls for content to load (slow infinite-scroll sites may need 3000-5000)",
-                            "default": 3000,
+                            "description": "Milliseconds to wait between scrolls for content to load",
+                            "default": 5000,
                         },
                         "dedup_by": {
                             "type": "string",
