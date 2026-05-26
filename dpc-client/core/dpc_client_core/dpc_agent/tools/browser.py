@@ -1290,6 +1290,7 @@ class AuthBrowser:
             self._page = None
             _active_camoufox_browsers.discard(self)
             _active_browser_sessions.pop(self._agent_id, None)
+            _session_locks.pop(self._agent_id, None)
             return
         if self._context is not None:
             self._save_storage_state()
@@ -1303,6 +1304,7 @@ class AuthBrowser:
                 self._page = None
         _active_camoufox_browsers.discard(self)
         _active_browser_sessions.pop(self._agent_id, None)
+        _session_locks.pop(self._agent_id, None)
 
     def _on_browser_disconnected(self, *args: Any) -> None:
         """Fired by Playwright when the browser process detaches."""
@@ -1315,6 +1317,7 @@ class AuthBrowser:
         )
         _active_camoufox_browsers.discard(self)
         _active_browser_sessions.pop(self._agent_id, None)
+        _session_locks.pop(self._agent_id, None)
 
 
 def _get_or_create_session(
@@ -1824,11 +1827,6 @@ async def search_web_ddgs(ctx: ToolContext, query: str, max_results: int = 5, ba
     return "\n\n".join(output_lines)
 
 
-# ─────────────────────────────────────────────────────────────
-# ADR-029 Task 006 — browser_* tool handlers (stateful session)
-# ─────────────────────────────────────────────────────────────
-
-
 def _cleanup_screenshots_lru(screenshots_dir: Path, max_keep: int = 50) -> None:
     """Drop oldest *.png files in `screenshots_dir` until at most
     `max_keep` remain. Per-agent quota enforced by the
@@ -1903,7 +1901,8 @@ def _get_session_or_error(agent_id: str) -> Optional["AuthBrowser"]:
 
 async def browser_snapshot(ctx: ToolContext) -> str:
     """Return the current page's accessibility-tree snapshot tagged
-    with @eN ref ids. Summarized when oversized per agent config."""
+    with @eN ref ids. Routes oversized snapshots through the per-agent
+    summarization config (LLM if configured, else line truncate)."""
     agent_id = ctx.agent_root.name
     session = _get_session_or_error(agent_id)
     if session is None:
