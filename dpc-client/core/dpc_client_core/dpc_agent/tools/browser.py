@@ -1555,34 +1555,11 @@ class AuthBrowser:
         }
         """
 
-        _FIND_SCROLL_CENTER_JS = """
-        (containerSel) => {
-          const ct = document.querySelector(containerSel);
-          if (!ct) return null;
-          ct.scrollIntoView({block: 'center', inline: 'center'});
-          const rect = ct.getBoundingClientRect();
-          return {
-            centerX: Math.round(rect.left + rect.width / 2),
-            centerY: Math.round(rect.top + rect.height / 2),
-            scrollHeight: ct.scrollHeight,
-            clientHeight: ct.clientHeight,
-          };
-        }
-        """
-
         all_items: list[dict] = []
         seen_keys: set[str] = set()
         dupes_skipped = 0
         scrolls_done = 0
         url = self._page.url
-
-        scroll_info = self._page.evaluate(_FIND_SCROLL_CENTER_JS, container)
-        if scroll_info is None:
-            self._audit_action("collect", url, "failed", error=f"container not found: {container}")
-            return {"error": f"container not found: {container}", "items": [], "total": 0, "scrolls_done": 0}
-
-        center_x = scroll_info["centerX"]
-        center_y = scroll_info["centerY"]
 
         for _ in range(max_scrolls + 1):
             result = self._page.evaluate(_COLLECT_ITEMS_JS, {
@@ -1624,13 +1601,8 @@ class AuthBrowser:
                 if not found_on_retry:
                     break
 
-            scroll_info = self._page.evaluate(_FIND_SCROLL_CENTER_JS, container)
-            if scroll_info:
-                center_x = scroll_info["centerX"]
-                center_y = scroll_info["centerY"]
             try:
-                self._page.mouse.move(center_x, center_y)
-                self._page.mouse.wheel(0, 800)
+                self.scroll("down", 800)
             except Exception:
                 break
 
