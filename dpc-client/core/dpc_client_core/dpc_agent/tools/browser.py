@@ -21,6 +21,7 @@ import platform
 import re
 import ssl
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from html.parser import HTMLParser
 from io import StringIO
 from pathlib import Path
@@ -463,6 +464,21 @@ def get_active_browser_sessions() -> dict[str, "AuthBrowser"]:
     """Accessor for browse_page handler — returns the live dict
     (mutation is intentional). Used by _get_or_create_session."""
     return _active_browser_sessions
+
+
+_session_locks: dict[str, asyncio.Lock] = {}
+
+
+def _get_session_lock(agent_id: str) -> asyncio.Lock:
+    """Return (creating if missing) a per-agent asyncio.Lock used by
+    every `browser_*` tool handler to serialize concurrent calls
+    against the same AuthBrowser instance (ADR-029 Task 006 §Failure
+    handling)."""
+    lock = _session_locks.get(agent_id)
+    if lock is None:
+        lock = asyncio.Lock()
+        _session_locks[agent_id] = lock
+    return lock
 
 
 _A11Y_INTERACTIVE_ROLES: frozenset[str] = frozenset({
@@ -1808,6 +1824,280 @@ async def search_web_ddgs(ctx: ToolContext, query: str, max_results: int = 5, ba
     return "\n\n".join(output_lines)
 
 
+# ─────────────────────────────────────────────────────────────
+# ADR-029 Task 006 — browser_* tool handlers (stateful session)
+# ─────────────────────────────────────────────────────────────
+
+
+def _cleanup_screenshots_lru(screenshots_dir: Path, max_keep: int = 50) -> None:
+    """Drop oldest *.png files in `screenshots_dir` until at most
+    `max_keep` remain. Per-agent quota enforced by the
+    `browser_screenshot` handler so disk usage stays bounded."""
+    if not screenshots_dir.is_dir():
+        return
+    pngs = sorted(
+        screenshots_dir.glob("*.png"), key=lambda p: p.stat().st_mtime,
+    )
+    excess = len(pngs) - max_keep
+    if excess <= 0:
+        return
+    for old in pngs[:excess]:
+        try:
+            old.unlink()
+        except OSError:
+            pass
+
+
+def _load_agent_summarize_config(agent_id: str) -> tuple[Optional[str], int]:
+    """Return (provider_alias, threshold) for agent snapshot
+    summarization. `provider_alias=None` falls back to llm_manager's
+    default_provider; `threshold` defaults to SNAPSHOT_SUMMARIZE_THRESHOLD
+    when missing or invalid in agent config."""
+    try:
+        from dpc_client_core.dpc_agent.utils import load_agent_config
+        config = load_agent_config(agent_id)
+    except Exception:
+        return None, SNAPSHOT_SUMMARIZE_THRESHOLD
+    provider = config.get("snapshot_summarize_provider") or None
+    threshold = config.get("snapshot_summarize_threshold")
+    if not isinstance(threshold, int) or threshold <= 0:
+        threshold = SNAPSHOT_SUMMARIZE_THRESHOLD
+    return provider, threshold
+
+
+async def _maybe_summarize_snapshot(
+    snapshot_text: str, ctx: ToolContext, agent_id: str,
+) -> str:
+    """Apply Phase 2 LLM summarization or Phase 1 line truncation when
+    `snapshot_text` exceeds the per-agent threshold; pass through
+    otherwise. Reads provider + threshold from agent config and pulls
+    llm_manager from `ctx.dpc_service`."""
+    if not snapshot_text:
+        return snapshot_text
+    provider, threshold = _load_agent_summarize_config(agent_id)
+    if len(snapshot_text) <= threshold:
+        return snapshot_text
+    llm_manager = None
+    dpc_service = getattr(ctx, "dpc_service", None)
+    if dpc_service is not None:
+        llm_manager = getattr(dpc_service, "llm_manager", None)
+    user_task = getattr(ctx, "current_task_type", None) or None
+    return await _llm_summarize_snapshot(
+        snapshot_text, user_task, llm_manager,
+        provider_alias=provider, max_chars=threshold,
+    )
+
+
+_NO_SESSION_MSG = (
+    "⚠️ No active browser session. Call "
+    "browse_page(url, use_auth=<domain>, keep_open=true) first."
+)
+
+
+def _get_session_or_error(agent_id: str) -> Optional["AuthBrowser"]:
+    session = _active_browser_sessions.get(agent_id)
+    if session is None or session._page is None:
+        return None
+    return session
+
+
+async def browser_snapshot(ctx: ToolContext) -> str:
+    """Return the current page's accessibility-tree snapshot tagged
+    with @eN ref ids. Summarized when oversized per agent config."""
+    agent_id = ctx.agent_root.name
+    session = _get_session_or_error(agent_id)
+    if session is None:
+        return _NO_SESSION_MSG
+    lock = _get_session_lock(agent_id)
+    async with lock:
+        try:
+            tree, _refs = await asyncio.to_thread(session.a11y_snapshot)
+        except Exception as e:
+            return f"⚠️ Snapshot failed: {type(e).__name__}: {e}"
+    return await _maybe_summarize_snapshot(tree, ctx, agent_id)
+
+
+async def browser_navigate(ctx: ToolContext, url: str) -> str:
+    """Navigate the active browser session to URL within the auth
+    domains. Returns the post-navigation accessibility snapshot."""
+    agent_id = ctx.agent_root.name
+    session = _get_session_or_error(agent_id)
+    if session is None:
+        return _NO_SESSION_MSG
+    lock = _get_session_lock(agent_id)
+    async with lock:
+        try:
+            snapshot = await asyncio.to_thread(session.navigate, url)
+        except ValueError as e:
+            return f"⚠️ Domain blocked: {e}"
+        except Exception as e:
+            return f"⚠️ Navigate failed: {type(e).__name__}: {e}"
+    summarized = await _maybe_summarize_snapshot(snapshot, ctx, agent_id)
+    if summarized:
+        return f"Navigated to {url}\n\n{summarized}"
+    return f"Navigated to {url}"
+
+
+async def browser_scroll(
+    ctx: ToolContext, direction: str = "down", amount: int = 500,
+) -> str:
+    """Scroll the active page up or down by a pixel amount."""
+    agent_id = ctx.agent_root.name
+    session = _get_session_or_error(agent_id)
+    if session is None:
+        return _NO_SESSION_MSG
+    lock = _get_session_lock(agent_id)
+    async with lock:
+        try:
+            await asyncio.to_thread(session.scroll, direction, amount)
+        except Exception as e:
+            return f"⚠️ Scroll failed: {type(e).__name__}: {e}"
+    return f"Scrolled {direction} by {amount}px"
+
+
+async def browser_click(
+    ctx: ToolContext, ref_or_selector: str, timeout: int = 30000,
+) -> str:
+    """Click an element by @eN ref (from last snapshot) or CSS selector."""
+    agent_id = ctx.agent_root.name
+    session = _get_session_or_error(agent_id)
+    if session is None:
+        return _NO_SESSION_MSG
+    lock = _get_session_lock(agent_id)
+    async with lock:
+        try:
+            await asyncio.to_thread(session.click, ref_or_selector, timeout)
+        except ValueError as e:
+            return f"⚠️ {e}"
+        except Exception as e:
+            return f"⚠️ Click failed: {type(e).__name__}: {e}"
+    return f"Clicked {ref_or_selector}"
+
+
+async def browser_fill(
+    ctx: ToolContext, ref_or_selector: str, text: str,
+) -> str:
+    """Fill an input element by @eN ref or CSS selector with text."""
+    agent_id = ctx.agent_root.name
+    session = _get_session_or_error(agent_id)
+    if session is None:
+        return _NO_SESSION_MSG
+    lock = _get_session_lock(agent_id)
+    async with lock:
+        try:
+            await asyncio.to_thread(session.fill, ref_or_selector, text)
+        except ValueError as e:
+            return f"⚠️ {e}"
+        except Exception as e:
+            return f"⚠️ Fill failed: {type(e).__name__}: {e}"
+    return f"Filled {ref_or_selector} ({len(text)} chars)"
+
+
+async def browser_wait_for(
+    ctx: ToolContext, ref_or_selector: str, timeout: int = 30000,
+) -> str:
+    """Wait for an element by @eN ref or CSS selector to become visible."""
+    agent_id = ctx.agent_root.name
+    session = _get_session_or_error(agent_id)
+    if session is None:
+        return _NO_SESSION_MSG
+    lock = _get_session_lock(agent_id)
+    async with lock:
+        try:
+            await asyncio.to_thread(
+                session.wait_for, ref_or_selector, timeout,
+            )
+        except ValueError as e:
+            return f"⚠️ {e}"
+        except Exception as e:
+            return f"⚠️ Wait failed: {type(e).__name__}: {e}"
+    return f"Element {ref_or_selector} is visible"
+
+
+async def browser_extract(ctx: ToolContext) -> str:
+    """Return the current page's full HTML (fallback inspection
+    surface when the accessibility tree is insufficient)."""
+    agent_id = ctx.agent_root.name
+    session = _get_session_or_error(agent_id)
+    if session is None:
+        return _NO_SESSION_MSG
+    lock = _get_session_lock(agent_id)
+    async with lock:
+        try:
+            html = await asyncio.to_thread(session.extract)
+        except Exception as e:
+            return f"⚠️ Extract failed: {type(e).__name__}: {e}"
+    return html
+
+
+async def browser_screenshot(
+    ctx: ToolContext, full_page: bool = False,
+) -> str:
+    """Capture a screenshot of the active page. Saves PNG under the
+    agent's screenshots/ directory with an LRU cap of 50 files."""
+    agent_id = ctx.agent_root.name
+    session = _get_session_or_error(agent_id)
+    if session is None:
+        return _NO_SESSION_MSG
+    screenshots_dir = ctx.agent_root / "screenshots"
+    screenshots_dir.mkdir(parents=True, exist_ok=True)
+    ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    path = screenshots_dir / f"{ts}.png"
+    lock = _get_session_lock(agent_id)
+    async with lock:
+        try:
+            await asyncio.to_thread(
+                session.screenshot, full_page, str(path),
+            )
+        except Exception as e:
+            return f"⚠️ Screenshot failed: {type(e).__name__}: {e}"
+    try:
+        _cleanup_screenshots_lru(screenshots_dir, max_keep=50)
+    except Exception:
+        pass
+    try:
+        rel = path.relative_to(ctx.agent_root)
+        return f"Saved screenshot to {rel}"
+    except ValueError:
+        return f"Saved screenshot to {path}"
+
+
+async def browser_switch_tab(ctx: ToolContext, index: int) -> str:
+    """Switch the active page to tab at `index` in the browser
+    context (0-based)."""
+    agent_id = ctx.agent_root.name
+    session = _get_session_or_error(agent_id)
+    if session is None:
+        return _NO_SESSION_MSG
+    lock = _get_session_lock(agent_id)
+    async with lock:
+        try:
+            new_page = await asyncio.to_thread(session.switch_tab, index)
+        except Exception as e:
+            return f"⚠️ Switch tab failed: {type(e).__name__}: {e}"
+    try:
+        url = new_page.url
+    except Exception:
+        url = "<unknown>"
+    return f"Switched to tab {index} ({url})"
+
+
+async def browser_close(ctx: ToolContext) -> str:
+    """Close the active browser session and free Camoufox resources."""
+    agent_id = ctx.agent_root.name
+    session = _get_session_or_error(agent_id)
+    if session is None:
+        return _NO_SESSION_MSG
+    lock = _get_session_lock(agent_id)
+    async with lock:
+        try:
+            await asyncio.to_thread(session.close)
+        except Exception as e:
+            return f"⚠️ Close failed: {type(e).__name__}: {e}"
+    _session_locks.pop(agent_id, None)
+    return "Browser session closed"
+
+
 def get_tools() -> List[ToolEntry]:
     """Export browser tools for registry."""
     return [
@@ -1927,6 +2217,179 @@ def get_tools() -> List[ToolEntry]:
                 }
             },
             handler=search_web_ddgs,
+            timeout_sec=30,
+            default_enabled=True,
+        ),
+
+        ToolEntry(
+            name="browser_snapshot",
+            schema={
+                "name": "browser_snapshot",
+                "description": "Return the current page's accessibility-tree snapshot annotated with @eN ref IDs on every interactive element. Primary inspection surface for the agent — pass refs back to browser_click / browser_fill / browser_wait_for. Snapshots above the agent's configured threshold are summarized via the agent's snapshot summarization LLM (falls back to line-based truncation).",
+                "parameters": {
+                    "type": "object",
+                    "properties": {},
+                },
+            },
+            handler=browser_snapshot,
+            timeout_sec=60,
+            default_enabled=True,
+        ),
+
+        ToolEntry(
+            name="browser_navigate",
+            schema={
+                "name": "browser_navigate",
+                "description": "Navigate the active browser session to URL within the agent's authorized auth domains. Returns the post-navigation accessibility snapshot inline (no follow-up browser_snapshot call needed in the common case).",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "url": {"type": "string", "description": "URL to navigate to"},
+                    },
+                    "required": ["url"],
+                },
+            },
+            handler=browser_navigate,
+            timeout_sec=60,
+            default_enabled=True,
+        ),
+
+        ToolEntry(
+            name="browser_scroll",
+            schema={
+                "name": "browser_scroll",
+                "description": "Scroll the active browser page up or down by a pixel amount.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "direction": {"type": "string", "enum": ["up", "down"], "default": "down"},
+                        "amount": {"type": "integer", "default": 500},
+                    },
+                },
+            },
+            handler=browser_scroll,
+            timeout_sec=15,
+            default_enabled=True,
+        ),
+
+        ToolEntry(
+            name="browser_click",
+            schema={
+                "name": "browser_click",
+                "description": "Click an element. Accepts a @eN ref ID from the last browser_snapshot or a CSS selector (fallback when refs are unavailable, e.g. shadow DOM).",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "ref_or_selector": {"type": "string", "description": "@eN ref or CSS selector"},
+                        "timeout": {"type": "integer", "default": 30000},
+                    },
+                    "required": ["ref_or_selector"],
+                },
+            },
+            handler=browser_click,
+            timeout_sec=45,
+            default_enabled=True,
+        ),
+
+        ToolEntry(
+            name="browser_fill",
+            schema={
+                "name": "browser_fill",
+                "description": "Type text into an input element. Accepts a @eN ref ID or CSS selector. The text value is NOT recorded in the audit log — only its length.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "ref_or_selector": {"type": "string", "description": "@eN ref or CSS selector"},
+                        "text": {"type": "string", "description": "Text to type"},
+                    },
+                    "required": ["ref_or_selector", "text"],
+                },
+            },
+            handler=browser_fill,
+            timeout_sec=30,
+            default_enabled=True,
+        ),
+
+        ToolEntry(
+            name="browser_wait_for",
+            schema={
+                "name": "browser_wait_for",
+                "description": "Wait for an element to become visible. Accepts a @eN ref ID or CSS selector.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "ref_or_selector": {"type": "string", "description": "@eN ref or CSS selector"},
+                        "timeout": {"type": "integer", "default": 30000},
+                    },
+                    "required": ["ref_or_selector"],
+                },
+            },
+            handler=browser_wait_for,
+            timeout_sec=45,
+            default_enabled=True,
+        ),
+
+        ToolEntry(
+            name="browser_extract",
+            schema={
+                "name": "browser_extract",
+                "description": "Return the current page's full HTML. Fallback inspection surface when the accessibility-tree snapshot is insufficient (canvas elements, shadow DOM, missing ARIA labels).",
+                "parameters": {
+                    "type": "object",
+                    "properties": {},
+                },
+            },
+            handler=browser_extract,
+            timeout_sec=30,
+            default_enabled=True,
+        ),
+
+        ToolEntry(
+            name="browser_screenshot",
+            schema={
+                "name": "browser_screenshot",
+                "description": "Capture a PNG screenshot of the active page. Saved under the agent's own screenshots/ folder; the relative path is returned. The folder is capped at 50 files (LRU eviction).",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "full_page": {"type": "boolean", "default": False, "description": "Capture full scrollable page vs viewport only"},
+                    },
+                },
+            },
+            handler=browser_screenshot,
+            timeout_sec=30,
+            default_enabled=True,
+        ),
+
+        ToolEntry(
+            name="browser_switch_tab",
+            schema={
+                "name": "browser_switch_tab",
+                "description": "Switch the active page to the tab at `index` (0-based) in the browser context.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "index": {"type": "integer", "description": "0-based tab index"},
+                    },
+                    "required": ["index"],
+                },
+            },
+            handler=browser_switch_tab,
+            timeout_sec=10,
+            default_enabled=True,
+        ),
+
+        ToolEntry(
+            name="browser_close",
+            schema={
+                "name": "browser_close",
+                "description": "Close the active browser session and free Camoufox resources. The next browse_page(keep_open=true) call opens a fresh session.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {},
+                },
+            },
+            handler=browser_close,
             timeout_sec=30,
             default_enabled=True,
         ),

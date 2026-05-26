@@ -777,7 +777,8 @@ class AgentService:
         return datetime.now(timezone.utc).isoformat()
 
     async def get_agent_model_config(self, agent_id: str, providers_getter) -> Dict[str, Any]:
-        """Get per-agent model configuration (Main LLM + Sleep LLM)."""
+        """Get per-agent model configuration (Main LLM + Sleep LLM +
+        snapshot summarization LLM + threshold + retrieval backends)."""
         try:
             from dpc_client_core.dpc_agent.utils import load_agent_config, AgentRegistry
             registry = AgentRegistry()
@@ -790,6 +791,8 @@ class AgentService:
                 "agent_id": agent_id,
                 "provider_alias": config.get("provider_alias"),
                 "sleep_provider_alias": config.get("sleep_provider_alias"),
+                "snapshot_summarize_provider": config.get("snapshot_summarize_provider"),
+                "snapshot_summarize_threshold": config.get("snapshot_summarize_threshold"),
                 "retrieval_vector": config.get("retrieval_vector", "native"),
                 "retrieval_text": config.get("retrieval_text", "native"),
                 "providers": providers_data.get("providers", []),
@@ -803,11 +806,14 @@ class AgentService:
         self, agent_id: str,
         provider_alias: str = None,
         sleep_provider_alias: str = None,
+        snapshot_summarize_provider: str = None,
+        snapshot_summarize_threshold: int = None,
         retrieval_vector: str = None,
         retrieval_text: str = None,
         providers_getter=None,
     ) -> Dict[str, Any]:
-        """Save per-agent model configuration (Main LLM + Sleep LLM + retrieval backend)."""
+        """Save per-agent model configuration (Main LLM + Sleep LLM +
+        snapshot summarization LLM + threshold + retrieval backend)."""
         try:
             from dpc_client_core.dpc_agent.utils import load_agent_config, save_agent_config, AgentRegistry
             registry = AgentRegistry()
@@ -819,6 +825,10 @@ class AgentService:
                 registry.update_agent(agent_id, {"provider_alias": provider_alias})
             if sleep_provider_alias is not None:
                 config["sleep_provider_alias"] = sleep_provider_alias
+            if snapshot_summarize_provider is not None:
+                config["snapshot_summarize_provider"] = snapshot_summarize_provider
+            if snapshot_summarize_threshold is not None:
+                config["snapshot_summarize_threshold"] = snapshot_summarize_threshold
             if retrieval_vector is not None:
                 config["retrieval_vector"] = retrieval_vector
             if retrieval_text is not None:
@@ -830,6 +840,8 @@ class AgentService:
                 "agent_id": agent_id,
                 "provider_alias": config.get("provider_alias"),
                 "sleep_provider_alias": config.get("sleep_provider_alias"),
+                "snapshot_summarize_provider": config.get("snapshot_summarize_provider"),
+                "snapshot_summarize_threshold": config.get("snapshot_summarize_threshold"),
                 "retrieval_vector": config.get("retrieval_vector", "native"),
                 "retrieval_text": config.get("retrieval_text", "native"),
                 "providers": providers_data.get("providers", []),

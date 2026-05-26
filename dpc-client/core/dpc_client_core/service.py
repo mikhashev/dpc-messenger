@@ -7100,6 +7100,8 @@ class CoreService:
         self, agent_id: str = None,
         provider_alias: str = None,
         sleep_provider_alias: str = None,
+        snapshot_summarize_provider: str = None,
+        snapshot_summarize_threshold: int = None,
         retrieval_vector: str = None,
         retrieval_text: str = None,
     ) -> Dict[str, Any]:
@@ -7112,6 +7114,8 @@ class CoreService:
             agent_id,
             provider_alias=provider_alias,
             sleep_provider_alias=sleep_provider_alias,
+            snapshot_summarize_provider=snapshot_summarize_provider,
+            snapshot_summarize_threshold=snapshot_summarize_threshold,
             retrieval_vector=retrieval_vector,
             retrieval_text=retrieval_text,
             providers_getter=self.get_providers_list,

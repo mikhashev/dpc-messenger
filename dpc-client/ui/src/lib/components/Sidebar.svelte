@@ -12,6 +12,8 @@
   let modelConfigAgentId = $state('');
   let modelConfigProviderAlias = $state('');
   let modelConfigSleepProvider = $state('');
+  let modelConfigSnapshotProvider = $state('');
+  let modelConfigSnapshotThreshold = $state<number>(8000);
   let modelConfigProvidersList = $state<{alias: string, model: string, type: string}[]>([]);
   let modelConfigSaving = $state(false);
   let modelConfigRetrievalVector = $state<'native' | 'grafeo'>('native');
@@ -158,6 +160,10 @@
       const result = await onGetAgentModelConfig(agentId);
       modelConfigProviderAlias = result.provider_alias || '';
       modelConfigSleepProvider = result.sleep_provider_alias || '';
+      modelConfigSnapshotProvider = result.snapshot_summarize_provider || '';
+      modelConfigSnapshotThreshold = Number(result.snapshot_summarize_threshold) > 0
+        ? Number(result.snapshot_summarize_threshold)
+        : 8000;
       modelConfigProvidersList = result.providers || [];
       modelConfigRetrievalVector = (result.retrieval_vector === 'grafeo') ? 'grafeo' : 'native';
       modelConfigRetrievalText = (result.retrieval_text === 'grafeo') ? 'grafeo' : 'native';
@@ -173,6 +179,10 @@
       await onSaveAgentModelConfig(modelConfigAgentId, {
         provider_alias: modelConfigProviderAlias,
         sleep_provider_alias: modelConfigSleepProvider || null,
+        snapshot_summarize_provider: modelConfigSnapshotProvider || null,
+        snapshot_summarize_threshold: Number(modelConfigSnapshotThreshold) > 0
+          ? Number(modelConfigSnapshotThreshold)
+          : null,
         retrieval_vector: modelConfigRetrievalVector,
         retrieval_text: modelConfigRetrievalText,
       });
@@ -830,6 +840,26 @@
           {/each}
         </select>
         <p class="dialog-hint">Model used for sleep consolidation analysis. "Default" uses the global provider.</p>
+
+        <label for="snapshot-llm" class="dialog-label">Snapshot summarization LLM:</label>
+        <select id="snapshot-llm" class="dialog-input" bind:value={modelConfigSnapshotProvider}>
+          <option value="">Default (global)</option>
+          {#each modelConfigProvidersList as p}
+            <option value={p.alias}>{p.alias} ({p.model})</option>
+          {/each}
+        </select>
+        <p class="dialog-hint">Model used to extract task-relevant parts from oversized browser snapshots (accessibility-tree). Falls back to line-based truncation when not set or the call fails.</p>
+
+        <label for="snapshot-threshold" class="dialog-label">Snapshot summarization threshold (chars):</label>
+        <input
+          id="snapshot-threshold"
+          class="dialog-input"
+          type="number"
+          min="500"
+          step="500"
+          bind:value={modelConfigSnapshotThreshold}
+        />
+        <p class="dialog-hint">Snapshots larger than this character count are summarized (LLM if configured, else line-truncated). Default 8000.</p>
 
         <hr class="dialog-divider">
 
