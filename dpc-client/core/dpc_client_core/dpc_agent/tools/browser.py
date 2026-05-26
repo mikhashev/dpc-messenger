@@ -468,6 +468,11 @@ def get_active_browser_sessions() -> dict[str, "AuthBrowser"]:
 _A11Y_INTERACTIVE_ROLES: frozenset[str] = frozenset({
     "button", "link", "textbox", "checkbox", "combobox",
     "menuitem", "tab", "searchbox",
+    "heading", "radio", "slider", "spinbutton", "switch",
+    "option", "treeitem",
+})
+_A11Y_VALUE_ROLES: frozenset[str] = frozenset({
+    "textbox", "searchbox", "combobox", "spinbutton", "slider",
 })
 _A11Y_SKIP_WRAPPER_ROLES: frozenset[str] = frozenset({
     "generic", "presentation", "none",
@@ -503,6 +508,9 @@ def _build_a11y_tree(root: dict) -> tuple[str, dict]:
         line = f"{indent}- {role}"
         if name:
             line += f' "{name}"'
+        value = node.get("value", "")
+        if value and role in _A11Y_VALUE_ROLES:
+            line += f' = "{value}"'
         line += ref_tag
         lines.append(line)
         for child in children:
@@ -867,11 +875,17 @@ class AuthBrowser:
             f"URL {url!r} is outside auth domains {sorted(self._etld1s)!r}"
         )
 
-    def navigate(self, url: str) -> None:
-        """Navigate to URL. URL eTLD+1 must match one of the session's
-        auth domains; in-page redirects and XHR are gated by the
-        Playwright route handler installed at session open
-        (ADR-029 Task 003).
+    def navigate(self, url: str) -> str:
+        """Navigate to URL and return the post-navigation accessibility
+        snapshot inline (ADR-029 Task 006 auto-snapshot — eliminates the
+        extra `a11y_snapshot()` round-trip the agent would otherwise
+        need after every navigation). Snapshot failure is non-fatal
+        — navigation still succeeds, returned text is "" with the
+        underlying error name recorded in the audit entry.
+
+        URL eTLD+1 must match one of the session's auth domains;
+        in-page redirects and XHR are gated by the Playwright route
+        handler installed at session open (ADR-029 Task 003).
 
         Replaces ADR-028 `goto()` — kept as an alias for back-compat."""
         self._require_open()
@@ -895,13 +909,22 @@ class AuthBrowser:
                 from_url=from_url, error=type(exc).__name__,
             )
             raise
-        self._audit_action("navigate", url, "ok", from_url=from_url)
+        snapshot_text = ""
+        snapshot_audit: dict[str, Any] = {"from_url": from_url}
+        try:
+            snapshot_text, refs = self.a11y_snapshot()
+            snapshot_audit["snapshot_node_count"] = len(refs)
+            snapshot_audit["snapshot_char_count"] = len(snapshot_text)
+        except Exception as exc:
+            snapshot_audit["snapshot_error"] = type(exc).__name__
+        self._audit_action("navigate", url, "ok", **snapshot_audit)
+        return snapshot_text
 
-    def goto(self, url: str) -> None:
+    def goto(self, url: str) -> str:
         """ADR-028 back-compat alias for `navigate()`. Single-shot
         consumers (_browse_with_camoufox / _auth_browse_html) call
-        goto(); proper wrapper (not class-level assignment) so subclass
-        overrides of navigate() are honored."""
+        goto() and discard the return; proper wrapper (not class-level
+        assignment) so subclass overrides of navigate() are honored."""
         return self.navigate(url)
 
     def get_page_html(self) -> str:
@@ -936,37 +959,44 @@ class AuthBrowser:
             "scroll", url, "ok", direction=direction, amount=amount,
         )
 
-    def click(self, selector: str, timeout: int = 30000) -> None:
-        """Click an element matching the Playwright selector."""
+    def click(self, ref_or_selector: str, timeout: int = 30000) -> None:
+        """Click an element. Accepts a `@eN` ref from the last
+        `a11y_snapshot()` or a CSS selector (fallback)."""
         self._require_open()
         url = self._page.url
+        mode = "ref" if ref_or_selector.startswith("@e") else "css"
         try:
-            self._page.click(selector, timeout=timeout)
+            self._resolve_ref(ref_or_selector).click(timeout=timeout)
         except Exception as exc:
             self._audit_action(
                 "click", url, "failed",
-                selector=selector, error=type(exc).__name__,
-            )
-            raise
-        self._audit_action("click", url, "ok", selector=selector)
-
-    def fill(self, selector: str, text: str) -> None:
-        """Fill an input element. Audit logs text_length, not the value."""
-        self._require_open()
-        url = self._page.url
-        text_length = len(text)
-        try:
-            self._page.fill(selector, text)
-        except Exception as exc:
-            self._audit_action(
-                "fill", url, "failed",
-                selector=selector, text_length=text_length,
+                selector=ref_or_selector, mode=mode,
                 error=type(exc).__name__,
             )
             raise
         self._audit_action(
+            "click", url, "ok", selector=ref_or_selector, mode=mode,
+        )
+
+    def fill(self, ref_or_selector: str, text: str) -> None:
+        """Fill an input element. Accepts a `@eN` ref or CSS selector.
+        Audit logs text_length, not the value."""
+        self._require_open()
+        url = self._page.url
+        text_length = len(text)
+        mode = "ref" if ref_or_selector.startswith("@e") else "css"
+        try:
+            self._resolve_ref(ref_or_selector).fill(text)
+        except Exception as exc:
+            self._audit_action(
+                "fill", url, "failed",
+                selector=ref_or_selector, mode=mode,
+                text_length=text_length, error=type(exc).__name__,
+            )
+            raise
+        self._audit_action(
             "fill", url, "ok",
-            selector=selector, text_length=text_length,
+            selector=ref_or_selector, mode=mode, text_length=text_length,
         )
 
     def screenshot(
@@ -1011,24 +1041,28 @@ class AuthBrowser:
             )
             raise
 
-    def wait_for(self, selector: str, timeout: int = 30000) -> None:
-        """Wait for an element to become visible."""
+    def wait_for(self, ref_or_selector: str, timeout: int = 30000) -> None:
+        """Wait for an element to become visible. Accepts a `@eN` ref
+        or CSS selector."""
         self._require_open()
         url = self._page.url
+        mode = "ref" if ref_or_selector.startswith("@e") else "css"
         try:
-            self._page.wait_for_selector(selector, timeout=timeout)
+            self._resolve_ref(ref_or_selector).wait_for(
+                timeout=timeout, state="visible",
+            )
         except Exception as exc:
             error_name = type(exc).__name__
             self._audit_action(
                 "wait_for", url, "failed",
-                selector=selector, timeout=timeout,
+                selector=ref_or_selector, mode=mode, timeout=timeout,
                 timeout_hit="timeout" in error_name.lower(),
                 error=error_name,
             )
             raise
         self._audit_action(
             "wait_for", url, "ok",
-            selector=selector, timeout=timeout,
+            selector=ref_or_selector, mode=mode, timeout=timeout,
         )
 
     def extract(self) -> str:
