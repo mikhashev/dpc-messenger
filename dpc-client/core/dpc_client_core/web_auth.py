@@ -180,7 +180,8 @@ def get_auth_status(agent_id: str, domain: str) -> dict:
         return {"has_cookies": False, "expires": None, "authenticated_at": None}
     cookies = entry.get("cookies", [])
     expires = min(
-        (c["expires"] for c in cookies if c.get("expires") is not None),
+        (c["expires"] for c in cookies
+         if c.get("expires") is not None and c["expires"] > 0),
         default=None,
     )
     return {
@@ -271,12 +272,11 @@ def audit_append(
 
 def is_expired(cookies: list[dict]) -> bool:
     """True if any cookie with an `expires` field has elapsed.
-    Session cookies (expires=None) are treated as not-expired here —
-    expiry detection for session cookies needs out-of-band signal
-    (HTTP 401, login redirect, etc), handled by the AuthBrowser path."""
+    Session cookies (expires=None or expires<=0) are treated as
+    not-expired here."""
     now = time.time()
     for c in cookies:
         exp = c.get("expires")
-        if exp is not None and exp <= now:
+        if exp is not None and exp > 0 and exp <= now:
             return True
     return False

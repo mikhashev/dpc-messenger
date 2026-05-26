@@ -521,6 +521,20 @@ class _FakeStateContext:
         self.closed = True
 
 
+def test_from_playwright_cookies_drops_session_marker(vault_home):
+    from dpc_client_core.dpc_agent.tools.browser import _from_playwright_cookies
+
+    src = [
+        {"name": "lang", "value": "en", "domain": ".x.com", "expires": -1},
+        {"name": "session", "value": "x", "domain": ".x.com"},
+        {"name": "valid", "value": "v", "domain": ".x.com", "expires": 1735689600},
+    ]
+    out = _from_playwright_cookies(src)
+    assert "expires" not in out[0]
+    assert "expires" not in out[1]
+    assert out[2]["expires"] == 1735689600
+
+
 def test_from_playwright_cookies_roundtrip(vault_home):
     """camelCase Playwright cookie → snake_case vault cookie →
     re-converted back to camelCase preserves all fields."""

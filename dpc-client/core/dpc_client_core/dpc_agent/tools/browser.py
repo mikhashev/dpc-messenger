@@ -329,8 +329,9 @@ def _from_playwright_cookies(cookies: list[dict]) -> list[dict]:
             "secure": bool(c.get("secure", False)),
             "httponly": bool(c.get("httpOnly", False)),
         }
-        if c.get("expires") is not None:
-            sc["expires"] = c["expires"]
+        expires = c.get("expires")
+        if expires is not None and expires > 0:
+            sc["expires"] = expires
         if c.get("sameSite"):
             sc["samesite"] = c["sameSite"]
         out.append(sc)

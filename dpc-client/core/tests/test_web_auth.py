@@ -233,6 +233,26 @@ def test_is_expired_with_future_cookie():
     assert web_auth.is_expired(cookies) is False
 
 
+def test_is_expired_ignores_playwright_session_marker():
+    from dpc_client_core import web_auth
+
+    cookies = [{"name": "lang", "value": "en", "expires": -1}]
+    assert web_auth.is_expired(cookies) is False
+
+
+def test_get_auth_status_ignores_playwright_session_marker(vault_home):
+    from dpc_client_core import web_auth
+
+    future = int(time.time()) + 3600
+    web_auth.save_cookies("agent_a", "ozon.ru", [
+        {"name": "lang", "value": "en", "domain": ".ozon.ru", "expires": -1},
+        {"name": "auth", "value": "t", "domain": ".ozon.ru", "expires": future},
+    ])
+    status = web_auth.get_auth_status("agent_a", "ozon.ru")
+    assert status["has_cookies"] is True
+    assert status["expires"] == future
+
+
 def test_invalid_token_recovery(vault_home, sample_cookies):
     """If the keyring entry is wiped (or rotated) while the on-disk
     vault still exists, the next load should NOT crash with
