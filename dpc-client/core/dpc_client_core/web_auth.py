@@ -275,6 +275,32 @@ def audit_append(
         f.write(line)
 
 
+def log_browser_action(
+    agent_id: str,
+    domain: str,
+    action: str,
+    url: str,
+    result: str = "ok",
+    **extra: Any,
+) -> None:
+    """Append browser-action entry to web_audit.jsonl. result ∈ {ok, failed, denied}."""
+    path = _vault_path(agent_id).parent / "web_audit.jsonl"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    entry: dict[str, Any] = {
+        "timestamp": _now_iso(),
+        "agent_id": agent_id,
+        "domain": domain,
+        "action": action,
+        "url": url,
+        "result": result,
+    }
+    if extra:
+        entry.update(extra)
+    line = json.dumps(entry, ensure_ascii=False) + "\n"
+    with open(path, "a", encoding="utf-8") as f:
+        f.write(line)
+
+
 def is_expired(cookies: list[dict]) -> bool:
     """True if any cookie with an `expires` field has elapsed.
     Session cookies (expires=None or expires<=0) are treated as

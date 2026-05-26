@@ -757,8 +757,45 @@ class AuthBrowser:
             pass
 
     def _on_domain_blocked(self, url: str, etld1: str) -> None:
-        # Task 005 will swap this stub for real audit emission.
+        # `etld1` here is the BLOCKED domain, not an auth domain.
         self._domain_blocks += 1
+        try:
+            from dpc_client_core import web_auth
+            web_auth.log_browser_action(
+                agent_id=self._agent_id,
+                domain=etld1,
+                action="domain_blocked",
+                url=url,
+                result="denied",
+            )
+        except Exception as exc:
+            log.warning("audit emit failed (domain_blocked %s): %s", url, exc)
+
+    def _current_etld1(self) -> str:
+        if self._page is not None:
+            try:
+                from dpc_client_core import web_auth
+                return web_auth.resolve_etld1(self._page.url)
+            except Exception:
+                pass
+        return self._etld1 or "unknown"
+
+    def _audit_action(
+        self, action: str, url: str, result: str, **extra: Any
+    ) -> None:
+        # Best-effort: failed audit write must not fail the user action.
+        try:
+            from dpc_client_core import web_auth
+            web_auth.log_browser_action(
+                agent_id=self._agent_id,
+                domain=self._current_etld1(),
+                action=action,
+                url=url,
+                result=result,
+                **extra,
+            )
+        except Exception as exc:
+            log.warning("audit emit failed (%s %s): %s", action, url, exc)
 
     def _require_open(self) -> None:
         if self._page is None:
@@ -790,8 +827,27 @@ class AuthBrowser:
 
         Replaces ADR-028 `goto()` — kept as an alias for back-compat."""
         self._require_open()
-        self._check_domain(url)
-        self._page.goto(url, wait_until="networkidle", timeout=30000)
+        try:
+            from_url = self._page.url
+        except AttributeError:
+            from_url = ""
+        try:
+            self._check_domain(url)
+        except ValueError as exc:
+            self._audit_action(
+                "navigate", url, "denied",
+                from_url=from_url, error=str(exc),
+            )
+            raise
+        try:
+            self._page.goto(url, wait_until="networkidle", timeout=30000)
+        except Exception as exc:
+            self._audit_action(
+                "navigate", url, "failed",
+                from_url=from_url, error=type(exc).__name__,
+            )
+            raise
+        self._audit_action("navigate", url, "ok", from_url=from_url)
 
     def goto(self, url: str) -> None:
         """ADR-028 back-compat alias for `navigate()`. Single-shot
@@ -817,18 +873,53 @@ class AuthBrowser:
     def scroll(self, direction: str = "down", amount: int = 500) -> None:
         """Scroll vertically. direction: 'up' or 'down'."""
         self._require_open()
+        url = self._page.url
         delta = -amount if direction == "up" else amount
-        self._page.mouse.wheel(0, delta)
+        try:
+            self._page.mouse.wheel(0, delta)
+        except Exception as exc:
+            self._audit_action(
+                "scroll", url, "failed",
+                direction=direction, amount=amount,
+                error=type(exc).__name__,
+            )
+            raise
+        self._audit_action(
+            "scroll", url, "ok", direction=direction, amount=amount,
+        )
 
     def click(self, selector: str, timeout: int = 30000) -> None:
         """Click an element matching the Playwright selector."""
         self._require_open()
-        self._page.click(selector, timeout=timeout)
+        url = self._page.url
+        try:
+            self._page.click(selector, timeout=timeout)
+        except Exception as exc:
+            self._audit_action(
+                "click", url, "failed",
+                selector=selector, error=type(exc).__name__,
+            )
+            raise
+        self._audit_action("click", url, "ok", selector=selector)
 
     def fill(self, selector: str, text: str) -> None:
-        """Fill an input element matching the Playwright selector."""
+        """Fill an input element. Audit logs text_length, not the value."""
         self._require_open()
-        self._page.fill(selector, text)
+        url = self._page.url
+        text_length = len(text)
+        try:
+            self._page.fill(selector, text)
+        except Exception as exc:
+            self._audit_action(
+                "fill", url, "failed",
+                selector=selector, text_length=text_length,
+                error=type(exc).__name__,
+            )
+            raise
+        self._audit_action(
+            "fill", url, "ok",
+            selector=selector, text_length=text_length,
+        )
 
     def screenshot(
         self, full_page: bool = False, save_to: str | None = None
@@ -839,22 +930,72 @@ class AuthBrowser:
         the image to that path and returns the path string instead —
         escape hatch for large full-page screenshots that cause memory
         pressure in the agent loop. Caller owns cleanup of the saved
-        file; AuthBrowser does not track or auto-remove it on close."""
+        file; AuthBrowser does not track or auto-remove it on close.
+
+        Audit logs byte_size, not the image data."""
         self._require_open()
-        if save_to:
-            self._page.screenshot(full_page=full_page, path=save_to)
-            return save_to
-        return self._page.screenshot(full_page=full_page)
+        try:
+            url = self._page.url
+        except AttributeError:
+            url = ""
+        try:
+            if save_to:
+                self._page.screenshot(full_page=full_page, path=save_to)
+                byte_size = (
+                    os.path.getsize(save_to) if os.path.exists(save_to) else 0
+                )
+                self._audit_action(
+                    "screenshot", url, "ok",
+                    full_page=full_page, byte_size=byte_size,
+                    saved=save_to,
+                )
+                return save_to
+            png = self._page.screenshot(full_page=full_page)
+            self._audit_action(
+                "screenshot", url, "ok",
+                full_page=full_page, byte_size=len(png),
+            )
+            return png
+        except Exception as exc:
+            self._audit_action(
+                "screenshot", url, "failed",
+                full_page=full_page, error=type(exc).__name__,
+            )
+            raise
 
     def wait_for(self, selector: str, timeout: int = 30000) -> None:
         """Wait for an element to become visible."""
         self._require_open()
-        self._page.wait_for_selector(selector, timeout=timeout)
+        url = self._page.url
+        try:
+            self._page.wait_for_selector(selector, timeout=timeout)
+        except Exception as exc:
+            error_name = type(exc).__name__
+            self._audit_action(
+                "wait_for", url, "failed",
+                selector=selector, timeout=timeout,
+                timeout_hit="timeout" in error_name.lower(),
+                error=error_name,
+            )
+            raise
+        self._audit_action(
+            "wait_for", url, "ok",
+            selector=selector, timeout=timeout,
+        )
 
     def extract(self) -> str:
-        """Return the full HTML of the current page (alias for
-        get_page_html, exposed under the ADR-029 method name)."""
-        return self.get_page_html()
+        """Return full HTML — audit-wrapped wrapper around get_page_html."""
+        self._require_open()
+        url = self._page.url
+        try:
+            html = self.get_page_html()
+        except Exception as exc:
+            self._audit_action(
+                "extract", url, "failed", error=type(exc).__name__,
+            )
+            raise
+        self._audit_action("extract", url, "ok", html_size=len(html))
+        return html
 
     def switch_tab(self, index: int):
         """Switch the active page to the tab at `index` in the current
@@ -862,12 +1003,27 @@ class AuthBrowser:
         Q2 default = persist, matches user mental model)."""
         self._require_open()
         pages = self._context.pages
-        if index < 0 or index >= len(pages):
-            raise IndexError(
-                f"switch_tab: index {index} out of range "
-                f"(context has {len(pages)} page(s))"
+        from_index = pages.index(self._page) if self._page in pages else -1
+        from_url = self._page.url
+        try:
+            if index < 0 or index >= len(pages):
+                raise IndexError(
+                    f"switch_tab: index {index} out of range "
+                    f"(context has {len(pages)} page(s))"
+                )
+            self._page = pages[index]
+        except Exception as exc:
+            self._audit_action(
+                "switch_tab", from_url, "failed",
+                from_index=from_index, to_index=index,
+                error=type(exc).__name__,
             )
-        self._page = pages[index]
+            raise
+        self._audit_action(
+            "switch_tab", self._page.url, "ok",
+            from_index=from_index, to_index=index,
+            url_at_target=self._page.url,
+        )
         return self._page
 
     def wait_for_popup(self, timeout: int = 30000):
@@ -879,6 +1035,16 @@ class AuthBrowser:
 
     def close(self) -> None:
         """Release browser resources. Safe to call multiple times."""
+        # Audit before teardown nulls _page. Skip when already disconnected.
+        if not self._disconnected:
+            url = ""
+            if self._page is not None:
+                try:
+                    url = self._page.url
+                except Exception:
+                    pass
+            self._audit_action("close", url, "ok")
+
         if self._disconnected:
             self._cm = None
             self._browser = None

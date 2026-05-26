@@ -268,3 +268,50 @@ def test_browse_page_anonymous_path_no_audit(vault_home):
         browser_mod._browse_sync = original
 
     assert _read_audit(vault_home, "agent_a") == []
+
+
+# ─────────────────────────────────────────────────────────────
+# ADR-029 Task 005 — log_browser_action coverage
+# ─────────────────────────────────────────────────────────────
+
+
+def test_log_browser_action_creates_entry(vault_home):
+    from dpc_client_core import web_auth
+
+    web_auth.log_browser_action(
+        agent_id="agent_a",
+        domain=f"{TEST_DOMAIN}",
+        action="click",
+        url=f"https://{TEST_DOMAIN}/path",
+        result="ok",
+    )
+    entries = _read_audit(vault_home, "agent_a")
+    assert len(entries) == 1
+    e = entries[0]
+    assert e["agent_id"] == "agent_a"
+    assert e["domain"] == f"{TEST_DOMAIN}"
+    assert e["action"] == "click"
+    assert e["url"] == f"https://{TEST_DOMAIN}/path"
+    assert e["result"] == "ok"
+    assert e["timestamp"].endswith("Z")
+
+
+def test_log_browser_action_includes_extra_fields(vault_home):
+    from dpc_client_core import web_auth
+
+    web_auth.log_browser_action(
+        agent_id="agent_a",
+        domain=f"{TEST_DOMAIN}",
+        action="fill",
+        url=f"https://{TEST_DOMAIN}/login",
+        result="ok",
+        selector="input[name=email]",
+        text_length=24,
+    )
+    entries = _read_audit(vault_home, "agent_a")
+    assert len(entries) == 1
+    e = entries[0]
+    assert e["selector"] == "input[name=email]"
+    assert e["text_length"] == 24
+    # Privacy contract — raw text never serialized
+    assert "text" not in e
