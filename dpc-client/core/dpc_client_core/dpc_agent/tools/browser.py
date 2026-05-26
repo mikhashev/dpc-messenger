@@ -1526,12 +1526,16 @@ class AuthBrowser:
         import time as _time
 
         _COLLECT_ITEMS_JS = """
-        ({container, itemSelector, extractAttrs}) => {
-          const ct = document.querySelector(container);
-          if (!ct) return {error: 'container not found: ' + container};
-          const els = ct.querySelectorAll(itemSelector);
+        ({containerSel, itemSelector, extractAttrs}) => {
+          const ct = document.querySelector(containerSel);
+          if (!ct) return {error: 'container not found: ' + containerSel};
+          const els = document.querySelectorAll(itemSelector);
           const items = [];
           for (const el of els) {
+            if (!ct.contains(el) && !el.contains(ct)) {
+              const closestScroller = el.closest(containerSel);
+              if (!closestScroller) continue;
+            }
             const item = {};
             for (const attr of extractAttrs) {
               if (attr === 'text') {
@@ -1547,18 +1551,21 @@ class AuthBrowser:
             }
             items.push(item);
           }
-          return {items, containerScrollHeight: ct.scrollHeight, containerClientHeight: ct.clientHeight};
+          return {items, found: els.length, matched: items.length};
         }
         """
 
-        _SCROLL_CONTAINER_JS = """
-        ({container, amount}) => {
-          const ct = document.querySelector(container);
-          if (!ct) return {scrolled: 0};
-          const before = ct.scrollTop;
-          ct.scrollBy({top: amount, behavior: 'instant'});
-          const after = ct.scrollTop;
-          return {scrolled: after - before, scrollTop: after, scrollHeight: ct.scrollHeight};
+        _FIND_SCROLL_CENTER_JS = """
+        (containerSel) => {
+          const ct = document.querySelector(containerSel);
+          if (!ct) return null;
+          const rect = ct.getBoundingClientRect();
+          return {
+            centerX: Math.round(rect.left + rect.width / 2),
+            centerY: Math.round(rect.top + rect.height / 2),
+            scrollHeight: ct.scrollHeight,
+            clientHeight: ct.clientHeight,
+          };
         }
         """
 
@@ -1568,9 +1575,17 @@ class AuthBrowser:
         scrolls_done = 0
         url = self._page.url
 
+        scroll_info = self._page.evaluate(_FIND_SCROLL_CENTER_JS, container)
+        if scroll_info is None:
+            self._audit_action("collect", url, "failed", error=f"container not found: {container}")
+            return {"error": f"container not found: {container}", "items": [], "total": 0, "scrolls_done": 0}
+
+        center_x = scroll_info["centerX"]
+        center_y = scroll_info["centerY"]
+
         for _ in range(max_scrolls + 1):
             result = self._page.evaluate(_COLLECT_ITEMS_JS, {
-                "container": container,
+                "containerSel": container,
                 "itemSelector": item_selector,
                 "extractAttrs": extract or ["text"],
             })
@@ -1591,12 +1606,10 @@ class AuthBrowser:
             if scrolls_done > 0 and new_count == 0:
                 break
 
-            scroll_result = self._page.evaluate(_SCROLL_CONTAINER_JS, {
-                "container": container,
-                "amount": 800,
-            })
-            scrolled = (scroll_result or {}).get("scrolled", 0)
-            if scrolled == 0:
+            try:
+                self._page.mouse.move(center_x, center_y)
+                self._page.mouse.wheel(0, 800)
+            except Exception:
                 break
 
             scrolls_done += 1
