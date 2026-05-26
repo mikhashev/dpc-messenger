@@ -1526,7 +1526,7 @@ class AuthBrowser:
         import time as _time
 
         _COLLECT_ITEMS_JS = """
-        ({container, itemSelector, extractAttrs, dedupKey}) => {
+        ({container, itemSelector, extractAttrs}) => {
           const ct = document.querySelector(container);
           if (!ct) return {error: 'container not found: ' + container};
           const els = ct.querySelectorAll(itemSelector);
@@ -1564,6 +1564,7 @@ class AuthBrowser:
 
         all_items: list[dict] = []
         seen_keys: set[str] = set()
+        dupes_skipped = 0
         scrolls_done = 0
         url = self._page.url
 
@@ -1572,7 +1573,6 @@ class AuthBrowser:
                 "container": container,
                 "itemSelector": item_selector,
                 "extractAttrs": extract or ["text"],
-                "dedupKey": dedup_by,
             })
             if isinstance(result, dict) and "error" in result:
                 self._audit_action("collect", url, "failed", error=result["error"])
@@ -1585,6 +1585,8 @@ class AuthBrowser:
                     seen_keys.add(key)
                     all_items.append(item)
                     new_count += 1
+                else:
+                    dupes_skipped += 1
 
             if scrolls_done > 0 and new_count == 0:
                 break
@@ -1600,7 +1602,6 @@ class AuthBrowser:
             scrolls_done += 1
             _time.sleep(scroll_pause_ms / 1000.0)
 
-        dupes = len(seen_keys) - len(all_items) if len(seen_keys) != len(all_items) else 0
         self._audit_action(
             "collect", url, "ok",
             container=container, item_selector=item_selector,
@@ -1611,8 +1612,8 @@ class AuthBrowser:
             "total": len(all_items),
             "scrolls_done": scrolls_done,
         }
-        if dupes > 0:
-            result_dict["warning"] = f"{dupes} duplicates detected, consider specifying unique attribute for dedup_by"
+        if dupes_skipped > 0:
+            result_dict["warning"] = f"{dupes_skipped} duplicates skipped, consider specifying unique attribute for dedup_by"
         return result_dict
 
     def _resolve_ref(self, ref_or_selector: str):
