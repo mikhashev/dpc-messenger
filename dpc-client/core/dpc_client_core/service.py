@@ -6859,6 +6859,17 @@ class CoreService:
                 response_payload["tokens_after_last_response"] = _tokens_after_last_response
                 response_payload["tokens_after_last_response_at"] = _tokens_after_last_response_at
 
+            # Context breakdown for agent chats (STATIC tooltip)
+            if conversation_id.startswith("agent_"):
+                try:
+                    dpc_prov = self.llm_manager.providers.get("dpc_agent")
+                    mgr = dpc_prov.get_manager(conversation_id) if dpc_prov else None
+                    if mgr:
+                        state = mgr.get_session_state(conversation_id)
+                        response_payload["context_breakdown"] = state.get("context_breakdown")
+                except Exception:
+                    pass
+
         except Exception as e:
             logger.error("Error during inference: %s", e, exc_info=True)
             status = "ERROR"
