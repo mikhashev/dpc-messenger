@@ -761,9 +761,10 @@ async def run_sleep(
         morning_brief["synthesis_budget"] = synthesis_budget_info
         sleep_findings["generated_at"] = datetime.now(timezone.utc).isoformat()
 
-        (conversation_dir / MORNING_BRIEF_FILE).write_text(
-            json.dumps(morning_brief, ensure_ascii=False, indent=2), encoding="utf-8"
-        )
+        if not group_id:
+            (conversation_dir / MORNING_BRIEF_FILE).write_text(
+                json.dumps(morning_brief, ensure_ascii=False, indent=2), encoding="utf-8"
+            )
         (conversation_dir / SLEEP_FINDINGS_FILE).write_text(
             json.dumps(sleep_findings, ensure_ascii=False, indent=2), encoding="utf-8"
         )
