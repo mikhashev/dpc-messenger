@@ -71,6 +71,8 @@ class DpcAgentManager:
         self._agents: Dict[str, DpcAgent] = {}
         # Default agent for backward compatibility
         self._agent: Optional[DpcAgent] = None
+        # Last agent that processed a message (for cap_info retrieval)
+        self._last_used_agent: Optional[DpcAgent] = None
 
         # Telegram bridge for notifications
         self._telegram_bridge = None
@@ -864,6 +866,7 @@ class DpcAgentManager:
 
             # Phase 3: Get provider-specific agent if agent_llm_provider is specified
             agent = self._get_or_create_agent_for_provider(agent_llm_provider) if agent_llm_provider else self.agent
+            self._last_used_agent = agent
 
             # ADR-022 Task 07: per-agent daily quota check
             quota_limit = self.config.get("quota_tokens_per_day", 0)
@@ -1167,7 +1170,7 @@ class DpcAgentManager:
         tokens_after_last_response = monitor._tokens_after_last_response
         tokens_after_last_response_at = monitor._tokens_after_last_response_at
         context_breakdown = None
-        agent = self._agents.get(self.agent_id)
+        agent = self._last_used_agent
         if agent and hasattr(agent, '_last_cap_info') and agent._last_cap_info:
             context_breakdown = agent._last_cap_info.get("context_breakdown")
 

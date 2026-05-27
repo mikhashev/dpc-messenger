@@ -498,7 +498,13 @@ def build_llm_messages(
 
     _context_breakdown = [{"name": "system_prompt", "tokens": estimate_tokens(static_text)}]
     for _p in semi_stable_parts:
-        _context_breakdown.append({"name": _section_name(_p), "tokens": estimate_tokens(_p)})
+        name = _section_name(_p)
+        if "ACTIVE RECALL" in _p or "RECALL HINTS" in _p:
+            import re as _re
+            _files = _re.findall(r'\[(?:EXT|L\d+)\]\s*(\S+?)[:,]', _p)
+            if _files:
+                name = f"Active Recall ({', '.join(_files)})"
+        _context_breakdown.append({"name": name, "tokens": estimate_tokens(_p)})
     for _p in dynamic_parts:
         _context_breakdown.append({"name": _section_name(_p), "tokens": estimate_tokens(_p)})
 
