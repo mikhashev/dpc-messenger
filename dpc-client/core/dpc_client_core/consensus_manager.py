@@ -332,6 +332,33 @@ class ConsensusManager:
         total_votes = len(votes)
         approval_rate = approve_count / total_votes if total_votes > 0 else 0
 
+        # No votes cast (timeout with no user action) — expire, don't treat as request_changes
+        if total_votes == 0:
+            session.status = "timeout"
+            proposal.status = "timeout"
+            logger.info("Proposal %s expired with no votes cast", proposal.proposal_id)
+            if self.on_commit_rejected:
+                await self.on_commit_rejected(proposal, votes)
+
+            result_payload = {
+                "proposal_id": proposal.proposal_id,
+                "topic": proposal.topic,
+                "summary": proposal.summary,
+                "status": "timeout",
+                "vote_tally": {
+                    "approve": 0, "reject": 0, "request_changes": 0,
+                    "total": 0, "threshold": self.consensus_threshold,
+                    "approval_rate": 0
+                },
+                "votes": [],
+            }
+            if self.broadcast:
+                await self.broadcast({
+                    "command": "KNOWLEDGE_COMMIT_RESULT",
+                    "payload": result_payload
+                })
+            return
+
         # Determine outcome
         if approval_rate >= self.consensus_threshold:
             # Approved!
