@@ -6279,6 +6279,7 @@ class CoreService:
                     "thinking_tokens": thinking_tokens,
                     "user_msg_index": user_msg_index,
                     "assistant_msg_index": assistant_msg_index,
+                    "context_breakdown": session_state.get("context_breakdown"),
                 }
             )
 
