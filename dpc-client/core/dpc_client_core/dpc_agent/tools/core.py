@@ -188,7 +188,7 @@ def write_file(ctx: ToolContext, path: str, content: str) -> str:
             filename = Path(path).name
             meta = read_file_meta(knowledge_dir, filename)
             if not meta.summary:
-                meta.summary = content[:200].strip()
+                meta.summary = content[:1000].strip()
                 meta.tags = [t for t in Path(path).stem.replace("_", "-").split("-") if len(t) > 2]
                 write_file_meta(knowledge_dir, filename, meta)
             update_access(knowledge_dir, filename)

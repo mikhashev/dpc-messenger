@@ -64,7 +64,7 @@ def backfill_meta(knowledge_dir: pathlib.Path) -> Dict[str, dict]:
         if not f.is_file() or f.name in _BACKFILL_SKIP:
             continue
         try:
-            content = f.read_text(encoding="utf-8", errors="replace")[:200]
+            content = f.read_text(encoding="utf-8", errors="replace")[:1000]
         except OSError:
             content = ""
         tags = [t for t in f.stem.replace("_", "-").split("-") if len(t) > 2]
@@ -128,7 +128,7 @@ def generate_smart_index(knowledge_dir: pathlib.Path) -> str:
 
     for fname, entry in all_meta.items():
         ts = entry.get("last_accessed", "")
-        summary = entry.get("summary", "")[:80]
+        summary = entry.get("summary", "")[:160]
         title = fname.replace(".md", "").replace("_", " ").replace("-", " ").title()
         if not ts:
             reference.append((fname, title, summary, ""))
