@@ -15,6 +15,7 @@
     historyTokens = 0,
     tokensAfterLastResponse = 0,
     tokensAfterLastResponseAt = null,
+    contextBreakdown = null,
     messageCount = 0,
     enableMarkdown = $bindable(true),
     isExtracting = false,
@@ -39,6 +40,7 @@
     historyTokens?: number;
     tokensAfterLastResponse?: number;
     tokensAfterLastResponseAt?: string | null;
+    contextBreakdown?: Array<{name: string, tokens: number}> | null;
     messageCount?: number;
     enableMarkdown?: boolean;
     isExtracting?: boolean;
@@ -102,6 +104,12 @@
       ? "Peer must be online to extract knowledge (requires voting)"
       : "Extract reusable knowledge from current conversation"
   );
+
+  let staticTitle = $derived(
+    contextBreakdown && contextBreakdown.length > 0
+      ? contextBreakdown.map((c: {name: string, tokens: number}) => `${c.name}: ~${c.tokens.toLocaleString()}`).join('\n')
+      : "System prompt + contexts + tool schemas"
+  );
 </script>
 
 {#if isAIChat || showForChatId.startsWith('group-')}
@@ -117,7 +125,7 @@
         <span class="token-value">{tokensAfterLastResponse.toLocaleString()}{#if showEstimation && estimatedTokens > 0} + ~{estimatedTokens.toLocaleString()}{/if} / {effectiveLimit.toLocaleString()}</span>
         <span class="token-percentage" class:warning={totalContextPercentWithInput >= 0.8}>({Math.round(totalContextPercentWithInput * 100)}%)</span>
       </div>
-      <div class="token-row token-row--muted" title="System prompt + contexts + tool schemas">
+      <div class="token-row token-row--muted" title={staticTitle}>
         <span class="token-label">Static</span>
         <span class="token-value">≈{staticMemory.toLocaleString()}</span>
         <span class="token-percentage"></span>

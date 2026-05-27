@@ -491,6 +491,17 @@ def build_llm_messages(
 
     dynamic_text = "\n\n".join(dynamic_parts)
 
+    # Context breakdown for UI tooltip (token estimates per component)
+    def _section_name(text: str) -> str:
+        first_line = text.split("\n", 1)[0].strip("# ").strip()
+        return first_line[:40] if first_line else "unknown"
+
+    _context_breakdown = [{"name": "system_prompt", "tokens": estimate_tokens(static_text)}]
+    for _p in semi_stable_parts:
+        _context_breakdown.append({"name": _section_name(_p), "tokens": estimate_tokens(_p)})
+    for _p in dynamic_parts:
+        _context_breakdown.append({"name": _section_name(_p), "tokens": estimate_tokens(_p)})
+
     # System message with 3 content blocks for optimal caching
     messages: List[Dict[str, Any]] = [
         {
@@ -541,6 +552,7 @@ def build_llm_messages(
     # --- Soft-cap token trimming ---
     soft_cap = (session_state or {}).get("tokens_limit") or 204800
     messages, cap_info = apply_message_token_soft_cap(messages, soft_cap)
+    cap_info["context_breakdown"] = _context_breakdown
 
     return messages, cap_info
 

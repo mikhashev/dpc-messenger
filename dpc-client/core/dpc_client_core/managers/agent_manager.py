@@ -1166,22 +1166,20 @@ class DpcAgentManager:
         history_tokens = usage.get("tokens_used", 0)
         tokens_after_last_response = monitor._tokens_after_last_response
         tokens_after_last_response_at = monitor._tokens_after_last_response_at
+        context_breakdown = None
+        agent = self._agents.get(self.agent_id)
+        if agent and hasattr(agent, '_last_cap_info') and agent._last_cap_info:
+            context_breakdown = agent._last_cap_info.get("context_breakdown")
+
         return {
-            # Conversation history only (user+assistant text ÷ 4).
-            # Same basis as the token counter shown in the UI.
             "history_tokens": history_tokens,
             "history_usage_percent": round(history_tokens / token_limit, 4) if token_limit else 0,
-            # Full LLM context measured immediately after the previous response.
-            # Includes: system prompt + scratchpad + identity + knowledge + tools + history.
-            # ONE REQUEST STALE: updated only after the LLM call completes, so during
-            # the current request this is a lower bound on actual current usage.
-            # Pair with *_at timestamp to compute freshness.
-            # This is what the log "Context size: X%" reports.
             "tokens_after_last_response": tokens_after_last_response,
             "tokens_after_last_response_at": tokens_after_last_response_at,
             "context_usage_percent": round(tokens_after_last_response / token_limit, 4) if token_limit and tokens_after_last_response else 0,
             "tokens_limit": token_limit,
             "messages_count": len(monitor.message_history),
+            "context_breakdown": context_breakdown,
         }
 
     def reset_conversation(self, conversation_id: str) -> bool:

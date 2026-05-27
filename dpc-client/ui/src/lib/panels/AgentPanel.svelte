@@ -45,7 +45,7 @@
     chatHistories: Writable<Map<string, Message[]>>;
     getPeerDisplayName: (id: string) => string;
     chatWindow: HTMLElement | null;
-    onUpdateTokenUsage: (conversationId: string, usage: { used: number; limit: number; historyTokens?: number; tokensAfterLastResponse?: number; tokensAfterLastResponseAt?: string | null }) => void;
+    onUpdateTokenUsage: (conversationId: string, usage: { used: number; limit: number; historyTokens?: number; tokensAfterLastResponse?: number; tokensAfterLastResponseAt?: string | null; contextBreakdown?: Array<{name: string, tokens: number}> | null }) => void;
     onAgentToast: (message: string, type: 'info' | 'warning' | 'error') => void;
     onRefreshAgents: () => void;
     agentProgressMessage?: string | null;
@@ -285,7 +285,7 @@
   // dependency, causing re-runs on every history change (infinite loop).
   $effect(() => {
     if ($agentHistoryUpdated) {
-      const { conversation_id, messages, tokens_used, token_limit, thinking, tokens_after_last_response, tokens_after_last_response_at } = $agentHistoryUpdated;
+      const { conversation_id, messages, tokens_used, token_limit, thinking, tokens_after_last_response, tokens_after_last_response_at, context_breakdown } = $agentHistoryUpdated;
 
       untrack(() => {
         // Flush pending buffer and capture accumulated streaming text before overwriting history
@@ -308,6 +308,7 @@
             historyTokens: tokens_used,
             tokensAfterLastResponse: tokens_after_last_response || 0,
             tokensAfterLastResponseAt: tokens_after_last_response_at ?? null,
+            contextBreakdown: context_breakdown ?? null,
           });
         }
 

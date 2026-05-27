@@ -284,6 +284,7 @@ export interface AgentHistoryUpdatedEvent {
     message_count?: number;
     tokens_after_last_response?: number;
     tokens_after_last_response_at?: string | null;
+    context_breakdown?: Array<{name: string, tokens: number}> | null;
 }
 
 // --- File Transfer Event Payloads ---

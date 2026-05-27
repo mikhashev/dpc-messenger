@@ -1070,12 +1070,15 @@ Send a voice message and it will be transcribed and processed\\.
             # the "Thoughts" collapsible (same as execute_ai_query direct path).
             # thinking lives in agent._last_usage["thinking"] after process() returns.
             thinking = None
+            context_breakdown = None
             try:
-                agent = self._agent_manager.agent  # property — may raise RuntimeError
+                agent = self._agent_manager.agent
                 last_usage = getattr(agent, '_last_usage', {}) or {}
                 thinking = last_usage.get('thinking')
+                cap_info = getattr(agent, '_last_cap_info', None) or {}
+                context_breakdown = cap_info.get("context_breakdown")
             except Exception:
-                pass  # thinking is optional; don't block the broadcast
+                pass
 
             await service.local_api.broadcast_event("agent_history_updated", {
                 "conversation_id": conversation_id,
@@ -1086,6 +1089,7 @@ Send a voice message and it will be transcribed and processed\\.
                 "thinking": thinking,
                 "tokens_after_last_response": monitor._tokens_after_last_response,
                 "tokens_after_last_response_at": monitor._tokens_after_last_response_at,
+                "context_breakdown": context_breakdown,
             })
             log.debug(f"[_broadcast_history_to_ui] Pushed {len(messages)} messages for {conversation_id}")
         except Exception as e:
