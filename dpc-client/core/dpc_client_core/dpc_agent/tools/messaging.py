@@ -186,6 +186,6 @@ def get_tools() -> List[ToolEntry]:
             is_code_tool=False,
             timeout_sec=30,
             is_core=True,
-            default_enabled=True,
+            default_enabled=False,
         ),
     ]

@@ -1712,7 +1712,7 @@ def get_tools() -> List[ToolEntry]:
             },
             handler=update_identity,
             timeout_sec=10,
-            default_enabled=True,
+            default_enabled=False,
         ),
 
         ToolEntry(
@@ -1728,7 +1728,7 @@ def get_tools() -> List[ToolEntry]:
             },
             handler=deduplicate_identity,
             timeout_sec=10,
-            default_enabled=True,
+            default_enabled=False,
         ),
 
         ToolEntry(
@@ -1861,7 +1861,7 @@ def get_tools() -> List[ToolEntry]:
             },
             handler=schedule_task,
             timeout_sec=10,
-            default_enabled=True,
+            default_enabled=False,
         ),
 
         ToolEntry(
@@ -1917,7 +1917,7 @@ def get_tools() -> List[ToolEntry]:
             },
             handler=register_task_type,
             timeout_sec=10,
-            default_enabled=True,
+            default_enabled=False,
         ),
 
         ToolEntry(
@@ -1954,7 +1954,7 @@ def get_tools() -> List[ToolEntry]:
             },
             handler=unregister_task_type,
             timeout_sec=5,
-            default_enabled=True,
+            default_enabled=False,
         ),
 
         # Extended sandbox tools (v0.16.0+ — read/write/list merged into read_file/write_file/list_dir)

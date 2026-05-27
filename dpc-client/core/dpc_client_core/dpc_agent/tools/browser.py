@@ -2630,7 +2630,7 @@ def get_tools() -> List[ToolEntry]:
             # Anonymous browse_page (without use_auth) returns in <10s so
             # the higher cap doesn't slow that path down.
             timeout_sec=360,
-            default_enabled=True,
+            default_enabled=False,
         ),
 
         ToolEntry(
@@ -2651,7 +2651,7 @@ def get_tools() -> List[ToolEntry]:
             },
             handler=fetch_json,
             timeout_sec=30,
-            default_enabled=True,
+            default_enabled=False,
         ),
 
 
@@ -2673,7 +2673,7 @@ def get_tools() -> List[ToolEntry]:
             },
             handler=check_url,
             timeout_sec=15,
-            default_enabled=True,
+            default_enabled=False,
         ),
 
         ToolEntry(
@@ -2706,7 +2706,7 @@ def get_tools() -> List[ToolEntry]:
             },
             handler=search_web_ddgs,
             timeout_sec=30,
-            default_enabled=True,
+            default_enabled=False,
         ),
 
         ToolEntry(
