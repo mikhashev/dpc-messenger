@@ -181,9 +181,17 @@ def write_file(ctx: ToolContext, path: str, content: str) -> str:
 
         file_path.write_text(content, encoding="utf-8")
 
-        # Regenerate _index.md if writing to knowledge/ dir (sandbox only)
+        # Update _meta.json + regenerate smart _index.md for knowledge writes
         if not os.path.isabs(path) and path.startswith("knowledge/") and not path.endswith("_index.md"):
-            _update_knowledge_index(ctx, Path(path).stem)
+            from ..memory import read_file_meta, write_file_meta, update_access
+            knowledge_dir = ctx.agent_root / "knowledge"
+            filename = Path(path).name
+            meta = read_file_meta(knowledge_dir, filename)
+            if not meta.summary:
+                meta.summary = content[:200].strip()
+                meta.tags = [t for t in Path(path).stem.replace("_", "-").split("-") if len(t) > 2]
+                write_file_meta(knowledge_dir, filename, meta)
+            update_access(knowledge_dir, filename)
             # Incremental reindex for Active Recall (MEM-3.7)
             try:
                 agent = getattr(ctx, '_agent', None)
@@ -721,33 +729,6 @@ def knowledge_list(ctx: ToolContext) -> str:
         return f"⚠️ Error listing knowledge: {e}"
 
 
-def _update_knowledge_index(ctx: ToolContext, topic: str) -> None:
-    """Update the knowledge base index file."""
-    try:
-        index_path = ctx.knowledge_path("_index")
-        knowledge_dir = ctx.agent_root / "knowledge"
-
-        topics = []
-        if knowledge_dir.exists():
-            for t in knowledge_dir.glob("*.md"):
-                if t.name != "_index.md":
-                    topics.append(t.stem)
-
-        index_content = f"""# Knowledge Base Index
-
-Last updated: {datetime.now(timezone.utc).isoformat()}
-
-## Topics
-
-"""
-        for t in sorted(topics):
-            index_content += f"- [{t}]({t}.md)\n"
-
-        index_path.parent.mkdir(parents=True, exist_ok=True)
-        index_path.write_text(index_content, encoding="utf-8")
-
-    except Exception as e:
-        log.warning(f"Failed to update knowledge index: {e}")
 
 
 # ---------------------------------------------------------------------------
