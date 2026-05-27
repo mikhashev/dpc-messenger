@@ -1165,6 +1165,11 @@
     tokenUsageMap = new Map(tokenUsageMap);
     tokenUsageMap.set(chatId, usage);
   }}
+  onUpdateContextBreakdown={(chatId, breakdown) => {
+    tokenUsageMap = new Map(tokenUsageMap);
+    const existing = tokenUsageMap.get(chatId) || { used: 0, limit: 0 };
+    tokenUsageMap.set(chatId, { ...existing, contextBreakdown: breakdown });
+  }}
   onMarkContextSent={(chatId, hash) => {
     lastSentContextHash = new Map(lastSentContextHash);
     lastSentContextHash.set(chatId, hash);

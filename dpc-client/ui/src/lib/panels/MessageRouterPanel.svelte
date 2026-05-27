@@ -30,6 +30,7 @@
     aiChats,
     onSetChatLoading,
     onUpdateTokenUsage,
+    onUpdateContextBreakdown,
     onMarkContextSent,
     onAgentToast,
     getStreamingText,
@@ -44,6 +45,7 @@
     aiChats: Writable<Map<string, any>>;
     onSetChatLoading: (chatId: string, loading: boolean) => void;
     onUpdateTokenUsage: (chatId: string, usage: { used: number; limit: number; historyTokens?: number; tokensAfterLastResponse?: number; tokensAfterLastResponseAt?: string | null; contextBreakdown?: Array<{name: string, tokens: number}> | null }) => void;
+    onUpdateContextBreakdown: (chatId: string, breakdown: Array<{name: string, tokens: number}>) => void;
     onMarkContextSent: (chatId: string, hash: string) => void;
     onAgentToast: (message: string, type: 'info' | 'warning' | 'error') => void;
     getStreamingText: () => string;
@@ -398,6 +400,10 @@
               tokensAfterLastResponseAt: message.payload.tokens_after_last_response_at ?? null,
               contextBreakdown: message.payload.context_breakdown ?? null,
             });
+          }
+          // Context breakdown arrives even when tokens_used is absent (agent queries)
+          if (message.status === 'OK' && message.payload.context_breakdown) {
+            onUpdateContextBreakdown(chatId, message.payload.context_breakdown);
           }
 
           // Phase 7: Mark context as sent (clears "Updated" status)
