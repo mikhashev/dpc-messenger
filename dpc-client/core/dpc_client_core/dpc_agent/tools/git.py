@@ -87,7 +87,7 @@ def _run_git(ctx: ToolContext, args: List[str], cwd: Optional[str] = None) -> Di
         return {"success": False, "error": f"Git error: {e}"}
 
 
-def _run_git_external(repo_path: str, args: List[str]) -> Dict[str, Any]:
+def _run_git_external(repo_path: str, args: List[str], timeout: int = 30) -> Dict[str, Any]:
     """
     Run a read-only git command in an external (non-sandbox) repository.
 
@@ -127,7 +127,7 @@ def _run_git_external(repo_path: str, args: List[str]) -> Dict[str, Any]:
             cwd=str(resolved),
             capture_output=True,
             text=True,
-            timeout=30,
+            timeout=timeout,
         )
         return {
             "success": result.returncode == 0,
@@ -136,25 +136,31 @@ def _run_git_external(repo_path: str, args: List[str]) -> Dict[str, Any]:
             "return_code": result.returncode,
         }
     except subprocess.TimeoutExpired:
-        return {"success": False, "error": "Git command timed out (30s)"}
+        return {"success": False, "error": f"Git command timed out ({timeout}s)"}
     except FileNotFoundError:
         return {"success": False, "error": "Git not found. Please install git."}
     except Exception as e:
         return {"success": False, "error": f"Git error: {e}"}
 
 
-def git_status(ctx: ToolContext, path: str = ".") -> str:
+def git_status(ctx: ToolContext, path: str = ".", repo_path: Optional[str] = None) -> str:
     """
     Check git status of a directory.
 
     Args:
         ctx: Tool context
         path: Directory path (relative to agent root)
+        repo_path: Optional absolute path to an external git repository.
+                   When provided, runs git status there instead of the agent sandbox.
 
     Returns:
         Git status output
     """
-    result = _run_git(ctx, ["status", "--short", "--branch"], cwd=path)
+    if repo_path is not None:
+        ctx.validate_extended_path(repo_path, require_write=False)
+        result = _run_git_external(repo_path, ["status", "--short", "--branch"])
+    else:
+        result = _run_git(ctx, ["status", "--short", "--branch"], cwd=path)
 
     if not result["success"]:
         return f"⚠️ Git status failed: {result.get('error', 'Unknown error')}"
@@ -163,7 +169,8 @@ def git_status(ctx: ToolContext, path: str = ".") -> str:
     if not output:
         return "Working directory clean"
 
-    return f"Git status:\n{output}"
+    location = repo_path if repo_path is not None else "agent sandbox"
+    return f"Git status [{location}]:\n{output}"
 
 
 def git_diff(ctx: ToolContext, path: str = ".", staged: bool = False, repo_path: Optional[str] = None) -> str:
@@ -241,7 +248,7 @@ def git_log(ctx: ToolContext, path: str = ".", count: int = 10, repo_path: Optio
     return f"Git log ({count} most recent, {ref}) [{location}]:\n{output}"
 
 
-def git_add(ctx: ToolContext, files: List[str], path: str = ".") -> str:
+def git_add(ctx: ToolContext, files: List[str], path: str = ".", repo_path: Optional[str] = None) -> str:
     """
     Stage files for commit.
 
@@ -249,6 +256,7 @@ def git_add(ctx: ToolContext, files: List[str], path: str = ".") -> str:
         ctx: Tool context
         files: List of file paths to stage
         path: Repository root
+        repo_path: Optional absolute path to an external git repository.
 
     Returns:
         Result message
@@ -256,7 +264,11 @@ def git_add(ctx: ToolContext, files: List[str], path: str = ".") -> str:
     if not files:
         return "⚠️ No files specified"
 
-    result = _run_git(ctx, ["add"] + files, cwd=path)
+    if repo_path is not None:
+        ctx.validate_extended_path(repo_path, require_write=True)
+        result = _run_git_external(repo_path, ["add"] + files)
+    else:
+        result = _run_git(ctx, ["add"] + files, cwd=path)
 
     if not result["success"]:
         return f"⚠️ Git add failed: {result.get('error', 'Unknown error')}"
@@ -264,7 +276,7 @@ def git_add(ctx: ToolContext, files: List[str], path: str = ".") -> str:
     return f"Staged {len(files)} file(s)"
 
 
-def git_commit(ctx: ToolContext, message: str, path: str = ".") -> str:
+def git_commit(ctx: ToolContext, message: str, path: str = ".", repo_path: Optional[str] = None) -> str:
     """
     Create a git commit.
 
@@ -280,6 +292,7 @@ def git_commit(ctx: ToolContext, message: str, path: str = ".") -> str:
         ctx: Tool context
         message: Conventional Commits message (type(scope): description)
         path: Repository root
+        repo_path: Optional absolute path to an external git repository.
 
     Returns:
         Result message
@@ -294,7 +307,11 @@ def git_commit(ctx: ToolContext, message: str, path: str = ".") -> str:
             f"Got: {message!r}"
         )
 
-    result = _run_git(ctx, ["commit", "-m", message], cwd=path)
+    if repo_path is not None:
+        ctx.validate_extended_path(repo_path, require_write=True)
+        result = _run_git_external(repo_path, ["commit", "-m", message])
+    else:
+        result = _run_git(ctx, ["commit", "-m", message], cwd=path)
 
     if not result["success"]:
         error = result.get("error", "") or ""
@@ -387,7 +404,7 @@ def git_checkout(ctx: ToolContext, branch: str, create: bool = False, path: str 
     return result["output"] or f"Switched to branch '{branch}'"
 
 
-def git_merge(ctx: ToolContext, branch: str, no_ff: bool = False, path: str = ".") -> str:
+def git_merge(ctx: ToolContext, branch: str, no_ff: bool = False, path: str = ".", repo_path: Optional[str] = None) -> str:
     """
     Merge a branch into the current branch.
 
@@ -396,6 +413,7 @@ def git_merge(ctx: ToolContext, branch: str, no_ff: bool = False, path: str = ".
         branch: Branch name to merge
         no_ff: Use --no-ff to always create a merge commit
         path: Repository root
+        repo_path: Optional absolute path to an external git repository.
 
     Returns:
         Result message (includes conflict details if merge failed)
@@ -405,7 +423,11 @@ def git_merge(ctx: ToolContext, branch: str, no_ff: bool = False, path: str = ".
         args.append("--no-ff")
     args.append(branch)
 
-    result = _run_git(ctx, args, cwd=path)
+    if repo_path is not None:
+        ctx.validate_extended_path(repo_path, require_write=True)
+        result = _run_git_external(repo_path, args)
+    else:
+        result = _run_git(ctx, args, cwd=path)
 
     if not result["success"]:
         output = result.get("output", "") or ""
@@ -420,7 +442,7 @@ def git_merge(ctx: ToolContext, branch: str, no_ff: bool = False, path: str = ".
     return result["output"] or f"Merged branch '{branch}'"
 
 
-def git_tag(ctx: ToolContext, name: str, message: Optional[str] = None, path: str = ".") -> str:
+def git_tag(ctx: ToolContext, name: str, message: Optional[str] = None, path: str = ".", repo_path: Optional[str] = None) -> str:
     """
     Create a git tag on the current commit.
 
@@ -429,6 +451,7 @@ def git_tag(ctx: ToolContext, name: str, message: Optional[str] = None, path: st
         name: Tag name (e.g. 'milestone-v1', 'before-cleanup-20260327')
         message: If provided, creates an annotated tag with this message
         path: Repository root
+        repo_path: Optional absolute path to an external git repository.
 
     Returns:
         Result message
@@ -438,7 +461,11 @@ def git_tag(ctx: ToolContext, name: str, message: Optional[str] = None, path: st
     else:
         args = ["tag", name]
 
-    result = _run_git(ctx, args, cwd=path)
+    if repo_path is not None:
+        ctx.validate_extended_path(repo_path, require_write=True)
+        result = _run_git_external(repo_path, args)
+    else:
+        result = _run_git(ctx, args, cwd=path)
 
     if not result["success"]:
         return f"⚠️ Git tag failed: {result.get('error', 'Unknown error')}"
@@ -492,7 +519,7 @@ def git_reset(
     return result["output"] or f"Reset to {ref}"
 
 
-def git_snapshot(ctx: ToolContext, path: str = ".") -> str:
+def git_snapshot(ctx: ToolContext, path: str = ".", repo_path: Optional[str] = None) -> str:
     """
     Quick snapshot: stage all changes and commit with a UTC timestamp message.
 
@@ -504,6 +531,7 @@ def git_snapshot(ctx: ToolContext, path: str = ".") -> str:
     Args:
         ctx: Tool context
         path: Repository root
+        repo_path: Optional absolute path to an external git repository.
 
     Returns:
         Commit hash and message, or 'nothing to commit' if no changes
@@ -513,11 +541,17 @@ def git_snapshot(ctx: ToolContext, path: str = ".") -> str:
     timestamp = _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     message = f"snapshot: {timestamp}"
 
-    add_result = _run_git(ctx, ["add", "-A"], cwd=path)
+    if repo_path is not None:
+        ctx.validate_extended_path(repo_path, require_write=True)
+        add_result = _run_git_external(repo_path, ["add", "-A"])
+        commit_result = _run_git_external(repo_path, ["commit", "-m", message]) if add_result["success"] else add_result
+    else:
+        add_result = _run_git(ctx, ["add", "-A"], cwd=path)
+        commit_result = _run_git(ctx, ["commit", "-m", message], cwd=path) if add_result["success"] else add_result
+
     if not add_result["success"]:
         return f"⚠️ Failed to stage files: {add_result.get('error', 'Unknown error')}"
 
-    commit_result = _run_git(ctx, ["commit", "-m", message], cwd=path)
     if not commit_result["success"]:
         combined = (commit_result.get("output") or "") + (commit_result.get("error") or "")
         if "nothing to commit" in combined.lower():
@@ -527,14 +561,52 @@ def git_snapshot(ctx: ToolContext, path: str = ".") -> str:
     return f"Snapshot created: {message}\n{commit_result['output']}"
 
 
+def git_push(ctx: ToolContext, repo_path: str, remote: str = "origin", branch: Optional[str] = None) -> str:
+    """
+    Push local commits to a remote repository.
+
+    Args:
+        ctx: Tool context
+        repo_path: Absolute path to the git repository to push from.
+        remote: Remote name (default: origin)
+        branch: Branch to push (default: current branch)
+
+    Returns:
+        Result message
+    """
+    ctx.validate_extended_path(repo_path, require_write=True)
+
+    args = ["push", remote]
+    if branch:
+        args.append(branch)
+
+    result = _run_git_external(repo_path, args, timeout=55)
+
+    if not result["success"]:
+        error = result.get("error", "") or ""
+        return f"⚠️ Git push failed: {error}"
+
+    output = result.get("output", "") or result.get("error", "") or ""
+    return f"Pushed to {remote}" + (f"/{branch}" if branch else "") + (f"\n{output}" if output else "")
+
+
 def get_tools() -> List[ToolEntry]:
     """Export git tools for registry."""
+    _REPO_PATH_DESC = (
+        "Absolute path to an external git repository "
+        "(e.g. 'C:\\\\Users\\\\mike\\\\Documents\\\\dpc-messenger'). "
+        "When provided, operates there instead of the agent sandbox."
+    )
     return [
+        # --- Tier 1: read-only (default_enabled=True) ---
         ToolEntry(
             name="git_status",
             schema={
                 "name": "git_status",
-                "description": "Check git status of a directory within the agent sandbox",
+                "description": (
+                    "Check git status (read-only). Defaults to agent sandbox. "
+                    "Provide repo_path (absolute path) to inspect an external repository."
+                ),
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -542,6 +614,10 @@ def get_tools() -> List[ToolEntry]:
                             "type": "string",
                             "description": "Directory path (relative to agent root)",
                             "default": "."
+                        },
+                        "repo_path": {
+                            "type": "string",
+                            "description": _REPO_PATH_DESC,
                         }
                     },
                     "required": []
@@ -549,7 +625,7 @@ def get_tools() -> List[ToolEntry]:
             },
             handler=git_status,
             timeout_sec=30,
-            default_enabled=False,
+            default_enabled=True,
         ),
 
         ToolEntry(
@@ -557,7 +633,7 @@ def get_tools() -> List[ToolEntry]:
             schema={
                 "name": "git_diff",
                 "description": (
-                    "View git diff of changes. Defaults to agent sandbox. "
+                    "View git diff of changes (read-only). Defaults to agent sandbox. "
                     "Provide repo_path (absolute path) to inspect an external repository."
                 ),
                 "parameters": {
@@ -575,11 +651,7 @@ def get_tools() -> List[ToolEntry]:
                         },
                         "repo_path": {
                             "type": "string",
-                            "description": (
-                                "Absolute path to an external git repository "
-                                "(e.g. 'C:\\\\Users\\\\mike\\\\Documents\\\\dpc-messenger'). "
-                                "When provided, runs git diff there instead of the agent sandbox."
-                            )
+                            "description": _REPO_PATH_DESC,
                         }
                     },
                     "required": []
@@ -587,7 +659,7 @@ def get_tools() -> List[ToolEntry]:
             },
             handler=git_diff,
             timeout_sec=30,
-            default_enabled=False,
+            default_enabled=True,
         ),
 
         ToolEntry(
@@ -595,10 +667,9 @@ def get_tools() -> List[ToolEntry]:
             schema={
                 "name": "git_log",
                 "description": (
-                    "View git commit history with full subject and body. "
+                    "View git commit history with full subject and body (read-only). "
                     "Defaults to agent sandbox. "
-                    "Provide repo_path (absolute path) to inspect an external repository "
-                    "such as the main dpc-messenger repo."
+                    "Provide repo_path (absolute path) to inspect an external repository."
                 ),
                 "parameters": {
                     "type": "object",
@@ -617,18 +688,13 @@ def get_tools() -> List[ToolEntry]:
                         },
                         "repo_path": {
                             "type": "string",
-                            "description": (
-                                "Absolute path to an external git repository "
-                                "(e.g. 'C:\\\\Users\\\\mike\\\\Documents\\\\dpc-messenger'). "
-                                "When provided, queries history there instead of the agent sandbox."
-                            )
+                            "description": _REPO_PATH_DESC,
                         },
                         "branch": {
                             "type": "string",
                             "description": (
                                 "Branch or ref to query (e.g. 'main', 'refactor/grand', 'HEAD~5'). "
-                                "Reads the currently checked-out branch when omitted. "
-                                "Use this instead of git_checkout to inspect any branch without switching."
+                                "Reads the currently checked-out branch when omitted."
                             )
                         }
                     },
@@ -637,14 +703,47 @@ def get_tools() -> List[ToolEntry]:
             },
             handler=git_log,
             timeout_sec=30,
-            default_enabled=False,
+            default_enabled=True,
         ),
 
+        ToolEntry(
+            name="git_branch",
+            schema={
+                "name": "git_branch",
+                "description": (
+                    "List git branches (read-only). Defaults to agent sandbox. "
+                    "Provide repo_path (absolute path) to inspect an external repository."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "path": {
+                            "type": "string",
+                            "description": "Repository root (used only for sandbox mode)",
+                            "default": "."
+                        },
+                        "repo_path": {
+                            "type": "string",
+                            "description": _REPO_PATH_DESC,
+                        }
+                    },
+                    "required": []
+                }
+            },
+            handler=git_branch,
+            timeout_sec=30,
+            default_enabled=True,
+        ),
+
+        # --- Tier 3: write operations (default_enabled=False) ---
         ToolEntry(
             name="git_add",
             schema={
                 "name": "git_add",
-                "description": "Stage files for commit within the agent sandbox",
+                "description": (
+                    "Stage files for commit. Defaults to agent sandbox. "
+                    "Provide repo_path (absolute path) to stage in an external repository."
+                ),
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -657,6 +756,10 @@ def get_tools() -> List[ToolEntry]:
                             "type": "string",
                             "description": "Repository root",
                             "default": "."
+                        },
+                        "repo_path": {
+                            "type": "string",
+                            "description": _REPO_PATH_DESC,
                         }
                     },
                     "required": ["files"]
@@ -672,13 +775,10 @@ def get_tools() -> List[ToolEntry]:
             schema={
                 "name": "git_commit",
                 "description": (
-                    "Create a git commit within the agent sandbox. "
+                    "Create a git commit. Defaults to agent sandbox. "
+                    "Provide repo_path (absolute path) to commit in an external repository. "
                     "REQUIRED: message must follow Conventional Commits — "
-                    "type(optional-scope): description — "
-                    "where type is one of: feat, fix, docs, style, refactor, perf, test, chore, build, ci, revert. "
-                    "Examples: 'feat(knowledge): add TurboQuant complexity analysis', "
-                    "'chore(identity): refine core values after security audit', "
-                    "'refactor: consolidate knowledge files by topic'."
+                    "type(optional-scope): description."
                 ),
                 "parameters": {
                     "type": "object",
@@ -694,45 +794,16 @@ def get_tools() -> List[ToolEntry]:
                             "type": "string",
                             "description": "Repository root",
                             "default": "."
+                        },
+                        "repo_path": {
+                            "type": "string",
+                            "description": _REPO_PATH_DESC,
                         }
                     },
                     "required": ["message"]
                 }
             },
             handler=git_commit,
-            timeout_sec=30,
-            default_enabled=False,
-        ),
-
-        ToolEntry(
-            name="git_branch",
-            schema={
-                "name": "git_branch",
-                "description": (
-                    "List git branches. Defaults to agent sandbox. "
-                    "Provide repo_path (absolute path) to inspect an external repository."
-                ),
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "path": {
-                            "type": "string",
-                            "description": "Repository root (used only for sandbox mode)",
-                            "default": "."
-                        },
-                        "repo_path": {
-                            "type": "string",
-                            "description": (
-                                "Absolute path to an external git repository "
-                                "(e.g. 'C:\\\\Users\\\\mike\\\\Documents\\\\dpc-messenger'). "
-                                "When provided, lists branches there instead of the agent sandbox."
-                            )
-                        }
-                    },
-                    "required": []
-                }
-            },
-            handler=git_branch,
             timeout_sec=30,
             default_enabled=False,
         ),
@@ -787,11 +858,7 @@ def get_tools() -> List[ToolEntry]:
                         },
                         "repo_path": {
                             "type": "string",
-                            "description": (
-                                "Absolute path to an external git repository "
-                                "(e.g. 'C:\\\\Users\\\\mike\\\\Documents\\\\dpc-messenger'). "
-                                "When provided, switches branches there instead of the agent sandbox."
-                            )
+                            "description": _REPO_PATH_DESC,
                         }
                     },
                     "required": ["branch"]
@@ -806,7 +873,10 @@ def get_tools() -> List[ToolEntry]:
             name="git_merge",
             schema={
                 "name": "git_merge",
-                "description": "Merge a branch into the current branch within the agent sandbox",
+                "description": (
+                    "Merge a branch into the current branch. Defaults to agent sandbox. "
+                    "Provide repo_path (absolute path) to merge in an external repository."
+                ),
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -823,6 +893,10 @@ def get_tools() -> List[ToolEntry]:
                             "type": "string",
                             "description": "Repository root",
                             "default": "."
+                        },
+                        "repo_path": {
+                            "type": "string",
+                            "description": _REPO_PATH_DESC,
                         }
                     },
                     "required": ["branch"]
@@ -837,7 +911,10 @@ def get_tools() -> List[ToolEntry]:
             name="git_tag",
             schema={
                 "name": "git_tag",
-                "description": "Create a git tag on the current commit within the agent sandbox",
+                "description": (
+                    "Create a git tag on the current commit. Defaults to agent sandbox. "
+                    "Provide repo_path (absolute path) to tag in an external repository."
+                ),
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -853,6 +930,10 @@ def get_tools() -> List[ToolEntry]:
                             "type": "string",
                             "description": "Repository root",
                             "default": "."
+                        },
+                        "repo_path": {
+                            "type": "string",
+                            "description": _REPO_PATH_DESC,
                         }
                     },
                     "required": ["name"]
@@ -868,7 +949,7 @@ def get_tools() -> List[ToolEntry]:
             schema={
                 "name": "git_reset",
                 "description": (
-                    "Reset files or commits within the agent sandbox. "
+                    "Reset files or commits within the agent sandbox (sandbox-only). "
                     "Safest with 'files' (restores specific files). "
                     "hard=True discards all uncommitted changes — use with care."
                 ),
@@ -909,9 +990,9 @@ def get_tools() -> List[ToolEntry]:
             schema={
                 "name": "git_snapshot",
                 "description": (
-                    "Quick save: stage all changes and commit with a UTC timestamp message "
-                    "(e.g. 'snapshot: 2026-03-27T14:30:00Z'). "
-                    "Use before experiments or restructuring when you want a save point without crafting a message."
+                    "Quick save: stage all changes and commit with a UTC timestamp message. "
+                    "Defaults to agent sandbox. "
+                    "Provide repo_path (absolute path) for an external repository."
                 ),
                 "parameters": {
                     "type": "object",
@@ -920,6 +1001,10 @@ def get_tools() -> List[ToolEntry]:
                             "type": "string",
                             "description": "Repository root",
                             "default": "."
+                        },
+                        "repo_path": {
+                            "type": "string",
+                            "description": _REPO_PATH_DESC,
                         }
                     },
                     "required": []
@@ -927,6 +1012,39 @@ def get_tools() -> List[ToolEntry]:
             },
             handler=git_snapshot,
             timeout_sec=30,
+            default_enabled=False,
+        ),
+
+        ToolEntry(
+            name="git_push",
+            schema={
+                "name": "git_push",
+                "description": (
+                    "Push local commits to a remote repository (e.g. GitHub). "
+                    "Requires repo_path — pushing from sandbox is not supported."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "repo_path": {
+                            "type": "string",
+                            "description": _REPO_PATH_DESC,
+                        },
+                        "remote": {
+                            "type": "string",
+                            "description": "Remote name (default: origin)",
+                            "default": "origin"
+                        },
+                        "branch": {
+                            "type": "string",
+                            "description": "Branch to push (default: current branch)"
+                        }
+                    },
+                    "required": ["repo_path"]
+                }
+            },
+            handler=git_push,
+            timeout_sec=60,
             default_enabled=False,
         ),
     ]
