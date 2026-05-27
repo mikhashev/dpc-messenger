@@ -6423,6 +6423,7 @@ class CoreService:
                     "tokens_after_last_response_at": token_stats.get("tokens_after_last_response_at"),
                     "history_tokens": token_stats.get("history_tokens", 0),
                     "tokens_limit": token_stats.get("tokens_limit", 128000),
+                    "context_breakdown": token_stats.get("context_breakdown"),
                 })
 
             logger.info("CC response injected into %s (%d chars)", conversation_id, len(text))

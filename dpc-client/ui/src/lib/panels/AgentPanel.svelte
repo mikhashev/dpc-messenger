@@ -377,7 +377,7 @@
   $effect(() => {
     if ($agentChatMessage) {
       const { conversation_id, message_id, content, sender_name, sender_node_id, timestamp, role, thinking, streaming_raw,
-              msg_index, tokens_after_last_response, tokens_after_last_response_at, history_tokens, tokens_limit } = $agentChatMessage;
+              msg_index, tokens_after_last_response, tokens_after_last_response_at, history_tokens, tokens_limit, context_breakdown: cb } = $agentChatMessage;
 
       untrack(() => {
         chatHistories.update(map => {
@@ -408,6 +408,7 @@
             historyTokens: history_tokens || 0,
             tokensAfterLastResponse: tokens_after_last_response,
             tokensAfterLastResponseAt: tokens_after_last_response_at ?? null,
+            contextBreakdown: cb ?? null,
           });
         }
 
