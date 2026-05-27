@@ -6867,8 +6867,8 @@ class CoreService:
                     if mgr:
                         state = mgr.get_session_state(conversation_id)
                         response_payload["context_breakdown"] = state.get("context_breakdown")
-                except Exception:
-                    pass
+                except Exception as bd_err:
+                    logger.warning("Context breakdown unavailable for %s: %s", conversation_id, bd_err)
 
         except Exception as e:
             logger.error("Error during inference: %s", e, exc_info=True)
