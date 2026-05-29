@@ -171,6 +171,7 @@ class DpcAgent:
         # can propagate it into task data for automatic result delivery.
         reply_telegram_chat_id: Optional[str] = None,
         message_source: Optional[str] = None,
+        chat_context: Optional[Dict[str, Any]] = None,
     ) -> str:
         """
         Process a user message and return response.
@@ -201,6 +202,8 @@ class DpcAgent:
             "image_mime": image_mime,
             "image_caption": image_caption,
         }
+        if chat_context:
+            task["chat_context"] = chat_context
 
         # Build LLM context — pass prior conversation turns (all except current user msg,
         # which was added to the monitor just before this call, so it's the last entry)

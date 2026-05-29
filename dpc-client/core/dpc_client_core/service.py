@@ -4690,10 +4690,33 @@ class CoreService:
 
             prompt = f"[{sender_name}]: {text}"
 
+            chat_context = None
+            group_meta = self.group_manager.get_group(group_id)
+            if group_meta:
+                participants = []
+                for nid in group_meta.members:
+                    if nid == self.p2p_manager.node_id:
+                        uname = self.p2p_manager.get_display_name() or "User"
+                        participants.append(f"{uname} (User)")
+                    else:
+                        pname = self.peer_metadata.get(nid, {}).get("name", nid[:16])
+                        participants.append(f"{pname} (peer)")
+                for nid, names in group_meta.agent_names.items():
+                    for aid, dname in names.items():
+                        participants.append(f"{dname} (agent)")
+                chat_context = {
+                    "chat_type": "group",
+                    "chat_name": group_meta.name,
+                    "chat_id": group_id,
+                    "description": group_meta.topic or "",
+                    "participants": participants,
+                }
+
             response = await manager.process_message(
                 message=prompt,
                 conversation_id=group_id,
                 sender_name=sender_name,
+                chat_context=chat_context,
             )
             if response:
                 agent_name = self._get_agent_display_name(agent_id)
