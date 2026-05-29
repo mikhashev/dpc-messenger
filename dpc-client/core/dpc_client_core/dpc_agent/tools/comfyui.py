@@ -19,8 +19,8 @@ from .registry import ToolEntry, ToolContext
 log = logging.getLogger(__name__)
 
 DEFAULT_API_URL = "http://127.0.0.1:8188"
-POLL_INTERVAL_SEC = 2
-POLL_MAX_ITERATIONS = 60
+POLL_INTERVAL_SEC = 3
+POLL_MAX_ITERATIONS = 120
 
 _client: Optional[httpx.AsyncClient] = None
 _client_lock = threading.Lock()
@@ -122,24 +122,26 @@ def comfyui_check(ctx: ToolContext, prompt_id: str, api_url: str = DEFAULT_API_U
     return future.result(timeout=15)
 
 
-def comfyui_wait(ctx: ToolContext, prompt_id: str, api_url: str = DEFAULT_API_URL) -> str:
-    """Blocking wait for workflow completion (polls every 2s, max 120s)."""
+def comfyui_wait(ctx: ToolContext, prompt_id: str, timeout: int = 300, api_url: str = DEFAULT_API_URL) -> str:
+    """Blocking wait for workflow completion. Agent controls timeout."""
     loop = ctx.agent_event_loop
     if loop is None:
         return "Error: no event loop available (agent_event_loop not set)."
+    timeout = max(30, min(timeout, 600))
+    max_iters = timeout // POLL_INTERVAL_SEC
 
     async def _wait():
         try:
             client = _get_client()
-            for i in range(POLL_MAX_ITERATIONS):
+            for i in range(max_iters):
                 resp = await client.get(f"{api_url.rstrip('/')}/history/{prompt_id}")
                 resp.raise_for_status()
                 data = resp.json()
                 if prompt_id not in data:
-                    if i < POLL_MAX_ITERATIONS - 1:
+                    if i < max_iters - 1:
                         await asyncio.sleep(POLL_INTERVAL_SEC)
                         continue
-                    return "Error: timeout waiting for ComfyUI (120s)."
+                    return f"Error: timeout waiting for ComfyUI ({timeout}s)."
 
                 entry = data[prompt_id]
                 status_info = entry.get("status", {})
@@ -165,7 +167,7 @@ def comfyui_wait(ctx: ToolContext, prompt_id: str, api_url: str = DEFAULT_API_UR
             return f"Error: {e}"
 
     future = asyncio.run_coroutine_threadsafe(_wait(), loop)
-    return future.result(timeout=130)
+    return future.result(timeout=timeout + 10)
 
 
 def get_tools() -> List[ToolEntry]:
@@ -235,7 +237,8 @@ def get_tools() -> List[ToolEntry]:
                 "name": "comfyui_wait",
                 "description": (
                     "Blocking wait for ComfyUI workflow completion. "
-                    "Polls every 2s, max 120s. Returns output filenames on success. "
+                    "Returns output filenames on success. "
+                    "Use timeout parameter to control wait time (default 300s, max 600s). "
                     "Use comfyui_check for non-blocking status checks."
                 ),
                 "parameters": {
@@ -244,6 +247,10 @@ def get_tools() -> List[ToolEntry]:
                         "prompt_id": {
                             "type": "string",
                             "description": "The prompt_id returned by comfyui_submit.",
+                        },
+                        "timeout": {
+                            "type": "integer",
+                            "description": "Max seconds to wait (default 300, min 30, max 600). Use 180 for warm start, 420 for cold/heavy tasks.",
                         },
                         "api_url": {
                             "type": "string",
@@ -255,7 +262,7 @@ def get_tools() -> List[ToolEntry]:
             },
             handler=comfyui_wait,
             is_code_tool=False,
-            timeout_sec=130,
+            timeout_sec=610,
             is_core=False,
             default_enabled=False,
         ),
