@@ -57,7 +57,8 @@ def comfyui_submit(ctx: ToolContext, workflow_json: dict, api_url: str = DEFAULT
         return "Error: no event loop available (agent_event_loop not set)."
 
     async def _submit():
-        payload: Dict[str, Any] = {"prompt": workflow_json}
+        prompt = {str(k): v for k, v in workflow_json.items()}
+        payload: Dict[str, Any] = {"prompt": prompt}
         try:
             client = _get_client()
             resp = await client.post(f"{api_url.rstrip('/')}/prompt", json=payload)
