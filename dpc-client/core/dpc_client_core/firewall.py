@@ -394,10 +394,11 @@ class ContextFirewall:
 
         # Check read_write paths first (they also allow read)
         for allowed_path in rw_paths:
+            prefix = allowed_path.rstrip(os.sep).rstrip("/")
             if allowed_path and (
                 normalized == allowed_path
-                or normalized.startswith(allowed_path + os.sep)
-                or normalized.startswith(allowed_path + "/")
+                or normalized.startswith(prefix + os.sep)
+                or normalized.startswith(prefix + "/")
             ):
                 return True
 
@@ -407,10 +408,11 @@ class ContextFirewall:
 
         # Check read_only paths
         for allowed_path in ro_paths:
+            prefix = allowed_path.rstrip(os.sep).rstrip("/")
             if allowed_path and (
                 normalized == allowed_path
-                or normalized.startswith(allowed_path + os.sep)
-                or normalized.startswith(allowed_path + "/")
+                or normalized.startswith(prefix + os.sep)
+                or normalized.startswith(prefix + "/")
             ):
                 return True
 
