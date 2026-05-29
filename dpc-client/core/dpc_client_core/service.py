@@ -7400,8 +7400,8 @@ class CoreService:
         for agent_id in local_agents:
             agent_dir = conversations_dir / agent_id
             if not agent_dir.exists():
-                logger.warning("Group sleep: skipping %s — dir %s not found", agent_id, agent_dir)
-                continue
+                agent_dir.mkdir(parents=True, exist_ok=True)
+                logger.info("Group sleep: created conversations dir for %s (group-only agent)", agent_id)
 
             agent_config = load_agent_config(agent_id)
             sleep_provider = agent_config.get("sleep_provider_alias") or None
