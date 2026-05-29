@@ -198,6 +198,8 @@ def get_embedding_provider(model_name: str = "BAAI/bge-m3", **kwargs) -> "Embedd
 class EmbeddingProvider:
     """Lazy-loading embedding provider. BGE-M3 via sentence-transformers + PyTorch."""
 
+    _gpu_semaphore = threading.Semaphore(1)
+
     def __init__(self, model_name: str = "BAAI/bge-m3",
                  device: Optional[str] = None, max_tokens: int = 4096,
                  local_files_only: bool = False):
@@ -248,11 +250,13 @@ class EmbeddingProvider:
 
     def embed(self, text: str) -> List[float]:
         self._load_model()
-        return self._model.encode(text, normalize_embeddings=True).tolist()
+        with self._gpu_semaphore:
+            return self._model.encode(text, normalize_embeddings=True).tolist()
 
     def embed_batch(self, texts: List[str]) -> List[List[float]]:
         self._load_model()
-        return self._model.encode(texts, normalize_embeddings=True).tolist()
+        with self._gpu_semaphore:
+            return self._model.encode(texts, normalize_embeddings=True).tolist()
 
     @property
     def dimensions(self) -> int:
