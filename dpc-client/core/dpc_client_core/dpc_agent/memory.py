@@ -195,6 +195,59 @@ def get_embedding_provider(model_name: str = "BAAI/bge-m3", **kwargs) -> "Embedd
         return _singleton_providers[model_name]
 
 
+class _EmbeddingDiskCache:
+    """Content-addressed embedding cache shared across all agents.
+
+    Key: SHA256(text)[:16].  Value: float16 numpy vector on disk.
+    Location: ``~/.dpc/cache/embeddings/``.
+    """
+
+    def __init__(self, cache_dir: Optional[pathlib.Path] = None, dtype=None):
+        import numpy as _np
+        self._np = _np
+        self._dtype = dtype or _np.float16
+        if cache_dir is None:
+            cache_dir = pathlib.Path(os.environ.get("DPC_HOME", pathlib.Path.home() / ".dpc")) / "cache" / "embeddings"
+        self._dir = cache_dir
+        self._dir.mkdir(parents=True, exist_ok=True)
+
+    def _key(self, text: str) -> str:
+        import hashlib
+        return hashlib.sha256(text.encode()).hexdigest()[:16]
+
+    def get(self, text: str):
+        path = self._dir / f"{self._key(text)}.bin"
+        if path.exists():
+            try:
+                return self._np.fromfile(path, dtype=self._dtype)
+            except Exception:
+                return None
+        return None
+
+    def put(self, text: str, vector) -> None:
+        path = self._dir / f"{self._key(text)}.bin"
+        tmp = path.with_name(f"{self._key(text)}.{threading.get_ident()}.tmp")
+        try:
+            self._np.asarray(vector, dtype=self._dtype).tofile(tmp)
+            tmp.replace(path)
+        except Exception:
+            if tmp.exists():
+                tmp.unlink(missing_ok=True)
+
+
+_disk_cache: Optional["_EmbeddingDiskCache"] = None
+_disk_cache_lock = threading.Lock()
+
+
+def _get_disk_cache() -> "_EmbeddingDiskCache":
+    global _disk_cache
+    if _disk_cache is None:
+        with _disk_cache_lock:
+            if _disk_cache is None:
+                _disk_cache = _EmbeddingDiskCache()
+    return _disk_cache
+
+
 class EmbeddingProvider:
     """Lazy-loading embedding provider. BGE-M3 via sentence-transformers + PyTorch."""
 
@@ -250,13 +303,38 @@ class EmbeddingProvider:
 
     def embed(self, text: str) -> List[float]:
         self._load_model()
+        cache = _get_disk_cache()
+        cached = cache.get(text)
+        if cached is not None:
+            return cached.tolist()
         with self._gpu_semaphore:
-            return self._model.encode(text, normalize_embeddings=True).tolist()
+            result = self._model.encode(text, normalize_embeddings=True).tolist()
+        cache.put(text, result)
+        return result
 
     def embed_batch(self, texts: List[str]) -> List[List[float]]:
         self._load_model()
-        with self._gpu_semaphore:
-            return self._model.encode(texts, normalize_embeddings=True).tolist()
+        import numpy as np
+        cache = _get_disk_cache()
+        results: List[Optional[List[float]]] = [None] * len(texts)
+        misses: List[tuple] = []
+        for i, text in enumerate(texts):
+            cached = cache.get(text)
+            if cached is not None:
+                results[i] = cached.tolist()
+            else:
+                misses.append((i, text))
+        if misses:
+            miss_texts = [t for _, t in misses]
+            with self._gpu_semaphore:
+                vectors = self._model.encode(miss_texts, normalize_embeddings=True).tolist()
+            for (idx, text), vec in zip(misses, vectors):
+                cache.put(text, vec)
+                results[idx] = vec
+        hits = len(texts) - len(misses)
+        if hits > 0:
+            log.debug("Embedding cache: %d hits, %d misses out of %d texts", hits, len(misses), len(texts))
+        return results
 
     @property
     def dimensions(self) -> int:
