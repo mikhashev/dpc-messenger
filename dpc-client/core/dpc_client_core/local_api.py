@@ -115,6 +115,7 @@ ALLOWED_COMMANDS: frozenset = frozenset({
     "leave_group",
     "delete_group",
     "get_groups",
+    "update_group_topic",
     # Knowledge
     "vote_knowledge_commit",
     # Telegram

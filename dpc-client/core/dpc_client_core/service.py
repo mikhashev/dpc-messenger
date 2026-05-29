@@ -4972,6 +4972,23 @@ class CoreService:
             logger.error("Error removing group member: %s", e, exc_info=True)
             return {"status": "error", "message": str(e)}
 
+    async def update_group_topic(self, group_id: str, topic: str) -> Dict[str, Any]:
+        """Update a group's topic/description. Only the creator can update."""
+        group = self.group_manager.get_group(group_id)
+        if not group:
+            return {"status": "error", "message": f"Group {group_id} not found"}
+        if group.created_by != self.p2p_manager.node_id:
+            return {"status": "error", "message": "Only the group creator can update the topic"}
+        if len(topic) > 15000:
+            return {"status": "error", "message": "Topic too long (max 15000 chars)"}
+        updated = self.group_manager.update_topic(group_id, topic)
+        if not updated:
+            return {"status": "error", "message": "Failed to update topic"}
+        await self.local_api.broadcast_event("group_updated", {
+            "group_id": group_id, "topic": topic,
+        })
+        return {"status": "success", "topic": topic}
+
     async def leave_group(self, group_id: str) -> Dict[str, Any]:
         """Leave a group and notify remaining members."""
         try:

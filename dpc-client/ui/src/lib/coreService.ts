@@ -1712,6 +1712,10 @@ export async function setConversationPersistHistory(conversationId: string, pers
     });
 }
 
+export async function updateGroupTopic(groupId: string, topic: string): Promise<any> {
+    return sendCommand('update_group_topic', { group_id: groupId, topic });
+}
+
 export async function deleteConversation(conversationId: string): Promise<any> {
     return sendCommand('delete_conversation', {
         conversation_id: conversationId
