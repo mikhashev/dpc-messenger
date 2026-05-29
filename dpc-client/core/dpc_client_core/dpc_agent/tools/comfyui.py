@@ -8,7 +8,9 @@ and retrieving results. Transport layer for Phase 1 Forge spike.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
+import pathlib
 import threading
 from typing import Any, Dict, List, Optional
 
@@ -50,15 +52,39 @@ def _collect_outputs(entry: dict) -> List[str]:
     return outputs
 
 
-def comfyui_submit(ctx: ToolContext, workflow_json: dict, api_url: str = DEFAULT_API_URL) -> str:
-    """Submit a ComfyUI workflow JSON for queued execution."""
+def comfyui_submit(ctx: ToolContext, workflow: str = "", prompt: str = "", workflow_json: dict = None, api_url: str = DEFAULT_API_URL) -> str:
+    """Submit a ComfyUI workflow. Pass workflow filename + prompt, or raw workflow_json."""
     loop = ctx.agent_event_loop
     if loop is None:
         return "Error: no event loop available (agent_event_loop not set)."
 
+    wf_data = workflow_json if not workflow else None
+    if workflow:
+        wf_dir = pathlib.Path(ctx.agent_root) / "comfy-ui-workflows" if ctx.agent_root else None
+        if not wf_dir:
+            return "Error: agent_root not set, cannot resolve workflow path."
+        wf_path = wf_dir / workflow
+        if not wf_path.exists():
+            return f"Error: workflow file not found: {wf_path}"
+        try:
+            wf_data = json.loads(wf_path.read_text(encoding="utf-8"))
+        except Exception as e:
+            return f"Error reading workflow: {e}"
+
+    if not wf_data:
+        return "Error: provide either workflow (filename) or workflow_json (dict)."
+
+    if prompt:
+        for node in wf_data.values():
+            if isinstance(node, dict) and node.get("class_type") == "CLIPTextEncode":
+                inputs = node.get("inputs", {})
+                if inputs.get("text") and "negative" not in str(node.get("_meta", {}).get("title", "")).lower():
+                    inputs["text"] = prompt
+                    break
+
     async def _submit():
-        prompt = {str(k): v for k, v in workflow_json.items()}
-        payload: Dict[str, Any] = {"prompt": prompt}
+        wf_str_keys = {str(k): v for k, v in wf_data.items()}
+        payload: Dict[str, Any] = {"prompt": wf_str_keys}
         try:
             client = _get_client()
             resp = await client.post(f"{api_url.rstrip('/')}/prompt", json=payload)
@@ -170,6 +196,30 @@ def comfyui_wait(ctx: ToolContext, prompt_id: str, timeout: int = 300, api_url: 
     return future.result(timeout=timeout + 10)
 
 
+def comfyui_queue_status(ctx: ToolContext, api_url: str = DEFAULT_API_URL) -> str:
+    """Check ComfyUI queue status — how many tasks pending/running."""
+    loop = ctx.agent_event_loop
+    if loop is None:
+        return "Error: no event loop available."
+
+    async def _status():
+        try:
+            client = _get_client()
+            resp = await client.get(f"{api_url.rstrip('/')}/queue")
+            resp.raise_for_status()
+            data = resp.json()
+            running = len(data.get("queue_running", []))
+            pending = len(data.get("queue_pending", []))
+            return f"running={running}, pending={pending}"
+        except httpx.ConnectError:
+            return f"Error: cannot connect to ComfyUI at {api_url}."
+        except Exception as e:
+            return f"Error: {e}"
+
+    future = asyncio.run_coroutine_threadsafe(_status(), loop)
+    return future.result(timeout=10)
+
+
 def get_tools() -> List[ToolEntry]:
     return [
         ToolEntry(
@@ -177,22 +227,32 @@ def get_tools() -> List[ToolEntry]:
             schema={
                 "name": "comfyui_submit",
                 "description": (
-                    "Submit a ComfyUI workflow JSON to the local ComfyUI HTTP API. "
-                    "Returns a prompt_id for checking status. ComfyUI must be running."
+                    "Submit a ComfyUI workflow for generation. "
+                    "Preferred: pass workflow (filename from comfy-ui-workflows/) + prompt (text). "
+                    "Tool reads file, injects prompt into CLIPTextEncode node, submits to ComfyUI. "
+                    "Alternative: pass workflow_json directly (legacy, error-prone)."
                 ),
                 "parameters": {
                     "type": "object",
                     "properties": {
+                        "workflow": {
+                            "type": "string",
+                            "description": "Workflow JSON filename from comfy-ui-workflows/ dir (e.g. 'wan22_ti2v_5B.json').",
+                        },
+                        "prompt": {
+                            "type": "string",
+                            "description": "Text prompt to inject into the positive CLIPTextEncode node.",
+                        },
                         "workflow_json": {
                             "type": "object",
-                            "description": "ComfyUI workflow as a JSON object (node graph).",
+                            "description": "Raw ComfyUI workflow JSON (legacy — prefer workflow + prompt).",
                         },
                         "api_url": {
                             "type": "string",
                             "description": f"ComfyUI API URL (default: {DEFAULT_API_URL}).",
                         },
                     },
-                    "required": ["workflow_json"],
+                    "required": [],
                 },
             },
             handler=comfyui_submit,
@@ -263,6 +323,31 @@ def get_tools() -> List[ToolEntry]:
             handler=comfyui_wait,
             is_code_tool=False,
             timeout_sec=610,
+            is_core=False,
+            default_enabled=False,
+        ),
+        ToolEntry(
+            name="comfyui_queue_status",
+            schema={
+                "name": "comfyui_queue_status",
+                "description": (
+                    "Check ComfyUI queue status — running and pending task counts. "
+                    "Use before comfyui_submit to avoid OOM from concurrent generation."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "api_url": {
+                            "type": "string",
+                            "description": f"ComfyUI API URL (default: {DEFAULT_API_URL}).",
+                        },
+                    },
+                    "required": [],
+                },
+            },
+            handler=comfyui_queue_status,
+            is_code_tool=False,
+            timeout_sec=10,
             is_core=False,
             default_enabled=False,
         ),
