@@ -331,17 +331,21 @@ class DpcLlmAdapter:
         Returns:
             (response_message, usage_dict) tuple in Ouroboros format
         """
-        # Build text prompt from messages (for the text part)
-        prompt = self._messages_to_prompt(messages)
+        # Vision: only the current user message text, not full conversation history
+        prompt = self._extract_user_text(messages)
 
         try:
-            log.info(f"Using native vision support from provider '{provider.alias}'")
+            image_sizes = [len(img.get("base64", "")) for img in images]
+            log.info(
+                f"Vision request to '{provider.alias}': prompt={len(prompt)} chars, "
+                f"images={len(images)} ({image_sizes} base64 chars)"
+            )
 
-            # Call provider's generate_with_vision method
             response = await provider.generate_with_vision(
                 prompt=prompt,
                 images=images,
             )
+            log.info(f"Vision response from '{provider.alias}': {len(response)} chars")
 
             # Detect silent vision failure: some Anthropic-compatible endpoints (e.g. Z.AI)
             # accept base64 images, convert them to CDN URLs internally, but the underlying
