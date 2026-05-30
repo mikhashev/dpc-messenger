@@ -1,5 +1,6 @@
 # dpc_client_core/providers/dpc_agent_provider.py
 
+import asyncio
 import logging
 from typing import Dict, Any, Optional, List, TYPE_CHECKING
 
@@ -57,6 +58,7 @@ class DpcAgentProvider(AIProvider):
         self._manager = None  # DEPRECATED: Single manager (backwards compatibility)
         self._managers: Dict[str, "DpcAgentManager"] = {}  # NEW: Multiple managers (one per agent)
         self._service = None  # Injected by LLMManager during initialization
+        self._agent_lock = asyncio.Lock()  # Sequential agent execution on shared provider
 
         logger.info(f"DpcAgentProvider '{alias}' initialized (tools={len(self.enabled_tools)}, "
                    f"budget=${self.budget_usd})")
@@ -182,6 +184,10 @@ class DpcAgentProvider(AIProvider):
         """
         Process a message through the autonomous agent.
 
+        Sequential execution: only one agent runs at a time when sharing
+        the same LLM provider, preventing thinking state contamination
+        and respecting provider concurrency limits.
+
         Args:
             prompt: User message text
             conversation_id: Optional conversation ID for progress tracking
@@ -194,6 +200,10 @@ class DpcAgentProvider(AIProvider):
         Raises:
             RuntimeError: If agent processing fails
         """
+        async with self._agent_lock:
+            return await self._generate_response_impl(prompt, conversation_id, agent_llm_provider, **kwargs)
+
+    async def _generate_response_impl(self, prompt: str, conversation_id: str = None, agent_llm_provider: str = None, **kwargs) -> str:
         try:
             # Extract agent_id from conversation_id for per-agent manager selection
             agent_id = None
@@ -239,17 +249,19 @@ class DpcAgentProvider(AIProvider):
     ) -> str:
         """
         Process a message through the autonomous agent with streaming.
-
-        Args:
-            prompt: User message text
-            on_chunk: Async callback for each text chunk: await on_chunk(chunk, conversation_id)
-            conversation_id: Optional conversation ID for progress tracking
-            agent_llm_provider: Optional underlying LLM provider for this agent (Phase 3)
-            **kwargs: Additional arguments (ignored)
-
-        Returns:
-            Agent's response text (accumulated from all chunks)
+        Sequential execution via _agent_lock (same as generate_response).
         """
+        async with self._agent_lock:
+            return await self._generate_response_stream_impl(prompt, on_chunk, conversation_id, agent_llm_provider, **kwargs)
+
+    async def _generate_response_stream_impl(
+        self,
+        prompt: str,
+        on_chunk: callable,
+        conversation_id: str = None,
+        agent_llm_provider: str = None,
+        **kwargs
+    ) -> str:
         try:
             # NEW: Extract agent_id from conversation_id for per-agent manager selection
             agent_id = None
