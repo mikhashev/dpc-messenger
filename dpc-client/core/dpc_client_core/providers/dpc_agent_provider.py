@@ -58,10 +58,19 @@ class DpcAgentProvider(AIProvider):
         self._manager = None  # DEPRECATED: Single manager (backwards compatibility)
         self._managers: Dict[str, "DpcAgentManager"] = {}  # NEW: Multiple managers (one per agent)
         self._service = None  # Injected by LLMManager during initialization
-        self._agent_lock = asyncio.Lock()  # Sequential agent execution on shared provider
+        self._provider_locks: Dict[str, asyncio.Lock] = {}  # Per-underlying-provider locks
 
         logger.info(f"DpcAgentProvider '{alias}' initialized (tools={len(self.enabled_tools)}, "
                    f"budget=${self.budget_usd})")
+
+    def _get_provider_lock(self, agent_id: str) -> asyncio.Lock:
+        """Get or create a lock for the agent's underlying LLM provider."""
+        from dpc_client_core.dpc_agent.utils import load_agent_config
+        config = load_agent_config(agent_id) or {}
+        provider_alias = config.get("provider_alias", "default")
+        if provider_alias not in self._provider_locks:
+            self._provider_locks[provider_alias] = asyncio.Lock()
+        return self._provider_locks[provider_alias]
 
     def set_service(self, service: "CoreService") -> None:
         """
@@ -200,7 +209,9 @@ class DpcAgentProvider(AIProvider):
         Raises:
             RuntimeError: If agent processing fails
         """
-        async with self._agent_lock:
+        agent_id = conversation_id if conversation_id and conversation_id.startswith("agent_") else None
+        lock = self._get_provider_lock(agent_id or "default")
+        async with lock:
             return await self._generate_response_impl(prompt, conversation_id, agent_llm_provider, **kwargs)
 
     async def _generate_response_impl(self, prompt: str, conversation_id: str = None, agent_llm_provider: str = None, **kwargs) -> str:
@@ -249,9 +260,11 @@ class DpcAgentProvider(AIProvider):
     ) -> str:
         """
         Process a message through the autonomous agent with streaming.
-        Sequential execution via _agent_lock (same as generate_response).
+        Sequential execution via per-provider lock (same as generate_response).
         """
-        async with self._agent_lock:
+        agent_id = conversation_id if conversation_id and conversation_id.startswith("agent_") else None
+        lock = self._get_provider_lock(agent_id or "default")
+        async with lock:
             return await self._generate_response_stream_impl(prompt, on_chunk, conversation_id, agent_llm_provider, **kwargs)
 
     async def _generate_response_stream_impl(
@@ -336,7 +349,9 @@ class DpcAgentProvider(AIProvider):
             if image_info:
                 enhanced_prompt = f"{prompt}\n\nAttached images:\n" + "\n".join(image_info)
 
-        return await self.generate_response(enhanced_prompt)
+        lock = self._get_provider_lock("default")
+        async with lock:
+            return await self._generate_response_impl(enhanced_prompt)
 
     def supports_thinking(self) -> bool:
         return False
