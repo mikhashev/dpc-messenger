@@ -138,6 +138,7 @@ class OllamaProvider(AIProvider):
                     messages=[message],
                     options=options if options else None,
                     think=True if self.supports_thinking() else None,
+                    keep_alive=self.config.get("vision_keep_alive", 0),
                 ),
                 timeout=timeout
             )
@@ -213,7 +214,16 @@ class OllamaProvider(AIProvider):
         return int(match.group(1)) if match else None
 
     async def close(self) -> None:
-        """Close the Ollama async client connection."""
+        """Close the Ollama async client and unload model from VRAM."""
+        try:
+            await self.client.chat(
+                model=self.model,
+                messages=[{"role": "user", "content": ""}],
+                keep_alive=0,
+            )
+            logger.info(f"OllamaProvider '{self.alias}': Model '{self.model}' unloaded from VRAM")
+        except Exception as e:
+            logger.debug(f"OllamaProvider '{self.alias}': VRAM unload skipped ({e})")
         if hasattr(self.client, 'close'):
             await self.client.close()
             logger.debug(f"OllamaProvider '{self.alias}': Client closed")
