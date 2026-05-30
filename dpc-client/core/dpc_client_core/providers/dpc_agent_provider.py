@@ -317,7 +317,7 @@ class DpcAgentProvider(AIProvider):
         return True
 
     async def generate_with_vision(
-        self, prompt: str, images: List[Dict[str, Any]], **kwargs
+        self, prompt: str, images: List[Dict[str, Any]], conversation_id: str = None, **kwargs
     ) -> str:
         """
         Handle vision queries by routing through the agent.
@@ -349,9 +349,10 @@ class DpcAgentProvider(AIProvider):
             if image_info:
                 enhanced_prompt = f"{prompt}\n\nAttached images:\n" + "\n".join(image_info)
 
-        lock = self._get_provider_lock("default")
+        agent_id = conversation_id if conversation_id and conversation_id.startswith("agent_") else None
+        lock = self._get_provider_lock(agent_id or "default")
         async with lock:
-            return await self._generate_response_impl(enhanced_prompt)
+            return await self._generate_response_impl(enhanced_prompt, conversation_id=conversation_id)
 
     def supports_thinking(self) -> bool:
         return False
