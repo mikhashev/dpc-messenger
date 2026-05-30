@@ -1,8 +1,9 @@
 """
-DPC Agent — ComfyUI tools (comfyui_submit, comfyui_check, comfyui_wait).
+DPC Agent — ComfyUI tools (comfyui_submit, comfyui_check, comfyui_wait, comfyui_convert).
 
 HTTP client tools for submitting workflows to a local ComfyUI server
 and retrieving results. Transport layer for Phase 1 Forge spike.
+comfyui_convert wraps ffmpeg for WEBP→MP4 conversion.
 """
 
 from __future__ import annotations
@@ -11,6 +12,7 @@ import asyncio
 import json
 import logging
 import pathlib
+import subprocess
 import threading
 from typing import Any, Dict, List, Optional
 
@@ -52,6 +54,79 @@ def _collect_outputs(entry: dict) -> List[str]:
     return outputs
 
 
+def _convert_ui_to_api(wf: dict) -> dict:
+    """Convert ComfyUI UI/graph format (nodes+links) to API prompt format."""
+    nodes = wf.get("nodes", [])
+    links = wf.get("links", [])
+    if not nodes:
+        return wf
+
+    link_map = {}
+    for link in links:
+        link_id, src_node, src_slot = link[0], link[1], link[2]
+        link_map[link_id] = (str(src_node), src_slot)
+
+    api = {}
+    for node in nodes:
+        nid = str(node["id"])
+        ct = node.get("class_type") or node.get("type", "")
+        wv = node.get("widgets_values", [])
+        inp_defs = node.get("inputs", [])
+
+        inputs = {}
+        for inp in inp_defs:
+            if isinstance(inp, dict) and inp.get("link") is not None:
+                link_id = inp["link"]
+                if link_id in link_map:
+                    inputs[inp["name"]] = list(link_map[link_id])
+
+        if ct == "UNETLoader":
+            inputs["unet_name"] = wv[0] if len(wv) > 0 else ""
+            inputs["weight_dtype"] = wv[1] if len(wv) > 1 else "default"
+        elif ct == "CLIPLoader":
+            inputs["clip_name"] = wv[0] if len(wv) > 0 else ""
+            inputs["type"] = wv[1] if len(wv) > 1 else "stable_diffusion"
+        elif ct == "VAELoader":
+            inputs["vae_name"] = wv[0] if len(wv) > 0 else ""
+        elif ct == "CLIPTextEncode":
+            inputs["text"] = wv[0] if len(wv) > 0 else ""
+        elif ct in ("EmptyLatentImage", "EmptySD3LatentImage"):
+            inputs["width"] = wv[0] if len(wv) > 0 else 512
+            inputs["height"] = wv[1] if len(wv) > 1 else 512
+            inputs["batch_size"] = wv[2] if len(wv) > 2 else 1
+        elif ct == "EmptyHunyuanLatentVideo":
+            inputs["width"] = wv[0] if len(wv) > 0 else 832
+            inputs["height"] = wv[1] if len(wv) > 1 else 480
+            inputs["length"] = wv[2] if len(wv) > 2 else 41
+            inputs["batch_size"] = wv[3] if len(wv) > 3 else 1
+        elif ct == "KSampler":
+            inputs["seed"] = wv[0] if len(wv) > 0 else 0
+            if len(wv) > 1 and isinstance(wv[1], str):
+                inputs["control_after_generate"] = wv[1]
+            inputs["steps"] = wv[2] if len(wv) > 2 else 20
+            inputs["cfg"] = wv[3] if len(wv) > 3 else 7.0
+            inputs["sampler_name"] = wv[4] if len(wv) > 4 else "euler"
+            inputs["scheduler"] = wv[5] if len(wv) > 5 else "normal"
+            inputs["denoise"] = wv[6] if len(wv) > 6 else 1.0
+        elif ct == "SaveImage":
+            inputs["filename_prefix"] = wv[0] if len(wv) > 0 else "ComfyUI"
+        elif ct == "SaveAnimatedWEBP":
+            inputs["filename_prefix"] = wv[0] if len(wv) > 0 else "ComfyUI"
+            inputs["fps"] = wv[1] if len(wv) > 1 else 6.0
+            inputs["lossless"] = wv[2] if len(wv) > 2 else True
+            inputs["quality"] = wv[3] if len(wv) > 3 else 80
+            inputs["method"] = wv[4] if len(wv) > 4 else "default"
+
+        api[nid] = {"class_type": ct, "inputs": inputs}
+
+    return api
+
+
+def _is_ui_format(wf: dict) -> bool:
+    """Detect if workflow is in UI/graph format (has nodes array) vs API format."""
+    return "nodes" in wf and isinstance(wf["nodes"], list)
+
+
 def comfyui_submit(ctx: ToolContext, workflow: str = "", prompt: str = "", workflow_json: dict = None, api_url: str = DEFAULT_API_URL) -> str:
     """Submit a ComfyUI workflow. Pass workflow filename + prompt, or raw workflow_json."""
     loop = ctx.agent_event_loop
@@ -73,6 +148,9 @@ def comfyui_submit(ctx: ToolContext, workflow: str = "", prompt: str = "", workf
 
     if not wf_data:
         return "Error: provide either workflow (filename) or workflow_json (dict)."
+
+    if _is_ui_format(wf_data):
+        wf_data = _convert_ui_to_api(wf_data)
 
     if prompt:
         for node in wf_data.values():
@@ -220,6 +298,65 @@ def comfyui_queue_status(ctx: ToolContext, api_url: str = DEFAULT_API_URL) -> st
     return future.result(timeout=10)
 
 
+def comfyui_convert(ctx: ToolContext, input_path: str, output_path: str = "", fps: int = 16, codec: str = "libx264") -> str:
+    """Convert ComfyUI animated WEBP output to MP4 via Pillow frame extraction + ffmpeg."""
+    import shutil
+    import tempfile
+
+    src = pathlib.Path(input_path)
+    if not src.exists():
+        return f"Error: input file not found: {input_path}"
+
+    if not output_path:
+        output_path = str(src.with_suffix(".mp4"))
+    dst = pathlib.Path(output_path)
+    dst.parent.mkdir(parents=True, exist_ok=True)
+
+    tmp_dir = None
+    try:
+        from PIL import Image
+        img = Image.open(str(src))
+        n_frames = getattr(img, "n_frames", 1)
+        if n_frames < 2:
+            return "Error: input is not an animated WEBP (single frame)."
+
+        tmp_dir = tempfile.mkdtemp(prefix="comfyui_convert_")
+        for i in range(n_frames):
+            img.seek(i)
+            frame = img.convert("RGB")
+            frame.save(pathlib.Path(tmp_dir) / f"frame_{i:05d}.png")
+
+        pattern = str(pathlib.Path(tmp_dir) / "frame_%05d.png")
+        cmd = [
+            "ffmpeg", "-y",
+            "-framerate", str(fps),
+            "-i", pattern,
+            "-c:v", codec,
+            "-pix_fmt", "yuv420p",
+            "-movflags", "+faststart",
+            str(dst),
+        ]
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+        if result.returncode != 0:
+            stderr = result.stderr[-500:] if result.stderr else ""
+            return f"Error: ffmpeg exit {result.returncode}: {stderr}"
+        if not dst.exists():
+            return "Error: ffmpeg completed but output file not found."
+        size_mb = dst.stat().st_size / (1024 * 1024)
+        return f"Done. output={dst}, size={size_mb:.1f}MB, frames={n_frames}, fps={fps}"
+    except ImportError:
+        return "Error: Pillow not installed (pip install Pillow)."
+    except FileNotFoundError:
+        return "Error: ffmpeg not found in PATH."
+    except subprocess.TimeoutExpired:
+        return "Error: ffmpeg timed out after 120s."
+    except Exception as e:
+        return f"Error: {e}"
+    finally:
+        if tmp_dir:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+
+
 def get_tools() -> List[ToolEntry]:
     return [
         ToolEntry(
@@ -348,6 +485,44 @@ def get_tools() -> List[ToolEntry]:
             handler=comfyui_queue_status,
             is_code_tool=False,
             timeout_sec=10,
+            is_core=False,
+            default_enabled=False,
+        ),
+        ToolEntry(
+            name="comfyui_convert",
+            schema={
+                "name": "comfyui_convert",
+                "description": (
+                    "Convert ComfyUI animated WEBP output to MP4 via ffmpeg. "
+                    "Required before publishing — ComfyUI saves video as animated WEBP, "
+                    "social platforms need MP4. Uses libx264 + yuv420p for universal compatibility."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "input_path": {
+                            "type": "string",
+                            "description": "Path to animated WEBP file from ComfyUI output.",
+                        },
+                        "output_path": {
+                            "type": "string",
+                            "description": "Path for MP4 output. Default: same name with .mp4 extension.",
+                        },
+                        "fps": {
+                            "type": "integer",
+                            "description": "Output framerate (default: 16, matching ComfyUI SaveAnimatedWEBP).",
+                        },
+                        "codec": {
+                            "type": "string",
+                            "description": "Video codec (default: libx264). Use libx265 for smaller files.",
+                        },
+                    },
+                    "required": ["input_path"],
+                },
+            },
+            handler=comfyui_convert,
+            is_code_tool=False,
+            timeout_sec=120,
             is_core=False,
             default_enabled=False,
         ),
