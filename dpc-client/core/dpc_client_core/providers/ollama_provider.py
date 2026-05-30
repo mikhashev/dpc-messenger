@@ -99,6 +99,7 @@ class OllamaProvider(AIProvider):
         Returns:
             str: AI response text
         """
+        self._last_thinking = None
         try:
             # Build image list (Ollama accepts paths or base64)
             image_inputs = []
