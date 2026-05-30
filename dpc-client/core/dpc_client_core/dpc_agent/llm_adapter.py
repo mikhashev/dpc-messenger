@@ -334,12 +334,6 @@ class DpcLlmAdapter:
         # Build text prompt from messages (for the text part)
         prompt = self._messages_to_prompt(messages)
 
-        # Inject tools if provided
-        if tools:
-            log.debug(f"Injecting {len(tools)} tool descriptions into vision prompt")
-            tool_descriptions = self._format_tools_for_prompt(tools)
-            prompt = f"{tool_descriptions}\n\n{prompt}"
-
         try:
             log.info(f"Using native vision support from provider '{provider.alias}'")
 
