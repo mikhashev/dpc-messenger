@@ -46,7 +46,7 @@
     {
       name: 'Web Tools',
       tools: [
-        { key: 'search_web', label: 'Web Search', desc: 'Search the web via DuckDuckGo' },
+        { key: 'search_web', label: 'Web Search', desc: 'Search the web (DuckDuckGo, Bing, Brave, Google, Yandex, and more)' },
         { key: 'browse_page', label: 'Browse Page', desc: 'Fetch and parse web pages' },
         { key: 'fetch_json', label: 'Fetch JSON', desc: 'Fetch JSON from APIs' },
         { key: 'extract_links', label: 'Extract Links', desc: 'Extract links from pages' },
