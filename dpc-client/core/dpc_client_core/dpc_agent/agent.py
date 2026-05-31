@@ -214,7 +214,8 @@ class DpcAgent:
                 prior_history = full_history[:-1]  # exclude the current user message
 
         # Get firewall-controlled tool access (needed for both context and tool registry)
-        allowed_tools = self._get_allowed_tools(message_source=message_source)
+        allowed_tools = self._get_allowed_tools(message_source=message_source,
+                                                  conversation_id=conversation_id)
 
         # Collect firewall metadata for capabilities section (transparency)
         all_tools_map = None
@@ -434,12 +435,17 @@ class DpcAgent:
         "read_file", "list_my_tools", "knowledge_list",
     })
 
-    def _get_allowed_tools(self, message_source: Optional[str] = None) -> Optional[set]:
+    def _get_allowed_tools(self, message_source: Optional[str] = None,
+                           conversation_id: Optional[str] = None) -> Optional[set]:
         """
-        Get set of allowed tools from firewall, restricted by message source.
+        Get set of allowed tools from firewall, restricted by message source
+        and conversation context (group vs 1:1).
 
         External sources (discord, telegram_public) get a read-only whitelist
         intersected with firewall permissions — new tools blocked by default.
+
+        Group chats restrict tools that have `{tool}_group_allowed: false`
+        in the agent's firewall profile (default: false for run_shell).
         """
         if self._firewall is None:
             if message_source in ("discord", "telegram_public"):
@@ -462,6 +468,24 @@ class DpcAgent:
         if message_source in ("discord", "telegram_public"):
             allowed = allowed & self.EXTERNAL_SOURCE_ALLOWED_TOOLS
             log.info("Source %s: restricted to %d read-only tools", message_source, len(allowed))
+
+        is_group = conversation_id and conversation_id.startswith("group-")
+        if is_group:
+            profile_tools = {}
+            if self._firewall_profile:
+                profile = self._firewall.get_agent_profile_settings(self._firewall_profile)
+                if profile:
+                    profile_tools = profile.get("tools", {})
+            group_restricted = set()
+            for tool_name in allowed:
+                key = f"{tool_name}_group_allowed"
+                if key in profile_tools and not profile_tools[key]:
+                    group_restricted.add(tool_name)
+                elif key not in profile_tools and tool_name == "run_shell":
+                    group_restricted.add(tool_name)
+            if group_restricted:
+                allowed = allowed - group_restricted
+                log.info("Group context: restricted %d tools: %s", len(group_restricted), group_restricted)
 
         return allowed
 
