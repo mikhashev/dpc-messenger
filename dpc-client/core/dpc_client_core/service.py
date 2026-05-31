@@ -4644,7 +4644,7 @@ class CoreService:
     async def _handle_group_agent_mentions(
         self, group_id: str, text: str, sender_name: str
     ) -> None:
-        """Detect @agent / @CC mentions in outgoing group messages and route to agents."""
+        """Detect @agent / @CC / @all mentions in outgoing group messages and route to agents."""
         plain_text = self._CODE_BLOCK_RE.sub('', text)
         mentions = {m.lower() for m in re.findall(r'@(\w+)\b', plain_text, re.IGNORECASE)}
         logger.debug("_handle_group_agent_mentions: mentions=%s in group %s", mentions, group_id)
@@ -4654,20 +4654,24 @@ class CoreService:
         node_id = self.p2p_manager.node_id
         allowed_agents = set(group.agents.get(node_id, [])) if group else set()
 
+        # @all expands to all agents + CC in this group
+        mention_all = "all" in mentions
+
         # Check if any mention matches an allowed agent's name or id
         sender_lower = sender_name.lower() if sender_name else ""
         for aid in allowed_agents:
             aname = self._get_agent_display_name(aid).lower()
             if aname == sender_lower:
                 continue
-            if aname in mentions or aid in mentions:
-                matched = aname if aname in mentions else aid
+            if mention_all or aname in mentions or aid in mentions:
+                matched = "all" if mention_all else (aname if aname in mentions else aid)
                 logger.info("Group @%s mention detected — invoking agent %s in group %s", matched, aid, group_id)
                 asyncio.ensure_future(self._invoke_agent_in_group(group_id, text, sender_name, aid))
 
         cc_name = self.get_cc_display_name().lower()
-        if cc_name in mentions and cc_name != sender_lower:
-            logger.info("Group @cc mention detected — broadcasting cc_group_mention in group %s", group_id)
+        if (mention_all or cc_name in mentions) and cc_name != sender_lower:
+            logger.info("Group @%s mention detected — broadcasting cc_group_mention in group %s",
+                        "all" if mention_all else "cc", group_id)
             await self.local_api.broadcast_event("cc_group_mention", {
                 "group_id": group_id,
                 "text": text,
