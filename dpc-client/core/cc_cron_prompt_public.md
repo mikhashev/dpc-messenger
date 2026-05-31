@@ -34,11 +34,14 @@ wherever you have `cc_agent_bridge.py` available).
 tree AND outside any directory the agent has under
 `sandbox_extensions.indexed_paths` in `privacy_rules.json` — otherwise
 the outbox file feeds back into the agent's Active Recall as if it were
-knowledge. Recommended: `~/.dpc/.cc_outbox/cc-out.md` on Linux/macOS,
-`C:\Users\<you>\.dpc\.cc_outbox\cc-out.md` on Windows. The leading dot
-on `.cc_outbox/` and its placement under `~/.dpc/` keep it out of any
-typical indexed-paths scan. The bridge reads this file directly (no
-shell interpretation), so backticks and code blocks pass through intact.
+knowledge. Recommended: `~/.dpc/.cc_outbox/cc-out-{target}.md` where
+`{target}` is the conversation-id or group-id being addressed (e.g.
+`cc-out-Ark.md`, `cc-out-group-b88b65076b85.md`). Per-target files
+prevent cross-chat stale content leaks when CC participates in multiple
+conversations simultaneously. The leading dot on `.cc_outbox/` and its
+placement under `~/.dpc/` keep it out of any typical indexed-paths scan.
+The bridge reads this file directly (no shell interpretation), so
+backticks and code blocks pass through intact.
 
 ## Eliminating per-send permission prompts
 
@@ -133,11 +136,18 @@ Add the matching permission pattern:
 
 ## Version notes
 
-This template tracks the bridge CLI as of v5.1 of the internal prompt.
-Changes from v5.0:
+This template tracks the bridge CLI as of v5.2 of the internal prompt.
+Changes from v5.1:
 
-- Outbox location recommendation moved to `~/.dpc/.cc_outbox/cc-out.md`
-  (was `~/.dpc/cc-out.md`). Reason: agents with project-root in their
+- Outbox is now per-target: `cc-out-{target}.md` instead of a single
+  shared `cc-out.md`. Prevents cross-chat stale content leaks when CC
+  participates in multiple conversations (agent 1:1 + group chat)
+  simultaneously. Target = the conversation-id or group-id value.
+
+Changes from v5.0 (v5.1 baseline):
+
+- Outbox location recommendation moved to `~/.dpc/.cc_outbox/`
+  (was `~/.dpc/`). Reason: agents with project-root in their
   `sandbox_extensions.indexed_paths` were picking up `cc-out.md` from
   the project root as knowledge, polluting Active Recall with the
   outbox's own recent contents (feedback loop, top hit by similarity).
