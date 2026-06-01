@@ -443,6 +443,10 @@ async def _analyze_single_session(
     )
 
     response = await llm_manager.query(prompt, provider_alias=provider_alias)
+    if not response or not response.strip():
+        raise ValueError(
+            "LLM returned empty response (extended thinking may have consumed all output tokens)"
+        )
     finding = _parse_llm_json(response)
     finding["archive_file"] = archive_file
     finding["digest_date"] = digest.get("date", "")
@@ -716,6 +720,10 @@ async def run_sleep(
         )
 
         response = await llm_manager.query(synthesis_prompt, provider_alias=provider_alias)
+        if not response or not response.strip():
+            raise ValueError(
+                "LLM returned empty response (extended thinking may have consumed all output tokens)"
+            )
         result = _parse_llm_json(response)
 
         morning_brief = result.get("morning_brief", {})

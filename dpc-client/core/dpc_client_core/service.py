@@ -4642,17 +4642,22 @@ class CoreService:
     _CODE_BLOCK_RE = re.compile(r'```[\s\S]*?```|`[^`\n]+`')
 
     async def _handle_group_agent_mentions(
-        self, group_id: str, text: str, sender_name: str
+        self, group_id: str, text: str, sender_name: str,
+        is_agent_sender: bool = False,
     ) -> None:
-        """Detect @agent / @CC mentions in outgoing group messages and route to agents."""
+        """Detect @agent / @CC / @all mentions in outgoing group messages and route to agents."""
         plain_text = self._CODE_BLOCK_RE.sub('', text)
         mentions = {m.lower() for m in re.findall(r'@(\w+)\b', plain_text, re.IGNORECASE)}
-        logger.debug("_handle_group_agent_mentions: mentions=%s in group %s", mentions, group_id)
+        logger.debug("_handle_group_agent_mentions: mentions=%s in group %s (agent_sender=%s)",
+                      mentions, group_id, is_agent_sender)
 
         # Get allowed agents for this group from metadata
         group = self.group_manager.get_group(group_id) if self.group_manager else None
         node_id = self.p2p_manager.node_id
         allowed_agents = set(group.agents.get(node_id, [])) if group else set()
+
+        # @all expands to all agents + CC — but only when a human sends the message
+        mention_all = "all" in mentions and not is_agent_sender
 
         # Check if any mention matches an allowed agent's name or id
         sender_lower = sender_name.lower() if sender_name else ""
@@ -4660,14 +4665,15 @@ class CoreService:
             aname = self._get_agent_display_name(aid).lower()
             if aname == sender_lower:
                 continue
-            if aname in mentions or aid in mentions:
-                matched = aname if aname in mentions else aid
+            if mention_all or aname in mentions or aid in mentions:
+                matched = "all" if mention_all else (aname if aname in mentions else aid)
                 logger.info("Group @%s mention detected — invoking agent %s in group %s", matched, aid, group_id)
                 asyncio.ensure_future(self._invoke_agent_in_group(group_id, text, sender_name, aid))
 
         cc_name = self.get_cc_display_name().lower()
-        if cc_name in mentions and cc_name != sender_lower:
-            logger.info("Group @cc mention detected — broadcasting cc_group_mention in group %s", group_id)
+        if (mention_all or cc_name in mentions) and cc_name != sender_lower:
+            logger.info("Group @%s mention detected — broadcasting cc_group_mention in group %s",
+                        "all" if mention_all else "cc", group_id)
             await self.local_api.broadcast_event("cc_group_mention", {
                 "group_id": group_id,
                 "text": text,
@@ -4690,10 +4696,33 @@ class CoreService:
 
             prompt = f"[{sender_name}]: {text}"
 
+            chat_context = None
+            group_meta = self.group_manager.get_group(group_id)
+            if group_meta:
+                participants = []
+                for nid in group_meta.members:
+                    if nid == self.p2p_manager.node_id:
+                        uname = self.p2p_manager.get_display_name() or "User"
+                        participants.append(f"{uname} (User)")
+                    else:
+                        pname = self.peer_metadata.get(nid, {}).get("name", nid[:16])
+                        participants.append(f"{pname} (peer)")
+                for nid, names in group_meta.agent_names.items():
+                    for aid, dname in names.items():
+                        participants.append(f"{dname} (agent)")
+                chat_context = {
+                    "chat_type": "group",
+                    "chat_name": group_meta.name,
+                    "chat_id": group_id,
+                    "description": group_meta.topic or "",
+                    "participants": participants,
+                }
+
             response = await manager.process_message(
                 message=prompt,
                 conversation_id=group_id,
                 sender_name=sender_name,
+                chat_context=chat_context,
             )
             if response:
                 agent_name = self._get_agent_display_name(agent_id)
@@ -4792,7 +4821,7 @@ class CoreService:
         })
 
         # Route @mentions from agent messages (enables CC→Ark and Ark→CC communication)
-        await self._handle_group_agent_mentions(group_id, text, agent_name)
+        await self._handle_group_agent_mentions(group_id, text, agent_name, is_agent_sender=True)
 
         return message_id
 
@@ -4948,6 +4977,23 @@ class CoreService:
         except Exception as e:
             logger.error("Error removing group member: %s", e, exc_info=True)
             return {"status": "error", "message": str(e)}
+
+    async def update_group_topic(self, group_id: str, topic: str) -> Dict[str, Any]:
+        """Update a group's topic/description. Only the creator can update."""
+        group = self.group_manager.get_group(group_id)
+        if not group:
+            return {"status": "error", "message": f"Group {group_id} not found"}
+        if group.created_by != self.p2p_manager.node_id:
+            return {"status": "error", "message": "Only the group creator can update the topic"}
+        if len(topic) > 15000:
+            return {"status": "error", "message": "Topic too long (max 15000 chars)"}
+        updated = self.group_manager.update_topic(group_id, topic)
+        if not updated:
+            return {"status": "error", "message": "Failed to update topic"}
+        await self.local_api.broadcast_event("group_updated", {
+            "group_id": group_id, "topic": topic,
+        })
+        return {"status": "success", "topic": topic}
 
     async def leave_group(self, group_id: str) -> Dict[str, Any]:
         """Leave a group and notify remaining members."""
@@ -7360,8 +7406,8 @@ class CoreService:
         for agent_id in local_agents:
             agent_dir = conversations_dir / agent_id
             if not agent_dir.exists():
-                logger.warning("Group sleep: skipping %s — dir %s not found", agent_id, agent_dir)
-                continue
+                agent_dir.mkdir(parents=True, exist_ok=True)
+                logger.info("Group sleep: created conversations dir for %s (group-only agent)", agent_id)
 
             agent_config = load_agent_config(agent_id)
             sleep_provider = agent_config.get("sleep_provider_alias") or None

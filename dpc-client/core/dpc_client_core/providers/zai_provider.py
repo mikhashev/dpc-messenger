@@ -117,6 +117,7 @@ class ZaiProvider(AIProvider):
 
     async def generate_response(self, prompt: str, **kwargs) -> str:
         """Generate text response using Z.AI GLM model with extended thinking"""
+        self._last_thinking = None
         try:
             # Determine max_tokens value
             # When thinking is enabled, max_tokens must be > budget_tokens
@@ -182,13 +183,28 @@ class ZaiProvider(AIProvider):
 
         except Exception as e:
             if self._is_retryable(e):
+                _captured_thinking = None
+
                 async def _retry_generate():
+                    nonlocal _captured_thinking
                     retry_text = ""
+                    _captured_thinking = None
                     async with self.client.messages.stream(**api_params) as stream:
                         async for text in stream.text_stream:
                             retry_text += text
+                        if self.thinking_enabled:
+                            try:
+                                final_msg = await stream.get_final_message()
+                                for block in final_msg.content:
+                                    if hasattr(block, 'type') and block.type == "thinking":
+                                        _captured_thinking = getattr(block, 'thinking', None)
+                            except Exception:
+                                pass
                     return retry_text or ""
-                return await self._retry_with_backoff(_retry_generate, e)
+
+                result = await self._retry_with_backoff(_retry_generate, e)
+                self._last_thinking = _captured_thinking
+                return result
             raise RuntimeError(f"Z.AI provider '{self.alias}' failed: {type(e).__name__}: {e}") from e
 
     async def generate_response_stream(
@@ -288,6 +304,8 @@ class ZaiProvider(AIProvider):
         except Exception as e:
             if self._is_retryable(e):
                 logger.warning(f"Z.AI streaming transient error, falling back to generate_response with backoff: {e}")
+                # Fallback to non-streaming generate_response which resets+captures
+                # _last_thinking cleanly (thinking from failed stream attempt is discarded)
                 async def _retry_stream_fallback():
                     return await self.generate_response(prompt)
                 result = await self._retry_with_backoff(_retry_stream_fallback, e)

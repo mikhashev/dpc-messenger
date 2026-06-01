@@ -1,5 +1,6 @@
 # dpc_client_core/providers/dpc_agent_provider.py
 
+import asyncio
 import logging
 from typing import Dict, Any, Optional, List, TYPE_CHECKING
 
@@ -57,9 +58,19 @@ class DpcAgentProvider(AIProvider):
         self._manager = None  # DEPRECATED: Single manager (backwards compatibility)
         self._managers: Dict[str, "DpcAgentManager"] = {}  # NEW: Multiple managers (one per agent)
         self._service = None  # Injected by LLMManager during initialization
+        self._provider_locks: Dict[str, asyncio.Lock] = {}  # Per-underlying-provider locks
 
         logger.info(f"DpcAgentProvider '{alias}' initialized (tools={len(self.enabled_tools)}, "
                    f"budget=${self.budget_usd})")
+
+    def _get_provider_lock(self, agent_id: str) -> asyncio.Lock:
+        """Get or create a lock for the agent's underlying LLM provider."""
+        from dpc_client_core.dpc_agent.utils import load_agent_config
+        config = load_agent_config(agent_id) or {}
+        provider_alias = config.get("provider_alias", "default")
+        if provider_alias not in self._provider_locks:
+            self._provider_locks[provider_alias] = asyncio.Lock()
+        return self._provider_locks[provider_alias]
 
     def set_service(self, service: "CoreService") -> None:
         """
@@ -182,6 +193,10 @@ class DpcAgentProvider(AIProvider):
         """
         Process a message through the autonomous agent.
 
+        Sequential execution: only one agent runs at a time when sharing
+        the same LLM provider, preventing thinking state contamination
+        and respecting provider concurrency limits.
+
         Args:
             prompt: User message text
             conversation_id: Optional conversation ID for progress tracking
@@ -194,6 +209,12 @@ class DpcAgentProvider(AIProvider):
         Raises:
             RuntimeError: If agent processing fails
         """
+        agent_id = conversation_id if conversation_id and conversation_id.startswith("agent_") else None
+        lock = self._get_provider_lock(agent_id or "default")
+        async with lock:
+            return await self._generate_response_impl(prompt, conversation_id, agent_llm_provider, **kwargs)
+
+    async def _generate_response_impl(self, prompt: str, conversation_id: str = None, agent_llm_provider: str = None, **kwargs) -> str:
         try:
             # Extract agent_id from conversation_id for per-agent manager selection
             agent_id = None
@@ -239,17 +260,21 @@ class DpcAgentProvider(AIProvider):
     ) -> str:
         """
         Process a message through the autonomous agent with streaming.
-
-        Args:
-            prompt: User message text
-            on_chunk: Async callback for each text chunk: await on_chunk(chunk, conversation_id)
-            conversation_id: Optional conversation ID for progress tracking
-            agent_llm_provider: Optional underlying LLM provider for this agent (Phase 3)
-            **kwargs: Additional arguments (ignored)
-
-        Returns:
-            Agent's response text (accumulated from all chunks)
+        Sequential execution via per-provider lock (same as generate_response).
         """
+        agent_id = conversation_id if conversation_id and conversation_id.startswith("agent_") else None
+        lock = self._get_provider_lock(agent_id or "default")
+        async with lock:
+            return await self._generate_response_stream_impl(prompt, on_chunk, conversation_id, agent_llm_provider, **kwargs)
+
+    async def _generate_response_stream_impl(
+        self,
+        prompt: str,
+        on_chunk: callable,
+        conversation_id: str = None,
+        agent_llm_provider: str = None,
+        **kwargs
+    ) -> str:
         try:
             # NEW: Extract agent_id from conversation_id for per-agent manager selection
             agent_id = None
@@ -292,7 +317,7 @@ class DpcAgentProvider(AIProvider):
         return True
 
     async def generate_with_vision(
-        self, prompt: str, images: List[Dict[str, Any]], **kwargs
+        self, prompt: str, images: List[Dict[str, Any]], conversation_id: str = None, **kwargs
     ) -> str:
         """
         Handle vision queries by routing through the agent.
@@ -324,7 +349,10 @@ class DpcAgentProvider(AIProvider):
             if image_info:
                 enhanced_prompt = f"{prompt}\n\nAttached images:\n" + "\n".join(image_info)
 
-        return await self.generate_response(enhanced_prompt)
+        agent_id = conversation_id if conversation_id and conversation_id.startswith("agent_") else None
+        lock = self._get_provider_lock(agent_id or "default")
+        async with lock:
+            return await self._generate_response_impl(enhanced_prompt, conversation_id=conversation_id)
 
     def supports_thinking(self) -> bool:
         return False

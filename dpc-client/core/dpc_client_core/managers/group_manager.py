@@ -354,6 +354,15 @@ class GroupManager:
             group.agent_names[node_id] = agent_names
         self._save_group(group_id)
 
+    def update_topic(self, group_id: str, topic: str) -> Optional[GroupMetadata]:
+        """Update a group's topic/description."""
+        group = self._groups.get(group_id)
+        if not group:
+            return None
+        group.topic = topic
+        self._save_group(group_id)
+        return group
+
     def get_group(self, group_id: str) -> Optional[GroupMetadata]:
         """Get group metadata by ID."""
         return self._groups.get(group_id)

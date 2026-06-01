@@ -122,7 +122,7 @@ class Settings:
             # Enable/disable individual connection strategies
             'enable_ipv6': 'true',  # Try IPv6 direct connections (Priority 1)
             'enable_ipv4': 'true',  # Try IPv4 direct connections (Priority 2)
-            'enable_hub_webrtc': 'true',  # Try Hub WebRTC with STUN/TURN (Priority 3)
+            'enable_hub_webrtc': 'false',  # Try Hub WebRTC with STUN/TURN (Priority 3) - requires Hub connection
             'enable_hole_punching': 'false',  # Try DHT-coordinated UDP hole punching (Priority 4) - DISABLED: lacks DTLS encryption (v0.10.0)
             'enable_relays': 'true',  # Try volunteer relay nodes (Priority 5)
             'enable_gossip': 'true',  # Use gossip store-and-forward fallback (Priority 6)

@@ -768,6 +768,8 @@ class DpcAgentManager:
         message_source: Optional[str] = None,
         # When True, don't save user message to history (already saved by caller)
         _skip_history: bool = False,
+        # Group chat metadata for agent context awareness
+        chat_context: Optional[Dict[str, Any]] = None,
     ) -> str:
         """
         Process a user message through the agent.
@@ -895,6 +897,7 @@ class DpcAgentManager:
                     image_caption=image_caption,
                     reply_telegram_chat_id=telegram_chat_id,
                     message_source=message_source,
+                    chat_context=chat_context,
                 )
             finally:
                 # ADR-022 Task 07: update daily token counter

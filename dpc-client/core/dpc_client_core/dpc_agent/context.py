@@ -95,10 +95,18 @@ def _build_runtime_section(
     is correctly classified for pay_per_use agents before the first task has
     written spent_usd.
     """
+    task_info = {"id": task.get("id"), "type": task.get("type")}
+    chat_ctx = task.get("chat_context")
+    if chat_ctx:
+        task_info["chat_type"] = chat_ctx.get("chat_type", "unknown")
+        task_info["chat_name"] = chat_ctx.get("chat_name", "")
+        task_info["chat_id"] = chat_ctx.get("chat_id", "")
+        task_info["description"] = chat_ctx.get("description", "")
+        task_info["participants"] = chat_ctx.get("participants", [])
     runtime_data = {
         "utc_now": utc_now_iso(),
         "agent_root": str(agent_root),
-        "task": {"id": task.get("id"), "type": task.get("type")},
+        "task": task_info,
     }
 
     # Budget info from agent state. Shape depends on billing model:

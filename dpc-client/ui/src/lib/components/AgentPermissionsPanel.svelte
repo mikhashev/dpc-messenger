@@ -46,7 +46,7 @@
     {
       name: 'Web Tools',
       tools: [
-        { key: 'search_web', label: 'Web Search', desc: 'Search the web via DuckDuckGo' },
+        { key: 'search_web', label: 'Web Search', desc: 'Search the web (DuckDuckGo, Bing, Brave, Google, Yandex, and more)' },
         { key: 'browse_page', label: 'Browse Page', desc: 'Fetch and parse web pages' },
         { key: 'fetch_json', label: 'Fetch JSON', desc: 'Fetch JSON from APIs' },
         { key: 'extract_links', label: 'Extract Links', desc: 'Extract links from pages' },
@@ -810,6 +810,19 @@
                       <p class="help-text-small" style="margin: 0;">{tool.desc}</p>
                     </div>
                   </label>
+                  {#if tool.key === 'run_shell' && editSettings.tools[tool.key]}
+                    <label for="agent-tool-run_shell_group_allowed" class="sub-checkbox">
+                      <input
+                        type="checkbox"
+                        id="agent-tool-run_shell_group_allowed"
+                        bind:checked={editSettings.tools.run_shell_group_allowed}
+                      />
+                      <div>
+                        <span class="event-name">Allow in group chats</span>
+                        <p class="help-text-small" style="margin: 0;">By default run_shell is restricted to 1:1 chats only</p>
+                      </div>
+                    </label>
+                  {/if}
                 {:else}
                   <label for="agent-tool-{tool.key}">
                     <input
@@ -823,6 +836,20 @@
                       <p class="help-text-small" style="margin: 0;">{tool.desc}</p>
                     </div>
                   </label>
+                  {#if tool.key === 'run_shell' && displaySettings.tools?.[tool.key]}
+                    <label for="agent-tool-run_shell_group_allowed-ro" class="sub-checkbox">
+                      <input
+                        type="checkbox"
+                        id="agent-tool-run_shell_group_allowed-ro"
+                        checked={displaySettings.tools?.run_shell_group_allowed}
+                        disabled
+                      />
+                      <div>
+                        <span class="event-name">Allow in group chats</span>
+                        <p class="help-text-small" style="margin: 0;">By default run_shell is restricted to 1:1 chats only</p>
+                      </div>
+                    </label>
+                  {/if}
                 {/if}
               </div>
             {/each}
@@ -1283,6 +1310,12 @@
     align-items: flex-start;
     gap: 0.75rem;
     cursor: pointer;
+  }
+
+  .notification-event-item label.sub-checkbox {
+    margin-left: 2rem;
+    margin-top: 0.4rem;
+    opacity: 0.85;
   }
 
   .event-name {
