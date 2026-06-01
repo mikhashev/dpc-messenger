@@ -1883,6 +1883,9 @@
     border-radius: 8px;
     max-width: 680px;
     width: 100%;
+    max-height: calc(100vh - 2rem);
+    display: flex;
+    flex-direction: column;
     box-shadow: 0 4px 20px rgba(0, 0, 0, 0.15);
   }
 
@@ -1920,6 +1923,8 @@
 
   .dialog-content {
     padding: 1.5rem;
+    overflow-y: auto;
+    flex: 1 1 auto;
   }
 
   .dialog-info {

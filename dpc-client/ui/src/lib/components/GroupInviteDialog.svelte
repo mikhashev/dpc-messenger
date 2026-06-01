@@ -86,6 +86,9 @@
     border-radius: 12px;
     width: 380px;
     max-width: 90vw;
+    max-height: calc(100vh - 2rem);
+    display: flex;
+    flex-direction: column;
     box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4);
   }
 
@@ -102,6 +105,8 @@
 
   .modal-body {
     padding: 16px 20px;
+    overflow-y: auto;
+    flex: 1 1 auto;
   }
 
   .invite-message {

@@ -228,6 +228,8 @@
     padding: 1.5rem;
     min-width: 400px;
     max-width: 90vw;
+    max-height: calc(100vh - 2rem);
+    overflow-y: auto;
     box-shadow: 0 4px 20px rgba(0, 0, 0, 0.3);
     animation: slideUp 0.3s ease-out;
   }

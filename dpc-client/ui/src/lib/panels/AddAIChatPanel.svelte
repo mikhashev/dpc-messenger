@@ -318,6 +318,8 @@
     box-shadow: 0 8px 32px rgba(0, 0, 0, 0.2);
     max-width: 500px;
     width: 90%;
+    max-height: calc(100vh - 2rem);
+    overflow-y: auto;
   }
 
   .modal-content h2 {

@@ -507,5 +507,8 @@
     color: #888;
   }
 
-  /* Modal styles are inherited from parent global styles (.modal-overlay, .modal-dialog, .accept-button, .reject-button) */
+  .modal-dialog {
+    max-height: calc(100vh - 2rem);
+    overflow-y: auto;
+  }
 </style>
