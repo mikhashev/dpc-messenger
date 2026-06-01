@@ -39,6 +39,17 @@ def _get_client() -> httpx.AsyncClient:
         return _client
 
 
+def _format_node_errors(node_errors: dict) -> str:
+    """Format ComfyUI node_errors into a readable string for the agent."""
+    lines = []
+    for node_id, errs in node_errors.items():
+        cls = errs.get("class_type", node_id)
+        for err in errs.get("errors", []):
+            msg = err.get("message", str(err))
+            lines.append(f"  node {node_id} ({cls}): {msg}")
+    return "\n".join(lines) if lines else str(node_errors)
+
+
 def _collect_outputs(entry: dict) -> List[str]:
     """Extract all output file paths from a ComfyUI history entry."""
     outputs = []
@@ -116,6 +127,17 @@ def _convert_ui_to_api(wf: dict) -> dict:
             inputs["lossless"] = wv[2] if len(wv) > 2 else True
             inputs["quality"] = wv[3] if len(wv) > 3 else 80
             inputs["method"] = wv[4] if len(wv) > 4 else "default"
+        elif ct == "CreateVideo":
+            inputs["fps"] = wv[0] if len(wv) > 0 else 8.0
+        elif ct == "SaveVideo":
+            inputs["filename_prefix"] = wv[0] if len(wv) > 0 else "video/ComfyUI"
+            inputs["format"] = wv[1] if len(wv) > 1 else "auto"
+            inputs["codec"] = wv[2] if len(wv) > 2 else "auto"
+        elif ct == "SaveWEBM":
+            inputs["filename_prefix"] = wv[0] if len(wv) > 0 else "ComfyUI"
+            inputs["codec"] = wv[1] if len(wv) > 1 else "vp9"
+            inputs["fps"] = wv[2] if len(wv) > 2 else 24.0
+            inputs["crf"] = wv[3] if len(wv) > 3 else 32.0
 
         api[nid] = {"class_type": ct, "inputs": inputs}
 
@@ -166,17 +188,28 @@ def comfyui_submit(ctx: ToolContext, workflow: str = "", prompt: str = "", workf
         try:
             client = _get_client()
             resp = await client.post(f"{api_url.rstrip('/')}/prompt", json=payload)
-            resp.raise_for_status()
             data = resp.json()
+
+            err = data.get("error")
+            node_errs = data.get("node_errors")
+            if err or (resp.status_code >= 400):
+                parts = [f"Error: ComfyUI validation failed (HTTP {resp.status_code})"]
+                if err:
+                    parts.append(f"  {err.get('type', '')}: {err.get('message', str(err))}")
+                if node_errs:
+                    parts.append(_format_node_errors(node_errs))
+                return "\n".join(parts)
+
             prompt_id = data.get("prompt_id")
             if not prompt_id:
                 return f"Error: ComfyUI response missing prompt_id: {data}"
-            return f"Queued. prompt_id={prompt_id}"
+
+            result = f"Queued. prompt_id={prompt_id}"
+            if node_errs:
+                result += f"\nWarnings:\n{_format_node_errors(node_errs)}"
+            return result
         except httpx.ConnectError:
             return f"Error: cannot connect to ComfyUI at {api_url}. Is it running?"
-        except httpx.HTTPStatusError as e:
-            body = e.response.text[:500] if e.response else ""
-            return f"Error: ComfyUI returned {e.response.status_code}: {body}"
         except Exception as e:
             log.warning("comfyui_submit failed: %s", e)
             return f"Error: {e}"
@@ -296,6 +329,65 @@ def comfyui_queue_status(ctx: ToolContext, api_url: str = DEFAULT_API_URL) -> st
 
     future = asyncio.run_coroutine_threadsafe(_status(), loop)
     return future.result(timeout=10)
+
+
+def comfyui_progress(ctx: ToolContext, timeout: int = 10, api_url: str = DEFAULT_API_URL) -> str:
+    """One-shot WebSocket snapshot of ComfyUI generation progress."""
+    loop = ctx.agent_event_loop
+    if loop is None:
+        return "Error: no event loop available."
+    timeout = max(3, min(timeout, 30))
+
+    async def _progress():
+        import websockets
+        ws_url = api_url.replace("http://", "ws://").replace("https://", "wss://")
+        ws_url = f"{ws_url.rstrip('/')}/ws?clientId=dpc-forge-progress"
+        events = []
+        try:
+            async with websockets.connect(ws_url, close_timeout=3) as ws:
+                deadline = asyncio.get_event_loop().time() + timeout
+                while asyncio.get_event_loop().time() < deadline:
+                    remaining = deadline - asyncio.get_event_loop().time()
+                    if remaining <= 0:
+                        break
+                    try:
+                        raw = await asyncio.wait_for(ws.recv(), timeout=min(remaining, 2.0))
+                        data = json.loads(raw)
+                        msg_type = data.get("type", "")
+                        msg_data = data.get("data", {})
+                        if msg_type == "progress":
+                            val = msg_data.get("value", 0)
+                            mx = msg_data.get("max", 0)
+                            events.append(f"progress: step {val}/{mx}")
+                        elif msg_type == "executing":
+                            node = msg_data.get("node", "")
+                            if node:
+                                events.append(f"executing: node {node}")
+                            else:
+                                events.append("executing: done (all nodes finished)")
+                                break
+                        elif msg_type == "executed":
+                            events.append(f"executed: node {msg_data.get('node', '?')}")
+                        elif msg_type == "execution_error":
+                            events.append(f"error: {msg_data.get('exception_message', str(msg_data))}")
+                            break
+                        elif msg_type == "status":
+                            q = msg_data.get("status", {}).get("exec_info", {})
+                            remaining_q = q.get("queue_remaining", 0)
+                            events.append(f"queue_remaining={remaining_q}")
+                    except asyncio.TimeoutError:
+                        continue
+        except Exception as e:
+            if not events:
+                return f"Error: cannot connect to ComfyUI WebSocket: {e}"
+            events.append(f"(connection closed: {e})")
+
+        if not events:
+            return "No activity detected (ComfyUI idle or timeout too short)."
+        return "\n".join(events)
+
+    future = asyncio.run_coroutine_threadsafe(_progress(), loop)
+    return future.result(timeout=timeout + 5)
 
 
 def comfyui_convert(ctx: ToolContext, input_path: str, output_path: str = "", fps: int = 16, codec: str = "libx264") -> str:
@@ -489,13 +581,44 @@ def get_tools() -> List[ToolEntry]:
             default_enabled=False,
         ),
         ToolEntry(
+            name="comfyui_progress",
+            schema={
+                "name": "comfyui_progress",
+                "description": (
+                    "One-shot WebSocket snapshot of ComfyUI generation progress. "
+                    "Shows current step (e.g. step 5/20), which node is executing, "
+                    "queue status, and errors. Use during long generations to check status. "
+                    "Non-blocking — reads available events within timeout and returns."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "timeout": {
+                            "type": "integer",
+                            "description": "Seconds to listen for events (default 10, max 30). Longer = more events captured.",
+                        },
+                        "api_url": {
+                            "type": "string",
+                            "description": f"ComfyUI API URL (default: {DEFAULT_API_URL}).",
+                        },
+                    },
+                    "required": [],
+                },
+            },
+            handler=comfyui_progress,
+            is_code_tool=False,
+            timeout_sec=35,
+            is_core=False,
+            default_enabled=False,
+        ),
+        ToolEntry(
             name="comfyui_convert",
             schema={
                 "name": "comfyui_convert",
                 "description": (
-                    "Convert ComfyUI animated WEBP output to MP4 via ffmpeg. "
-                    "Required before publishing — ComfyUI saves video as animated WEBP, "
-                    "social platforms need MP4. Uses libx264 + yuv420p for universal compatibility."
+                    "Convert ComfyUI animated WEBP output to MP4 via ffmpeg (fallback). "
+                    "Use only if SaveVideo node is unavailable. Preferred path: SaveVideo in workflow. "
+                    "Uses libx264 + yuv420p for universal compatibility."
                 ),
                 "parameters": {
                     "type": "object",
