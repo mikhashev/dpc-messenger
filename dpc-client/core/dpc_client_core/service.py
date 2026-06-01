@@ -4642,20 +4642,22 @@ class CoreService:
     _CODE_BLOCK_RE = re.compile(r'```[\s\S]*?```|`[^`\n]+`')
 
     async def _handle_group_agent_mentions(
-        self, group_id: str, text: str, sender_name: str
+        self, group_id: str, text: str, sender_name: str,
+        is_agent_sender: bool = False,
     ) -> None:
         """Detect @agent / @CC / @all mentions in outgoing group messages and route to agents."""
         plain_text = self._CODE_BLOCK_RE.sub('', text)
         mentions = {m.lower() for m in re.findall(r'@(\w+)\b', plain_text, re.IGNORECASE)}
-        logger.debug("_handle_group_agent_mentions: mentions=%s in group %s", mentions, group_id)
+        logger.debug("_handle_group_agent_mentions: mentions=%s in group %s (agent_sender=%s)",
+                      mentions, group_id, is_agent_sender)
 
         # Get allowed agents for this group from metadata
         group = self.group_manager.get_group(group_id) if self.group_manager else None
         node_id = self.p2p_manager.node_id
         allowed_agents = set(group.agents.get(node_id, [])) if group else set()
 
-        # @all expands to all agents + CC in this group
-        mention_all = "all" in mentions
+        # @all expands to all agents + CC — but only when a human sends the message
+        mention_all = "all" in mentions and not is_agent_sender
 
         # Check if any mention matches an allowed agent's name or id
         sender_lower = sender_name.lower() if sender_name else ""
@@ -4819,7 +4821,7 @@ class CoreService:
         })
 
         # Route @mentions from agent messages (enables CC→Ark and Ark→CC communication)
-        await self._handle_group_agent_mentions(group_id, text, agent_name)
+        await self._handle_group_agent_mentions(group_id, text, agent_name, is_agent_sender=True)
 
         return message_id
 
