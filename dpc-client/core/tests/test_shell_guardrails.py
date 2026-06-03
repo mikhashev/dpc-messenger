@@ -1,12 +1,18 @@
 """Tests for ADR-030 run_shell safety guardrails."""
 
+import pathlib
+import tempfile
+from unittest.mock import MagicMock
+
 import pytest
 from dpc_client_core.dpc_agent.tools.shell import (
     _validate_command,
     _normalize_command,
     _split_segments,
     _is_fork_bomb,
+    run_shell,
 )
+from dpc_client_core.dpc_agent.tools.registry import ToolContext
 
 
 class TestNormalization:
@@ -46,11 +52,20 @@ class TestForkBomb:
     def test_classic(self):
         assert _is_fork_bomb(":(){ :|:& };:")
 
+    def test_with_spaces(self):
+        assert _is_fork_bomb(":() { :|:& };:")
+
+    def test_multiline_variant(self):
+        assert _is_fork_bomb(":(){ :|:& }; :")
+
     def test_not_fork_bomb(self):
         assert not _is_fork_bomb("echo hello")
 
     def test_partial_no_match(self):
         assert not _is_fork_bomb(":()")
+
+    def test_partial_pipe_no_match(self):
+        assert not _is_fork_bomb(":|:")
 
 
 class TestHardlinePatterns:
@@ -274,3 +289,32 @@ class TestPipeSplitting:
 
     def test_safe_pipe(self):
         assert _validate_command("cat file.txt | grep pattern") is None
+
+
+class TestCwdEnforcement:
+    """cwd must be within agent sandbox (agent_root + sandbox_extensions)."""
+
+    def _make_ctx(self, agent_root: pathlib.Path) -> ToolContext:
+        ctx = ToolContext(agent_root=agent_root)
+        ctx.firewall = None
+        return ctx
+
+    def test_default_cwd_uses_agent_root(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            ctx = self._make_ctx(pathlib.Path(tmpdir))
+            result = run_shell(ctx, "echo hello", cwd="")
+            assert "hello" in result
+
+    def test_cwd_inside_sandbox_allowed(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            sub = pathlib.Path(tmpdir) / "subdir"
+            sub.mkdir()
+            ctx = self._make_ctx(pathlib.Path(tmpdir))
+            result = run_shell(ctx, "echo ok", cwd=str(sub))
+            assert "ok" in result
+
+    def test_cwd_outside_sandbox_blocked(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            ctx = self._make_ctx(pathlib.Path(tmpdir))
+            result = run_shell(ctx, "echo hi", cwd="C:\\Windows")
+            assert "outside allowed sandbox" in result or "not a valid directory" in result
