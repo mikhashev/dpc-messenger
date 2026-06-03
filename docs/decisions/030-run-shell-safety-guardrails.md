@@ -167,6 +167,33 @@ _validate_command(command: str, cwd: str) -> tuple[str, str] | None
 - Multi-node: when an agent from another node is @mentioned in a group chat, the approval request goes to that agent's owner (who is also in the group). No cross-node approval protocol needed — the owner sees the chat context directly.
 - Add-to-whitelist — "Approve + Add to whitelist" button in approval dialog (per-agent persistent whitelist)
 - Note: Tier 1 approval assumes agent owner is online. Agent availability management is a separate concern (Group Settings feature, outside ADR-030 scope).
+- Whitelist storage: `privacy_rules.json` → `agent_profiles.<id>.tools.run_shell.tier1_whitelist: [...]` (per-agent, empty = all Tier 1 blocked = v1 behavior)
+
+**AgentPermissions Panel — Shell Access section (v2 UI wireframe):**
+
+```
+Shell Access
+  Execute shell commands  [toggle]
+
+  [ ] Allow in group chats
+      By default run_shell is restricted to 1:1 chats only
+
+  ── Safety Guardrails (ADR-030) ──
+
+  Tier 0 — Auto-approved commands:
+    git status, git log, ls, cat, echo, pwd...
+
+  Tier 1 — Requires approval (shown in chat):
+    [+ Add command to whitelist]
+    • python script.py     [x remove]
+    • pip install          [x remove]
+    • curl                 [x remove]
+
+  Tier 2 — Always blocked:
+    rm -rf, shutdown, python -c, docker...
+```
+
+Tier 0 and Tier 2 lists are read-only (hardcoded). Tier 1 whitelist is editable — user can add/remove commands proactively or via "Approve + Add to whitelist" button in the chat approval dialog.
 
 ## Implementation Status
 
