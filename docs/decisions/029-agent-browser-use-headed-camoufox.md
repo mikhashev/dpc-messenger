@@ -73,7 +73,7 @@ Mike's directive (S146): *"агент мог пользоваться брауз
 
 ## Decision
 
-**Option B** — headed Camoufox as the sole post-login agent browser pipeline. Tauri WebView2 popup retained for login only.
+**Option B** — headed Camoufox as the sole agent browser pipeline, including login. Tauri WebView2 popup deprecated for auth-domain sites (S181 amendment: cross-browser session race with Yarche+ proved popup-based login creates unreliable sessions for Camoufox).
 
 ### Rationale
 
@@ -88,14 +88,18 @@ Option A keeps the broken popup pipeline alive; Option C adds a second LLM in th
 │                    DPC Agent (Python)                     │
 │                                                          │
 │  Agent wants to interact with a website:                 │
-│  1. Check if storage_state exists for domain             │
-│     ├─ Yes → load storage_state, skip login popup        │
-│     └─ No  → Tauri popup for human login (ADR-028)       │
-│  2. Launch headed Camoufox with auth context              │
-│  3. Agent calls browser_* tools (navigate, click, etc.)  │
-│  4. Human observes in visible Firefox window              │
-│  5. On completion → save storage_state + sync to Vault   │
-│  6. Close browser                                        │
+│  1. Check if storage_state / vault cookies exist         │
+│     ├─ Yes → load into Camoufox context, navigate        │
+│     └─ No  → open login URL in headed Camoufox,          │
+│              human enters credentials in same window,     │
+│              cookies saved to vault from same context     │
+│  2. Agent calls browser_* tools (navigate, click, etc.)  │
+│  3. Human observes in visible Firefox window              │
+│  4. On completion → save storage_state + sync to Vault   │
+│  5. Close browser                                        │
+│                                                          │
+│  Key: login + navigation in SAME browser context →       │
+│  no cross-browser session transfer, no race conditions    │
 │                                                          │
 │  Interrupt: human presses Стоп button → agent checks     │
 │  inbox between browser steps and halts the flow           │
@@ -104,8 +108,8 @@ Option A keeps the broken popup pipeline alive; Option C adds a second LLM in th
 
 ### Key Properties
 
-1. **Login popup retained** — Tauri WebView2 popup for initial cookie capture only (ADR-028 Phase 1 path). User types credentials, agent gets cookies. No change to existing flow.
-2. **Headed Camoufox for agent actions** — All post-login browsing, extraction, and interaction happens in a visible Firefox window via Playwright APIs. Human can observe everything the agent does.
+1. **Login in Camoufox** — Agent opens login URL in headed Camoufox; human enters credentials in the same Firefox window the agent will use for subsequent navigation. Cookies stay in the same browser context — no cross-browser session transfer, no single-session invalidation race. Tauri WebView2 popup login path (ADR-028 T2) deprecated for auth-domain sites; retained only as legacy fallback.
+2. **Headed Camoufox for agent actions** — All browsing, login, extraction, and interaction happens in a visible Firefox window via Playwright APIs. Human can observe everything the agent does.
 3. **Domain restriction** — Navigation is gated to authorized domains only (`privacy_rules.json` whitelist). Fail-closed: if no whitelist, agent cannot browse.
 4. **Storage state persistence** — Playwright `context.storage_state()` saved to disk as fast-restore cache. Vault stores encrypted backup. No auto-expiry (Q3 decision).
 5. **Audit trail** — All browser actions logged with action type, URL, selector, timestamp. Privacy: `fill` logs `text_length`, not content; `screenshot` logs `byte_size`, not pixels.
@@ -116,9 +120,9 @@ Option A keeps the broken popup pipeline alive; Option C adds a second LLM in th
 
 ### Retained from T10
 
-- Tauri WebView2 popup for login (user-facing cookie capture)
 - `browse_page(keep_open=false)` headless single-shot extraction (unchanged)
 - Cookie sync to Vault (existing `encrypt_and_store` path)
+- Tauri WebView2 popup login as legacy fallback only (deprecated for auth-domain sites per S181 decision)
 
 ### Removed from T10
 
@@ -140,6 +144,7 @@ Decomposition under [`tasks/adr-029-headed-camoufox/`](../../tasks/adr-029-heade
 | 4 | Audit trail | Structured log of browser actions, privacy-preserving field filtering | Task 1 |
 | 5 | Tool registry | Register 9 `browser_*` tools + firewall defaults; **accessibility-tree snapshot + ref-based interaction + auto-snapshot after navigate + LLM-Manager-routed summarization** for snapshots beyond a size threshold (S154 decision matrix) | Task 1, 2, 3 |
 | 6 | Interrupt mechanism | Stop button + agent inbox check between browser steps | Task 1 |
+| 7 | Camoufox login flow | Agent opens login URL in headed Camoufox; human authenticates in same window; cookies saved from same context. Replaces Tauri popup for auth-domain sites. Eliminates cross-browser session race (S181 Yarche+ incident). | Task 1, 3 |
 
 ## Consequences
 
@@ -174,7 +179,7 @@ How to verify the decision was implemented correctly:
 - [ ] Cookies and localStorage persist across browser restart (via `storage_state`)
 - [ ] Domain restriction enforced — agent cannot navigate outside auth domain (eTLD+1 + subdomains)
 - [ ] All agent browser actions recorded in `web_audit.jsonl` (extends ADR-028 audit schema)
-- [ ] Tauri popup still functions for login flow (ADR-028 T2 unaffected)
+- [ ] Agent can trigger Camoufox login flow: opens login URL in headed window, human authenticates, cookies saved to vault from same context (Task 7)
 - [ ] Stop button appears when browser session live; pressing it halts current tool call without closing Firefox window
 - [ ] Cross-platform smoke test: Windows + at least one of Linux/macOS
 
@@ -199,6 +204,7 @@ How to verify the decision was implemented correctly:
 | Task 4 — audit trail extension | Done | `50e52dd` |
 | Task 5 — agent tool registry rewire | Pending | — |
 | Task 6 — interrupt mechanism (Stop button) | Pending | — |
+| Task 7 — Camoufox login flow | Pending | — |
 
 ## Authors
 
