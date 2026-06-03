@@ -125,9 +125,8 @@ def _get_tier1_whitelist(ctx: Optional["ToolContext"] = None) -> list[str]:
         profiles = rules.get("agent_profiles", {})
         profile = profiles.get(profile_name, {})
         tools_block = profile.get("tools", {})
-        shell_block = tools_block.get("run_shell", {})
-        if isinstance(shell_block, dict):
-            wl = shell_block.get("tier1_whitelist", [])
+        wl = tools_block.get("run_shell_tier1_whitelist", [])
+        if isinstance(wl, list):
             log.debug("tier1_whitelist[%s]: %s", profile_name, wl)
             return wl
     except Exception as e:

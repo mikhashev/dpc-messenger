@@ -830,8 +830,8 @@
                           <div class="whitelist-entry">
                             <code>{entry}</code>
                             <button class="btn-remove-wl" on:click={() => {
-                              const wl = editSettings.tools.run_shell_tier1_whitelist || [];
-                              editSettings.tools.run_shell_tier1_whitelist = wl.filter((_: any, idx: number) => idx !== i);
+                              const wl: string[] = editSettings.tools.run_shell_tier1_whitelist || [];
+                              editSettings.tools.run_shell_tier1_whitelist = wl.filter((_entry: string, idx: number) => idx !== i);
                             }}>×</button>
                           </div>
                         {/each}
@@ -844,9 +844,14 @@
                           on:keydown={(e) => {
                             const target = e.target as HTMLInputElement;
                             if (e.key === 'Enter' && target.value.trim()) {
-                              const wl = editSettings.tools.run_shell_tier1_whitelist || [];
-                              if (!wl.includes(target.value.trim())) {
-                                editSettings.tools.run_shell_tier1_whitelist = [...wl, target.value.trim()];
+                              const val = target.value.trim();
+                              const tier2warn = ['rm', 'rmdir', 'del', 'format', 'mkfs', 'shutdown', 'reboot', 'docker', 'wsl'];
+                              if (tier2warn.some(t => val.toLowerCase().startsWith(t))) {
+                                alert(`Warning: "${val}" matches a Tier 2 (blocked) command. Adding to whitelist will NOT override Tier 2 blocks.`);
+                              }
+                              const wl: string[] = editSettings.tools.run_shell_tier1_whitelist || [];
+                              if (!wl.includes(val)) {
+                                editSettings.tools.run_shell_tier1_whitelist = [...wl, val];
                               }
                               target.value = '';
                             }

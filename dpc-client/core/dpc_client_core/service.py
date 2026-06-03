@@ -4081,13 +4081,12 @@ class CoreService:
             profiles = rules.setdefault("agent_profiles", {})
             profile = profiles.setdefault(agent_id, {})
             tools = profile.setdefault("tools", {})
-            shell_block = tools.setdefault("run_shell", {})
-            if not isinstance(shell_block, dict):
-                tools["run_shell"] = {"tier1_whitelist": [command_prefix]}
-            else:
-                whitelist = shell_block.setdefault("tier1_whitelist", [])
-                if command_prefix not in whitelist:
-                    whitelist.append(command_prefix)
+            whitelist = tools.setdefault("run_shell_tier1_whitelist", [])
+            if not isinstance(whitelist, list):
+                whitelist = []
+                tools["run_shell_tier1_whitelist"] = whitelist
+            if command_prefix not in whitelist:
+                whitelist.append(command_prefix)
             self.firewall.save_rules_from_dict(rules)
             return {"status": "ok", "agent_id": agent_id, "added": command_prefix}
         except Exception as e:
