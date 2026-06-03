@@ -1799,9 +1799,12 @@ class ContextFirewall:
                                 'extended_path_read', 'extended_path_write',
                                 'repo_list', 'drive_list', 'extended_path_list',
                             }
+                            tool_metadata_keys = {'run_shell_tier1_whitelist', 'run_shell_group_allowed'}
                             for tool_name, tool_enabled in tools.items():
                                 if tool_name.startswith('_'):
                                     continue  # Skip comments
+                                if tool_name in tool_metadata_keys:
+                                    continue  # Non-boolean tool settings
                                 if tool_name not in valid_tools:
                                     logger.warning("Unknown tool in dpc_agent.tools: '%s' (ignored — may be from older config)", tool_name)
                                 if not isinstance(tool_enabled, bool):
@@ -1877,9 +1880,12 @@ class ContextFirewall:
                                         'extended_path_read', 'extended_path_write',
                                         'repo_list', 'drive_list', 'extended_path_list',
                                     }
+                                    tool_metadata_keys = {'run_shell_tier1_whitelist', 'run_shell_group_allowed'}
                                     for tool_name, tool_enabled in tools.items():
                                         if tool_name.startswith('_'):
                                             continue  # Skip comments
+                                        if tool_name in tool_metadata_keys:
+                                            continue  # Non-boolean tool settings
                                         if tool_name not in valid_tools:
                                             logger.warning("Unknown tool in agent_profiles.%s.tools: '%s' (ignored)", profile_name, tool_name)
                                         if not isinstance(tool_enabled, bool):

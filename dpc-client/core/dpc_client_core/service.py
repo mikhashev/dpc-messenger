@@ -4083,7 +4083,10 @@ class CoreService:
                 tools["run_shell_tier1_whitelist"] = whitelist
             if command_prefix not in whitelist:
                 whitelist.append(command_prefix)
-            self.firewall.save_rules_from_dict(rules)
+            ok, msg, errs = self.firewall.save_rules_from_dict(rules)
+            if not ok:
+                logger.error("shell_add_to_whitelist save failed: %s %s", msg, errs)
+                return {"status": "error", "message": f"Save failed: {msg}", "errors": errs}
             return {"status": "ok", "agent_id": agent_id, "added": command_prefix}
         except Exception as e:
             logger.error("shell_add_to_whitelist failed: %s", e)
