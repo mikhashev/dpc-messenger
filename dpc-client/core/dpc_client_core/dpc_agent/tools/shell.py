@@ -175,6 +175,20 @@ def _validate_command(command: str, ctx: Optional["ToolContext"] = None) -> Opti
 
 
 _pending_approvals: dict = {}
+APPROVAL_TTL_SECONDS = 60
+
+
+def _cleanup_expired_approvals() -> None:
+    """Remove pending approvals older than TTL."""
+    import time
+    now = time.time()
+    expired = [k for k, v in _pending_approvals.items()
+               if now - v.get("created_at", 0) > APPROVAL_TTL_SECONDS]
+    for k in expired:
+        entry = _pending_approvals.pop(k, None)
+        if entry:
+            log.info("Shell approval expired (TTL %ds): %s — %r",
+                     APPROVAL_TTL_SECONDS, k, entry.get("command"))
 
 
 def _request_approval(ctx: ToolContext, command: str, reason: str, cwd: str, timeout: int) -> str:
@@ -184,7 +198,10 @@ def _request_approval(ctx: ToolContext, command: str, reason: str, cwd: str, tim
     asynchronously when the user approves via shell_approve_command WS.
     Result is broadcast to chat — agent sees it on the next turn.
     """
+    import time
     import uuid
+
+    _cleanup_expired_approvals()
 
     request_id = str(uuid.uuid4())[:8]
     agent_name = getattr(getattr(ctx, "_agent", None), "display_name", "Agent")
@@ -195,6 +212,7 @@ def _request_approval(ctx: ToolContext, command: str, reason: str, cwd: str, tim
         "timeout": timeout,
         "agent_name": agent_name,
         "ctx": ctx,
+        "created_at": time.time(),
     }
 
     ctx.pending_events.append({
