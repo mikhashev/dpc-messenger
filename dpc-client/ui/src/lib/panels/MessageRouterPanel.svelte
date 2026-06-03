@@ -6,6 +6,7 @@
 
 <script lang="ts">
   import type { Writable } from 'svelte/store';
+  import { mapBackendMessage } from '$lib/utils/messageMapper';
   import {
     p2pMessages,
     groupTextReceived,
@@ -145,17 +146,11 @@
           // Preserve backend message_id as the local id when available — enables
           // group_message_deleted to find this message later (e.g. stale morning
           // brief cleanup on Sleep button).
-          newMap.set(msg.group_id, [...hist, {
-            id: msg.message_id || crypto.randomUUID(),
-            sender: msg.sender_node_id,
-            senderName: msg.sender_name,
-            text: msg.text,
-            timestamp: Date.now(),
-            mentions: msg.mentions || [],
-            isAgent: msg.sender_type === 'agent' || msg.is_agent || false,
-            agentOwner: msg.agent_owner || null,
-            msg_index: msg.msg_index || 0,
-          }]);
+          const mapped = mapBackendMessage(msg, { fallbackSender: msg.sender_node_id, fallbackSenderName: msg.sender_name });
+          mapped.id = msg.message_id || crypto.randomUUID();
+          mapped.text = msg.text;
+          mapped.timestamp = Date.now();
+          newMap.set(msg.group_id, [...hist, mapped]);
           return newMap;
         });
 

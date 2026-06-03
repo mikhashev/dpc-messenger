@@ -7,6 +7,7 @@
 <script lang="ts">
   import { type Writable, get } from 'svelte/store';
   import { untrack } from 'svelte';
+  import { mapBackendMessage } from '$lib/utils/messageMapper';
   import {
     agentProgress,
     agentProgressClear,
@@ -162,23 +163,20 @@
                 const localById = new Map(localHistory.map((m: any) => [m.id, m]));
 
                 const msgs = histResult.messages.map((msg: any, index: number) => {
-                  const ts = msg.timestamp ? new Date(msg.timestamp).getTime() : Date.now() - (histResult.messages.length - index) * 1000;
-                  // Prefer backend UUID (msg.id) for uniqueness; fall back to timestamp-based ID
-                  const stableId = msg.id || `${conv_id}-${msg.timestamp ? ts : index}`;
-                  const local = localById.get(stableId);
                   const { sender, senderName } = mapMessageSender(msg, conv_id, agent.name || conv_id);
-                  return {
-                    id: stableId,
-                    sender,
-                    senderName,
-                    text: msg.content,
-                    timestamp: ts,
-                    attachments: msg.attachments || [],
-                    msg_index: msg.msg_index || 0,
-                    // Restore rich metadata: prefer persisted history.json fields, fall back to localStorage
-                    thinking: msg.thinking || local?.thinking,
-                    streamingRaw: msg.streaming_raw || local?.streamingRaw,
-                  };
+                  const stableId = msg.id || `${conv_id}-${msg.timestamp ? new Date(msg.timestamp).getTime() : index}`;
+                  const local = localById.get(stableId);
+                  const mapped = mapBackendMessage(msg, {
+                    fallbackSender: sender,
+                    fallbackSenderName: senderName,
+                    index,
+                    totalCount: histResult.messages.length,
+                  });
+                  mapped.id = stableId;
+                  mapped.text = msg.content;
+                  mapped.thinking = msg.thinking || local?.thinking;
+                  mapped.streamingRaw = msg.streaming_raw || local?.streamingRaw;
+                  return mapped;
                 });
                 newMap.set(conv_id, msgs);
                 return newMap;
@@ -332,16 +330,11 @@
           const mappedMessages = (messages || []).map((msg: any, index: number) => {
             const { sender, senderName } = mapMessageSender(msg, conversation_id, getAgentName(conversation_id));
             const stableId = msg.id || `${conversation_id}-${msg.timestamp ? new Date(msg.timestamp).getTime() : index}`;
-            return {
-              id: stableId,
-              sender,
-              senderName,
-              text: msg.content,
-              timestamp: msg.timestamp ? new Date(msg.timestamp).getTime() : Date.now(),
-              attachments: msg.attachments || [],
-              msg_index: msg.msg_index || 0,
-            } as Message;
-          });
+            const mapped = mapBackendMessage(msg, { fallbackSender: sender, fallbackSenderName: senderName });
+            mapped.id = stableId;
+            mapped.text = msg.content;
+            return mapped;
+          }) as Message[];
 
           // Attach streamingRaw and thinking to the last assistant message
           const lastAssistantIdx = [...mappedMessages].reverse().findIndex(m => m.sender === conversation_id);

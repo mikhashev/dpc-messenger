@@ -6,6 +6,7 @@
 <script lang="ts">
   import type { Writable } from 'svelte/store';
   import { get } from 'svelte/store';
+  import { mapBackendMessage } from '$lib/utils/messageMapper';
   import {
     historyRestored,
     groupHistorySynced,
@@ -86,21 +87,16 @@
               chatHistories.update(map => {
                 const newMap = new Map(map);
                 const syncedMessages = response.messages.map((msg: any, index: number) => {
-                  const stableId = msg.message_id || msg.id || `synced-${index}-${Date.now()}`;
-                  const senderName = msg.sender_name || '';
                   const isAgent = msg.sender_type === 'agent' || msg.is_agent || false;
                   const isLocalHuman = !isAgent && (!msg.sender_node_id || msg.sender_node_id === selfNodeId);
-                  return {
-                    id: stableId,
-                    sender: isLocalHuman ? 'user' : (msg.sender_node_id || msg.node_id || syncedGroupId),
-                    senderName: isLocalHuman ? 'You' : (senderName || getPeerDisplayName(msg.sender_node_id || syncedGroupId)),
-                    text: msg.content || msg.text,
-                    timestamp: new Date(msg.timestamp).getTime() || Date.now() - (response.messages.length - index) * 1000,
-                    attachments: msg.attachments || [],
-                    isAgent: isAgent,
-                    agentOwner: msg.agent_owner || null,
-                    msg_index: msg.msg_index || 0,
-                  };
+                  const mapped = mapBackendMessage(msg, {
+                    fallbackSender: isLocalHuman ? 'user' : (msg.sender_node_id || msg.node_id || syncedGroupId),
+                    fallbackSenderName: isLocalHuman ? 'You' : (msg.sender_name || getPeerDisplayName(msg.sender_node_id || syncedGroupId)),
+                    index,
+                    totalCount: response.messages.length,
+                  });
+                  mapped.id = msg.message_id || msg.id || `synced-${index}-${Date.now()}`;
+                  return mapped;
                 });
 
                 syncedMessages.forEach((m: any) => {

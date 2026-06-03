@@ -4841,12 +4841,17 @@ class CoreService:
             )
             if response:
                 agent_name = self._get_agent_display_name(agent_id)
-                await self.send_group_agent_message(group_id, agent_name, response)
+                tool_calls = None
+                agent = manager._agents.get(group_id)
+                if agent and hasattr(agent, '_last_trace'):
+                    tool_calls = (agent._last_trace or {}).get("accumulated_tool_calls")
+                await self.send_group_agent_message(group_id, agent_name, response, tool_calls=tool_calls)
         except Exception as e:
             logger.error("Agent group response failed: %s", e, exc_info=True)
 
     async def send_group_agent_message(
-        self, group_id: str, agent_name: str, text: str
+        self, group_id: str, agent_name: str, text: str,
+        tool_calls: Optional[list] = None,
     ) -> Optional[str]:
         """Send a group message attributed to an agent.
 
@@ -4887,6 +4892,11 @@ class CoreService:
             sender_type="agent",
             agent_owner=self.p2p_manager.node_id,
         ))
+        if tool_calls:
+            history = monitor.get_message_history()
+            if history and history[-1].get("id") == message_id:
+                history[-1]["tool_calls"] = tool_calls
+                monitor._history_dirty = True
         monitor.save_history()
 
         last_msg = monitor.get_message_history()[-1] if monitor.get_message_history() else {}
