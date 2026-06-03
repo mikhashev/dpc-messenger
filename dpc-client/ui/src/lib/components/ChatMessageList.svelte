@@ -459,67 +459,6 @@
     font-size: 13px;
   }
 
-  /* Agent progress indicator (v0.15.0+) */
-  .agent-progress {
-    display: flex;
-    align-items: center;
-    gap: 12px;
-    padding: 12px 16px;
-    margin: 8px 0;
-    background: linear-gradient(135deg, #e3f2fd 0%, #f3e5f5 100%);
-    border: 1px solid #90caf9;
-    border-radius: 12px;
-    animation: pulse 2s ease-in-out infinite;
-  }
-
-  @keyframes pulse {
-    0%, 100% { opacity: 1; }
-    50% { opacity: 0.8; }
-  }
-
-  .agent-progress-spinner {
-    width: 20px;
-    height: 20px;
-    border: 2px solid #90caf9;
-    border-top-color: #1976d2;
-    border-radius: 50%;
-    animation: spin 1s linear infinite;
-  }
-
-  @keyframes spin {
-    to { transform: rotate(360deg); }
-  }
-
-  .agent-progress-content {
-    display: flex;
-    flex-wrap: wrap;
-    align-items: center;
-    gap: 8px;
-    flex: 1;
-  }
-
-  .agent-progress-tool {
-    font-weight: 600;
-    color: #1565c0;
-  }
-
-  .agent-progress-round {
-    font-size: 0.85em;
-    color: #666;
-    background: rgba(0,0,0,0.05);
-    padding: 2px 8px;
-    border-radius: 10px;
-  }
-
-  .agent-progress-message {
-    color: #555;
-    font-size: 0.9em;
-    max-width: 300px;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-
   /* Agent streaming text (v0.16.0+) */
   .ai-streaming {
     background: linear-gradient(135deg, #e8f5e9 0%, #f1f8e9 100%);
