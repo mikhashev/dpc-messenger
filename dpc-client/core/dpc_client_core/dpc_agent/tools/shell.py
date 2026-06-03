@@ -39,9 +39,10 @@ HARDLINE_PATTERNS: list[re.Pattern] = [
     # Mass delete (Windows)
     re.compile(r"\b(rd|rmdir)\b.*\s+/s", re.I),
     re.compile(r"\bdel\b\s+/s", re.I),
-    # Disk format
+    # Disk format / erase
     re.compile(r"\bmkfs\b", re.I),
     re.compile(r"\bformat\s+[A-Za-z]:", re.I),
+    re.compile(r"\bdiskutil\s+(eraseDisk|partitionDisk|secureErase)", re.I),
     # Raw device write
     re.compile(r"\bdd\b.*\bof=/dev/", re.I),
     re.compile(r">\s*/dev/sd", re.I),
@@ -80,6 +81,9 @@ DANGEROUS_PATTERNS: list[re.Pattern] = [
     re.compile(r"\bgit\s+branch\b.*\s+-D\b", re.I),
     # Service control
     re.compile(r"\b(systemctl\s+(stop|disable)|sc\s+delete|net\s+stop)\b", re.I),
+    # macOS system security
+    re.compile(r"\bcsrutil\s+disable\b", re.I),
+    re.compile(r"\blaunchctl\s+(unload|remove)\b", re.I),
     # Docker (arbitrary code execution surface)
     re.compile(r"\bdocker\b", re.I),
 ]
