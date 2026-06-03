@@ -341,6 +341,8 @@ async def _execute_with_timeout(
     # Use shared executor to avoid memory leak from creating new executors
     executor = _get_shared_executor()
     loop = asyncio.get_running_loop()
+    if ctx is not None:
+        ctx._event_loop = loop
 
     t0 = time.monotonic()
     try:

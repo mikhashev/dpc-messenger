@@ -219,13 +219,17 @@ def _request_approval(ctx: ToolContext, command: str, reason: str, cwd: str, tim
     if local_api:
         import asyncio
         try:
-            loop = asyncio.get_running_loop()
-            loop.create_task(local_api.broadcast_event("shell_approval_request", {
+            coro = local_api.broadcast_event("shell_approval_request", {
                 "request_id": request_id,
                 "command": command,
                 "reason": reason,
                 "agent_name": agent_name,
-            }))
+            })
+            main_loop = getattr(ctx, "_event_loop", None)
+            if main_loop and main_loop.is_running():
+                asyncio.run_coroutine_threadsafe(coro, main_loop)
+            else:
+                log.warning("No main event loop available for shell_approval_request broadcast")
         except Exception as e:
             log.warning("Failed to broadcast shell_approval_request: %s", e)
     else:
