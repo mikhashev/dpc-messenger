@@ -507,6 +507,8 @@ async def run_llm_loop(
     )
 
     round_idx = 0
+    empty_retry_count = 0
+    MAX_EMPTY_RETRIES = 3
     try:
         while True:
             round_idx += 1
@@ -610,14 +612,15 @@ async def run_llm_loop(
                     llm_trace["assistant_notes"].append(clean_content.strip()[:320])
                     return clean_content, accumulated_usage, llm_trace
                 # LLM returned empty content (e.g. GLM thinking-only with no text).
-                # Inject a re-prompt and retry once so the user gets a real answer.
-                if round_idx == 1:
-                    log.warning("LLM returned empty content with no tool calls — re-prompting for text response")
-                    messages.append({
-                        "role": "user",
-                        "content": "Please provide your answer as text. Your previous response was empty.",
-                    })
+                # Retry the same call without prompt modification.
+                if empty_retry_count < MAX_EMPTY_RETRIES:
+                    empty_retry_count += 1
+                    log.warning(
+                        "LLM returned empty content — retry %d/%d",
+                        empty_retry_count, MAX_EMPTY_RETRIES,
+                    )
                     continue
+                log.warning("LLM returned empty content after %d retries", MAX_EMPTY_RETRIES)
                 return "", accumulated_usage, llm_trace
 
             # Process tool calls — strip hallucinated post-tool-call content before storing

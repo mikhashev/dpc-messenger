@@ -917,8 +917,16 @@ class DpcAgentManager:
 
             # Skip saving agent errors to history — they pollute context for future requests
             _is_llm_error = response and response.startswith("⚠️")
+            _is_empty_after_retry = not response and not _has_extras
 
-            if (_has_content or _has_extras) and not _is_llm_error:
+            if _is_empty_after_retry:
+                log.warning("Agent returned empty response after retries — sending toast notification")
+                await self.service.local_api.broadcast_event("error_toast", {
+                    "title": "Empty Response",
+                    "message": f"{agent_display_name} returned an empty response after retries. Try again.",
+                    "duration": 5000,
+                })
+            elif (_has_content or _has_extras) and not _is_llm_error:
                 monitor.add_message(
                     role="assistant",
                     content=response or "",

@@ -126,6 +126,7 @@ dpc-client/core/dpc_client_core/cli_backup.py
 # Triaged task list for Mike + Ark + CC. Contains unpatched security findings
 # and WIP architecture decisions. See conversations/ for decision history.
 backlog.md
+backlog_closed.md
 
 # 19. Internal process protocol (CC + Ark + Mike operating agreement)
 # Triple-agent collaboration rules, workflow patterns, internal references.
