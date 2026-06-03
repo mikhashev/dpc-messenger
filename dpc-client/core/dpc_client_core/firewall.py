@@ -1773,7 +1773,7 @@ class ContextFirewall:
                                 # Git tools
                                 'git_status', 'git_diff', 'git_log', 'git_add', 'git_commit', 'git_branch', 'git_init',
                                 'git_checkout', 'git_merge', 'git_tag', 'git_reset', 'git_snapshot',
-                                'repo_commit_push',
+                                'git_push',
                                 # Restricted tools
                                 'run_shell',
                                 # Task queue tools (v0.16.0+)
@@ -1857,7 +1857,7 @@ class ContextFirewall:
                                         'browse_page', 'fetch_json', 'check_url', 'search_web',
                                         'git_status', 'git_diff', 'git_log', 'git_add', 'git_commit', 'git_branch', 'git_init',
                                         'git_checkout', 'git_merge', 'git_tag', 'git_reset', 'git_snapshot',
-                                        'repo_commit_push',
+                                        'git_push',
                                         'run_shell',
                                         'schedule_task', 'get_task_status',
                                         'search_files', 'search_in_file',

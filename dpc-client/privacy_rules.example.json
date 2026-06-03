@@ -195,7 +195,7 @@
       "git_commit": false,
       "git_branch": false,
       "git_init": false,
-      "repo_commit_push": false,
+      "git_push": false,
       "run_shell": false,
       "claude_code_edit": false
     }

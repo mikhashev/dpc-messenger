@@ -104,7 +104,7 @@
         { key: 'git_tag', label: 'Git Tag', desc: 'Create milestone tags' },
         { key: 'git_reset', label: 'Git Reset', desc: 'Rollback files or commits (hard=true is destructive)', isDanger: true },
         { key: 'git_snapshot', label: 'Git Snapshot', desc: 'Quick save: stage all + commit with UTC timestamp' },
-        { key: 'repo_commit_push', label: 'Git Push', desc: 'Push to remote (not used — local only)', isDanger: true },
+        { key: 'git_push', label: 'Git Push', desc: 'Push to remote (not used — local only)', isDanger: true },
       ]
     },
     {

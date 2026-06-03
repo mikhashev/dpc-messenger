@@ -238,7 +238,7 @@ CORE_TOOL_NAMES = {
 RESTRICTED_TOOL_NAMES = {
     "run_shell",           # Shell access
     "claude_code_edit",    # Code editing via Claude
-    "repo_commit_push",    # Git push
+    "git_push",            # Git push
     "request_restart",     # Control operations
     "promote_to_stable",
     # Git tools (can modify files / history)
