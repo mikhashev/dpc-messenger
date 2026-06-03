@@ -467,6 +467,27 @@ def get_active_browser_sessions() -> dict[str, "AuthBrowser"]:
     return _active_browser_sessions
 
 
+async def cleanup_idle_browser_sessions() -> int:
+    """Close browser sessions idle longer than IDLE_TIMEOUT_SECONDS.
+
+    Called periodically from a background task in service.py.
+    Returns the number of sessions closed.
+    """
+    now = time.monotonic()
+    closed = 0
+    for agent_id, session in list(_active_browser_sessions.items()):
+        idle = now - session._last_activity
+        if idle > IDLE_TIMEOUT_SECONDS:
+            log.info("Closing idle browser session for %s (idle %.0fs)", agent_id, idle)
+            try:
+                await _run_in_session(session, "close")
+            except Exception as e:
+                log.warning("Error closing idle session %s: %s", agent_id, e)
+            _active_browser_sessions.pop(agent_id, None)
+            closed += 1
+    return closed
+
+
 _session_locks: dict[str, asyncio.Lock] = {}
 
 
@@ -903,6 +924,7 @@ class AuthBrowser:
         self._disconnected = False
         self._last_refs: dict[str, dict] = {}
         self._executor: Optional[ThreadPoolExecutor] = None
+        self._last_activity: float = time.monotonic()
 
     def _get_executor(self) -> ThreadPoolExecutor:
         """Lazy single-worker executor pinned to this AuthBrowser.
@@ -1736,6 +1758,9 @@ def _get_or_create_session(
     return session
 
 
+IDLE_TIMEOUT_SECONDS = 30 * 60
+
+
 async def _run_in_session(
     session: "AuthBrowser", method_name: str, *args: Any, **kwargs: Any,
 ) -> Any:
@@ -1743,6 +1768,7 @@ async def _run_in_session(
     single-worker thread. Required because Playwright sync API objects
     (Page, Context, Browser) are thread-affine; every call must come
     from the thread that owns the connection."""
+    session._last_activity = time.monotonic()
     loop = asyncio.get_running_loop()
     method = getattr(session, method_name)
     return await loop.run_in_executor(

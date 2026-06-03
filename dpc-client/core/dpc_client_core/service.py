@@ -887,6 +887,10 @@ class CoreService:
             self.connection_status.update_hub_status(connected=False)
             self.connection_status.update_webrtc_status(available=False)
 
+        browser_cleanup_task = asyncio.create_task(self._browser_idle_cleanup_loop())
+        browser_cleanup_task.set_name("browser_idle_cleanup")
+        self._background_tasks.add(browser_cleanup_task)
+
         self._is_running = True
         logger.info("D-PC Core Service started")
         logger.info("Node ID: %s", self.p2p_manager.node_id)
@@ -921,6 +925,20 @@ class CoreService:
             return
         logger.info("Stopping D-PC Core Service")
         self._shutdown_event.set()
+
+    async def _browser_idle_cleanup_loop(self) -> None:
+        """Periodically close idle Camoufox browser sessions (CAMOUFOX-IDLE-LEAK fix)."""
+        from .dpc_agent.tools.browser import cleanup_idle_browser_sessions
+        while not self._shutdown_event.is_set():
+            try:
+                await asyncio.sleep(300)
+                closed = await cleanup_idle_browser_sessions()
+                if closed:
+                    logger.info("Browser idle cleanup: closed %d session(s)", closed)
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.warning("Browser idle cleanup error: %s", e)
 
     async def shutdown(self):
         """Performs a clean shutdown of all components."""
