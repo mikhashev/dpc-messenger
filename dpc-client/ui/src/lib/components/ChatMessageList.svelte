@@ -6,6 +6,7 @@
   import ImageMessage from './ImageMessage.svelte';
   import VoicePlayer from './VoicePlayer.svelte';
   import ThinkingBlock from './ThinkingBlock.svelte';
+  import AgentProgressCollapsible from './AgentProgressCollapsible.svelte';
   import type { Message, Mention } from '$lib/types.js';
 
   // Props (Svelte 5 runes mode)
@@ -155,6 +156,14 @@
           {/if}
         {/if}
 
+        <!-- Tool calls collapsible (ADR-030 v3 / UI-AGENT-ACTIONS-COLLAPSIBLE) -->
+        {#if isAiSender(msg.sender, msg) && msg.tool_calls && msg.tool_calls.length > 0}
+          <AgentProgressCollapsible
+            toolCalls={msg.tool_calls}
+            agentName={msg.senderName || ''}
+          />
+        {/if}
+
         <!-- Raw streaming output (v0.16.0+): Collapsible section showing incremental text -->
         {#if isAiSender(msg.sender, msg) && msg.streamingRaw && msg.streamingRaw.length > 50}
           <details class="streaming-raw-details">
@@ -224,16 +233,16 @@
     </div>
   {/if}
 
-  <!-- Agent progress indicator (v0.15.0+) -->
+  <!-- Agent progress indicator (v0.15.0+ / redesigned S185 collapsible) -->
   {#if agentProgressTool || agentProgressMessage}
     <div class="agent-progress">
       <div class="agent-progress-spinner"></div>
       <div class="agent-progress-content">
-        {#if agentProgressTool}
-          <span class="agent-progress-tool">🔧 {agentProgressTool}</span>
-        {/if}
         {#if agentProgressRound > 0}
           <span class="agent-progress-round">Round {agentProgressRound}</span>
+        {/if}
+        {#if agentProgressTool}
+          <span class="agent-progress-tool">{agentProgressTool}</span>
         {/if}
         {#if agentProgressMessage}
           <span class="agent-progress-message">{agentProgressMessage}</span>

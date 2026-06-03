@@ -66,6 +66,14 @@ export type Message = {
   isAgent?: boolean;           // Agent message in group chat (v0.25.0+)
   agentOwner?: string | null;
   msg_index?: number;          // Sequential message number (MSG-CHAIN, v0.25.0+)
+  tool_calls?: Array<{         // Tool call trace (S185, persisted in history.json)
+    tool: string;
+    input: string;
+    output: string;
+    is_error: boolean;
+    duration_ms: number;
+    round: number;
+  }>;
 };
 
 // --- Provider System ---
