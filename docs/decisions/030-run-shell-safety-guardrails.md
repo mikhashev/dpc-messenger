@@ -203,9 +203,18 @@ Tier 0 and Tier 2 lists are read-only (hardcoded). Tier 1 whitelist is editable 
 | Tier 2 blocklist + NFKC + pipe splitting | Done | `d17ee65` |
 | macOS patterns (diskutil, csrutil, launchctl) | Done | `8553f36` |
 | cwd enforcement (sandbox path validation) | Done | `1fee6a5` |
-| Tests | Pending | — |
-| Tier 1 approval UI (v2) | Deferred | — |
-| Group chat approval routing (v2) | Deferred | — |
+| ADR documentation (chat coverage, macOS tables, Q1) | Done | `2273c07`, `f578d42`, `82f9333` |
+| Tests (98 unit tests + curl\|sh cross-segment fix) | Done | `b5c1bf9`, `1fa982d` |
+| v2 backend: Tier 1 approval (Variant B) + whitelist | Done | `836c5eb`, `eab6e8c`, `dbb34ae`, `3244b69` |
+| v2 frontend: ShellApprovalDialog + result cards | Done | `4b79277`, `76b4dd7` |
+| v2 frontend: AgentPermissions whitelist CRUD | Done | `bb5ee73` |
+| v2 broadcast fix (threadsafe from executor thread) | Done | `f2d6f28`, `c26143c`, `a72a08e` |
+
+### v3 Scope (next session)
+
+- **AFTER_TOOL_CALL hook lifecycle event** — canonical path for tool side effects (broadcast approval requests, emit notifications) instead of `run_coroutine_threadsafe` workaround. Current v2 stores `ctx._event_loop` in loop.py before executor dispatch and uses `asyncio.run_coroutine_threadsafe()` from the thread. v3 replaces this with a proper hook that fires after tool execution in the async context of the main event loop. Benefits: cleaner architecture, reusable for other tools that need async side effects (browse_page popup could migrate too).
+- **Smoke test** ADR-030 v2 approval dialog in UI (broadcast fix committed but not yet verified with restart)
+- **Telegram approval path** (Q3) — deferred from v2
 
 ## Open Questions
 
