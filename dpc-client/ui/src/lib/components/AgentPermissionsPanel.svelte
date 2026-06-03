@@ -1636,7 +1636,8 @@
     display: inline-flex;
     align-items: center;
     gap: 4px;
-    background: var(--bg-tertiary, #11111b);
+    background: var(--bg-tertiary, #e8e8e8);
+    color: var(--text-primary, #1a1a2e);
     padding: 2px 8px;
     border-radius: 4px;
     font-size: 0.85em;
