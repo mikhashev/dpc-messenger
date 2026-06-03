@@ -219,7 +219,7 @@ def _request_approval(ctx: ToolContext, command: str, reason: str, cwd: str, tim
     if local_api:
         import asyncio
         try:
-            loop = asyncio.get_event_loop()
+            loop = asyncio.get_running_loop()
             loop.create_task(local_api.broadcast_event("shell_approval_request", {
                 "request_id": request_id,
                 "command": command,
