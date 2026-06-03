@@ -13,7 +13,11 @@ session: S177
 
 ## Context and Problem Statement
 
-The agent `run_shell` tool (`dpc_agent/tools/shell.py`) executes arbitrary shell commands via `subprocess.run(command, shell=True)` with zero content validation. The only existing protections are firewall scope restriction (1:1 chats only by default, S176 commit `347550b`), timeout (5-300s), and output truncation (50K chars).
+The agent `run_shell` tool (`dpc_agent/tools/shell.py`) executes arbitrary shell commands via `subprocess.run(command, shell=True)` with zero content validation. The only existing protections are firewall scope restriction (per-agent toggle with optional group chat checkbox, S176 commit `347550b`), timeout (5-300s), and output truncation (50K chars).
+
+### Chat Context Coverage
+
+These guardrails apply uniformly in **both 1:1 and group chat contexts**. The firewall controls WHO can use `run_shell` (per-agent toggle + group chat checkbox in AgentPanel UI). ADR-030 controls WHAT commands are allowed — regardless of chat context. An agent with `run_shell` enabled in a group chat is subject to the same Tier 0/1/2 classification as in 1:1.
 
 This leaves the system vulnerable to catastrophic damage from agent-initiated commands — whether from hallucination, prompt injection, or design drift. Real-world incidents confirm this risk: CVE-2025-53773 (GitHub Copilot agent rewrote its own approval settings), Replit Jul 2025 (agent deleted production DB without any injection).
 
@@ -155,17 +159,22 @@ _validate_command(command: str, cwd: str) -> tuple[str, str] | None
 ### v2 Scope (future, not this ADR)
 - `dpc_agent/tools/shell.py` — add Tier 1 `pending_approval` return path
 - `dpc_client_core/local_api.py` — add `execute_approved` WebSocket command
-- `dpc-client/ui/src/lib/panels/ChatPanel.svelte` — approval buttons in chat
+- `dpc-client/ui/src/lib/panels/ChatPanel.svelte` — approval buttons in chat (1:1 + group)
 - `~/.dpc/config.ini` or `privacy_rules.json` — configurable Tier 1 patterns
+- Group chat approval routing — Tier 1 approval in group chats routes to the group owner (Mike), not broadcast to all participants
+- Add-to-whitelist — "Approve + Add to whitelist" button in approval dialog (per-agent persistent whitelist)
 
 ## Implementation Status
 
 | Task | Status | Commit |
 |------|--------|--------|
-| ADR-030 draft | Done | — |
-| Tier 2 blocklist + NFKC + cwd enforcement | Pending | — |
+| ADR-030 draft | Done | `0cc61e3` |
+| Tier 2 blocklist + NFKC + pipe splitting | Done | `d17ee65` |
+| macOS patterns (diskutil, csrutil, launchctl) | Done | `8553f36` |
+| cwd enforcement (sandbox path validation) | Done | `1fee6a5` |
 | Tests | Pending | — |
 | Tier 1 approval UI (v2) | Deferred | — |
+| Group chat approval routing (v2) | Deferred | — |
 
 ## Open Questions
 
