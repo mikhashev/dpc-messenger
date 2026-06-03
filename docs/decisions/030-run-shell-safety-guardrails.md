@@ -1,7 +1,7 @@
 ---
 adr: 030
 title: "Add safety guardrails to agent run_shell tool"
-status: accepted
+status: implemented
 date: 2026-06-01
 deciders: [Mike]
 consulted: [Ark, CC]
@@ -210,6 +210,15 @@ Tier 0 and Tier 2 lists are read-only (hardcoded). Tier 1 whitelist is editable 
 | v2 frontend: AgentPermissions whitelist CRUD | Done | `bb5ee73` |
 | v2 broadcast fix (threadsafe from executor thread) | Done | `f2d6f28`, `c26143c`, `a72a08e` |
 | Smoke test v2 approval dialog | PASS | 2026-06-03 (manual, Mike) |
+| v3 blocking Tier 1 approval (result returns to agent) | Done | `ca70d27` |
+| v3 remove redundant shell_execution_result broadcast | Done | `ca70d27` |
+| v3 approval card dismiss on click | Done | `0c6016b` |
+| v3 whitelist profile key fix (display_name → agent_id) | Done | `d78e009` |
+| v3 firewall validator: allow non-boolean metadata keys | Done | `36b0654` |
+| v3 whitelist badge color visibility | Done | `bee2486` |
+| Tool categories reorganization (Browser/ComfyUI/Archives) | Done | `82acb3b` |
+| repo_commit_push → git_push rename | Done | `8696923` |
+| Smoke test v3 (all paths) | PASS | 2026-06-03 (manual, Mike + Ark) |
 
 ### v3 Scope (current session)
 
