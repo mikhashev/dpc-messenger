@@ -822,6 +822,38 @@
                         <p class="help-text-small" style="margin: 0;">By default run_shell is restricted to 1:1 chats only</p>
                       </div>
                     </label>
+                    <!-- ADR-030 v2: Tier 1 whitelist management -->
+                    <div class="whitelist-section">
+                      <span class="event-name" style="font-size: 0.85em;">Command Whitelist (auto-approved)</span>
+                      <div class="whitelist-entries">
+                        {#each (editSettings.tools.run_shell_tier1_whitelist || []) as entry, i}
+                          <div class="whitelist-entry">
+                            <code>{entry}</code>
+                            <button class="btn-remove-wl" on:click={() => {
+                              const wl = editSettings.tools.run_shell_tier1_whitelist || [];
+                              editSettings.tools.run_shell_tier1_whitelist = wl.filter((_: any, idx: number) => idx !== i);
+                            }}>×</button>
+                          </div>
+                        {/each}
+                      </div>
+                      <div class="whitelist-add">
+                        <input
+                          type="text"
+                          placeholder="e.g. pip install"
+                          class="wl-input"
+                          on:keydown={(e) => {
+                            const target = e.target as HTMLInputElement;
+                            if (e.key === 'Enter' && target.value.trim()) {
+                              const wl = editSettings.tools.run_shell_tier1_whitelist || [];
+                              if (!wl.includes(target.value.trim())) {
+                                editSettings.tools.run_shell_tier1_whitelist = [...wl, target.value.trim()];
+                              }
+                              target.value = '';
+                            }
+                          }}
+                        />
+                      </div>
+                    </div>
                   {/if}
                 {:else}
                   <label for="agent-tool-{tool.key}">
@@ -849,6 +881,16 @@
                         <p class="help-text-small" style="margin: 0;">By default run_shell is restricted to 1:1 chats only</p>
                       </div>
                     </label>
+                    {#if (displaySettings.tools?.run_shell_tier1_whitelist || []).length > 0}
+                      <div class="whitelist-section" style="opacity: 0.7;">
+                        <span class="event-name" style="font-size: 0.85em;">Whitelisted commands:</span>
+                        <div class="whitelist-entries">
+                          {#each displaySettings.tools.run_shell_tier1_whitelist as entry}
+                            <div class="whitelist-entry"><code>{entry}</code></div>
+                          {/each}
+                        </div>
+                      </div>
+                    {/if}
                   {/if}
                 {/if}
               </div>
@@ -1534,5 +1576,50 @@
 
   .btn-archive-danger {
     background: var(--danger, #ef4444);
+  }
+
+  .whitelist-section {
+    margin: 8px 0 4px 28px;
+    padding: 8px;
+    border-left: 2px solid var(--border, #333);
+  }
+
+  .whitelist-entries {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+    margin: 4px 0;
+  }
+
+  .whitelist-entry {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    background: var(--bg-tertiary, #11111b);
+    padding: 2px 8px;
+    border-radius: 4px;
+    font-size: 0.85em;
+  }
+
+  .btn-remove-wl {
+    background: none;
+    border: none;
+    color: var(--danger, #ef4444);
+    cursor: pointer;
+    font-size: 1em;
+    padding: 0 2px;
+    opacity: 0.6;
+  }
+  .btn-remove-wl:hover { opacity: 1; }
+
+  .wl-input {
+    margin-top: 4px;
+    padding: 4px 8px;
+    border: 1px solid var(--border, #333);
+    border-radius: 4px;
+    background: var(--bg-tertiary, #11111b);
+    color: var(--text-primary, #cdd6f4);
+    font-size: 0.85em;
+    width: 200px;
   }
 </style>
