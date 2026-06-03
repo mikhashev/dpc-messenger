@@ -113,7 +113,34 @@ CROSS_SEGMENT_PATTERNS: list[re.Pattern] = [
 ]
 
 
-def _validate_command(command: str) -> Optional[Tuple[str, str]]:
+def _get_tier1_whitelist(ctx: Optional["ToolContext"] = None) -> list[str]:
+    """Load per-agent Tier 1 whitelist from privacy_rules.json."""
+    if not ctx or not ctx.firewall:
+        return []
+    try:
+        _profile = getattr(getattr(ctx, "_agent", None), "_firewall_profile", None)
+        rules = ctx.firewall.rules
+        profiles = rules.get("agent_profiles", {})
+        profile = profiles.get(_profile or "default", {})
+        tools_block = profile.get("tools", {})
+        shell_block = tools_block.get("run_shell", {})
+        if isinstance(shell_block, dict):
+            return shell_block.get("tier1_whitelist", [])
+    except Exception:
+        pass
+    return []
+
+
+def _is_whitelisted(command: str, whitelist: list[str]) -> bool:
+    """Check if command prefix matches any whitelist entry."""
+    normalized = _normalize_command(command).strip().lower()
+    for entry in whitelist:
+        if normalized.startswith(entry.lower()):
+            return True
+    return False
+
+
+def _validate_command(command: str, ctx: Optional["ToolContext"] = None) -> Optional[Tuple[str, str]]:
     """Validate command against safety tiers. Returns (tier, reason) or None if allowed."""
     normalized = _normalize_command(command)
 
@@ -134,18 +161,56 @@ def _validate_command(command: str) -> Optional[Tuple[str, str]]:
                 return ("tier2", f"Blocked by HARDLINE pattern: {pattern.pattern}")
         for pattern in DANGEROUS_PATTERNS:
             if pattern.search(segment):
-                return ("tier2", f"Blocked by DANGEROUS pattern (v1): {pattern.pattern}")
+                whitelist = _get_tier1_whitelist(ctx)
+                if _is_whitelisted(command, whitelist):
+                    return None
+                return ("tier1", f"Requires approval: {pattern.pattern}")
 
     return None
 
 
+def _request_approval(ctx: ToolContext, command: str, reason: str) -> Optional[str]:
+    """Request user approval for a Tier 1 command via WebSocket event.
+
+    Returns the command output if approved, or a rejection message.
+    Uses asyncio.Future pattern similar to web_auth popup flow.
+    """
+    import asyncio
+    import uuid
+
+    request_id = str(uuid.uuid4())[:8]
+    agent_name = getattr(getattr(ctx, "_agent", None), "display_name", "Agent")
+
+    if not hasattr(ctx, "_approval_futures"):
+        ctx._approval_futures = {}
+
+    loop = asyncio.get_event_loop()
+    future = loop.create_future()
+    ctx._approval_futures[request_id] = future
+
+    ctx.pending_events.append({
+        "type": "shell_approval_request",
+        "request_id": request_id,
+        "command": command,
+        "reason": reason,
+        "agent_name": agent_name,
+    })
+
+    log.info("run_shell TIER1 approval requested: %r (id=%s)", command, request_id)
+    return f"⏳ Command requires approval: {command}\nReason: {reason}\nWaiting for user approval..."
+
+
 def run_shell(ctx: ToolContext, command: str, timeout: int = 120, cwd: str = "") -> str:
     # ADR-030: validate command before execution
-    violation = _validate_command(command)
+    violation = _validate_command(command, ctx)
     if violation:
         tier, reason = violation
-        log.warning("run_shell BLOCKED (%s): %r — %s", tier, command, reason)
-        return f"⛔ Command blocked by safety guardrails: {reason}"
+        if tier == "tier2":
+            log.warning("run_shell BLOCKED (tier2): %r — %s", command, reason)
+            return f"⛔ Command blocked by safety guardrails: {reason}"
+        elif tier == "tier1":
+            log.warning("run_shell TIER1 (approval needed): %r — %s", command, reason)
+            return _request_approval(ctx, command, reason)
 
     working_dir: str | None = None
     if cwd:

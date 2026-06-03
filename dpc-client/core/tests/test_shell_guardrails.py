@@ -154,7 +154,7 @@ class TestHardlinePatterns:
 
 
 class TestDangerousPatterns:
-    """Tier 1 (blocked in v1)."""
+    """Tier 1 — requires approval (v2). Without whitelist, returns tier1."""
 
     @pytest.mark.parametrize("cmd", [
         "sudo apt install",
@@ -165,7 +165,7 @@ class TestDangerousPatterns:
     def test_privilege_escalation(self, cmd):
         result = _validate_command(cmd)
         assert result is not None
-        assert result[0] == "tier2"
+        assert result[0] == "tier1"
 
     @pytest.mark.parametrize("cmd", [
         "bash -c 'echo hi'",
@@ -178,7 +178,7 @@ class TestDangerousPatterns:
     def test_subshell_invocation(self, cmd):
         result = _validate_command(cmd)
         assert result is not None
-        assert result[0] == "tier2"
+        assert result[0] == "tier1"
 
     def test_powershell_encoded(self):
         result = _validate_command("powershell -enc SGVsbG8=")

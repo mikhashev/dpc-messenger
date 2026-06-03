@@ -3995,6 +3995,55 @@ class CoreService:
         entry.future.set_result(content_html)
         return {"status": "ok", "request_id": request_id, "bytes": len(content_html)}
 
+    # --- Shell approval (ADR-030 v2) ---
+
+    async def shell_approve_command(self, request_id: str, add_to_whitelist: bool = False) -> Dict[str, Any]:
+        """Approve a Tier 1 shell command execution request."""
+        from .dpc_agent.tools import shell as _shell
+        pending = getattr(_shell, "_pending_approvals", {})
+        entry = pending.get(request_id)
+        if not entry:
+            return {"status": "error", "message": f"Unknown request_id: {request_id}"}
+        entry["approved"] = True
+        entry["add_to_whitelist"] = add_to_whitelist
+        if entry.get("future") and not entry["future"].done():
+            entry["future"].set_result(True)
+        logger.info("Shell command approved: %s (whitelist=%s)", request_id, add_to_whitelist)
+        return {"status": "ok", "request_id": request_id}
+
+    async def shell_reject_command(self, request_id: str) -> Dict[str, Any]:
+        """Reject a Tier 1 shell command execution request."""
+        from .dpc_agent.tools import shell as _shell
+        pending = getattr(_shell, "_pending_approvals", {})
+        entry = pending.get(request_id)
+        if not entry:
+            return {"status": "error", "message": f"Unknown request_id: {request_id}"}
+        entry["approved"] = False
+        if entry.get("future") and not entry["future"].done():
+            entry["future"].set_result(False)
+        logger.info("Shell command rejected: %s", request_id)
+        return {"status": "ok", "request_id": request_id}
+
+    async def shell_add_to_whitelist(self, agent_id: str, command_prefix: str) -> Dict[str, Any]:
+        """Add a command prefix to an agent's Tier 1 whitelist."""
+        try:
+            rules = self.firewall.rules
+            profiles = rules.setdefault("agent_profiles", {})
+            profile = profiles.setdefault(agent_id, {})
+            tools = profile.setdefault("tools", {})
+            shell_block = tools.setdefault("run_shell", {})
+            if not isinstance(shell_block, dict):
+                tools["run_shell"] = {"tier1_whitelist": [command_prefix]}
+            else:
+                whitelist = shell_block.setdefault("tier1_whitelist", [])
+                if command_prefix not in whitelist:
+                    whitelist.append(command_prefix)
+            self.firewall.save_rules_from_dict(rules)
+            return {"status": "ok", "agent_id": agent_id, "added": command_prefix}
+        except Exception as e:
+            logger.error("shell_add_to_whitelist failed: %s", e)
+            return {"status": "error", "message": str(e)}
+
     async def get_session_archive_info(self, conversation_id: str) -> Dict[str, Any]:
         """Delegated to AgentService."""
         return await self.agent_service.get_session_archive_info(conversation_id)

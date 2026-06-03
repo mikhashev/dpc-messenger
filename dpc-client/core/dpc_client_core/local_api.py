@@ -159,6 +159,10 @@ ALLOWED_COMMANDS: frozenset = frozenset({
     "web_auth_add_domain",
     "web_auth_remove_domain",
     "web_auth_popup_complete",
+    # Shell approval (ADR-030 v2)
+    "shell_approve_command",
+    "shell_reject_command",
+    "shell_add_to_whitelist",
 })
 
 
