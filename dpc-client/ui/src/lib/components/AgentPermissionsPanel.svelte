@@ -51,6 +51,23 @@
         { key: 'fetch_json', label: 'Fetch JSON', desc: 'Fetch JSON from APIs' },
         { key: 'extract_links', label: 'Extract Links', desc: 'Extract links from pages' },
         { key: 'check_url', label: 'Check URL', desc: 'Check if URL is accessible' },
+        { key: 'list_auth_domains', label: 'Auth Domains', desc: 'List domains where agent has stored credentials' },
+      ]
+    },
+    {
+      name: 'Browser Automation (Camoufox interactive)',
+      tools: [
+        { key: 'browser_snapshot', label: 'Snapshot', desc: 'Take accessibility snapshot of current page' },
+        { key: 'browser_navigate', label: 'Navigate', desc: 'Navigate to URL in active browser session' },
+        { key: 'browser_scroll', label: 'Scroll', desc: 'Scroll page up/down' },
+        { key: 'browser_click', label: 'Click', desc: 'Click element on page' },
+        { key: 'browser_fill', label: 'Fill', desc: 'Fill input field with text' },
+        { key: 'browser_wait_for', label: 'Wait For', desc: 'Wait for element or condition' },
+        { key: 'browser_extract', label: 'Extract', desc: 'Extract data from page elements' },
+        { key: 'browser_screenshot', label: 'Screenshot', desc: 'Take screenshot of current page' },
+        { key: 'browser_switch_tab', label: 'Switch Tab', desc: 'Switch between browser tabs' },
+        { key: 'browser_collect', label: 'Collect', desc: 'Collect structured data from page' },
+        { key: 'browser_close', label: 'Close', desc: 'Close browser session' },
       ]
     },
     {
@@ -112,6 +129,25 @@
       name: 'Messaging Tools (user communication)',
       tools: [
         { key: 'send_user_message', label: 'Send User Message', desc: 'Send Telegram messages to user (agent-initiated)' },
+      ]
+    },
+    {
+      name: 'ComfyUI Tools (image/video generation)',
+      tools: [
+        { key: 'comfyui_submit', label: 'Submit Workflow', desc: 'Submit ComfyUI workflow for execution' },
+        { key: 'comfyui_check', label: 'Check Status', desc: 'Check status of submitted workflow' },
+        { key: 'comfyui_wait', label: 'Wait Complete', desc: 'Wait for workflow to complete (blocking)' },
+        { key: 'comfyui_queue_status', label: 'Queue Status', desc: 'Check ComfyUI queue length and running jobs' },
+        { key: 'comfyui_progress', label: 'Progress', desc: 'Get real-time progress of running workflow' },
+        { key: 'comfyui_convert', label: 'Convert Workflow', desc: 'Convert UI-format workflow to API format' },
+      ]
+    },
+    {
+      name: 'Session Archives (read-only)',
+      tools: [
+        { key: 'read_session_archive', label: 'Read Archive', desc: 'Read archived session summary' },
+        { key: 'read_session_detail', label: 'Read Detail', desc: 'Read full session detail from archive' },
+        { key: 'search_session_archives', label: 'Search Archives', desc: 'Search across all archived sessions' },
       ]
     },
   ];
