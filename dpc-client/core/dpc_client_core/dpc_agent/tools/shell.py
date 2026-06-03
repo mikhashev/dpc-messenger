@@ -144,6 +144,11 @@ def run_shell(ctx: ToolContext, command: str, timeout: int = 120, cwd: str = "")
         expanded = os.path.expanduser(cwd)
         if not os.path.isdir(expanded):
             return f"Error: cwd '{cwd}' is not a valid directory."
+        try:
+            ctx.validate_extended_path(expanded)
+        except PermissionError:
+            log.warning("run_shell cwd BLOCKED: %r outside sandbox", cwd)
+            return f"⛔ cwd '{cwd}' is outside allowed sandbox paths."
         working_dir = expanded
     else:
         working_dir = str(ctx.agent_root)
