@@ -59,14 +59,14 @@ _validate_command(command: str, cwd: str) -> tuple[str, str] | None
 
 **HARDLINE_PATTERNS (Tier 2 — unconditional block):**
 
-| Category | Linux | Windows |
-|---|---|---|
-| Mass delete | `rm -rf /`, `rm -rf ~`, `rm` on system dirs | `rd /s /q`, `rmdir /s /q`, `del /s /q C:\` |
-| Disk format | `mkfs` | `format [A-Z]:` |
-| Raw device write | `dd of=/dev/sd*`, `> /dev/sd*` | — |
-| Fork bomb | `:(){ :|:& };:` | — |
-| Shutdown/reboot | `shutdown`, `reboot`, `halt`, `poweroff`, `init 0/6` | `shutdown /s`, `shutdown /r` |
-| Kill all | `kill -9 -1` | — |
+| Category | Linux | Windows | macOS |
+|---|---|---|---|
+| Mass delete | `rm -rf /`, `rm -rf ~`, `rm` on system dirs | `rd /s /q`, `rmdir /s /q`, `del /s /q C:\` | `rm -rf /` (shared with Linux) |
+| Disk format/erase | `mkfs` | `format [A-Z]:` | `diskutil eraseDisk/partitionDisk/secureErase` |
+| Raw device write | `dd of=/dev/sd*`, `> /dev/sd*` | — | `dd of=/dev/disk*` (shared with Linux) |
+| Fork bomb | `:(){ :|:& };:` | — | `:(){ :|:& };:` (shared with Linux) |
+| Shutdown/reboot | `shutdown`, `reboot`, `halt`, `poweroff`, `init 0/6` | `shutdown /s`, `shutdown /r` | `shutdown` (shared with Linux) |
+| Kill all | `kill -9 -1` | — | `kill -9 -1` (shared with Linux) |
 
 **DANGEROUS_PATTERNS (Tier 1 in v2, blocked in v1):**
 
@@ -81,6 +81,8 @@ _validate_command(command: str, cwd: str) -> tuple[str, str] | None
 | Git destructive | `git push --force`, `git reset --hard`, `git clean -f`, `git branch -D` |
 | WSL escape | `wsl` prefix (full block) |
 | Service control | `systemctl stop/disable`, `sc delete`, `net stop` |
+| macOS security | `csrutil disable` (SIP), `launchctl unload/remove` |
+| Container runtime | `docker` (arbitrary code execution surface) |
 
 ### cwd Enforcement
 
@@ -180,7 +182,7 @@ _validate_command(command: str, cwd: str) -> tuple[str, str] | None
 
 ## Open Questions
 
-- **Q1:** Should `python -c` be Tier 1 (approval) or Tier 2 (block) in final version? Currently Tier 2. — @Mike
+- **Q1:** Should `python -c` be Tier 1 (approval) or Tier 2 (block) in final version? — @Mike (decided S185: Tier 2, block. Agents use `python script.py` via Tier 1 instead.)
 - **Q2:** Approval timeout default — 60s sufficient? — @Mike (decided: yes)
 - **Q3:** Telegram approval path — deferred to v3? — @Mike (decided: yes, deferred)
 
