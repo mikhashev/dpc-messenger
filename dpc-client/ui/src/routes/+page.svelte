@@ -23,6 +23,7 @@
   import NewGroupDialog from "$lib/components/NewGroupDialog.svelte";
   import GroupSettingsDialog from "$lib/components/GroupSettingsDialog.svelte";
   import WebAuthPopupRequest from "$lib/components/WebAuthPopupRequest.svelte";
+  import ShellApprovalDialog from "$lib/components/ShellApprovalDialog.svelte";
   import ChatPanel from "$lib/panels/ChatPanel.svelte";
   import AgentPanel from "$lib/panels/AgentPanel.svelte";
   import VoicePanel from "$lib/panels/VoicePanel.svelte";
@@ -1191,6 +1192,11 @@
      content extraction. Subscribes to the webAuthPopupRequest store fed by
      coreService.ts WS handler. -->
 <WebAuthPopupRequest />
+
+<!-- ShellApprovalDialog: ADR-030 v2 — floating approval cards for Tier 1
+     shell commands. Subscribes to pendingShellApprovals store fed by
+     coreService.ts shell_approval_request WS handler. -->
+<ShellApprovalDialog />
 
 <!-- ChatHistorySyncPanel: loads history from backend when switching to peer/agent/group chat (Step 8) -->
 <ChatHistorySyncPanel

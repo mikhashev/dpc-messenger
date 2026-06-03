@@ -782,6 +782,21 @@ export async function connectToCoreService() {
                     console.error(`[ERROR TOAST] ${title}: ${toastMessage}`);
                 }
 
+                // Shell approval events (ADR-030 v2)
+                else if (message.event === "shell_approval_request") {
+                    console.log("Shell approval request:", message.payload);
+                    const { pendingShellApprovals } = await import("$lib/services/shellApproval");
+                    pendingShellApprovals.update((list: any[]) => [...list, message.payload]);
+                }
+                else if (message.event === "shell_execution_result") {
+                    console.log("Shell execution result:", message.payload);
+                    const { pendingShellApprovals, shellExecutionResults } = await import("$lib/services/shellApproval");
+                    pendingShellApprovals.update((list: any[]) =>
+                        list.filter((r: any) => r.request_id !== message.payload.request_id)
+                    );
+                    shellExecutionResults.update((list: any[]) => [...list, message.payload]);
+                }
+
                 // Whisper model loading events (v0.13.3+ model pre-loading)
                 else if (message.event === "whisper_model_loading_started") {
                     console.log("Whisper model loading started:", message.payload);
