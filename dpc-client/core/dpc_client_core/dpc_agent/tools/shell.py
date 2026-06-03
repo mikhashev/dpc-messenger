@@ -204,7 +204,9 @@ def _request_approval(ctx: ToolContext, command: str, reason: str, cwd: str, tim
     _cleanup_expired_approvals()
 
     request_id = str(uuid.uuid4())[:8]
-    agent_name = getattr(getattr(ctx, "_agent", None), "display_name", "Agent")
+    agent_obj = getattr(ctx, "_agent", None)
+    agent_name = getattr(agent_obj, "display_name", "Agent")
+    agent_profile = getattr(agent_obj, "_firewall_profile", None) or agent_name
     event = threading.Event()
 
     _pending_approvals[request_id] = {
@@ -212,6 +214,7 @@ def _request_approval(ctx: ToolContext, command: str, reason: str, cwd: str, tim
         "cwd": cwd or str(ctx.agent_root),
         "timeout": timeout,
         "agent_name": agent_name,
+        "agent_profile": agent_profile,
         "ctx": ctx,
         "created_at": time.time(),
         "event": event,

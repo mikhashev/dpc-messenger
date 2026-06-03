@@ -4049,7 +4049,8 @@ class CoreService:
         if add_to_whitelist:
             tokens = command.strip().split()
             cmd_prefix = " ".join(tokens[:2]) if len(tokens) >= 2 else tokens[0] if tokens else command
-            await self.shell_add_to_whitelist(agent_name, cmd_prefix)
+            agent_profile = entry.get("agent_profile", agent_name)
+            await self.shell_add_to_whitelist(agent_profile, cmd_prefix)
 
         return {"status": "ok", "request_id": request_id, "output_length": len(output)}
 
