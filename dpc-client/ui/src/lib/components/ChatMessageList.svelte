@@ -19,6 +19,7 @@
     agentProgressMessage = null,  // v0.15.0+: Agent progress message
     agentProgressTool = null,  // v0.15.0+: Current tool being executed
     agentProgressRound = 0,  // v0.15.0+: Current round number
+    agentProgressName = "",  // S185: Agent display name for live progress
     agentStreamingText = "",  // v0.16.0+: Streaming text from agent
     peerDisplayNames = new Map<string, string>(),  // v0.19.1+: Map of node_id -> display name
     selfNodeId = "",  // v0.19.1+: Current user's node ID
@@ -32,6 +33,7 @@
     agentProgressMessage?: string | null;
     agentProgressTool?: string | null;
     agentProgressRound?: number;
+    agentProgressName?: string;
     agentStreamingText?: string;
     peerDisplayNames?: Map<string, string>;
     selfNodeId?: string;
@@ -252,6 +254,7 @@
   {#if agentProgressTool || agentProgressMessage}
     <AgentProgressCollapsible
       toolCalls={liveToolCalls}
+      agentName={agentProgressName}
       isLive={true}
       currentTool={agentProgressTool || ''}
       currentRound={agentProgressRound}

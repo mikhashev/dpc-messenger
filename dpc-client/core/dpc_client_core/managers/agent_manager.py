@@ -831,6 +831,7 @@ class DpcAgentManager:
             # after 40 messages).
 
         agent_display_name = self._agent_display_name or self.agent_id or "DPC Agent"
+        self._current_agent_display_name = agent_display_name
 
         # Get DPC context if requested
         dpc_context = None
@@ -1271,6 +1272,7 @@ class DpcAgentManager:
                     "conversation_id": conversation_id,
                     "tool_name": tool_name,
                     "round": round,
+                    "agent_name": getattr(self, '_current_agent_display_name', ''),
                     "ts": utc_now_iso(),
                 }))
         except Exception as e:

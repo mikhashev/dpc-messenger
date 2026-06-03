@@ -38,6 +38,7 @@
     agentProgressMessage = $bindable<string | null>(null),
     agentProgressTool = $bindable<string | null>(null),
     agentProgressRound = $bindable<number>(0),
+    agentProgressName = $bindable<string>(''),
     agentStreamingText = $bindable<string>(''),
   }: {
     activeChatId: string;
@@ -51,6 +52,7 @@
     agentProgressMessage?: string | null;
     agentProgressTool?: string | null;
     agentProgressRound?: number;
+    agentProgressName?: string;
     agentStreamingText?: string;
   } = $props();
 
@@ -207,6 +209,7 @@
         agentProgressMessage = message || null;
         agentProgressTool = tool_name || null;
         agentProgressRound = round || 0;
+        if ($agentProgress.agent_name) agentProgressName = $agentProgress.agent_name;
 
         // Append tool call activity to streaming buffer (appears in Raw output)
         if (tool_name) {

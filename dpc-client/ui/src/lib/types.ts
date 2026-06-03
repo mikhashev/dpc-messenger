@@ -255,6 +255,7 @@ export interface AgentProgressEvent {
     message?: string;
     round?: number;
     tool_name?: string;
+    agent_name?: string;
     ts?: string;
 }
 

@@ -88,6 +88,7 @@
   let agentProgressMessage = $state<string | null>(null);
   let agentProgressTool = $state<string | null>(null);
   let agentProgressRound = $state<number>(0);
+  let agentProgressName = $state<string>('');
   let agentStreamingText = $state<string>('');
   // Component ref — used to call flushAndCapture() in the AI response handler
   let agentPanelComp: AgentPanel | null = $state(null);
@@ -1062,6 +1063,7 @@
         agentProgressMessage={agentProgressMessage}
         agentProgressTool={agentProgressTool}
         agentProgressRound={agentProgressRound}
+        agentProgressName={agentProgressName}
         agentStreamingText={agentStreamingText}
         peerDisplayNames={peerDisplayNames}
         selfNodeId={$nodeStatus?.node_id || ''}
@@ -1134,6 +1136,7 @@
   bind:agentProgressMessage
   bind:agentProgressTool
   bind:agentProgressRound
+  bind:agentProgressName
   bind:agentStreamingText
 />
 
