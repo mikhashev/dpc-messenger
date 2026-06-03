@@ -49,10 +49,25 @@
     return id;
   };
 
-  // Debug: Log when progress props change
+  // Live tool calls accumulator for collapsible progress display
+  let liveToolCalls = $state<Array<{tool: string; input: string; output: string; is_error: boolean; duration_ms: number; round: number}>>([]);
+  let lastSeenTool = $state('');
+
   $effect(() => {
-    if (agentProgressTool || agentProgressMessage) {
-      console.log(`[ChatMessageList] Progress props: tool=${agentProgressTool}, msg=${agentProgressMessage?.substring(0,50)}, round=${agentProgressRound}`);
+    if (agentProgressTool && agentProgressTool !== lastSeenTool) {
+      liveToolCalls = [...liveToolCalls, {
+        tool: agentProgressTool,
+        input: agentProgressMessage?.substring(0, 120) || '',
+        output: '',
+        is_error: false,
+        duration_ms: 0,
+        round: agentProgressRound,
+      }];
+      lastSeenTool = agentProgressTool;
+    }
+    if (!agentProgressTool && !agentProgressMessage) {
+      liveToolCalls = [];
+      lastSeenTool = '';
     }
   });
 
@@ -233,22 +248,14 @@
     </div>
   {/if}
 
-  <!-- Agent progress indicator (v0.15.0+ / redesigned S185 collapsible) -->
+  <!-- Agent progress indicator (S185 collapsible — live view) -->
   {#if agentProgressTool || agentProgressMessage}
-    <div class="agent-progress">
-      <div class="agent-progress-spinner"></div>
-      <div class="agent-progress-content">
-        {#if agentProgressRound > 0}
-          <span class="agent-progress-round">Round {agentProgressRound}</span>
-        {/if}
-        {#if agentProgressTool}
-          <span class="agent-progress-tool">{agentProgressTool}</span>
-        {/if}
-        {#if agentProgressMessage}
-          <span class="agent-progress-message">{agentProgressMessage}</span>
-        {/if}
-      </div>
-    </div>
+    <AgentProgressCollapsible
+      toolCalls={liveToolCalls}
+      isLive={true}
+      currentTool={agentProgressTool || ''}
+      currentRound={agentProgressRound}
+    />
   {/if}
 
   <!-- Agent streaming text (v0.16.0+) - Shows AI response as it's generated -->
