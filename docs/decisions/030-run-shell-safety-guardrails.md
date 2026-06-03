@@ -161,8 +161,10 @@ _validate_command(command: str, cwd: str) -> tuple[str, str] | None
 - `dpc_client_core/local_api.py` — add `execute_approved` WebSocket command
 - `dpc-client/ui/src/lib/panels/ChatPanel.svelte` — approval buttons in chat (1:1 + group)
 - `~/.dpc/config.ini` or `privacy_rules.json` — configurable Tier 1 patterns
-- Group chat approval routing — Tier 1 approval in group chats routes to the group owner (Mike), not broadcast to all participants
+- Group chat approval routing — Tier 1 approval routes to the **agent owner** (who created the agent on their node), not to the @mention initiator. Owner is always a participant in the group chat and sees full context. Approval UI appears in the same chat.
+- Multi-node: when an agent from another node is @mentioned in a group chat, the approval request goes to that agent's owner (who is also in the group). No cross-node approval protocol needed — the owner sees the chat context directly.
 - Add-to-whitelist — "Approve + Add to whitelist" button in approval dialog (per-agent persistent whitelist)
+- Note: Tier 1 approval assumes agent owner is online. Agent availability management is a separate concern (Group Settings feature, outside ADR-030 scope).
 
 ## Implementation Status
 
