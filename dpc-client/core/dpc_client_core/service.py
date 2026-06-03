@@ -3998,29 +3998,78 @@ class CoreService:
     # --- Shell approval (ADR-030 v2) ---
 
     async def shell_approve_command(self, request_id: str, add_to_whitelist: bool = False) -> Dict[str, Any]:
-        """Approve a Tier 1 shell command execution request."""
-        from .dpc_agent.tools import shell as _shell
-        pending = getattr(_shell, "_pending_approvals", {})
-        entry = pending.get(request_id)
+        """Approve and execute a Tier 1 shell command (Variant B).
+
+        Executes the command that was pending approval, broadcasts
+        the result to UI via shell_execution_result event.
+        """
+        import subprocess
+        from .dpc_agent.tools.shell import _pending_approvals, MAX_OUTPUT
+
+        entry = _pending_approvals.pop(request_id, None)
         if not entry:
-            return {"status": "error", "message": f"Unknown request_id: {request_id}"}
-        entry["approved"] = True
-        entry["add_to_whitelist"] = add_to_whitelist
-        if entry.get("future") and not entry["future"].done():
-            entry["future"].set_result(True)
-        logger.info("Shell command approved: %s (whitelist=%s)", request_id, add_to_whitelist)
-        return {"status": "ok", "request_id": request_id}
+            return {"status": "error", "message": f"Unknown or expired request_id: {request_id}"}
+
+        command = entry["command"]
+        working_dir = entry["cwd"]
+        timeout = entry["timeout"]
+        agent_name = entry["agent_name"]
+
+        logger.info("Shell command approved: %s — executing %r", request_id, command)
+
+        try:
+            import os
+            result = subprocess.run(
+                command, shell=True, capture_output=True, text=True,
+                encoding="utf-8", errors="replace", timeout=timeout,
+                cwd=working_dir,
+                env={**os.environ, "PYTHONIOENCODING": "utf-8"},
+            )
+            parts = []
+            if result.stdout:
+                stdout = result.stdout[:MAX_OUTPUT]
+                parts.append(stdout)
+            if result.stderr:
+                stderr = result.stderr[:MAX_OUTPUT]
+                parts.append(f"[stderr]\n{stderr}")
+            if result.returncode != 0:
+                parts.append(f"[exit code: {result.returncode}]")
+            output = "\n".join(parts) if parts else "(no output)"
+        except subprocess.TimeoutExpired:
+            output = f"Error: command timed out after {timeout}s."
+        except Exception as e:
+            output = f"Error: {e}"
+
+        await self.local_api.broadcast_event("shell_execution_result", {
+            "request_id": request_id,
+            "command": command,
+            "output": output,
+            "agent_name": agent_name,
+            "approved_by": "user",
+        })
+
+        if add_to_whitelist:
+            cmd_prefix = command.split()[0] if command.strip() else command
+            await self.shell_add_to_whitelist(agent_name, cmd_prefix)
+
+        return {"status": "ok", "request_id": request_id, "output_length": len(output)}
 
     async def shell_reject_command(self, request_id: str) -> Dict[str, Any]:
         """Reject a Tier 1 shell command execution request."""
-        from .dpc_agent.tools import shell as _shell
-        pending = getattr(_shell, "_pending_approvals", {})
-        entry = pending.get(request_id)
+        from .dpc_agent.tools.shell import _pending_approvals
+
+        entry = _pending_approvals.pop(request_id, None)
         if not entry:
-            return {"status": "error", "message": f"Unknown request_id: {request_id}"}
-        entry["approved"] = False
-        if entry.get("future") and not entry["future"].done():
-            entry["future"].set_result(False)
+            return {"status": "error", "message": f"Unknown or expired request_id: {request_id}"}
+
+        await self.local_api.broadcast_event("shell_execution_result", {
+            "request_id": request_id,
+            "command": entry["command"],
+            "output": "❌ Command rejected by user.",
+            "agent_name": entry["agent_name"],
+            "rejected": True,
+        })
+
         logger.info("Shell command rejected: %s", request_id)
         return {"status": "ok", "request_id": request_id}
 

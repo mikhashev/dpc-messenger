@@ -116,18 +116,23 @@ CROSS_SEGMENT_PATTERNS: list[re.Pattern] = [
 def _get_tier1_whitelist(ctx: Optional["ToolContext"] = None) -> list[str]:
     """Load per-agent Tier 1 whitelist from privacy_rules.json."""
     if not ctx or not ctx.firewall:
+        log.debug("tier1_whitelist: no ctx/firewall, returning empty")
         return []
     try:
         _profile = getattr(getattr(ctx, "_agent", None), "_firewall_profile", None)
+        profile_name = _profile or "default"
         rules = ctx.firewall.rules
         profiles = rules.get("agent_profiles", {})
-        profile = profiles.get(_profile or "default", {})
+        profile = profiles.get(profile_name, {})
         tools_block = profile.get("tools", {})
         shell_block = tools_block.get("run_shell", {})
         if isinstance(shell_block, dict):
-            return shell_block.get("tier1_whitelist", [])
-    except Exception:
-        pass
+            wl = shell_block.get("tier1_whitelist", [])
+            log.debug("tier1_whitelist[%s]: %s", profile_name, wl)
+            return wl
+    except Exception as e:
+        log.debug("tier1_whitelist load error: %s", e)
+    log.debug("tier1_whitelist: no whitelist found for profile")
     return []
 
 
@@ -169,24 +174,28 @@ def _validate_command(command: str, ctx: Optional["ToolContext"] = None) -> Opti
     return None
 
 
-def _request_approval(ctx: ToolContext, command: str, reason: str) -> Optional[str]:
-    """Request user approval for a Tier 1 command via WebSocket event.
+_pending_approvals: dict = {}
 
-    Returns the command output if approved, or a rejection message.
-    Uses asyncio.Future pattern similar to web_auth popup flow.
+
+def _request_approval(ctx: ToolContext, command: str, reason: str, cwd: str, timeout: int) -> str:
+    """Request user approval for a Tier 1 command (Variant B).
+
+    Returns a pending message to the agent. The actual execution happens
+    asynchronously when the user approves via shell_approve_command WS.
+    Result is broadcast to chat — agent sees it on the next turn.
     """
-    import asyncio
     import uuid
 
     request_id = str(uuid.uuid4())[:8]
     agent_name = getattr(getattr(ctx, "_agent", None), "display_name", "Agent")
 
-    if not hasattr(ctx, "_approval_futures"):
-        ctx._approval_futures = {}
-
-    loop = asyncio.get_event_loop()
-    future = loop.create_future()
-    ctx._approval_futures[request_id] = future
+    _pending_approvals[request_id] = {
+        "command": command,
+        "cwd": cwd or str(ctx.agent_root),
+        "timeout": timeout,
+        "agent_name": agent_name,
+        "ctx": ctx,
+    }
 
     ctx.pending_events.append({
         "type": "shell_approval_request",
@@ -197,7 +206,7 @@ def _request_approval(ctx: ToolContext, command: str, reason: str) -> Optional[s
     })
 
     log.info("run_shell TIER1 approval requested: %r (id=%s)", command, request_id)
-    return f"⏳ Command requires approval: {command}\nReason: {reason}\nWaiting for user approval..."
+    return f"⏳ Command requires approval: `{command}`\nWaiting for user decision. Result will appear in chat after approval."
 
 
 def run_shell(ctx: ToolContext, command: str, timeout: int = 120, cwd: str = "") -> str:
@@ -210,7 +219,7 @@ def run_shell(ctx: ToolContext, command: str, timeout: int = 120, cwd: str = "")
             return f"⛔ Command blocked by safety guardrails: {reason}"
         elif tier == "tier1":
             log.warning("run_shell TIER1 (approval needed): %r — %s", command, reason)
-            return _request_approval(ctx, command, reason)
+            return _request_approval(ctx, command, reason, cwd, timeout)
 
     working_dir: str | None = None
     if cwd:
