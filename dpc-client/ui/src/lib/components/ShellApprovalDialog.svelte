@@ -13,6 +13,7 @@
     const RESULT_DISPLAY_MS = 8000;
 
     async function approve(requestId: string, addToWhitelist = false) {
+        pendingShellApprovals.update(list => list.filter(r => r.request_id !== requestId));
         await sendCommand("shell_approve_command", {
             request_id: requestId,
             add_to_whitelist: addToWhitelist,
@@ -20,6 +21,7 @@
     }
 
     async function reject(requestId: string) {
+        pendingShellApprovals.update(list => list.filter(r => r.request_id !== requestId));
         await sendCommand("shell_reject_command", {
             request_id: requestId,
         });
