@@ -66,8 +66,7 @@ DANGEROUS_PATTERNS: list[re.Pattern] = [
     re.compile(r"\bnode\s+-e\b", re.I),
     # Encoded commands
     re.compile(r"\bpowershell\b.*(-enc|-encodedcommand)", re.I),
-    # Download + execute
-    re.compile(r"\b(curl|wget)\b.*\|\s*(sh|bash|python)", re.I),
+    # Download + execute — checked in CROSS_SEGMENT_PATTERNS (spans pipe boundary)
     # Registry (Windows)
     re.compile(r"\breg\s+(delete|add)\b", re.I),
     re.compile(r"\bregedit\b", re.I),
@@ -109,12 +108,21 @@ def _is_fork_bomb(command: str) -> bool:
     return all(sig in command for sig in _FORK_BOMB_SIGS)
 
 
+CROSS_SEGMENT_PATTERNS: list[re.Pattern] = [
+    re.compile(r"\b(curl|wget)\b.*\|\s*(sh|bash|python)", re.I),
+]
+
+
 def _validate_command(command: str) -> Optional[Tuple[str, str]]:
     """Validate command against safety tiers. Returns (tier, reason) or None if allowed."""
     normalized = _normalize_command(command)
 
     if _is_fork_bomb(normalized):
         return ("tier2", "Fork bomb detected")
+
+    for pattern in CROSS_SEGMENT_PATTERNS:
+        if pattern.search(normalized):
+            return ("tier2", f"Blocked by cross-segment pattern: {pattern.pattern}")
 
     segments = _split_segments(normalized)
     for segment in segments:
