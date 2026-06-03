@@ -1470,7 +1470,8 @@ PARTICIPANTS' CULTURAL CONTEXTS:
                     sender_name: Optional[str] = None, message_id: Optional[str] = None,
                     thinking: Optional[str] = None, streaming_raw: Optional[str] = None,
                     source: Optional[str] = None, sender_type: Optional[str] = None,
-                    agent_owner: Optional[str] = None):
+                    agent_owner: Optional[str] = None,
+                    tool_calls: Optional[List[Dict[str, Any]]] = None):
         """Add a message to the conversation history
 
         Args:
@@ -1514,6 +1515,8 @@ PARTICIPANTS' CULTURAL CONTEXTS:
             message_dict["sender_type"] = sender_type
         if agent_owner:
             message_dict["agent_owner"] = agent_owner
+        if tool_calls:
+            message_dict["tool_calls"] = tool_calls
 
         # Track message ID for deduplication (v0.20.0)
         self.message_ids.add(message_id)

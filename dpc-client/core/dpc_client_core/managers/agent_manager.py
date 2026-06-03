@@ -927,6 +927,8 @@ class DpcAgentManager:
                     "duration": 5000,
                 })
             elif (_has_content or _has_extras) and not _is_llm_error:
+                _trace = getattr(agent, '_last_trace', None) or {}
+                _tool_calls_for_msg = _trace.get("accumulated_tool_calls") or []
                 monitor.add_message(
                     role="assistant",
                     content=response or "",
@@ -935,6 +937,7 @@ class DpcAgentManager:
                     sender_name=agent_display_name,
                     thinking=_thinking,
                     streaming_raw=_streaming_raw,
+                    tool_calls=_tool_calls_for_msg if _tool_calls_for_msg else None,
                 )
                 monitor.save_history()  # Save to disk immediately
             elif _is_llm_error:

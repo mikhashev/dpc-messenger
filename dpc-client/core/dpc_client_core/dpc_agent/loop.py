@@ -474,6 +474,8 @@ async def run_llm_loop(
         "assistant_notes": [],
         "tool_calls": [],
     }
+    _accumulated_tool_calls: list[dict] = []
+    llm_trace["accumulated_tool_calls"] = _accumulated_tool_calls
     accumulated_usage: Dict[str, Any] = {
         "prompt_tokens": 0,        # cumulative across all rounds (for cost/billing)
         "first_prompt_tokens": 0,  # round-1 only — baseline context before tool results inflate it
@@ -685,6 +687,14 @@ async def run_llm_loop(
                     "args": exec_result["args_for_log"],
                     "result": truncate_for_log(exec_result["result"], 700),
                     "is_error": exec_result["is_error"],
+                })
+                _accumulated_tool_calls.append({
+                    "tool": exec_result["fn_name"],
+                    "input": truncate_for_log(str(exec_result["args_for_log"]), 100),
+                    "output": truncate_for_log(exec_result["result"], 100),
+                    "is_error": exec_result["is_error"],
+                    "duration_ms": exec_result.get("duration_ms", 0),
+                    "round": round_idx,
                 })
 
                 # Emit tool result so frontend can show it in Raw output

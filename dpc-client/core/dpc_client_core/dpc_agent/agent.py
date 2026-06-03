@@ -326,8 +326,9 @@ class DpcAgent:
             conversation_id=conversation_id,
         )
 
-        # Store last usage for session state access by agent_manager
+        # Store last usage and trace for session state access by agent_manager
         self._last_usage = usage
+        self._last_trace = trace
 
         # Phase 3: Skill Write phase — record outcomes, optionally reflect
         used_skills = self.skill_reflector.record_outcome(trace, usage)
