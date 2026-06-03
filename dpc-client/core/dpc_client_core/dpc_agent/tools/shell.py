@@ -191,19 +191,21 @@ def _cleanup_expired_approvals() -> None:
 
 
 def _request_approval(ctx: ToolContext, command: str, reason: str, cwd: str, timeout: int) -> str:
-    """Request user approval for a Tier 1 command (Variant B).
+    """Request user approval for a Tier 1 command (blocking).
 
-    Returns a pending message to the agent. The actual execution happens
-    asynchronously when the user approves via shell_approve_command WS.
-    Result is broadcast to chat — agent sees it on the next turn.
+    Blocks the executor thread until user approves/rejects via UI.
+    On approval, service.py executes the command and stores the result.
+    Returns the actual command output to the agent — approval is transparent.
     """
     import time
     import uuid
+    import threading
 
     _cleanup_expired_approvals()
 
     request_id = str(uuid.uuid4())[:8]
     agent_name = getattr(getattr(ctx, "_agent", None), "display_name", "Agent")
+    event = threading.Event()
 
     _pending_approvals[request_id] = {
         "command": command,
@@ -212,6 +214,8 @@ def _request_approval(ctx: ToolContext, command: str, reason: str, cwd: str, tim
         "agent_name": agent_name,
         "ctx": ctx,
         "created_at": time.time(),
+        "event": event,
+        "result": None,
     }
 
     dpc_service = getattr(ctx, "dpc_service", None)
@@ -235,8 +239,20 @@ def _request_approval(ctx: ToolContext, command: str, reason: str, cwd: str, tim
     else:
         log.warning("No local_api available for shell_approval_request broadcast")
 
-    log.info("run_shell TIER1 approval requested: %r (id=%s)", command, request_id)
-    return f"⏳ Command requires approval: `{command}`\nWaiting for user decision. Result will appear in chat after approval."
+    log.info("run_shell TIER1 approval requested: %r (id=%s), blocking executor thread", command, request_id)
+
+    signaled = event.wait(timeout=APPROVAL_TTL_SECONDS)
+    entry = _pending_approvals.pop(request_id, None)
+
+    if not signaled or entry is None:
+        log.info("Shell approval timed out (%ds): %s — %r", APPROVAL_TTL_SECONDS, request_id, command)
+        return f"⏳ Command approval timed out after {APPROVAL_TTL_SECONDS}s: `{command}`"
+
+    result = entry.get("result")
+    if result is None:
+        return f"⏳ Command approval resolved but no result: `{command}`"
+
+    return result
 
 
 def run_shell(ctx: ToolContext, command: str, timeout: int = 120, cwd: str = "") -> str:

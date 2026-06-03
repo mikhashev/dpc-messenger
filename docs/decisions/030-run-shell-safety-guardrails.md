@@ -38,7 +38,7 @@ Implement a 3-tier command classification system in `run_shell()`, adapted from 
 
 **Tier 0 — Auto-approve (default):** Commands not matching Tier 1 or Tier 2 execute immediately. No allowlist — everything is permitted unless explicitly blocked.
 
-**Tier 1 — Require approval (v2):** Dangerous but legitimate commands require user confirmation via UI chat buttons. Configurable — user can move commands between Tier 0 and Tier 1.
+**Tier 1 — Require approval (v2→v3):** Dangerous but legitimate commands require user confirmation via UI chat buttons. Tool **blocks executor thread** until user responds — agent sees synchronous call with actual command result. Configurable — user can move commands between Tier 0 and Tier 1.
 
 **Tier 2 — Hard block (v1):** Catastrophic commands blocked unconditionally. Hardcoded in Python, not overridable by config or agent.
 
@@ -209,12 +209,28 @@ Tier 0 and Tier 2 lists are read-only (hardcoded). Tier 1 whitelist is editable 
 | v2 frontend: ShellApprovalDialog + result cards | Done | `4b79277`, `76b4dd7` |
 | v2 frontend: AgentPermissions whitelist CRUD | Done | `bb5ee73` |
 | v2 broadcast fix (threadsafe from executor thread) | Done | `f2d6f28`, `c26143c`, `a72a08e` |
+| Smoke test v2 approval dialog | PASS | 2026-06-03 (manual, Mike) |
 
-### v3 Scope (next session)
+### v3 Scope (current session)
 
-- **AFTER_TOOL_CALL hook lifecycle event** — canonical path for tool side effects (broadcast approval requests, emit notifications) instead of `run_coroutine_threadsafe` workaround. Current v2 stores `ctx._event_loop` in loop.py before executor dispatch and uses `asyncio.run_coroutine_threadsafe()` from the thread. v3 replaces this with a proper hook that fires after tool execution in the async context of the main event loop. Benefits: cleaner architecture, reusable for other tools that need async side effects (browse_page popup could migrate too).
-- **Smoke test** ADR-030 v2 approval dialog in UI (broadcast fix committed but not yet verified with restart)
-- **Telegram approval path** (Q3) — deferred from v2
+**Core change:** Tier 1 approval flow redesigned from deferred broadcast to **blocking execution**. Agent sees `run_shell` as synchronous: call → user approves → result returns. Approval is implementation detail, not part of agent experience.
+
+**Previous design (v2, incorrect):** Tool returns "Command requires approval" immediately. Agent loses result. UI shows execution card but agent context has no feedback.
+
+**New design (v3):** Tool blocks executor thread via `threading.Event`. Broadcasts approval request to UI. On approval, executes command. On completion, `Event.set()` unblocks thread. Tool returns actual command result to agent.
+
+| # | Task | LOC | Description |
+|---|---|---|---|
+| 1 | AFTER_TOOL_CALL hook registry | ~45 | Hook infrastructure in loop.py for async side effects |
+| 2 | Shell.py: blocking Tier 1 approval | ~30-40 | Event.wait() blocks executor thread, returns result on approval |
+| 3 | Browse_page popup migrate to hook | ~10 | Replace run_coroutine_threadsafe with AFTER_TOOL_CALL |
+| 4 | Comfyui migrate (6 sites) | ~40 | Replace run_coroutine_threadsafe with AFTER_TOOL_CALL |
+| 5 | Execution result card CSS fix | ~5 | Black square / invisible text |
+| 6 | Telegram approval path (Q3) | ~50-100 | Separate PR |
+
+**Architectural principle:** Tools stay sync. Hook middleware fires async in event loop for broadcast/notification side effects. Approval synchronization uses threading.Event in executor thread — agent perceives synchronous tool call.
+
+**Smoke test v2 status:** PASS (2026-06-03). Approval card renders, Approve/Whitelist/Reject buttons work, command executes. Execution result card has cosmetic CSS bug (black square, invisible text) — fix included in v3 PR.
 
 ## Open Questions
 
