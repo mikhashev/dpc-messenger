@@ -214,13 +214,22 @@ def _request_approval(ctx: ToolContext, command: str, reason: str, cwd: str, tim
         "created_at": time.time(),
     }
 
-    ctx.pending_events.append({
-        "type": "shell_approval_request",
-        "request_id": request_id,
-        "command": command,
-        "reason": reason,
-        "agent_name": agent_name,
-    })
+    dpc_service = getattr(ctx, "dpc_service", None)
+    local_api = getattr(dpc_service, "local_api", None) if dpc_service else None
+    if local_api:
+        import asyncio
+        try:
+            loop = asyncio.get_event_loop()
+            loop.create_task(local_api.broadcast_event("shell_approval_request", {
+                "request_id": request_id,
+                "command": command,
+                "reason": reason,
+                "agent_name": agent_name,
+            }))
+        except Exception as e:
+            log.warning("Failed to broadcast shell_approval_request: %s", e)
+    else:
+        log.warning("No local_api available for shell_approval_request broadcast")
 
     log.info("run_shell TIER1 approval requested: %r (id=%s)", command, request_id)
     return f"⏳ Command requires approval: `{command}`\nWaiting for user decision. Result will appear in chat after approval."
