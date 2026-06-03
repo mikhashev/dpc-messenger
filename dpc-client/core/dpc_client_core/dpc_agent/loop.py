@@ -690,8 +690,8 @@ async def run_llm_loop(
                 })
                 _accumulated_tool_calls.append({
                     "tool": exec_result["fn_name"],
-                    "input": truncate_for_log(str(exec_result["args_for_log"]), 100),
-                    "output": truncate_for_log(exec_result["result"], 100),
+                    "input": str(exec_result["args_for_log"]),
+                    "output": exec_result["result"],
                     "is_error": exec_result["is_error"],
                     "duration_ms": exec_result.get("duration_ms", 0),
                     "round": round_idx,
