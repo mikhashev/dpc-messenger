@@ -612,14 +612,27 @@ async def run_llm_loop(
                     return clean_content, accumulated_usage, llm_trace
                 # LLM returned empty content (e.g. GLM thinking-only with no text).
                 # Retry the same call without prompt modification.
+                # Diagnose the empty: non-empty thinking + empty content points at
+                # thinking-budget exhaustion (CoT consumed the output-token budget);
+                # empty thinking too points at a transient provider/network blip. The
+                # retry is a blind re-send, so a deterministic cause repeats identically.
+                _empty_thinking = (msg.get("thinking") or "").strip()
+                _empty_diag = (
+                    "thinking-budget (CoT present, no output text)"
+                    if _empty_thinking
+                    else "transient (no CoT either)"
+                )
                 if empty_retry_count < MAX_EMPTY_RETRIES:
                     empty_retry_count += 1
                     log.warning(
-                        "LLM returned empty content — retry %d/%d",
-                        empty_retry_count, MAX_EMPTY_RETRIES,
+                        "LLM returned empty content — retry %d/%d [thinking_len=%d → %s]",
+                        empty_retry_count, MAX_EMPTY_RETRIES, len(_empty_thinking), _empty_diag,
                     )
                     continue
-                log.warning("LLM returned empty content after %d retries", MAX_EMPTY_RETRIES)
+                log.warning(
+                    "LLM returned empty content after %d retries [thinking_len=%d → %s]",
+                    MAX_EMPTY_RETRIES, len(_empty_thinking), _empty_diag,
+                )
                 return "", accumulated_usage, llm_trace
 
             # Process tool calls — strip hallucinated post-tool-call content before storing
