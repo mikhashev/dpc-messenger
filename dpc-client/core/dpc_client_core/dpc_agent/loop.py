@@ -653,7 +653,7 @@ async def run_llm_loop(
             # home for intermediate text — it is no longer folded into the final answer.
             round_reasoning = "\n\n".join(
                 dict.fromkeys(
-                    s.strip() for s in (msg.get("thinking"), thinking) if s and s.strip()
+                    s.strip() for s in (msg.get("thinking"), thinking, content) if s and s.strip()
                 )
             )
 
