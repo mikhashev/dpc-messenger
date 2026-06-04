@@ -55,6 +55,13 @@
         collapsedRounds = next;
     }
 
+    // One-line result preview shown in the collapsed tool row (full output on expand).
+    function outputPreview(output: string, maxLen: number = 100): string {
+        if (!output) return '';
+        const oneLine = output.replace(/\s+/g, ' ').trim();
+        return oneLine.length > maxLen ? oneLine.slice(0, maxLen) + '...' : oneLine;
+    }
+
     function truncateOutput(output: string, maxLen: number = 500): string {
         if (!output || output.length <= maxLen) return output || '';
         return output.slice(0, maxLen) + '...';
@@ -117,7 +124,10 @@
                         </button>
                         {#if !roundCollapsed}
                             {#if group.text}
-                                <div class="round-text">{group.text}</div>
+                                <div class="round-text">
+                                    <span class="round-text-label">Thinking</span>
+                                    <span class="round-text-body">{group.text}</span>
+                                </div>
                             {/if}
                             {#each group.tools as tc, i}
                                 {@const globalIdx = toolCalls.indexOf(tc)}
@@ -137,6 +147,9 @@
                                             <span class="tool-expand-icon">{expandedTools.has(globalIdx) ? '▾' : '▸'}</span>
                                         {/if}
                                     </button>
+                                    {#if tc.output && !expandedTools.has(globalIdx)}
+                                        <div class="tool-output-preview">{outputPreview(tc.output)}</div>
+                                    {/if}
                                     {#if expandedTools.has(globalIdx) && tc.output}
                                         <pre class="tool-output">{truncateOutput(tc.output)}</pre>
                                     {/if}
@@ -280,14 +293,38 @@
     }
 
     .round-text {
+        display: flex;
+        flex-direction: column;
+        gap: 2px;
+        margin: 3px 0 6px 20px;
+        padding-left: 8px;
+        border-left: 2px solid #475569;
+    }
+
+    .round-text-label {
+        font-size: 0.7em;
+        font-weight: 700;
+        color: #94a3b8;
+        letter-spacing: 0.06em;
+        text-transform: uppercase;
+    }
+
+    .round-text-body {
         font-size: 0.85em;
         color: #e2e8f0;
         white-space: pre-wrap;
         word-wrap: break-word;
         line-height: 1.45;
-        margin: 2px 0 4px 20px;
-        padding-left: 6px;
-        border-left: 2px solid #334155;
+    }
+
+    .tool-output-preview {
+        margin: 0 0 3px 28px;
+        font-size: 0.78em;
+        color: #64748b;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        max-width: 600px;
     }
 
     .tool-call-item {

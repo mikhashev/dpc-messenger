@@ -27,6 +27,14 @@ const pathArg = (input: string) => extractFirst(input, 'path') || extractFirst(i
 const patternArg = (input: string) => extractFirst(input, 'pattern') || extractFirst(input, 'query');
 const urlArg = (input: string) => extractFirst(input, 'url');
 const cmdArg = (input: string) => extractFirst(input, 'command');
+// Fallback for tools without a specific argExtract — surface the most relevant arg so
+// EVERY tool shows WHAT it operated on (which file / pattern / url / command / ...).
+const genericArg = (input: string) =>
+    extractFirst(input, 'path') || extractFirst(input, 'file_path') ||
+    extractFirst(input, 'pattern') || extractFirst(input, 'query') ||
+    extractFirst(input, 'url') || extractFirst(input, 'command') ||
+    extractFirst(input, 'name') || extractFirst(input, 'ref') ||
+    extractFirst(input, 'branch') || extractFirst(input, 'message');
 const nameArg = (input: string) => extractFirst(input, 'name');
 const msgArg = (input: string) => {
     const t = extractFirst(input, 'text') || extractFirst(input, 'message');
@@ -137,6 +145,8 @@ export function getActionLabel(count: number): string {
 
 export function getToolArgPreview(toolName: string, input: string): string {
     const entry = TOOL_DISPLAY[toolName];
-    if (!entry?.argExtract) return '';
-    return entry.argExtract(input) || '';
+    // Specific extractor when defined, otherwise a generic fallback so tools like
+    // git_diff / git_log (no extractor) still show their target instead of nothing.
+    if (entry?.argExtract) return entry.argExtract(input) || '';
+    return genericArg(input);
 }

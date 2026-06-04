@@ -38,7 +38,7 @@ from .guards import (
 )
 
 if TYPE_CHECKING:
-    from .tools.registry import ToolRegistry
+    from .tools.registry import ToolContext, ToolRegistry
 
 log = logging.getLogger(__name__)
 
@@ -491,8 +491,6 @@ async def run_llm_loop(
     # The whitelist check inside schemas() still enforces per-agent authorization.
     tool_schemas = tools.schemas(core_only=False, include_restricted=True)
 
-    _pre_tool_content: list = []  # Accumulate content from tool-call rounds (lost otherwise)
-
     # Hooks & middleware infrastructure (ADR-007). One registry per
     # run_llm_loop call — guard state is scoped to the task.
     hooks = HookRegistry()
@@ -608,11 +606,8 @@ async def run_llm_loop(
             if not tool_calls:
                 if content and content.strip():
                     clean_content = _strip_role_boundaries(content)
-                    # Prepend any content from tool-call rounds that was otherwise lost
-                    if _pre_tool_content:
-                        full_content = "\n\n".join(_pre_tool_content) + "\n\n" + clean_content
-                        clean_content = full_content
-                        _pre_tool_content.clear()
+                    # Intermediate per-round text is shown per-round (round_text), not
+                    # assembled into the final answer (Variant 2). Final = this last round.
                     llm_trace["assistant_notes"].append(clean_content.strip()[:320])
                     return clean_content, accumulated_usage, llm_trace
                 # LLM returned empty content (e.g. GLM thinking-only with no text).
@@ -639,10 +634,15 @@ async def run_llm_loop(
             sgr_quality["task_id"] = task_id
             append_jsonl(logs_dir / "reasoning.jsonl", sgr_quality)
 
-            # round_reasoning: prefer the model's CoT (extended thinking) so every round
-            # shows the agent's reasoning even when it writes no content preamble before
-            # the tool call. content prefix is the fallback. Drives live emit + round_text.
-            round_reasoning = (msg.get("thinking") or thinking or "").strip()
+            # round_reasoning: everything the model produced this round for display —
+            # CoT (extended thinking) + content preamble, deduped. Shown per-round in the
+            # collapsible (round_text) and emitted live. Per Variant 2 this is the ONLY
+            # home for intermediate text — it is no longer folded into the final answer.
+            round_reasoning = "\n\n".join(
+                dict.fromkeys(
+                    s.strip() for s in (msg.get("thinking"), thinking) if s and s.strip()
+                )
+            )
 
             if round_reasoning:
                 emit_progress(round_reasoning, None, round_idx)
@@ -651,15 +651,24 @@ async def run_llm_loop(
                 names = ", ".join(tc["function"]["name"] for tc in tool_calls)
                 emit_progress(f"→ {names}", None, round_idx)
 
-            # content-prefix (not CoT) feeds the final-response assembly + notes — unchanged.
+            # content-prefix is shown per-round via round_text (Variant 2), not folded into
+            # the final answer — keep only the trace note here.
             if thinking and thinking.strip():
                 llm_trace["assistant_notes"].append(thinking.strip()[:320])
-                _pre_tool_content.append(thinking.strip())  # Save for final response
 
             # Execute tool calls
             for tc in tool_calls:
                 tool_name = tc["function"]["name"]
-                emit_progress(f"Executing {tool_name}...", tool_name, round_idx)
+                # Emit the tool's arguments (JSON) so the live row shows WHAT the agent is
+                # doing — which file it reads, which pattern it searches — not just "Executing".
+                _raw_args = tc.get("function", {}).get("arguments")
+                if isinstance(_raw_args, str):
+                    _args_msg = _raw_args
+                elif _raw_args:
+                    _args_msg = json.dumps(_raw_args, default=str)
+                else:
+                    _args_msg = ""
+                emit_progress(_args_msg or f"Executing {tool_name}...", tool_name, round_idx)
                 timeout = tools.get_timeout(tc["function"]["name"])
                 exec_result = await _execute_with_timeout(
                     tools, tc, logs_dir, timeout, task_id,
@@ -697,7 +706,7 @@ async def run_llm_loop(
                 })
                 _accumulated_tool_calls.append({
                     "tool": exec_result["fn_name"],
-                    "input": str(exec_result["args_for_log"]),
+                    "input": json.dumps(exec_result["args_for_log"], default=str),
                     "output": exec_result["result"],
                     "is_error": exec_result["is_error"],
                     "duration_ms": exec_result.get("duration_ms", 0),

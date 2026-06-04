@@ -63,10 +63,19 @@
     if (msg && !agentProgressTool && !/^(Executing |[✓❌→])/.test(msg) && !liveRoundTexts.has(agentProgressRound)) {
       liveRoundTexts = new Map(liveRoundTexts).set(agentProgressRound, msg);
     }
+    // Tool result line ("✓ fn: ..." / "❌ fn: ...") — attach to the most recent tool call
+    // so the live row shows WHAT the tool returned, not just that it ran.
+    const resMatch = msg.match(/^([✓❌])\s+\S+:\s*([\s\S]*)$/);
+    if (resMatch && !agentProgressTool && liveToolCalls.length > 0 && !liveToolCalls[liveToolCalls.length - 1].output) {
+      const last = liveToolCalls[liveToolCalls.length - 1];
+      liveToolCalls = [...liveToolCalls.slice(0, -1), { ...last, output: resMatch[2], is_error: resMatch[1] === '❌' }];
+    }
     if (agentProgressTool && agentProgressTool !== lastSeenTool) {
       liveToolCalls = [...liveToolCalls, {
         tool: agentProgressTool,
-        input: agentProgressMessage?.substring(0, 120) || '',
+        // Full args (no cap) — the backend now emits the tool's JSON args here, so the
+        // live row shows WHICH file/pattern, not just "Executing <tool>...".
+        input: agentProgressMessage || '',
         output: '',
         is_error: false,
         duration_ms: 0,

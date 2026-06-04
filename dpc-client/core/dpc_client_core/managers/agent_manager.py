@@ -1268,7 +1268,9 @@ class DpcAgentManager:
             if local_api and hasattr(local_api, "broadcast_event"):
                 import asyncio
                 asyncio.create_task(local_api.broadcast_event("agent_progress", {
-                    "message": message[:500],
+                    # No length cap — live progress must carry the full reasoning / tool args
+                    # so the user sees exactly what the agent is doing each round.
+                    "message": message,
                     "conversation_id": conversation_id,
                     "tool_name": tool_name,
                     "round": round,
