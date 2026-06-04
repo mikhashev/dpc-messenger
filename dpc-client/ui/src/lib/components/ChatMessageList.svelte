@@ -7,6 +7,7 @@
   import VoicePlayer from './VoicePlayer.svelte';
   import ThinkingBlock from './ThinkingBlock.svelte';
   import AgentProgressCollapsible from './AgentProgressCollapsible.svelte';
+  import { agentLiveTools } from '$lib/coreService';
   import type { Message, Mention } from '$lib/types.js';
 
   // Props (Svelte 5 runes mode)
@@ -51,45 +52,11 @@
     return id;
   };
 
-  // Live tool calls accumulator for collapsible progress display
-  let liveToolCalls = $state<Array<{tool: string; input: string; output: string; is_error: boolean; duration_ms: number; round: number; round_text: string}>>([]);
-  let lastSeenTool = $state('');
-  // Per-round reasoning text captured live: the first plain progress message of a
-  // round (no tool, not an "Executing"/status line) is the agent's thinking for it.
-  let liveRoundTexts = $state<Map<number, string>>(new Map());
-
-  $effect(() => {
-    const msg = agentProgressMessage || '';
-    if (msg && !agentProgressTool && !/^(Executing |[✓❌→])/.test(msg) && !liveRoundTexts.has(agentProgressRound)) {
-      liveRoundTexts = new Map(liveRoundTexts).set(agentProgressRound, msg);
-    }
-    // Tool result line ("✓ fn: ..." / "❌ fn: ...") — attach to the most recent tool call
-    // so the live row shows WHAT the tool returned, not just that it ran.
-    const resMatch = msg.match(/^([✓❌])\s+\S+:\s*([\s\S]*)$/);
-    if (resMatch && !agentProgressTool && liveToolCalls.length > 0 && !liveToolCalls[liveToolCalls.length - 1].output) {
-      const last = liveToolCalls[liveToolCalls.length - 1];
-      liveToolCalls = [...liveToolCalls.slice(0, -1), { ...last, output: resMatch[2], is_error: resMatch[1] === '❌' }];
-    }
-    if (agentProgressTool && agentProgressTool !== lastSeenTool) {
-      liveToolCalls = [...liveToolCalls, {
-        tool: agentProgressTool,
-        // Full args (no cap) — the backend now emits the tool's JSON args here, so the
-        // live row shows WHICH file/pattern, not just "Executing <tool>...".
-        input: agentProgressMessage || '',
-        output: '',
-        is_error: false,
-        duration_ms: 0,
-        round: agentProgressRound,
-        round_text: liveRoundTexts.get(agentProgressRound) || '',
-      }];
-      lastSeenTool = agentProgressTool;
-    }
-    if (!agentProgressTool && !agentProgressMessage) {
-      liveToolCalls = [];
-      lastSeenTool = '';
-      liveRoundTexts = new Map();
-    }
-  });
+  // Live tool calls: authoritative snapshot from the backend (agent_progress.tool_calls),
+  // keyed per conversation. Renders the full run directly — no lossy accumulation, no
+  // dropped results, survives chat switches. The currently-executing tool shows via the
+  // live spinner (currentTool); completed tools come from the snapshot with their results.
+  let liveToolCalls = $derived($agentLiveTools[conversationId] ?? []);
 
   // Filter tool_call code blocks from streaming when collapsible is active
   let filteredStreamingText = $derived.by(() => {
@@ -277,8 +244,10 @@
     </div>
   {/if}
 
-  <!-- Unified agent collapsible: tool calls + streaming text in one block (S187) -->
-  {#if agentProgressTool || agentProgressMessage || filteredStreamingText}
+  <!-- Unified agent collapsible: tool calls + streaming text in one block (S187).
+       liveToolCalls.length keeps it visible when switching INTO a chat with an active
+       run (snapshot present) before the next progress event arrives. -->
+  {#if agentProgressTool || agentProgressMessage || filteredStreamingText || liveToolCalls.length > 0}
     <AgentProgressCollapsible
       toolCalls={liveToolCalls}
       agentName={agentProgressName}

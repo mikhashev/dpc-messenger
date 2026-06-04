@@ -436,7 +436,7 @@ async def run_llm_loop(
     tools: "ToolRegistry",
     llm: DpcLlmAdapter,
     agent_root: pathlib.Path,
-    emit_progress: Callable[[str, Optional[str], Optional[int]], None],
+    emit_progress: Callable[..., None],
     task_id: str = "",
     budget_remaining_usd: Optional[float] = None,
     max_rounds: int = DEFAULT_MAX_ROUNDS,
@@ -724,6 +724,7 @@ async def run_llm_loop(
                     f"{status_icon} {exec_result['fn_name']}: {result_preview}",
                     None,
                     round_idx,
+                    list(_accumulated_tool_calls),  # full snapshot so the UI renders authoritatively
                 )
 
             # BudgetLimitGuard fires via BETWEEN_ROUNDS at the top of the

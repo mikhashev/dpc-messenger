@@ -19,6 +19,11 @@ export const agentProfiles = writable<string[]>([]);
 // Agent execution / streaming
 export const agentProgress = writable<AgentProgressEvent | null>(null);
 export const agentProgressClear = writable<AgentProgressClearEvent | null>(null);
+// Authoritative per-conversation tool-call snapshot (conversation_id -> tool_calls[]).
+// Populated from agent_progress.tool_calls so the live collapsible renders the full
+// list directly instead of accumulating a lossy event stream (no dropped results,
+// survives chat switches).
+export const agentLiveTools = writable<Record<string, any[]>>({});
 export const agentTextChunk = writable<AgentTextChunkEvent | null>(null);
 
 // CC agent chat message (injected by CC via send_cc_agent_response)

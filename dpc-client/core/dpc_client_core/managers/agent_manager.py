@@ -840,8 +840,8 @@ class DpcAgentManager:
 
         try:
             # Process through agent with progress callback that includes conversation_id
-            def emit_progress_with_context(msg: str, tool: str = None, round: int = None):
-                self._emit_progress(msg, conversation_id, tool, round)
+            def emit_progress_with_context(msg: str, tool: str = None, round: int = None, tool_calls=None):
+                self._emit_progress(msg, conversation_id, tool, round, tool_calls)
 
             # Accumulate streaming chunks for persistence to history.json
             _stream_chunks: list = []
@@ -1259,7 +1259,8 @@ class DpcAgentManager:
         message: str,
         conversation_id: str = None,
         tool_name: str = None,
-        round: int = None
+        round: int = None,
+        tool_calls=None,
     ) -> None:
         """Emit progress message to DPC UI (if available)."""
         try:
@@ -1274,6 +1275,10 @@ class DpcAgentManager:
                     "conversation_id": conversation_id,
                     "tool_name": tool_name,
                     "round": round,
+                    # Full per-round tool snapshot (set on tool completion) so the UI renders
+                    # the authoritative list per-conversation instead of accumulating a lossy
+                    # event stream — fixes dropped results + chat-switch gaps.
+                    "tool_calls": tool_calls,
                     "agent_name": getattr(self, '_current_agent_display_name', ''),
                     "ts": utc_now_iso(),
                 }))

@@ -284,7 +284,7 @@ class DpcAgent:
             current_task_id=conversation_id,
             current_task_type="chat",
             tool_whitelist=allowed_tools,
-            emit_progress_fn=emit_progress or (lambda msg, tool=None, rnd=None: None),
+            emit_progress_fn=emit_progress or (lambda msg, tool=None, rnd=None, tool_calls=None: None),
             firewall=self._firewall,  # For extended sandbox paths
             conversation_monitor=conversation_monitor,  # For knowledge extraction tool
             reply_telegram_chat_id=reply_telegram_chat_id,
@@ -318,7 +318,7 @@ class DpcAgent:
             tools=self.tools,
             llm=self.llm,
             agent_root=self.agent_root,
-            emit_progress=emit_progress or (lambda msg, tool=None, rnd=None: None),
+            emit_progress=emit_progress or (lambda msg, tool=None, rnd=None, tool_calls=None: None),
             task_id=conversation_id,
             budget_remaining_usd=None if self.config.billing_model == "subscription" else self.config.budget_usd,
             max_rounds=self.config.max_rounds,
