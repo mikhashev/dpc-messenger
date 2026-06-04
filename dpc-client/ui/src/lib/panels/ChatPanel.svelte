@@ -433,7 +433,22 @@
     } else if (activeChatId.startsWith('telegram-')) {
       await _sendTelegramMessage(text);
     } else if (activeChatId.startsWith('group-')) {
-      sendGroupMessage(activeChatId, text);
+      const groupChatId = activeChatId;
+      sendGroupMessage(groupChatId, text).then((resp: any) => {
+        if (resp?.msg_index) {
+          chatHistories.update(h => {
+            const m = new Map(h);
+            const hist = m.get(groupChatId) || [];
+            const lastUserIdx = hist.findLastIndex((msg: any) => msg.sender === 'user' && msg.text === text);
+            if (lastUserIdx >= 0) {
+              const updated = [...hist];
+              updated[lastUserIdx] = { ...updated[lastUserIdx], msg_index: resp.msg_index, id: resp.message_id || updated[lastUserIdx].id };
+              m.set(groupChatId, updated);
+            }
+            return m;
+          });
+        }
+      });
     } else {
       sendCommand('send_p2p_message', { target_node_id: activeChatId, text });
     }

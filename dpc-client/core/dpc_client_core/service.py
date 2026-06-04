@@ -4749,6 +4749,7 @@ class CoreService:
             return {
                 "status": "success",
                 "message_id": message_id,
+                "msg_index": msg_index,
                 "tokens_used": history_tokens,
                 "token_limit": token_limit,
                 "history_tokens": history_tokens,
