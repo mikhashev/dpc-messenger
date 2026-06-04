@@ -135,6 +135,11 @@ class CoreService:
 
         self.skip_knowledge_index = skip_knowledge_index
 
+        # Per-group agent serialization lock — one agent runs in a given group at a time
+        # so concurrent @mentions queue instead of racing (prevents one agent's progress
+        # -clear wiping another's, and concurrent same-group LLM load).
+        self._group_agent_locks: Dict[str, asyncio.Lock] = {}
+
         DPC_HOME_DIR.mkdir(exist_ok=True)
 
         # Load settings (supports environment variables and config file)
@@ -4783,7 +4788,7 @@ class CoreService:
             if mention_all or aname in mentions or aid in mentions:
                 matched = "all" if mention_all else (aname if aname in mentions else aid)
                 logger.info("Group @%s mention detected — invoking agent %s in group %s", matched, aid, group_id)
-                asyncio.ensure_future(self._invoke_agent_in_group(group_id, text, sender_name, aid))
+                asyncio.ensure_future(self._invoke_agent_in_group_serialized(group_id, text, sender_name, aid))
 
         cc_name = self.get_cc_display_name().lower()
         if (mention_all or cc_name in mentions) and cc_name != sender_lower:
@@ -4795,6 +4800,18 @@ class CoreService:
                 "sender_name": sender_name,
                 "sender_node_id": self.p2p_manager.node_id,
             })
+
+    async def _invoke_agent_in_group_serialized(
+        self, group_id: str, text: str, sender_name: str, agent_id: str = None
+    ) -> None:
+        """Run an agent in a group under the per-group lock — serializes agents so two
+        @mentions in the same group queue (one at a time) instead of running in parallel.
+        Prevents one agent's completion progress-clear wiping another's still-running
+        progress, and avoids concurrent same-group LLM load."""
+        if group_id not in self._group_agent_locks:
+            self._group_agent_locks[group_id] = asyncio.Lock()
+        async with self._group_agent_locks[group_id]:
+            await self._invoke_agent_in_group(group_id, text, sender_name, agent_id)
 
     async def _invoke_agent_in_group(
         self, group_id: str, text: str, sender_name: str, agent_id: str = None
