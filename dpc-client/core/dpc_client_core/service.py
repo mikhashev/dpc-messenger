@@ -4842,7 +4842,10 @@ class CoreService:
             if response:
                 agent_name = self._get_agent_display_name(agent_id)
                 tool_calls = None
-                agent = manager._agents.get(group_id)
+                # _last_used_agent is the agent that just processed this message.
+                # _agents is keyed by provider_alias, not group_id, so .get(group_id)
+                # was always None and tool_calls never persisted for group messages.
+                agent = manager._last_used_agent
                 if agent and hasattr(agent, '_last_trace'):
                     tool_calls = (agent._last_trace or {}).get("accumulated_tool_calls")
                 await self.send_group_agent_message(group_id, agent_name, response, tool_calls=tool_calls)
@@ -4914,6 +4917,9 @@ class CoreService:
             "mentions": [],
             "is_agent": True,
             "msg_index": msg_index,
+            # tool_calls in the live broadcast so the collapsible renders immediately
+            # on the finalized message, not only after a history reload.
+            "tool_calls": tool_calls or [],
         }
 
         # Broadcast to UI

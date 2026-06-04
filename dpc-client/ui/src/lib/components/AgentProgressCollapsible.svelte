@@ -4,7 +4,7 @@
      * Renders from message.tool_calls (persisted) or live progress events.
      * Unified for 1:1 and group chats. Drift-style categories + human-readable labels.
      */
-    import { getToolLabel, getToolCategory, getCategoryLabel, getToolArgPreview, getActionLabel, type ToolCategory } from '$lib/utils/toolDisplay';
+    import { getToolLabel, getToolArgPreview, getActionLabel } from '$lib/utils/toolDisplay';
 
     interface ToolCall {
         tool: string;
@@ -46,24 +46,23 @@
         return output.slice(0, maxLen) + '...';
     }
 
-    interface GroupedCategory {
-        category: ToolCategory | 'other';
-        label: string;
+    interface GroupedRound {
+        round: number;
         tools: ToolCall[];
     }
 
-    function groupByCategory(calls: ToolCall[]): GroupedCategory[] {
-        const map = new Map<string, ToolCall[]>();
+    // Group by LLM round — mirrors loop.py execution: each round is one LLM call
+    // that may issue several tool calls. round is stamped on each accumulated tool call.
+    function groupByRound(calls: ToolCall[]): GroupedRound[] {
+        const map = new Map<number, ToolCall[]>();
         for (const tc of calls) {
-            const cat = getToolCategory(tc.tool);
-            if (!map.has(cat)) map.set(cat, []);
-            map.get(cat)!.push(tc);
+            const r = tc.round ?? 0;
+            if (!map.has(r)) map.set(r, []);
+            map.get(r)!.push(tc);
         }
-        return Array.from(map.entries()).map(([cat, tools]) => ({
-            category: cat as ToolCategory | 'other',
-            label: getCategoryLabel(cat as ToolCategory | 'other'),
-            tools,
-        }));
+        return Array.from(map.entries())
+            .sort((a, b) => a[0] - b[0])
+            .map(([round, tools]) => ({ round, tools }));
     }
 </script>
 
@@ -88,8 +87,8 @@
 
         {#if expanded}
             <div class="tool-calls-list">
-                {#each groupByCategory(toolCalls) as group}
-                    <div class="category-label">{group.label}</div>
+                {#each groupByRound(toolCalls) as group}
+                    <div class="round-label">Round {group.round}</div>
                     {#each group.tools as tc, i}
                         {@const globalIdx = toolCalls.indexOf(tc)}
                         <div class="tool-call-wrapper">
@@ -205,7 +204,7 @@
         font-size: 0.85em;
     }
 
-    .category-label {
+    .round-label {
         font-size: 0.75em;
         font-weight: 700;
         color: #94a3b8;
@@ -213,10 +212,9 @@
         margin-top: 6px;
         margin-bottom: 2px;
         padding-left: 20px;
-        text-transform: uppercase;
     }
 
-    .category-label:first-child {
+    .round-label:first-child {
         margin-top: 2px;
     }
 

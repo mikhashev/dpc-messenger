@@ -511,6 +511,7 @@
                 attachments: msg.attachments || [],
                 thinking: msg.thinking || local?.thinking,
                 streamingRaw: msg.streaming_raw || local?.streamingRaw,
+                tool_calls: msg.tool_calls || local?.tool_calls || [],
                 msg_index: msg.msg_index || 0,
               };
             });
