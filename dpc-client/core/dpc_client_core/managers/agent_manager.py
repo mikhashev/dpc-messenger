@@ -13,6 +13,7 @@ This manager bridges the embedded DpcAgent with DPC Messenger's CoreService.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import pathlib
@@ -58,6 +59,7 @@ class DpcAgentManager:
         self.agent_id = agent_id  # Store agent_id for per-agent configuration
         self._agent_display_name: str | None = None  # Cached display name from config.json
         self._stop_event = threading.Event()
+        self._interrupt_events: Dict[str, asyncio.Event] = {}
 
         # Get firewall reference from CoreService
         self.firewall = getattr(service, "firewall", None)
@@ -747,6 +749,16 @@ class DpcAgentManager:
             self._agent = None
         log.info("DpcAgent stopped")
 
+    def interrupt(self, conversation_id: str) -> bool:
+        """Signal the active agent loop to stop after the current LLM call/tool finishes."""
+        ev = self._interrupt_events.get(conversation_id)
+        if ev:
+            ev.set()
+            log.info("Interrupt signal sent for conversation %s", conversation_id)
+            return True
+        log.warning("No active agent loop for conversation %s", conversation_id)
+        return False
+
     async def process_message(
         self,
         message: str,
@@ -883,6 +895,8 @@ class DpcAgentManager:
                     return f"⚠️ Agent quota exceeded ({self._daily_tokens_used:,}/{quota_limit:,} tokens today). Reset at midnight UTC."
 
             try:
+                interrupt_ev = asyncio.Event()
+                self._interrupt_events[conversation_id] = interrupt_ev
                 response = await agent.process(
                     message=message,
                     conversation_id=conversation_id,
@@ -899,8 +913,10 @@ class DpcAgentManager:
                     reply_telegram_chat_id=telegram_chat_id,
                     message_source=message_source,
                     chat_context=chat_context,
+                    stop_event=interrupt_ev,
                 )
             finally:
+                self._interrupt_events.pop(conversation_id, None)
                 # ADR-022 Task 07: update daily token counter
                 last_usage = getattr(agent, '_last_usage', None)
                 if last_usage and quota_limit:
@@ -1280,6 +1296,7 @@ class DpcAgentManager:
                     # event stream — fixes dropped results + chat-switch gaps.
                     "tool_calls": tool_calls,
                     "agent_name": getattr(self, '_current_agent_display_name', ''),
+                    "agent_id": self.agent_id or '',
                     "ts": utc_now_iso(),
                 }))
         except Exception as e:

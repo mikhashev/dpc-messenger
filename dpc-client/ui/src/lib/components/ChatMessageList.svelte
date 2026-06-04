@@ -21,6 +21,7 @@
     agentProgressTool = null,  // v0.15.0+: Current tool being executed
     agentProgressRound = 0,  // v0.15.0+: Current round number
     agentProgressName = "",  // S185: Agent display name for live progress
+    agentProgressAgentId = "",  // S190: Agent ID for Stop button routing
     agentStreamingText = "",  // v0.16.0+: Streaming text from agent
     peerDisplayNames = new Map<string, string>(),  // v0.19.1+: Map of node_id -> display name
     selfNodeId = "",  // v0.19.1+: Current user's node ID
@@ -35,6 +36,7 @@
     agentProgressTool?: string | null;
     agentProgressRound?: number;
     agentProgressName?: string;
+    agentProgressAgentId?: string;
     agentStreamingText?: string;
     peerDisplayNames?: Map<string, string>;
     selfNodeId?: string;
@@ -255,6 +257,8 @@
       currentTool={agentProgressTool || ''}
       currentRound={agentProgressRound}
       streamingText={filteredStreamingText}
+      conversationId={conversationId}
+      agentId={agentProgressAgentId || (conversationId.startsWith('agent_') ? conversationId : '')}
     />
   {/if}
 </div>

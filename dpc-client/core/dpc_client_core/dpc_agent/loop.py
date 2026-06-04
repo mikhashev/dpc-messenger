@@ -442,6 +442,7 @@ async def run_llm_loop(
     max_rounds: int = DEFAULT_MAX_ROUNDS,
     on_stream_chunk: Optional[Callable[[str, str], None]] = None,
     conversation_id: Optional[str] = None,
+    stop_event: Optional[asyncio.Event] = None,
 ) -> Tuple[str, Dict[str, Any], Dict[str, Any]]:
     """
     Core LLM-with-tools loop.
@@ -515,6 +516,13 @@ async def run_llm_loop(
         while True:
             round_idx += 1
             ctx.round_idx = round_idx
+
+            # User-initiated stop (L1 Interrupt API).
+            if stop_event and stop_event.is_set():
+                log.info("Agent stopped by user after %d rounds", round_idx - 1)
+                llm_trace["stopped_by_user"] = True
+                llm_trace["accumulated_tool_calls"] = list(_accumulated_tool_calls)
+                return f"⚠️ Stopped by user after {round_idx - 1} rounds.", accumulated_usage, llm_trace
 
             # RoundLimitGuard + BudgetLimitGuard checkpoint.
             if await hooks.fire(HookLifecycle.BETWEEN_ROUNDS, ctx) is not None:
@@ -671,6 +679,11 @@ async def run_llm_loop(
 
             # Execute tool calls
             for tc in tool_calls:
+                if stop_event and stop_event.is_set():
+                    log.info("Agent stopped by user mid-round %d (between tool calls)", round_idx)
+                    llm_trace["stopped_by_user"] = True
+                    llm_trace["accumulated_tool_calls"] = list(_accumulated_tool_calls)
+                    return f"⚠️ Stopped by user after {round_idx} rounds.", accumulated_usage, llm_trace
                 tool_name = tc["function"]["name"]
                 # Emit the tool's arguments (JSON) so the live row shows WHAT the agent is
                 # doing — which file it reads, which pattern it searches — not just "Executing".

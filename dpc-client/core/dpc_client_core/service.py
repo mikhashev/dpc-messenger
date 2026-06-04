@@ -7392,6 +7392,33 @@ class CoreService:
             agent_id = self._get_default_agent_id()
         return await self.agent_service.cancel_agent_task(agent_id, task_id)
 
+    async def interrupt_agent(self, agent_id: str = "", conversation_id: str = "") -> Dict[str, Any]:
+        """Stop an active agent loop gracefully (L1 Interrupt API).
+
+        Works for both 1:1 (conversation_id=agent_xxx) and group chats
+        (conversation_id=group-xxx) by routing via explicit agent_id.
+        """
+        logger.info("interrupt_agent called: agent_id=%r, conversation_id=%r", agent_id, conversation_id)
+        if not agent_id and conversation_id.startswith("agent_"):
+            agent_id = conversation_id
+        if not agent_id:
+            logger.warning("interrupt_agent: no agent_id provided")
+            return {"status": "error", "message": "agent_id required"}
+        if not conversation_id:
+            conversation_id = agent_id
+        provider = self.llm_manager.providers.get("dpc_agent") if self.llm_manager else None
+        if not provider or not hasattr(provider, "get_manager"):
+            logger.warning("interrupt_agent: DpcAgentProvider not found")
+            return {"status": "error", "message": "DpcAgentProvider not available"}
+        try:
+            manager = provider.get_manager(agent_id)
+            stopped = manager.interrupt(conversation_id)
+            logger.info("interrupt_agent result: agent_id=%s, conversation_id=%s, stopped=%s", agent_id, conversation_id, stopped)
+            return {"status": "stopped" if stopped else "no_active_loop"}
+        except Exception as e:
+            logger.error("interrupt_agent error: %s", e)
+            return {"status": "error", "message": str(e)}
+
     # --- Sleep Consolidation (ADR-014) ---
 
     @staticmethod

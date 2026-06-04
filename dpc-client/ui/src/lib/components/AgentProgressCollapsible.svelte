@@ -5,6 +5,7 @@
      * Unified for 1:1 and group chats. Drift-style categories + human-readable labels.
      */
     import { getToolLabel, getToolArgPreview } from '$lib/utils/toolDisplay';
+    import { sendCommand } from '$lib/coreService';
 
     interface ToolCall {
         tool: string;
@@ -23,6 +24,8 @@
         currentTool = '',
         currentRound = 0,
         streamingText = '',
+        conversationId = '',
+        agentId = '',
     }: {
         toolCalls: ToolCall[];
         agentName?: string;
@@ -30,6 +33,8 @@
         currentTool?: string;
         currentRound?: number;
         streamingText?: string;
+        conversationId?: string;
+        agentId?: string;
     } = $props();
 
     let expanded = $state(isLive);
@@ -107,6 +112,13 @@
             </span>
             <span class="expand-icon">{expanded ? '▾' : '▸'}</span>
         </button>
+        {#if isLive && conversationId}
+            <button
+                class="stop-btn"
+                title="Stop agent"
+                onclick={(e) => { e.stopPropagation(); sendCommand('interrupt_agent', { agent_id: agentId, conversation_id: conversationId }); }}
+            >Stop</button>
+        {/if}
 
         {#if expanded}
             <div class="tool-calls-list">
@@ -221,6 +233,18 @@
         font-size: 0.8em;
         color: #94a3b8;
     }
+
+    .stop-btn {
+        background: #dc2626;
+        color: white;
+        border: none;
+        border-radius: 4px;
+        padding: 2px 8px;
+        font-size: 0.75rem;
+        cursor: pointer;
+        margin-left: 8px;
+    }
+    .stop-btn:hover { background: #b91c1c; }
 
     .spinner {
         display: inline-block;

@@ -172,6 +172,7 @@ class DpcAgent:
         reply_telegram_chat_id: Optional[str] = None,
         message_source: Optional[str] = None,
         chat_context: Optional[Dict[str, Any]] = None,
+        stop_event: Optional[asyncio.Event] = None,
     ) -> str:
         """
         Process a user message and return response.
@@ -324,6 +325,7 @@ class DpcAgent:
             max_rounds=self.config.max_rounds,
             on_stream_chunk=on_stream_chunk,
             conversation_id=conversation_id,
+            stop_event=stop_event,
         )
 
         # Store last usage and trace for session state access by agent_manager

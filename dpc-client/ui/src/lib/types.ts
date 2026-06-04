@@ -256,6 +256,7 @@ export interface AgentProgressEvent {
     round?: number;
     tool_name?: string;
     agent_name?: string;
+    agent_id?: string;
     ts?: string;
 }
 
