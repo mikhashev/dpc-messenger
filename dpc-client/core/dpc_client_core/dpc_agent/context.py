@@ -299,7 +299,7 @@ def _build_capabilities_section(
         return "\n".join(lines)
 
     allowed = allowed_tools or set()
-    disabled = [t for t in all_tools if t not in allowed]
+    disabled = [t for t, v in all_tools.items() if isinstance(v, bool) and t not in allowed]
 
     lines.append("")
     lines.append(f"You have **{len(allowed)} enabled tools** (see tool schemas for details).")
