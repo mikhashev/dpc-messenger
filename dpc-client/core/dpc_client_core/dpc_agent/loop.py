@@ -639,15 +639,22 @@ async def run_llm_loop(
             sgr_quality["task_id"] = task_id
             append_jsonl(logs_dir / "reasoning.jsonl", sgr_quality)
 
-            if thinking and thinking.strip():
-                emit_progress(thinking.strip(), None, round_idx)
-                llm_trace["assistant_notes"].append(thinking.strip()[:320])
-                _pre_tool_content.append(thinking.strip())  # Save for final response
+            # round_reasoning: prefer the model's CoT (extended thinking) so every round
+            # shows the agent's reasoning even when it writes no content preamble before
+            # the tool call. content prefix is the fallback. Drives live emit + round_text.
+            round_reasoning = (msg.get("thinking") or thinking or "").strip()
+
+            if round_reasoning:
+                emit_progress(round_reasoning, None, round_idx)
             elif tool_calls:
-                # Native tool calling returns no text preamble — emit tool names so the
-                # UI shows activity rather than a silent "Thinking..." placeholder.
+                # No reasoning at all — emit tool names so the UI shows activity.
                 names = ", ".join(tc["function"]["name"] for tc in tool_calls)
                 emit_progress(f"→ {names}", None, round_idx)
+
+            # content-prefix (not CoT) feeds the final-response assembly + notes — unchanged.
+            if thinking and thinking.strip():
+                llm_trace["assistant_notes"].append(thinking.strip()[:320])
+                _pre_tool_content.append(thinking.strip())  # Save for final response
 
             # Execute tool calls
             for tc in tool_calls:
@@ -695,6 +702,10 @@ async def run_llm_loop(
                     "is_error": exec_result["is_error"],
                     "duration_ms": exec_result.get("duration_ms", 0),
                     "round": round_idx,
+                    # per-round reasoning text (same for every tool in the round) so the
+                    # collapsible can show the agent's "thought -> did -> got" flow.
+                    # round_reasoning prefers the model's CoT so every round has reasoning.
+                    "round_text": round_reasoning,
                 })
 
                 # Emit tool result so frontend can show it in Raw output

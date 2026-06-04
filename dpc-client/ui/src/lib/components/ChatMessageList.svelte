@@ -52,10 +52,17 @@
   };
 
   // Live tool calls accumulator for collapsible progress display
-  let liveToolCalls = $state<Array<{tool: string; input: string; output: string; is_error: boolean; duration_ms: number; round: number}>>([]);
+  let liveToolCalls = $state<Array<{tool: string; input: string; output: string; is_error: boolean; duration_ms: number; round: number; round_text: string}>>([]);
   let lastSeenTool = $state('');
+  // Per-round reasoning text captured live: the first plain progress message of a
+  // round (no tool, not an "Executing"/status line) is the agent's thinking for it.
+  let liveRoundTexts = $state<Map<number, string>>(new Map());
 
   $effect(() => {
+    const msg = agentProgressMessage || '';
+    if (msg && !agentProgressTool && !/^(Executing |[✓❌→])/.test(msg) && !liveRoundTexts.has(agentProgressRound)) {
+      liveRoundTexts = new Map(liveRoundTexts).set(agentProgressRound, msg);
+    }
     if (agentProgressTool && agentProgressTool !== lastSeenTool) {
       liveToolCalls = [...liveToolCalls, {
         tool: agentProgressTool,
@@ -64,12 +71,14 @@
         is_error: false,
         duration_ms: 0,
         round: agentProgressRound,
+        round_text: liveRoundTexts.get(agentProgressRound) || '',
       }];
       lastSeenTool = agentProgressTool;
     }
     if (!agentProgressTool && !agentProgressMessage) {
       liveToolCalls = [];
       lastSeenTool = '';
+      liveRoundTexts = new Map();
     }
   });
 

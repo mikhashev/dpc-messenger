@@ -4,7 +4,7 @@
      * Renders from message.tool_calls (persisted) or live progress events.
      * Unified for 1:1 and group chats. Drift-style categories + human-readable labels.
      */
-    import { getToolLabel, getToolArgPreview, getActionLabel } from '$lib/utils/toolDisplay';
+    import { getToolLabel, getToolArgPreview } from '$lib/utils/toolDisplay';
 
     interface ToolCall {
         tool: string;
@@ -13,6 +13,7 @@
         is_error: boolean;
         duration_ms: number;
         round: number;
+        round_text?: string;
     }
 
     let {
@@ -33,12 +34,25 @@
 
     let expanded = $state(isLive);
     let expandedTools = $state<Set<number>>(new Set());
+    // Distinct round count for the header summary ("N rounds · M actions").
+    let roundCount = $derived(new Set(toolCalls.map((tc) => tc.round)).size);
 
     function toggleTool(index: number) {
         const next = new Set(expandedTools);
         if (next.has(index)) next.delete(index);
         else next.add(index);
         expandedTools = next;
+    }
+
+    // Per-round nested collapsible — rounds expanded by default (transparency),
+    // click a round header to collapse it.
+    let collapsedRounds = $state<Set<number>>(new Set());
+
+    function toggleRound(round: number) {
+        const next = new Set(collapsedRounds);
+        if (next.has(round)) next.delete(round);
+        else next.add(round);
+        collapsedRounds = next;
     }
 
     function truncateOutput(output: string, maxLen: number = 500): string {
@@ -48,11 +62,13 @@
 
     interface GroupedRound {
         round: number;
+        text: string;
         tools: ToolCall[];
     }
 
     // Group by LLM round — mirrors loop.py execution: each round is one LLM call
-    // that may issue several tool calls. round is stamped on each accumulated tool call.
+    // that may issue several tool calls. round + round_text are stamped on each
+    // accumulated tool call; round_text is the agent's reasoning for that round.
     function groupByRound(calls: ToolCall[]): GroupedRound[] {
         const map = new Map<number, ToolCall[]>();
         for (const tc of calls) {
@@ -62,7 +78,7 @@
         }
         return Array.from(map.entries())
             .sort((a, b) => a[0] - b[0])
-            .map(([round, tools]) => ({ round, tools }));
+            .map(([round, tools]) => ({ round, text: tools[0]?.round_text || '', tools }));
     }
 </script>
 
@@ -80,7 +96,7 @@
                 <span class="agent-label">{agentName}</span>
             {/if}
             <span class="action-count">
-                {getActionLabel(toolCalls.length)}{isLive ? '...' : ''}
+                {roundCount} {roundCount === 1 ? 'round' : 'rounds'} · {toolCalls.length} {toolCalls.length === 1 ? 'action' : 'actions'}{isLive ? '...' : ''}
             </span>
             <span class="expand-icon">{expanded ? '▾' : '▸'}</span>
         </button>
@@ -88,30 +104,46 @@
         {#if expanded}
             <div class="tool-calls-list">
                 {#each groupByRound(toolCalls) as group}
-                    <div class="round-label">Round {group.round}</div>
-                    {#each group.tools as tc, i}
-                        {@const globalIdx = toolCalls.indexOf(tc)}
-                        <div class="tool-call-wrapper">
-                            <button
-                                class="tool-call-item"
-                                class:error={tc.is_error}
-                                class:has-output={!!tc.output}
-                                onclick={() => tc.output && toggleTool(globalIdx)}
-                            >
-                                <span class="tool-status">{tc.is_error ? '✗' : '✓'}</span>
-                                <span class="tool-name">{getToolLabel(tc.tool)}</span>
-                                {#if getToolArgPreview(tc.tool, tc.input)}
-                                    <span class="tool-arg"> — {getToolArgPreview(tc.tool, tc.input)}</span>
-                                {/if}
-                                {#if tc.output}
-                                    <span class="tool-expand-icon">{expandedTools.has(globalIdx) ? '▾' : '▸'}</span>
-                                {/if}
-                            </button>
-                            {#if expandedTools.has(globalIdx) && tc.output}
-                                <pre class="tool-output">{truncateOutput(tc.output)}</pre>
+                    {@const roundCollapsed = collapsedRounds.has(group.round)}
+                    <div class="round-group">
+                        <button
+                            class="round-header"
+                            onclick={() => toggleRound(group.round)}
+                            aria-expanded={!roundCollapsed}
+                        >
+                            <span class="round-expand-icon">{roundCollapsed ? '▸' : '▾'}</span>
+                            <span class="round-label">Round {group.round}</span>
+                            <span class="round-count">{group.tools.length} {group.tools.length === 1 ? 'action' : 'actions'}</span>
+                        </button>
+                        {#if !roundCollapsed}
+                            {#if group.text}
+                                <div class="round-text">{group.text}</div>
                             {/if}
-                        </div>
-                    {/each}
+                            {#each group.tools as tc, i}
+                                {@const globalIdx = toolCalls.indexOf(tc)}
+                                <div class="tool-call-wrapper">
+                                    <button
+                                        class="tool-call-item"
+                                        class:error={tc.is_error}
+                                        class:has-output={!!tc.output}
+                                        onclick={() => tc.output && toggleTool(globalIdx)}
+                                    >
+                                        <span class="tool-status">{tc.is_error ? '✗' : '✓'}</span>
+                                        <span class="tool-name">{getToolLabel(tc.tool)}</span>
+                                        {#if getToolArgPreview(tc.tool, tc.input)}
+                                            <span class="tool-arg"> — {getToolArgPreview(tc.tool, tc.input)}</span>
+                                        {/if}
+                                        {#if tc.output}
+                                            <span class="tool-expand-icon">{expandedTools.has(globalIdx) ? '▾' : '▸'}</span>
+                                        {/if}
+                                    </button>
+                                    {#if expandedTools.has(globalIdx) && tc.output}
+                                        <pre class="tool-output">{truncateOutput(tc.output)}</pre>
+                                    {/if}
+                                </div>
+                            {/each}
+                        {/if}
+                    </div>
                 {/each}
                 {#if isLive && currentTool}
                     <div class="tool-call-item current">
@@ -121,7 +153,10 @@
                 {/if}
             </div>
         {/if}
-        {#if streamingText}
+        <!-- During live with per-round structure, narration lives inside each round —
+             suppress the bottom block to avoid duplicating it (and the old raw leak).
+             The final answer appears as msg.text when the message finalizes. -->
+        {#if streamingText && !(isLive && toolCalls.length > 0)}
             <div class="streaming-inside-collapsible">
                 <pre class="streaming-text">{streamingText}</pre>
             </div>
@@ -204,18 +239,55 @@
         font-size: 0.85em;
     }
 
+    .round-group {
+        margin-top: 4px;
+    }
+
+    .round-header {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        width: 100%;
+        text-align: left;
+        background: none;
+        border: none;
+        cursor: pointer;
+        padding: 3px 4px;
+        border-radius: 3px;
+    }
+
+    .round-header:hover {
+        background: rgba(255, 255, 255, 0.06);
+    }
+
+    .round-expand-icon {
+        font-size: 0.7em;
+        color: #64748b;
+        width: 10px;
+        flex-shrink: 0;
+    }
+
     .round-label {
         font-size: 0.75em;
         font-weight: 700;
-        color: #94a3b8;
+        color: #cbd5e1;
         letter-spacing: 0.08em;
-        margin-top: 6px;
-        margin-bottom: 2px;
-        padding-left: 20px;
     }
 
-    .round-label:first-child {
-        margin-top: 2px;
+    .round-count {
+        font-size: 0.7em;
+        color: #94a3b8;
+    }
+
+    .round-text {
+        font-size: 0.85em;
+        color: #e2e8f0;
+        white-space: pre-wrap;
+        word-wrap: break-word;
+        line-height: 1.45;
+        margin: 2px 0 4px 20px;
+        padding-left: 6px;
+        border-left: 2px solid #334155;
     }
 
     .tool-call-item {
