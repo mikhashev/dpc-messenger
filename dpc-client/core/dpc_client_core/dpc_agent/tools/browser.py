@@ -295,7 +295,7 @@ def _browse_with_camoufox(url: str) -> Optional[str]:
         with Camoufox(headless=True, **_camoufox_launch_kwargs()) as browser:
             page = browser.new_page()
             _attach_page_diagnostics(page)
-            page.goto(url, wait_until="networkidle", timeout=30000)
+            page.goto(url, wait_until="networkidle", timeout=60000)
             html = page.content()
 
         import trafilatura
@@ -1243,7 +1243,7 @@ class AuthBrowser:
             )
             raise
         try:
-            self._page.goto(url, wait_until="networkidle", timeout=30000)
+            self._page.goto(url, wait_until="networkidle", timeout=60000)
         except Exception as exc:
             self._audit_action(
                 "navigate", url, "failed",
