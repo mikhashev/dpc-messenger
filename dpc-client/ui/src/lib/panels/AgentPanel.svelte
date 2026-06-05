@@ -8,6 +8,7 @@
   import { type Writable, get } from 'svelte/store';
   import { untrack } from 'svelte';
   import { mapBackendMessage } from '$lib/utils/messageMapper';
+  import { showNotificationIfBackground } from '$lib/notificationService';
   import {
     agentProgress,
     agentProgressClear,
@@ -408,6 +409,15 @@
             tokensAfterLastResponse: tokens_after_last_response,
             tokensAfterLastResponseAt: tokens_after_last_response_at ?? null,
             contextBreakdown: cb ?? null,
+          });
+        }
+
+        // Notify on agent/chain-triggered message if app is in background (skip CC auto-responses)
+        if (sender !== 'cc' && content) {
+          const preview = content.length > 80 ? content.slice(0, 80) + '...' : content;
+          showNotificationIfBackground({
+            title: senderName || 'Agent',
+            body: preview,
           });
         }
 

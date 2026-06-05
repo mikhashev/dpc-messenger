@@ -409,6 +409,15 @@
             console.log(`[Context Sent] Marked context as sent for ${chatId}`);
           }
 
+          // Notify on agent response if app is in background
+          if (message.status === 'OK' && chatId?.startsWith('agent_') && newSender !== 'cc') {
+            const preview = newText.length > 80 ? newText.slice(0, 80) + '...' : newText;
+            showNotificationIfBackground({
+              title: agentSenderName || 'Agent',
+              body: preview,
+            });
+          }
+
           // Clean up the command mapping
           commandToChatMap.delete(responseCommandId);
           persistCommandToChatMap?.();
