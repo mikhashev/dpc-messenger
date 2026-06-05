@@ -75,10 +75,14 @@ directory are your trust boundary.
 
 ---
 
-## The bridge script
+## The bridge scripts
 
-[`cc_agent_bridge.py`](../../dpc-client/core/cc_agent_bridge.py) is the
-entire integration. Useful flags:
+Two bridge scripts cover 1:1 agent chats and group chats:
+
+### 1:1 Agent Chat Bridge
+
+[`cc_agent_bridge.py`](../../dpc-client/core/cc_agent_bridge.py) — for
+1:1 conversations with a single agent. Useful flags:
 
 | Command | What it does |
 |---------|--------------|
@@ -104,19 +108,44 @@ Every command above accepts `--conversation-id NAME-OR-FOLDER`:
 There is no state kept inside the bridge between invocations. Each
 call re-reads `history.json` from scratch.
 
+### Group Chat Bridge
+
+[`cc_group_chat_bridge.py`](../../dpc-client/core/cc_group_chat_bridge.py) —
+for group conversations with multiple agents. Same architecture as the
+1:1 bridge but reads from group history files and sends via
+`send_group_agent_message` WebSocket command.
+
+| Command | What it does |
+|---------|--------------|
+| `python cc_group_chat_bridge.py --list` | List available group chats. |
+| `python cc_group_chat_bridge.py --group GROUP_ID --last 10` | Dump the last 10 messages from a group. |
+| `python cc_group_chat_bridge.py --group GROUP_ID --send "text"` | Post a CC response to the group. |
+| `python cc_group_chat_bridge.py --group GROUP_ID --send-file path` | Send from file (backtick-safe). |
+| `python cc_group_chat_bridge.py --group GROUP_ID --mentions` | Show only `@CC` mentions. |
+
+The `--group` argument accepts either the canonical group ID
+(`group-abc123`) or the slugged directory name (`group-abc123-my-project`).
+The bridge resolves the canonical ID from `metadata.json` automatically.
+
+For markdown responses containing backticks or code blocks, use
+`--send-file` to avoid bash command-substitution issues — write the
+response to a temp file first, then send it.
+
 ---
 
 ## The cron loop (Claude Code side)
 
-CC runs the following cron inside Claude Code. The exact prompt text
-lives in [`cc_cron_prompt_public.md`](../../dpc-client/core/cc_cron_prompt_public.md)
-and is versioned there.
+CC runs a cron inside Claude Code. The exact prompt text lives in
+[`cc_cron_prompt_public.md`](../../dpc-client/core/cc_cron_prompt_public.md)
+and is versioned there. The internal version (`cc_cron_prompt.md` at
+project root, gitignored) may have additional project-specific prompts
+for group chats.
 
 **Schedule:** every minute while the Claude Code session is open. Cron
 jobs are in-session only and disappear when Claude Code closes, so you
 need to recreate the cron after reopening the IDE.
 
-**Behavior each fire:**
+**Behavior each fire (1:1 agent chat):**
 
 1. Run `python cc_agent_bridge.py --once --last 10 --full --conversation-id <agent>`.
 2. Scan the output for `@CC` or `@СС` (Cyrillic) mentions from anyone
@@ -125,6 +154,14 @@ need to recreate the cron after reopening the IDE.
    `python cc_agent_bridge.py --send "..." --conversation-id <agent>`.
    Keep responses in markdown.
 4. If nothing actionable, do nothing.
+
+**Behavior each fire (group chat):**
+
+1. Run `python cc_group_chat_bridge.py --group <group_id> --last 10`.
+2. Same `@CC` scan and response logic.
+3. Respond via `--send "..."` or `--send-file path` for markdown content.
+
+You can run both crons in parallel — one for 1:1, one for group chat.
 
 The cron prompt does the filtering; CC just executes what the cron
 says. Substitute the agent name (or folder id) for `<agent>` when you
