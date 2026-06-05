@@ -3747,178 +3747,27 @@ class CoreService:
             logger.error("Error reloading firewall: %s", e, exc_info=True)
             return {"status": "error", "message": str(e)}
 
-    # ─────────────────────────────────────────────────────────────
-    # ADR-028 web auth — UI ↔ vault bridge (T8 + Wiring)
-    # ─────────────────────────────────────────────────────────────
+    # --- Web auth headless approval (ADR-029 Task 008) ---
 
-    async def web_auth_login_complete(
-        self, agent_id: str, domain: str, cookies: list
-    ) -> Dict[str, Any]:
-        """T2 → T3 glue: receive cookies extracted by the Tauri WebView
-        popup (forwarded by the frontend after listening to the
-        `web_auth_login_complete` Tauri event) and persist them to the
-        per-agent encrypted vault.
+    async def web_auth_approve_headless(self, request_id: str) -> Dict[str, Any]:
+        from .dpc_agent.tools.browser import get_pending_auth_approvals
+        pending = get_pending_auth_approvals()
+        entry = pending.get(request_id)
+        if not entry:
+            return {"status": "error", "message": f"Unknown request_id: {request_id}"}
+        entry["approved"] = True
+        entry["event"].set()
+        return {"status": "approved", "request_id": request_id}
 
-        Frontend supplies `agent_id` because the Tauri event payload
-        from `web_auth.rs` only carries `{domain, cookies}` — which
-        agent the login was for is the calling UI's responsibility to
-        track (per-agent Login button context).
-        """
-        from . import web_auth as _wa
-
-        try:
-            if not agent_id or not domain or not isinstance(cookies, list):
-                return {"status": "error", "message": "agent_id, domain, cookies required"}
-            _wa.save_cookies(agent_id, domain, cookies)
-            logger.info(
-                "web_auth: saved %d cookies for agent=%s domain=%s",
-                len(cookies), agent_id, domain,
-            )
-            await self.local_api.broadcast_event(
-                "web_auth_status_changed",
-                {"agent_id": agent_id, "domain": domain, "has_cookies": True},
-            )
-            return {"status": "success", "agent_id": agent_id, "domain": domain,
-                    "cookies_count": len(cookies)}
-        except Exception as e:
-            logger.error("web_auth_login_complete failed: %s", e, exc_info=True)
-            return {"status": "error", "message": str(e)}
-
-    async def web_auth_list_domains(self, agent_id: str) -> Dict[str, Any]:
-        """Return the agent's web_auth whitelist + current cookie status
-        per domain, for the per-agent UI panel. Mirrors the agent-side
-        `list_auth_domains` tool but returns structured data instead of
-        formatted text."""
-        from . import web_auth as _wa
-
-        try:
-            allowed = self.firewall.get_agent_web_auth_domains(agent_id)
-            entries = []
-            for domain in allowed:
-                status = _wa.get_auth_status(agent_id, domain)
-                entries.append({
-                    "domain": domain,
-                    "has_cookies": status.get("has_cookies", False),
-                    "expires": status.get("expires"),
-                    "authenticated_at": status.get("authenticated_at"),
-                })
-            return {"status": "success", "agent_id": agent_id, "domains": entries}
-        except Exception as e:
-            logger.error("web_auth_list_domains failed: %s", e, exc_info=True)
-            return {"status": "error", "message": str(e)}
-
-    async def web_auth_add_domain(self, agent_id: str, domain: str) -> Dict[str, Any]:
-        """Append `domain` to the agent's `web_auth.allowed_domains`
-        whitelist in privacy_rules.json. URL-or-hostname input is
-        normalized to eTLD+1 before storing (so `https://www.example.com/`,
-        `www.example.com`, and `example.com` all land as `example.com` — matching
-        what `firewall.is_authenticated` resolves at read time).
-        Duplicate entries are silently coalesced.
-
-        Saves through firewall.save_rules_from_dict so all existing
-        validation + hot-reload + UI broadcast machinery runs.
-        """
-        from . import web_auth as _wa
-
-        try:
-            if not agent_id or not domain or not isinstance(domain, str):
-                return {"status": "error", "message": "agent_id and domain required"}
-            raw = domain.strip().lower()
-            if not raw:
-                return {"status": "error", "message": "domain must be non-empty"}
-            # Reject inputs that obviously cannot be a hostname before
-            # URL parsing — keeps the rejection message specific.
-            if " " in raw:
-                return {"status": "error",
-                        "message": "domain must be a valid hostname (no spaces)"}
-            # URL→hostname→eTLD+1 so a user pasting `https://www.example.com/`
-            # in the UI lands the same vault key as `browse_page` requests
-            # at read time. Phase 2 (PSL/IDN) is still the followup.
-            domain_norm = _wa.resolve_etld1(raw)
-            if not domain_norm or "." not in domain_norm:
-                return {"status": "error",
-                        "message": "domain must be a valid hostname (contain a dot)"}
-
-            rules = self.firewall.get_rules_as_dict()
-            profiles = rules.setdefault("agent_profiles", {})
-            agent = profiles.setdefault(agent_id, {})
-            web_auth_block = agent.setdefault("web_auth", {})
-            allowed = web_auth_block.setdefault("allowed_domains", [])
-            if not isinstance(allowed, list):
-                allowed = []
-                web_auth_block["allowed_domains"] = allowed
-            normalized = [d.lower() for d in allowed if isinstance(d, str)]
-            if domain_norm in normalized:
-                return {"status": "success", "message": "already in whitelist",
-                        "agent_id": agent_id, "domain": domain_norm}
-            allowed.append(domain_norm)
-
-            success, message, errors = self.firewall.save_rules_from_dict(rules)
-            if not success:
-                return {"status": "error", "message": message, "errors": errors}
-
-            await self.local_api.broadcast_event(
-                "web_auth_domains_changed",
-                {"agent_id": agent_id, "action": "added", "domain": domain_norm},
-            )
-            return {"status": "success", "agent_id": agent_id, "domain": domain_norm,
-                    "message": f"added {domain_norm} to {agent_id}'s allowed_domains"}
-        except Exception as e:
-            logger.error("web_auth_add_domain failed: %s", e, exc_info=True)
-            return {"status": "error", "message": str(e)}
-
-    async def web_auth_remove_domain(
-        self, agent_id: str, domain: str
-    ) -> Dict[str, Any]:
-        """Remove `domain` from the agent's whitelist AND revoke any
-        cookies for that domain in the vault — keeping orphan cookies
-        after the user revoked authorization would be a privacy bug.
-
-        Same URL→eTLD+1 normalization as `web_auth_add_domain` so a
-        user pasting a URL into the remove flow hits the same vault
-        key that was written by the add flow."""
-        from . import web_auth as _wa
-
-        try:
-            if not agent_id or not domain or not isinstance(domain, str):
-                return {"status": "error", "message": "agent_id and domain required"}
-            raw = domain.strip().lower()
-            if not raw:
-                return {"status": "error", "message": "domain must be non-empty"}
-            domain_norm = _wa.resolve_etld1(raw)
-            if not domain_norm:
-                return {"status": "error", "message": "domain must be non-empty"}
-
-            rules = self.firewall.get_rules_as_dict()
-            profiles = rules.get("agent_profiles", {})
-            agent = profiles.get(agent_id, {})
-            web_auth_block = agent.get("web_auth", {})
-            allowed = web_auth_block.get("allowed_domains", [])
-            if not isinstance(allowed, list):
-                return {"status": "error", "message": "allowed_domains is not a list"}
-
-            new_allowed = [d for d in allowed if isinstance(d, str) and d.lower() != domain_norm]
-            removed = len(new_allowed) != len(allowed)
-            web_auth_block["allowed_domains"] = new_allowed
-
-            if removed:
-                success, message, errors = self.firewall.save_rules_from_dict(rules)
-                if not success:
-                    return {"status": "error", "message": message, "errors": errors}
-                # Revoke vault cookies — keeping them after whitelist
-                # removal would let a future re-add silently re-authorize
-                # the agent on stale cookies.
-                _wa.revoke(agent_id, domain_norm)
-                await self.local_api.broadcast_event(
-                    "web_auth_domains_changed",
-                    {"agent_id": agent_id, "action": "removed", "domain": domain_norm},
-                )
-
-            return {"status": "success", "agent_id": agent_id, "domain": domain_norm,
-                    "removed_from_whitelist": removed}
-        except Exception as e:
-            logger.error("web_auth_remove_domain failed: %s", e, exc_info=True)
-            return {"status": "error", "message": str(e)}
+    async def web_auth_reject_headless(self, request_id: str) -> Dict[str, Any]:
+        from .dpc_agent.tools.browser import get_pending_auth_approvals
+        pending = get_pending_auth_approvals()
+        entry = pending.get(request_id)
+        if not entry:
+            return {"status": "error", "message": f"Unknown request_id: {request_id}"}
+        entry["approved"] = False
+        entry["event"].set()
+        return {"status": "rejected", "request_id": request_id}
 
     # --- Shell approval (ADR-030 v2) ---
 

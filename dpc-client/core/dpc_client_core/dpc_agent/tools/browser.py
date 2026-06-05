@@ -451,6 +451,12 @@ async def cleanup_idle_browser_sessions() -> int:
 
 _session_locks: dict[str, asyncio.Lock] = {}
 
+_pending_auth_approvals: dict[str, dict] = {}
+
+
+def get_pending_auth_approvals() -> dict[str, dict]:
+    return _pending_auth_approvals
+
 
 class _DaemonThreadPoolExecutor(ThreadPoolExecutor):
     """ThreadPoolExecutor whose worker threads are daemon.
@@ -1831,74 +1837,59 @@ async def browse_page(
         # dpc_service wired) — those tests bypass the gate by design.
         firewall = None
         dpc_service = getattr(ctx, "dpc_service", None)
-        if dpc_service is not None:
-            firewall = getattr(dpc_service, "firewall", None)
-        # ADR-028 T6 audit hook: import lazily so the tool module stays
-        # importable even when web_auth.py is unavailable in tests.
         from dpc_client_core import web_auth as _web_auth_mod
 
-        if firewall is not None and not firewall.is_auth_domain_allowed(agent_id, use_auth):
-            reason = firewall.get_auth_denial_reason(agent_id, use_auth)
-            # ADR-029 Task 7: when keep_open=True and the only problem is
-            # missing/expired cookies, bypass the error and open headed
-            # Camoufox so the human can log in directly in the browser
-            # window. The domain must still be whitelisted — only the
-            # cookie requirement is relaxed for the login flow.
-            if keep_open and reason in ("cookies_missing", "cookies_expired"):
-                log.info(
-                    "ADR-029 Task 7: cookies %s for %s (agent=%s), "
-                    "opening headed Camoufox for login",
-                    reason, use_auth, agent_id,
+        # ADR-029 Task 008: per-request approval for headless auth.
+        # Headed (keep_open=True) needs no gate — human sees the browser.
+        # Headless (keep_open=False) broadcasts approval request to UI.
+        if not keep_open:
+            local_api = getattr(dpc_service, "local_api", None) if dpc_service else None
+            if local_api is not None:
+                import threading
+                import uuid as _uuid
+                approval_id = _uuid.uuid4().hex[:12]
+                approval_event = threading.Event()
+                _pending_auth_approvals[approval_id] = {
+                    "event": approval_event,
+                    "agent_id": agent_id,
+                    "domain": use_auth,
+                    "url": url,
+                    "approved": False,
+                }
+                await local_api.broadcast_event(
+                    "web_auth_headless_approval_request",
+                    {
+                        "request_id": approval_id,
+                        "agent_id": agent_id,
+                        "domain": use_auth,
+                        "url": url,
+                    },
                 )
+                loop = asyncio.get_running_loop()
+                try:
+                    approved = await asyncio.wait_for(
+                        loop.run_in_executor(None, approval_event.wait, 120),
+                        timeout=120,
+                    )
+                except asyncio.TimeoutError:
+                    approved = False
+                entry = _pending_auth_approvals.pop(approval_id, {})
+                if not entry.get("approved", False):
+                    _web_auth_mod.audit_append(
+                        agent_id, use_auth, url, status="headless_rejected",
+                    )
+                    return (
+                        f"⚠️ Headless access to '{use_auth}' was not approved. "
+                        f"Use keep_open=true for headed browser login."
+                    )
                 _web_auth_mod.audit_append(
-                    agent_id, use_auth, url,
-                    status=f"camoufox_login:{reason}",
-                )
-            else:
-                _web_auth_mod.audit_append(
-                    agent_id, use_auth, url,
-                    status=f"firewall_denied:{reason or 'unknown'}",
-                )
-                if reason == "not_in_whitelist":
-                    return (
-                        f"⚠️ Domain '{use_auth}' is not in agent '{agent_id}''s "
-                        f"authorized list. Add it to "
-                        f"agent_profiles.{agent_id}.web_auth.allowed_domains in "
-                        f"privacy_rules.json (UI: AgentPermissionsPanel → Web "
-                        f"Authentication → '+ Add'), then log in via the popup."
-                    )
-                if reason == "cookies_missing":
-                    return (
-                        f"⚠️ Agent '{agent_id}' has no saved login for "
-                        f"'{use_auth}'. Open AgentPermissionsPanel → Web "
-                        f"Authentication and click 'Login' next to '{use_auth}' "
-                        f"to authenticate."
-                    )
-                if reason == "cookies_expired":
-                    return (
-                        f"⚠️ Saved login for '{use_auth}' has expired for "
-                        f"agent '{agent_id}'. Open AgentPermissionsPanel → Web "
-                        f"Authentication and click 'Re-login' next to "
-                        f"'{use_auth}' to refresh cookies."
-                    )
-                return (
-                    f"⚠️ Domain '{use_auth}' is not authorized for agent "
-                    f"'{agent_id}'. Check the Web Authentication settings."
+                    agent_id, use_auth, url, status="headless_approved",
                 )
 
         try:
             if keep_open:
-                # ADR-029 Task 002: stateful headed session — page stays
-                # open after returning, agent calls browser_* tools for
-                # subsequent actions. Cookies for every allowed domain
-                # load up-front (D1 multi-domain context).
-                allowed = (
-                    firewall.get_agent_web_auth_domains(agent_id)
-                    if firewall is not None
-                    else [use_auth]
-                )
                 session = await _get_or_create_session_async(
-                    agent_id, list(allowed), True,
+                    agent_id, [use_auth], True,
                 )
                 await _run_in_session(session, "navigate", url)
                 html = await _run_in_session(session, "get_page_html")

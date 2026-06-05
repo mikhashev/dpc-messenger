@@ -3,9 +3,9 @@
    * AgentPermissionsPanel - Unified panel for editing agent permissions
    * Works for both global settings (dpc_agent) and individual agent profiles
    */
-  import { sendCommand, registerPendingWebAuthLogin } from '$lib/coreService';
+  import { sendCommand } from '$lib/coreService';
   import { openPath } from '@tauri-apps/plugin-opener';
-  import { onMount, onDestroy } from 'svelte';
+  import { onMount } from 'svelte';
 
   export let displaySettings: any = null;  // Settings for display mode
   export let editSettings: any = null;     // Settings for edit mode (bindable)
@@ -317,176 +317,21 @@
     : 0;
   $: archiveUnlimited = archiveInfo ? archiveInfo.max_sessions === 0 : false;
 
-  // ─────────────────────────────────────────────────────────────
-  // ADR-028 T8 — Web Auth per-agent UI section
-  // ─────────────────────────────────────────────────────────────
-  // Parallel to "Configure Extended Paths" but with immediate-action
-  // semantics: each add/remove/login is its own WS call, no edit-mode
-  // batching. Domain whitelist is read from the firewall via
-  // web_auth_list_domains and mutated via web_auth_{add,remove}_domain.
-  // Per-agent scope: uses conversationId as agent_id (same convention
-  // as the archive commands already in this component).
-
-  type WebAuthEntry = {
-    domain: string;
-    has_cookies: boolean;
-    expires: number | null;
-    authenticated_at: string | null;
-  };
-
-  let webAuthEntries: WebAuthEntry[] = [];
-  let webAuthLoading: boolean = false;
-  let webAuthError: string = '';
-  let newWebAuthDomain: string = '';
-  let webAuthBusy: Record<string, boolean> = {};
-  let _webAuthMessageHandler: ((event: MessageEvent) => void) | null = null;
-
-  async function loadWebAuthDomains() {
-    if (isGlobal || !conversationId) return;
-    webAuthLoading = true;
-    webAuthError = '';
-    try {
-      const result: any = await sendCommand('web_auth_list_domains',
-        { agent_id: conversationId });
-      if (result && result.status === 'success') {
-        webAuthEntries = result.domains || [];
-      } else {
-        webAuthError = result?.message || 'failed to load domains';
-      }
-    } catch (e: any) {
-      webAuthError = String(e?.message || e);
-    } finally {
-      webAuthLoading = false;
-    }
-  }
-
-  async function addWebAuthDomain() {
-    const domain = newWebAuthDomain.trim().toLowerCase();
-    if (!domain) return;
-    webAuthError = '';
-    try {
-      const result: any = await sendCommand('web_auth_add_domain',
-        { agent_id: conversationId, domain });
-      if (result && result.status === 'success') {
-        newWebAuthDomain = '';
-        await loadWebAuthDomains();
-      } else {
-        webAuthError = result?.message || 'failed to add domain';
-      }
-    } catch (e: any) {
-      webAuthError = String(e?.message || e);
-    }
-  }
-
-  async function removeWebAuthDomain(domain: string) {
-    webAuthBusy = { ...webAuthBusy, [domain]: true };
-    webAuthError = '';
-    try {
-      const result: any = await sendCommand('web_auth_remove_domain',
-        { agent_id: conversationId, domain });
-      if (result && result.status === 'success') {
-        await loadWebAuthDomains();
-      } else {
-        webAuthError = result?.message || 'failed to remove domain';
-      }
-    } catch (e: any) {
-      webAuthError = String(e?.message || e);
-    } finally {
-      const { [domain]: _, ...rest } = webAuthBusy;
-      webAuthBusy = rest;
-    }
-  }
-
-  async function loginWebAuthDomain(domain: string) {
-    webAuthBusy = { ...webAuthBusy, [domain]: true };
-    webAuthError = '';
-    try {
-      // Register the (agent_id, domain) pair so the central Tauri
-      // event listener in coreService.ts can route the resulting
-      // cookies to the right agent (see ADR-028 Wiring).
-      registerPendingWebAuthLogin(conversationId, domain);
-      const { invoke } = await import('@tauri-apps/api/core');
-      const result = await invoke('web_auth_open_login_window', { domain });
-      // The Rust scaffold may currently return Err with a TODO hint —
-      // surface it to the user rather than silently swallowing.
-      if (typeof result === 'string' && result.includes('TODO')) {
-        webAuthError = `WebView2 cookie extraction not yet implemented: ${result}`;
-      }
-    } catch (e: any) {
-      webAuthError = `login popup failed: ${String(e?.message || e)}`;
-    } finally {
-      const { [domain]: _, ...rest } = webAuthBusy;
-      webAuthBusy = rest;
-    }
-  }
-
-  // Re-load whenever the selected agent changes
-  $: if (!isGlobal && conversationId) {
-    loadWebAuthDomains();
-  }
-
-  // Subscribe to backend broadcasts so the UI reflects vault changes
-  // initiated elsewhere (Tauri popup completion, JSON edit on disk,
-  // another panel).
   onMount(() => {
-    _webAuthMessageHandler = (event: MessageEvent) => {
-      try {
-        const data = JSON.parse(event.data);
-        if (data.event === 'web_auth_status_changed' ||
-            data.event === 'web_auth_domains_changed' ||
-            data.event === 'firewall_rules_updated') {
-          loadWebAuthDomains();
-        }
-      } catch (_) {
-        // not JSON — ignore
-      }
-    };
-    window.addEventListener('message', _webAuthMessageHandler);
-
-    // Query the backend for the full ToolRegistry list. Backend restart
-    // is what brings new ToolEntry registrations into the registry, so
-    // a single startup-time fetch is sufficient (no live reactive sync
-    // — Mike's S147 simplification).
     (async () => {
       try {
         const result = sendCommand('list_all_tools', {});
-        if (result === false) {
-          // Socket not open yet — graceful skip; AgentPermissionsPanel
-          // remounts after connection, the next mount will retry.
-          return;
-        }
+        if (result === false) return;
         const resp = await (result as Promise<any>);
         if (resp?.status === 'success' && Array.isArray(resp.tools)) {
           allRegisteredTools = resp.tools;
         }
       } catch (e) {
         console.warn('[AgentPermissionsPanel] list_all_tools failed:', e);
-        // Graceful fallback — panel works without the dynamic section.
       }
     })();
   });
 
-  onDestroy(() => {
-    if (_webAuthMessageHandler) {
-      window.removeEventListener('message', _webAuthMessageHandler);
-      _webAuthMessageHandler = null;
-    }
-  });
-
-  function formatExpiry(unix: number | null): string {
-    // Some cookie frameworks emit `expires: 0` as a session-cookie
-    // sentinel (Ark S140 [#89] review). Treat the same as null so the
-    // UI doesn't show "expired" for a cookie that's really session-only.
-    if (unix === null || unix === undefined || unix === 0) return 'session-only';
-    const ms = unix * 1000;
-    const now = Date.now();
-    if (ms <= now) return 'expired';
-    const days = Math.round((ms - now) / 86_400_000);
-    if (days >= 1) return `${days}d`;
-    const hours = Math.round((ms - now) / 3_600_000);
-    if (hours >= 1) return `${hours}h`;
-    return '<1h';
-  }
 </script>
 
 {#if displaySettings}
@@ -1177,86 +1022,6 @@
             <p class="help-text-small" style="font-style: italic;">No extended paths configured</p>
           {/if}
 
-          <!-- ADR-028 T8: Web Authentication (per-agent) -->
-          <h5 style="margin-top: 1.5rem; margin-bottom: 0.5rem; color: var(--text-secondary);">🔐 Web Authentication</h5>
-          <p class="help-text-small" style="margin-bottom: 0.5rem;">
-            Domains the agent can authenticate to via <code>browse_page(use_auth=...)</code>.
-            Each domain requires (a) being on this whitelist and (b) a completed login via Camoufox browser or the popup below.
-            Removing a domain also revokes any stored cookies.
-          </p>
-
-          {#if webAuthError}
-            <p class="help-text-small" style="color: var(--danger-color, #c0392b); margin-bottom: 0.5rem;">
-              ⚠️ {webAuthError}
-            </p>
-          {/if}
-
-          <div class="sandbox-paths-config">
-            <div class="path-group-card">
-              <div class="path-group-header">
-                <span class="path-label">Authorized domains</span>
-              </div>
-
-              <div class="path-list-edit">
-                {#each webAuthEntries as entry (entry.domain)}
-                  <div class="path-entry">
-                    <input
-                      type="text"
-                      class="path-input"
-                      readonly
-                      value={entry.domain}
-                    />
-                    <span class="web-auth-status"
-                          style="font-size: 0.85em; padding: 0 0.5rem; white-space: nowrap;
-                                 color: {entry.has_cookies ? 'var(--success-color, #27ae60)' : 'var(--text-secondary, #888)'};">
-                      {#if entry.has_cookies}
-                        ✓ logged in ({formatExpiry(entry.expires)})
-                      {:else}
-                        ○ not logged in
-                      {/if}
-                    </span>
-                    <button
-                      type="button"
-                      class="btn-path-add"
-                      disabled={webAuthBusy[entry.domain]}
-                      on:click={() => loginWebAuthDomain(entry.domain)}
-                      title={entry.has_cookies ? 'Re-login (replace cookies)' : 'Open login window'}
-                    >{entry.has_cookies ? 'Re-login' : 'Login'}</button>
-                    <button
-                      type="button"
-                      class="btn-path-remove"
-                      disabled={webAuthBusy[entry.domain]}
-                      on:click={() => removeWebAuthDomain(entry.domain)}
-                      title="Remove from whitelist + revoke cookies"
-                    >×</button>
-                  </div>
-                {:else}
-                  {#if webAuthLoading}
-                    <p class="empty-small">Loading…</p>
-                  {:else}
-                    <p class="empty-small">No web auth domains configured</p>
-                  {/if}
-                {/each}
-              </div>
-
-              <!-- Add new domain -->
-              <div class="path-entry" style="margin-top: 0.5rem;">
-                <input
-                  type="text"
-                  class="path-input"
-                  placeholder="e.g. example.com"
-                  bind:value={newWebAuthDomain}
-                  on:keydown={(e) => { if (e.key === 'Enter') { e.preventDefault(); addWebAuthDomain(); } }}
-                />
-                <button
-                  type="button"
-                  class="btn-path-add"
-                  disabled={!newWebAuthDomain.trim()}
-                  on:click={addWebAuthDomain}
-                >+ Add</button>
-              </div>
-            </div>
-          </div>
         {/if}
       </div>
     {/if}

@@ -8,10 +8,6 @@ use tauri::Manager;
 // Audio recording module (Linux workaround for getUserMedia)
 mod audio_recorder;
 
-// Agent web auth — Tauri WebView cookie extraction (ADR-028 T2)
-// Cross-platform via Tauri 2 native cookies API (since 2.9.5).
-mod web_auth;
-
 // File metadata helper for dynamic timeout calculation (v0.11.2+)
 #[tauri::command]
 fn get_file_metadata(path: String) -> Result<FileMetadata, String> {
@@ -66,24 +62,7 @@ fn main() {
             audio_recorder::tauri_start_recording,
             audio_recorder::tauri_stop_recording,
             audio_recorder::tauri_get_recording_status,
-            web_auth::web_auth_open_login_window,
-            web_auth::web_auth_get_status,
-            web_auth::web_auth_revoke,
         ])
-        .on_window_event(|window, event| {
-            // S144 SHUTDOWN-PIPE-DRAIN fix: close login popup windows on
-            // main window close to prevent IPC pipe hang on Windows.
-            if let tauri::WindowEvent::CloseRequested { .. } = event {
-                if window.label() == "main" {
-                    let app = window.app_handle();
-                    for (label, popup) in app.webview_windows() {
-                        if label != "main" && label.starts_with("web_auth_") {
-                            let _ = popup.close();
-                        }
-                    }
-                }
-            }
-        })
         .setup(|app| {
             #[cfg(debug_assertions)]
             {
