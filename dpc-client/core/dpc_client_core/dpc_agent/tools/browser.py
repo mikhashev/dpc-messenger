@@ -1895,7 +1895,7 @@ async def browse_page(
                 )
                 try:
                     await _run_in_session(session, "navigate", url)
-                except (RuntimeError, OSError) as nav_err:
+                except Exception as nav_err:
                     log.warning(
                         "navigate failed (agent=%s, url=%s): %s — "
                         "closing session and retrying with fresh context",
@@ -1963,7 +1963,7 @@ async def browse_page(
             session = await _get_or_create_session_async(agent_id, [], True)
             try:
                 await _run_in_session(session, "navigate", url)
-            except (RuntimeError, OSError) as nav_err:
+            except Exception as nav_err:
                 log.warning(
                     "navigate failed (agent=%s, url=%s): %s — retrying fresh",
                     agent_id, url, nav_err,
@@ -1976,7 +1976,7 @@ async def browse_page(
                 session = await _get_or_create_session_async(agent_id, [], True)
                 await _run_in_session(session, "navigate", url)
             html = await _run_in_session(session, "get_page_html")
-        except (RuntimeError, OSError, ImportError) as e:
+        except Exception as e:
             return f"⚠️ Camoufox browser failed: {e}"
         text = _html_to_markdown(html)
         max_chars = _SIZE_PRESETS.get(size, _SIZE_PRESETS["m"])
