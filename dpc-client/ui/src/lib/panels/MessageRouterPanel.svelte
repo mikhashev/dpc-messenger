@@ -412,8 +412,9 @@
           // Notify on agent response if app is in background
           if (message.status === 'OK' && chatId?.startsWith('agent_') && newSender !== 'cc') {
             const preview = newText.length > 80 ? newText.slice(0, 80) + '...' : newText;
+            const notifName = $aiChats.get(chatId)?.name || 'Agent';
             showNotificationIfBackground({
-              title: agentSenderName || 'Agent',
+              title: notifName,
               body: preview,
             });
           }

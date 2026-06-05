@@ -550,6 +550,11 @@ class ContextFirewall:
             return profiles[profile_name].copy()
         return None
 
+    def get_agent_web_auth_domains(self, agent_id: str) -> list:
+        """Return the list of allowed web-auth domains for an agent profile."""
+        profile = self.rules.get('agent_profiles', {}).get(agent_id, {})
+        return profile.get('web_auth', {}).get('allowed_domains', [])
+
     def get_agent_permissions_summary(self, agent_id: str = "agent_001") -> Dict[str, Any]:
         """
         Get a complete permissions summary for an agent — for UI transparency.
