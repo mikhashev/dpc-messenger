@@ -1939,6 +1939,21 @@ async def browse_page(
             text = text[:max_chars] + f"\n\n... (truncated, {total} total chars, use size='l' or 'f' for more)"
         return f"Content from {url} (markdown, auth={use_auth}, {total} chars):\n\n{text}"
 
+    if keep_open:
+        agent_id = ctx.agent_root.name if hasattr(ctx, 'agent_root') else "anonymous"
+        try:
+            session = await _get_or_create_session_async(agent_id, [], True)
+            await _run_in_session(session, "navigate", url)
+            html = await _run_in_session(session, "get_page_html")
+        except (RuntimeError, OSError, ImportError) as e:
+            return f"⚠️ Camoufox browser failed: {e}"
+        text = _html_to_markdown(html)
+        max_chars = _SIZE_PRESETS.get(size, _SIZE_PRESETS["m"])
+        total = len(text)
+        if max_chars and total > max_chars:
+            text = text[:max_chars] + f"\n\n... (truncated, {total} total chars, use size='l' or 'f' for more)"
+        return f"Content from {url} (markdown, headed, {total} chars):\n\n{text}"
+
     result = await asyncio.to_thread(_browse_sync, url)
 
     if not result.get("success", False) and "error" in result:
