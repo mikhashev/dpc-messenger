@@ -380,10 +380,11 @@
               msg_index, tokens_after_last_response, tokens_after_last_response_at, history_tokens, tokens_limit, context_breakdown: cb } = $agentChatMessage;
 
       untrack(() => {
+        const { sender, senderName } = mapMessageSender({ role, sender_node_id, sender_name }, conversation_id, getAgentName(conversation_id));
+
         chatHistories.update(map => {
           const newMap = new Map(map);
           const existing = newMap.get(conversation_id) || [];
-          const { sender, senderName } = mapMessageSender({ role, sender_node_id, sender_name }, conversation_id, getAgentName(conversation_id));
           const stableId = message_id || `${sender}-${timestamp ? new Date(timestamp).getTime() : Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
           const newMsg: Message = {
             id: stableId,
