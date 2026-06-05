@@ -1106,6 +1106,8 @@ class AuthBrowser:
     def _install_domain_route_handler(self) -> None:
         if self._context is None:
             return
+        if not self._domains:
+            return
         self._context.route("**/*", self._domain_route_gate)
 
     def _domain_route_gate(self, route) -> None:
