@@ -1745,19 +1745,28 @@ async def _run_in_session(
     )
 
 
+_session_create_locks: dict[str, asyncio.Lock] = {}
+
+
 async def _get_or_create_session_async(
     agent_id: str, domains: list[str], headed: bool,
 ) -> "AuthBrowser":
     """Async wrapper around `_get_or_create_session` that pins the
     initial `start()` to the new session's executor, so every later
-    `_run_in_session` call lands on the same thread."""
-    existing = _active_browser_sessions.get(agent_id)
-    if existing is not None and existing._page is not None:
-        return existing
-    session = AuthBrowser(agent_id=agent_id, domains=domains, headed=headed)
-    await _run_in_session(session, "start")
-    _active_browser_sessions[agent_id] = session
-    return session
+    `_run_in_session` call lands on the same thread.
+
+    Uses a per-agent asyncio.Lock to prevent duplicate browser launches
+    when the LLM emits parallel browse_page tool calls in one round."""
+    if agent_id not in _session_create_locks:
+        _session_create_locks[agent_id] = asyncio.Lock()
+    async with _session_create_locks[agent_id]:
+        existing = _active_browser_sessions.get(agent_id)
+        if existing is not None and existing._page is not None:
+            return existing
+        session = AuthBrowser(agent_id=agent_id, domains=domains, headed=headed)
+        await _run_in_session(session, "start")
+        _active_browser_sessions[agent_id] = session
+        return session
 
 
 def _html_to_markdown(html: str) -> str:
