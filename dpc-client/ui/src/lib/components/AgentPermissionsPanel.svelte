@@ -1181,7 +1181,7 @@
           <h5 style="margin-top: 1.5rem; margin-bottom: 0.5rem; color: var(--text-secondary);">🔐 Web Authentication</h5>
           <p class="help-text-small" style="margin-bottom: 0.5rem;">
             Domains the agent can authenticate to via <code>browse_page(use_auth=...)</code>.
-            Each domain requires (a) being on this whitelist and (b) a completed login via the popup below.
+            Each domain requires (a) being on this whitelist and (b) a completed login via Camoufox browser or the popup below.
             Removing a domain also revokes any stored cookies.
           </p>
 

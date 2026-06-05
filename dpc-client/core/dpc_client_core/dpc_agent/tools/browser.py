@@ -314,46 +314,6 @@ def _browse_with_camoufox(url: str) -> Optional[str]:
 
 
 # ─────────────────────────────────────────────────────────────
-# ADR-028 T9 — Anti-bot challenge detection
-# ─────────────────────────────────────────────────────────────
-
-# Markers of common anti-bot challenge / interstitial pages. The lowercase
-# check below makes these case-insensitive. Add new markers conservatively
-# — every entry is a potential false-positive surface for legitimate pages
-# that happen to mention the marker string in body text.
-ANTI_BOT_PATTERNS: tuple[str, ...] = (
-    "fab_chlg_",            # example.com marketplace marker
-    "__cf_chl_",            # Cloudflare challenge
-    "g-recaptcha",          # Google reCAPTCHA widget
-    "_incapsula_resource",  # Imperva / Incapsula
-    "px-captcha",           # PerimeterX
-)
-
-
-def looks_like_challenge(html: str) -> bool:
-    """Heuristic: does this HTML look like an anti-bot challenge page?
-
-    Challenge pages share two traits we can cheaply test for:
-      1. They are small — typically a stub that bootstraps a JS challenge,
-         not a full content page. We cap at 50 KB to avoid scanning real
-         page bodies that just happen to mention a challenge framework
-         in passing (e.g. a blog post about reCAPTCHA).
-      2. They contain a known vendor marker near the top of the document.
-
-    Returns True only when both conditions hold on the first 10 KB.
-
-    False positives are possible — a small page mentioning ``g-recaptcha``
-    in body text would trigger. Acceptable for MVP per ADR-028 T9; the
-    fallback is a popup the user actively closes, so a false trigger
-    costs one human interaction, not a wrong result.
-    """
-    if not html or len(html) > 50_000:
-        return False
-    sample = html[:10_000].lower()
-    return any(p in sample for p in ANTI_BOT_PATTERNS)
-
-
-# ─────────────────────────────────────────────────────────────
 # ADR-028 T4 — AuthBrowser (authenticated read-only Camoufox)
 # ─────────────────────────────────────────────────────────────
 
@@ -1810,8 +1770,7 @@ def _html_to_markdown(html: str) -> str:
 def _auth_browse_html(
     agent_id: str, domain: str, url: str, headed: bool = True
 ) -> str:
-    """Sync helper returning RAW HTML. T9 needs the pre-conversion HTML
-    for `looks_like_challenge()` detection."""
+    """Sync helper returning RAW HTML."""
     with AuthBrowser(agent_id=agent_id, domain=domain, headed=headed) as ab:
         ab.goto(url)
         return ab.get_page_html()
@@ -1823,129 +1782,6 @@ def _auth_browse(
     """Wrapper around `_auth_browse_html` + `_html_to_markdown`. Kept so
     existing tests that patch `_auth_browse` directly continue to work."""
     return _html_to_markdown(_auth_browse_html(agent_id, domain, url, headed))
-
-
-# ─────────────────────────────────────────────────────────────
-# ADR-028 T9 — Popup fallback (caller side)
-# ─────────────────────────────────────────────────────────────
-
-@dataclass
-class PendingPopupRequest:
-    """One in-flight popup-fallback request. The WS handler for
-    `web_auth_popup_complete` reads `expected_url` / `expected_etld1`
-    to enforce the Q2 URL-safety check (Ark softer version) before
-    resolving the future with the popup-extracted HTML.
-    """
-    future: asyncio.Future
-    expected_url: str
-    expected_etld1: str
-    agent_id: str = ""
-    opened_at: float = 0.0
-
-
-# Pending popup requests keyed by request_id. The future is resolved by
-# the local-api WS handler for `web_auth_popup_complete` (Step 3) when
-# the frontend reports back with the popup-extracted HTML.
-# Ephemeral by design (Q3 decision S142): backend restart loses pending
-# requests, frontend popups become orphaned, user retries.
-#
-# Thread-safety: the dict is mutated from coroutines on the CoreService
-# event loop and from the WS handler running on the same loop. DPC has
-# a single event loop; if a future deployment multiplexes loops, this
-# dict needs an asyncio.Lock or per-loop registries.
-_pending_popup_requests: dict[str, PendingPopupRequest] = {}
-
-# 5-minute popup timeout per ADR-028 T9 Q4 (Mike + Ark agreed S142).
-_POPUP_TIMEOUT_S = 300
-
-
-def get_pending_popup_requests() -> dict[str, PendingPopupRequest]:
-    """Accessor used by the Step 3 WS handler to resolve futures by id.
-    Module-level dict is the source of truth; this returns the live ref
-    (mutation is intentional)."""
-    return _pending_popup_requests
-
-
-async def _request_popup_fallback(
-    ctx: ToolContext,
-    agent_id: str,
-    domain: str,
-    url: str,
-    reason: str = "anti_bot_challenge",
-) -> str:
-    """Ask the frontend to open a Tauri WebView popup so the user can
-    solve a challenge (example.com fab_chlg, Cloudflare) or view JS-rendered
-    content (example.org orders) for `url`. Awaits the user closing the
-    popup; the backend WS handler `web_auth_popup_complete` resolves
-    the future with the extracted HTML.
-
-    `reason` is forwarded to the frontend so the popup-request panel
-    can render context-appropriate copy:
-      - "anti_bot_challenge" — Camoufox got a challenge stub
-        (`looks_like_challenge` triggered)
-      - "always_popup" — domain is on the agent's `always_popup`
-        whitelist (example.org class — JS-render-only sites)
-
-    Returns the popup-extracted HTML. The caller converts to markdown
-    via `_html_to_markdown`. Raises `AuthRequiredError` on timeout,
-    missing dpc_service, or popup_error reported by the frontend.
-    """
-    dpc_service = getattr(ctx, "dpc_service", None)
-    local_api = getattr(dpc_service, "local_api", None) if dpc_service else None
-    if local_api is None:
-        raise AuthRequiredError(
-            "Popup fallback requires DPC service — unavailable in this context"
-        )
-
-    import time
-    import uuid
-
-    # eTLD+1 used by the Q2 URL-safety check in `web_auth_popup_complete`.
-    # Lazy import to keep this module importable when web_auth (which
-    # owns the ETLD1_MAP / resolver) isn't wired in unit tests.
-    from dpc_client_core import web_auth as _wa
-
-    request_id = uuid.uuid4().hex[:12]
-    loop = asyncio.get_running_loop()
-    future: asyncio.Future = loop.create_future()
-    _pending_popup_requests[request_id] = PendingPopupRequest(
-        future=future,
-        expected_url=url,
-        expected_etld1=_wa.resolve_etld1(domain),
-        agent_id=agent_id,
-        opened_at=time.monotonic(),
-    )
-
-    try:
-        await local_api.broadcast_event(
-            "web_auth_popup_request",
-            {
-                "request_id": request_id,
-                "agent_id": agent_id,
-                "domain": domain,
-                "url": url,
-                "reason": reason,
-            },
-        )
-        return await asyncio.wait_for(future, timeout=_POPUP_TIMEOUT_S)
-    except asyncio.TimeoutError as e:
-        # T10-FRONTEND-CLEANUP-ON-TIMEOUT: tell the frontend to dismiss
-        # the modal and close the popup window. Backend-side leak in
-        # `_pending_popup_requests` is closed by the finally below; this
-        # event closes the matching frontend-side state.
-        try:
-            await local_api.broadcast_event(
-                "web_auth_popup_force_close",
-                {"request_id": request_id, "reason": "timeout"},
-            )
-        except Exception:
-            pass  # best-effort; do not mask the AuthRequiredError below
-        raise AuthRequiredError(
-            f"Popup fallback timeout ({_POPUP_TIMEOUT_S}s) for {url} — "
-            f"user did not complete"
-        ) from e
-    finally:
-        _pending_popup_requests.pop(request_id, None)
 
 
 async def browse_page(
@@ -2050,39 +1886,6 @@ async def browse_page(
                     f"'{agent_id}'. Check the Web Authentication settings."
                 )
 
-        # T9 always_popup (example.org variant C): skip Camoufox entirely
-        # for sites whose interesting content only renders under a real
-        # browser (JS-only order pages, client-rendered SPAs). The user
-        # already authorized this exact domain via allowed_domains, so
-        # the firewall check above is the security boundary; this just
-        # decides headless vs popup at fetch time.
-        if firewall is not None:
-            use_auth_etld1 = _web_auth_mod.resolve_etld1(use_auth)
-            if use_auth_etld1 in firewall.get_agent_always_popup_domains(agent_id):
-                log.info(
-                    "always_popup whitelist hit for %s (agent=%s) — "
-                    "skipping headless fetch", url, agent_id,
-                )
-                try:
-                    html = await _request_popup_fallback(
-                        ctx, agent_id, use_auth, url,
-                        reason="always_popup",
-                    )
-                except AuthRequiredError as e:
-                    _web_auth_mod.audit_append(
-                        agent_id, use_auth, url, status="popup_timeout"
-                    )
-                    return f"⚠️ {e}"
-                text = _html_to_markdown(html)
-                _web_auth_mod.audit_append(
-                    agent_id, use_auth, url, status=200, bytes_size=len(text)
-                )
-                max_chars = _SIZE_PRESETS.get(size, _SIZE_PRESETS["m"])
-                total = len(text)
-                if max_chars and total > max_chars:
-                    text = text[:max_chars] + f"\n\n... (truncated, {total} total chars, use size='l' or 'f' for more)"
-                return f"Content from {url} (markdown, auth={use_auth}, {total} chars):\n\n{text}"
-
         try:
             if keep_open:
                 # ADR-029 Task 002: stateful headed session — page stays
@@ -2133,26 +1936,6 @@ async def browse_page(
                 agent_id, use_auth, url, status="browser_error"
             )
             return f"⚠️ Camoufox browser failed: {e}"
-
-        # T9 challenge detection: if Camoufox got back an anti-bot stub,
-        # hand off to the Tauri WebView popup (T2 cookie jar / fingerprint
-        # the user already trusted at login). User solves challenge or
-        # views JS-rendered content, popup closes, backend gets the
-        # rendered HTML back via WS `web_auth_popup_complete`.
-        if looks_like_challenge(html):
-            log.info(
-                "Anti-bot challenge detected for %s (agent=%s) — "
-                "requesting popup fallback", url, agent_id,
-            )
-            try:
-                html = await _request_popup_fallback(
-                    ctx, agent_id, use_auth, url,
-                )
-            except AuthRequiredError as e:
-                _web_auth_mod.audit_append(
-                    agent_id, use_auth, url, status="popup_timeout"
-                )
-                return f"⚠️ {e}"
 
         text = _html_to_markdown(html)
         # Success path — record byte size for cost / quota tracking.

@@ -22,7 +22,6 @@
   import Sidebar from "$lib/components/Sidebar.svelte";
   import NewGroupDialog from "$lib/components/NewGroupDialog.svelte";
   import GroupSettingsDialog from "$lib/components/GroupSettingsDialog.svelte";
-  import WebAuthPopupRequest from "$lib/components/WebAuthPopupRequest.svelte";
   import ShellApprovalDialog from "$lib/components/ShellApprovalDialog.svelte";
   import ChatPanel from "$lib/panels/ChatPanel.svelte";
   import AgentPanel from "$lib/panels/AgentPanel.svelte";
@@ -1193,12 +1192,6 @@
 
 <!-- ModelDownloadPanel: model download dialog + effects (Step 8) -->
 <ModelDownloadPanel />
-
-<!-- WebAuthPopupRequest: ADR-028 T9 modal prompt when an agent needs the
-     user to open a Tauri WebView popup for anti-bot challenge / JS-rendered
-     content extraction. Subscribes to the webAuthPopupRequest store fed by
-     coreService.ts WS handler. -->
-<WebAuthPopupRequest />
 
 <!-- ShellApprovalDialog: ADR-030 v2 — floating approval cards for Tier 1
      shell commands. Subscribes to pendingShellApprovals store fed by

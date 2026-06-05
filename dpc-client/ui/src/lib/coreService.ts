@@ -129,7 +129,6 @@ import { agentsList, agentCreated, agentUpdated, agentDeleted, agentProfiles, ag
 import { telegramEnabled, telegramConnected, telegramStatus, telegramError, telegramLinkedChats, telegramMessages, telegramMessageReceived, telegramVoiceReceived, telegramImageReceived, telegramFileReceived, agentTelegramLinked, agentTelegramUnlinked, agentHistoryUpdated } from './services/telegram';
 import { personalContext, contextUpdated, peerContextUpdated, knowledgeCommitProposal, knowledgeCommitResult, extractionFailure, tokenWarning, integrityWarnings } from './services/knowledge';
 import { historyRestored, newSessionProposal, newSessionResult, conversationReset, conversationSettings, conversationSettingsChanged, conversationDeleted } from './services/session';
-import { webAuthPopupRequest } from './services/webAuth';
 
 // Re-export all service stores for backward compatibility.
 // NOTE: When adding new UI-reactive fields from privacy_rules.json, add the store in
@@ -144,7 +143,6 @@ export { agentsList, agentCreated, agentUpdated, agentDeleted, agentProfiles, ag
 export { telegramEnabled, telegramConnected, telegramStatus, telegramError, telegramLinkedChats, telegramMessages, telegramMessageReceived, telegramVoiceReceived, telegramImageReceived, telegramFileReceived, agentTelegramLinked, agentTelegramUnlinked, agentHistoryUpdated };
 export { personalContext, contextUpdated, peerContextUpdated, knowledgeCommitProposal, knowledgeCommitResult, extractionFailure, tokenWarning, integrityWarnings };
 export { historyRestored, newSessionProposal, newSessionResult, conversationReset, conversationSettings, conversationSettingsChanged, conversationDeleted };
-export { webAuthPopupRequest };
 
 // Track currently active chat to prevent unread badges on open chats
 let activeChat: string | null = null;
@@ -1058,51 +1056,6 @@ export async function connectToCoreService() {
                         });
                     }
                 }
-                else if (message.event === "web_auth_popup_request") {
-                    // ADR-028 T9: backend agent hit an anti-bot challenge (or
-                    // matched the always_popup whitelist) on an authenticated
-                    // browse and is now awaiting a popup-extracted HTML.
-                    // Surface the prompt — WebAuthPopupRequestPanel binds to
-                    // this store and renders the "Open {domain}" button.
-                    console.log("[web_auth] popup_request", message.payload?.url);
-                    webAuthPopupRequest.set(message.payload);
-                }
-                else if (message.event === "web_auth_popup_force_close") {
-                    // T10-FRONTEND-CLEANUP-ON-TIMEOUT: backend hit an error
-                    // path on a popup-fallback session (timeout, unexpected
-                    // failure). Without this, the modal + the Tauri popup
-                    // window stay visible indefinitely from the user's
-                    // perspective even though the agent already saw the
-                    // error and moved on. Close both surfaces here so the
-                    // user is not left staring at a stranded popup.
-                    const rid = message.payload?.request_id;
-                    const reason = message.payload?.reason;
-                    if (!rid) {
-                        console.warn('[web_auth] popup_force_close missing request_id');
-                    } else {
-                        console.log('[web_auth] popup_force_close', rid, `reason=${reason}`);
-                        // Cancel any armed watchdog so it doesn't fire after cleanup.
-                        cancelPopupCloseWatchdog(rid);
-                        // Dismiss the in-app modal so the user is unblocked
-                        // immediately. webAuthPopupRequest holds at most one
-                        // outstanding request at a time (Q3 sequential).
-                        webAuthPopupRequest.set(null);
-                        // Best-effort: close the popup window via Tauri's
-                        // WebviewWindow API. The popup window label matches
-                        // the backend convention `web_auth_popup_{request_id}`.
-                        (async () => {
-                            try {
-                                const { WebviewWindow } = await import('@tauri-apps/api/webviewWindow');
-                                const popup = await WebviewWindow.getByLabel(`web_auth_popup_${rid}`);
-                                if (popup) {
-                                    await popup.close();
-                                }
-                            } catch (e) {
-                                console.log('[web_auth] popup_force_close: nothing to close', e);
-                            }
-                        })();
-                    }
-                }
             } catch (error) {
                 console.error("Error parsing message:", error);
             }
@@ -1200,31 +1153,6 @@ export function resetReconnection() {
 const pendingWebAuthLogins = new Map<string, string>();
 let webAuthListenerInstalled = false;
 
-// ADR-028 T9 bug 1 — Path A defense. When the Rust popup CloseRequested
-// handler fires, it emits `web_auth_popup_closing` and then tries to
-// eval the JS extractor. If the WebView is torn down before the JS
-// runs, no `web_auth_popup_extracted` event ever arrives — the modal
-// would otherwise stay stuck until the 5-minute backend timeout. The
-// closing-event listener arms a short watchdog for each request_id;
-// the extracted listener cancels it on success.
-const popupCloseWatchdogs = new Map<string, ReturnType<typeof setTimeout>>();
-const POPUP_CLOSE_WATCHDOG_MS = 3000;
-
-/**
- * Bug 6 (S143): cancel an armed popup-close watchdog for a given
- * request_id. Used by the WebAuthPopupRequest modal Cancel button to
- * prevent a double `web_auth_popup_complete` round (Cancel resolves
- * the backend future, then the watchdog would fire a second one and
- * crash the handler with InvalidStateError on the already-done future).
- */
-export function cancelPopupCloseWatchdog(requestId: string): void {
-    const timer = popupCloseWatchdogs.get(requestId);
-    if (timer !== undefined) {
-        clearTimeout(timer);
-        popupCloseWatchdogs.delete(requestId);
-    }
-}
-
 export function registerPendingWebAuthLogin(agentId: string, domain: string): void {
     const key = domain.toLowerCase();
     // Stale-entry guard (Ark S140 [#82] review): if a previous popup
@@ -1274,76 +1202,6 @@ async function ensureWebAuthListener(): Promise<void> {
                 domain: payload.domain,
                 cookies: payload.cookies || [],
             });
-        });
-
-        // ADR-028 T9 bug 1 — Path A watchdog. Rust emits this BEFORE
-        // calling popup.eval(). Arm a short timer here; the
-        // `web_auth_popup_extracted` listener below cancels it on
-        // either success or Rust-side eval-error. If neither arrives
-        // (Path A — JS torn down before injected emit runs), the timer
-        // fires, manually forwards an error to backend, and dismisses
-        // the modal so the user is not stuck staring at "browser
-        // window opened" after they already closed it.
-        await listen<{ request_id: string }>('web_auth_popup_closing', (event) => {
-            const payload = event.payload;
-            if (!payload || !payload.request_id) return;
-            const requestId = payload.request_id;
-            // Idempotent: if Rust emits closing twice (shouldn't, but
-            // defensive), the second timer overwrites the first cleanly.
-            const existing = popupCloseWatchdogs.get(requestId);
-            if (existing !== undefined) clearTimeout(existing);
-            const timer = setTimeout(() => {
-                popupCloseWatchdogs.delete(requestId);
-                console.warn(
-                    `[web_auth] popup_extracted did not arrive within ${POPUP_CLOSE_WATCHDOG_MS}ms ` +
-                    `for request_id=${requestId} — assuming Path A (JS torn down before emit), ` +
-                    `closing modal and reporting error to backend`,
-                );
-                sendCommand('web_auth_popup_complete', {
-                    request_id: requestId,
-                    error: 'popup close timeout — JS extraction event did not arrive',
-                });
-                webAuthPopupRequest.set(null);
-            }, POPUP_CLOSE_WATCHDOG_MS);
-            popupCloseWatchdogs.set(requestId, timer);
-        });
-
-        // ADR-028 T9: same listener-install gate handles the popup-fallback
-        // companion event. Rust `web_auth_open_popup_for_content` emits this
-        // when the user closes the popup; the payload already carries
-        // request_id (closed-over in the init-script JS), so unlike the T8
-        // login flow we don't need a pendingMap to recover the agent — the
-        // Python Step-3 handler resolves the matching Future by id.
-        await listen<{
-            request_id: string;
-            content_html?: string;
-            current_url?: string;
-            error?: string;
-        }>('web_auth_popup_extracted', (event) => {
-            const payload = event.payload;
-            if (!payload || !payload.request_id) {
-                console.warn('[web_auth] popup_extracted with no request_id — ignoring');
-                return;
-            }
-            // Cancel any pending Path-A watchdog set by the closing listener.
-            const watchdog = popupCloseWatchdogs.get(payload.request_id);
-            if (watchdog !== undefined) {
-                clearTimeout(watchdog);
-                popupCloseWatchdogs.delete(payload.request_id);
-            }
-            console.log(
-                '[web_auth] popup_extracted',
-                payload.request_id,
-                payload.error ? `error=${payload.error}` : `bytes=${payload.content_html?.length || 0}`,
-            );
-            sendCommand('web_auth_popup_complete', {
-                request_id: payload.request_id,
-                content_html: payload.content_html,
-                current_url: payload.current_url,
-                error: payload.error,
-            });
-            // Clear the pending-request store so the panel dismisses its UI.
-            webAuthPopupRequest.set(null);
         });
 
         webAuthListenerInstalled = true;
