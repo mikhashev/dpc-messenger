@@ -6193,6 +6193,10 @@ class CoreService:
                 if thinking_text:
                     thinking_tokens = len(thinking_text) // 4  # rough token estimate
 
+            # Get tool_calls from agent trace for collapsible rendering
+            _trace = getattr(agent, '_last_trace', None) or {}
+            tool_calls_for_response = _trace.get("accumulated_tool_calls") or []
+
             # Pull msg_index for both user and assistant turns from monitor —
             # process_message() appends user msg then assistant msg, so the
             # last two history entries are the pair we just produced. Frontend
@@ -6223,6 +6227,7 @@ class CoreService:
                     "tokens_after_last_response_at": session_state.get("tokens_after_last_response_at"),
                     "thinking": thinking_text,
                     "thinking_tokens": thinking_tokens,
+                    "tool_calls": tool_calls_for_response if tool_calls_for_response else [],
                     "user_msg_index": user_msg_index,
                     "assistant_msg_index": assistant_msg_index,
                     "context_breakdown": session_state.get("context_breakdown"),

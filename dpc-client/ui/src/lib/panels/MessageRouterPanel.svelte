@@ -309,6 +309,7 @@
         // v1.4+: Extract thinking fields for reasoning models
         const thinkingContent = message.status === 'OK' ? message.payload.thinking : undefined;
         const thinkingTokenCount = message.status === 'OK' ? message.payload.thinking_tokens : undefined;
+        const toolCallsData = message.status === 'OK' ? (message.payload.tool_calls || []) : [];
 
         // Show toast notification for errors (helps remote users see host failures)
         if (message.status !== 'OK') {
@@ -371,6 +372,7 @@
                   msg_index: assistantMsgIndex || m.msg_index || 0,
                   thinking: thinkingContent,
                   thinkingTokens: thinkingTokenCount,
+                  tool_calls: toolCallsData.length > 0 ? toolCallsData : undefined,
                   streamingRaw: capturedStreamingText || undefined,
                   commandId: undefined,
                 };

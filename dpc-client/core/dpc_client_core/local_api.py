@@ -300,13 +300,16 @@ class LocalApiServer:
         """
         lock = self._client_locks.get(client)
         if lock is None:
-            # Client was unregistered between gather setup and send dispatch,
-            # or send was called before registration (auth-response path).
-            # No lock to acquire — fall through to a direct send.
             await client.send(message)
             return
-        async with lock:
-            await client.send(message)
+        try:
+            async with lock:
+                await client.send(message)
+        except RuntimeError as e:
+            if "bound to a different event loop" in str(e):
+                await client.send(message)
+            else:
+                raise
 
     async def _handler(self, websocket: WebSocketServerProtocol):
         if not await self._authenticate(websocket):
