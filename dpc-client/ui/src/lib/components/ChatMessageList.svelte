@@ -153,7 +153,8 @@
           <span class="timestamp">{#if msg.msg_index}<span class="msg-index">#{msg.msg_index}</span> {/if}{new Date(msg.timestamp).toLocaleTimeString()}</span>
         </div>
         <!-- Thinking block (v1.4+): Display AI reasoning before main response -->
-        {#if isAiSender(msg.sender, msg) && msg.thinking}
+        <!-- Hidden when tool_calls collapsible is present (per-round thinking shown there instead) -->
+        {#if isAiSender(msg.sender, msg) && msg.thinking && !(msg.tool_calls && msg.tool_calls.length > 0)}
           <ThinkingBlock thinking={msg.thinking} tokenCount={msg.thinkingTokens} />
         {/if}
 
@@ -177,8 +178,8 @@
           />
         {/if}
 
-        <!-- Raw streaming output (v0.16.0+): Collapsible section showing incremental text -->
-        {#if isAiSender(msg.sender, msg) && msg.streamingRaw && msg.streamingRaw.length > 50}
+        <!-- Raw streaming output (v0.16.0+): Hidden when tool_calls collapsible is present -->
+        {#if isAiSender(msg.sender, msg) && msg.streamingRaw && msg.streamingRaw.length > 50 && !(msg.tool_calls && msg.tool_calls.length > 0)}
           <details class="streaming-raw-details">
             <summary class="streaming-raw-summary">
               <span class="streaming-raw-icon">📝</span>

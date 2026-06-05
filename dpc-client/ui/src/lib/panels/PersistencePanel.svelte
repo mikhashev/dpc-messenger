@@ -66,6 +66,10 @@
         const historiesToSave = Object.fromEntries(
           Array.from($chatHistories.entries())
             .filter(([id]) => (id.startsWith('ai_') || id.startsWith('agent_')) && !id.startsWith('telegram-'))
+            .map(([id, msgs]) => [id, (msgs as any[]).map(m => {
+              const { tool_calls, streamingRaw, ...rest } = m;
+              return rest;
+            })])
         );
         localStorage.setItem('dpc-ai-chat-histories', JSON.stringify(historiesToSave));
       } catch (error) {
