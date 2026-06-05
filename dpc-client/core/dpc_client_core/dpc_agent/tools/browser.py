@@ -20,6 +20,7 @@ import os
 import platform
 import re
 import ssl
+import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -2001,44 +2002,53 @@ async def browse_page(
         from dpc_client_core import web_auth as _web_auth_mod
 
         if firewall is not None and not firewall.is_auth_domain_allowed(agent_id, use_auth):
-            # Per-reason guidance instead of one generic message — Mike
-            # S142 caught the old phrasing conflating "add to whitelist"
-            # and "re-login" when the actual fix depends on which check
-            # failed. get_auth_denial_reason mirrors the conditions in
-            # is_auth_domain_allowed so the advice always matches reality.
             reason = firewall.get_auth_denial_reason(agent_id, use_auth)
-            _web_auth_mod.audit_append(
-                agent_id, use_auth, url,
-                status=f"firewall_denied:{reason or 'unknown'}",
-            )
-            if reason == "not_in_whitelist":
-                return (
-                    f"⚠️ Domain '{use_auth}' is not in agent '{agent_id}''s "
-                    f"authorized list. Add it to "
-                    f"agent_profiles.{agent_id}.web_auth.allowed_domains in "
-                    f"privacy_rules.json (UI: AgentPermissionsPanel → Web "
-                    f"Authentication → '+ Add'), then log in via the popup."
+            # ADR-029 Task 7: when keep_open=True and the only problem is
+            # missing/expired cookies, bypass the error and open headed
+            # Camoufox so the human can log in directly in the browser
+            # window. The domain must still be whitelisted — only the
+            # cookie requirement is relaxed for the login flow.
+            if keep_open and reason in ("cookies_missing", "cookies_expired"):
+                log.info(
+                    "ADR-029 Task 7: cookies %s for %s (agent=%s), "
+                    "opening headed Camoufox for login",
+                    reason, use_auth, agent_id,
                 )
-            if reason == "cookies_missing":
-                return (
-                    f"⚠️ Agent '{agent_id}' has no saved login for "
-                    f"'{use_auth}'. Open AgentPermissionsPanel → Web "
-                    f"Authentication and click 'Login' next to '{use_auth}' "
-                    f"to authenticate."
+                _web_auth_mod.audit_append(
+                    agent_id, use_auth, url,
+                    status=f"camoufox_login:{reason}",
                 )
-            if reason == "cookies_expired":
-                return (
-                    f"⚠️ Saved login for '{use_auth}' has expired for "
-                    f"agent '{agent_id}'. Open AgentPermissionsPanel → Web "
-                    f"Authentication and click 'Re-login' next to "
-                    f"'{use_auth}' to refresh cookies."
+            else:
+                _web_auth_mod.audit_append(
+                    agent_id, use_auth, url,
+                    status=f"firewall_denied:{reason or 'unknown'}",
                 )
-            # Belt-and-suspenders: keep the original generic phrasing for
-            # any future denial reason we forget to map here.
-            return (
-                f"⚠️ Domain '{use_auth}' is not authorized for agent "
-                f"'{agent_id}'. Check the Web Authentication settings."
-            )
+                if reason == "not_in_whitelist":
+                    return (
+                        f"⚠️ Domain '{use_auth}' is not in agent '{agent_id}''s "
+                        f"authorized list. Add it to "
+                        f"agent_profiles.{agent_id}.web_auth.allowed_domains in "
+                        f"privacy_rules.json (UI: AgentPermissionsPanel → Web "
+                        f"Authentication → '+ Add'), then log in via the popup."
+                    )
+                if reason == "cookies_missing":
+                    return (
+                        f"⚠️ Agent '{agent_id}' has no saved login for "
+                        f"'{use_auth}'. Open AgentPermissionsPanel → Web "
+                        f"Authentication and click 'Login' next to '{use_auth}' "
+                        f"to authenticate."
+                    )
+                if reason == "cookies_expired":
+                    return (
+                        f"⚠️ Saved login for '{use_auth}' has expired for "
+                        f"agent '{agent_id}'. Open AgentPermissionsPanel → Web "
+                        f"Authentication and click 'Re-login' next to "
+                        f"'{use_auth}' to refresh cookies."
+                    )
+                return (
+                    f"⚠️ Domain '{use_auth}' is not authorized for agent "
+                    f"'{agent_id}'. Check the Web Authentication settings."
+                )
 
         # T9 always_popup (example.org variant C): skip Camoufox entirely
         # for sites whose interesting content only renders under a real
