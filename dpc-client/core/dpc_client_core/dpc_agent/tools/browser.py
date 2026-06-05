@@ -1891,7 +1891,23 @@ async def browse_page(
                 session = await _get_or_create_session_async(
                     agent_id, [use_auth], True,
                 )
-                await _run_in_session(session, "navigate", url)
+                try:
+                    await _run_in_session(session, "navigate", url)
+                except (RuntimeError, OSError) as nav_err:
+                    log.warning(
+                        "navigate failed (agent=%s, url=%s): %s — "
+                        "closing session and retrying with fresh context",
+                        agent_id, url, nav_err,
+                    )
+                    try:
+                        await _run_in_session(session, "close")
+                    except Exception:
+                        pass
+                    _active_browser_sessions.pop(agent_id, None)
+                    session = await _get_or_create_session_async(
+                        agent_id, [use_auth], True,
+                    )
+                    await _run_in_session(session, "navigate", url)
                 html = await _run_in_session(session, "get_page_html")
             else:
                 html = await asyncio.to_thread(
@@ -1943,7 +1959,20 @@ async def browse_page(
         agent_id = ctx.agent_root.name if hasattr(ctx, 'agent_root') else "anonymous"
         try:
             session = await _get_or_create_session_async(agent_id, [], True)
-            await _run_in_session(session, "navigate", url)
+            try:
+                await _run_in_session(session, "navigate", url)
+            except (RuntimeError, OSError) as nav_err:
+                log.warning(
+                    "navigate failed (agent=%s, url=%s): %s — retrying fresh",
+                    agent_id, url, nav_err,
+                )
+                try:
+                    await _run_in_session(session, "close")
+                except Exception:
+                    pass
+                _active_browser_sessions.pop(agent_id, None)
+                session = await _get_or_create_session_async(agent_id, [], True)
+                await _run_in_session(session, "navigate", url)
             html = await _run_in_session(session, "get_page_html")
         except (RuntimeError, OSError, ImportError) as e:
             return f"⚠️ Camoufox browser failed: {e}"
