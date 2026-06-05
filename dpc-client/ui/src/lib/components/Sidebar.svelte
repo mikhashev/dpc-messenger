@@ -629,10 +629,14 @@
                   if (onSelectAgent) {
                     onSelectAgent(agent.agent_id);
                   }
+                  onResetUnreadCount(agent.agent_id);
                 }}
                 title="{agent.name} (Profile: {agent.profile_name}, LLM: {agent.provider_alias})"
               >
                 <span class="agent-name">{agent.name}</span>
+                {#if (unreadMessageCounts.get(agent.agent_id) ?? 0) > 0}
+                  <span class="unread-badge">{unreadMessageCounts.get(agent.agent_id)}</span>
+                {/if}
                 <span
                   role="button"
                   tabindex="0"
