@@ -6083,7 +6083,7 @@ class CoreService:
             import re
             _mentions = {m.lower() for m in re.findall(r'@(\w+)\b', prompt or '', re.IGNORECASE)}
             cc_name_lower = self.get_cc_display_name().lower()
-            _agent_id = self._get_default_agent_id()
+            _agent_id = conversation_id
             agent_name_lower = self._get_agent_display_name(_agent_id).lower()
             agent_mentioned = agent_name_lower in _mentions or _agent_id in _mentions
             if cc_name_lower in _mentions and not agent_mentioned:
