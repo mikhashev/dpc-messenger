@@ -34,6 +34,7 @@
     sendGroupImage,
     sendGroupVoiceMessage,
     sendGroupFile,
+    userMessageConfirmed,
   } from '$lib/coreService';
   import { estimateConversationUsage } from '$lib/tokenEstimator';
   import { showNotificationIfBackground } from '$lib/notificationService';
@@ -455,6 +456,28 @@
 
     autoScroll();
   }
+
+  // Apply msg_index to user message as soon as backend confirms (before LLM responds)
+  $effect(() => {
+    const confirmed = $userMessageConfirmed;
+    if (!confirmed) return;
+    const { conversation_id, msg_index } = confirmed;
+    if (!conversation_id || !msg_index) return;
+    chatHistories.update(h => {
+      const m = new Map(h);
+      const chatId = Array.from(m.keys()).find(k => k === conversation_id || k.endsWith(conversation_id));
+      if (!chatId) return h;
+      const hist = m.get(chatId) || [];
+      const lastUserIdx = hist.findLastIndex((msg: any) => msg.sender === 'user' && !msg.msg_index);
+      if (lastUserIdx >= 0) {
+        const updated = [...hist];
+        updated[lastUserIdx] = { ...updated[lastUserIdx], msg_index };
+        m.set(chatId, updated);
+        return m;
+      }
+      return h;
+    });
+  });
 
   async function _sendImageMessage() {
     const text = currentInput.trim();

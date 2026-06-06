@@ -6127,6 +6127,26 @@ class CoreService:
                 logger.info("@CC-only mention in %s — broadcast to MCP bridge (real CC)", conversation_id)
                 return
 
+            # Record user message BEFORE LLM starts so we can emit msg_index immediately
+            monitor = agent_manager._get_or_create_agent_monitor(conversation_id)
+            from dpc_client_core.dpc_agent.utils import utc_now_iso
+            _user_node_id = getattr(self.p2p_manager, "node_id", "local-user")
+            monitor.add_message(
+                role="user",
+                content=prompt,
+                timestamp=utc_now_iso(),
+                sender_node_id=_user_node_id,
+                sender_name=self.p2p_manager.get_display_name() or "User",
+            )
+            monitor.save_history()
+            _early_user_msg_index = monitor.get_last_msg_index()
+
+            await self.local_api.broadcast_event("user_message_confirmed", {
+                "conversation_id": conversation_id,
+                "msg_index": _early_user_msg_index,
+                "command_id": command_id,
+            })
+
             # Process message through agent (agent manager handles its own prompt assembly)
             response = await agent_manager.process_message(
                 message=prompt,
@@ -6134,6 +6154,7 @@ class CoreService:
                 include_context=include_context,
                 agent_llm_provider=agent_llm_provider or conversation_id,
                 sender_name=self.p2p_manager.get_display_name() or "User",
+                _skip_history=True,
             )
 
             # Get actual model and provider from agent's last usage.
