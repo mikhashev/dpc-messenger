@@ -631,45 +631,22 @@ class FileTransferManager:
             await self._finalize_download(node_id, transfer)
 
     async def _finalize_download(self, node_id: str, transfer: FileTransfer):
-        """Finalize download: assemble chunks in order, verify hash, and save file."""
+        """Finalize download: write chunks to disk, verify hash async, save file."""
         logger.info(f"All chunks received for {transfer.filename}, finalizing...")
 
-        # v0.11.1: Verify all chunks are present before assembly
         for chunk_index in range(transfer.total_chunks):
             if chunk_index not in transfer.chunk_data:
                 logger.error(f"Missing chunk {chunk_index} during finalization!")
+                transfer.chunk_data.clear()
                 transfer.status = TransferStatus.FAILED
                 await self._send_file_cancel(node_id, transfer.transfer_id, "missing_chunks")
                 return
 
-        # Assemble chunks in correct order for hash verification
-        assembled_data = bytearray()
-        for chunk_index in range(transfer.total_chunks):
-            assembled_data.extend(transfer.chunk_data[chunk_index])
-
-        logger.info(f"Assembled {len(assembled_data)} bytes from {transfer.total_chunks} chunks in correct order")
-
-        # Verify hash
-        computed_hash = None
-        if self.verify_hash and transfer.hash != "none":
-            computed_hash = hashlib.sha256(assembled_data).hexdigest()
-            if computed_hash != transfer.hash:
-                logger.error(f"Hash mismatch! Expected {transfer.hash}, got {computed_hash}")
-                transfer.status = TransferStatus.FAILED
-                await self._send_file_cancel(node_id, transfer.transfer_id, "hash_mismatch")
-                return
-        else:
-            # Compute hash for FILE_COMPLETE even if verification disabled
-            computed_hash = hashlib.sha256(assembled_data).hexdigest()
-
-        # Detect if this is an image transfer
         is_image = (transfer.mime_type and transfer.mime_type.startswith("image/")
                    and transfer.image_metadata is not None)
 
-        # Save file - use screenshots subdirectory for images
         subdir = "files/screenshots" if is_image else "files"
 
-        # Store group files in group's conversation folder (slug path from ConversationMonitor)
         if transfer.group_id:
             if self.service and hasattr(self.service, '_get_or_create_conversation_monitor'):
                 group_monitor = self.service._get_or_create_conversation_monitor(transfer.group_id)
@@ -678,25 +655,50 @@ class FileTransferManager:
                 storage_path = self.storage_base_path / transfer.group_id / subdir
             storage_path.mkdir(parents=True, exist_ok=True)
         else:
-            # P2P file: store in peer's conversation folder
             storage_path = self._get_peer_storage_path(node_id, subdir)
-        # Use hash in filename to avoid collisions
+
         safe_filename = f"{transfer.filename.replace('/', '_')}"
         file_path = storage_path / safe_filename
 
-        # Check privacy settings - allow disabling screenshot storage
         save_to_disk = True
         if is_image and self.firewall:
             img_rules = self.firewall.rules.get("image_transfer", {})
             save_to_disk = img_rules.get("save_screenshots_to_disk", True)
 
         if save_to_disk:
-            with open(file_path, 'wb') as f:
-                f.write(assembled_data)
+            temp_path = file_path.with_suffix(file_path.suffix + ".tmp")
+            total_bytes = 0
+            try:
+                with open(temp_path, 'wb') as f:
+                    for chunk_index in range(transfer.total_chunks):
+                        chunk = transfer.chunk_data[chunk_index]
+                        f.write(chunk)
+                        total_bytes += len(chunk)
+            except Exception:
+                temp_path.unlink(missing_ok=True)
+                raise
+            logger.info(f"Written {total_bytes} bytes from {transfer.total_chunks} chunks to {temp_path.name}")
+
+            transfer.chunk_data.clear()
+
+            computed_hash = None
+            if self.verify_hash and transfer.hash != "none":
+                computed_hash = await self._compute_file_hash_async(temp_path)
+                if computed_hash != transfer.hash:
+                    logger.error(f"Hash mismatch! Expected {transfer.hash}, got {computed_hash}")
+                    temp_path.unlink(missing_ok=True)
+                    transfer.status = TransferStatus.FAILED
+                    await self._send_file_cancel(node_id, transfer.transfer_id, "hash_mismatch")
+                    return
+            else:
+                computed_hash = "none"
+
+            temp_path.replace(file_path)
             transfer.status = TransferStatus.COMPLETED
             logger.info(f"{'Screenshot' if is_image else 'File'} saved: {file_path}")
         else:
-            # Don't save to disk - use thumbnail for display only
+            transfer.chunk_data.clear()
+            computed_hash = "none"
             transfer.status = TransferStatus.COMPLETED
             logger.info(f"Screenshot received but not saved to disk (save_screenshots_to_disk=false): {transfer.filename}")
 
