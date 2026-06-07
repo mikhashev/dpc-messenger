@@ -1010,8 +1010,20 @@ class AuthBrowser:
         context_kwargs: dict = {}
         if state_path.exists():
             try:
-                json.loads(state_path.read_text(encoding="utf-8"))
-                context_kwargs["storage_state"] = str(state_path)
+                state_data = json.loads(state_path.read_text(encoding="utf-8"))
+                # Strip origins (localStorage/sessionStorage) — they cause
+                # Firefox to briefly visit each origin on context creation,
+                # which makes previous URLs flash in the address bar.
+                # Cookies are the only cross-session state we need.
+                if state_data.get("origins"):
+                    state_data["origins"] = []
+                    tmp = state_path.with_suffix(".json.tmp")
+                    tmp.write_text(
+                        json.dumps(state_data), encoding="utf-8"
+                    )
+                    context_kwargs["storage_state"] = str(tmp)
+                else:
+                    context_kwargs["storage_state"] = str(state_path)
             except (json.JSONDecodeError, OSError) as e:
                 log.warning(
                     "storage_state parse error at %s, falling back to vault: %s",
