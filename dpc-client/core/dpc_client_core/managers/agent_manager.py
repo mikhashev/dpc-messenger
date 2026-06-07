@@ -845,6 +845,11 @@ class DpcAgentManager:
         agent_display_name = self._agent_display_name or self.agent_id or "DPC Agent"
         self._current_agent_display_name = agent_display_name
 
+        # Emit early progress so the UI knows which agent is processing
+        # BEFORE any streaming text arrives (fixes empty name in collapsible
+        # header when agent responds without tool calls).
+        self._emit_progress("thinking", conversation_id)
+
         # Get DPC context if requested
         dpc_context = None
         if include_context:

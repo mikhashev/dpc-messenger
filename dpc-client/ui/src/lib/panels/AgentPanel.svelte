@@ -242,6 +242,8 @@
         agentProgressMessage = null;
         agentProgressTool = null;
         agentProgressRound = 0;
+        agentProgressName = '';
+        agentProgressAgentId = '';
         // For chain-triggered responses (CC→@Ark), there's no execute_ai_query
         // response to capture streaming text, so clear it here to prevent
         // the streaming indicator from staying stuck.
