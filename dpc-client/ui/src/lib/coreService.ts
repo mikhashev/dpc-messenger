@@ -865,6 +865,9 @@ export async function connectToCoreService() {
                     const _cid = message.payload?.conversation_id;
                     if (_cid) {
                         agentLiveTools.update((m) => { const n = { ...m }; delete n[_cid]; return n; });
+                        if (_cid !== activeChat && !_cid.startsWith('group-')) {
+                            unreadMessageCounts.update((m) => { const n = new Map(m); n.set(_cid, (m.get(_cid) ?? 0) + 1); return n; });
+                        }
                     }
                 }
                 else if (message.event === "agent_text_chunk") {
@@ -877,6 +880,10 @@ export async function connectToCoreService() {
                     // payload: {conversation_id, message_id, role, content, sender_name, timestamp}
                     console.log("[AgentChatMessage] CC response in", message.payload?.conversation_id);
                     agentChatMessage.set(message.payload);
+                    const _ccCid = message.payload?.conversation_id;
+                    if (_ccCid && _ccCid !== activeChat) {
+                        unreadMessageCounts.update((m) => { const n = new Map(m); n.set(_ccCid, (m.get(_ccCid) ?? 0) + 1); return n; });
+                    }
                 }
                 else if (message.event === "user_message_confirmed") {
                     userMessageConfirmed.set(message.payload);
