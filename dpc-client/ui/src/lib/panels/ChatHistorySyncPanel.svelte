@@ -112,6 +112,7 @@
                     isAgent: isAgent,
                     agentOwner: msg.agent_owner || null,
                     msg_index: msg.msg_index || 0,
+                    tool_calls: msg.tool_calls || [],
                   };
                 });
                 // Populate processedMessageIds so real-time events for these messages are deduped
