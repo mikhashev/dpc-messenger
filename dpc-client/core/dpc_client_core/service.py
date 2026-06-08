@@ -4017,38 +4017,38 @@ class CoreService:
                 else:
                     logger.debug("No history file found for %s", conversation_id)
 
-            if not monitor:
-                # Try loading from disk for group conversations (same pattern as agent_)
-                if conversation_id.startswith("group-"):
-                    conv_dir = None
-                    if hasattr(self, 'group_manager') and self.group_manager:
-                        conv_dir = self.group_manager._get_conversation_dir(conversation_id)
-                    if conv_dir and (conv_dir / "history.json").exists():
-                        try:
-                            import json as _json
-                            with open(conv_dir / "history.json", encoding="utf-8") as f:
-                                data = _json.load(f)
-                            messages = data.get("messages", [])
-                            for msg in messages:
-                                msg.setdefault("sender_type", "human")
-                                msg.setdefault("agent_owner", None)
-                            history_tokens = sum(len(msg.get("content", "") or "") for msg in messages) // 4
-                            token_limit = 0
-                            if hasattr(self, 'llm_manager') and self.llm_manager:
-                                model = self.llm_manager.get_active_model_name()
-                                token_limit = self.llm_manager.get_context_window(model) or 0
-                            logger.info("Loaded %d messages from disk for %s (%s)", len(messages), conversation_id, conv_dir.name)
-                            return {
-                                "status": "success",
-                                "messages": messages,
-                                "message_count": len(messages),
-                                "tokens_used": history_tokens,
-                                "token_limit": token_limit,
-                                "history_tokens": history_tokens,
-                            }
-                        except Exception as e:
-                            logger.error("Failed to load group history from disk: %s", e)
+            # Group conversations: always read from disk (same SSoT pattern as agent_)
+            if conversation_id.startswith("group-"):
+                conv_dir = None
+                if hasattr(self, 'group_manager') and self.group_manager:
+                    conv_dir = self.group_manager._get_conversation_dir(conversation_id)
+                if conv_dir and (conv_dir / "history.json").exists():
+                    try:
+                        import json as _json
+                        with open(conv_dir / "history.json", encoding="utf-8") as f:
+                            data = _json.load(f)
+                        messages = data.get("messages", [])
+                        for msg in messages:
+                            msg.setdefault("sender_type", "human")
+                            msg.setdefault("agent_owner", None)
+                        history_tokens = sum(len(msg.get("content", "") or "") for msg in messages) // 4
+                        token_limit = 0
+                        if hasattr(self, 'llm_manager') and self.llm_manager:
+                            model = self.llm_manager.get_active_model_name()
+                            token_limit = self.llm_manager.get_context_window(model) or 0
+                        logger.info("Loaded %d messages from disk for %s (%s)", len(messages), conversation_id, conv_dir.name)
+                        return {
+                            "status": "success",
+                            "messages": messages,
+                            "message_count": len(messages),
+                            "tokens_used": history_tokens,
+                            "token_limit": token_limit,
+                            "history_tokens": history_tokens,
+                        }
+                    except Exception as e:
+                        logger.error("Failed to load group history from disk: %s", e)
 
+            if not monitor:
                 logger.debug("No conversation monitor found for %s, returning empty history", conversation_id)
                 return {
                     "status": "success",

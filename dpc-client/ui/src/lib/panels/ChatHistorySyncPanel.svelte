@@ -6,6 +6,7 @@
 <script lang="ts">
   import type { Writable } from 'svelte/store';
   import { connectionStatus, sendCommand } from '$lib/coreService';
+  import { mapBackendMessage } from '$lib/utils/messageMapper';
   import { onMount, untrack } from 'svelte';
 
   // ---------------------------------------------------------------------------
@@ -77,44 +78,26 @@
               chatHistories.update(map => {
                 const newMap = new Map(map);
                 const loadedMessages = result.messages.map((msg: any, index: number) => {
-                  // Use backend's timestamp if available (ISO format), otherwise generate fake timestamp
-                  let timestamp;
-                  if (msg.timestamp) {
-                    // Parse ISO timestamp to Date (milliseconds)
-                    timestamp = new Date(msg.timestamp).getTime();
-                  } else {
-                    // Fallback to fake timestamp (sequential from now)
-                    timestamp = Date.now() - (result.messages.length - index) * 1000;
-                  }
-
-                  // Use backend's sender info if available, otherwise fallback to role-based logic
-                  let sender;
-                  let senderName;
-                  if (msg.sender_node_id) {
-                    sender = msg.sender_node_id;
-                    senderName = msg.sender_name || (msg.role === 'user' ? 'You' : getPeerDisplayName(activeChatId));
-                  } else {
-                    // Fallback for messages without sender info (old format)
-                    sender = msg.role === 'user' ? 'user' : activeChatId;
-                    senderName = msg.role === 'user' ? 'You' : getPeerDisplayName(activeChatId);
-                  }
-
-                  const stableId = msg.message_id || `backend-${index}-${Date.now()}`;
-                  const isAgent = msg.sender_type === 'agent' || msg.is_agent || false;
+                  if (index === 0) console.log(`[ChatHistory] DIAG first msg keys:`, Object.keys(msg), `tool_calls:`, msg.tool_calls?.length, `sender_type:`, msg.sender_type, `msg_index:`, msg.msg_index);
+                  const fallbackSender = msg.sender_node_id || (msg.role === 'user' ? 'user' : activeChatId);
+                  const fallbackName = msg.sender_name || (msg.role === 'user' ? 'You' : getPeerDisplayName(activeChatId));
+                  const mapped = mapBackendMessage(msg, {
+                    fallbackSender,
+                    fallbackSenderName: fallbackName,
+                    index,
+                    totalCount: result.messages.length,
+                  });
+                  mapped.id = msg.message_id || `backend-${index}-${Date.now()}`;
                   const isLocalHuman = msg.sender_type === 'human' && (!msg.sender_node_id || msg.sender_node_id === selfNodeId);
-                  return {
-                    id: stableId,
-                    sender: isLocalHuman ? 'user' : sender,
-                    senderName: isLocalHuman ? 'You' : senderName,
-                    text: msg.content,
-                    timestamp: timestamp,
-                    attachments: msg.attachments || [],
-                    isAgent: isAgent,
-                    agentOwner: msg.agent_owner || null,
-                    msg_index: msg.msg_index || 0,
-                    tool_calls: msg.tool_calls || [],
-                  };
+                  if (isLocalHuman) {
+                    mapped.sender = 'user';
+                    mapped.senderName = 'You';
+                  }
+                  return mapped;
                 });
+                const agentMsgs = loadedMessages.filter((m: any) => m.isAgent);
+                const withTools = loadedMessages.filter((m: any) => m.tool_calls?.length > 0);
+                console.log(`[ChatHistory] DIAG mapped: total=${loadedMessages.length}, agents=${agentMsgs.length}, withToolCalls=${withTools.length}, firstAgent:`, agentMsgs[0] ? {sender: agentMsgs[0].sender, isAgent: agentMsgs[0].isAgent, tool_calls_len: agentMsgs[0].tool_calls?.length, msg_index: agentMsgs[0].msg_index} : 'none');
                 // Populate processedMessageIds so real-time events for these messages are deduped
                 loadedMessages.forEach((m: any) => {
                   if (m.id && !m.id.startsWith('backend-')) processedMessageIds.add(m.id);
