@@ -794,6 +794,13 @@ export async function connectToCoreService() {
                     );
                     shellExecutionResults.update((list: any[]) => [...list, message.payload]);
                 }
+                else if (message.event === "shell_approval_expired") {
+                    console.log("Shell approval expired:", message.payload);
+                    const { pendingShellApprovals } = await import("$lib/services/shellApproval");
+                    pendingShellApprovals.update((list: any[]) =>
+                        list.filter((r: any) => r.request_id !== message.payload.request_id)
+                    );
+                }
 
                 // Whisper model loading events (v0.13.3+ model pre-loading)
                 else if (message.event === "whisper_model_loading_started") {

@@ -692,6 +692,7 @@
                     </div>
                   </label>
                   {#if tool.key === 'run_shell' && editSettings.tools[tool.key]}
+                    <p class="help-text-small" style="margin: 4px 0 6px 28px; color: var(--warning, #e6a700);">&#9888; Shell access allows agents to bypass firewall restrictions — including file access, network access, process control, and more. All commands outside auto-approved patterns require your approval.</p>
                     <label for="agent-tool-run_shell_group_allowed" class="sub-checkbox">
                       <input
                         type="checkbox"
@@ -755,6 +756,7 @@
                     </div>
                   </label>
                   {#if tool.key === 'run_shell' && displaySettings.tools?.[tool.key]}
+                    <p class="help-text-small" style="margin: 4px 0 6px 28px; color: var(--warning, #e6a700);">&#9888; Shell access allows agents to bypass firewall restrictions — including file access, network access, process control, and more. All commands outside auto-approved patterns require your approval.</p>
                     <label for="agent-tool-run_shell_group_allowed-ro" class="sub-checkbox">
                       <input
                         type="checkbox"

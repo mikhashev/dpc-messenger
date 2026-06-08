@@ -170,6 +170,22 @@ def _validate_command(command: str, ctx: Optional["ToolContext"] = None) -> Opti
                     return None
                 return ("tier1", f"Requires approval: {pattern.pattern}")
 
+    if ctx:
+        _PATH_PATTERNS = [
+            re.compile(r'\b([A-Z]:\\[^\s"\'<>|&;]+)'),
+            re.compile(r'(?<!\w)(/[a-zA-Z][^\s"\'<>|&;]*)'),
+        ]
+        for pat in _PATH_PATTERNS:
+            for match in pat.finditer(normalized):
+                extracted = match.group(1)
+                try:
+                    ctx.validate_extended_path(extracted)
+                except PermissionError:
+                    whitelist = _get_tier1_whitelist(ctx)
+                    if _is_whitelisted(command, whitelist):
+                        break
+                    return ("tier1", f"Command accesses path outside sandbox: {extracted}")
+
     return None
 
 
@@ -249,6 +265,15 @@ def _request_approval(ctx: ToolContext, command: str, reason: str, cwd: str, tim
 
     if not signaled or entry is None:
         log.info("Shell approval timed out (%ds): %s — %r", APPROVAL_TTL_SECONDS, request_id, command)
+        if local_api:
+            try:
+                coro = local_api.broadcast_event("shell_approval_expired", {
+                    "request_id": request_id,
+                })
+                if main_loop and main_loop.is_running():
+                    asyncio.run_coroutine_threadsafe(coro, main_loop)
+            except Exception as e:
+                log.warning("Failed to broadcast shell_approval_expired: %s", e)
         return f"⏳ Command approval timed out after {APPROVAL_TTL_SECONDS}s: `{command}`"
 
     result = entry.get("result")

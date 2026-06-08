@@ -195,6 +195,10 @@ Shell Access
 
 Tier 0 and Tier 2 lists are read-only (hardcoded). Tier 1 whitelist is editable — user can add/remove commands proactively or via "Approve + Add to whitelist" button in the chat approval dialog.
 
+## Known Limitations
+
+Path extraction in `_validate_command` uses regex to detect absolute paths in shell command strings. This does not cover paths embedded in string arguments (e.g., `python -c "open('/etc/passwd')"`) or paths constructed via shell variables/subshell expansion. Full sandboxing would require OS-level isolation (chroot/namespace on Linux, not feasible on Windows). The current approach covers ~90% of practical cases (explicit `cat/type/head` with literal paths).
+
 ## Implementation Status
 
 | Task | Status | Commit |
