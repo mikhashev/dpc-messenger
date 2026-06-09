@@ -256,7 +256,9 @@
         return newMap;
       });
 
-      autoScroll();
+      if (response.conversation_id === activeChatId) {
+        autoScroll();
+      }
       aiResponseWithImage.set(null);
     }
   });
@@ -430,7 +432,9 @@
           if (firstId) processedMessageIds.delete(firstId);
         }
 
-        autoScroll();
+        if (chatId === activeChatId) {
+          autoScroll();
+        }
       }
     }
   });
