@@ -235,18 +235,17 @@
   });
 
   // Clear progress when agent task completes/fails
+  // Always clear — even if user switched to another chat, so the Stop
+  // button doesn't stay stuck when switching back (ghost-stop bug S197).
   $effect(() => {
     if ($agentProgressClear) {
       const { conversation_id } = $agentProgressClear;
+      agentProgressMessage = null;
+      agentProgressTool = null;
+      agentProgressRound = 0;
+      agentProgressName = '';
+      agentProgressAgentId = '';
       if (isActiveChatConv(conversation_id)) {
-        agentProgressMessage = null;
-        agentProgressTool = null;
-        agentProgressRound = 0;
-        agentProgressName = '';
-        agentProgressAgentId = '';
-        // For chain-triggered responses (CC→@Ark), there's no execute_ai_query
-        // response to capture streaming text, so clear it here to prevent
-        // the streaming indicator from staying stuck.
         const hist = get(chatHistories).get(conversation_id) || [];
         const hasPendingCommand = hist.some((m: any) => m.commandId);
         if (!hasPendingCommand) {

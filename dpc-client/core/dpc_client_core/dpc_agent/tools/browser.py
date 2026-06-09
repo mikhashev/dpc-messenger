@@ -1732,7 +1732,15 @@ def _get_or_create_session(
     `_get_or_create_session_async` instead."""
     existing = _active_browser_sessions.get(agent_id)
     if existing is not None and existing._page is not None:
-        return existing
+        try:
+            if existing._page.is_closed():
+                log.info("Stale session for %s (page closed) — recreating", agent_id)
+                _active_browser_sessions.pop(agent_id, None)
+            else:
+                return existing
+        except Exception:
+            log.info("Stale session for %s (check failed) — recreating", agent_id)
+            _active_browser_sessions.pop(agent_id, None)
     session = AuthBrowser(agent_id=agent_id, domains=domains, headed=headed)
     session.start()
     _active_browser_sessions[agent_id] = session
@@ -1740,6 +1748,9 @@ def _get_or_create_session(
 
 
 IDLE_TIMEOUT_SECONDS = 30 * 60
+
+
+_SESSION_CALL_TIMEOUT = 120  # seconds — prevents hung executor from blocking the event loop forever
 
 
 async def _run_in_session(
@@ -1752,8 +1763,11 @@ async def _run_in_session(
     session._last_activity = time.monotonic()
     loop = asyncio.get_running_loop()
     method = getattr(session, method_name)
-    return await loop.run_in_executor(
-        session._get_executor(), lambda: method(*args, **kwargs),
+    return await asyncio.wait_for(
+        loop.run_in_executor(
+            session._get_executor(), lambda: method(*args, **kwargs),
+        ),
+        timeout=_SESSION_CALL_TIMEOUT,
     )
 
 
@@ -1774,7 +1788,15 @@ async def _get_or_create_session_async(
     async with _session_create_locks[agent_id]:
         existing = _active_browser_sessions.get(agent_id)
         if existing is not None and existing._page is not None:
-            return existing
+            try:
+                if existing._page.is_closed():
+                    log.info("Stale session for %s (page closed) — recreating", agent_id)
+                    _active_browser_sessions.pop(agent_id, None)
+                else:
+                    return existing
+            except Exception:
+                log.info("Stale session for %s (check failed) — recreating", agent_id)
+                _active_browser_sessions.pop(agent_id, None)
         session = AuthBrowser(agent_id=agent_id, domains=domains, headed=headed)
         await _run_in_session(session, "start")
         _active_browser_sessions[agent_id] = session
