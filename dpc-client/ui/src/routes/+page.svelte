@@ -6,6 +6,7 @@
   import { writable } from "svelte/store";
   import { connectionStatus, nodeStatus, sendCommand, resetReconnection, connectToCoreService, knowledgeCommitProposal, personalContext, tokenWarning, extractionFailure, availableProviders, peerProviders, unreadMessageCounts, resetUnreadCount, setActiveChat, newSessionProposal, proposeNewSession, voteNewSession, defaultProviders, providersList, groupChats, loadGroups, listAgents, agentsList, sleepStateChanged, sleepProgress, sleepAgentStates, tokenUsageUpdated } from "$lib/coreService";
   import { confirmAsync } from "$lib/utils/dialog";
+  import { mapBackendMessage } from "$lib/utils/messageMapper";
   import KnowledgeCommitDialog from "$lib/components/KnowledgeCommitDialog.svelte";
   import NewSessionDialog from "$lib/components/NewSessionDialog.svelte";
   import VoteResultDialog from "$lib/components/VoteResultDialog.svelte";
@@ -270,22 +271,12 @@
             chatHistories.update(map => {
               const newMap = new Map(map);
               const agentName = $agentsList?.find((a: any) => a.agent_id === state.agent_id)?.name || state.agent_id;
-              const msgs = result.messages.map((msg: any, index: number) => {
-                const ts = msg.timestamp ? new Date(msg.timestamp).getTime() : Date.now() - (result.messages.length - index) * 1000;
-                const stableId = msg.id || `${state.agent_id}-${ts}`;
-                const isAgent = msg.role === 'assistant' || msg.sender_name === state.agent_id;
-                return {
-                  id: stableId,
-                  sender: isAgent ? state.agent_id : 'user',
-                  senderName: msg.sender_name || (isAgent ? agentName : 'You'),
-                  text: msg.content,
-                  timestamp: ts,
-                  attachments: msg.attachments || [],
-                  thinking: msg.thinking,
-                  streamingRaw: msg.streaming_raw,
-                  msg_index: msg.msg_index || 0,
-                };
-              });
+              const msgs = result.messages.map((msg: any, index: number) =>
+                mapBackendMessage(msg, {
+                  index,
+                  totalCount: result.messages.length,
+                  identity: { agentSelfId: state.agent_id, agentSelfName: agentName, selfNodeId: $nodeStatus?.node_id || '' },
+                }));
               newMap.set(state.agent_id, msgs);
               return newMap;
             });
@@ -498,22 +489,13 @@
             const localHistory: any[] = newMap.get(activeChatId) || [];
             const localById = new Map(localHistory.map((m: any) => [m.id, m]));
             const msgs = result.messages.map((msg: any, index: number) => {
-              const ts = msg.timestamp ? new Date(msg.timestamp).getTime() : Date.now() - (result.messages.length - index) * 1000;
-              const stableId = msg.id || `${activeChatId}-${ts}`;
-              const local = localById.get(stableId);
-              const isAgent = msg.role === 'assistant' || msg.sender_name === activeChatId;
-              return {
-                id: stableId,
-                sender: isAgent ? activeChatId : 'user',
-                senderName: msg.sender_name || (isAgent ? agentName : 'You'),
-                text: msg.content,
-                timestamp: ts,
-                attachments: msg.attachments || [],
-                thinking: msg.thinking || local?.thinking,
-                streamingRaw: msg.streaming_raw || local?.streamingRaw,
-                tool_calls: msg.tool_calls || local?.tool_calls || [],
-                msg_index: msg.msg_index || 0,
-              };
+              const local = localById.get(msg.id);
+              return mapBackendMessage(msg, {
+                index,
+                totalCount: result.messages.length,
+                identity: { agentSelfId: activeChatId, agentSelfName: agentName, selfNodeId: $nodeStatus?.node_id || '' },
+                local: local ? { thinking: local.thinking, streamingRaw: local.streamingRaw, tool_calls: local.tool_calls } : undefined,
+              });
             });
             newMap.set(activeChatId, msgs);
             return newMap;

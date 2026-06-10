@@ -45,6 +45,20 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 
+def select_prior_history(
+    full_history: List[Dict[str, Any]],
+    trigger_message_id: Optional[str],
+) -> Optional[List[Dict[str, Any]]]:
+    """Prior turns without the current trigger. Id-based dedup (ADR-031 T2):
+    the positional slice cuts the wrong record when another participant's
+    message lands mid-invoke."""
+    if trigger_message_id:
+        return [m for m in full_history if m.get("id") != trigger_message_id]
+    if len(full_history) > 1:
+        return full_history[:-1]
+    return None
+
+
 @dataclass
 class AgentConfig:
     """Configuration for the DPC agent."""
@@ -173,6 +187,8 @@ class DpcAgent:
         message_source: Optional[str] = None,
         chat_context: Optional[Dict[str, Any]] = None,
         stop_event: Optional[asyncio.Event] = None,
+        reader_identity: Optional[Dict[str, str]] = None,
+        trigger_message_id: Optional[str] = None,
     ) -> str:
         """
         Process a user message and return response.
@@ -206,13 +222,11 @@ class DpcAgent:
         if chat_context:
             task["chat_context"] = chat_context
 
-        # Build LLM context — pass prior conversation turns (all except current user msg,
-        # which was added to the monitor just before this call, so it's the last entry)
         prior_history = None
         if conversation_monitor is not None:
-            full_history = conversation_monitor.get_message_history()
-            if len(full_history) > 1:
-                prior_history = full_history[:-1]  # exclude the current user message
+            prior_history = select_prior_history(
+                conversation_monitor.get_message_history(), trigger_message_id
+            )
 
         # Get firewall-controlled tool access (needed for both context and tool registry)
         allowed_tools = self._get_allowed_tools(message_source=message_source,
@@ -242,6 +256,7 @@ class DpcAgent:
             sandbox_read_write=sandbox_rw,
             embedding_provider=self._embedding_provider,
             billing_model=self.config.billing_model,
+            reader_identity=reader_identity,
         )
 
         # Store cap_info for agent_manager to include in next request's session_state

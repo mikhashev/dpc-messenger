@@ -312,6 +312,46 @@ def _build_capabilities_section(
     return "\n".join(lines)
 
 
+def derive_history_role(
+    hist_msg: Dict[str, Any],
+    reader_identity: Dict[str, str],
+    is_group: bool,
+) -> Optional[str]:
+    """Per-reader role derivation (ADR-031 §2): the reader's own messages map
+    to assistant, everything else to user; None excludes the record.
+
+    Agent matching uses the composite key (agent_owner, sender_name) per
+    ADR-023 — agent_owner holds the owner node_id, shared by all agents of a
+    node, so only the pair is unique. The sender_name fallback for records
+    without identity fields is 1:1-only.
+    """
+    sender_type = hist_msg.get("sender_type")
+    if sender_type == "system":
+        return None
+    if sender_type == "human":
+        return "user"
+
+    sender_name = hist_msg.get("sender_name") or ""
+    reader_name = reader_identity.get("display_name") or ""
+
+    if sender_type == "agent":
+        owner = hist_msg.get("agent_owner")
+        if (owner
+                and owner in (reader_identity.get("node_id"), reader_identity.get("agent_id"))
+                and sender_name == reader_name):
+            return "assistant"
+        return "user"
+
+    if not sender_name:
+        stored = hist_msg.get("role")
+        if not is_group and stored in ("user", "assistant"):
+            return stored
+        return "user"
+    if not is_group and reader_name and sender_name == reader_name:
+        return "assistant"
+    return "user"
+
+
 def build_llm_messages(
     agent_root: pathlib.Path,
     memory: Memory,
@@ -327,6 +367,7 @@ def build_llm_messages(
     sandbox_read_write: Optional[List[str]] = None,
     embedding_provider: Optional[Any] = None,
     billing_model: str = "subscription",
+    reader_identity: Optional[Dict[str, str]] = None,
 ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
     """
     Build the full LLM message context for a task.
@@ -339,9 +380,11 @@ def build_llm_messages(
         dpc_context: Optional DPC context (personal, device)
         session_state: Optional session state from ConversationMonitor
                       (tokens_used, tokens_limit, usage_percent, etc.)
-        conversation_history: Optional list of previous user/assistant message dicts
-                              from ConversationMonitor (all turns except the current one).
-                              Each dict has at minimum {"role": "user"/"assistant", "content": "..."}
+        conversation_history: Optional list of previous message dicts from
+                              ConversationMonitor (all turns except the current one)
+        reader_identity: Reading agent identity for per-reader role derivation
+                         (ADR-031): {"agent_id", "display_name", "node_id"}.
+                         None = stored role is used (legacy callers).
         skill_store: Optional skill store for skill listing
         allowed_tools: Set of tool names allowed by firewall (None = all allowed)
         all_tools: Dict of all tool names → default enabled from firewall
@@ -541,21 +584,34 @@ def build_llm_messages(
 
     # Insert previous conversation turns so the agent has continuity
     if conversation_history:
+        is_group = str(task.get("id") or "").startswith("group-")
         for hist_msg in conversation_history:
-            role = hist_msg.get("role", "")
             content = hist_msg.get("content", "")
-            if role in ("user", "assistant") and content:
-                msg_index = hist_msg.get("msg_index", "")
-                timestamp = hist_msg.get("timestamp", "")
-                sender = hist_msg.get("sender_name", "")
-                prefix_parts = [f"#{msg_index}" if msg_index else ""]
-                if timestamp:
-                    ts_display = timestamp.split('T')[1][:8] if 'T' in timestamp else timestamp
-                    prefix_parts.append(ts_display)
-                if sender:
-                    prefix_parts.append(sender)
-                content = f"[{' | '.join(p for p in prefix_parts if p)}] {content}"
-                messages.append({"role": role, "content": content})
+            if not content:
+                continue
+            if reader_identity is not None:
+                role = derive_history_role(hist_msg, reader_identity, is_group)
+                if role is None:
+                    continue
+            else:
+                role = hist_msg.get("role", "")
+                if role not in ("user", "assistant"):
+                    continue
+            msg_index = hist_msg.get("msg_index", "")
+            timestamp = hist_msg.get("timestamp", "")
+            sender = hist_msg.get("sender_name", "")
+            prefix_parts = [f"#{msg_index}" if msg_index else ""]
+            if timestamp:
+                ts_display = timestamp.split('T')[1][:8] if 'T' in timestamp else timestamp
+                prefix_parts.append(ts_display)
+            if sender:
+                prefix_parts.append(sender)
+            content = f"[{' | '.join(p for p in prefix_parts if p)}] {content}"
+            messages.append({"role": role, "content": content})
+        if reader_identity is not None:
+            _assistant_turns = sum(1 for m in messages[1:] if m["role"] == "assistant")
+            log.debug("History turns for reader %s: %d total, %d assistant",
+                      reader_identity.get("display_name"), len(messages) - 1, _assistant_turns)
 
     next_idx = max((m.get("msg_index", 0) for m in conversation_history), default=0) + 1 if conversation_history else 1
     user_content = _build_user_content(task)

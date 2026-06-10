@@ -45,14 +45,17 @@
 
       chatHistories.update(map => {
         const newMap = new Map(map);
-        const restoredMessages = $historyRestored.messages.map((msg: any, index: number) => ({
-          id: `restored-${index}-${Date.now()}`,
-          sender: msg.role === 'user' ? 'user' : $historyRestored.conversation_id,
-          senderName: msg.role === 'user' ? 'You' : getPeerDisplayName($historyRestored.conversation_id),
-          text: msg.content,
-          timestamp: Date.now() - ($historyRestored.messages.length - index) * 1000,
-          attachments: msg.attachments || []
-        }));
+        const restoredMessages = $historyRestored.messages.map((msg: any, index: number) => {
+          const isSelf = msg.sender_node_id ? msg.sender_node_id === selfNodeId : msg.role === 'user';
+          return {
+            id: `restored-${index}-${Date.now()}`,
+            sender: isSelf ? 'user' : ($historyRestored.conversation_id),
+            senderName: isSelf ? (msg.sender_name || 'You') : (msg.sender_name || getPeerDisplayName($historyRestored.conversation_id)),
+            text: msg.content,
+            timestamp: Date.now() - ($historyRestored.messages.length - index) * 1000,
+            attachments: msg.attachments || []
+          };
+        });
         newMap.set($historyRestored.conversation_id, restoredMessages);
         return newMap;
       });

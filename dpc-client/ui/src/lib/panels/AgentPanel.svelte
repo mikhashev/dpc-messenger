@@ -7,7 +7,7 @@
 <script lang="ts">
   import { type Writable, get } from 'svelte/store';
   import { untrack } from 'svelte';
-  import { mapBackendMessage } from '$lib/utils/messageMapper';
+  import { mapBackendMessage, resolveSenderIdentity } from '$lib/utils/messageMapper';
   import { showNotificationIfBackground } from '$lib/notificationService';
   import {
     agentProgress,
@@ -73,18 +73,17 @@
 
   /**
    * Map backend message fields to frontend sender/senderName.
-   * Single source of truth — used by all 3 message-mapping paths
+   * Delegates to the canonical identity resolution (ADR-031 §5) —
+   * used by all 3 message-mapping paths
    * (initial load, agentChatMessage, agentHistoryUpdated).
    */
   function mapMessageSender(msg: any, conversationId: string, agentName: string): { sender: string; senderName: string } {
-    if (msg.role === 'assistant')
-      return { sender: conversationId, senderName: agentName };
-    const selfNodeId = $nodeStatus?.node_id || '';
-    // Local user: no sender_node_id, or sender_node_id matches own node
-    if (!msg.sender_node_id || msg.sender_node_id === selfNodeId)
-      return { sender: 'user', senderName: msg.sender_name || 'You' };
-    // External participant: CC, future agents, etc.
-    return { sender: msg.sender_node_id, senderName: msg.sender_name || msg.sender_node_id };
+    const { sender, senderName } = resolveSenderIdentity(msg, {
+      agentSelfId: conversationId,
+      agentSelfName: agentName,
+      selfNodeId: $nodeStatus?.node_id || '',
+    });
+    return { sender, senderName };
   }
 
   function getAgentName(conversationId: string): string {

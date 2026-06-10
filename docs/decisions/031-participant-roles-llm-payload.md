@@ -72,10 +72,13 @@ Each message stores (existing fields, now canonical):
 One function in the context-assembly path (`dpc_agent/context.py:build_llm_messages`) derives roles for the *reading* agent:
 
 ```
-own message     (sender_type == "agent" and agent_owner == reader_agent_id) → role = "assistant", content as-is
+own message     (sender_type == "agent" and agent_owner ∈ {reader node_id, reader agent_id}
+                 and sender_name == reader display name)                     → role = "assistant", content as-is
 everything else (humans, other agents, peers, bridge users)                 → role = "user", content = "[{sender_name}]: {content}"
 system records                                                              → excluded from history turns (system prompt is Block 1-3 territory)
 ```
+
+*(Formula refined at T1 implementation: `agent_owner` stores the owner **node_id** — shared by all agents of one node — so reader matching needs the full ADR-023 composite key `(agent_owner, sender_name)`, not `agent_owner` alone.)*
 
 This applies to **all chat types**. In a 1:1 agent chat the derivation degenerates exactly to today's behavior (the agent's messages → `assistant`, the human's → `user`), so back-compat holds by construction. The legacy `"peer"` role in P2P chats folds into the same rule (peer = not-mine → `user` with name prefix).
 
@@ -147,14 +150,14 @@ All UI sender/agent detection flows through `mapBackendMessage`/`mapMessageSende
 
 ## Confirmation
 
-- [ ] Group invoke payload contains the trigger exactly once (log the assembled message count vs history length).
-- [ ] In a group with ≥2 agents, each agent's payload shows its *own* prior messages as `assistant` and the other agent's as `user` with `[Name]:` prefix (capture two consecutive invokes, diff the payloads).
-- [ ] A second participant's message landing mid-invoke is neither dropped from the next payload nor duplicated (race test: send during agent processing).
-- [ ] Group `history.json` message count is monotonically increasing across a multi-agent session (no clobber: write counter assertions in service-side monitor logs).
-- [ ] 1:1 agent chat payload keeps correct user/assistant **alternation** (semantic check: the agent's own prior messages arrive as `assistant`, never flat-user) AND is payload-equivalent pre/post change for the same history (token-count equivalence; byte-identical where prefixes match). *(Reworded per Ark review R2 — format equality alone does not prove role semantics.)*
-- [ ] UI renders sender attribution correctly in 1:1 and group chats after the `role`-detection removal (manual pass per ADR-006 rendering table).
-- [ ] MSG-CHAIN verification on an existing group history behaves identically pre/post change (storage format untouched per §1 revision; this criterion guards against accidental write-path drift).
-- [ ] P2P history sync round-trip with an old-build peer: records merge in both directions, no message loss in either side's agent payload (Q5 verification).
+- [x] Group invoke payload contains the trigger exactly once (log the assembled message count vs history length). *(S200: trigger stored once, no prefixed copy after invoke; saves monotonic.)*
+- [x] In a group with ≥2 agents, each agent's payload shows its *own* prior messages as `assistant` and the other agent's as `user` with `[Name]:` prefix (capture two consecutive invokes, diff the payloads). *(S200 debug log, same history: reader Ark 32/9 assistant vs reader Warren 35/0 — no cross-attribution; Warren's 0 is the R3-conservative result of the brief folder-id naming defect, Consequences (b).)*
+- [x] A second participant's message landing mid-invoke is neither dropped from the next payload nor duplicated (race test: send during agent processing). *(Unit-covered; live race not staged.)*
+- [x] Group `history.json` message count is monotonically increasing across a multi-agent session (no clobber: write counter assertions in service-side monitor logs). *(S200: one save per response — pre-T3 every response produced two saves 9 ms apart.)*
+- [x] 1:1 agent chat payload keeps correct user/assistant **alternation** (semantic check: the agent's own prior messages arrive as `assistant`, never flat-user) AND is payload-equivalent pre/post change for the same history (token-count equivalence; byte-identical where prefixes match). *(Reworded per Ark review R2 — format equality alone does not prove role semantics.)* *(Unit equivalence tests + S200 live 1:1 debug line.)*
+- [x] UI renders sender attribution correctly in 1:1 and group chats after the `role`-detection removal (manual pass per ADR-006 rendering table). *(Mike visual pass S200 after backend+frontend restart.)*
+- [x] MSG-CHAIN verification on an existing group history behaves identically pre/post change (storage format untouched per §1 revision; this criterion guards against accidental write-path drift). *(S200: chain integrity verified, zero warnings.)*
+- [ ] P2P history sync round-trip with an old-build peer: records merge in both directions, no message loss in either side's agent payload (Q5 verification). *(Deferred to cross-node session after repo push — Mike S200.)*
 
 ## Scope
 
@@ -182,12 +185,12 @@ Docs:
 
 | Task | Status | Commit |
 |------|--------|--------|
-| T1 Translation layer in `build_llm_messages` (per-reader derivation + legacy fallbacks) | Pending | — |
-| T2 Trigger dedup by `message_id` (replaces positional slice) | Pending | — |
-| T3 Single-writer: agent-side monitor read-only for groups | Pending | — |
-| T4 `group_handler` identity propagation + explicit save; P2P sync compat check (role write stays as-is per §1 revision) | Pending | — |
-| T5 UI migration to identity-based mapping | Pending | — |
-| T6 Verification matrix (Confirmation checklist) on live multi-agent group | Pending | — |
+| T1 Translation layer in `build_llm_messages` (per-reader derivation + legacy fallbacks) | Done | feature/adr-031 |
+| T2 Trigger dedup by `message_id` (replaces positional slice) | Done | feature/adr-031 |
+| T3 Single-writer: agent-side monitor read-only for groups | Done | feature/adr-031 |
+| T4 `group_handler` identity propagation + explicit save; P2P sync compat check (role write stays as-is per §1 revision) | Done | feature/adr-031 |
+| T5 UI migration to identity-based mapping | Done | feature/adr-031 |
+| T6 Verification matrix (Confirmation checklist) on live multi-agent group | Done (local scope; cross-node sync item deferred) | feature/adr-031 |
 
 Suggested order: T1+T2 first (token relief + correctness, no storage change), then T3+T4 (write ownership), then T5 (UI), T6 throughout.
 

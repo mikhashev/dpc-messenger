@@ -352,6 +352,7 @@ class GroupManager:
         group.agents[node_id] = agent_ids
         if agent_names:
             group.agent_names[node_id] = agent_names
+        group.version += 1
         self._save_group(group_id)
 
     def update_topic(self, group_id: str, topic: str) -> Optional[GroupMetadata]:

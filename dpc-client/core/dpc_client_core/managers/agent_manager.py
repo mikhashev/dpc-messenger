@@ -283,6 +283,10 @@ class DpcAgentManager:
                 # First-use full rebuild (MEM-3.7 spec)
                 import asyncio
                 agent_root = self._agent.agent_root if self._agent else None
+                # Bind a default before the agent_root gate: the success log at
+                # the end of this block references _actual_model unconditionally,
+                # so a None agent_root must not leave it unbound (UnboundLocalError).
+                _actual_model = mem_cfg.embedding_model
                 if agent_root:
                     from dpc_client_core.dpc_agent.memory import EmbeddingProvider
                     _provider_ref = self._agent._embedding_provider if self._agent else None
@@ -782,6 +786,7 @@ class DpcAgentManager:
         _skip_history: bool = False,
         # Group chat metadata for agent context awareness
         chat_context: Optional[Dict[str, Any]] = None,
+        trigger_message_id: Optional[str] = None,
     ) -> str:
         """
         Process a user message through the agent.
@@ -800,6 +805,14 @@ class DpcAgentManager:
             Agent's response text
         """
         import uuid
+
+        # A manager can be created without ever being start()-ed — e.g. a
+        # remote group @mention routes through get_manager() + process_message()
+        # directly (group_handler._invoke_agent), skipping the local startup
+        # path. Without this, the first remote-origin invoke leaves _agent None,
+        # so both the memory init below and self.agent later raise "Agent not
+        # initialized". ensure_started() is idempotent — a no-op once started.
+        await self.ensure_started()
 
         if not self._memory_indexes_initialized:
             log.info("Lazy memory init triggered by first prompt for agent %s", self.agent_id or "singleton")
@@ -820,13 +833,13 @@ class DpcAgentManager:
         # Get or create ConversationMonitor for this agent conversation (reuse existing)
         monitor = self._get_or_create_agent_monitor(conversation_id)
 
-        # Reload history from disk for group conversations so the agent sees
-        # messages added by other monitors (service.py, group_handler, CC bridge).
-        if conversation_id.startswith("group-"):
+        # ADR-031 §3 single-writer: for group-* the agent-side monitor is a
+        # read-only consumer (reload before invoke, never add/save)
+        is_group = conversation_id.startswith("group-")
+        if is_group:
             monitor.load_history()
 
-        # Track user message in monitor (skip when caller already saved it, e.g. CC chain trigger)
-        if not _skip_history:
+        if not _skip_history and not is_group:
             node_id = getattr(self.service.p2p_manager, "node_id", "local-user")
             monitor.add_message(
                 role="user",
@@ -919,6 +932,12 @@ class DpcAgentManager:
                     message_source=message_source,
                     chat_context=chat_context,
                     stop_event=interrupt_ev,
+                    reader_identity={
+                        "agent_id": self.agent_id or "",
+                        "display_name": agent_display_name,
+                        "node_id": getattr(self.service.p2p_manager, "node_id", "") or "",
+                    },
+                    trigger_message_id=trigger_message_id,
                 )
             finally:
                 self._interrupt_events.pop(conversation_id, None)
@@ -948,7 +967,7 @@ class DpcAgentManager:
                     "message": f"{agent_display_name} returned an empty response after retries. Try again.",
                     "duration": 5000,
                 })
-            elif (_has_content or _has_extras) and not _is_llm_error:
+            elif (_has_content or _has_extras) and not _is_llm_error and not is_group:
                 _trace = getattr(agent, '_last_trace', None) or {}
                 _tool_calls_for_msg = _trace.get("accumulated_tool_calls") or []
                 monitor.add_message(
