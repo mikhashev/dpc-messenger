@@ -608,6 +608,10 @@ def build_llm_messages(
                 prefix_parts.append(sender)
             content = f"[{' | '.join(p for p in prefix_parts if p)}] {content}"
             messages.append({"role": role, "content": content})
+        if reader_identity is not None:
+            _assistant_turns = sum(1 for m in messages[1:] if m["role"] == "assistant")
+            log.debug("History turns for reader %s: %d total, %d assistant",
+                      reader_identity.get("display_name"), len(messages) - 1, _assistant_turns)
 
     next_idx = max((m.get("msg_index", 0) for m in conversation_history), default=0) + 1 if conversation_history else 1
     user_content = _build_user_content(task)

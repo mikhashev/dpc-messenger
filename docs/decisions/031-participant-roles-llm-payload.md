@@ -189,7 +189,7 @@ Docs:
 | T2 Trigger dedup by `message_id` (replaces positional slice) | Done | feature/adr-031 |
 | T3 Single-writer: agent-side monitor read-only for groups | Done | feature/adr-031 |
 | T4 `group_handler` identity propagation + explicit save; P2P sync compat check (role write stays as-is per §1 revision) | Done | feature/adr-031 |
-| T5 UI migration to identity-based mapping | Pending | — |
+| T5 UI migration to identity-based mapping | Done | feature/adr-031 |
 | T6 Verification matrix (Confirmation checklist) on live multi-agent group | Pending | — |
 
 Suggested order: T1+T2 first (token relief + correctness, no storage change), then T3+T4 (write ownership), then T5 (UI), T6 throughout.
