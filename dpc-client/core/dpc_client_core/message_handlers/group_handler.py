@@ -165,10 +165,13 @@ class GroupTextHandler(MessageHandler):
                 sender_name=sender_name,
                 text=text,
                 timestamp=timestamp,  # v0.20.0: Use sender-provided timestamp
+                sender_type=payload.get("sender_type"),
+                agent_owner=payload.get("agent_owner"),
             )
 
             # Buffer message for manual extraction
             await monitor.on_message(conv_message)
+            monitor.save_history()
         except Exception as e:
             self.logger.error("Error in group conversation monitoring: %s", e, exc_info=True)
 

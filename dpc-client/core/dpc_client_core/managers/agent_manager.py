@@ -821,13 +821,13 @@ class DpcAgentManager:
         # Get or create ConversationMonitor for this agent conversation (reuse existing)
         monitor = self._get_or_create_agent_monitor(conversation_id)
 
-        # Reload history from disk for group conversations so the agent sees
-        # messages added by other monitors (service.py, group_handler, CC bridge).
-        if conversation_id.startswith("group-"):
+        # ADR-031 §3 single-writer: for group-* the agent-side monitor is a
+        # read-only consumer (reload before invoke, never add/save)
+        is_group = conversation_id.startswith("group-")
+        if is_group:
             monitor.load_history()
 
-        # Track user message in monitor (skip when caller already saved it, e.g. CC chain trigger)
-        if not _skip_history:
+        if not _skip_history and not is_group:
             node_id = getattr(self.service.p2p_manager, "node_id", "local-user")
             monitor.add_message(
                 role="user",
@@ -955,7 +955,7 @@ class DpcAgentManager:
                     "message": f"{agent_display_name} returned an empty response after retries. Try again.",
                     "duration": 5000,
                 })
-            elif (_has_content or _has_extras) and not _is_llm_error:
+            elif (_has_content or _has_extras) and not _is_llm_error and not is_group:
                 _trace = getattr(agent, '_last_trace', None) or {}
                 _tool_calls_for_msg = _trace.get("accumulated_tool_calls") or []
                 monitor.add_message(

@@ -4583,8 +4583,6 @@ class CoreService:
                     "participants": participants,
                 }
 
-            # The trigger is already on disk (service-side write) — skip the
-            # agent-side copy and exclude it from prior history by id (ADR-031 T2)
             response = await manager.process_message(
                 message=prompt,
                 conversation_id=group_id,
@@ -6356,6 +6354,7 @@ class CoreService:
                 timestamp=timestamp,
                 sender_node_id="cc",
                 sender_name=cc_name,
+                sender_type="agent",
             )
             monitor.save_history()
 

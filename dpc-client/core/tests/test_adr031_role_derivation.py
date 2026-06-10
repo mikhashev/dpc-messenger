@@ -59,13 +59,11 @@ class TestDeriveHistoryRoleGroup:
         assert derive_history_role(row, READER, is_group=True) == "user"
 
     def test_identity_less_assistant_row_in_group_stays_user(self):
-        # Ark review note 2: stored-role fallback must not fire in groups
         assert derive_history_role({"role": "assistant", "content": "x"}, READER, True) == "user"
 
 
 class TestDeriveHistoryRoleOneToOne:
     def test_legacy_assistant_write_matches_by_name(self):
-        # 1:1 agent-side writes store no sender_type/agent_owner
         row = {"role": "assistant", "content": "x", "sender_name": "Ark",
                "sender_node_id": "agent_001"}
         assert derive_history_role(row, READER, is_group=False) == "assistant"
@@ -110,7 +108,6 @@ class TestSelectPriorHistory:
         assert [m["id"] for m in result] == ["m1", "m2"]
 
     def test_mid_invoke_message_is_kept(self):
-        # m4 landed after the trigger m3 — positional slice would cut m4 and keep m3
         history = self.HISTORY + [{"id": "m4", "content": "d"}]
         result = select_prior_history(history, "m3")
         assert [m["id"] for m in result] == ["m1", "m2", "m4"]
@@ -118,6 +115,61 @@ class TestSelectPriorHistory:
     def test_single_message_history(self):
         assert select_prior_history([{"id": "m1", "content": "a"}], None) is None
         assert select_prior_history([{"id": "m1", "content": "a"}], "m1") == []
+
+
+class TestGroupHistoryOwnership:
+    @pytest.fixture()
+    def fake_home(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(pathlib.Path, "home", lambda: tmp_path)
+        return tmp_path
+
+    def _monitor(self, conv_id):
+        from dpc_client_core.conversation_monitor import ConversationMonitor
+        return ConversationMonitor(
+            conversation_id=conv_id,
+            participants=[{"node_id": "dpc-node-aaa", "name": "Mike", "context": ""}],
+            llm_manager=None,
+        )
+
+    def test_readonly_consumer_does_not_clobber_writer(self, fake_home):
+        writer = self._monitor("group-own")
+        writer.add_message(role="user", content="m1", message_id="a",
+                           sender_name="Mike", sender_type="human")
+        writer.save_history()
+
+        reader = self._monitor("group-own")
+        reader.load_history()
+
+        writer.add_message(role="user", content="m2", message_id="b",
+                           sender_name="Ark", sender_type="agent", agent_owner="dpc-node-aaa")
+        writer.save_history()
+
+        reader.load_history()
+        assert [m["id"] for m in reader.get_message_history()] == ["a", "b"]
+
+    def test_on_message_persists_identity_fields(self, fake_home):
+        import asyncio
+        from dpc_client_core.conversation_monitor import Message as ConvMessage
+
+        monitor = self._monitor("group-own2")
+        asyncio.run(monitor.on_message(ConvMessage(
+            message_id="x1",
+            conversation_id="group-own2",
+            sender_node_id="dpc-node-remote",
+            sender_name="Warren",
+            text="hi",
+            timestamp="2026-06-10T12:00:00Z",
+            sender_type="agent",
+            agent_owner="dpc-node-remote",
+        )))
+        monitor.save_history()
+
+        fresh = self._monitor("group-own2")
+        fresh.load_history()
+        row = fresh.get_message_history()[-1]
+        assert row["sender_type"] == "agent"
+        assert row["agent_owner"] == "dpc-node-remote"
+        assert row["id"] == "x1"
 
 
 class TestBuildLlmMessagesDerivation:
