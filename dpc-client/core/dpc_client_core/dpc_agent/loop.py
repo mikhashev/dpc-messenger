@@ -618,6 +618,20 @@ async def run_llm_loop(
                     # assembled into the final answer (Variant 2). Final = this last round.
                     llm_trace["assistant_notes"].append(clean_content.strip()[:320])
                     return clean_content, accumulated_usage, llm_trace
+                if ("prompt_tokens" in usage
+                        and usage.get("prompt_tokens") == 0
+                        and usage.get("completion_tokens") == 0):
+                    log.error(
+                        "LLM returned empty response with zero usage — provider "
+                        "dropped the request (likely context overflow). Skipping retries."
+                    )
+                    return (
+                        "⚠️ Провайдер отбросил запрос без обработки (zero token usage) — "
+                        "вероятно, контекст разговора превысил лимит модели. "
+                        "Начните новую сессию (New Session) или сократите историю.",
+                        accumulated_usage,
+                        llm_trace,
+                    )
                 # LLM returned empty content (e.g. GLM thinking-only with no text).
                 # Retry the same call without prompt modification.
                 # Diagnose the empty: non-empty thinking + empty content points at
