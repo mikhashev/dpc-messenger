@@ -3772,50 +3772,24 @@ class CoreService:
     # --- Shell approval (ADR-030 v2) ---
 
     async def shell_approve_command(self, request_id: str, add_to_whitelist: bool = False) -> Dict[str, Any]:
-        """Approve and execute a Tier 1 shell command (blocking flow).
+        """Approve a Tier 1 shell command.
 
-        Executes the command, stores result in the pending entry,
-        signals the blocking Event so the agent tool thread unblocks
-        and returns the actual output to the agent.
+        Records the decision and signals the waiting executor thread, which
+        runs the command itself. Executing here (async) would block the event
+        loop and race the approval TTL timer (S197 timeout-race fix).
         """
-        import subprocess
-        from .dpc_agent.tools.shell import _pending_approvals, MAX_OUTPUT
+        from .dpc_agent.tools.shell import _pending_approvals
 
         entry = _pending_approvals.get(request_id)
         if not entry:
             return {"status": "error", "message": f"Unknown or expired request_id: {request_id}"}
 
         command = entry["command"]
-        working_dir = entry["cwd"]
-        timeout = entry["timeout"]
         agent_name = entry["agent_name"]
 
-        logger.info("Shell command approved: %s — executing %r", request_id, command)
+        logger.info("Shell command approved: %s — %r", request_id, command)
 
-        try:
-            import os
-            result = subprocess.run(
-                command, shell=True, capture_output=True, text=True,
-                encoding="utf-8", errors="replace", timeout=timeout,
-                cwd=working_dir,
-                env={**os.environ, "PYTHONIOENCODING": "utf-8"},
-            )
-            parts = []
-            if result.stdout:
-                stdout = result.stdout[:MAX_OUTPUT]
-                parts.append(stdout)
-            if result.stderr:
-                stderr = result.stderr[:MAX_OUTPUT]
-                parts.append(f"[stderr]\n{stderr}")
-            if result.returncode != 0:
-                parts.append(f"[exit code: {result.returncode}]")
-            output = "\n".join(parts) if parts else "(no output)"
-        except subprocess.TimeoutExpired:
-            output = f"Error: command timed out after {timeout}s."
-        except Exception as e:
-            output = f"Error: {e}"
-
-        entry["result"] = output
+        entry["decision"] = "approved"
         event = entry.get("event")
         if event:
             event.set()
@@ -3826,7 +3800,7 @@ class CoreService:
             agent_profile = entry.get("agent_profile", agent_name)
             await self.shell_add_to_whitelist(agent_profile, cmd_prefix)
 
-        return {"status": "ok", "request_id": request_id, "output_length": len(output)}
+        return {"status": "ok", "request_id": request_id}
 
     async def shell_reject_command(self, request_id: str) -> Dict[str, Any]:
         """Reject a Tier 1 shell command execution request."""
@@ -3836,6 +3810,7 @@ class CoreService:
         if not entry:
             return {"status": "error", "message": f"Unknown or expired request_id: {request_id}"}
 
+        entry["decision"] = "rejected"
         entry["result"] = "❌ Command rejected by user."
         event = entry.get("event")
         if event:

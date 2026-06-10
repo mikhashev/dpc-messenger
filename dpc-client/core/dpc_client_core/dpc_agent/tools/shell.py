@@ -260,6 +260,8 @@ def _request_approval(ctx: ToolContext, command: str, reason: str, cwd: str, tim
 
     log.info("run_shell TIER1 approval requested: %r (id=%s), blocking executor thread", command, request_id)
 
+    # Wait for the user's decision only; the command runs below on this
+    # thread, not in the approve handler (S197 timeout-race fix).
     signaled = event.wait(timeout=APPROVAL_TTL_SECONDS)
     entry = _pending_approvals.pop(request_id, None)
 
@@ -276,44 +278,17 @@ def _request_approval(ctx: ToolContext, command: str, reason: str, cwd: str, tim
                 log.warning("Failed to broadcast shell_approval_expired: %s", e)
         return f"⏳ Command approval timed out after {APPROVAL_TTL_SECONDS}s: `{command}`"
 
-    result = entry.get("result")
-    if result is None:
-        return f"⏳ Command approval resolved but no result: `{command}`"
+    if entry.get("decision") == "rejected":
+        return entry.get("result") or "❌ Command rejected by user."
 
-    return result
+    log.info("Shell approval granted: %s — executing %r", request_id, command)
+    return _execute_shell_command(command, entry.get("cwd"), entry.get("timeout", 120))
 
 
-def run_shell(ctx: ToolContext, command: str, timeout: int = 120, cwd: str = "") -> str:
-    # ADR-030: validate command before execution
-    violation = _validate_command(command, ctx)
-    if violation:
-        tier, reason = violation
-        if tier == "tier2":
-            log.warning("run_shell BLOCKED (tier2): %r — %s", command, reason)
-            return f"⛔ Command blocked by safety guardrails: {reason}"
-        elif tier == "tier1":
-            log.warning("run_shell TIER1 (approval needed): %r — %s", command, reason)
-            return _request_approval(ctx, command, reason, cwd, timeout)
-
-    working_dir: str | None = None
-    if cwd:
-        expanded = os.path.expanduser(cwd)
-        if not os.path.isdir(expanded):
-            return f"Error: cwd '{cwd}' is not a valid directory."
-        try:
-            ctx.validate_extended_path(expanded)
-        except PermissionError:
-            log.warning("run_shell cwd BLOCKED: %r outside sandbox", cwd)
-            return f"⛔ cwd '{cwd}' is outside allowed sandbox paths."
-        working_dir = expanded
-    else:
-        working_dir = str(ctx.agent_root)
-
+def _execute_shell_command(command: str, working_dir: str | None, timeout: int) -> str:
+    """Run a shell command, format stdout/stderr/exit. Executor-thread only."""
     is_windows = platform.system() == "Windows"
     timeout = min(max(timeout, 5), 300)
-
-    log.info("run_shell: %s (cwd=%s, timeout=%ds)", command, working_dir, timeout)
-
     if is_windows:
         command = f"chcp 65001 >nul && {command}"
 
@@ -344,14 +319,43 @@ def run_shell(ctx: ToolContext, command: str, timeout: int = 120, cwd: str = "")
         if result.returncode != 0:
             parts.append(f"[exit code: {result.returncode}]")
 
-        output = "\n".join(parts) if parts else "(no output)"
-        return output
+        return "\n".join(parts) if parts else "(no output)"
 
     except subprocess.TimeoutExpired:
         return f"Error: command timed out after {timeout}s."
     except Exception as e:
         log.error("run_shell failed: %s", e)
         return f"Error: {e}"
+
+
+def run_shell(ctx: ToolContext, command: str, timeout: int = 120, cwd: str = "") -> str:
+    # ADR-030: validate command before execution
+    violation = _validate_command(command, ctx)
+    if violation:
+        tier, reason = violation
+        if tier == "tier2":
+            log.warning("run_shell BLOCKED (tier2): %r — %s", command, reason)
+            return f"⛔ Command blocked by safety guardrails: {reason}"
+        elif tier == "tier1":
+            log.warning("run_shell TIER1 (approval needed): %r — %s", command, reason)
+            return _request_approval(ctx, command, reason, cwd, timeout)
+
+    working_dir: str | None = None
+    if cwd:
+        expanded = os.path.expanduser(cwd)
+        if not os.path.isdir(expanded):
+            return f"Error: cwd '{cwd}' is not a valid directory."
+        try:
+            ctx.validate_extended_path(expanded)
+        except PermissionError:
+            log.warning("run_shell cwd BLOCKED: %r outside sandbox", cwd)
+            return f"⛔ cwd '{cwd}' is outside allowed sandbox paths."
+        working_dir = expanded
+    else:
+        working_dir = str(ctx.agent_root)
+
+    log.info("run_shell: %s (cwd=%s, timeout=%ds)", command, working_dir, min(max(timeout, 5), 300))
+    return _execute_shell_command(command, working_dir, timeout)
 
 
 def get_tools() -> List[ToolEntry]:
