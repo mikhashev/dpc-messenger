@@ -314,6 +314,9 @@ def run_shell(ctx: ToolContext, command: str, timeout: int = 120, cwd: str = "")
 
     log.info("run_shell: %s (cwd=%s, timeout=%ds)", command, working_dir, timeout)
 
+    if is_windows:
+        command = f"chcp 65001 >nul && {command}"
+
     try:
         result = subprocess.run(
             command,

@@ -428,7 +428,7 @@ def comfyui_convert(ctx: ToolContext, input_path: str, output_path: str = "", fp
             "-movflags", "+faststart",
             str(dst),
         ]
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+        result = subprocess.run(cmd, capture_output=True, encoding="utf-8", errors="replace", timeout=120)
         if result.returncode != 0:
             stderr = result.stderr[-500:] if result.stderr else ""
             return f"Error: ffmpeg exit {result.returncode}: {stderr}"

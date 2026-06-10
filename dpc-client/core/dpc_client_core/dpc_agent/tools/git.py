@@ -68,13 +68,14 @@ def _run_git(ctx: ToolContext, args: List[str], cwd: Optional[str] = None) -> Di
             ["git"] + args,
             cwd=str(work_dir),
             capture_output=True,
-            text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=30,
         )
 
         return {
             "success": result.returncode == 0,
-            "output": result.stdout.strip(),
+            "output": result.stdout.strip() if result.stdout else "",
             "error": result.stderr.strip() if result.stderr else None,
             "return_code": result.returncode,
         }
@@ -126,12 +127,13 @@ def _run_git_external(repo_path: str, args: List[str], timeout: int = 30) -> Dic
             ["git"] + args,
             cwd=str(resolved),
             capture_output=True,
-            text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=timeout,
         )
         return {
             "success": result.returncode == 0,
-            "output": result.stdout.strip(),
+            "output": result.stdout.strip() if result.stdout else "",
             "error": result.stderr.strip() if result.stderr else None,
             "return_code": result.returncode,
         }
