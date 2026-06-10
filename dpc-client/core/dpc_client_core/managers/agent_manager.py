@@ -283,6 +283,10 @@ class DpcAgentManager:
                 # First-use full rebuild (MEM-3.7 spec)
                 import asyncio
                 agent_root = self._agent.agent_root if self._agent else None
+                # Bind a default before the agent_root gate: the success log at
+                # the end of this block references _actual_model unconditionally,
+                # so a None agent_root must not leave it unbound (UnboundLocalError).
+                _actual_model = mem_cfg.embedding_model
                 if agent_root:
                     from dpc_client_core.dpc_agent.memory import EmbeddingProvider
                     _provider_ref = self._agent._embedding_provider if self._agent else None
@@ -801,6 +805,14 @@ class DpcAgentManager:
             Agent's response text
         """
         import uuid
+
+        # A manager can be created without ever being start()-ed — e.g. a
+        # remote group @mention routes through get_manager() + process_message()
+        # directly (group_handler._invoke_agent), skipping the local startup
+        # path. Without this, the first remote-origin invoke leaves _agent None,
+        # so both the memory init below and self.agent later raise "Agent not
+        # initialized". ensure_started() is idempotent — a no-op once started.
+        await self.ensure_started()
 
         if not self._memory_indexes_initialized:
             log.info("Lazy memory init triggered by first prompt for agent %s", self.agent_id or "singleton")
