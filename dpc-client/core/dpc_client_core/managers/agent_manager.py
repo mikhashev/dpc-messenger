@@ -782,6 +782,7 @@ class DpcAgentManager:
         _skip_history: bool = False,
         # Group chat metadata for agent context awareness
         chat_context: Optional[Dict[str, Any]] = None,
+        trigger_message_id: Optional[str] = None,
     ) -> str:
         """
         Process a user message through the agent.
@@ -919,6 +920,12 @@ class DpcAgentManager:
                     message_source=message_source,
                     chat_context=chat_context,
                     stop_event=interrupt_ev,
+                    reader_identity={
+                        "agent_id": self.agent_id or "",
+                        "display_name": agent_display_name,
+                        "node_id": getattr(self.service.p2p_manager, "node_id", "") or "",
+                    },
+                    trigger_message_id=trigger_message_id,
                 )
             finally:
                 self._interrupt_events.pop(conversation_id, None)

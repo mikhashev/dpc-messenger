@@ -72,10 +72,13 @@ Each message stores (existing fields, now canonical):
 One function in the context-assembly path (`dpc_agent/context.py:build_llm_messages`) derives roles for the *reading* agent:
 
 ```
-own message     (sender_type == "agent" and agent_owner == reader_agent_id) → role = "assistant", content as-is
+own message     (sender_type == "agent" and agent_owner ∈ {reader node_id, reader agent_id}
+                 and sender_name == reader display name)                     → role = "assistant", content as-is
 everything else (humans, other agents, peers, bridge users)                 → role = "user", content = "[{sender_name}]: {content}"
 system records                                                              → excluded from history turns (system prompt is Block 1-3 territory)
 ```
+
+*(Formula refined at T1 implementation: `agent_owner` stores the owner **node_id** — shared by all agents of one node — so reader matching needs the full ADR-023 composite key `(agent_owner, sender_name)`, not `agent_owner` alone.)*
 
 This applies to **all chat types**. In a 1:1 agent chat the derivation degenerates exactly to today's behavior (the agent's messages → `assistant`, the human's → `user`), so back-compat holds by construction. The legacy `"peer"` role in P2P chats folds into the same rule (peer = not-mine → `user` with name prefix).
 
@@ -182,8 +185,8 @@ Docs:
 
 | Task | Status | Commit |
 |------|--------|--------|
-| T1 Translation layer in `build_llm_messages` (per-reader derivation + legacy fallbacks) | Pending | — |
-| T2 Trigger dedup by `message_id` (replaces positional slice) | Pending | — |
+| T1 Translation layer in `build_llm_messages` (per-reader derivation + legacy fallbacks) | Done | feature/adr-031 |
+| T2 Trigger dedup by `message_id` (replaces positional slice) | Done | feature/adr-031 |
 | T3 Single-writer: agent-side monitor read-only for groups | Pending | — |
 | T4 `group_handler` identity propagation + explicit save; P2P sync compat check (role write stays as-is per §1 revision) | Pending | — |
 | T5 UI migration to identity-based mapping | Pending | — |

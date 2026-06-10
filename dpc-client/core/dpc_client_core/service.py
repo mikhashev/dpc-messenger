@@ -4458,7 +4458,8 @@ class CoreService:
             })
 
             # Detect @agent mentions and route to Ark / CC
-            await self._handle_group_agent_mentions(group_id, text, sender_name)
+            await self._handle_group_agent_mentions(group_id, text, sender_name,
+                                                    trigger_message_id=message_id)
 
             history_tokens = sum(len(m.get("content", "") or "") for m in monitor.get_message_history()) // 4
             monitor.set_token_count(history_tokens)
@@ -4491,6 +4492,7 @@ class CoreService:
     async def _handle_group_agent_mentions(
         self, group_id: str, text: str, sender_name: str,
         is_agent_sender: bool = False,
+        trigger_message_id: Optional[str] = None,
     ) -> None:
         """Detect @agent / @CC / @all mentions in outgoing group messages and route to agents."""
         plain_text = self._CODE_BLOCK_RE.sub('', text)
@@ -4515,7 +4517,8 @@ class CoreService:
             if mention_all or aname in mentions or aid in mentions:
                 matched = "all" if mention_all else (aname if aname in mentions else aid)
                 logger.info("Group @%s mention detected — invoking agent %s in group %s", matched, aid, group_id)
-                asyncio.ensure_future(self._invoke_agent_in_group_serialized(group_id, text, sender_name, aid))
+                asyncio.ensure_future(self._invoke_agent_in_group_serialized(
+                    group_id, text, sender_name, aid, trigger_message_id))
 
         cc_name = self.get_cc_display_name().lower()
         if (mention_all or cc_name in mentions) and cc_name != sender_lower:
@@ -4529,7 +4532,8 @@ class CoreService:
             })
 
     async def _invoke_agent_in_group_serialized(
-        self, group_id: str, text: str, sender_name: str, agent_id: str = None
+        self, group_id: str, text: str, sender_name: str, agent_id: str = None,
+        trigger_message_id: Optional[str] = None,
     ) -> None:
         """Run an agent in a group under the per-group lock — serializes agents so two
         @mentions in the same group queue (one at a time) instead of running in parallel.
@@ -4538,10 +4542,12 @@ class CoreService:
         if group_id not in self._group_agent_locks:
             self._group_agent_locks[group_id] = asyncio.Lock()
         async with self._group_agent_locks[group_id]:
-            await self._invoke_agent_in_group(group_id, text, sender_name, agent_id)
+            await self._invoke_agent_in_group(group_id, text, sender_name, agent_id,
+                                              trigger_message_id)
 
     async def _invoke_agent_in_group(
-        self, group_id: str, text: str, sender_name: str, agent_id: str = None
+        self, group_id: str, text: str, sender_name: str, agent_id: str = None,
+        trigger_message_id: Optional[str] = None,
     ) -> None:
         """Invoke a specific agent and post its response to the group."""
         try:
@@ -4577,11 +4583,15 @@ class CoreService:
                     "participants": participants,
                 }
 
+            # The trigger is already on disk (service-side write) — skip the
+            # agent-side copy and exclude it from prior history by id (ADR-031 T2)
             response = await manager.process_message(
                 message=prompt,
                 conversation_id=group_id,
                 sender_name=sender_name,
                 chat_context=chat_context,
+                _skip_history=True,
+                trigger_message_id=trigger_message_id,
             )
             if response:
                 agent_name = self._get_agent_display_name(agent_id)
@@ -4696,7 +4706,8 @@ class CoreService:
         })
 
         # Route @mentions from agent messages (enables CC→Ark and Ark→CC communication)
-        await self._handle_group_agent_mentions(group_id, text, agent_name, is_agent_sender=True)
+        await self._handle_group_agent_mentions(group_id, text, agent_name, is_agent_sender=True,
+                                                trigger_message_id=message_id)
 
         return message_id
 
