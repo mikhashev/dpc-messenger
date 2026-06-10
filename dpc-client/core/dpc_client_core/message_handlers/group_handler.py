@@ -374,6 +374,7 @@ class GroupSyncHandler(MessageHandler):
                 "topic": result.topic,
                 "members": result.members,
                 "agents": result.agents,
+                "agent_names": result.agent_names,
                 "version": result.version,
             })
 

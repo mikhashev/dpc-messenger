@@ -4310,20 +4310,7 @@ class CoreService:
             members = member_node_ids or []
             group = self.group_manager.create_group(name, topic, members)
 
-            # Auto-populate agents from this node's registry
-            if self.agent_service:
-                try:
-                    result = await self.agent_service.list_agents()
-                    agents = result.get("agents", [])
-                    agent_ids = [a["agent_id"] for a in agents]
-                    agent_names = {a["agent_id"]: a.get("name", a["agent_id"]) for a in agents}
-                    if agent_ids:
-                        self.group_manager.set_node_agents(
-                            group.group_id, self.p2p_manager.node_id, agent_ids, agent_names
-                        )
-                except Exception:
-                    pass
-
+            # Agents start empty: each node opts its own in via set_group_agents.
             # Send GROUP_CREATE to all members
             await self._broadcast_to_group(group.group_id, {
                 "command": "GROUP_CREATE",
@@ -4354,6 +4341,10 @@ class CoreService:
             )
             group = self.group_manager.get_group(group_id)
             if group:
+                await self._broadcast_to_group(group_id, {
+                    "command": "GROUP_SYNC",
+                    "payload": group.to_dict(),
+                })
                 await self.local_api.broadcast_event("group_updated", {
                     "group_id": group.group_id,
                     "name": group.name,
