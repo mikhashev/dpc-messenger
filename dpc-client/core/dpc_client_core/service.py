@@ -7371,10 +7371,10 @@ class CoreService:
             agent_config = load_agent_config(agent_id)
             sleep_provider = agent_config.get("sleep_provider_alias") or None
 
-            agent_display_name = agent_id
+            agent_display_name = self._get_agent_display_name(agent_id)
             if local_node_id:
                 names_map = metadata.get("agent_names", {}).get(local_node_id, {})
-                agent_display_name = names_map.get(agent_id, agent_id)
+                agent_display_name = names_map.get(agent_id) or agent_display_name
 
             sleep_data = {"agent_id": agent_id, "group_id": group_id, "status": "sleeping"}
             await self.local_api.broadcast_event("sleep_state_changed", sleep_data)
@@ -7384,6 +7384,8 @@ class CoreService:
             # Pattern-match also catches legacy briefs posted before chat_message_id tracking.
             try:
                 await self._delete_group_briefs(group_id, agent_display_name)
+                if agent_display_name != agent_id:
+                    await self._delete_group_briefs(group_id, agent_id)
             except Exception as e:
                 logger.warning("Failed to clean stale briefs for %s in %s: %s",
                                agent_display_name, group_id, e)
@@ -7443,7 +7445,7 @@ class CoreService:
             for aid in agent_ids:
                 all_agents.append(aid)
                 names_map = metadata.get("agent_names", {}).get(node_id, {})
-                agent_names[aid] = names_map.get(aid, aid)
+                agent_names[aid] = names_map.get(aid)
 
         posted = 0
         for agent_id in all_agents:
@@ -7455,7 +7457,7 @@ class CoreService:
                 if brief.get("consumed"):
                     continue
                 chat_text = self._format_morning_brief(brief)
-                display_name = agent_names.get(agent_id, agent_id)
+                display_name = agent_names.get(agent_id) or self._get_agent_display_name(agent_id)
                 await self.send_group_agent_message(group_id, display_name, chat_text)
                 brief["consumed"] = True
                 brief_path.write_text(json.dumps(brief, ensure_ascii=False, indent=2), encoding="utf-8")
