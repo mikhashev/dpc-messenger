@@ -44,6 +44,8 @@ if TYPE_CHECKING:
     from ..llm_manager import LLMManager
 log = logging.getLogger(__name__)
 
+CONTEXT_ROUND_RESERVE_TOKENS = 16384
+
 
 def select_prior_history(
     full_history: List[Dict[str, Any]],
@@ -291,7 +293,9 @@ class DpcAgent:
 
         # Hard block: refuse to call LLM if context window is nearly full.
         # Without this guard the LLM call hangs silently (AGENT-CTX-1).
-        if _estimated > _ctx_window * 0.95:
+        _reserve = max(int(_ctx_window * 0.05),
+                       min(CONTEXT_ROUND_RESERVE_TOKENS, int(_ctx_window * 0.2)))
+        if _ctx_window - _estimated < _reserve:
             _pct = _estimated / _ctx_window * 100
             log.error(
                 "Context window overflow blocked: %d / %d tokens (%.0f%%)",

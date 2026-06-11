@@ -482,8 +482,12 @@ class DpcLlmAdapter:
             response_msg["thinking"] = raw["thinking"]
 
         usage = raw.get("usage") or {}
-        if not usage.get("total_tokens"):
-            # Fallback if provider didn't return usage
+        provider_reported_drop = (
+            "prompt_tokens" in usage
+            and not usage.get("prompt_tokens")
+            and not usage.get("completion_tokens")
+        )
+        if not usage.get("total_tokens") and not provider_reported_drop:
             model_name = self.default_model()
             if self._token_counter:
                 prompt_tokens = self._token_counter.count_tokens(str(anthropic_messages), model_name)
