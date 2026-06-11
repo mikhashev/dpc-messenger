@@ -139,6 +139,7 @@ class CoreService:
         # so concurrent @mentions queue instead of racing (prevents one agent's progress
         # -clear wiping another's, and concurrent same-group LLM load).
         self._group_agent_locks: Dict[str, asyncio.Lock] = {}
+        self._group_agent_context: Dict[str, Dict[str, tuple]] = {}
 
         DPC_HOME_DIR.mkdir(exist_ok=True)
 
@@ -4088,18 +4089,24 @@ class CoreService:
             # For local AI monitors, current_token_count = prompt_tokens (already the full context).
             tokens_after_last_response = monitor._tokens_after_last_response or token_usage.get("tokens_used", 0)
             tokens_after_last_response_at = monitor._tokens_after_last_response_at
+            token_limit = token_usage.get("token_limit", 0)
             # For group chats, current_token_count may be 0 (no LLM calls update it).
             # Use history_tokens as the floor to keep the UI counter accurate.
             tokens_used = token_usage.get("tokens_used", 0)
-            if conversation_id.startswith("group-") and tokens_used < history_tokens:
-                tokens_used = history_tokens
-                monitor.set_token_count(history_tokens)
+            if conversation_id.startswith("group-"):
+                if tokens_used < history_tokens:
+                    tokens_used = history_tokens
+                    monitor.set_token_count(history_tokens)
+                worst = self._worst_group_agent_context(conversation_id)
+                if worst:
+                    tokens_after_last_response, token_limit, tokens_after_last_response_at = worst
+                    tokens_used = max(tokens_used, tokens_after_last_response)
             return {
                 "status": "success",
                 "messages": messages,
                 "message_count": len(messages),
                 "tokens_used": tokens_used,
-                "token_limit": token_usage.get("token_limit", 0),
+                "token_limit": token_limit,
                 "history_tokens": history_tokens,
                 "tokens_after_last_response": tokens_after_last_response,
                 "tokens_after_last_response_at": tokens_after_last_response_at,
@@ -4280,6 +4287,7 @@ class CoreService:
 
     async def reset_conversation(self, conversation_id: str) -> Dict[str, Any]:
         """Delegated to KnowledgeService."""
+        self._group_agent_context.pop(conversation_id, None)
         return await self.knowledge_service.reset_conversation(conversation_id)
 
     async def get_conversation_settings(self, conversation_id: str) -> Dict[str, Any]:
@@ -4595,6 +4603,21 @@ class CoreService:
         except Exception as e:
             logger.error("Agent group response failed: %s", e, exc_info=True)
 
+    def update_group_agent_context(self, group_id: str, agent_id: str,
+                                   prompt_tokens: int, token_limit: int) -> None:
+        agents = self._group_agent_context.setdefault(group_id, {})
+        agents[agent_id] = (prompt_tokens, token_limit,
+                            datetime.now(timezone.utc).isoformat())
+
+    def _worst_group_agent_context(self, group_id: str) -> Optional[tuple]:
+        agents = self._group_agent_context.get(group_id)
+        if not agents:
+            return None
+        return max(
+            agents.values(),
+            key=lambda v: (v[0] / v[1]) if v[1] else 0,
+        )
+
     async def send_group_agent_message(
         self, group_id: str, agent_name: str, text: str,
         tool_calls: Optional[list] = None,
@@ -4685,10 +4708,17 @@ class CoreService:
         tokens_after_last_response_at = getattr(monitor, '_tokens_after_last_response_at', None)
         monitor.set_token_count(max(history_tokens, tokens_after_last_response))
         token_usage = monitor.get_token_usage()
+        token_limit = token_usage.get("token_limit", 0)
+        if not token_limit:
+            token_limit = self.llm_manager.get_context_window(
+                self.llm_manager.get_active_model_name())
+        worst = self._worst_group_agent_context(group_id)
+        if worst:
+            tokens_after_last_response, token_limit, tokens_after_last_response_at = worst
         await self.local_api.broadcast_event("token_usage_updated", {
             "conversation_id": group_id,
             "tokens_used": max(history_tokens, tokens_after_last_response),
-            "token_limit": token_usage.get("token_limit", 0) or 128000,
+            "token_limit": token_limit,
             "history_tokens": history_tokens,
             "tokens_after_last_response": tokens_after_last_response,
             "tokens_after_last_response_at": tokens_after_last_response_at,

@@ -276,6 +276,7 @@ class NewSessionProposalManager:
             else:
                 _preserve, _max = True, 0
             monitor.reset_conversation(preserve=_preserve, max_sessions=_max)
+            self.core_service._group_agent_context.pop(local_conversation_id, None)
 
         # Broadcast result to all participants (use original conversation_id so initiator can look it up)
         if self.on_result_broadcast:

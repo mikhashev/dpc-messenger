@@ -1058,6 +1058,16 @@ class DpcAgentManager:
                     monitor.set_token_limit(context_window)
                 monitor.set_token_count(conversation_tokens)
 
+            agent_token_limit = monitor.get_token_usage().get("token_limit") or 0
+            if (conversation_id.startswith("group-") and new_token_count
+                    and agent_token_limit and self.agent_id and self.service):
+                try:
+                    self.service.update_group_agent_context(
+                        conversation_id, self.agent_id, new_token_count,
+                        agent_token_limit)
+                except Exception as e:
+                    log.debug("update_group_agent_context failed: %s", e)
+
             # Emit TASK_COMPLETED event
             await emitter.emit(EventType.TASK_COMPLETED, {
                 "task_id": task_id,
