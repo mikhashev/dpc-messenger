@@ -98,6 +98,24 @@ def test_runtime_section_renders_context_breakdown(tmp_path):
     assert "25000" in text
 
 
+def test_group_agent_context_attribution():
+    from dpc_client_core.service import CoreService
+
+    svc = CoreService.__new__(CoreService)
+    svc._group_agent_context = {}
+    svc.update_group_agent_context("group-x", "agent_001", 201844, 204800, "Ark")
+    svc.update_group_agent_context("group-x", "agent_w", 16000, 204800, "Warren")
+
+    worst = svc._worst_group_agent_context("group-x")
+    assert worst[0] == 201844
+    assert worst[3] == "Ark"
+
+    agents = svc._group_agent_context_list("group-x")
+    assert [a["name"] for a in agents] == ["Ark", "Warren"]
+    assert agents[0]["percent"] == 98.6
+    assert agents[1]["percent"] == 7.8
+
+
 def test_runtime_section_without_breakdown(tmp_path):
     from dpc_client_core.dpc_agent.context import _build_runtime_section
 

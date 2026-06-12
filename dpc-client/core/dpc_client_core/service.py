@@ -4093,14 +4093,18 @@ class CoreService:
             # For group chats, current_token_count may be 0 (no LLM calls update it).
             # Use history_tokens as the floor to keep the UI counter accurate.
             tokens_used = token_usage.get("tokens_used", 0)
+            context_agent = ""
+            context_agents = []
             if conversation_id.startswith("group-"):
                 if tokens_used < history_tokens:
                     tokens_used = history_tokens
                     monitor.set_token_count(history_tokens)
                 worst = self._worst_group_agent_context(conversation_id)
                 if worst:
-                    tokens_after_last_response, token_limit, tokens_after_last_response_at = worst
+                    tokens_after_last_response, token_limit, tokens_after_last_response_at = worst[:3]
+                    context_agent = worst[3] if len(worst) > 3 else ""
                     tokens_used = max(tokens_used, tokens_after_last_response)
+                context_agents = self._group_agent_context_list(conversation_id)
             return {
                 "status": "success",
                 "messages": messages,
@@ -4110,6 +4114,8 @@ class CoreService:
                 "history_tokens": history_tokens,
                 "tokens_after_last_response": tokens_after_last_response,
                 "tokens_after_last_response_at": tokens_after_last_response_at,
+                "context_agent": context_agent,
+                "context_agents": context_agents,
             }
 
         except Exception as e:
@@ -4604,13 +4610,29 @@ class CoreService:
             logger.error("Agent group response failed: %s", e, exc_info=True)
 
     def update_group_agent_context(self, group_id: str, agent_id: str,
-                                   prompt_tokens: int, token_limit: int) -> None:
+                                   prompt_tokens: int, token_limit: int,
+                                   display_name: str = "") -> None:
         agents = self._group_agent_context.setdefault(group_id, {})
         agents[agent_id] = (prompt_tokens, token_limit,
-                            datetime.now(timezone.utc).isoformat())
+                            datetime.now(timezone.utc).isoformat(),
+                            display_name or agent_id)
 
     def get_group_agent_context(self, group_id: str, agent_id: str) -> Optional[tuple]:
         return self._group_agent_context.get(group_id, {}).get(agent_id)
+
+    def _group_agent_context_list(self, group_id: str) -> list:
+        agents = self._group_agent_context.get(group_id, {})
+        out = []
+        for entry in agents.values():
+            tokens, limit = entry[0], entry[1]
+            out.append({
+                "name": entry[3] if len(entry) > 3 else "",
+                "tokens": tokens,
+                "limit": limit,
+                "percent": round(tokens / limit * 100, 1) if limit else 0,
+            })
+        out.sort(key=lambda a: a["percent"], reverse=True)
+        return out
 
     def _worst_group_agent_context(self, group_id: str) -> Optional[tuple]:
         agents = self._group_agent_context.get(group_id)
@@ -4715,9 +4737,11 @@ class CoreService:
         if not token_limit:
             token_limit = self.llm_manager.get_context_window(
                 self.llm_manager.get_active_model_name())
+        context_agent = ""
         worst = self._worst_group_agent_context(group_id)
         if worst:
-            tokens_after_last_response, token_limit, tokens_after_last_response_at = worst
+            tokens_after_last_response, token_limit, tokens_after_last_response_at = worst[:3]
+            context_agent = worst[3] if len(worst) > 3 else ""
         await self.local_api.broadcast_event("token_usage_updated", {
             "conversation_id": group_id,
             "tokens_used": max(history_tokens, tokens_after_last_response),
@@ -4725,6 +4749,8 @@ class CoreService:
             "history_tokens": history_tokens,
             "tokens_after_last_response": tokens_after_last_response,
             "tokens_after_last_response_at": tokens_after_last_response_at,
+            "context_agent": context_agent,
+            "context_agents": self._group_agent_context_list(group_id),
         })
 
         # Route @mentions from agent messages (enables CC→Ark and Ark→CC communication)

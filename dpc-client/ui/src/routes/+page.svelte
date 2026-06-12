@@ -161,7 +161,7 @@
   // showGroupInviteDialog + pendingGroupInvite moved to GroupPanel.svelte (Step 7)
   let showGroupSettingsDialog = $state(false);  // v0.19.0: group settings/members panel
   // Token tracking state (Phase 2)
-  let tokenUsageMap = $state(new Map<string, {used: number, limit: number, historyTokens?: number, tokensAfterLastResponse?: number, tokensAfterLastResponseAt?: string | null, contextBreakdown?: Array<{name: string, tokens: number}> | null}>());
+  let tokenUsageMap = $state(new Map<string, {used: number, limit: number, historyTokens?: number, tokensAfterLastResponse?: number, tokensAfterLastResponseAt?: string | null, contextBreakdown?: Array<{name: string, tokens: number}> | null, contextAgent?: string, contextAgents?: Array<{name: string, tokens: number, limit: number, percent: number}> | null}>());
   let showTokenWarning = $state(false);
   let tokenWarningMessage = $state("");
 
@@ -537,6 +537,8 @@
     tokensAfterLastResponse: currentTokenUsage.tokensAfterLastResponse ?? 0,
     tokensAfterLastResponseAt: currentTokenUsage.tokensAfterLastResponseAt ?? null,
     contextBreakdown: currentTokenUsage.contextBreakdown ?? null,
+    contextAgent: currentTokenUsage.contextAgent ?? '',
+    contextAgents: currentTokenUsage.contextAgents ?? null,
   });
 
   // Reactive: Estimate token usage including current input (real-time feedback in SessionControls)
@@ -1021,6 +1023,8 @@
             tokensAfterLastResponse={effectiveTokenUsage.tokensAfterLastResponse ?? 0}
             tokensAfterLastResponseAt={effectiveTokenUsage.tokensAfterLastResponseAt ?? null}
             contextBreakdown={effectiveTokenUsage.contextBreakdown ?? null}
+            contextAgent={effectiveTokenUsage.contextAgent ?? ''}
+            contextAgents={effectiveTokenUsage.contextAgents ?? null}
             messageCount={$chatHistories.get(activeChatId)?.length ?? 0}
             bind:enableMarkdown
             isExtracting={isExtractingKnowledge}

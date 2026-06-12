@@ -15,6 +15,8 @@
     historyTokens = 0,
     tokensAfterLastResponse = 0,
     tokensAfterLastResponseAt = null,
+    contextAgent = '',
+    contextAgents = null,
     contextBreakdown = null,
     messageCount = 0,
     enableMarkdown = $bindable(true),
@@ -40,6 +42,8 @@
     historyTokens?: number;
     tokensAfterLastResponse?: number;
     tokensAfterLastResponseAt?: string | null;
+    contextAgent?: string;
+    contextAgents?: Array<{name: string, tokens: number, limit: number, percent: number}> | null;
     contextBreakdown?: Array<{name: string, tokens: number}> | null;
     messageCount?: number;
     enableMarkdown?: boolean;
@@ -110,6 +114,12 @@
       ? contextBreakdown.map((c: {name: string, tokens: number}) => `${c.name}: ~${c.tokens.toLocaleString()}`).join('\n')
       : "System prompt + contexts + tool schemas"
   );
+
+  let agentsTooltip = $derived(
+    contextAgents && contextAgents.length > 0
+      ? contextAgents.map((a) => `${a.name}: ${a.tokens.toLocaleString()} / ${a.limit.toLocaleString()} (${a.percent}%)`).join('\n')
+      : ""
+  );
 </script>
 
 {#if isAIChat || showForChatId.startsWith('group-')}
@@ -120,13 +130,13 @@
         <span class="token-value">{historyTokens.toLocaleString()}{#if showEstimation && estimatedTokens > 0} + ~{estimatedTokens.toLocaleString()}{/if} / {dialogAvailable.toLocaleString()}</span>
         <span class="token-percentage" class:warning={dialogPercentWithInput >= 0.8}>({Math.round(dialogPercentWithInput * 100)}%)</span>
       </div>
-      <div class="token-row">
+      <div class="token-row" title={agentsTooltip}>
         <span class="token-label">Total</span>
-        <span class="token-value">{tokensAfterLastResponse.toLocaleString()}{#if showEstimation && estimatedTokens > 0} + ~{estimatedTokens.toLocaleString()}{/if} / {effectiveLimit.toLocaleString()}</span>
+        <span class="token-value">{tokensAfterLastResponse.toLocaleString()}{#if showEstimation && estimatedTokens > 0} + ~{estimatedTokens.toLocaleString()}{/if} / {effectiveLimit.toLocaleString()}{#if contextAgent} — {contextAgent}{/if}</span>
         <span class="token-percentage" class:warning={totalContextPercentWithInput >= 0.8}>({Math.round(totalContextPercentWithInput * 100)}%)</span>
       </div>
       <div class="token-row token-row--muted" title={staticTitle}>
-        <span class="token-label">Static</span>
+        <span class="token-label">{contextAgent ? 'Agent ctx' : 'Static'}</span>
         <span class="token-value">≈{staticMemory.toLocaleString()}</span>
         <span class="token-percentage"></span>
       </div>

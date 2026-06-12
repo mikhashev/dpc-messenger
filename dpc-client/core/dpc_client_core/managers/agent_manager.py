@@ -1064,7 +1064,7 @@ class DpcAgentManager:
                 try:
                     self.service.update_group_agent_context(
                         conversation_id, self.agent_id, new_token_count,
-                        agent_token_limit)
+                        agent_token_limit, self._agent_display_name or self.agent_id)
                 except Exception as e:
                     log.debug("update_group_agent_context failed: %s", e)
 

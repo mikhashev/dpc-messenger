@@ -29,7 +29,7 @@
     processedMessageIds: Set<string>;
     chatWindow: HTMLElement | undefined;
     getPeerDisplayName: (id: string) => string;
-    onUpdateTokenUsage: (chatId: string, usage: { used: number; limit: number; historyTokens?: number; tokensAfterLastResponse?: number; tokensAfterLastResponseAt?: string | null }) => void;
+    onUpdateTokenUsage: (chatId: string, usage: { used: number; limit: number; historyTokens?: number; tokensAfterLastResponse?: number; tokensAfterLastResponseAt?: string | null; contextAgent?: string; contextAgents?: Array<{name: string, tokens: number, limit: number, percent: number}> | null }) => void;
     hasTokenUsage: (chatId: string) => boolean;
     selfNodeId?: string;
   } = $props();
@@ -115,6 +115,8 @@
                   historyTokens: result.history_tokens ?? 0,
                   tokensAfterLastResponse: result.tokens_after_last_response ?? 0,
                   tokensAfterLastResponseAt: result.tokens_after_last_response_at ?? null,
+                  contextAgent: result.context_agent ?? '',
+                  contextAgents: result.context_agents ?? null,
                 });
               }
 

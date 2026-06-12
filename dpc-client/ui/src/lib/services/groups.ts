@@ -32,7 +32,7 @@ export const groupMessageDeleted = writable<{
     sender_name?: string;
     content_prefix?: string;
 } | null>(null);
-export const tokenUsageUpdated = writable<{conversation_id: string; tokens_used: number; token_limit: number; history_tokens: number; tokens_after_last_response: number; tokens_after_last_response_at: string | null} | null>(null);
+export const tokenUsageUpdated = writable<{conversation_id: string; tokens_used: number; token_limit: number; history_tokens: number; tokens_after_last_response: number; tokens_after_last_response_at: string | null; context_agent?: string; context_agents?: Array<{name: string, tokens: number, limit: number, percent: number}>} | null>(null);
 
 // --- Command functions ---
 type SendCommandFn = (command: string, payload?: any) => Promise<any> | boolean;

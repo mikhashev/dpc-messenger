@@ -28,7 +28,7 @@
     onUpdatePeerContextHash,
   }: {
     onOpenCommitDialog: () => void;
-    onUpdateTokenUsage: (conversationId: string, usage: { used: number; limit: number; historyTokens?: number; tokensAfterLastResponse?: number; tokensAfterLastResponseAt?: string | null }) => void;
+    onUpdateTokenUsage: (conversationId: string, usage: { used: number; limit: number; historyTokens?: number; tokensAfterLastResponse?: number; tokensAfterLastResponseAt?: string | null; contextAgent?: string; contextAgents?: Array<{name: string, tokens: number, limit: number, percent: number}> | null }) => void;
     onShowTokenWarning: (message: string) => void;
     onShowExtractionFailure: (message: string) => void;
     onShowCommitResult: (message: string, type: 'info' | 'error' | 'warning', result: any) => void;
@@ -81,13 +81,15 @@
     const payload = $tokenUsageUpdated;
     if (payload) {
       tokenUsageUpdated.set(null);
-      const { conversation_id, tokens_used, token_limit, history_tokens, tokens_after_last_response, tokens_after_last_response_at } = payload;
+      const { conversation_id, tokens_used, token_limit, history_tokens, tokens_after_last_response, tokens_after_last_response_at, context_agent, context_agents } = payload;
       onUpdateTokenUsage(conversation_id, {
         used: tokens_used,
         limit: token_limit,
         historyTokens: history_tokens ?? 0,
         tokensAfterLastResponse: tokens_after_last_response ?? 0,
         tokensAfterLastResponseAt: tokens_after_last_response_at ?? null,
+        contextAgent: context_agent ?? '',
+        contextAgents: context_agents ?? null,
       });
     }
   });
