@@ -1352,8 +1352,11 @@ class CoreService:
                 # v0.20.0: Send GROUP_HISTORY_STATUS for hash-based sync
                 # This replaces the old "request if empty" logic with intelligent sync
                 monitor = self.conversation_monitors.get(group.group_id)
-                local_hash = monitor.compute_history_hash() if monitor and hasattr(monitor, "compute_history_hash") else "sha256:empty"
-                local_count = len(monitor.message_history) if monitor else 0
+                if monitor and hasattr(monitor, "compute_history_hash"):
+                    local_hash = monitor.compute_history_hash()
+                    local_count = len(monitor.message_history)
+                else:
+                    local_count, local_hash = ConversationMonitor.peek_group_history_stats(group.group_id)
 
                 try:
                     await self.p2p_manager.send_message_to_peer(peer_id, {

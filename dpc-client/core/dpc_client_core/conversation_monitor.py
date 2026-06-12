@@ -2130,24 +2130,20 @@ PARTICIPANTS' CULTURAL CONTEXTS:
         settings["last_modified"] = datetime.now(timezone.utc).isoformat()
         return self._save_conversation_settings(settings)
 
-    def compute_history_hash(self) -> str:
-        """Compute SHA256 hash of current message history.
+    @staticmethod
+    def history_hash_for(messages: List[Dict[str, Any]]) -> str:
+        """SHA256 hash of a message list (MSG-CHAIN-aware).
 
-        Uses last chain_hash if available (MSG-CHAIN integration with P2P sync).
-        Falls back to sorted ID+timestamp hash for backward compatibility.
-
-        Returns:
-            Hash string like "sha256:abc123..." or "sha256:empty" if no messages
+        Uses the last chain_hash if present, else a sorted ID+timestamp hash.
+        Single source of truth so disk peeks and loaded monitors agree.
         """
-        if not self.message_history:
+        if not messages:
             return "sha256:empty"
-
-        last_chain = self.message_history[-1].get("chain_hash")
+        last_chain = messages[-1].get("chain_hash")
         if last_chain:
             return f"sha256:{last_chain[:16]}"
-
         sorted_msgs = sorted(
-            self.message_history,
+            messages,
             key=lambda m: (m.get("timestamp", ""), m.get("id", ""))
         )
         data = "|".join(
@@ -2155,6 +2151,42 @@ PARTICIPANTS' CULTURAL CONTEXTS:
             for m in sorted_msgs
         )
         return "sha256:" + hashlib.sha256(data.encode()).hexdigest()[:16]
+
+    def compute_history_hash(self) -> str:
+        """Compute SHA256 hash of current message history.
+
+        Returns:
+            Hash string like "sha256:abc123..." or "sha256:empty" if no messages
+        """
+        return ConversationMonitor.history_hash_for(self.message_history)
+
+    @staticmethod
+    def peek_group_history_stats(conversation_id: str) -> tuple:
+        """Read (message_count, history_hash) for a group straight from disk.
+
+        Used by the on-connect GROUP_HISTORY_STATUS exchange so a node advertises
+        its real history even when the group's monitor has not been loaded into
+        memory yet (chat not opened this session). Read-only: resolves the slugged
+        conversation dir without migrating or mutating state.
+        """
+        base = Path.home() / ".dpc" / "conversations"
+        target = base / conversation_id
+        if not (target / "history.json").exists() and base.exists():
+            prefix = conversation_id + "-"
+            for d in base.iterdir():
+                if d.is_dir() and d.name.startswith(prefix) and (d / "history.json").exists():
+                    target = d
+                    break
+        path = target / "history.json"
+        if not path.exists():
+            return (0, "sha256:empty")
+        try:
+            with open(path, encoding="utf-8") as f:
+                data = json.load(f)
+            messages = data.get("messages", []) if isinstance(data, dict) else []
+            return (len(messages), ConversationMonitor.history_hash_for(messages))
+        except (json.JSONDecodeError, OSError):
+            return (0, "sha256:empty")
 
     def save_history(self) -> bool:
         """Persist message history to disk

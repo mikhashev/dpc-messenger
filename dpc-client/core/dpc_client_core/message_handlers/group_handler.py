@@ -5,7 +5,7 @@ import time
 from typing import Dict, Any, Optional
 from datetime import datetime, timezone
 from . import MessageHandler
-from ..conversation_monitor import Message as ConvMessage
+from ..conversation_monitor import Message as ConvMessage, ConversationMonitor
 
 
 class GroupCreateHandler(MessageHandler):
@@ -430,8 +430,10 @@ class GroupHistoryRequestHandler(MessageHandler):
             sender_node_id[:20], group_id
         )
 
-        # Get conversation monitor for this group
+        # Get conversation monitor for this group; load from disk if not in memory
         monitor = self.service.conversation_monitors.get(group_id)
+        if not monitor:
+            monitor = self.service._get_or_create_conversation_monitor(group_id)
         if not monitor:
             self.logger.debug("No conversation history for group %s", group_id)
             return None
@@ -530,9 +532,12 @@ class GroupHistoryStatusHandler(MessageHandler):
         # Get local monitor
         monitor = self.service.conversation_monitors.get(group_id)
 
-        # Compute local hash
-        local_hash = monitor.compute_history_hash() if monitor and hasattr(monitor, "compute_history_hash") else "sha256:empty"
-        local_count = len(monitor.message_history) if monitor else 0
+        # Compute local hash (peek disk when the monitor is not loaded this session)
+        if monitor and hasattr(monitor, "compute_history_hash"):
+            local_hash = monitor.compute_history_hash()
+            local_count = len(monitor.message_history)
+        else:
+            local_count, local_hash = ConversationMonitor.peek_group_history_stats(group_id)
 
         # Reply only to the initiating STATUS (not to replies), to prevent infinite ping-pong.
         # A sends STATUS → B replies once with is_reply=True → A does NOT reply again.
@@ -547,8 +552,8 @@ class GroupHistoryStatusHandler(MessageHandler):
                 }
             })
 
-        # If hashes differ and peer has more messages, request history
-        if remote_hash != local_hash and remote_count > local_count:
+        # Hash mismatch → request sync (bidirectional; covers equal-count divergence)
+        if remote_hash != local_hash:
             self.logger.info(
                 "Requesting history sync for group %s (local: %d, remote: %d)",
                 group_id, local_count, remote_count
