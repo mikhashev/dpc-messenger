@@ -72,6 +72,7 @@ ALLOWED_COMMANDS: frozenset = frozenset({
     "save_firewall_rules",
     "list_all_tools",
     "get_cc_config",
+    "set_cc_display_name",
     # AI queries
     "execute_ai_query",
     # Conversation history
