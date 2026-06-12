@@ -1234,6 +1234,14 @@ class DpcAgentManager:
         history_tokens = usage.get("tokens_used", 0)
         tokens_after_last_response = monitor._tokens_after_last_response
         tokens_after_last_response_at = monitor._tokens_after_last_response_at
+        if conversation_id.startswith("group-") and self.agent_id and self.service:
+            try:
+                own = self.service.get_group_agent_context(conversation_id, self.agent_id)
+            except Exception:
+                own = None
+            if own and own[0] > (tokens_after_last_response or 0):
+                tokens_after_last_response = own[0]
+                tokens_after_last_response_at = own[2]
         context_breakdown = None
         agent = self._last_used_agent
         if agent and hasattr(agent, '_last_cap_info') and agent._last_cap_info:

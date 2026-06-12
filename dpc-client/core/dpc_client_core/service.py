@@ -4609,6 +4609,9 @@ class CoreService:
         agents[agent_id] = (prompt_tokens, token_limit,
                             datetime.now(timezone.utc).isoformat())
 
+    def get_group_agent_context(self, group_id: str, agent_id: str) -> Optional[tuple]:
+        return self._group_agent_context.get(group_id, {}).get(agent_id)
+
     def _worst_group_agent_context(self, group_id: str) -> Optional[tuple]:
         agents = self._group_agent_context.get(group_id)
         if not agents:

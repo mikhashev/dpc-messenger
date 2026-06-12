@@ -1,0 +1,68 @@
+"""GROUP-GUARD-REAL-COUNT-BLIND: get_session_state must feed the agent's own
+last real prompt count from the service group map for group conversations,
+because the agent-side monitor reloads group history.json before every invoke
+and the on-disk token_stats are zero by design (display-only counter)."""
+
+from dpc_client_core.managers.agent_manager import DpcAgentManager
+
+
+class FakeMonitor:
+    def __init__(self, tokens_after=0, at=None):
+        self._tokens_after_last_response = tokens_after
+        self._tokens_after_last_response_at = at
+        self.message_history = []
+
+    def get_token_usage(self):
+        return {"token_limit": 204800, "tokens_used": 5000}
+
+
+class FakeService:
+    def __init__(self, value=None):
+        self._value = value
+        self.calls = []
+
+    def get_group_agent_context(self, group_id, agent_id):
+        self.calls.append((group_id, agent_id))
+        return self._value
+
+
+def make_manager(conversation_id, monitor, service):
+    mgr = DpcAgentManager.__new__(DpcAgentManager)
+    mgr._agent_monitors = {conversation_id: monitor}
+    mgr.config = {}
+    mgr.agent_id = "agent_001"
+    mgr.service = service
+    mgr._last_used_agent = None
+    return mgr
+
+
+def test_group_uses_own_real_count_from_service_map():
+    service = FakeService(value=(194827, 204800, "2026-06-12T11:04:47Z"))
+    mgr = make_manager("group-abc", FakeMonitor(tokens_after=0), service)
+    state = mgr.get_session_state("group-abc")
+    assert state["tokens_after_last_response"] == 194827
+    assert state["tokens_after_last_response_at"] == "2026-06-12T11:04:47Z"
+    assert service.calls == [("group-abc", "agent_001")]
+
+
+def test_group_keeps_monitor_value_when_map_empty():
+    service = FakeService(value=None)
+    mgr = make_manager("group-abc", FakeMonitor(tokens_after=0), service)
+    state = mgr.get_session_state("group-abc")
+    assert state["tokens_after_last_response"] == 0
+
+
+def test_group_keeps_larger_monitor_value():
+    service = FakeService(value=(100, 204800, "old"))
+    mgr = make_manager("group-abc", FakeMonitor(tokens_after=150000, at="fresh"), service)
+    state = mgr.get_session_state("group-abc")
+    assert state["tokens_after_last_response"] == 150000
+    assert state["tokens_after_last_response_at"] == "fresh"
+
+
+def test_non_group_does_not_consult_map():
+    service = FakeService(value=(194827, 204800, "ts"))
+    mgr = make_manager("agent_001", FakeMonitor(tokens_after=42), service)
+    state = mgr.get_session_state("agent_001")
+    assert state["tokens_after_last_response"] == 42
+    assert service.calls == []
