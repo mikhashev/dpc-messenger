@@ -1928,6 +1928,21 @@ class CoreService:
         """Delegated to VoiceService."""
         return self.voice_service._provider_supports_voice(provider)
 
+    def build_p2p_provider_info(self, alias: str, provider: Any) -> Dict[str, Any]:
+        """Single source for the provider dict sent to peers in PROVIDERS_RESPONSE.
+
+        context_window is None when the model is unknown locally, so peers can
+        distinguish "unknown" from a real window size.
+        """
+        return {
+            "alias": alias,
+            "model": provider.model,
+            "type": provider.config.get("type", "unknown"),
+            "supports_vision": provider.supports_vision(),
+            "supports_voice": self._provider_supports_voice(provider),
+            "context_window": self.llm_manager.lookup_context_window(provider.model),
+        }
+
     async def set_voice_provider(self, provider_alias: str) -> Dict[str, Any]:
         """Delegated to VoiceService."""
         return await self.voice_service.set_voice_provider(provider_alias)
@@ -5904,15 +5919,8 @@ class CoreService:
                     all_models = []
 
                     for alias, provider in self.llm_manager.providers.items():
-                        model = provider.model
-                        provider_type = provider.config.get("type", "unknown")
-
-                        all_providers.append({
-                            "alias": alias,
-                            "model": model,
-                            "type": provider_type
-                        })
-                        all_models.append(model)
+                        all_providers.append(self.build_p2p_provider_info(alias, provider))
+                        all_models.append(provider.model)
 
                     logger.debug("Found %d total providers", len(all_providers))
 

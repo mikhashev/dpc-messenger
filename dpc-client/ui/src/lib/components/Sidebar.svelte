@@ -14,7 +14,7 @@
   let modelConfigSleepProvider = $state('');
   let modelConfigSnapshotProvider = $state('');
   let modelConfigSnapshotThreshold = $state<number>(8000);
-  let modelConfigProvidersList = $state<{alias: string, model: string, type: string}[]>([]);
+  let modelConfigProvidersList = $state<{alias: string, model: string, type: string, is_remote?: boolean, peer_id?: string}[]>([]);
   let modelConfigSaving = $state(false);
   let modelConfigRetrievalVector = $state<'native' | 'grafeo'>('native');
   let modelConfigRetrievalText = $state<'native' | 'grafeo'>('native');
@@ -150,6 +150,12 @@
     telegramUnifiedConversation = false;
     linkErrorMessage = '';
     linkingAgentId = '';
+  }
+
+  function providerOptionLabel(p: {alias: string, model: string, is_remote?: boolean, peer_id?: string}): string {
+    if (!p.is_remote) return `${p.alias} (${p.model})`;
+    const peerName = nodeStatus?.peer_info?.find(pi => pi.node_id === p.peer_id)?.name || p.peer_id?.slice(0, 20) || 'peer';
+    return `${p.alias} (${p.model}) @ ${peerName}`;
   }
 
   // Handle model config badge click
@@ -831,7 +837,7 @@
         <label for="main-llm" class="dialog-label">Agent Main LLM:</label>
         <select id="main-llm" class="dialog-input" bind:value={modelConfigProviderAlias}>
           {#each modelConfigProvidersList as p}
-            <option value={p.alias}>{p.alias} ({p.model})</option>
+            <option value={p.alias} disabled={p.is_remote}>{providerOptionLabel(p)}</option>
           {/each}
         </select>
         <p class="dialog-hint">Primary language model used for agent conversations.</p>
@@ -840,7 +846,7 @@
         <select id="sleep-llm" class="dialog-input" bind:value={modelConfigSleepProvider}>
           <option value="">Default (global)</option>
           {#each modelConfigProvidersList as p}
-            <option value={p.alias}>{p.alias} ({p.model})</option>
+            <option value={p.alias} disabled={p.is_remote}>{providerOptionLabel(p)}</option>
           {/each}
         </select>
         <p class="dialog-hint">Model used for sleep consolidation analysis. "Default" uses the global provider.</p>
@@ -849,7 +855,7 @@
         <select id="snapshot-llm" class="dialog-input" bind:value={modelConfigSnapshotProvider}>
           <option value="">Default (global)</option>
           {#each modelConfigProvidersList as p}
-            <option value={p.alias}>{p.alias} ({p.model})</option>
+            <option value={p.alias} disabled={p.is_remote}>{providerOptionLabel(p)}</option>
           {/each}
         </select>
         <p class="dialog-hint">Model used to extract task-relevant parts from oversized browser snapshots (accessibility-tree). Falls back to line-based truncation when not set or the call fails.</p>

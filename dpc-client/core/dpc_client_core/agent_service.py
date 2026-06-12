@@ -145,6 +145,9 @@ class AgentService:
             extras = {}
             if compute_host:
                 extras["compute_host"] = compute_host
+                peer_cw = self._peer_provider_context_window(compute_host, provider_alias)
+                if peer_cw:
+                    extras["context_window"] = peer_cw
             if retrieval_vector:
                 extras["retrieval_vector"] = retrieval_vector
             if retrieval_text:
@@ -735,6 +738,20 @@ class AgentService:
 
     # --- Utility Methods ---
 
+    def _peer_provider_context_window(self, compute_host: str, provider_alias: str) -> Optional[int]:
+        """Context window of a peer's provider from the peer_metadata cache, if known."""
+        peer_providers = self.peer_metadata.get(compute_host, {}).get("providers", [])
+        for p in peer_providers:
+            if p.get("alias") == provider_alias:
+                cw = p.get("context_window")
+                if cw:
+                    try:
+                        return int(cw)
+                    except (ValueError, TypeError):
+                        return None
+                return None
+        return None
+
     def _resolve_agent_token_limit(self, agent_id: str) -> int:
         """Resolve the context window for an agent using its stored config.
 
@@ -786,6 +803,13 @@ class AgentService:
                 return {"status": "error", "message": f"Agent not found: {agent_id}"}
             config = load_agent_config(agent_id)
             providers_data = await providers_getter()
+            providers_list = list(providers_data.get("providers", []))
+            for peer_id, meta in self.peer_metadata.items():
+                for p in meta.get("providers", []):
+                    entry = dict(p)
+                    entry["is_remote"] = True
+                    entry["peer_id"] = peer_id
+                    providers_list.append(entry)
             return {
                 "status": "ok",
                 "agent_id": agent_id,
@@ -795,8 +819,9 @@ class AgentService:
                 "snapshot_summarize_threshold": config.get("snapshot_summarize_threshold"),
                 "retrieval_vector": config.get("retrieval_vector", "native"),
                 "retrieval_text": config.get("retrieval_text", "native"),
-                "providers": providers_data.get("providers", []),
+                "providers": providers_list,
                 "default_provider": providers_data.get("default_provider", ""),
+                "compute_host": config.get("compute_host", ""),
             }
         except Exception as e:
             logger.error("get_agent_model_config failed: %s", e, exc_info=True)

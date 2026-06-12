@@ -318,16 +318,10 @@ class P2PCoordinator:
                 logger.error("Error sending providers response to %s: %s", peer_id, e, exc_info=True)
             return
 
-        all_providers = []
-        for alias, provider in self.service.llm_manager.providers.items():
-            model = provider.model
-            provider_type = provider.config.get("type", "unknown")
-            provider_info = {
-                "alias": alias, "model": model, "type": provider_type,
-                "supports_vision": provider.supports_vision(),
-                "supports_voice": self.service._provider_supports_voice(provider)
-            }
-            all_providers.append(provider_info)
+        all_providers = [
+            self.service.build_p2p_provider_info(alias, provider)
+            for alias, provider in self.service.llm_manager.providers.items()
+        ]
 
         filtered_providers = []
         for provider_info in all_providers:

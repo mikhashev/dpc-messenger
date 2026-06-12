@@ -491,20 +491,15 @@ class LLMManager:
         """
         return self.token_count_manager.count_tokens(text, model)
 
-    def get_context_window(self, model: str) -> int:
+    def lookup_context_window(self, model: str) -> Optional[int]:
         """
-        Get the context window size for a given model.
+        Strict context window lookup: returns None when the model is unknown
+        (no provider config override and no MODEL_CONTEXT_WINDOWS match),
+        so callers can distinguish "unknown" from a real window size.
 
         Priority:
         1. Check provider config (providers.toml) for context_window field
-        2. Check hardcoded MODEL_CONTEXT_WINDOWS dict
-        3. Return default if not found
-
-        Args:
-            model: The model name (e.g., "gpt-4", "llama3.1:8b")
-
-        Returns:
-            Context window size in tokens
+        2. Check hardcoded MODEL_CONTEXT_WINDOWS dict (exact, then partial match)
         """
         # Phase 6: Check provider config first (providers.toml can override)
         for alias, provider in self.providers.items():
@@ -527,7 +522,27 @@ class LLMManager:
             if known_model in model or model in known_model:
                 return window_size
 
-        # Return default
+        return None
+
+    def get_context_window(self, model: str) -> int:
+        """
+        Get the context window size for a given model.
+
+        Priority:
+        1. Check provider config (providers.toml) for context_window field
+        2. Check hardcoded MODEL_CONTEXT_WINDOWS dict
+        3. Return default if not found
+
+        Args:
+            model: The model name (e.g., "gpt-4", "llama3.1:8b")
+
+        Returns:
+            Context window size in tokens
+        """
+        window = self.lookup_context_window(model)
+        if window is not None:
+            return window
+
         logger.warning("Context window size unknown for model '%s' - using default: %d",
                       model, MODEL_CONTEXT_WINDOWS['default'])
         return MODEL_CONTEXT_WINDOWS["default"]
