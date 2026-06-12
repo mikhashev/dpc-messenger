@@ -18,6 +18,9 @@
   let modelConfigSaving = $state(false);
   let modelConfigRetrievalVector = $state<'native' | 'grafeo'>('native');
   let modelConfigRetrievalText = $state<'native' | 'grafeo'>('native');
+  let mainConfigPeerId = $derived(
+    modelConfigProvidersList.find(p => p.alias === modelConfigProviderAlias && p.is_remote)?.peer_id || ''
+  );
 
   // All available agent event types (mirrors EVENT_EMOJIS in agent_telegram_bridge.py)
   const ALL_EVENT_TYPES: { key: string; label: string }[] = [
@@ -837,7 +840,7 @@
         <label for="main-llm" class="dialog-label">Agent Main LLM:</label>
         <select id="main-llm" class="dialog-input" bind:value={modelConfigProviderAlias}>
           {#each modelConfigProvidersList as p}
-            <option value={p.alias} disabled={p.is_remote}>{providerOptionLabel(p)}</option>
+            <option value={p.alias}>{providerOptionLabel(p)}</option>
           {/each}
         </select>
         <p class="dialog-hint">Primary language model used for agent conversations.</p>
@@ -846,19 +849,19 @@
         <select id="sleep-llm" class="dialog-input" bind:value={modelConfigSleepProvider}>
           <option value="">Default (global)</option>
           {#each modelConfigProvidersList as p}
-            <option value={p.alias} disabled={p.is_remote}>{providerOptionLabel(p)}</option>
+            <option value={p.alias} disabled={p.is_remote && p.peer_id !== mainConfigPeerId}>{providerOptionLabel(p)}</option>
           {/each}
         </select>
-        <p class="dialog-hint">Model used for sleep consolidation analysis. "Default" uses the global provider.</p>
+        <p class="dialog-hint">Model used for sleep consolidation analysis. "Default" uses the global provider. Remote (peer) models are selectable only when the Main LLM runs on that same peer.</p>
 
         <label for="snapshot-llm" class="dialog-label">Snapshot summarization LLM:</label>
         <select id="snapshot-llm" class="dialog-input" bind:value={modelConfigSnapshotProvider}>
           <option value="">Default (global)</option>
           {#each modelConfigProvidersList as p}
-            <option value={p.alias} disabled={p.is_remote}>{providerOptionLabel(p)}</option>
+            <option value={p.alias} disabled={p.is_remote && p.peer_id !== mainConfigPeerId}>{providerOptionLabel(p)}</option>
           {/each}
         </select>
-        <p class="dialog-hint">Model used to extract task-relevant parts from oversized browser snapshots (accessibility-tree). Falls back to line-based truncation when not set or the call fails.</p>
+        <p class="dialog-hint">Model used to extract task-relevant parts from oversized browser snapshots (accessibility-tree). Falls back to line-based truncation when not set or the call fails. Remote (peer) models are selectable only when the Main LLM runs on that same peer.</p>
 
         <label for="snapshot-threshold" class="dialog-label">Snapshot summarization threshold (chars):</label>
         <input

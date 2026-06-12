@@ -848,6 +848,21 @@ class AgentService:
             if provider_alias is not None:
                 config["provider_alias"] = provider_alias
                 registry.update_agent(agent_id, {"provider_alias": provider_alias})
+                resolved_peer = None
+                for peer_id, meta in self.peer_metadata.items():
+                    if any(p.get("alias") == provider_alias for p in meta.get("providers", [])):
+                        resolved_peer = peer_id
+                        break
+                if resolved_peer:
+                    config["compute_host"] = resolved_peer
+                    cw = self._peer_provider_context_window(resolved_peer, provider_alias)
+                    if cw:
+                        config["context_window"] = cw
+                    registry.update_agent(agent_id, {"compute_host": resolved_peer})
+                else:
+                    config["compute_host"] = ""
+                    config.pop("context_window", None)
+                    registry.update_agent(agent_id, {"compute_host": ""})
             if sleep_provider_alias is not None:
                 config["sleep_provider_alias"] = sleep_provider_alias
             if snapshot_summarize_provider is not None:
