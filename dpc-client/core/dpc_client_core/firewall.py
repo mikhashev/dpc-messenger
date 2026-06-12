@@ -181,8 +181,8 @@ class ContextFirewall:
 
         dpc_agent = self.rules.get('dpc_agent', {})
         self.dpc_agent_enabled = dpc_agent.get('enabled', True)
-        self.dpc_agent_personal_context_access = dpc_agent.get('personal_context_access', True)
-        self.dpc_agent_device_context_access = dpc_agent.get('device_context_access', True)
+        self.dpc_agent_personal_context_access = dpc_agent.get('personal_context_access', False)
+        self.dpc_agent_device_context_access = dpc_agent.get('device_context_access', False)
         self.dpc_agent_human_knowledge_access = dpc_agent.get('human_knowledge_access', True)
 
         # Parse tool permissions from config — defaults come from the
@@ -673,8 +673,8 @@ class ContextFirewall:
             # Create with safe defaults
             self.rules['agent_profiles'][profile_name] = {
                 'enabled': True,
-                'personal_context_access': True,
-                'device_context_access': True,
+                'personal_context_access': False,
+                'device_context_access': False,
                 'human_knowledge_access': True,
                 'tools': {
                     'read_file': True,
@@ -817,8 +817,8 @@ class ContextFirewall:
                 "dpc_agent": {
                     "_comment": "DPC Agent permissions - Control what the embedded AI agent can access. Tools dict is populated automatically from the ToolEntry registry on first load (see _seed_missing_tools_into_rules) — single source of truth is ToolEntry.default_enabled per registration.",
                     "enabled": True,
-                    "personal_context_access": True,
-                    "device_context_access": True,
+                    "personal_context_access": False,
+                    "device_context_access": False,
                     "human_knowledge_access": True,
                     "tools": {}
                 },
