@@ -152,11 +152,10 @@ class TestGroupManagerDelete:
 
     def test_delete_removes_file(self, manager):
         group = manager.create_group("Test", "", [])
-        # v0.21.0: Files now stored in conversations/{group_id}/metadata.json
-        group_file = manager.conversations_dir / group.group_id / "metadata.json"
-        assert group_file.exists()
+        conv_dir = manager._get_conversation_dir(group.group_id)
+        assert (conv_dir / "metadata.json").exists()
         manager.delete_group(group.group_id, "dpc-node-self-abc")
-        assert not group_file.exists()
+        assert not conv_dir.exists()
 
 
 class TestGroupManagerLeave:
@@ -170,11 +169,10 @@ class TestGroupManagerLeave:
 
     def test_leave_removes_file(self, manager):
         group = manager.create_group("Test", "", [])
-        # v0.21.0: Files now stored in conversations/{group_id}/metadata.json
-        group_file = manager.conversations_dir / group.group_id / "metadata.json"
-        assert group_file.exists()
+        conv_dir = manager._get_conversation_dir(group.group_id)
+        assert (conv_dir / "metadata.json").exists()
         manager.leave_group(group.group_id)
-        assert not group_file.exists()
+        assert not conv_dir.exists()
 
 
 class TestGroupManagerPersistence:
@@ -257,6 +255,13 @@ class TestGroupManagerSync:
         group = manager.create_group("Doomed", "", [])
         manager.handle_group_deleted(group.group_id)
         assert manager.get_group(group.group_id) is None
+
+    def test_handle_group_deleted_removes_file(self, manager):
+        group = manager.create_group("Doomed", "", [])
+        conv_dir = manager._get_conversation_dir(group.group_id)
+        assert (conv_dir / "metadata.json").exists()
+        manager.handle_group_deleted(group.group_id)
+        assert not conv_dir.exists()
 
     def test_handle_group_deleted_nonexistent(self, manager):
         # Should not raise

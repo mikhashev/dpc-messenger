@@ -446,8 +446,8 @@ class GroupManager:
             )
             return False
 
-        del self._groups[group_id]
         self._delete_group_file(group_id)
+        del self._groups[group_id]
 
         # v0.20.0: Add to deleted registry for offline member sync
         self.mark_group_deleted(group_id, requester_node_id)
@@ -469,8 +469,8 @@ class GroupManager:
         if self.node_id in group.members:
             group.members.remove(self.node_id)
 
-        del self._groups[group_id]
         self._delete_group_file(group_id)
+        del self._groups[group_id]
         logger.info("Left group %s", group_id)
         return True
 
@@ -517,8 +517,8 @@ class GroupManager:
             if not deleted_by:
                 deleted_by = self._groups[group_id].created_by
 
-            del self._groups[group_id]
             self._delete_group_file(group_id)
+            del self._groups[group_id]
 
             # v0.20.0: Add to deleted registry
             if deleted_by:
