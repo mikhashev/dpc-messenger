@@ -90,6 +90,7 @@
         newMap.delete(deleted.group_id);
         return newMap;
       });
+      groupDeleted.set(null);
     }
   });
 
@@ -102,6 +103,7 @@
       if (group) {
         onAgentToast(`${memberName} left "${group.name}"`, 'info');
       }
+      groupMemberLeft.set(null);
     }
   });
 
