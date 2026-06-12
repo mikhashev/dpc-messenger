@@ -1249,10 +1249,10 @@ class DpcAgentManager:
 
         return {
             "history_tokens": history_tokens,
-            "history_usage_percent": round(history_tokens / token_limit, 4) if token_limit else 0,
+            "history_usage_percent": round(history_tokens / token_limit * 100, 2) if token_limit else 0,
             "tokens_after_last_response": tokens_after_last_response,
             "tokens_after_last_response_at": tokens_after_last_response_at,
-            "context_usage_percent": round(tokens_after_last_response / token_limit, 4) if token_limit and tokens_after_last_response else 0,
+            "context_usage_percent": round(tokens_after_last_response / token_limit * 100, 2) if token_limit and tokens_after_last_response else 0,
             "tokens_limit": token_limit,
             "messages_count": len(monitor.message_history),
             "context_breakdown": context_breakdown,

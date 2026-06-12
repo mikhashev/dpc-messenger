@@ -66,3 +66,43 @@ def test_non_group_does_not_consult_map():
     state = mgr.get_session_state("agent_001")
     assert state["tokens_after_last_response"] == 42
     assert service.calls == []
+
+
+def test_usage_percent_is_percent_not_ratio():
+    service = FakeService(value=None)
+    mgr = make_manager("agent_001", FakeMonitor(tokens_after=194827), service)
+    state = mgr.get_session_state("agent_001")
+    assert state["context_usage_percent"] == 95.13
+    assert state["history_usage_percent"] == 2.44
+
+
+def test_runtime_section_renders_context_breakdown(tmp_path):
+    from dpc_client_core.dpc_agent.context import _build_runtime_section
+
+    breakdown = [
+        {"name": "system_prompt", "tokens": 12000},
+        {"name": "Scratchpad", "tokens": 25000},
+        {"name": "Active Recall (EXT/backlog.md)", "tokens": 30000},
+    ]
+    text = _build_runtime_section(
+        tmp_path, {"id": "t1", "type": "chat"},
+        session_state={
+            "tokens_limit": 204800,
+            "history_tokens": 5000,
+            "tokens_after_last_response": 100000,
+            "context_breakdown": breakdown,
+        },
+    )
+    assert "context_breakdown" in text
+    assert "Active Recall (EXT/backlog.md)" in text
+    assert "25000" in text
+
+
+def test_runtime_section_without_breakdown(tmp_path):
+    from dpc_client_core.dpc_agent.context import _build_runtime_section
+
+    text = _build_runtime_section(
+        tmp_path, {"id": "t1", "type": "chat"},
+        session_state={"tokens_limit": 204800, "history_tokens": 5000},
+    )
+    assert "context_breakdown" not in text

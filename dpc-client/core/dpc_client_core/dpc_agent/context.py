@@ -152,6 +152,9 @@ def _build_runtime_section(
             "tokens_after_last_response_at": tokens_after_last_response_at,
             "context_usage_percent": session_state.get("context_usage_percent", 0),
         }
+        breakdown = session_state.get("context_breakdown")
+        if breakdown:
+            runtime_data["session"]["context_breakdown"] = breakdown
 
     return "## Runtime context\n\n" + json.dumps(runtime_data, ensure_ascii=False, indent=2)
 
@@ -760,11 +763,19 @@ Your runtime context includes session metrics:
 - `tokens_after_last_response` — full context size measured AFTER your previous response (system + memory + tools + history)
 - `tokens_after_last_response_at` — ISO 8601 timestamp of when `tokens_after_last_response` was measured
 - `context_usage_percent` — how full your context window is (based on `tokens_after_last_response`)
+- `context_breakdown` — per-section composition of your previous request's context: section name + estimated tokens (system prompt, scratchpad, identity, knowledge index, skills, tool capabilities, Active Recall with its file list). Token values are rough estimates — read the proportions, not the absolutes.
 
 **Thresholds:**
 - >65%: Start wrapping up open threads, save important insights
 - >85%: Warn the user. Propose knowledge extraction and new session
 - >95%: Strongly recommend immediate session reset
+
+**Context composition awareness:** if `context_breakdown` shows a bloated
+section or Active Recall pulling files irrelevant to the current session,
+flag it to the user and propose a dedicated cleaning session. Never clean
+scratchpad, knowledge or identity autonomously based on this data — cleaning
+is a joint activity with the user (and other agents) in a session dedicated
+to it.
 
 Note: `tokens_after_last_response` is ONE REQUEST STALE by design — it is the
 measurement taken at the end of your previous LLM call, not a live counter for
