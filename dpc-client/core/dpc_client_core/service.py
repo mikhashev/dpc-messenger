@@ -4939,6 +4939,10 @@ class CoreService:
         updated = self.group_manager.update_topic(group_id, topic)
         if not updated:
             return {"status": "error", "message": "Failed to update topic"}
+        await self._broadcast_to_group(group_id, {
+            "command": "GROUP_SYNC",
+            "payload": updated.to_dict()
+        })
         await self.local_api.broadcast_event("group_updated", {
             "group_id": group_id, "topic": topic,
         })

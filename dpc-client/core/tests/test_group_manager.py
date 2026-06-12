@@ -266,3 +266,90 @@ class TestGroupManagerSync:
     def test_handle_group_deleted_nonexistent(self, manager):
         # Should not raise
         manager.handle_group_deleted("group-nope")
+
+
+class TestGroupSyncTieBreak:
+    def _two_diverged_managers(self, tmp_path):
+        home_a = tmp_path / "node_a"
+        home_b = tmp_path / "node_b"
+        home_a.mkdir()
+        home_b.mkdir()
+        manager_a = GroupManager(home_a, node_id="dpc-node-aaaa")
+        manager_b = GroupManager(home_b, node_id="dpc-node-bbbb")
+
+        base = GroupMetadata(
+            group_id="group-tie123",
+            name="Tie Group",
+            created_by="dpc-node-aaaa",
+            created_at="2026-06-12T10:00:00Z",
+            members=["dpc-node-aaaa", "dpc-node-bbbb"],
+            version=3,
+        )
+        copy_a = GroupMetadata.from_dict(base.to_dict())
+        copy_a.topic = "topic from A"
+        copy_b = GroupMetadata.from_dict(base.to_dict())
+        copy_b.agents = {"dpc-node-bbbb": ["agent_001"]}
+
+        manager_a._groups[copy_a.group_id] = copy_a
+        manager_a._save_group(copy_a.group_id)
+        manager_b._groups[copy_b.group_id] = copy_b
+        manager_b._save_group(copy_b.group_id)
+        return manager_a, manager_b, copy_a, copy_b
+
+    def test_equal_version_identical_content_is_noop(self, manager):
+        group = manager.create_group("Same", "", [])
+        result = manager.apply_sync(group.to_dict())
+        assert result is None
+        assert manager.get_group(group.group_id).version == group.version
+
+    def test_equal_version_divergent_content_exactly_one_side_accepts(self, tmp_path):
+        manager_a, manager_b, copy_a, copy_b = self._two_diverged_managers(tmp_path)
+
+        result_on_a = manager_a.apply_sync(copy_b.to_dict())
+        result_on_b = manager_b.apply_sync(copy_a.to_dict())
+
+        accepted = [r for r in (result_on_a, result_on_b) if r is not None]
+        assert len(accepted) == 1
+        assert accepted[0].version == 4
+
+    def test_tie_break_converges_after_second_sync(self, tmp_path):
+        manager_a, manager_b, copy_a, copy_b = self._two_diverged_managers(tmp_path)
+
+        manager_a.apply_sync(copy_b.to_dict())
+        manager_b.apply_sync(copy_a.to_dict())
+
+        # Second sync round: each side sends its current copy to the other
+        manager_a.apply_sync(manager_b.get_group("group-tie123").to_dict())
+        manager_b.apply_sync(manager_a.get_group("group-tie123").to_dict())
+
+        final_a = manager_a.get_group("group-tie123")
+        final_b = manager_b.get_group("group-tie123")
+        assert final_a.version == final_b.version == 4
+        assert GroupManager._content_hash(final_a) == GroupManager._content_hash(final_b)
+
+    def test_strictly_higher_version_still_wins(self, manager):
+        group = manager.create_group("Normal", "", [])
+        remote = group.to_dict()
+        remote["version"] = group.version + 1
+        remote["topic"] = "newer"
+        result = manager.apply_sync(remote)
+        assert result is not None
+        assert result.topic == "newer"
+
+
+class TestUpdateTopicVersioning:
+    def test_update_topic_bumps_version(self, manager):
+        group = manager.create_group("Topical", "", [])
+        v_before = group.version
+        updated = manager.update_topic(group.group_id, "new topic")
+        assert updated.version == v_before + 1
+        assert updated.topic == "new topic"
+
+    def test_update_topic_persists_version(self, manager, tmp_dpc_home):
+        group = manager.create_group("Topical", "", [])
+        manager.update_topic(group.group_id, "new topic")
+        reloaded = GroupManager(tmp_dpc_home, node_id="dpc-node-self-abc")
+        reloaded.load_from_disk()
+        loaded = reloaded.get_group(group.group_id)
+        assert loaded.topic == "new topic"
+        assert loaded.version == group.version
