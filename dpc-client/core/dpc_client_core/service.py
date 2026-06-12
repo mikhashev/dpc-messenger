@@ -3990,6 +3990,8 @@ class CoreService:
                         with open(history_path, encoding="utf-8") as f:
                             data = _json.load(f)
                         messages = data.get("messages", [])
+                        for msg in messages:
+                            msg.setdefault("message_id", msg.get("id"))
                         logger.info("Loaded %d messages from disk for %s", len(messages), conversation_id)
                         token_stats = data.get("token_stats", {})
                         history_tokens = sum(len(msg.get("content", "") or "") for msg in messages) // 4
@@ -4025,6 +4027,7 @@ class CoreService:
                         for msg in messages:
                             msg.setdefault("sender_type", "human")
                             msg.setdefault("agent_owner", None)
+                            msg.setdefault("message_id", msg.get("id"))
                         history_tokens = sum(len(msg.get("content", "") or "") for msg in messages) // 4
                         token_limit = 0
                         if hasattr(self, 'llm_manager') and self.llm_manager:
