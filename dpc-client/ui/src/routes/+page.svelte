@@ -922,7 +922,7 @@
       onLinkAgentTelegram={handleLinkAgentTelegram}
       onUnlinkAgentTelegram={handleUnlinkAgentTelegram}
       onGetAgentModelConfig={async (agentId) => await sendCommand('get_agent_model_config', { agent_id: agentId })}
-      onSaveAgentModelConfig={async (agentId, config) => { await sendCommand('save_agent_model_config', { agent_id: agentId, ...config }); const r = await listAgents(); if (r?.status === 'success' && r.agents) agentsList.set(r.agents); if (config.provider_alias) aiChats.update(m => { const e = m.get(agentId); if (e) { e.llm_provider = config.provider_alias; } return new Map(m); }); }}
+      onSaveAgentModelConfig={async (agentId, config) => { const res = await sendCommand('save_agent_model_config', { agent_id: agentId, ...config }); const r = await listAgents(); if (r?.status === 'success' && r.agents) agentsList.set(r.agents); if (config.provider_alias) aiChats.update(m => { const e = m.get(agentId); if (e) { e.llm_provider = config.provider_alias; } return new Map(m); }); if (config.provider_alias && res?.context_window) { tokenUsageMap = new Map(tokenUsageMap); const cur = tokenUsageMap.get(agentId); tokenUsageMap.set(agentId, { ...cur, used: cur?.used ?? 0, limit: Number(res.context_window) }); } }}
     />
 
 

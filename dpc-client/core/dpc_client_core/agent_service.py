@@ -827,6 +827,19 @@ class AgentService:
             logger.error("get_agent_model_config failed: %s", e, exc_info=True)
             return {"status": "error", "message": str(e)}
 
+    async def _refresh_live_agent_manager(self, agent_id: str, config: Dict[str, Any]) -> Optional[int]:
+        """Push an updated config into the running agent manager (if any) so a model switch takes effect (1:1 + group counters) without a backend restart; returns the resolved context window."""
+        try:
+            dpc_provider = self.llm_manager.providers.get("dpc_agent") if self.llm_manager else None
+            managers = getattr(dpc_provider, "_managers", {}) if dpc_provider else {}
+            manager = managers.get(agent_id)
+            if manager is None:
+                return None
+            return await manager.apply_model_config_live(config)
+        except Exception as e:
+            logger.warning("Live agent manager refresh failed for %s: %s", agent_id, e)
+            return None
+
     async def save_agent_model_config(
         self, agent_id: str,
         provider_alias: str = None,
@@ -874,6 +887,7 @@ class AgentService:
             if retrieval_text is not None:
                 config["retrieval_text"] = retrieval_text
             save_agent_config(agent_id, config)
+            context_window = await self._refresh_live_agent_manager(agent_id, config)
             providers_data = await providers_getter() if providers_getter else {"providers": [], "default_provider": ""}
             return {
                 "status": "ok",
@@ -884,6 +898,7 @@ class AgentService:
                 "snapshot_summarize_threshold": config.get("snapshot_summarize_threshold"),
                 "retrieval_vector": config.get("retrieval_vector", "native"),
                 "retrieval_text": config.get("retrieval_text", "native"),
+                "context_window": context_window,
                 "providers": providers_data.get("providers", []),
                 "default_provider": providers_data.get("default_provider", ""),
             }

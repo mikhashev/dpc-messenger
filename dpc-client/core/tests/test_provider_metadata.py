@@ -4,11 +4,12 @@ peer context_window resolution (REMOTE-AGENT-CONTEXT-WINDOW)."""
 
 import asyncio
 from types import SimpleNamespace
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch, MagicMock, AsyncMock
 
 from dpc_client_core.llm_manager import LLMManager, MODEL_CONTEXT_WINDOWS
 from dpc_client_core.service import CoreService
 from dpc_client_core.agent_service import AgentService
+from dpc_client_core.managers.agent_manager import DpcAgentManager
 
 
 def _llm_manager_with(providers: dict) -> LLMManager:
@@ -113,6 +114,7 @@ class TestSaveAgentModelConfigComputeHost:
         stub._peer_provider_context_window = (
             lambda host, alias: AgentService._peer_provider_context_window(stub, host, alias)
         )
+        stub._refresh_live_agent_manager = AsyncMock(return_value=None)
         saved = {}
         reg = MagicMock()
         reg.get_agent.return_value = {"id": "agent_x"}
@@ -156,3 +158,101 @@ class TestSaveAgentModelConfigComputeHost:
         )
         assert saved["compute_host"] == ""
         assert "context_window" not in saved
+
+
+class FakeMonitor:
+    def __init__(self):
+        self.limit = None
+
+    def set_token_limit(self, n):
+        self.limit = n
+
+
+class _FakeAgent:
+    def __init__(self):
+        self.provider_alias = "unset"
+
+    def set_provider_alias(self, alias):
+        self.provider_alias = alias
+
+
+class TestResolveAndApplyModelConfig:
+    def _manager(self, config, providers):
+        mgr = object.__new__(DpcAgentManager)
+        mgr.config = dict(config)
+        mgr.service = SimpleNamespace(llm_manager=_llm_manager_with(providers), peer_metadata={})
+        mgr._agent_monitors = {}
+        mgr._agent = None
+        return mgr
+
+    def test_resolve_uses_provider_override(self):
+        mgr = self._manager(
+            {"provider_alias": "glm52"},
+            {"glm52": FakeProvider("glm-5.2", ptype="zai", context_window=1000000)},
+        )
+        assert mgr._resolve_context_window() == 1000000
+
+    def test_resolve_stored_window_wins(self):
+        mgr = self._manager(
+            {"provider_alias": "glm52", "context_window": 524288},
+            {"glm52": FakeProvider("glm-5.2", context_window=1000000)},
+        )
+        assert mgr._resolve_context_window() == 524288
+
+    def test_apply_model_config_refreshes_live_monitors(self):
+        mgr = self._manager(
+            {"provider_alias": "old"},
+            {
+                "old": FakeProvider("glm-5.1", context_window=204800),
+                "new": FakeProvider("glm-5.2", context_window=1000000),
+            },
+        )
+        stale = FakeMonitor()
+        stale.set_token_limit(204800)
+        mgr._agent_monitors["agent_001"] = stale
+        window = mgr.apply_model_config({"provider_alias": "new"})
+        assert window == 1000000
+        assert stale.limit == 1000000
+        assert mgr.config["provider_alias"] == "new"
+
+    def test_apply_model_config_live_refreshes_group_overlay(self):
+        mgr = object.__new__(DpcAgentManager)
+        mgr.config = {"provider_alias": "old"}
+        mgr.agent_id = "agent_001"
+        mgr._agent_monitors = {}
+        mgr._agent = None
+        broadcasts = []
+
+        async def _broadcast(gid):
+            broadcasts.append(gid)
+
+        mgr.service = SimpleNamespace(
+            llm_manager=_llm_manager_with({"new": FakeProvider("glm-5.2", context_window=1000000)}),
+            peer_metadata={},
+            _group_agent_context={"group-1": {"agent_001": (50000, 204800, "ts", "Ark")}},
+            broadcast_group_token_usage=_broadcast,
+        )
+        window = asyncio.run(mgr.apply_model_config_live({"provider_alias": "new"}))
+        assert window == 1000000
+        assert mgr.service._group_agent_context["group-1"]["agent_001"][1] == 1000000
+        assert broadcasts == ["group-1"]
+
+    def test_apply_model_config_refreshes_agent_provider(self):
+        mgr = self._manager(
+            {"provider_alias": "old"},
+            {"new": FakeProvider("glm-5.2", context_window=1000000)},
+        )
+        agent = _FakeAgent()
+        mgr._agent = agent
+        mgr.apply_model_config({"provider_alias": "new"})
+        assert agent.provider_alias == "new"
+
+
+def test_adapter_set_provider_alias_resets_cached_model():
+    from dpc_client_core.dpc_agent.llm_adapter import DpcLlmAdapter
+    adapter = object.__new__(DpcLlmAdapter)
+    adapter._provider_alias = "old"
+    adapter._default_model = "cached-glm-5.1"
+    adapter.set_provider_alias("glm-5.2[1m]")
+    assert adapter._provider_alias == "glm-5.2[1m]"
+    assert adapter._default_model is None

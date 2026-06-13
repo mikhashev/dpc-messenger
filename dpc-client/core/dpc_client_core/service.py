@@ -4638,6 +4638,26 @@ class CoreService:
                             datetime.now(timezone.utc).isoformat(),
                             display_name or agent_id)
 
+    async def broadcast_group_token_usage(self, group_id: str) -> None:
+        """Recompute the worst-agent group counter and push it to the UI (used after a live model switch)."""
+        worst = self._worst_group_agent_context(group_id)
+        if not worst:
+            return
+        tokens_after_last_response, token_limit, tokens_after_last_response_at = worst[:3]
+        context_agent = worst[3] if len(worst) > 3 else ""
+        monitor = self.knowledge_service._get_or_create_conversation_monitor(group_id)
+        history_tokens = sum(len(m.get("content", "") or "") for m in monitor.get_message_history()) // 4
+        await self.local_api.broadcast_event("token_usage_updated", {
+            "conversation_id": group_id,
+            "tokens_used": max(history_tokens, tokens_after_last_response),
+            "token_limit": token_limit,
+            "history_tokens": history_tokens,
+            "tokens_after_last_response": tokens_after_last_response,
+            "tokens_after_last_response_at": tokens_after_last_response_at,
+            "context_agent": context_agent,
+            "context_agents": self._group_agent_context_list(group_id),
+        })
+
     def get_group_agent_context(self, group_id: str, agent_id: str) -> Optional[tuple]:
         return self._group_agent_context.get(group_id, {}).get(agent_id)
 

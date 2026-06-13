@@ -167,6 +167,11 @@ class DpcAgent:
 
         log.info(f"DpcAgent initialized with storage at {self.agent_root}")
 
+    def set_provider_alias(self, provider_alias: Optional[str]) -> None:
+        """Switch this agent's inference provider at runtime (Main LLM change) without recreating the agent, so the task processor, memory and Telegram bridge stay intact."""
+        self._provider_alias = provider_alias
+        self.llm.set_provider_alias(provider_alias)
+
     async def process(
         self,
         message: str,

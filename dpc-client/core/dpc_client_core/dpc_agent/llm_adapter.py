@@ -58,6 +58,11 @@ class DpcLlmAdapter:
         if self._token_counter is None:
             log.warning("TokenCountManager not available - using character estimation")
 
+    def set_provider_alias(self, provider_alias: Optional[str]) -> None:
+        """Update the per-agent provider override at runtime (Main LLM switch) and drop the cached model so the next call re-resolves."""
+        self._provider_alias = provider_alias
+        self._default_model = None
+
     def _get_agent_provider_alias(self) -> Optional[str]:
         """
         Get the provider alias to use for agent inference.
