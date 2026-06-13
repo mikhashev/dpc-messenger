@@ -6,7 +6,7 @@ This guide explains how to configure, test, and use the embedded autonomous AI a
 
 The embedded agent is a self-modifying AI agent adapted from the [Ouroboros project](https://github.com/razzant/ouroboros), integrated directly into DPC Messenger's codebase. It provides:
 
-- **Tools**: File operations, web search, memory management, git, task scheduling, skill execution
+- **Tools**: File operations, web fetch & search, browser automation (Camoufox), shell commands (guarded), memory & knowledge, git, ComfyUI, session archives, task scheduling, skill execution
 - **Sleep Consolidation**: Analyzes past sessions, prepares morning briefs (ADR-014)
 - **Persistent Memory**: Scratchpad, identity, and knowledge base
 - **Self-Modification**: Can modify files within its sandbox (`~/.dpc/agents/{id}/`)
@@ -373,53 +373,72 @@ The agent registry tracks all created agents in `~/.dpc/agents/_registry.json`:
 
 ### Core Tools (Always Available)
 
-| Tool | Description | Safe |
+| Tool | Description | Default |
 |------|-------------|------|
-| `read_file` | Read files in sandbox | ✅ |
+| `read_file` | Read files in sandbox (or firewall-allowed paths) | ✅ |
 | `list_dir` | List files in sandbox | ✅ |
+| `write_file` | Write a file in sandbox (writes under `knowledge/` trigger metadata indexing) | ✅ |
+| `repo_delete` | Delete a file in sandbox | ⛔ opt-in |
 | `update_scratchpad` | Update working memory | ✅ |
 | `update_identity` | Update self-understanding | ✅ |
-| `browse_page` | Fetch and parse web pages | ✅ |
-| `search_web` | DuckDuckGo search | ✅ |
-| `self_review` | Content quality analysis | ✅ |
-| `request_critique` | Devil's advocate analysis | ✅ |
+| `get_dpc_context` | Get DPC personal/device context | ⛔ opt-in |
+| `chat_history` | Read the current conversation history | ✅ |
 
-### Browser Tools
+> `get_dpc_context` has `default_enabled=True` on its registration, but the firewall removes it from an agent's allowed set unless `personal_context_access` is granted (default-deny since S204). Net default: **disabled**. Same pattern: `import_skill_from_agent` requires `accept_peer_skills`.
 
-| Tool | Description |
-|------|-------------|
-| `browse_page` | Fetch web page, extract as markdown (trafilatura) |
-| `fetch_json` | Fetch JSON from API endpoints |
-| `check_url` | Check URL accessibility |
-| `search_web` | Multi-engine search via ddgs |
+### Web Fetch Tools
 
-### Review Tools
+| Tool | Description | Default |
+|------|-------------|---------|
+| `browse_page` | Fetch a web page, extract readable content as markdown (trafilatura); optional `use_auth` path drives a headed Camoufox session for logged-in pages | ✅ |
+| `fetch_json` | Fetch JSON from an API endpoint | ✅ |
+| `check_url` | Check URL accessibility | ✅ |
+| `search_web` | Multi-engine web search (ddgs) | ✅ |
 
-| Tool | Description |
-|------|-------------|
-| `self_review` | Self-review content for quality |
-| `request_critique` | Critical devil's advocate analysis |
-| `compare_approaches` | Compare multiple approaches |
-| `quality_checklist` | Generate quality checklist |
-| `consensus_check` | Check for consensus among responses |
+### Browser Automation Tools (ADR-029, Camoufox)
+
+Interactive headed/headless browser driven via Camoufox + Playwright. Disabled by default (least privilege) — enable per agent in the firewall.
+
+| Tool | Description | Default |
+|------|-------------|---------|
+| `browser_snapshot` | Accessibility-tree snapshot of the page with element refs | ⛔ opt-in |
+| `browser_navigate` | Navigate the stateful session to a URL | ⛔ opt-in |
+| `browser_scroll` | Scroll the page / a scrollable container (real wheel events) | ⛔ opt-in |
+| `browser_click` | Click an element by ref or selector | ⛔ opt-in |
+| `browser_fill` | Fill an input field | ⛔ opt-in |
+| `browser_wait_for` | Wait for an element/condition | ⛔ opt-in |
+| `browser_extract` | Extract structured content from the page | ⛔ opt-in |
+| `browser_screenshot` | Capture a screenshot | ⛔ opt-in |
+| `browser_switch_tab` | Switch between open tabs | ⛔ opt-in |
+| `browser_collect` | Collect items from infinite-scroll / paginated lists | ⛔ opt-in |
+| `browser_close` | Close the browser session | ⛔ opt-in |
+
+### Shell Tool (ADR-030)
+
+| Tool | Description | Default |
+|------|-------------|---------|
+| `run_shell` | Run a shell command with 3-tier safety guardrails (Tier-0/2 blocklist, Tier-1 user approval + per-agent whitelist, cwd sandbox). Restricted to 1:1 chats by default. | ⛔ opt-in |
+
+### Web Auth Tools (ADR-028)
+
+| Tool | Description | Default |
+|------|-------------|---------|
+| `list_auth_domains` | List the per-agent domains with stored auth credentials (cookie vault, per-domain firewall gate) | ⛔ opt-in |
 
 ### Memory & Knowledge Tools
 
-| Tool | Description | Safe |
+| Tool | Description | Default |
 |------|-------------|------|
-| `update_scratchpad` | Update working memory | ✅ |
-| `update_identity` | Update self-understanding | ✅ |
 | `deduplicate_identity` | Remove duplicate sections from identity | ✅ |
-| `knowledge_read` | Read knowledge base files | ✅ |
-| `knowledge_write` | Write to knowledge base | ✅ |
 | `knowledge_list` | List knowledge topics | ✅ |
-| `extract_knowledge` | Extract knowledge from conversations | ✅ |
-| `execute_skill` | Load a skill strategy by name (Memento-Skills router) | ✅ |
-| `get_dpc_context` | Get DPC personal/device context | ✅ |
+| `memory_search` | Semantic + text search over the agent's memory index (Active Recall) | ✅ |
+| `get_task_board` | Read the agent's task board | ✅ |
+
+> Knowledge is read via `read_file` and written via `write_file` under `knowledge/` (which triggers metadata indexing) — there are no separate `knowledge_read`/`knowledge_write`/`extract_knowledge` tools.
 
 ### Task Scheduling Tools
 
-| Tool | Description | Safe |
+| Tool | Description | Default |
 |------|-------------|------|
 | `schedule_task` | Schedule a background task | ✅ |
 | `get_task_status` | Check task execution status | ✅ |
@@ -427,56 +446,82 @@ The agent registry tracks all created agents in `~/.dpc/agents/_registry.json`:
 | `list_task_types` | List available task types | ✅ |
 | `unregister_task_type` | Remove custom task type | ✅ |
 
-### Evolution Control Tools
-
-| Tool | Description | Safe |
-|------|-------------|------|
-
 ### Extended Sandbox Tools
 
-These tools access paths outside `~/.dpc/agent/` via firewall-controlled permissions:
+The Core file tools (`read_file`, `list_dir`, `write_file`) also operate on paths outside `~/.dpc/agents/<id>/` when those paths are granted via firewall-controlled extended-sandbox permissions. One tool inspects that configuration:
 
-| Tool | Description | Risk |
-|------|-------------|------|
-| `read_file` | Read from sandbox or firewall-allowed absolute paths | Medium |
-| `list_dir` | List sandbox or firewall-allowed absolute paths | Low |
-| `write_file` | Write to sandbox or firewall-allowed absolute paths | Medium |
-| `list_extended_sandbox_paths` | List configured extended paths | Low |
+| Tool | Description | Default |
+|------|-------------|---------|
+| `list_extended_sandbox_paths` | List the configured extended-sandbox paths | ✅ |
 
 ### Search Tools
 
-| Tool | Description | Safe |
+| Tool | Description | Default |
 |------|-------------|------|
 | `search_files` | Search for files by name pattern | ✅ |
 | `search_in_file` | Search content within files | ✅ |
 
 ### Messaging Tools
 
-| Tool | Description | Safe |
+| Tool | Description | Default |
 |------|-------------|------|
 | `send_user_message` | Send message to user via DPC | ✅ |
 
-### Git Tools (Restricted)
+### Git Tools
 
-| Tool | Description | Risk |
-|------|-------------|------|
-| `git_status` | Check git status | Low |
-| `git_diff` | View changes | Low |
-| `git_log` | View history | Low |
-| `git_branch` | List branches | Low |
-| `git_add` | Stage files | Medium |
-| `git_commit` | Create commit | Medium |
-| `git_init` | Initialize repo | Medium |
+Read-only git tools are safe-by-default; mutating ones are opt-in. All accept a `repo_path`.
 
-### Restricted Tools (Require Firewall Enablement)
+| Tool | Description | Default |
+|------|-------------|---------|
+| `git_status` | Show working tree status | ✅ |
+| `git_diff` | View changes | ✅ |
+| `git_log` | View commit history | ✅ |
+| `git_branch` | List branches | ✅ |
+| `git_add` | Stage files | ⛔ opt-in |
+| `git_commit` | Create a commit | ⛔ opt-in |
+| `git_init` | Initialize a repo | ⛔ opt-in |
+| `git_checkout` | Switch branch / checkout paths | ⛔ opt-in |
+| `git_merge` | Merge a branch | ⛔ opt-in |
+| `git_tag` | Create/list tags | ⛔ opt-in |
+| `git_reset` | Reset working tree / index | ⛔ opt-in |
+| `git_snapshot` | Snapshot current state (safety checkpoint) | ⛔ opt-in |
+| `git_push` | Push to a remote | ⛔ opt-in |
 
-These tools are restricted by default and must be explicitly enabled in the firewall:
+### ComfyUI Tools (Phase 1 Forge spike)
 
-| Tool | Description | Risk Level | Status |
-|------|-------------|------------|--------|
-| `git_add` | Stage git files | Medium | ✅ Implemented |
-| `git_commit` | Create git commits | Medium | ✅ Implemented |
-| `git_init` | Initialize git repo | Medium | ✅ Implemented |
+Agent-controlled image/video generation via a ComfyUI backend. Opt-in.
+
+| Tool | Description | Default |
+|------|-------------|---------|
+| `comfyui_submit` | Submit a workflow (filename + prompt) to the ComfyUI queue | ⛔ opt-in |
+| `comfyui_check` | Check a submitted job's status | ⛔ opt-in |
+| `comfyui_wait` | Wait for a job to finish (agent-controlled timeout) | ⛔ opt-in |
+| `comfyui_queue_status` | Read the ComfyUI queue status | ⛔ opt-in |
+| `comfyui_progress` | Stream job progress via WebSocket | ⛔ opt-in |
+| `comfyui_convert` | Convert a UI-format workflow to API format | ⛔ opt-in |
+
+### Session Archive Tools
+
+| Tool | Description | Default |
+|------|-------------|---------|
+| `read_session_archive` | Read an archived session summary | ✅ |
+| `read_session_detail` | Read a specific archived session's full detail | ✅ |
+| `search_session_archives` | Search across archived sessions | ✅ |
+
+### Skills & Agent Discovery Tools
+
+| Tool | Description | Default |
+|------|-------------|---------|
+| `execute_skill` | Load a skill strategy by name (Memento-Skills router) | ✅ |
+| `list_my_skills` | List the agent's own skills | ✅ |
+| `list_my_tools` | List the tools available to this agent | ✅ |
+| `list_local_agents` | List other agents on this node | ✅ |
+| `list_agent_skills` | List another agent's skills | ✅ |
+| `import_skill_from_agent` | Import a skill from another agent (firewall-gated) | ⛔ opt-in |
+
+### Tool Enablement (Firewall)
+
+The `Default` column above reflects each tool's `ToolEntry.default_enabled` (deny-by-default for anything that mutates state, runs commands, or egresses the network — TOOL-DEFAULT-DENY). The **authoritative, live source of truth** is the per-agent **Agent Permissions** panel in the UI, which renders directly from the tool registry (`list_all_tools` + merge-on-startup) — new tools appear there automatically. Toggle any `⛔ opt-in` tool on per agent there; this guide's tables are a human-readable snapshot and may lag the registry.
 
 ## Storage Structure
 

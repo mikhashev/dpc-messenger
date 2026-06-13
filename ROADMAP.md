@@ -1,6 +1,6 @@
 # D-PC Messenger Development Roadmap
 
-> **Status:** Alpha | **Last Updated:** May 2026 | **Current Version:** 0.26.0 | **Current Phase:** Phase 2 - Agent Maturity (Track 1 mostly complete, Track 2 in progress, Discord community live)
+> **Status:** Alpha | **Last Updated:** June 2026 | **Current Version:** 0.26.0 | **Current Phase:** Phase 2 - Agent Maturity (Track 1 mostly complete, Track 2 in progress, Discord community live)
 
 ---
 
@@ -10,7 +10,7 @@ D-PC Messenger development:
 
 1. **Phase 1: Federated MVP - COMPLETE (v0.8.0)** - Proven P2P messaging with AI collaboration
 2. **Phase 1.5: Extended Features - COMPLETE (v0.9.0 - v0.18.0)** - File transfer, voice, agent, resilient infrastructure
-3. **Phase 2: Team Collaboration + Agent Evolution** - Track 1 (Agent Maturity) mostly complete, Track 2 (Team Collaboration) planned
+3. **Phase 2: Team Collaboration + Agent Evolution** - Track 1 (Agent Maturity) mostly complete, Track 2 (Team Collaboration) in progress (multi-node P2P live)
 4. **Where This Leads** - Autonomous agents, network effects, local-first sovereignty
 
 ---
@@ -75,7 +75,7 @@ These features were developed organically as the product matured, significantly 
 
 ## Phase 2: Team Collaboration + Agent Evolution
 
-**Status:** Track 1 (Agent Maturity) mostly complete, Track 2 (Team Collaboration) planned
+**Status:** Track 1 (Agent Maturity) mostly complete, Track 2 (Team Collaboration) in progress (multi-node P2P live, S206)
 **Timeline:** Q1-Q3 2026
 **Scope:** Small teams (2-20 members + AIs), embedded agent system
 
@@ -93,7 +93,7 @@ North Star: Sleep consolidates session learnings → Memory system enables recal
 | **Decision Proposals Pipeline** | **DONE** (S57-S59) | Extraction triggers, JSONL storage, review_proposal + list_proposals tools |
 | **Morning Brief Pipeline** | **DONE** (S66-S69) | Startup posting, consumed tracking, UI reload on wakeup, Telegram delivery |
 | **Context Window Guard** | **DONE** (S69) | Blocks LLM call at 95% context, user-visible error |
-| **Agent Web Pipeline (ADR-016)** | **ADR Accepted** (S67) | ddgs multi-engine search + trafilatura extraction. Implementation pending |
+| **Agent Web Pipeline (ADR-016 → ADR-029)** | **DONE** (v0.26.0) | ddgs multi-engine search + trafilatura extraction; fully realized by ADR-029 Camoufox-only browser (11 `browser_*` tools, domain restriction, per-agent web-auth vault) |
 | **Per-Agent Permission Profiles** | **DONE** (S55-S60) | Inheritance model, per-agent firewall, UI panel |
 | **Agent Storage Isolation** | **DONE** | Per-conversation folders, per-agent managers |
 | **Agent Telegram Commands** | **DONE** (S69) | /sleep, /extract_knowledge, sleep notifications |
@@ -113,11 +113,18 @@ North Star: Sleep consolidates session learnings → Memory system enables recal
 - **Rate Limiting + Security (ARCH-26)** — security/ folder, THREAT-MODEL.md (S58)
 - **Protocol 13** (v1.13) — Human-AI team coordination (Mike=approve, CC=execute, Ark=review)
 - **External Agent Bridge** — CC ↔ DPC via cc_agent_bridge.py + cc_group_chat_bridge.py, cron monitoring, P13 coordination
-- **Group Chat** (v0.19.0) — Multi-participant with files, voice, knowledge commits. Phase 1 dogfooding complete (S88-S92). Phase 2 multi-node fixes (S97-S108): history sync, remote agent @mention, sender metadata, Discord bridge
+- **Group Chat** (v0.19.0 → v0.26.0) — Multi-participant with files, voice, knowledge commits. Phase 1 dogfooding complete (S88-S92). Phase 2 multi-node (S97-S206, **live-verified on two nodes S206**): cross-node history sync (hash-based bidirectional gate, disk-SSoT, `message_id` dedup), **ADR-031 per-reader role derivation** + single-writer history, `@all`/`@CC` mention routing, GROUP_SYNC content-hash tie-break + topic sync, delete-folder cleanup, per-group serialization lock, group Sleep button + morning briefs, token-counter agent attribution, peer-model selectable, default-deny agent context. See `docs/GROUP_CHAT.md`
 - **Discord Integration (ADR-025)** — Phase 1.5 done (S97-S107): discord_service.py, @mention routing, Iris agent (agent_007) created, system prompt, identity, Discord channel live
 - **Public Agent Guardrails (ADR-026)** — 7/7 tasks done (S106-S107): source-based tool filtering, rate limiting, output sanitization, URL whitelist, graceful fallback, TTL + context management, mention sanitization
 - **MSG-CHAIN Integrity** — Per-message hash chain (S105) + RSA content signing + chain-aware P2P sync (S108). Content hash + signature + signer_node_id on every message. Verification at merge
 - **Content-Aware Index Staleness** — Full content fingerprint in staleness hash (S108). Changed files trigger re-indexing even without rename
+- **Agent Browser — Camoufox-only (ADR-029)** — Replaced the Tauri WebView2 auth stack (~3700 LOC removed) with headed/headless Camoufox as the sole browser. 11 `browser_*` tools (a11y snapshot, navigate, click, fill, collect, screenshot, …), domain restriction via Playwright route handler, storage_state + vault hybrid cookie persistence, per-request headless auth gate. Pairs with **Agent Web Auth (ADR-028)** — per-agent encrypted credential vault, per-domain firewall gate
+- **Shell Guardrails (ADR-030)** — `run_shell` tool with 3-tier command classification, Tier-0/2 blocklist (Win/Linux/macOS), Tier-1 approval flow + per-agent whitelist, cwd sandbox enforcement, 92 unit tests
+- **Per-Reader Role Derivation (ADR-031)** — per-reader assistant/user role labels in the group LLM payload + single-writer group history + `message_id` dedup
+- **TOOL-DEFAULT-DENY** — deny-by-default for all non-read agent tools; `ToolEntry.default_enabled` as single source of truth + merge-on-startup seeding into the firewall
+- **Agent Transparency** — Drift-style collapsible tool calls (human-readable labels), full per-round reasoning, untruncated tool_calls in history, context-breakdown token tooltip, L1 agent interrupt (Stop button)
+- **ComfyUI / Forge Spike** — agent-controlled ComfyUI transport tools (submit/wait/convert/queue/progress), UI→API workflow conversion, MP4 + WebSocket progress (Phase 1 video spike)
+- **Incremental Memory Indexing** — per-file hash incremental indexing (no full rebuild), shared content-addressed embedding cache; `HF_HUB_OFFLINE` opt-in offline mode
 - **Agent Skills** — Static SKILL.md files. Reflection removed (S68). Rewrite planned (Track 1)
 - **Agent Progress Board** — Sleep state works. Evolution panel needs rework (shows removed system data)
 
@@ -126,7 +133,7 @@ North Star: Sleep consolidates session learnings → Memory system enables recal
 
 ### Track 2: Team Collaboration
 
-**Status:** Phase 1 dogfooding COMPLETE (S92). Group chat "DPC Project" (Mike + Ark + CC) functional — agent participation, @mention routing, persistence, history sync all working. Phase 2 (multi-node P2P) not started.
+**Status:** Phase 1 dogfooding COMPLETE (S92). Group chat "DPC Project" (Mike + Ark + CC) functional — agent participation, @mention routing, persistence, history sync all working. **Phase 2 (multi-node P2P) IN PROGRESS** — second node (Linux) live, cross-node group chat live-verified S206 (v0.26.0): history sync, GROUP_SYNC tie-break, remote agent @mention all confirmed across nodes.
 
 **Design decisions (S88):**
 - Trust boundary = node level (node = human + agents). No separate agent crypto identity needed.
@@ -201,6 +208,6 @@ See `git log` for complete version history.
 
 ---
 
-**Last Updated:** May 2026
+**Last Updated:** June 2026
 **Maintained By:** D-PC Messenger Core Team
 **License:** See [LICENSE.md](./LICENSE.md)
