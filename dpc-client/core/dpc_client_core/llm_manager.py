@@ -111,6 +111,13 @@ MODEL_CONTEXT_WINDOWS = {
     "glm-4-128-0414-128k": 131072,  # 128K explicit in name
     "autoglm-phone-multilingal": 32768,  # Conservative estimate
 
+    # GLM-5 series (standalone-API window unconfirmed; [1m] 1M variant is Coding-Plan-only.
+    # Conservative fallback — set context_window in providers.json to override per provider.)
+    "glm-5": 200000,
+    "glm-5.1": 204800,
+    "glm-5.2": 200000,
+    "glm-5-turbo": 200000,
+
     # Default fallback
     "default": 4096
 }
