@@ -16,6 +16,7 @@
     listAgentProfiles,
     sendCommand,
   } from '$lib/coreService';
+  import { confirmAsync } from '$lib/utils/dialog';
 
   // ---------------------------------------------------------------------------
   // Types
@@ -68,6 +69,8 @@
   let selectedAgentLLMProvider = $state('');
   let selectedDialogComputeHost = $state('local');
   let availableAgentProfiles = $state<string[]>(['default']);
+  let selectedRetrievalVector = $state<'native' | 'grafeo'>('native');
+  let selectedRetrievalText = $state<'native' | 'grafeo'>('native');
 
   // ---------------------------------------------------------------------------
   // Public API (called from +page.svelte via bind:this)
@@ -159,7 +162,9 @@
           'general',
           50.0, 200,
           selectedDialogComputeHost !== 'local' ? selectedDialogComputeHost : undefined,
-          llmProviderInfo?.context_window
+          llmProviderInfo?.context_window,
+          selectedRetrievalVector,
+          selectedRetrievalText,
         );
         if (result?.status === 'success') {
           console.log('[DPC Agent] Created agent storage:', result.agent_id);
@@ -211,38 +216,25 @@
     newAgentName = '';
     selectedAgentLLMProvider = '';
     selectedDialogComputeHost = 'local';
+    selectedRetrievalVector = 'native';
+    selectedRetrievalText = 'native';
   }
 
-  export async function handleDeleteAIChat(chatId: string, ask: any) {
+  export async function handleDeleteAIChat(chatId: string, _ask?: any) {
     if (chatId === 'local_ai') {
-      if (ask) {
-        await ask('Cannot delete the default Local AI chat.', { title: 'D-PC Messenger', kind: 'info' });
-      } else {
-        alert('Cannot delete the default Local AI chat.');
-      }
+      await confirmAsync('Cannot delete the default Local AI chat.', { kind: 'info' });
       return;
     }
 
-    let shouldDelete = false;
-    if (ask) {
-      if (chatId.startsWith('telegram-')) {
-        shouldDelete = await ask(
+    const shouldDelete = chatId.startsWith('telegram-')
+      ? await confirmAsync(
           'Delete this Telegram chat? This will remove the chat history and unlink the Telegram conversation. You can still receive new messages from this contact.',
           { title: 'Confirm Telegram Chat Deletion', kind: 'warning' }
-        );
-      } else {
-        shouldDelete = await ask(
+        )
+      : await confirmAsync(
           'Delete this AI chat? This will permanently remove the chat history.',
           { title: 'Confirm Deletion', kind: 'warning' }
         );
-      }
-    } else {
-      if (chatId.startsWith('telegram-')) {
-        shouldDelete = confirm('Delete this Telegram chat? This will remove the chat history and unlink the Telegram conversation. You can still receive new messages from this contact.');
-      } else {
-        shouldDelete = confirm('Delete this AI chat? This will permanently remove the chat history.');
-      }
-    }
 
     if (!shouldDelete) return;
 
@@ -326,6 +318,8 @@
     box-shadow: 0 8px 32px rgba(0, 0, 0, 0.2);
     max-width: 500px;
     width: 90%;
+    max-height: calc(100vh - 2rem);
+    overflow-y: auto;
   }
 
   .modal-content h2 {
@@ -480,6 +474,28 @@
           </select>
           <p class="dialog-hint" style="font-size: 0.85em; color: #888; margin-top: 4px;">
             Controls what tools and data this agent can access. Configure in Firewall → Agent Profiles.
+          </p>
+        </div>
+
+        <div class="dialog-provider-selector">
+          <label for="new-agent-retrieval-vector">Retrieval Vector Backend:</label>
+          <select id="new-agent-retrieval-vector" bind:value={selectedRetrievalVector}>
+            <option value="native">native (FAISS)</option>
+            <option value="grafeo">grafeo (HNSW)</option>
+          </select>
+          <p class="dialog-hint" style="font-size: 0.85em; color: #888; margin-top: 4px;">
+            Vector search backend for memory retrieval. Switching later requires backend restart and re-indexing.
+          </p>
+        </div>
+
+        <div class="dialog-provider-selector">
+          <label for="new-agent-retrieval-text">Retrieval Text Backend:</label>
+          <select id="new-agent-retrieval-text" bind:value={selectedRetrievalText}>
+            <option value="native">native (BM25)</option>
+            <option value="grafeo">grafeo (BM25)</option>
+          </select>
+          <p class="dialog-hint" style="font-size: 0.85em; color: #888; margin-top: 4px;">
+            Text/keyword search backend. native is the safe default; grafeo is opt-in.
           </p>
         </div>
       {:else}

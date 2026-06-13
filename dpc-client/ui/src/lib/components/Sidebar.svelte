@@ -12,8 +12,15 @@
   let modelConfigAgentId = $state('');
   let modelConfigProviderAlias = $state('');
   let modelConfigSleepProvider = $state('');
-  let modelConfigProvidersList = $state<{alias: string, model: string, type: string}[]>([]);
+  let modelConfigSnapshotProvider = $state('');
+  let modelConfigSnapshotThreshold = $state<number>(8000);
+  let modelConfigProvidersList = $state<{alias: string, model: string, type: string, is_remote?: boolean, peer_id?: string}[]>([]);
   let modelConfigSaving = $state(false);
+  let modelConfigRetrievalVector = $state<'native' | 'grafeo'>('native');
+  let modelConfigRetrievalText = $state<'native' | 'grafeo'>('native');
+  let mainConfigPeerId = $derived(
+    modelConfigProvidersList.find(p => p.alias === modelConfigProviderAlias && p.is_remote)?.peer_id || ''
+  );
 
   // All available agent event types (mirrors EVENT_EMOJIS in agent_telegram_bridge.py)
   const ALL_EVENT_TYPES: { key: string; label: string }[] = [
@@ -148,6 +155,12 @@
     linkingAgentId = '';
   }
 
+  function providerOptionLabel(p: {alias: string, model: string, is_remote?: boolean, peer_id?: string}): string {
+    if (!p.is_remote) return `${p.alias} (${p.model})`;
+    const peerName = nodeStatus?.peer_info?.find(pi => pi.node_id === p.peer_id)?.name || p.peer_id?.slice(0, 20) || 'peer';
+    return `${p.alias} (${p.model}) @ ${peerName}`;
+  }
+
   // Handle model config badge click
   async function handleModelConfig(agentId: string) {
     modelConfigAgentId = agentId;
@@ -156,7 +169,13 @@
       const result = await onGetAgentModelConfig(agentId);
       modelConfigProviderAlias = result.provider_alias || '';
       modelConfigSleepProvider = result.sleep_provider_alias || '';
+      modelConfigSnapshotProvider = result.snapshot_summarize_provider || '';
+      modelConfigSnapshotThreshold = Number(result.snapshot_summarize_threshold) > 0
+        ? Number(result.snapshot_summarize_threshold)
+        : 8000;
       modelConfigProvidersList = result.providers || [];
+      modelConfigRetrievalVector = (result.retrieval_vector === 'grafeo') ? 'grafeo' : 'native';
+      modelConfigRetrievalText = (result.retrieval_text === 'grafeo') ? 'grafeo' : 'native';
       showModelConfigPopup = true;
     } catch (error) {
       console.error('Failed to load agent model config:', error);
@@ -169,6 +188,12 @@
       await onSaveAgentModelConfig(modelConfigAgentId, {
         provider_alias: modelConfigProviderAlias,
         sleep_provider_alias: modelConfigSleepProvider || null,
+        snapshot_summarize_provider: modelConfigSnapshotProvider || null,
+        snapshot_summarize_threshold: Number(modelConfigSnapshotThreshold) > 0
+          ? Number(modelConfigSnapshotThreshold)
+          : null,
+        retrieval_vector: modelConfigRetrievalVector,
+        retrieval_text: modelConfigRetrievalText,
       });
       showModelConfigPopup = false;
     } catch (error) {
@@ -310,7 +335,7 @@
     }) => Promise<void>;
     onUnlinkAgentTelegram?: (agentId: string) => Promise<void>;
     onGetAgentModelConfig: (agentId: string) => Promise<any>;
-    onSaveAgentModelConfig: (agentId: string, config: { provider_alias: string; sleep_provider_alias: string | null }) => Promise<void>;
+    onSaveAgentModelConfig: (agentId: string, config: { provider_alias: string; sleep_provider_alias: string | null; snapshot_summarize_provider?: string | null; snapshot_summarize_threshold?: number | null; retrieval_vector?: 'native' | 'grafeo'; retrieval_text?: 'native' | 'grafeo' }) => Promise<void>;
   } = $props();
 </script>
 
@@ -613,10 +638,14 @@
                   if (onSelectAgent) {
                     onSelectAgent(agent.agent_id);
                   }
+                  onResetUnreadCount(agent.agent_id);
                 }}
                 title="{agent.name} (Profile: {agent.profile_name}, LLM: {agent.provider_alias})"
               >
                 <span class="agent-name">{agent.name}</span>
+                {#if (unreadMessageCounts.get(agent.agent_id) ?? 0) > 0}
+                  <span class="unread-badge">{unreadMessageCounts.get(agent.agent_id)}</span>
+                {/if}
                 <span
                   role="button"
                   tabindex="0"
@@ -811,7 +840,7 @@
         <label for="main-llm" class="dialog-label">Agent Main LLM:</label>
         <select id="main-llm" class="dialog-input" bind:value={modelConfigProviderAlias}>
           {#each modelConfigProvidersList as p}
-            <option value={p.alias}>{p.alias} ({p.model})</option>
+            <option value={p.alias}>{providerOptionLabel(p)}</option>
           {/each}
         </select>
         <p class="dialog-hint">Primary language model used for agent conversations.</p>
@@ -820,10 +849,46 @@
         <select id="sleep-llm" class="dialog-input" bind:value={modelConfigSleepProvider}>
           <option value="">Default (global)</option>
           {#each modelConfigProvidersList as p}
-            <option value={p.alias}>{p.alias} ({p.model})</option>
+            <option value={p.alias} disabled={p.is_remote && p.peer_id !== mainConfigPeerId}>{providerOptionLabel(p)}</option>
           {/each}
         </select>
-        <p class="dialog-hint">Model used for sleep consolidation analysis. "Default" uses the global provider.</p>
+        <p class="dialog-hint">Model used for sleep consolidation analysis. "Default" uses the global provider. Remote (peer) models are selectable only when the Main LLM runs on that same peer.</p>
+
+        <label for="snapshot-llm" class="dialog-label">Snapshot summarization LLM:</label>
+        <select id="snapshot-llm" class="dialog-input" bind:value={modelConfigSnapshotProvider}>
+          <option value="">Default (global)</option>
+          {#each modelConfigProvidersList as p}
+            <option value={p.alias} disabled={p.is_remote && p.peer_id !== mainConfigPeerId}>{providerOptionLabel(p)}</option>
+          {/each}
+        </select>
+        <p class="dialog-hint">Model used to extract task-relevant parts from oversized browser snapshots (accessibility-tree). Falls back to line-based truncation when not set or the call fails. Remote (peer) models are selectable only when the Main LLM runs on that same peer.</p>
+
+        <label for="snapshot-threshold" class="dialog-label">Snapshot summarization threshold (chars):</label>
+        <input
+          id="snapshot-threshold"
+          class="dialog-input"
+          type="number"
+          min="500"
+          step="500"
+          bind:value={modelConfigSnapshotThreshold}
+        />
+        <p class="dialog-hint">Snapshots larger than this character count are summarized (LLM if configured, else line-truncated). Default 8000.</p>
+
+        <hr class="dialog-divider">
+
+        <label for="retrieval-vector" class="dialog-label" title="Switching requires backend restart and re-indexing.">Retrieval Vector Backend:</label>
+        <select id="retrieval-vector" class="dialog-input" bind:value={modelConfigRetrievalVector}>
+          <option value="native">native (FAISS)</option>
+          <option value="grafeo">grafeo (HNSW)</option>
+        </select>
+        <p class="dialog-hint">Vector search backend for memory retrieval. Switching requires backend restart; old index files remain on disk and are not auto-deleted.</p>
+
+        <label for="retrieval-text" class="dialog-label" title="Switching requires backend restart and re-indexing.">Retrieval Text Backend:</label>
+        <select id="retrieval-text" class="dialog-input" bind:value={modelConfigRetrievalText}>
+          <option value="native">native (BM25)</option>
+          <option value="grafeo">grafeo (BM25)</option>
+        </select>
+        <p class="dialog-hint">Text/keyword search backend. native is the safe default; grafeo is opt-in (parity work in progress).</p>
       </div>
       <div class="dialog-actions">
         <button type="button" class="btn-cancel" onclick={() => showModelConfigPopup = false}>Cancel</button>
@@ -1831,6 +1896,9 @@
     border-radius: 8px;
     max-width: 680px;
     width: 100%;
+    max-height: calc(100vh - 2rem);
+    display: flex;
+    flex-direction: column;
     box-shadow: 0 4px 20px rgba(0, 0, 0, 0.15);
   }
 
@@ -1868,6 +1936,8 @@
 
   .dialog-content {
     padding: 1.5rem;
+    overflow-y: auto;
+    flex: 1 1 auto;
   }
 
   .dialog-info {

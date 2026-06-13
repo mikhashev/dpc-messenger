@@ -13,6 +13,7 @@ This manager bridges the embedded DpcAgent with DPC Messenger's CoreService.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import pathlib
@@ -58,6 +59,7 @@ class DpcAgentManager:
         self.agent_id = agent_id  # Store agent_id for per-agent configuration
         self._agent_display_name: str | None = None  # Cached display name from config.json
         self._stop_event = threading.Event()
+        self._interrupt_events: Dict[str, asyncio.Event] = {}
 
         # Get firewall reference from CoreService
         self.firewall = getattr(service, "firewall", None)
@@ -71,9 +73,13 @@ class DpcAgentManager:
         self._agents: Dict[str, DpcAgent] = {}
         # Default agent for backward compatibility
         self._agent: Optional[DpcAgent] = None
+        # Last agent that processed a message (for cap_info retrieval)
+        self._last_used_agent: Optional[DpcAgent] = None
 
         # Telegram bridge for notifications
         self._telegram_bridge = None
+
+        self._memory_indexes_initialized = False
 
         # Eagerly load display name from config.json
         self._agent_display_name = self._load_display_name()
@@ -140,10 +146,8 @@ class DpcAgentManager:
             raise RuntimeError("CoreService does not have llm_manager")
 
         # Build agent config
-        raw_budget = self.config.get("budget_usd", 500_000)
-        budget = raw_budget if raw_budget >= 1000 else 500_000
         agent_config = AgentConfig(
-            budget_usd=budget,
+            budget_usd=self.config.get("budget_usd"),
             max_rounds=self.config.get("max_rounds", 200),
             enable_task_queue=False,
             billing_model=self.config.get("billing_model", "subscription"),
@@ -194,10 +198,8 @@ class DpcAgentManager:
             else None
         )
 
-        raw_budget = self.config.get("budget_usd", 500_000)
-        budget = raw_budget if raw_budget >= 1000 else 500_000
         agent_config = AgentConfig(
-            budget_usd=budget,
+            budget_usd=self.config.get("budget_usd"),
             max_rounds=self.config.get("max_rounds", 200),
             enable_task_queue=self.config.get("enable_task_queue", True),
             billing_model=self.config.get("billing_model", "subscription"),
@@ -224,199 +226,14 @@ class DpcAgentManager:
             await self._agent.start_task_processor()
             log.info("Task processor started")
 
-        # Initialize memory system (ADR-010)
-        try:
-            from dpc_client_core.dpc_agent.memory_config import get_memory_config
-            from dpc_client_core.dpc_agent.model_download import notify_download_needed
-            _profile = self.firewall.get_agent_profile_settings(self.agent_id) if (self.firewall and self.agent_id) else {}
-            mem_cfg = get_memory_config(_profile or self.config)
-            if mem_cfg.enabled:
-                notification = notify_download_needed(mem_cfg.embedding_model)
-                if notification.get("needed"):
-                    log.info("Memory: embedding model not yet downloaded (%s)", mem_cfg.embedding_model)
-                    # MEM-3.9: notify UI about pending model download
-                    if hasattr(self.service, 'broadcast_event'):
-                        self.service.broadcast_event("memory_model_download_needed", notification)
-                # First-use full rebuild (MEM-3.7 spec)
-                import asyncio
-                agent_root = self._agent.agent_root if self._agent else None
-                if agent_root:
-                    from dpc_client_core.dpc_agent.memory import EmbeddingProvider
-                    _provider_ref = self._agent._embedding_provider if self._agent else None
-                    _actual_model = _provider_ref.model_name if _provider_ref else mem_cfg.embedding_model
-
-                    index_dir = agent_root / "state" / "memory_index"
-                    needs_full_rebuild = not (index_dir / "index_meta.json").exists()
-                    if not needs_full_rebuild:
-                        try:
-                            import json as _json
-                            _meta = _json.loads((index_dir / "index_meta.json").read_text(encoding="utf-8"))
-                            _stored_model = _meta.get("header", {}).get("model_name", "")
-                            if _stored_model != _actual_model:
-                                log.info("Memory index model changed (%s -> %s), forcing rebuild", _stored_model, _actual_model)
-                                needs_full_rebuild = True
-                        except Exception:
-                            needs_full_rebuild = True
-
-                    def _sync_index():
-                        """Runs in thread executor to avoid blocking the event loop."""
-                        try:
-                            import numpy as np
-                            import hashlib
-                            from pathlib import Path
-                            import os
-                            from dpc_client_core.dpc_agent.memory import get_embedding_provider
-                            from dpc_client_core.dpc_agent.faiss_index import FaissIndex
-                            from dpc_client_core.dpc_agent.bm25_index import BM25Index
-                            from dpc_client_core.dpc_agent.text_extract import extract_text
-                            from dpc_client_core.dpc_agent.indexing_pipeline import _extract_heading, _build_doc_text
-                            provider = _provider_ref or get_embedding_provider(model_name=_actual_model)
-                            faiss_idx = FaissIndex(index_dir, model_name=_actual_model, dimensions=provider.dimensions)
-                            bm25_idx = BM25Index(index_dir)
-
-                            count = 0
-                            l6_count = 0
-                            # Always rebuild L5 agent knowledge (not just on first init)
-                            from dpc_client_core.dpc_agent.indexing_pipeline import full_rebuild
-                            knowledge_dir = agent_root / "knowledge"
-                            count = full_rebuild(knowledge_dir, provider, faiss_idx, bm25_idx, stop_event=self._stop_event)
-
-                            # Collect all extra documents (L6 + EXT) then embed+index in bulk
-                            extra_texts = []
-                            extra_metas = []
-
-                            # L6: human knowledge (always re-index, not just on full rebuild)
-                            if self.firewall and self.firewall.can_agent_access_context('knowledge', profile_name=self.agent_id):
-                                l6_dir = Path(os.environ.get("DPC_HOME", Path.home() / ".dpc")) / "knowledge"
-                                if l6_dir.is_dir():
-                                    for f in sorted(l6_dir.iterdir()):
-                                        if f.suffix == ".md" and f.is_file():
-                                            text = extract_text(f)
-                                            if text:
-                                                heading = _extract_heading(text)
-                                                doc_text = _build_doc_text(f.name, heading, text)
-                                                extra_texts.append(doc_text)
-                                                extra_metas.append({"source_file": f.name, "heading": heading,
-                                                                    "source_layer": "L6", "char_count": len(text),
-                                                                    "text": text[:500]})
-                                                l6_count += 1
-                                    if l6_count:
-                                        log.info("L6 human knowledge collected: %d documents from %s", l6_count, l6_dir)
-
-                            # MEM-3.10: always re-index extended paths on startup
-                            ext_count = 0
-                            if self.firewall:
-                                try:
-                                    from dpc_client_core.dpc_agent.extended_paths_index import collect_extended_files, RECALL_EXTENSIONS
-                                    ext_paths = self.firewall.get_extended_paths(profile_name=self.agent_id) if hasattr(self.firewall, 'get_extended_paths') else {}
-                                    indexed_list = self.firewall._get_profile_or_global(self.agent_id, 'sandbox_extensions', 'indexed_paths', default=[]) if self.agent_id else []
-                                    excluded_dirs = self.firewall._get_profile_or_global(self.agent_id, 'sandbox_extensions', 'excluded_dirs', default=None) if self.agent_id else None
-                                    ext_files = collect_extended_files(ext_paths, indexed_paths=indexed_list, excluded_dirs=excluded_dirs, allowed_extensions=RECALL_EXTENSIONS) if indexed_list else []
-                                    if ext_files:
-                                        for f in ext_files:
-                                            text = extract_text(f)
-                                            if text:
-                                                heading = _extract_heading(text)
-                                                doc_text = _build_doc_text(f.name, heading, text)
-                                                extra_texts.append(doc_text)
-                                                extra_metas.append({"source_file": f.name, "heading": heading,
-                                                                    "source_layer": "EXT", "char_count": len(text),
-                                                                    "text": text[:500]})
-                                                ext_count += 1
-                                    elif indexed_list:
-                                        log.info("Extended paths: %d paths configured but 0 text files found", len(indexed_list))
-                                except Exception as e:
-                                    log.debug("Extended paths indexing skipped: %s", e)
-
-                            # Hash-based staleness check: skip re-embedding if sources AND content unchanged
-                            source_fingerprint = hashlib.sha256(
-                                "\n".join(sorted(m.get("source_file", "") for m in extra_metas)).encode()
-                            ).hexdigest()[:16]
-                            content_fingerprint = hashlib.sha256(
-                                "\n".join(extra_texts).encode()
-                            ).hexdigest()[:16]
-                            extra_hash = f"{l6_count}:{ext_count}:{source_fingerprint}:{content_fingerprint}"
-
-                            stored_extra_hash = ""
-                            meta_path = index_dir / "index_meta.json"
-                            if meta_path.exists() and not needs_full_rebuild:
-                                try:
-                                    import json as _json2
-                                    _stored = _json2.loads(meta_path.read_text(encoding="utf-8"))
-                                    stored_extra_hash = _stored.get("extra_hash", "")
-                                except Exception:
-                                    pass
-
-                            if stored_extra_hash == extra_hash and not needs_full_rebuild and extra_texts:
-                                faiss_idx.load()
-                                bm25_idx.load()
-                                log.info("Extra index unchanged (hash=%s), skipping re-embed of %d docs", extra_hash, len(extra_texts))
-                                extra_texts = []
-
-                            # Embed + index extra documents in batches
-                            BATCH_SIZE = 4
-                            if extra_texts:
-                                indexed = 0
-                                for batch_start in range(0, len(extra_texts), BATCH_SIZE):
-                                    if self._stop_event.is_set():
-                                        log.info("Extra indexing interrupted by shutdown at batch %d/%d", batch_start, len(extra_texts))
-                                        break
-                                    batch_texts = extra_texts[batch_start:batch_start + BATCH_SIZE]
-                                    batch_metas = extra_metas[batch_start:batch_start + BATCH_SIZE]
-                                    vectors = np.array(provider.embed_batch(batch_texts), dtype=np.float32)
-                                    for vec, meta in zip(vectors, batch_metas):
-                                        faiss_idx.add(vec.reshape(1, -1), [meta])
-                                        indexed += 1
-                                if not self._stop_event.is_set():
-                                    bm25_idx.add(extra_texts, extra_metas)
-                                    log.info("Bulk indexed %d extra documents (L6: %d, EXT: %d)", len(extra_texts), l6_count, ext_count)
-                                else:
-                                    log.info("Extra indexing interrupted by shutdown before BM25")
-
-                            if needs_full_rebuild or extra_texts:
-                                faiss_idx.save()
-                                bm25_idx.save()
-                                # Persist extra_hash for staleness detection on next startup
-                                try:
-                                    import json as _json3
-                                    _mp = index_dir / "index_meta.json"
-                                    _md = _json3.loads(_mp.read_text(encoding="utf-8")) if _mp.exists() else {}
-                                    _md["extra_hash"] = extra_hash
-                                    _mp.write_text(_json3.dumps(_md, ensure_ascii=False, indent=2), encoding="utf-8")
-                                except Exception as _e:
-                                    log.debug("Failed to save extra_hash: %s", _e)
-                            if needs_full_rebuild:
-                                total = count + l6_count + ext_count
-                                log.info("Memory index built: %d documents (L5: %d, L6: %d, EXT: %d)", total, count, l6_count, ext_count)
-                            elif ext_count > 0:
-                                log.info("Extended paths re-indexed on startup: %d documents", ext_count)
-                            # ADR-024: Build knowledge graph (nodes + structural edges)
-                            try:
-                                from dpc_client_core.dpc_agent.knowledge_graph import KnowledgeGraph
-                                _kg = KnowledgeGraph(agent_root)
-                                _kg.bulk_import_knowledge_files(knowledge_dir)
-                                if self.firewall and self.firewall.can_agent_access_context('knowledge', profile_name=self.agent_id):
-                                    _l6_dir = Path(os.environ.get("DPC_HOME", Path.home() / ".dpc")) / "knowledge"
-                                    _kg.bulk_import_knowledge_files(_l6_dir)
-                                _archive_dir = Path(os.environ.get("DPC_HOME", Path.home() / ".dpc")) / "conversations" / (self.agent_id or "agent_001") / "archive"
-                                _kg.extract_structural_edges(knowledge_dir, _archive_dir if _archive_dir.exists() else None)
-                                log.info("Knowledge graph built: %d nodes, %d edges", _kg.backend.node_count(), _kg.backend.edge_count())
-                            except Exception as e:
-                                log.warning("Knowledge graph build failed (non-fatal): %s", e)
-
-                        except Exception as e:
-                            log.warning("Background memory indexing failed: %s", e)
-
-                    if needs_full_rebuild or (self.firewall and self.firewall._get_profile_or_global(self.agent_id, 'sandbox_extensions', 'indexed_paths', default=[])):
-                        loop = asyncio.get_event_loop()
-                        loop.run_in_executor(None, _sync_index)
-                        if needs_full_rebuild:
-                            log.info("Memory: first-use index rebuild started in thread")
-                        else:
-                            log.info("Memory: extended paths re-index started in thread")
-                log.info("Memory system initialized (model=%s, active_recall=%s)", _actual_model, mem_cfg.active_recall)
-        except Exception as e:
-            log.warning("Memory system init skipped: %s", e)
+        if getattr(self.service, "skip_knowledge_index", False):
+            log.info(
+                "Memory init deferred for agent %s (--skip-knowledge-index); "
+                "first agent prompt will trigger lazy init",
+                self.agent_id or "singleton",
+            )
+        else:
+            await self._init_memory_indexes()
 
         # Initialize Telegram bridge for agent notifications
         await self._start_telegram_bridge()
@@ -446,6 +263,301 @@ class DpcAgentManager:
             log.debug("Morning brief startup check skipped: %s", e)
 
         log.info("DpcAgent started successfully")
+
+    async def _init_memory_indexes(self) -> None:
+        """Build FAISS/BM25/extended-paths/knowledge-graph indexes (ADR-010)."""
+        if self._memory_indexes_initialized:
+            return
+        try:
+            from dpc_client_core.dpc_agent.memory_config import get_memory_config
+            from dpc_client_core.dpc_agent.model_download import notify_download_needed
+            _profile = self.firewall.get_agent_profile_settings(self.agent_id) if (self.firewall and self.agent_id) else {}
+            mem_cfg = get_memory_config(_profile or self.config)
+            if mem_cfg.enabled:
+                notification = notify_download_needed(mem_cfg.embedding_model)
+                if notification.get("needed"):
+                    log.info("Memory: embedding model not yet downloaded (%s)", mem_cfg.embedding_model)
+                    # MEM-3.9: notify UI about pending model download
+                    if hasattr(self.service, 'broadcast_event'):
+                        self.service.broadcast_event("memory_model_download_needed", notification)
+                # First-use full rebuild (MEM-3.7 spec)
+                import asyncio
+                agent_root = self._agent.agent_root if self._agent else None
+                # Bind a default before the agent_root gate: the success log at
+                # the end of this block references _actual_model unconditionally,
+                # so a None agent_root must not leave it unbound (UnboundLocalError).
+                _actual_model = mem_cfg.embedding_model
+                if agent_root:
+                    from dpc_client_core.dpc_agent.memory import EmbeddingProvider
+                    _provider_ref = self._agent._embedding_provider if self._agent else None
+                    _actual_model = _provider_ref.model_name if _provider_ref else mem_cfg.embedding_model
+
+                    index_dir = agent_root / "state" / "memory_index"
+                    needs_full_rebuild = not (index_dir / "index_meta.json").exists()
+                    if not needs_full_rebuild:
+                        try:
+                            import json as _json
+                            _meta = _json.loads((index_dir / "index_meta.json").read_text(encoding="utf-8"))
+                            _stored_model = _meta.get("header", {}).get("model_name", "")
+                            if _stored_model != _actual_model:
+                                log.info("Memory index model changed (%s -> %s), forcing rebuild", _stored_model, _actual_model)
+                                needs_full_rebuild = True
+                            # Key format migration: pre-fix metas used basenames; new
+                            # format uses per-layer relative posix keys. Force rebuild
+                            # once when an older meta lacks the version marker.
+                            _stored_key_fmt = _meta.get("header", {}).get("key_format", "")
+                            if _stored_key_fmt != "layer_relative_posix_v1":
+                                log.info("Memory index key format outdated (%r), forcing rebuild", _stored_key_fmt)
+                                needs_full_rebuild = True
+                        except Exception:
+                            needs_full_rebuild = True
+
+                    def _sync_index():
+                        """Per-file hash incremental indexing in thread executor."""
+                        nonlocal needs_full_rebuild
+                        try:
+                            import numpy as np
+                            import hashlib
+                            import time
+                            from pathlib import Path
+                            import os
+                            from dpc_client_core.dpc_agent.memory import get_embedding_provider
+                            from dpc_client_core.dpc_agent.retrieval import (
+                                TextAddItem, VectorAddItem, make_backend_for_agent,
+                            )
+                            from dpc_client_core.dpc_agent.text_extract import extract_text, is_binary
+                            from dpc_client_core.dpc_agent.indexing_pipeline import (
+                                _extract_heading, _build_doc_text, _BACKFILL_SKIP, read_file_meta,
+                            )
+                            provider = _provider_ref or get_embedding_provider(model_name=_actual_model)
+                            backend = make_backend_for_agent(
+                                agent_root,
+                                model_name=_actual_model,
+                                dimensions=provider.dimensions,
+                            )
+
+                            knowledge_dir = agent_root / "knowledge"
+
+                            collected: list = []
+                            l5_count = l6_count = ext_count = 0
+
+                            if knowledge_dir.is_dir():
+                                for f in sorted(knowledge_dir.iterdir()):
+                                    if self._stop_event.is_set():
+                                        return
+                                    if not f.is_file() or f.name in _BACKFILL_SKIP or is_binary(f):
+                                        continue
+                                    text = extract_text(f)
+                                    if not text:
+                                        continue
+                                    heading = _extract_heading(text)
+                                    file_meta = read_file_meta(knowledge_dir, f.name)
+                                    key = f.relative_to(knowledge_dir).as_posix()
+                                    doc_text = _build_doc_text(key, heading, text)
+                                    collected.append((
+                                        key, doc_text,
+                                        {"source_file": key, "heading": heading,
+                                         "source_layer": file_meta.source_layer,
+                                         "char_count": len(text), "text": text[:500]},
+                                        "L5",
+                                    ))
+                                    l5_count += 1
+
+                            if self.firewall and self.firewall.can_agent_access_context('knowledge', profile_name=self.agent_id):
+                                l6_dir = Path(os.environ.get("DPC_HOME", Path.home() / ".dpc")) / "knowledge"
+                                if l6_dir.is_dir():
+                                    for f in sorted(l6_dir.iterdir()):
+                                        if self._stop_event.is_set():
+                                            return
+                                        if f.suffix != ".md" or not f.is_file():
+                                            continue
+                                        text = extract_text(f)
+                                        if not text:
+                                            continue
+                                        heading = _extract_heading(text)
+                                        key = f"L6/{f.relative_to(l6_dir).as_posix()}"
+                                        doc_text = _build_doc_text(key, heading, text)
+                                        collected.append((
+                                            key, doc_text,
+                                            {"source_file": key, "heading": heading,
+                                             "source_layer": "L6", "char_count": len(text),
+                                             "text": text[:500]},
+                                            "L6",
+                                        ))
+                                        l6_count += 1
+
+                            if self.firewall:
+                                try:
+                                    from dpc_client_core.dpc_agent.extended_paths_index import collect_extended_files, RECALL_EXTENSIONS
+                                    ext_paths = self.firewall.get_extended_paths(profile_name=self.agent_id) if hasattr(self.firewall, 'get_extended_paths') else {}
+                                    indexed_list = self.firewall._get_profile_or_global(self.agent_id, 'sandbox_extensions', 'indexed_paths', default=[]) if self.agent_id else []
+                                    excluded_dirs = self.firewall._get_profile_or_global(self.agent_id, 'sandbox_extensions', 'excluded_dirs', default=None) if self.agent_id else None
+                                    ext_files = collect_extended_files(ext_paths, indexed_paths=indexed_list, excluded_dirs=excluded_dirs, allowed_extensions=RECALL_EXTENSIONS) if indexed_list else []
+                                    indexed_path_objs = [Path(ip) for ip in indexed_list]
+                                    for f in ext_files:
+                                        if self._stop_event.is_set():
+                                            return
+                                        text = extract_text(f)
+                                        if not text:
+                                            continue
+                                        heading = _extract_heading(text)
+                                        # Find longest matching indexed_path so relative_to gives the
+                                        # shortest portable suffix. Fallback to bare name if no match
+                                        # (shouldn't happen — collect_extended_files only yields files
+                                        # inside indexed_paths — but defends against config drift).
+                                        rel = None
+                                        for ip in sorted(indexed_path_objs, key=lambda p: len(p.parts), reverse=True):
+                                            try:
+                                                rel = f.relative_to(ip).as_posix()
+                                                break
+                                            except ValueError:
+                                                continue
+                                        key = f"EXT/{rel}" if rel else f"EXT/{f.name}"
+                                        doc_text = _build_doc_text(key, heading, text)
+                                        collected.append((
+                                            key, doc_text,
+                                            {"source_file": key, "heading": heading,
+                                             "source_layer": "EXT", "char_count": len(text),
+                                             "text": text[:500]},
+                                            "EXT",
+                                        ))
+                                        ext_count += 1
+                                    if not ext_files and indexed_list:
+                                        log.info("Extended paths: %d paths configured but 0 text files found", len(indexed_list))
+                                except Exception as e:
+                                    log.debug("Extended paths indexing skipped: %s", e)
+
+                            import json as _json
+                            meta_path = index_dir / "index_meta.json"
+                            old_meta: dict = {}
+                            if meta_path.exists():
+                                try:
+                                    old_meta = _json.loads(meta_path.read_text(encoding="utf-8"))
+                                except Exception:
+                                    old_meta = {}
+                            old_hashes: dict = old_meta.get("file_hashes", {}) if isinstance(old_meta, dict) else {}
+
+                            # Legacy pool-hash meta: no per-file map, force clear to avoid duplicates
+                            if not old_hashes and ("extra_hash" in old_meta or meta_path.exists()):
+                                needs_full_rebuild = True
+
+                            new_hashes: dict = {}
+                            to_embed: list = []   # (source_file, doc_text, meta)
+                            unchanged: list = []
+                            for source_file, doc_text, meta, _layer in collected:
+                                h = hashlib.sha256(doc_text.encode()).hexdigest()[:16]
+                                new_hashes[source_file] = h
+                                if not needs_full_rebuild and old_hashes.get(source_file) == h:
+                                    unchanged.append(source_file)
+                                else:
+                                    to_embed.append((source_file, doc_text, meta))
+                            removed_files = [f for f in old_hashes if f not in new_hashes]
+
+                            t_start = time.monotonic()
+
+                            if needs_full_rebuild:
+                                backend.vector.clear()
+                                backend.text.clear()
+                            else:
+                                backend.load()
+                                # remove_by_source kills all rows for source_file, must precede add for modified entries
+                                modified_or_removed = [f for f, _, _ in to_embed if f in old_hashes] + removed_files
+                                if modified_or_removed:
+                                    for sf in modified_or_removed:
+                                        backend.vector.remove_by_source(sf)
+                                        backend.text.remove_by_source(sf)
+
+                            BATCH_SIZE = 8
+                            embedded = 0
+                            if to_embed:
+                                if hasattr(backend.text, "begin_batch"):
+                                    backend.text.begin_batch()
+                                try:
+                                    for batch_start in range(0, len(to_embed), BATCH_SIZE):
+                                        if self._stop_event.is_set():
+                                            log.info("Per-file indexing interrupted by shutdown at batch %d/%d", batch_start, len(to_embed))
+                                            break
+                                        batch = to_embed[batch_start:batch_start + BATCH_SIZE]
+                                        batch_texts = [t for _, t, _ in batch]
+                                        batch_metas = [m for _, _, m in batch]
+                                        vectors = np.array(provider.embed_batch(batch_texts), dtype=np.float32)
+                                        backend.vector.add([
+                                            VectorAddItem(vector=vec.reshape(1, -1), meta=meta)
+                                            for vec, meta in zip(vectors, batch_metas)
+                                        ])
+                                        backend.text.add([
+                                            TextAddItem(text=t, meta=m)
+                                            for t, m in zip(batch_texts, batch_metas)
+                                        ])
+                                        embedded += len(batch)
+                                finally:
+                                    if hasattr(backend.text, "end_batch"):
+                                        backend.text.end_batch()
+
+                            # meta save last = commit point for crash safety
+                            if to_embed or removed_files or needs_full_rebuild:
+                                backend.save()
+                                try:
+                                    _md = old_meta if isinstance(old_meta, dict) else {}
+                                    # header.model_name is read at startup to detect
+                                    # model swap → forced full rebuild. Must persist on
+                                    # save or every restart trips the mismatch check.
+                                    # header.key_format pins the file_hashes key schema
+                                    # (per-layer relative posix). Bump when key shape changes.
+                                    _hdr = _md.setdefault("header", {})
+                                    _hdr["model_name"] = _actual_model
+                                    _hdr["key_format"] = "layer_relative_posix_v1"
+                                    _md["file_hashes"] = new_hashes
+                                    _md.pop("extra_hash", None)
+                                    meta_path.write_text(
+                                        _json.dumps(_md, ensure_ascii=False, indent=2),
+                                        encoding="utf-8",
+                                    )
+                                except Exception as _e:
+                                    log.debug("Failed to save file_hashes meta: %s", _e)
+
+                            elapsed = time.monotonic() - t_start
+                            log.info(
+                                "Per-file index update: %d unchanged, %d modified+new, %d removed → re-embed %d docs (%.1fs) [L5:%d L6:%d EXT:%d]",
+                                len(unchanged), len(to_embed), len(removed_files),
+                                embedded, elapsed, l5_count, l6_count, ext_count,
+                            )
+
+                            # ADR-024: Build knowledge graph (nodes + structural edges)
+                            try:
+                                from dpc_client_core.dpc_agent.knowledge_graph import KnowledgeGraph
+                                _kg = KnowledgeGraph(agent_root)
+                                _kg.bulk_import_knowledge_files(knowledge_dir)
+                                if self.firewall and self.firewall.can_agent_access_context('knowledge', profile_name=self.agent_id):
+                                    _l6_dir = Path(os.environ.get("DPC_HOME", Path.home() / ".dpc")) / "knowledge"
+                                    _kg.bulk_import_knowledge_files(_l6_dir)
+                                _archive_dir = Path(os.environ.get("DPC_HOME", Path.home() / ".dpc")) / "conversations" / (self.agent_id or "agent_001") / "archive"
+                                _kg.extract_structural_edges(knowledge_dir, _archive_dir if _archive_dir.exists() else None)
+                                log.info("Knowledge graph built: %d nodes, %d edges", _kg.backend.node_count(), _kg.backend.edge_count())
+                            except Exception as e:
+                                log.warning("Knowledge graph build failed (non-fatal): %s", e)
+
+                            # Release embedding activations; singleton model stays loaded
+                            try:
+                                import torch
+                                if torch.cuda.is_available():
+                                    torch.cuda.empty_cache()
+                            except Exception:
+                                pass
+
+                        except Exception as e:
+                            log.warning("Background memory indexing failed: %s", e)
+
+                    loop = asyncio.get_event_loop()
+                    loop.run_in_executor(None, _sync_index)
+                    log.info(
+                        "Memory: %s index update started in thread",
+                        "first-use" if needs_full_rebuild else "per-file",
+                    )
+                log.info("Memory system initialized (model=%s, active_recall=%s)", _actual_model, mem_cfg.active_recall)
+        except Exception as e:
+            log.warning("Memory system init skipped: %s", e)
+        self._memory_indexes_initialized = True
 
     def sync_firewall_settings(self) -> None:
         """Re-read settings from firewall after UI save."""
@@ -641,6 +753,16 @@ class DpcAgentManager:
             self._agent = None
         log.info("DpcAgent stopped")
 
+    def interrupt(self, conversation_id: str) -> bool:
+        """Signal the active agent loop to stop after the current LLM call/tool finishes."""
+        ev = self._interrupt_events.get(conversation_id)
+        if ev:
+            ev.set()
+            log.info("Interrupt signal sent for conversation %s", conversation_id)
+            return True
+        log.warning("No active agent loop for conversation %s", conversation_id)
+        return False
+
     async def process_message(
         self,
         message: str,
@@ -662,6 +784,9 @@ class DpcAgentManager:
         message_source: Optional[str] = None,
         # When True, don't save user message to history (already saved by caller)
         _skip_history: bool = False,
+        # Group chat metadata for agent context awareness
+        chat_context: Optional[Dict[str, Any]] = None,
+        trigger_message_id: Optional[str] = None,
     ) -> str:
         """
         Process a user message through the agent.
@@ -681,6 +806,18 @@ class DpcAgentManager:
         """
         import uuid
 
+        # A manager can be created without ever being start()-ed — e.g. a
+        # remote group @mention routes through get_manager() + process_message()
+        # directly (group_handler._invoke_agent), skipping the local startup
+        # path. Without this, the first remote-origin invoke leaves _agent None,
+        # so both the memory init below and self.agent later raise "Agent not
+        # initialized". ensure_started() is idempotent — a no-op once started.
+        await self.ensure_started()
+
+        if not self._memory_indexes_initialized:
+            log.info("Lazy memory init triggered by first prompt for agent %s", self.agent_id or "singleton")
+            await self._init_memory_indexes()
+
         # Generate task ID for this request
         task_id = f"chat-{uuid.uuid4().hex[:8]}"
         emitter = get_event_emitter()
@@ -696,13 +833,13 @@ class DpcAgentManager:
         # Get or create ConversationMonitor for this agent conversation (reuse existing)
         monitor = self._get_or_create_agent_monitor(conversation_id)
 
-        # Reload history from disk for group conversations so the agent sees
-        # messages added by other monitors (service.py, group_handler, CC bridge).
-        if conversation_id.startswith("group-"):
+        # ADR-031 §3 single-writer: for group-* the agent-side monitor is a
+        # read-only consumer (reload before invoke, never add/save)
+        is_group = conversation_id.startswith("group-")
+        if is_group:
             monitor.load_history()
 
-        # Track user message in monitor (skip when caller already saved it, e.g. CC chain trigger)
-        if not _skip_history:
+        if not _skip_history and not is_group:
             node_id = getattr(self.service.p2p_manager, "node_id", "local-user")
             monitor.add_message(
                 role="user",
@@ -713,11 +850,18 @@ class DpcAgentManager:
             )
             monitor.save_history()  # Save to disk immediately
 
-            # context_estimated is updated after each LLM response (lines 778-786)
-            # from accurate token counts. No additive increment here — it caused
-            # cumulative drift (63% claimed vs 14% actual after 40 messages).
+            # tokens_after_last_response is updated after each LLM response
+            # (writer below this block) from accurate token counts. No additive
+            # increment here — it caused cumulative drift (63% claimed vs 14% actual
+            # after 40 messages).
 
         agent_display_name = self._agent_display_name or self.agent_id or "DPC Agent"
+        self._current_agent_display_name = agent_display_name
+
+        # Emit early progress so the UI knows which agent is processing
+        # BEFORE any streaming text arrives (fixes empty name in collapsible
+        # header when agent responds without tool calls).
+        self._emit_progress("thinking", conversation_id)
 
         # Get DPC context if requested
         dpc_context = None
@@ -726,8 +870,8 @@ class DpcAgentManager:
 
         try:
             # Process through agent with progress callback that includes conversation_id
-            def emit_progress_with_context(msg: str, tool: str = None, round: int = None):
-                self._emit_progress(msg, conversation_id, tool, round)
+            def emit_progress_with_context(msg: str, tool: str = None, round: int = None, tool_calls=None):
+                self._emit_progress(msg, conversation_id, tool, round, tool_calls)
 
             # Accumulate streaming chunks for persistence to history.json
             _stream_chunks: list = []
@@ -755,6 +899,7 @@ class DpcAgentManager:
 
             # Phase 3: Get provider-specific agent if agent_llm_provider is specified
             agent = self._get_or_create_agent_for_provider(agent_llm_provider) if agent_llm_provider else self.agent
+            self._last_used_agent = agent
 
             # ADR-022 Task 07: per-agent daily quota check
             quota_limit = self.config.get("quota_tokens_per_day", 0)
@@ -768,6 +913,8 @@ class DpcAgentManager:
                     return f"⚠️ Agent quota exceeded ({self._daily_tokens_used:,}/{quota_limit:,} tokens today). Reset at midnight UTC."
 
             try:
+                interrupt_ev = asyncio.Event()
+                self._interrupt_events[conversation_id] = interrupt_ev
                 response = await agent.process(
                     message=message,
                     conversation_id=conversation_id,
@@ -783,8 +930,17 @@ class DpcAgentManager:
                     image_caption=image_caption,
                     reply_telegram_chat_id=telegram_chat_id,
                     message_source=message_source,
+                    chat_context=chat_context,
+                    stop_event=interrupt_ev,
+                    reader_identity={
+                        "agent_id": self.agent_id or "",
+                        "display_name": agent_display_name,
+                        "node_id": getattr(self.service.p2p_manager, "node_id", "") or "",
+                    },
+                    trigger_message_id=trigger_message_id,
                 )
             finally:
+                self._interrupt_events.pop(conversation_id, None)
                 # ADR-022 Task 07: update daily token counter
                 last_usage = getattr(agent, '_last_usage', None)
                 if last_usage and quota_limit:
@@ -802,8 +958,18 @@ class DpcAgentManager:
 
             # Skip saving agent errors to history — they pollute context for future requests
             _is_llm_error = response and response.startswith("⚠️")
+            _is_empty_after_retry = not response and not _has_extras
 
-            if (_has_content or _has_extras) and not _is_llm_error:
+            if _is_empty_after_retry:
+                log.warning("Agent returned empty response after retries — sending toast notification")
+                await self.service.local_api.broadcast_event("error_toast", {
+                    "title": "Empty Response",
+                    "message": f"{agent_display_name} returned an empty response after retries. Try again.",
+                    "duration": 5000,
+                })
+            elif (_has_content or _has_extras) and not _is_llm_error and not is_group:
+                _trace = getattr(agent, '_last_trace', None) or {}
+                _tool_calls_for_msg = _trace.get("accumulated_tool_calls") or []
                 monitor.add_message(
                     role="assistant",
                     content=response or "",
@@ -812,24 +978,31 @@ class DpcAgentManager:
                     sender_name=agent_display_name,
                     thinking=_thinking,
                     streaming_raw=_streaming_raw,
+                    tool_calls=_tool_calls_for_msg if _tool_calls_for_msg else None,
                 )
                 monitor.save_history()  # Save to disk immediately
             elif _is_llm_error:
                 log.warning(f"LLM error not saved to history: {response[:100]}")
 
-            # Store full context estimate from this request so next request's session_state
+            # Store full context measurement from this request so next request's session_state
             # can expose it. One request stale, but accurate — context grows incrementally.
             # Prefer accurate token count from LLM adapter (first_prompt_tokens = round-1 context
             # before tool results inflate it); fall back to chars/4 estimate from cap_info.
+            # Value + timestamp updated atomically so freshness is always derivable.
+            new_token_count: Optional[int] = None
             if hasattr(agent, '_last_usage') and agent._last_usage:
                 accurate = (agent._last_usage.get("first_prompt_tokens")
                             or agent._last_usage.get("prompt_tokens", 0))
                 if accurate:
-                    monitor._last_context_estimated = accurate
+                    new_token_count = accurate
                 elif hasattr(agent, '_last_cap_info') and agent._last_cap_info:
-                    monitor._last_context_estimated = agent._last_cap_info.get("estimated_tokens_before", 0)
+                    new_token_count = agent._last_cap_info.get("estimated_tokens_before", 0)
             elif hasattr(agent, '_last_cap_info') and agent._last_cap_info:
-                monitor._last_context_estimated = agent._last_cap_info.get("estimated_tokens_before", 0)
+                new_token_count = agent._last_cap_info.get("estimated_tokens_before", 0)
+
+            if new_token_count is not None:
+                monitor._tokens_after_last_response = new_token_count
+                monitor._tokens_after_last_response_at = utc_now_iso()
 
             # Update token count in monitor after agent response.
             # Count tokens directly from the conversation history (user + assistant messages)
@@ -884,6 +1057,16 @@ class DpcAgentManager:
                             context_window = llm_manager.get_context_window(model)
                     monitor.set_token_limit(context_window)
                 monitor.set_token_count(conversation_tokens)
+
+            agent_token_limit = monitor.get_token_usage().get("token_limit") or 0
+            if (conversation_id.startswith("group-") and new_token_count
+                    and agent_token_limit and self.agent_id and self.service):
+                try:
+                    self.service.update_group_agent_context(
+                        conversation_id, self.agent_id, new_token_count,
+                        agent_token_limit, self._agent_display_name or self.agent_id)
+                except Exception as e:
+                    log.debug("update_group_agent_context failed: %s", e)
 
             # Emit TASK_COMPLETED event
             await emitter.emit(EventType.TASK_COMPLETED, {
@@ -1049,50 +1232,76 @@ class DpcAgentManager:
         usage = monitor.get_token_usage()
         token_limit = usage.get("token_limit") or config_cw or 204800
         history_tokens = usage.get("tokens_used", 0)
-        context_estimated = monitor._last_context_estimated
+        tokens_after_last_response = monitor._tokens_after_last_response
+        tokens_after_last_response_at = monitor._tokens_after_last_response_at
+        if conversation_id.startswith("group-") and self.agent_id and self.service:
+            try:
+                own = self.service.get_group_agent_context(conversation_id, self.agent_id)
+            except Exception:
+                own = None
+            if own and own[0] > (tokens_after_last_response or 0):
+                tokens_after_last_response = own[0]
+                tokens_after_last_response_at = own[2]
+        context_breakdown = None
+        agent = self._last_used_agent
+        if agent and hasattr(agent, '_last_cap_info') and agent._last_cap_info:
+            context_breakdown = agent._last_cap_info.get("context_breakdown")
+
         return {
-            # Conversation history only (user+assistant text ÷ 4).
-            # Same basis as the token counter shown in the UI.
             "history_tokens": history_tokens,
-            "history_usage_percent": round(history_tokens / token_limit, 4) if token_limit else 0,
-            # Full context estimate from previous request (one request stale).
-            # Includes: system prompt + scratchpad + identity + knowledge + tools + history.
-            # This is what the log "Context size: X%" reports.
-            "context_estimated": context_estimated,
-            "context_usage_percent": round(context_estimated / token_limit, 4) if token_limit and context_estimated else 0,
+            "history_usage_percent": round(history_tokens / token_limit * 100, 2) if token_limit else 0,
+            "tokens_after_last_response": tokens_after_last_response,
+            "tokens_after_last_response_at": tokens_after_last_response_at,
+            "context_usage_percent": round(tokens_after_last_response / token_limit * 100, 2) if token_limit and tokens_after_last_response else 0,
             "tokens_limit": token_limit,
             "messages_count": len(monitor.message_history),
+            "context_breakdown": context_breakdown,
         }
 
     def reset_conversation(self, conversation_id: str) -> bool:
         """
         Reset conversation history for a specific conversation.
 
+        If the monitor is not in memory (e.g. after backend restart, before
+        any message has been sent in this session) but history.json exists
+        on disk, hydrates the monitor first so _archive_current_session can
+        archive before clearing. Without this, the caller's fallback would
+        unlink history.json directly, losing the session.
+
         Args:
             conversation_id: The conversation to reset (e.g., "telegram-12345")
 
         Returns:
-            True if reset was successful, False if conversation not found
+            True if reset was successful, False if no monitor and no history file
         """
         monitor = self._agent_monitors.get(conversation_id)
-        if monitor:
-            preserve, max_sessions = self._get_history_settings()
-            archive_count = monitor.reset_conversation(preserve=preserve, max_sessions=max_sessions)
-            log.info(f"Reset conversation: {conversation_id} (preserve={preserve}, archives={archive_count})")
-            # Broadcast warning if archive is approaching the retention limit (≥80%).
-            # When max_sessions is 0 (unlimited), no limit to approach — skip warning.
-            if preserve and max_sessions > 0 and archive_count >= int(max_sessions * 0.8):
-                import asyncio
-                local_api = getattr(self.service, "local_api", None)
-                if local_api:
-                    asyncio.ensure_future(local_api.broadcast_event("session_archive_warning", {
-                        "conversation_id": conversation_id,
-                        "archive_count": archive_count,
-                        "max_sessions": max_sessions,
-                    }))
-            return True
-        log.debug(f"Conversation not found for reset: {conversation_id}")
-        return False
+        if not monitor:
+            history_path = (
+                pathlib.Path.home() / ".dpc" / "conversations"
+                / conversation_id / "history.json"
+            )
+            if history_path.exists():
+                log.info(f"Hydrating monitor from disk for reset: {conversation_id}")
+                monitor = self._get_or_create_agent_monitor(conversation_id)
+            else:
+                log.debug(f"Conversation not found for reset: {conversation_id}")
+                return False
+
+        preserve, max_sessions = self._get_history_settings()
+        archive_count = monitor.reset_conversation(preserve=preserve, max_sessions=max_sessions)
+        log.info(f"Reset conversation: {conversation_id} (preserve={preserve}, archives={archive_count})")
+        # Broadcast warning if archive is approaching the retention limit (≥80%).
+        # When max_sessions is 0 (unlimited), no limit to approach — skip warning.
+        if preserve and max_sessions > 0 and archive_count >= int(max_sessions * 0.8):
+            import asyncio
+            local_api = getattr(self.service, "local_api", None)
+            if local_api:
+                asyncio.ensure_future(local_api.broadcast_event("session_archive_warning", {
+                    "conversation_id": conversation_id,
+                    "archive_count": archive_count,
+                    "max_sessions": max_sessions,
+                }))
+        return True
 
     def _get_history_settings(self) -> tuple:
         """Return (preserve_on_reset, max_archived_sessions) from firewall config.
@@ -1108,7 +1317,8 @@ class DpcAgentManager:
         message: str,
         conversation_id: str = None,
         tool_name: str = None,
-        round: int = None
+        round: int = None,
+        tool_calls=None,
     ) -> None:
         """Emit progress message to DPC UI (if available)."""
         try:
@@ -1117,10 +1327,18 @@ class DpcAgentManager:
             if local_api and hasattr(local_api, "broadcast_event"):
                 import asyncio
                 asyncio.create_task(local_api.broadcast_event("agent_progress", {
-                    "message": message[:500],
+                    # No length cap — live progress must carry the full reasoning / tool args
+                    # so the user sees exactly what the agent is doing each round.
+                    "message": message,
                     "conversation_id": conversation_id,
                     "tool_name": tool_name,
                     "round": round,
+                    # Full per-round tool snapshot (set on tool completion) so the UI renders
+                    # the authoritative list per-conversation instead of accumulating a lossy
+                    # event stream — fixes dropped results + chat-switch gaps.
+                    "tool_calls": tool_calls,
+                    "agent_name": getattr(self, '_current_agent_display_name', ''),
+                    "agent_id": self.agent_id or '',
                     "ts": utc_now_iso(),
                 }))
         except Exception as e:
@@ -1144,7 +1362,8 @@ class DpcAgentManager:
             "initialized": self._agent is not None,
             "agent_root": str(self.agent_root),
             "config": {
-                "budget_usd": self.config.get("budget_usd", 500_000),
+                "budget_usd": self.config.get("budget_usd"),
+                "billing_model": self.config.get("billing_model", "subscription"),
                 "max_rounds": self.config.get("max_rounds", 200),
                 "tools": self.config.get("tools", []),
             },

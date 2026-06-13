@@ -1,10 +1,10 @@
-"""Whole-document indexing pipeline (ADR-010 + ADR-018).
+"""Whole-document indexing pipeline (ADR-010 + ADR-018 + ADR-024 Phase 1.6b.1).
 
 One embedding per file (no chunking). BGE-M3's 8192-token window covers
 all DPC knowledge files (0.5-5KB each).
 
 Triggers: write_file(knowledge/), approved commit (L6), Extended Paths mtime change.
-Full rebuild if model/dimensions change (detected by FaissIndex.needs_rebuild).
+Full rebuild if model/dimensions change (detected by backend.vector.needs_rebuild).
 """
 
 from __future__ import annotations
@@ -18,6 +18,7 @@ from typing import Dict, List, Optional
 
 import numpy as np
 
+from .retrieval import RetrievalBackend, TextAddItem, VectorAddItem
 from .text_extract import extract_text, is_binary
 from .memory import read_all_meta, write_file_meta, read_file_meta, FileMeta, _BACKFILL_SKIP
 
@@ -57,20 +58,28 @@ def _build_doc_text(filename: str, heading: str, content: str) -> str:
 def index_single_file(
     path: pathlib.Path,
     embedding_provider,
-    faiss_index,
-    bm25_index,
+    backend: RetrievalBackend,
     source_layer: str = "L5",
+    source_file_key: "str | None" = None,
 ) -> int:
-    """Extract, embed, and index a single file as one document. Returns 1 if indexed, 0 if skipped."""
+    """Extract, embed, and index a single file as one document. Returns 1 if indexed, 0 if skipped.
+
+    source_file_key lets the caller pin the key/display string used as
+    `meta["source_file"]` (matters for `remove_by_source` lookups and for
+    avoiding cross-layer basename collisions in the index). Defaults to
+    `path.name` for backward compat — production callers pass the layer-
+    prefixed relative posix key from `_sync_index`.
+    """
     text = extract_text(path)
     if not text:
         return 0
 
     heading = _extract_heading(text)
-    doc_text = _build_doc_text(path.name, heading, text)
+    _src = source_file_key or path.name
+    doc_text = _build_doc_text(_src, heading, text)
 
     meta = {
-        "source_file": path.name,
+        "source_file": _src,
         "heading": heading,
         "source_layer": source_layer,
         "char_count": len(text),
@@ -78,8 +87,8 @@ def index_single_file(
     }
 
     vector = np.array(embedding_provider.embed(doc_text), dtype=np.float32).reshape(1, -1)
-    faiss_index.add(vector, [meta])
-    bm25_index.add([doc_text], [meta])
+    backend.vector.add([VectorAddItem(vector=vector, meta=meta)])
+    backend.text.add([TextAddItem(text=doc_text, meta=meta)])
 
     return 1
 
@@ -87,12 +96,11 @@ def index_single_file(
 def full_rebuild(
     knowledge_dir: pathlib.Path,
     embedding_provider,
-    faiss_index,
-    bm25_index,
+    backend: RetrievalBackend,
     stop_event: "threading.Event | None" = None,
 ) -> int:
     """Full rebuild of both indexes from all files in knowledge_dir. One vector per file."""
-    faiss_index.clear()
+    backend.vector.clear()
     all_doc_texts: List[str] = []
     all_metas: List[dict] = []
 
@@ -109,11 +117,12 @@ def full_rebuild(
         if not text:
             continue
         heading = _extract_heading(text)
-        doc_text = _build_doc_text(f.name, heading, text)
+        _src = f.relative_to(knowledge_dir).as_posix()
+        doc_text = _build_doc_text(_src, heading, text)
         file_meta = read_file_meta(knowledge_dir, f.name)
         all_doc_texts.append(doc_text)
         all_metas.append({
-            "source_file": f.name,
+            "source_file": _src,
             "heading": heading,
             "source_layer": file_meta.source_layer,
             "char_count": len(text),
@@ -135,15 +144,23 @@ def full_rebuild(
         if stop_event and stop_event.is_set():
             log.info("Indexing interrupted by shutdown after embedding batch %d/%d", batch_start, len(all_doc_texts))
             return indexed_count
-        for vec, meta in zip(vectors, batch_metas):
-            faiss_index.add(vec.reshape(1, -1), [meta])
-            indexed_count += 1
+        backend.vector.add([
+            VectorAddItem(vector=vec.reshape(1, -1), meta=meta)
+            for vec, meta in zip(vectors, batch_metas)
+        ])
+        indexed_count += len(batch_texts)
 
     if stop_event and stop_event.is_set():
         log.info("Indexing interrupted by shutdown before BM25 build")
         return indexed_count
 
-    bm25_index.build(all_doc_texts, all_metas)
+    # Rebuild text channel from scratch: clear() + add() replaces existing state,
+    # matching prior bm25_index.build() semantics.
+    backend.text.clear()
+    backend.text.add([
+        TextAddItem(text=t, meta=m)
+        for t, m in zip(all_doc_texts, all_metas)
+    ])
 
     log.info("Full rebuild: %d documents indexed (whole-document, ADR-018)",
              len(all_doc_texts))

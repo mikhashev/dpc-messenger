@@ -2,7 +2,7 @@
 
 <script lang="ts">
   import { createEventDispatcher } from 'svelte';
-  import { getConversationSettings, setConversationPersistHistory } from '$lib/coreService';
+  import { getConversationSettings, setConversationPersistHistory, updateGroupTopic } from '$lib/coreService';
 
   export let open: boolean = false;
   export let group: {
@@ -25,6 +25,9 @@
   let showAddMember = false;
   let persistHistory: boolean = true;  // Groups default to persisting history
   let settingsLoaded: boolean = false;
+  let editingTopic = false;
+  let editTopicValue = '';
+  let savingTopic = false;
 
   // Peers that are connected but not yet in the group
   $: availablePeers = connectedPeers.filter(
@@ -107,9 +110,31 @@
     agentsDirty = false;
   }
 
+  function startEditTopic() {
+    editTopicValue = group?.topic || '';
+    editingTopic = true;
+  }
+
+  async function saveTopic() {
+    if (!group) return;
+    savingTopic = true;
+    try {
+      const result = await updateGroupTopic(group.group_id, editTopicValue);
+      if (result?.status === 'success') {
+        group.topic = editTopicValue;
+        editingTopic = false;
+      }
+    } catch (e) {
+      console.error('Failed to update topic:', e);
+    } finally {
+      savingTopic = false;
+    }
+  }
+
   function handleClose() {
     showAddMember = false;
     agentsDirty = false;
+    editingTopic = false;
     open = false;
   }
 </script>
@@ -129,12 +154,35 @@
             <span class="label">Name</span>
             <span class="value">{group.name}</span>
           </div>
-          {#if group.topic}
-            <div class="info-row">
-              <span class="label">Topic</span>
-              <span class="value">{group.topic}</span>
-            </div>
-          {/if}
+          <div class="info-row topic-row">
+            <span class="label">Topic</span>
+            {#if editingTopic}
+              <div class="topic-edit">
+                <textarea
+                  class="topic-textarea"
+                  bind:value={editTopicValue}
+                  rows="3"
+                  maxlength="15000"
+                  placeholder="Group topic or description..."
+                ></textarea>
+                <span class="topic-char-count">{editTopicValue.length}/15000</span>
+                <div class="topic-actions">
+                  <button class="btn-topic-save" on:click={saveTopic} disabled={savingTopic}>
+                    {savingTopic ? '...' : 'Save'}
+                  </button>
+                  <button class="btn-topic-cancel" on:click={() => editingTopic = false}>Cancel</button>
+                </div>
+              </div>
+            {:else}
+              {#if isCreator}
+                <span class="value topic-value" on:click={startEditTopic} on:keydown={e => e.key === 'Enter' && startEditTopic()} role="button" tabindex="0" title="Click to edit">
+                  {group.topic || '(click to add topic)'}
+                </span>
+              {:else}
+                <span class="value">{group.topic || '(no topic)'}</span>
+              {/if}
+            {/if}
+          </div>
         </div>
 
         <!-- History Settings (v0.21.0) -->
@@ -529,5 +577,70 @@
     font-size: 0.8em;
     color: #888;
     margin-left: 0.5em;
+  }
+  .topic-row {
+    align-items: flex-start;
+  }
+  .topic-value {
+    cursor: pointer;
+    border-bottom: 1px dashed #45475a;
+    padding-bottom: 2px;
+  }
+  .topic-value:hover {
+    border-bottom-color: #89b4fa;
+    color: #89b4fa;
+  }
+  .topic-edit {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+  .topic-textarea {
+    width: 100%;
+    background: #313244;
+    border: 1px solid #45475a;
+    border-radius: 6px;
+    color: #cdd6f4;
+    font-size: 0.85rem;
+    padding: 8px;
+    resize: vertical;
+    font-family: inherit;
+  }
+  .topic-textarea:focus {
+    outline: none;
+    border-color: #89b4fa;
+  }
+  .topic-actions {
+    display: flex;
+    gap: 6px;
+    justify-content: flex-end;
+  }
+  .btn-topic-save {
+    padding: 4px 12px;
+    border: none;
+    border-radius: 4px;
+    background: #89b4fa;
+    color: #1e1e2e;
+    cursor: pointer;
+    font-size: 0.75rem;
+    font-weight: 600;
+  }
+  .btn-topic-save:hover { background: #74c7ec; }
+  .btn-topic-save:disabled { opacity: 0.5; cursor: default; }
+  .btn-topic-cancel {
+    padding: 4px 12px;
+    border: 1px solid #45475a;
+    border-radius: 4px;
+    background: transparent;
+    color: #6c7086;
+    cursor: pointer;
+    font-size: 0.75rem;
+  }
+  .btn-topic-cancel:hover { color: #cdd6f4; border-color: #6c7086; }
+  .topic-char-count {
+    font-size: 0.7rem;
+    color: #6c7086;
+    text-align: right;
   }
 </style>

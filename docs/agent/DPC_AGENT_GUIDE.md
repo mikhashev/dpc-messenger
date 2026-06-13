@@ -36,7 +36,7 @@ Add a provider configuration to `~/.dpc/providers.json`:
 {
   "alias": "dpc_agent",
   "type": "dpc_agent",
-  "tools": ["repo_read", "repo_list", "update_scratchpad", "browse_page", "search_web"],
+  "tools": ["read_file", "list_dir", "update_scratchpad", "browse_page", "search_web"],
 
   "budget_usd": 50,
   "max_rounds": 200,
@@ -54,8 +54,8 @@ Agent settings are configured in `~/.dpc/privacy_rules.json` under the `dpc_agen
     "enabled": true,
   
     "tools": {
-      "repo_read": true,
-      "repo_list": true,
+      "read_file": true,
+      "list_dir": true,
       "update_scratchpad": true,
       "browse_page": true,
       "search_web": true
@@ -217,8 +217,8 @@ Agent tool permissions and sandbox paths are configured in
     "enabled": true,
   
     "tools": {
-      "repo_read": true,
-      "repo_list": true,
+      "read_file": true,
+      "list_dir": true,
       "update_scratchpad": true,
       "browse_page": true,
       "search_web": true
@@ -259,8 +259,8 @@ Agent profiles define reusable permission templates in `~/.dpc/privacy_rules.jso
       "device_context_access": true,
       "knowledge_access": "read_only",
       "tools": {
-        "repo_read": true,
-        "repo_list": true,
+        "read_file": true,
+        "list_dir": true,
         "update_scratchpad": true,
         "browse_page": true,
         "search_web": true
@@ -279,8 +279,8 @@ Agent profiles define reusable permission templates in `~/.dpc/privacy_rules.jso
     "coder": {
       "enabled": true,
       "tools": {
-        "repo_read": true,
-        "repo_list": true,
+        "read_file": true,
+        "list_dir": true,
         "git_status": true,
         "git_diff": true,
         "search_files": true,
@@ -295,6 +295,51 @@ Agent profiles define reusable permission templates in `~/.dpc/privacy_rules.jso
 - Agents inherit from `dpc_agent` (global defaults) if no custom profile is specified
 - Custom profiles override specific settings (tools, context access)
 - `inherit_from` field allows chaining profiles (planned feature)
+
+### Retrieval Backend Configuration (ADR-024)
+
+Retrieval backends (vector search, text search, result fusion) and the
+knowledge-graph storage are configured per-agent in
+`~/.dpc/agents/{agent_id}/config.json`. All flags are optional and default
+to the production-validated stack.
+
+| Key | Values | Default | What it switches |
+|-----|--------|---------|------------------|
+| `graph_backend` | `"sqlite"`, `"grafeo"` | `"grafeo"` | Knowledge-graph storage (ADR-024 §1.5) |
+| `retrieval_vector` | `"native"`, `"grafeo"` | `"native"` | Vector similarity search backend (BGE-M3 + FAISS HNSW vs Grafeo HNSW) |
+| `retrieval_text` | `"native"`, `"grafeo"` | `"native"` | Full-text/BM25 backend (bm25s vs Grafeo BM25) |
+| `retrieval_fusion` | `"custom"`, `"grafeo"` | `"custom"` | Result fusion (custom RRF with per-layer weights vs Grafeo native; currently aliases custom — see ADR-024 §1.6c) |
+
+Example — switch the vector channel to Grafeo while keeping text on
+native bm25s (the "escape hatch" combo if Phase B human grading reveals
+text-channel regression on Grafeo):
+
+```json
+{
+  "agent_id": "default",
+  "name": "Ark",
+  "provider_alias": "GLM-5.1",
+  "retrieval_vector": "grafeo",
+  "retrieval_text": "native"
+}
+```
+
+**Operational notes:**
+
+- **Restart required.** Flags are read at agent startup
+  (`_sync_index()`); changes don't take effect until DPC restarts.
+- **Independent flags.** Mix-and-match supported. Unknown values raise
+  `ValueError` at startup so typos fail loudly instead of silently
+  reverting to native.
+- **Reversible without data loss.** Switching to Grafeo creates a fresh
+  index under `<agent_root>/state/memory_index/grafeo/` (full rebuild
+  on first launch, ~1-2 min per 1000 docs on CPU embedding). Native
+  state files (`vectors.faiss`, `bm25/`) are preserved untouched, so
+  rollback = remove the keys + restart.
+- **Embedding model unchanged.** All backends consume vectors produced
+  by the same `MemoryConfig.embedding_model` (BGE-M3 in production).
+  Switching the retrieval backend does *not* re-embed the corpus — it
+  reuses the same vectors in a different storage/search layer.
 
 ### Agent Registry
 
@@ -330,8 +375,8 @@ The agent registry tracks all created agents in `~/.dpc/agents/_registry.json`:
 
 | Tool | Description | Safe |
 |------|-------------|------|
-| `repo_read` | Read files in sandbox | ✅ |
-| `repo_list` | List files in sandbox | ✅ |
+| `read_file` | Read files in sandbox | ✅ |
+| `list_dir` | List files in sandbox | ✅ |
 | `update_scratchpad` | Update working memory | ✅ |
 | `update_identity` | Update self-understanding | ✅ |
 | `browse_page` | Fetch and parse web pages | ✅ |
@@ -393,9 +438,9 @@ These tools access paths outside `~/.dpc/agent/` via firewall-controlled permiss
 
 | Tool | Description | Risk |
 |------|-------------|------|
-| `extended_path_read` | Read from firewall-allowed paths | Medium |
-| `extended_path_list` | List firewall-allowed directories | Low |
-| `extended_path_write` | Write to firewall-allowed paths | Medium |
+| `read_file` | Read from sandbox or firewall-allowed absolute paths | Medium |
+| `list_dir` | List sandbox or firewall-allowed absolute paths | Low |
+| `write_file` | Write to sandbox or firewall-allowed absolute paths | Medium |
 | `list_extended_sandbox_paths` | List configured extended paths | Low |
 
 ### Search Tools
@@ -493,7 +538,7 @@ Tools can be enabled/disabled per agent via profiles:
   "agent_profiles": {
     "safe_agent": {
       "tools": {
-        "repo_read": true,
+        "read_file": true,
         "browse_page": true,
         "search_web": true,
         "run_shell": false,
@@ -531,8 +576,8 @@ Enable or disable individual tools in the `dpc_agent.tools` object:
   "dpc_agent": {
     "enabled": true,
     "tools": {
-      "repo_read": true,
-      "repo_list": true,
+      "read_file": true,
+      "list_dir": true,
       "run_shell": false,
       "repo_commit_push": false
     }
@@ -698,7 +743,7 @@ asyncio.run(test())
 User: What files are in my agent directory?
 
 Agent: I'll check the files in your agent sandbox.
-[Uses repo_list tool]
+[Uses list_dir tool]
 
 Your agent directory contains:
 - memory/
@@ -909,8 +954,8 @@ Quick example - restrict to safe tools only:
 {
   "dpc_agent": {
     "tools": {
-      "repo_read": true,
-      "repo_list": true,
+      "read_file": true,
+      "list_dir": true,
       "browse_page": true,
       "search_web": true,
       "run_shell": false,

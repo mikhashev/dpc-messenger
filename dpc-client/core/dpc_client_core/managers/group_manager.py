@@ -6,6 +6,7 @@ Group metadata is stored as individual JSON files in ~/.dpc/conversations/{group
 Legacy location ~/.dpc/groups/ is supported for migration.
 """
 
+import hashlib
 import json
 import logging
 import uuid
@@ -352,7 +353,18 @@ class GroupManager:
         group.agents[node_id] = agent_ids
         if agent_names:
             group.agent_names[node_id] = agent_names
+        group.version += 1
         self._save_group(group_id)
+
+    def update_topic(self, group_id: str, topic: str) -> Optional[GroupMetadata]:
+        """Update a group's topic/description."""
+        group = self._groups.get(group_id)
+        if not group:
+            return None
+        group.topic = topic
+        group.version += 1
+        self._save_group(group_id)
+        return group
 
     def get_group(self, group_id: str) -> Optional[GroupMetadata]:
         """Get group metadata by ID."""
@@ -436,8 +448,8 @@ class GroupManager:
             )
             return False
 
-        del self._groups[group_id]
         self._delete_group_file(group_id)
+        del self._groups[group_id]
 
         # v0.20.0: Add to deleted registry for offline member sync
         self.mark_group_deleted(group_id, requester_node_id)
@@ -459,28 +471,67 @@ class GroupManager:
         if self.node_id in group.members:
             group.members.remove(self.node_id)
 
-        del self._groups[group_id]
         self._delete_group_file(group_id)
+        del self._groups[group_id]
         logger.info("Left group %s", group_id)
         return True
 
+    @staticmethod
+    def _content_hash(group: GroupMetadata) -> str:
+        """Deterministic hash of the sync-relevant metadata fields.
+
+        Used to break equal-version ties in apply_sync: both nodes evaluate
+        the same symmetric rule, so exactly one side accepts the other's copy.
+        """
+        payload = "|".join((
+            group.name,
+            group.topic,
+            json.dumps(sorted(group.members)),
+            json.dumps(group.agents, sort_keys=True),
+            json.dumps(group.agent_names, sort_keys=True),
+        ))
+        return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
+
     def apply_sync(self, remote_group: Dict[str, Any]) -> Optional[GroupMetadata]:
         """
-        Apply a GROUP_SYNC from a remote peer. Highest version wins.
+        Apply a GROUP_SYNC from a remote peer. Highest version wins; equal
+        versions with divergent content are resolved by content-hash tie-break
+        (higher hash wins on both sides, the accepting side bumps the version
+        so the next sync propagates the winner).
 
         Args:
             remote_group: Group metadata dict from remote peer
 
         Returns:
-            Updated GroupMetadata if applied, None if local version is newer
+            Updated GroupMetadata if applied, None if the local copy is kept
         """
         remote = GroupMetadata.from_dict(remote_group)
 
         local = self._groups.get(remote.group_id)
-        if local and local.version >= remote.version:
+        if local and local.version > remote.version:
             logger.debug(
-                "Ignoring GROUP_SYNC for %s: local v%d >= remote v%d",
+                "Ignoring GROUP_SYNC for %s: local v%d > remote v%d",
                 remote.group_id, local.version, remote.version,
+            )
+            return None
+
+        if local and local.version == remote.version:
+            local_hash = self._content_hash(local)
+            remote_hash = self._content_hash(remote)
+            if local_hash == remote_hash:
+                return None
+            if remote_hash > local_hash:
+                remote.version += 1
+                self._groups[remote.group_id] = remote
+                self._save_group(remote.group_id)
+                logger.info(
+                    "Applied GROUP_SYNC tie-break for %s (v%d, remote hash wins, bumped to v%d)",
+                    remote.group_id, local.version, remote.version,
+                )
+                return remote
+            logger.debug(
+                "Keeping local copy for %s on v%d tie (local hash wins)",
+                remote.group_id, local.version,
             )
             return None
 
@@ -507,8 +558,8 @@ class GroupManager:
             if not deleted_by:
                 deleted_by = self._groups[group_id].created_by
 
-            del self._groups[group_id]
             self._delete_group_file(group_id)
+            del self._groups[group_id]
 
             # v0.20.0: Add to deleted registry
             if deleted_by:

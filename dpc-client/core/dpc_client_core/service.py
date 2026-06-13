@@ -14,6 +14,22 @@ from typing import Dict, Any, List, Optional
 
 logger = logging.getLogger(__name__)
 
+
+# Per-agent profile keys owned by dedicated backend commands, not by
+# FirewallEditor. When FirewallEditor saves a stale snapshot of one of
+# these keys, the on-disk version always wins — the editor never had
+# authoritative ownership of the field. Used by
+# `CoreService._merge_unknown_agent_profile_keys`.
+#
+# Mike S141 regression: FirewallEditor `save_firewall_rules` shipped
+# `web_auth = {allowed_domains: ['example.com']}` (stale snapshot from
+# editor open time) ~3s after a successful login_complete added cookies
+# for `example.org`. Without force-preserve, the absent-key merge
+# skipped the wipe because the `web_auth` key WAS present in incoming,
+# just with stale contents — `example.org` silently disappeared from
+# the whitelist.
+_BACKEND_OWNED_PROFILE_KEYS = frozenset({"web_auth"})
+
 from .__version__ import __version__
 from .firewall import ContextFirewall
 from .hub_client import HubClient
@@ -114,8 +130,16 @@ class CoreService:
     The main orchestrating class for the D-PC client's backend.
     Manages all sub-components and the application's lifecycle.
     """
-    def __init__(self):
+    def __init__(self, skip_knowledge_index: bool = False):
         logger.info("Initializing D-PC Core Service")
+
+        self.skip_knowledge_index = skip_knowledge_index
+
+        # Per-group agent serialization lock — one agent runs in a given group at a time
+        # so concurrent @mentions queue instead of racing (prevents one agent's progress
+        # -clear wiping another's, and concurrent same-group LLM load).
+        self._group_agent_locks: Dict[str, asyncio.Lock] = {}
+        self._group_agent_context: Dict[str, Dict[str, tuple]] = {}
 
         DPC_HOME_DIR.mkdir(exist_ok=True)
 
@@ -631,6 +655,12 @@ class CoreService:
 
     async def _eager_agent_index_rebuild(self):
         """Scan all agents with memory.enabled=true and trigger index rebuild on startup."""
+        if self.skip_knowledge_index:
+            logger.info(
+                "Skipping eager agent index rebuild (--skip-knowledge-index flag). "
+                "First prompt to any agent will trigger lazy index init (~2 min expected)."
+            )
+            return
         from pathlib import Path
         import json as _json
         agents_dir = Path.home() / ".dpc" / "agents"
@@ -651,6 +681,8 @@ class CoreService:
             try:
                 agent_id = agent_dir.name
                 profile = self.firewall.get_agent_profile_settings(agent_id) if self.firewall else {}
+                if profile is None:
+                    continue
                 memory_cfg = profile.get("memory", {})
                 if not memory_cfg.get("enabled", False):
                     continue
@@ -861,6 +893,10 @@ class CoreService:
             self.connection_status.update_hub_status(connected=False)
             self.connection_status.update_webrtc_status(available=False)
 
+        browser_cleanup_task = asyncio.create_task(self._browser_idle_cleanup_loop())
+        browser_cleanup_task.set_name("browser_idle_cleanup")
+        self._background_tasks.add(browser_cleanup_task)
+
         self._is_running = True
         logger.info("D-PC Core Service started")
         logger.info("Node ID: %s", self.p2p_manager.node_id)
@@ -895,6 +931,20 @@ class CoreService:
             return
         logger.info("Stopping D-PC Core Service")
         self._shutdown_event.set()
+
+    async def _browser_idle_cleanup_loop(self) -> None:
+        """Periodically close idle Camoufox browser sessions (CAMOUFOX-IDLE-LEAK fix)."""
+        from .dpc_agent.tools.browser import cleanup_idle_browser_sessions
+        while not self._shutdown_event.is_set():
+            try:
+                await asyncio.sleep(300)
+                closed = await cleanup_idle_browser_sessions()
+                if closed:
+                    logger.info("Browser idle cleanup: closed %d session(s)", closed)
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.warning("Browser idle cleanup error: %s", e)
 
     async def shutdown(self):
         """Performs a clean shutdown of all components."""
@@ -964,6 +1014,49 @@ class CoreService:
 
         # Shutdown LLMManager (close async HTTP clients to prevent event loop errors)
         await self.llm_manager.shutdown()
+
+        # S144 SHUTDOWN-PIPE-DRAIN: close any AuthBrowser (Camoufox)
+        # subprocesses still alive. Without this they keep stdin/stdout
+        # IOCP overlapped reads pending and the ProactorEventLoop logs
+        # "IocpProactor overlapped#=1 ... running for Ns" indefinitely
+        # after every other component reports clean stop. Each close is
+        # synchronous (Playwright sync_api over a subprocess pipe), so
+        # we offload to a thread + bound each by 5s so a hung browser
+        # cannot stall the whole shutdown.
+        #
+        # Import is lazy so the dpc_agent.tools chain stays optional
+        # for unit-test contexts that don't wire CoreService end-to-end.
+        try:
+            from .dpc_agent.tools import browser as _browser_mod
+            live_browsers = list(_browser_mod.get_active_camoufox_browsers())
+            if live_browsers:
+                logger.info(
+                    "Closing %d live Camoufox browser(s) during shutdown",
+                    len(live_browsers),
+                )
+                for browser in live_browsers:
+                    try:
+                        await asyncio.wait_for(
+                            _browser_mod._run_in_session(browser, "close"),
+                            timeout=5.0,
+                        )
+                    except asyncio.TimeoutError:
+                        logger.warning(
+                            "Camoufox browser close timed out after 5s — "
+                            "forcing executor shutdown so the process can exit"
+                        )
+                        try:
+                            browser._shutdown_executor()
+                        except Exception:
+                            pass
+                    except Exception as e:
+                        logger.warning("Camoufox browser close failed: %s", e)
+                        try:
+                            browser._shutdown_executor()
+                        except Exception:
+                            pass
+        except Exception as e:
+            logger.error("Camoufox shutdown sweep failed: %s", e, exc_info=True)
 
         # Shutdown core components
         await self.p2p_manager.shutdown_all()
@@ -1259,8 +1352,11 @@ class CoreService:
                 # v0.20.0: Send GROUP_HISTORY_STATUS for hash-based sync
                 # This replaces the old "request if empty" logic with intelligent sync
                 monitor = self.conversation_monitors.get(group.group_id)
-                local_hash = monitor.compute_history_hash() if monitor and hasattr(monitor, "compute_history_hash") else "sha256:empty"
-                local_count = len(monitor.message_history) if monitor else 0
+                if monitor and hasattr(monitor, "compute_history_hash"):
+                    local_hash = monitor.compute_history_hash()
+                    local_count = len(monitor.message_history)
+                else:
+                    local_count, local_hash = ConversationMonitor.peek_group_history_stats(group.group_id)
 
                 try:
                     await self.p2p_manager.send_message_to_peer(peer_id, {
@@ -1834,6 +1930,21 @@ class CoreService:
     def _provider_supports_voice(self, provider: Any) -> bool:
         """Delegated to VoiceService."""
         return self.voice_service._provider_supports_voice(provider)
+
+    def build_p2p_provider_info(self, alias: str, provider: Any) -> Dict[str, Any]:
+        """Single source for the provider dict sent to peers in PROVIDERS_RESPONSE.
+
+        context_window is None when the model is unknown locally, so peers can
+        distinguish "unknown" from a real window size.
+        """
+        return {
+            "alias": alias,
+            "model": provider.model,
+            "type": provider.config.get("type", "unknown"),
+            "supports_vision": provider.supports_vision(),
+            "supports_voice": self._provider_supports_voice(provider),
+            "context_window": self.llm_manager.lookup_context_window(provider.model),
+        }
 
     async def set_voice_provider(self, provider_alias: str) -> Dict[str, Any]:
         """Delegated to VoiceService."""
@@ -3489,6 +3600,44 @@ class CoreService:
             except Exception as e:
                 logger.error(f"Failed to broadcast transcription to {node_id}: {e}")
 
+    async def list_all_tools(self) -> Dict[str, Any]:
+        """Enumerate every registered agent tool for the UI.
+
+        AgentPermissionsPanel uses this to render the full set of tools
+        the registry knows about (across all agents — registry is shared
+        at module discovery time). Tools not yet in privacy_rules.json
+        show up as "unmanaged" so the user can flip them on/off without
+        editing JSON by hand.
+
+        Backlog ref: AGENT-TOOL-FIREWALL-DEFAULT-DRIFT (Mike picked
+        Option 2 — UI auto-detection — in S147 chat).
+        """
+        try:
+            from .dpc_agent.tools.registry import (
+                ToolRegistry,
+                CORE_TOOL_NAMES,
+                RESTRICTED_TOOL_NAMES,
+            )
+            registry = ToolRegistry()
+            tools = []
+            for entry in registry._entries.values():
+                description = entry.schema.get("description", "") if isinstance(entry.schema, dict) else ""
+                is_core = entry.name in CORE_TOOL_NAMES
+                is_restricted = entry.name in RESTRICTED_TOOL_NAMES
+                tools.append({
+                    "name": entry.name,
+                    "description": description,
+                    "is_core": is_core,
+                    "is_restricted": is_restricted,
+                    # Canonical default from ToolEntry.default_enabled (single source of truth).
+                    "default_enabled": entry.default_enabled,
+                })
+            tools.sort(key=lambda t: t["name"])
+            return {"status": "success", "tools": tools}
+        except Exception as e:
+            logger.error("Error listing all tools: %s", e, exc_info=True)
+            return {"status": "error", "message": str(e)}
+
     async def get_firewall_rules(self) -> Dict[str, Any]:
         """Get current firewall rules as JSON dict for editor."""
         try:
@@ -3503,8 +3652,23 @@ class CoreService:
             return {"status": "error", "message": str(e)}
 
     async def save_firewall_rules(self, rules_dict: Dict[str, Any]) -> Dict[str, Any]:
-        """Save updated firewall rules from UI editor."""
+        """Save updated firewall rules from UI editor.
+
+        Selective merge protects per-agent sub-keys added by other
+        writers (e.g. `web_auth_add_domain` writing to
+        `agent_profiles.<id>.web_auth`) during FirewallEditor's
+        open-but-unsaved window. Without the merge, FirewallEditor
+        saves a stale snapshot and silently wipes those keys.
+
+        Scope: only sub-keys within profiles already present in the
+        incoming payload are preserved. An agent profile missing from
+        the incoming payload is treated as an explicit delete (the
+        editor has a delete-profile UI). New-profile-added-by-another-
+        writer-while-editor-open remains an edge case deferred until
+        optimistic concurrency lands.
+        """
         try:
+            self._merge_unknown_agent_profile_keys(rules_dict)
             success, message, errors = self.firewall.save_rules_from_dict(rules_dict)
 
             if not success:
@@ -3527,6 +3691,67 @@ class CoreService:
             logger.error("Error saving firewall rules: %s", e, exc_info=True)
             return {"status": "error", "message": str(e)}
 
+    def _merge_unknown_agent_profile_keys(self, rules_dict: Dict[str, Any]) -> None:
+        """Mutate `rules_dict` in place: for every agent profile present
+        in both the incoming payload and the on-disk rules, reconcile
+        sub-keys against the stale-snapshot wipe pattern. Two rules:
+
+        1. Sub-keys in `_BACKEND_OWNED_PROFILE_KEYS` — disk version
+           ALWAYS wins (FirewallEditor never had authoritative ownership
+           of `web_auth`; only `web_auth_add_domain`/`remove_domain` do).
+        2. Sub-keys missing entirely from the incoming snapshot — copy
+           from disk (covers other panels writing sub-keys during the
+           editor's open-but-unsaved window).
+
+        Profiles missing entirely from `rules_dict` are treated as
+        explicit deletes (FirewallEditor has a delete-profile control)
+        and are NOT re-introduced.
+        """
+        try:
+            current = self.firewall.get_rules_as_dict()
+        except Exception as e:
+            # If the on-disk rules are unreadable for any reason, fall
+            # back to no-merge (the original pass-through behaviour) —
+            # better to write the user's edit than to swallow it.
+            logger.warning(
+                "save_firewall_rules: stale-merge skipped, on-disk rules "
+                "unreadable: %s", e,
+            )
+            return
+
+        current_profiles = current.get("agent_profiles")
+        if not isinstance(current_profiles, dict):
+            return
+        incoming_profiles = rules_dict.get("agent_profiles")
+        if not isinstance(incoming_profiles, dict):
+            return
+
+        for agent_id, current_profile in current_profiles.items():
+            if not isinstance(current_profile, dict):
+                continue
+            if agent_id not in incoming_profiles:
+                # Editor either deleted the profile or never loaded it;
+                # respect the absence either way.
+                continue
+            incoming_profile = incoming_profiles[agent_id]
+            if not isinstance(incoming_profile, dict):
+                continue
+            for key, value in current_profile.items():
+                if key in _BACKEND_OWNED_PROFILE_KEYS:
+                    # Disk wins regardless of what FirewallEditor shipped;
+                    # the key is not the editor's to write.
+                    incoming_profile[key] = value
+                elif key not in incoming_profile:
+                    incoming_profile[key] = value
+            # Zombie-wipe pass: a backend-owned key that exists on
+            # incoming but was removed from disk must NOT resurrect
+            # (e.g. last web_auth domain was revoked via
+            # web_auth_remove_domain, then FirewallEditor saved a
+            # stale snapshot that still has web_auth in it).
+            for key in _BACKEND_OWNED_PROFILE_KEYS:
+                if key not in current_profile and key in incoming_profile:
+                    del incoming_profile[key]
+
     async def reload_firewall(self) -> Dict[str, Any]:
         """Reload firewall rules from disk."""
         try:
@@ -3539,6 +3764,100 @@ class CoreService:
             return {"status": "success", "message": message}
         except Exception as e:
             logger.error("Error reloading firewall: %s", e, exc_info=True)
+            return {"status": "error", "message": str(e)}
+
+    # --- Web auth headless approval (ADR-029 Task 008) ---
+
+    async def web_auth_approve_headless(self, request_id: str) -> Dict[str, Any]:
+        from .dpc_agent.tools.browser import get_pending_auth_approvals
+        pending = get_pending_auth_approvals()
+        entry = pending.get(request_id)
+        if not entry:
+            return {"status": "error", "message": f"Unknown request_id: {request_id}"}
+        entry["approved"] = True
+        entry["event"].set()
+        return {"status": "approved", "request_id": request_id}
+
+    async def web_auth_reject_headless(self, request_id: str) -> Dict[str, Any]:
+        from .dpc_agent.tools.browser import get_pending_auth_approvals
+        pending = get_pending_auth_approvals()
+        entry = pending.get(request_id)
+        if not entry:
+            return {"status": "error", "message": f"Unknown request_id: {request_id}"}
+        entry["approved"] = False
+        entry["event"].set()
+        return {"status": "rejected", "request_id": request_id}
+
+    # --- Shell approval (ADR-030 v2) ---
+
+    async def shell_approve_command(self, request_id: str, add_to_whitelist: bool = False) -> Dict[str, Any]:
+        """Approve a Tier 1 shell command.
+
+        Records the decision and signals the waiting executor thread, which
+        runs the command itself. Executing here (async) would block the event
+        loop and race the approval TTL timer (S197 timeout-race fix).
+        """
+        from .dpc_agent.tools.shell import _pending_approvals
+
+        entry = _pending_approvals.get(request_id)
+        if not entry:
+            return {"status": "error", "message": f"Unknown or expired request_id: {request_id}"}
+
+        command = entry["command"]
+        agent_name = entry["agent_name"]
+
+        logger.info("Shell command approved: %s — %r", request_id, command)
+
+        entry["decision"] = "approved"
+        event = entry.get("event")
+        if event:
+            event.set()
+
+        if add_to_whitelist:
+            tokens = command.strip().split()
+            cmd_prefix = " ".join(tokens[:2]) if len(tokens) >= 2 else tokens[0] if tokens else command
+            agent_profile = entry.get("agent_profile", agent_name)
+            await self.shell_add_to_whitelist(agent_profile, cmd_prefix)
+
+        return {"status": "ok", "request_id": request_id}
+
+    async def shell_reject_command(self, request_id: str) -> Dict[str, Any]:
+        """Reject a Tier 1 shell command execution request."""
+        from .dpc_agent.tools.shell import _pending_approvals
+
+        entry = _pending_approvals.get(request_id)
+        if not entry:
+            return {"status": "error", "message": f"Unknown or expired request_id: {request_id}"}
+
+        entry["decision"] = "rejected"
+        entry["result"] = "❌ Command rejected by user."
+        event = entry.get("event")
+        if event:
+            event.set()
+
+        logger.info("Shell command rejected: %s", request_id)
+        return {"status": "ok", "request_id": request_id}
+
+    async def shell_add_to_whitelist(self, agent_id: str, command_prefix: str) -> Dict[str, Any]:
+        """Add a command prefix to an agent's Tier 1 whitelist."""
+        try:
+            rules = self.firewall.rules
+            profiles = rules.setdefault("agent_profiles", {})
+            profile = profiles.setdefault(agent_id, {})
+            tools = profile.setdefault("tools", {})
+            whitelist = tools.setdefault("run_shell_tier1_whitelist", [])
+            if not isinstance(whitelist, list):
+                whitelist = []
+                tools["run_shell_tier1_whitelist"] = whitelist
+            if command_prefix not in whitelist:
+                whitelist.append(command_prefix)
+            ok, msg, errs = self.firewall.save_rules_from_dict(rules)
+            if not ok:
+                logger.error("shell_add_to_whitelist save failed: %s %s", msg, errs)
+                return {"status": "error", "message": f"Save failed: {msg}", "errors": errs}
+            return {"status": "ok", "agent_id": agent_id, "added": command_prefix}
+        except Exception as e:
+            logger.error("shell_add_to_whitelist failed: %s", e)
             return {"status": "error", "message": str(e)}
 
     async def get_session_archive_info(self, conversation_id: str) -> Dict[str, Any]:
@@ -3671,11 +3990,14 @@ class CoreService:
                         with open(history_path, encoding="utf-8") as f:
                             data = _json.load(f)
                         messages = data.get("messages", [])
+                        for msg in messages:
+                            msg.setdefault("message_id", msg.get("id"))
                         logger.info("Loaded %d messages from disk for %s", len(messages), conversation_id)
                         token_stats = data.get("token_stats", {})
                         history_tokens = sum(len(msg.get("content", "") or "") for msg in messages) // 4
                         token_limit = token_stats.get("token_limit", 0) or self._resolve_agent_token_limit(conversation_id)
-                        context_estimated = token_stats.get("context_estimated", 0)
+                        tokens_after_last_response = token_stats.get("tokens_after_last_response", 0)
+                        tokens_after_last_response_at = token_stats.get("tokens_after_last_response_at")
                         return {
                             "status": "success",
                             "messages": messages,
@@ -3683,45 +4005,47 @@ class CoreService:
                             "tokens_used": token_stats.get("current_token_count", history_tokens),
                             "token_limit": token_limit,
                             "history_tokens": history_tokens,
-                            "context_estimated": context_estimated,
+                            "tokens_after_last_response": tokens_after_last_response,
+                            "tokens_after_last_response_at": tokens_after_last_response_at,
                         }
                     except Exception as e:
                         logger.error("Failed to load agent history from disk: %s", e)
                 else:
                     logger.debug("No history file found for %s", conversation_id)
 
-            if not monitor:
-                # Try loading from disk for group conversations (same pattern as agent_)
-                if conversation_id.startswith("group-"):
-                    conv_dir = None
-                    if hasattr(self, 'group_manager') and self.group_manager:
-                        conv_dir = self.group_manager._get_conversation_dir(conversation_id)
-                    if conv_dir and (conv_dir / "history.json").exists():
-                        try:
-                            import json as _json
-                            with open(conv_dir / "history.json", encoding="utf-8") as f:
-                                data = _json.load(f)
-                            messages = data.get("messages", [])
-                            for msg in messages:
-                                msg.setdefault("sender_type", "human")
-                                msg.setdefault("agent_owner", None)
-                            history_tokens = sum(len(msg.get("content", "") or "") for msg in messages) // 4
-                            token_limit = 0
-                            if hasattr(self, 'llm_manager') and self.llm_manager:
-                                model = self.llm_manager.get_active_model_name()
-                                token_limit = self.llm_manager.get_context_window(model) or 0
-                            logger.info("Loaded %d messages from disk for %s (%s)", len(messages), conversation_id, conv_dir.name)
-                            return {
-                                "status": "success",
-                                "messages": messages,
-                                "message_count": len(messages),
-                                "tokens_used": history_tokens,
-                                "token_limit": token_limit,
-                                "history_tokens": history_tokens,
-                            }
-                        except Exception as e:
-                            logger.error("Failed to load group history from disk: %s", e)
+            # Group conversations: always read from disk (same SSoT pattern as agent_)
+            if conversation_id.startswith("group-"):
+                conv_dir = None
+                if hasattr(self, 'group_manager') and self.group_manager:
+                    conv_dir = self.group_manager._get_conversation_dir(conversation_id)
+                if conv_dir and (conv_dir / "history.json").exists():
+                    try:
+                        import json as _json
+                        with open(conv_dir / "history.json", encoding="utf-8") as f:
+                            data = _json.load(f)
+                        messages = data.get("messages", [])
+                        for msg in messages:
+                            msg.setdefault("sender_type", "human")
+                            msg.setdefault("agent_owner", None)
+                            msg.setdefault("message_id", msg.get("id"))
+                        history_tokens = sum(len(msg.get("content", "") or "") for msg in messages) // 4
+                        token_limit = 0
+                        if hasattr(self, 'llm_manager') and self.llm_manager:
+                            model = self.llm_manager.get_active_model_name()
+                            token_limit = self.llm_manager.get_context_window(model) or 0
+                        logger.info("Loaded %d messages from disk for %s (%s)", len(messages), conversation_id, conv_dir.name)
+                        return {
+                            "status": "success",
+                            "messages": messages,
+                            "message_count": len(messages),
+                            "tokens_used": history_tokens,
+                            "token_limit": token_limit,
+                            "history_tokens": history_tokens,
+                        }
+                    except Exception as e:
+                        logger.error("Failed to load group history from disk: %s", e)
 
+            if not monitor:
                 logger.debug("No conversation monitor found for %s, returning empty history", conversation_id)
                 return {
                     "status": "success",
@@ -3781,24 +4105,38 @@ class CoreService:
             token_usage = monitor.get_token_usage()
             # history_tokens: dialog-only (chars ÷ 4), same basis as the token counter
             history_tokens = sum(len(msg.get("content", "") or "") for msg in messages) // 4
-            # context_estimated: full LLM context from the last request.
-            # For agent monitors, stored in _last_context_estimated.
+            # tokens_after_last_response: full LLM context measured after the previous response.
+            # For agent monitors, stored in _tokens_after_last_response (one request stale).
             # For local AI monitors, current_token_count = prompt_tokens (already the full context).
-            context_estimated = monitor._last_context_estimated or token_usage.get("tokens_used", 0)
+            tokens_after_last_response = monitor._tokens_after_last_response or token_usage.get("tokens_used", 0)
+            tokens_after_last_response_at = monitor._tokens_after_last_response_at
+            token_limit = token_usage.get("token_limit", 0)
             # For group chats, current_token_count may be 0 (no LLM calls update it).
             # Use history_tokens as the floor to keep the UI counter accurate.
             tokens_used = token_usage.get("tokens_used", 0)
-            if conversation_id.startswith("group-") and tokens_used < history_tokens:
-                tokens_used = history_tokens
-                monitor.set_token_count(history_tokens)
+            context_agent = ""
+            context_agents = []
+            if conversation_id.startswith("group-"):
+                if tokens_used < history_tokens:
+                    tokens_used = history_tokens
+                    monitor.set_token_count(history_tokens)
+                worst = self._worst_group_agent_context(conversation_id)
+                if worst:
+                    tokens_after_last_response, token_limit, tokens_after_last_response_at = worst[:3]
+                    context_agent = worst[3] if len(worst) > 3 else ""
+                    tokens_used = max(tokens_used, tokens_after_last_response)
+                context_agents = self._group_agent_context_list(conversation_id)
             return {
                 "status": "success",
                 "messages": messages,
                 "message_count": len(messages),
                 "tokens_used": tokens_used,
-                "token_limit": token_usage.get("token_limit", 0),
+                "token_limit": token_limit,
                 "history_tokens": history_tokens,
-                "context_estimated": context_estimated,
+                "tokens_after_last_response": tokens_after_last_response,
+                "tokens_after_last_response_at": tokens_after_last_response_at,
+                "context_agent": context_agent,
+                "context_agents": context_agents,
             }
 
         except Exception as e:
@@ -3925,7 +4263,8 @@ class CoreService:
                         "tokens_used": 0,
                         "token_limit": token_limit,
                         "history_tokens": 0,
-                        "context_estimated": 0,
+                        "tokens_after_last_response": 0,
+                        "tokens_after_last_response_at": None,
                     })
                     if not group.is_discord_bridge:
                         asyncio.create_task(self.trigger_group_sleep(conversation_id))
@@ -3975,6 +4314,7 @@ class CoreService:
 
     async def reset_conversation(self, conversation_id: str) -> Dict[str, Any]:
         """Delegated to KnowledgeService."""
+        self._group_agent_context.pop(conversation_id, None)
         return await self.knowledge_service.reset_conversation(conversation_id)
 
     async def get_conversation_settings(self, conversation_id: str) -> Dict[str, Any]:
@@ -4005,20 +4345,7 @@ class CoreService:
             members = member_node_ids or []
             group = self.group_manager.create_group(name, topic, members)
 
-            # Auto-populate agents from this node's registry
-            if self.agent_service:
-                try:
-                    result = await self.agent_service.list_agents()
-                    agents = result.get("agents", [])
-                    agent_ids = [a["agent_id"] for a in agents]
-                    agent_names = {a["agent_id"]: a.get("name", a["agent_id"]) for a in agents}
-                    if agent_ids:
-                        self.group_manager.set_node_agents(
-                            group.group_id, self.p2p_manager.node_id, agent_ids, agent_names
-                        )
-                except Exception:
-                    pass
-
+            # Agents start empty: each node opts its own in via set_group_agents.
             # Send GROUP_CREATE to all members
             await self._broadcast_to_group(group.group_id, {
                 "command": "GROUP_CREATE",
@@ -4047,6 +4374,21 @@ class CoreService:
             self.group_manager.set_node_agents(
                 group_id, self.p2p_manager.node_id, agent_ids or [], agent_names
             )
+            group = self.group_manager.get_group(group_id)
+            if group:
+                await self._broadcast_to_group(group_id, {
+                    "command": "GROUP_SYNC",
+                    "payload": group.to_dict(),
+                })
+                await self.local_api.broadcast_event("group_updated", {
+                    "group_id": group.group_id,
+                    "name": group.name,
+                    "topic": group.topic,
+                    "members": group.members,
+                    "agents": group.agents,
+                    "agent_names": group.agent_names,
+                    "version": group.version,
+                })
             return {"status": "success"}
         except Exception as e:
             return {"status": "error", "message": str(e)}
@@ -4142,7 +4484,8 @@ class CoreService:
             })
 
             # Detect @agent mentions and route to Ark / CC
-            await self._handle_group_agent_mentions(group_id, text, sender_name)
+            await self._handle_group_agent_mentions(group_id, text, sender_name,
+                                                    trigger_message_id=message_id)
 
             history_tokens = sum(len(m.get("content", "") or "") for m in monitor.get_message_history()) // 4
             monitor.set_token_count(history_tokens)
@@ -4153,15 +4496,18 @@ class CoreService:
                 "tokens_used": history_tokens,
                 "token_limit": token_limit,
                 "history_tokens": history_tokens,
-                "context_estimated": 0,
+                "tokens_after_last_response": 0,
+                "tokens_after_last_response_at": None,
             })
             return {
                 "status": "success",
                 "message_id": message_id,
+                "msg_index": msg_index,
                 "tokens_used": history_tokens,
                 "token_limit": token_limit,
                 "history_tokens": history_tokens,
-                "context_estimated": 0,
+                "tokens_after_last_response": 0,
+                "tokens_after_last_response_at": None,
             }
         except Exception as e:
             logger.error("Error sending group message: %s", e, exc_info=True)
@@ -4170,17 +4516,23 @@ class CoreService:
     _CODE_BLOCK_RE = re.compile(r'```[\s\S]*?```|`[^`\n]+`')
 
     async def _handle_group_agent_mentions(
-        self, group_id: str, text: str, sender_name: str
+        self, group_id: str, text: str, sender_name: str,
+        is_agent_sender: bool = False,
+        trigger_message_id: Optional[str] = None,
     ) -> None:
-        """Detect @agent / @CC mentions in outgoing group messages and route to agents."""
+        """Detect @agent / @CC / @all mentions in outgoing group messages and route to agents."""
         plain_text = self._CODE_BLOCK_RE.sub('', text)
         mentions = {m.lower() for m in re.findall(r'@(\w+)\b', plain_text, re.IGNORECASE)}
-        logger.debug("_handle_group_agent_mentions: mentions=%s in group %s", mentions, group_id)
+        logger.debug("_handle_group_agent_mentions: mentions=%s in group %s (agent_sender=%s)",
+                      mentions, group_id, is_agent_sender)
 
         # Get allowed agents for this group from metadata
         group = self.group_manager.get_group(group_id) if self.group_manager else None
         node_id = self.p2p_manager.node_id
         allowed_agents = set(group.agents.get(node_id, [])) if group else set()
+
+        # @all expands to all agents + CC — but only when a human sends the message
+        mention_all = "all" in mentions and not is_agent_sender
 
         # Check if any mention matches an allowed agent's name or id
         sender_lower = sender_name.lower() if sender_name else ""
@@ -4188,14 +4540,16 @@ class CoreService:
             aname = self._get_agent_display_name(aid).lower()
             if aname == sender_lower:
                 continue
-            if aname in mentions or aid in mentions:
-                matched = aname if aname in mentions else aid
+            if mention_all or aname in mentions or aid in mentions:
+                matched = "all" if mention_all else (aname if aname in mentions else aid)
                 logger.info("Group @%s mention detected — invoking agent %s in group %s", matched, aid, group_id)
-                asyncio.ensure_future(self._invoke_agent_in_group(group_id, text, sender_name, aid))
+                asyncio.ensure_future(self._invoke_agent_in_group_serialized(
+                    group_id, text, sender_name, aid, trigger_message_id))
 
         cc_name = self.get_cc_display_name().lower()
-        if cc_name in mentions and cc_name != sender_lower:
-            logger.info("Group @cc mention detected — broadcasting cc_group_mention in group %s", group_id)
+        if (mention_all or cc_name in mentions) and cc_name != sender_lower:
+            logger.info("Group @%s mention detected — broadcasting cc_group_mention in group %s",
+                        "all" if mention_all else "cc", group_id)
             await self.local_api.broadcast_event("cc_group_mention", {
                 "group_id": group_id,
                 "text": text,
@@ -4203,8 +4557,23 @@ class CoreService:
                 "sender_node_id": self.p2p_manager.node_id,
             })
 
+    async def _invoke_agent_in_group_serialized(
+        self, group_id: str, text: str, sender_name: str, agent_id: str = None,
+        trigger_message_id: Optional[str] = None,
+    ) -> None:
+        """Run an agent in a group under the per-group lock — serializes agents so two
+        @mentions in the same group queue (one at a time) instead of running in parallel.
+        Prevents one agent's completion progress-clear wiping another's still-running
+        progress, and avoids concurrent same-group LLM load."""
+        if group_id not in self._group_agent_locks:
+            self._group_agent_locks[group_id] = asyncio.Lock()
+        async with self._group_agent_locks[group_id]:
+            await self._invoke_agent_in_group(group_id, text, sender_name, agent_id,
+                                              trigger_message_id)
+
     async def _invoke_agent_in_group(
-        self, group_id: str, text: str, sender_name: str, agent_id: str = None
+        self, group_id: str, text: str, sender_name: str, agent_id: str = None,
+        trigger_message_id: Optional[str] = None,
     ) -> None:
         """Invoke a specific agent and post its response to the group."""
         try:
@@ -4218,20 +4587,87 @@ class CoreService:
 
             prompt = f"[{sender_name}]: {text}"
 
+            chat_context = None
+            group_meta = self.group_manager.get_group(group_id)
+            if group_meta:
+                participants = []
+                for nid in group_meta.members:
+                    if nid == self.p2p_manager.node_id:
+                        uname = self.p2p_manager.get_display_name() or "User"
+                        participants.append(f"{uname} (User)")
+                    else:
+                        pname = self.peer_metadata.get(nid, {}).get("name", nid[:16])
+                        participants.append(f"{pname} (peer)")
+                for nid, names in group_meta.agent_names.items():
+                    for aid, dname in names.items():
+                        participants.append(f"{dname} (agent)")
+                chat_context = {
+                    "chat_type": "group",
+                    "chat_name": group_meta.name,
+                    "chat_id": group_id,
+                    "description": group_meta.topic or "",
+                    "participants": participants,
+                }
+
             response = await manager.process_message(
                 message=prompt,
                 conversation_id=group_id,
                 sender_name=sender_name,
+                chat_context=chat_context,
+                _skip_history=True,
+                trigger_message_id=trigger_message_id,
             )
             if response:
                 agent_name = self._get_agent_display_name(agent_id)
-                await self.send_group_agent_message(group_id, agent_name, response)
+                tool_calls = None
+                # _last_used_agent is the agent that just processed this message.
+                # _agents is keyed by provider_alias, not group_id, so .get(group_id)
+                # was always None and tool_calls never persisted for group messages.
+                agent = manager._last_used_agent
+                if agent and hasattr(agent, '_last_trace'):
+                    tool_calls = (agent._last_trace or {}).get("accumulated_tool_calls")
+                await self.send_group_agent_message(group_id, agent_name, response, tool_calls=tool_calls)
         except Exception as e:
             logger.error("Agent group response failed: %s", e, exc_info=True)
 
+    def update_group_agent_context(self, group_id: str, agent_id: str,
+                                   prompt_tokens: int, token_limit: int,
+                                   display_name: str = "") -> None:
+        agents = self._group_agent_context.setdefault(group_id, {})
+        agents[agent_id] = (prompt_tokens, token_limit,
+                            datetime.now(timezone.utc).isoformat(),
+                            display_name or agent_id)
+
+    def get_group_agent_context(self, group_id: str, agent_id: str) -> Optional[tuple]:
+        return self._group_agent_context.get(group_id, {}).get(agent_id)
+
+    def _group_agent_context_list(self, group_id: str) -> list:
+        agents = self._group_agent_context.get(group_id, {})
+        out = []
+        for entry in agents.values():
+            tokens, limit = entry[0], entry[1]
+            out.append({
+                "name": entry[3] if len(entry) > 3 else "",
+                "tokens": tokens,
+                "limit": limit,
+                "percent": round(tokens / limit * 100, 1) if limit else 0,
+            })
+        out.sort(key=lambda a: a["percent"], reverse=True)
+        return out
+
+    def _worst_group_agent_context(self, group_id: str) -> Optional[tuple]:
+        agents = self._group_agent_context.get(group_id)
+        if not agents:
+            return None
+        return max(
+            agents.values(),
+            key=lambda v: (v[0] / v[1]) if v[1] else 0,
+        )
+
     async def send_group_agent_message(
-        self, group_id: str, agent_name: str, text: str
-    ) -> None:
+        self, group_id: str, agent_name: str, text: str,
+        tool_calls: Optional[list] = None,
+    ) -> Optional[str]:
         """Send a group message attributed to an agent.
 
         The message appears with agent_name as the sender and is marked
@@ -4241,11 +4677,16 @@ class CoreService:
             group_id: Target group ID
             agent_name: Display name (from config.json or CC display name)
             text: Message text
+
+        Returns:
+            The generated message_id (16-char hex), or None if the group was not found.
+            Callers use this to track posted messages for later deletion (e.g. morning
+            brief replacement on Sleep button).
         """
         group = self.group_manager.get_group(group_id)
         if not group:
             logger.warning("send_group_agent_message: group %s not found", group_id)
-            return
+            return None
 
         import uuid
         message_id = uuid.uuid4().hex[:16]
@@ -4266,6 +4707,11 @@ class CoreService:
             sender_type="agent",
             agent_owner=self.p2p_manager.node_id,
         ))
+        if tool_calls:
+            history = monitor.get_message_history()
+            if history and history[-1].get("id") == message_id:
+                history[-1]["tool_calls"] = tool_calls
+                monitor._history_dirty = True
         monitor.save_history()
 
         last_msg = monitor.get_message_history()[-1] if monitor.get_message_history() else {}
@@ -4283,6 +4729,9 @@ class CoreService:
             "mentions": [],
             "is_agent": True,
             "msg_index": msg_index,
+            # tool_calls in the live broadcast so the collapsible renders immediately
+            # on the finalized message, not only after a history reload.
+            "tool_calls": tool_calls or [],
         }
 
         # Broadcast to UI
@@ -4299,21 +4748,93 @@ class CoreService:
         # Relay to P2P peers so remote members see the agent response
         await self._broadcast_to_group(group_id, {"command": "GROUP_TEXT", "payload": payload})
 
-        # Update token count — use agent's context_estimated if available
+        # Update token count — use agent's tokens_after_last_response if available
         history_tokens = sum(len(m.get("content", "") or "") for m in monitor.get_message_history()) // 4
-        context_estimated = getattr(monitor, '_last_context_estimated', 0) or 0
-        monitor.set_token_count(max(history_tokens, context_estimated))
+        tokens_after_last_response = getattr(monitor, '_tokens_after_last_response', 0) or 0
+        tokens_after_last_response_at = getattr(monitor, '_tokens_after_last_response_at', None)
+        monitor.set_token_count(max(history_tokens, tokens_after_last_response))
         token_usage = monitor.get_token_usage()
+        token_limit = token_usage.get("token_limit", 0)
+        if not token_limit:
+            token_limit = self.llm_manager.get_context_window(
+                self.llm_manager.get_active_model_name())
+        context_agent = ""
+        worst = self._worst_group_agent_context(group_id)
+        if worst:
+            tokens_after_last_response, token_limit, tokens_after_last_response_at = worst[:3]
+            context_agent = worst[3] if len(worst) > 3 else ""
         await self.local_api.broadcast_event("token_usage_updated", {
             "conversation_id": group_id,
-            "tokens_used": max(history_tokens, context_estimated),
-            "token_limit": token_usage.get("token_limit", 0) or 128000,
+            "tokens_used": max(history_tokens, tokens_after_last_response),
+            "token_limit": token_limit,
             "history_tokens": history_tokens,
-            "context_estimated": context_estimated,
+            "tokens_after_last_response": tokens_after_last_response,
+            "tokens_after_last_response_at": tokens_after_last_response_at,
+            "context_agent": context_agent,
+            "context_agents": self._group_agent_context_list(group_id),
         })
 
         # Route @mentions from agent messages (enables CC→Ark and Ark→CC communication)
-        await self._handle_group_agent_mentions(group_id, text, agent_name)
+        await self._handle_group_agent_mentions(group_id, text, agent_name, is_agent_sender=True,
+                                                trigger_message_id=message_id)
+
+        return message_id
+
+    async def _delete_group_briefs(self, group_id: str, agent_sender_name: str) -> int:
+        """Delete all morning-brief messages from a given agent in a group chat.
+
+        Used by trigger_group_sleep to clean up stale briefs before posting fresh ones.
+        Identifies briefs by content prefix (constant from _format_morning_brief) so it
+        works for both new briefs (tracked via chat_message_id) and legacy briefs
+        posted before message-id tracking was added.
+
+        Args:
+            group_id: Target group ID
+            agent_sender_name: Display name to match against sender_name in history
+
+        Returns:
+            Number of brief messages deleted.
+        """
+        BRIEF_PREFIX = "**Morning Brief (Sleep Consolidation)**"
+
+        monitor = self._get_or_create_conversation_monitor(group_id)
+        history = monitor.message_history
+        if not history:
+            return 0
+
+        to_delete = [
+            m for m in history
+            if (m.get("sender_name") == agent_sender_name
+                and (m.get("content") or "").startswith(BRIEF_PREFIX))
+        ]
+
+        if not to_delete:
+            return 0
+
+        deleted_ids = []
+        for m in to_delete:
+            mid = m.get("message_id") or m.get("id")
+            if mid:
+                deleted_ids.append(mid)
+
+        # Mutate in place
+        monitor.message_history[:] = [m for m in history if m not in to_delete]
+        monitor.save_history()
+
+        # Notify UI to remove from view. Include sender + content_prefix hint so
+        # frontend can also match by pattern (for legacy briefs whose backend
+        # message_id was never stored on the frontend side).
+        for mid in deleted_ids:
+            await self.local_api.broadcast_event("group_message_deleted", {
+                "group_id": group_id,
+                "message_id": mid,
+                "sender_name": agent_sender_name,
+                "content_prefix": BRIEF_PREFIX,
+            })
+
+        logger.info("Deleted %d brief(s) from group %s for agent %s",
+                    len(to_delete), group_id, agent_sender_name)
+        return len(to_delete)
 
     async def add_group_member(self, group_id: str, node_id: str) -> Dict[str, Any]:
         """Add a member to a group and notify all members.
@@ -4364,8 +4885,13 @@ class CoreService:
 
             # Notify local UI to refresh group settings
             await self.local_api.broadcast_event("group_updated", {
-                "group_id": group_id,
-                "group": group.to_dict(),
+                "group_id": group.group_id,
+                "name": group.name,
+                "topic": group.topic,
+                "members": group.members,
+                "agents": group.agents,
+                "agent_names": group.agent_names,
+                "version": group.version,
             })
 
             return {"status": "success", "group": group.to_dict()}
@@ -4391,10 +4917,42 @@ class CoreService:
                 "payload": group.to_dict()
             })
 
+            # Notify local UI to refresh group settings
+            await self.local_api.broadcast_event("group_updated", {
+                "group_id": group.group_id,
+                "name": group.name,
+                "topic": group.topic,
+                "members": group.members,
+                "agents": group.agents,
+                "agent_names": group.agent_names,
+                "version": group.version,
+            })
+
             return {"status": "success", "group": group.to_dict()}
         except Exception as e:
             logger.error("Error removing group member: %s", e, exc_info=True)
             return {"status": "error", "message": str(e)}
+
+    async def update_group_topic(self, group_id: str, topic: str) -> Dict[str, Any]:
+        """Update a group's topic/description. Only the creator can update."""
+        group = self.group_manager.get_group(group_id)
+        if not group:
+            return {"status": "error", "message": f"Group {group_id} not found"}
+        if group.created_by != self.p2p_manager.node_id:
+            return {"status": "error", "message": "Only the group creator can update the topic"}
+        if len(topic) > 15000:
+            return {"status": "error", "message": "Topic too long (max 15000 chars)"}
+        updated = self.group_manager.update_topic(group_id, topic)
+        if not updated:
+            return {"status": "error", "message": "Failed to update topic"}
+        await self._broadcast_to_group(group_id, {
+            "command": "GROUP_SYNC",
+            "payload": updated.to_dict()
+        })
+        await self.local_api.broadcast_event("group_updated", {
+            "group_id": group_id, "topic": topic,
+        })
+        return {"status": "success", "topic": topic}
 
     async def leave_group(self, group_id: str) -> Dict[str, Any]:
         """Leave a group and notify remaining members."""
@@ -5371,15 +5929,8 @@ class CoreService:
                     all_models = []
 
                     for alias, provider in self.llm_manager.providers.items():
-                        model = provider.model
-                        provider_type = provider.config.get("type", "unknown")
-
-                        all_providers.append({
-                            "alias": alias,
-                            "model": model,
-                            "type": provider_type
-                        })
-                        all_models.append(model)
+                        all_providers.append(self.build_p2p_provider_info(alias, provider))
+                        all_models.append(provider.model)
 
                     logger.debug("Found %d total providers", len(all_providers))
 
@@ -5584,7 +6135,7 @@ class CoreService:
             import re
             _mentions = {m.lower() for m in re.findall(r'@(\w+)\b', prompt or '', re.IGNORECASE)}
             cc_name_lower = self.get_cc_display_name().lower()
-            _agent_id = self._get_default_agent_id()
+            _agent_id = conversation_id
             agent_name_lower = self._get_agent_display_name(_agent_id).lower()
             agent_mentioned = agent_name_lower in _mentions or _agent_id in _mentions
             if cc_name_lower in _mentions and not agent_mentioned:
@@ -5620,12 +6171,33 @@ class CoreService:
                         "tokens_used": 0,
                         "token_limit": 128000,
                         "history_tokens": 0,
-                        "context_estimated": 0,
+                        "tokens_after_last_response": 0,
+                        "tokens_after_last_response_at": None,
                         "user_msg_index": user_msg_index,
                     }
                 )
                 logger.info("@CC-only mention in %s — broadcast to MCP bridge (real CC)", conversation_id)
                 return
+
+            # Record user message BEFORE LLM starts so we can emit msg_index immediately
+            monitor = agent_manager._get_or_create_agent_monitor(conversation_id)
+            from dpc_client_core.dpc_agent.utils import utc_now_iso
+            _user_node_id = getattr(self.p2p_manager, "node_id", "local-user")
+            monitor.add_message(
+                role="user",
+                content=prompt,
+                timestamp=utc_now_iso(),
+                sender_node_id=_user_node_id,
+                sender_name=self.p2p_manager.get_display_name() or "User",
+            )
+            monitor.save_history()
+            _early_user_msg_index = monitor.get_last_msg_index()
+
+            await self.local_api.broadcast_event("user_message_confirmed", {
+                "conversation_id": conversation_id,
+                "msg_index": _early_user_msg_index,
+                "command_id": command_id,
+            })
 
             # Process message through agent (agent manager handles its own prompt assembly)
             response = await agent_manager.process_message(
@@ -5634,6 +6206,7 @@ class CoreService:
                 include_context=include_context,
                 agent_llm_provider=agent_llm_provider or conversation_id,
                 sender_name=self.p2p_manager.get_display_name() or "User",
+                _skip_history=True,
             )
 
             # Get actual model and provider from agent's last usage.
@@ -5678,7 +6251,8 @@ class CoreService:
                     "token_limit": token_limit,
                     "usage_percent": usage_percent,
                     "history_tokens": session_state.get("history_tokens", 0),
-                    "context_estimated": session_state.get("context_estimated", 0),
+                    "tokens_after_last_response": session_state.get("tokens_after_last_response", 0),
+                    "tokens_after_last_response_at": session_state.get("tokens_after_last_response_at"),
                 })
                 logger.warning("Token Warning - %s: %.1f%% of context window used (%d/%d tokens)",
                                conversation_id, usage_percent * 100,
@@ -5691,6 +6265,10 @@ class CoreService:
                 thinking_text = agent._last_usage.get("thinking")
                 if thinking_text:
                     thinking_tokens = len(thinking_text) // 4  # rough token estimate
+
+            # Get tool_calls from agent trace for collapsible rendering
+            _trace = getattr(agent, '_last_trace', None) or {}
+            tool_calls_for_response = _trace.get("accumulated_tool_calls") or []
 
             # Pull msg_index for both user and assistant turns from monitor —
             # process_message() appends user msg then assistant msg, so the
@@ -5718,11 +6296,14 @@ class CoreService:
                     "tokens_used": tokens_used,
                     "token_limit": token_limit,
                     "history_tokens": session_state.get("history_tokens", 0),
-                    "context_estimated": session_state.get("context_estimated", 0),
+                    "tokens_after_last_response": session_state.get("tokens_after_last_response", 0),
+                    "tokens_after_last_response_at": session_state.get("tokens_after_last_response_at"),
                     "thinking": thinking_text,
                     "thinking_tokens": thinking_tokens,
+                    "tool_calls": tool_calls_for_response if tool_calls_for_response else [],
                     "user_msg_index": user_msg_index,
                     "assistant_msg_index": assistant_msg_index,
+                    "context_breakdown": session_state.get("context_breakdown"),
                 }
             )
 
@@ -5841,10 +6422,11 @@ class CoreService:
                 timestamp=timestamp,
                 sender_node_id="cc",
                 sender_name=cc_name,
+                sender_type="agent",
             )
             monitor.save_history()
 
-            # context_estimated is updated after each LLM response — no additive
+            # tokens_after_last_response is updated after each LLM response — no additive
             # increment here (same fix as agent_manager.py drift removal).
             token_stats = manager.get_session_state(conversation_id)
 
@@ -5863,9 +6445,11 @@ class CoreService:
                     "sender_node_id": "cc",
                     "timestamp": timestamp,
                     "msg_index": monitor.get_last_msg_index(),
-                    "context_estimated": token_stats.get("context_estimated", 0),
+                    "tokens_after_last_response": token_stats.get("tokens_after_last_response", 0),
+                    "tokens_after_last_response_at": token_stats.get("tokens_after_last_response_at"),
                     "history_tokens": token_stats.get("history_tokens", 0),
                     "tokens_limit": token_stats.get("tokens_limit", 128000),
+                    "context_breakdown": token_stats.get("context_breakdown"),
                 })
 
             logger.info("CC response injected into %s (%d chars)", conversation_id, len(text))
@@ -6265,9 +6849,10 @@ class CoreService:
                 monitor.set_token_count(result["prompt_tokens"])
 
                 # Compute breakdown for three-metric token display:
-                # - context_estimated = full assembled prompt (system + contexts + history)
+                # - tokens_after_last_response = full assembled prompt (system + contexts + history)
                 # - history_tokens = rough estimate of conversation text only (chars ÷ 4)
-                _context_estimated = result["prompt_tokens"]
+                _tokens_after_last_response = result["prompt_tokens"]
+                _tokens_after_last_response_at = datetime.now(timezone.utc).isoformat()
                 _history_tokens = sum(
                     len(msg.get("content", "")) for msg in message_history
                 ) // 4
@@ -6285,7 +6870,8 @@ class CoreService:
                         "token_limit": current_limit,
                         "usage_percent": current_usage_percent,
                         "history_tokens": _history_tokens,
-                        "context_estimated": _context_estimated,
+                        "tokens_after_last_response": _tokens_after_last_response,
+                        "tokens_after_last_response_at": _tokens_after_last_response_at,
                     })
                     logger.warning("Token Warning - %s: %.1f%% of context window used (%d/%d tokens)",
                                  conversation_id, current_usage_percent * 100,
@@ -6296,7 +6882,19 @@ class CoreService:
                 response_payload["token_limit"] = result.get("model_max_tokens", 0)
                 response_payload["this_query_tokens"] = result["tokens_used"]  # Per-query tokens (for debugging)
                 response_payload["history_tokens"] = _history_tokens
-                response_payload["context_estimated"] = _context_estimated
+                response_payload["tokens_after_last_response"] = _tokens_after_last_response
+                response_payload["tokens_after_last_response_at"] = _tokens_after_last_response_at
+
+            # Context breakdown for agent chats (STATIC tooltip)
+            if conversation_id.startswith("agent_"):
+                try:
+                    dpc_prov = self.llm_manager.providers.get("dpc_agent")
+                    mgr = dpc_prov.get_manager(conversation_id) if dpc_prov else None
+                    if mgr:
+                        state = mgr.get_session_state(conversation_id)
+                        response_payload["context_breakdown"] = state.get("context_breakdown")
+                except Exception as bd_err:
+                    logger.warning("Context breakdown unavailable for %s: %s", conversation_id, bd_err)
 
         except Exception as e:
             logger.error("Error during inference: %s", e, exc_info=True)
@@ -6470,6 +7068,8 @@ class CoreService:
         budget_usd: float = 50.0,
         max_rounds: int = 200,
         compute_host: str = "",  # Optional remote peer node_id for LLM inference
+        retrieval_vector: str = "",  # "native" | "grafeo" | "" (default native)
+        retrieval_text: str = "",    # "native" | "grafeo" | "" (default native)
     ) -> Dict[str, Any]:
         """Delegates to AgentService."""
         if not self.agent_service:
@@ -6482,6 +7082,8 @@ class CoreService:
             budget_usd=budget_usd,
             max_rounds=max_rounds,
             compute_host=compute_host,
+            retrieval_vector=retrieval_vector,
+            retrieval_text=retrieval_text,
         )
 
     async def list_agents(self) -> Dict[str, Any]:
@@ -6544,6 +7146,10 @@ class CoreService:
         self, agent_id: str = None,
         provider_alias: str = None,
         sleep_provider_alias: str = None,
+        snapshot_summarize_provider: str = None,
+        snapshot_summarize_threshold: int = None,
+        retrieval_vector: str = None,
+        retrieval_text: str = None,
     ) -> Dict[str, Any]:
         """Delegated to AgentService."""
         if not self.agent_service:
@@ -6551,7 +7157,14 @@ class CoreService:
         if agent_id is None:
             agent_id = self._get_default_agent_id()
         return await self.agent_service.save_agent_model_config(
-            agent_id, provider_alias, sleep_provider_alias, self.get_providers_list
+            agent_id,
+            provider_alias=provider_alias,
+            sleep_provider_alias=sleep_provider_alias,
+            snapshot_summarize_provider=snapshot_summarize_provider,
+            snapshot_summarize_threshold=snapshot_summarize_threshold,
+            retrieval_vector=retrieval_vector,
+            retrieval_text=retrieval_text,
+            providers_getter=self.get_providers_list,
         )
 
     # --- Agent Task Board Methods (v0.20.0) ---
@@ -6608,6 +7221,33 @@ class CoreService:
         if agent_id is None:
             agent_id = self._get_default_agent_id()
         return await self.agent_service.cancel_agent_task(agent_id, task_id)
+
+    async def interrupt_agent(self, agent_id: str = "", conversation_id: str = "") -> Dict[str, Any]:
+        """Stop an active agent loop gracefully (L1 Interrupt API).
+
+        Works for both 1:1 (conversation_id=agent_xxx) and group chats
+        (conversation_id=group-xxx) by routing via explicit agent_id.
+        """
+        logger.info("interrupt_agent called: agent_id=%r, conversation_id=%r", agent_id, conversation_id)
+        if not agent_id and conversation_id.startswith("agent_"):
+            agent_id = conversation_id
+        if not agent_id:
+            logger.warning("interrupt_agent: no agent_id provided")
+            return {"status": "error", "message": "agent_id required"}
+        if not conversation_id:
+            conversation_id = agent_id
+        provider = self.llm_manager.providers.get("dpc_agent") if self.llm_manager else None
+        if not provider or not hasattr(provider, "get_manager"):
+            logger.warning("interrupt_agent: DpcAgentProvider not found")
+            return {"status": "error", "message": "DpcAgentProvider not available"}
+        try:
+            manager = provider.get_manager(agent_id)
+            stopped = manager.interrupt(conversation_id)
+            logger.info("interrupt_agent result: agent_id=%s, conversation_id=%s, stopped=%s", agent_id, conversation_id, stopped)
+            return {"status": "stopped" if stopped else "no_active_loop"}
+        except Exception as e:
+            logger.error("interrupt_agent error: %s", e)
+            return {"status": "error", "message": str(e)}
 
     # --- Sleep Consolidation (ADR-014) ---
 
@@ -6689,7 +7329,7 @@ class CoreService:
                 })
 
             try:
-                result = await run_sleep(conversation_dir, self.llm_manager, agent_id=agent_id, force=True, provider_alias=sleep_provider, progress_callback=_sleep_progress)
+                result = await run_sleep(conversation_dir, self.llm_manager, agent_id=agent_id, force=False, provider_alias=sleep_provider, progress_callback=_sleep_progress)
                 if result.get("status") == "completed":
                     brief = result.get("morning_brief", {})
                     chat_text = self._format_morning_brief(brief)
@@ -6772,19 +7412,30 @@ class CoreService:
         for agent_id in local_agents:
             agent_dir = conversations_dir / agent_id
             if not agent_dir.exists():
-                logger.warning("Group sleep: skipping %s — dir %s not found", agent_id, agent_dir)
-                continue
+                agent_dir.mkdir(parents=True, exist_ok=True)
+                logger.info("Group sleep: created conversations dir for %s (group-only agent)", agent_id)
 
             agent_config = load_agent_config(agent_id)
             sleep_provider = agent_config.get("sleep_provider_alias") or None
 
-            agent_display_name = agent_id
+            agent_display_name = self._get_agent_display_name(agent_id)
             if local_node_id:
                 names_map = metadata.get("agent_names", {}).get(local_node_id, {})
-                agent_display_name = names_map.get(agent_id, agent_id)
+                agent_display_name = names_map.get(agent_id) or agent_display_name
 
             sleep_data = {"agent_id": agent_id, "group_id": group_id, "status": "sleeping"}
             await self.local_api.broadcast_event("sleep_state_changed", sleep_data)
+
+            # Delete stale briefs from this agent BEFORE running new sleep, so the chat
+            # view doesn't accumulate outdated briefs across manual Sleep button presses.
+            # Pattern-match also catches legacy briefs posted before chat_message_id tracking.
+            try:
+                await self._delete_group_briefs(group_id, agent_display_name)
+                if agent_display_name != agent_id:
+                    await self._delete_group_briefs(group_id, agent_id)
+            except Exception as e:
+                logger.warning("Failed to clean stale briefs for %s in %s: %s",
+                               agent_display_name, group_id, e)
 
             async def _run_group_sleep(aid=agent_id, adir=agent_dir, sp=sleep_provider, dname=agent_display_name):
                 async def _progress(current, total, phase, archive_file):
@@ -6795,7 +7446,7 @@ class CoreService:
                     })
                 try:
                     result = await run_sleep(
-                        adir, self.llm_manager, agent_id=aid, force=True,
+                        adir, self.llm_manager, agent_id=aid, force=False,
                         provider_alias=sp, progress_callback=_progress, group_id=group_id,
                     )
                     if result.get("status") == "completed":
@@ -6803,8 +7454,10 @@ class CoreService:
                         brief["group_id"] = group_id
                         brief_path = adir / f"morning_brief_group_{group_id}.json"
                         chat_text = self._format_morning_brief(brief)
-                        await self.send_group_agent_message(group_id, dname, chat_text)
+                        new_msg_id = await self.send_group_agent_message(group_id, dname, chat_text)
                         brief["consumed"] = True
+                        if new_msg_id:
+                            brief["chat_message_id"] = new_msg_id
                         brief_path.write_text(json.dumps(brief, ensure_ascii=False, indent=2), encoding="utf-8")
                     done_data = {"agent_id": aid, "group_id": group_id, "status": "awake",
                                  "result": result.get("status", "unknown"),
@@ -6839,7 +7492,7 @@ class CoreService:
             for aid in agent_ids:
                 all_agents.append(aid)
                 names_map = metadata.get("agent_names", {}).get(node_id, {})
-                agent_names[aid] = names_map.get(aid, aid)
+                agent_names[aid] = names_map.get(aid)
 
         posted = 0
         for agent_id in all_agents:
@@ -6851,7 +7504,7 @@ class CoreService:
                 if brief.get("consumed"):
                     continue
                 chat_text = self._format_morning_brief(brief)
-                display_name = agent_names.get(agent_id, agent_id)
+                display_name = agent_names.get(agent_id) or self._get_agent_display_name(agent_id)
                 await self.send_group_agent_message(group_id, display_name, chat_text)
                 brief["consumed"] = True
                 brief_path.write_text(json.dumps(brief, ensure_ascii=False, indent=2), encoding="utf-8")

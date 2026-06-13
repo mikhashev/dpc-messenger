@@ -13,8 +13,8 @@ from dpc_client_core.dpc_agent.tools.browser import (
     _extract_text,
     _fetch_url,
     browse_page,
-    fetch_json,
     check_url,
+    fetch_json,
 )
 
 

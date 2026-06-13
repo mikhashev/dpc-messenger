@@ -6,7 +6,8 @@
 <script lang="ts">
   import type { Writable } from 'svelte/store';
   import { connectionStatus, sendCommand } from '$lib/coreService';
-  import { untrack } from 'svelte';
+  import { mapBackendMessage } from '$lib/utils/messageMapper';
+  import { onMount, untrack } from 'svelte';
 
   // ---------------------------------------------------------------------------
   // Props
@@ -28,16 +29,30 @@
     processedMessageIds: Set<string>;
     chatWindow: HTMLElement | undefined;
     getPeerDisplayName: (id: string) => string;
-    onUpdateTokenUsage: (chatId: string, usage: { used: number; limit: number; historyTokens?: number; contextEstimated?: number }) => void;
+    onUpdateTokenUsage: (chatId: string, usage: { used: number; limit: number; historyTokens?: number; tokensAfterLastResponse?: number; tokensAfterLastResponseAt?: string | null; contextAgent?: string; contextAgents?: Array<{name: string, tokens: number, limit: number, percent: number}> | null }) => void;
     hasTokenUsage: (chatId: string) => boolean;
     selfNodeId?: string;
   } = $props();
 
   // ---------------------------------------------------------------------------
+  // Gate history load on selfNodeId arrival (race fix).
+  // Without this, get_conversation_history can fire before nodeStatus arrives,
+  // and own messages get tagged with the literal node_id instead of 'user',
+  // losing the green "me" styling until manual reload.
+  // Fallback: after 3s, load anyway with best-effort (selfNodeId may stay '').
+  // ---------------------------------------------------------------------------
+  let nodeStatusFallbackElapsed = $state(false);
+  onMount(() => {
+    const t = setTimeout(() => { nodeStatusFallbackElapsed = true; }, 3000);
+    return () => clearTimeout(t);
+  });
+  let canLoadHistory = $derived(!!selfNodeId || nodeStatusFallbackElapsed);
+
+  // ---------------------------------------------------------------------------
   // Reactive: Sync chat history from backend when switching to peer chat with no messages (v0.11.2)
   // ---------------------------------------------------------------------------
   $effect(() => {
-    if ($connectionStatus === 'connected' && activeChatId && activeChatId !== 'local_ai' && !activeChatId.startsWith('ai_')) {
+    if ($connectionStatus === 'connected' && canLoadHistory && activeChatId && activeChatId !== 'local_ai' && !activeChatId.startsWith('ai_')) {
       // Check if this peer chat has no messages in frontend
       const currentHistory = $chatHistories.get(activeChatId);
       console.log(`[ChatHistory] Reactive triggered: chatId=${activeChatId.slice(0,20)}, historyLen=${currentHistory?.length || 0}, loading=${loadingHistory.has(activeChatId)}`);
@@ -63,43 +78,26 @@
               chatHistories.update(map => {
                 const newMap = new Map(map);
                 const loadedMessages = result.messages.map((msg: any, index: number) => {
-                  // Use backend's timestamp if available (ISO format), otherwise generate fake timestamp
-                  let timestamp;
-                  if (msg.timestamp) {
-                    // Parse ISO timestamp to Date (milliseconds)
-                    timestamp = new Date(msg.timestamp).getTime();
-                  } else {
-                    // Fallback to fake timestamp (sequential from now)
-                    timestamp = Date.now() - (result.messages.length - index) * 1000;
-                  }
-
-                  // Use backend's sender info if available, otherwise fallback to role-based logic
-                  let sender;
-                  let senderName;
-                  if (msg.sender_node_id) {
-                    sender = msg.sender_node_id;
-                    senderName = msg.sender_name || (msg.role === 'user' ? 'You' : getPeerDisplayName(activeChatId));
-                  } else {
-                    // Fallback for messages without sender info (old format)
-                    sender = msg.role === 'user' ? 'user' : activeChatId;
-                    senderName = msg.role === 'user' ? 'You' : getPeerDisplayName(activeChatId);
-                  }
-
-                  const stableId = msg.message_id || `backend-${index}-${Date.now()}`;
-                  const isAgent = msg.sender_type === 'agent' || msg.is_agent || false;
+                  if (index === 0) console.log(`[ChatHistory] DIAG first msg keys:`, Object.keys(msg), `tool_calls:`, msg.tool_calls?.length, `sender_type:`, msg.sender_type, `msg_index:`, msg.msg_index);
+                  const fallbackSender = msg.sender_node_id || (msg.role === 'user' ? 'user' : activeChatId);
+                  const fallbackName = msg.sender_name || (msg.role === 'user' ? 'You' : getPeerDisplayName(activeChatId));
+                  const mapped = mapBackendMessage(msg, {
+                    fallbackSender,
+                    fallbackSenderName: fallbackName,
+                    index,
+                    totalCount: result.messages.length,
+                  });
+                  mapped.id = msg.message_id || `backend-${index}-${Date.now()}`;
                   const isLocalHuman = msg.sender_type === 'human' && (!msg.sender_node_id || msg.sender_node_id === selfNodeId);
-                  return {
-                    id: stableId,
-                    sender: isLocalHuman ? 'user' : sender,
-                    senderName: isLocalHuman ? 'You' : senderName,
-                    text: msg.content,
-                    timestamp: timestamp,
-                    attachments: msg.attachments || [],
-                    isAgent: isAgent,
-                    agentOwner: msg.agent_owner || null,
-                    msg_index: msg.msg_index || 0,
-                  };
+                  if (isLocalHuman) {
+                    mapped.sender = 'user';
+                    mapped.senderName = 'You';
+                  }
+                  return mapped;
                 });
+                const agentMsgs = loadedMessages.filter((m: any) => m.isAgent);
+                const withTools = loadedMessages.filter((m: any) => m.tool_calls?.length > 0);
+                console.log(`[ChatHistory] DIAG mapped: total=${loadedMessages.length}, agents=${agentMsgs.length}, withToolCalls=${withTools.length}, firstAgent:`, agentMsgs[0] ? {sender: agentMsgs[0].sender, isAgent: agentMsgs[0].isAgent, tool_calls_len: agentMsgs[0].tool_calls?.length, msg_index: agentMsgs[0].msg_index} : 'none');
                 // Populate processedMessageIds so real-time events for these messages are deduped
                 loadedMessages.forEach((m: any) => {
                   if (m.id && !m.id.startsWith('backend-')) processedMessageIds.add(m.id);
@@ -115,7 +113,10 @@
                   used: result.tokens_used,
                   limit: result.token_limit,
                   historyTokens: result.history_tokens ?? 0,
-                  contextEstimated: result.context_estimated ?? 0,
+                  tokensAfterLastResponse: result.tokens_after_last_response ?? 0,
+                  tokensAfterLastResponseAt: result.tokens_after_last_response_at ?? null,
+                  contextAgent: result.context_agent ?? '',
+                  contextAgents: result.context_agents ?? null,
                 });
               }
 
@@ -162,7 +163,8 @@
                 used: result.tokens_used,
                 limit: result.token_limit,
                 historyTokens: result.history_tokens ?? 0,
-                contextEstimated: result.context_estimated ?? 0,
+                tokensAfterLastResponse: result.tokens_after_last_response ?? 0,
+                tokensAfterLastResponseAt: result.tokens_after_last_response_at ?? null,
               });
               console.log(`[ChatHistory] Token counter refreshed for ${activeChatId.slice(0,20)}: ${result.tokens_used}/${result.token_limit}`);
             }

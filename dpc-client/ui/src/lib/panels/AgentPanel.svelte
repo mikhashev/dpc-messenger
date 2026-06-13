@@ -7,6 +7,8 @@
 <script lang="ts">
   import { type Writable, get } from 'svelte/store';
   import { untrack } from 'svelte';
+  import { mapBackendMessage, resolveSenderIdentity } from '$lib/utils/messageMapper';
+  import { showNotificationIfBackground } from '$lib/notificationService';
   import {
     agentProgress,
     agentProgressClear,
@@ -38,6 +40,8 @@
     agentProgressMessage = $bindable<string | null>(null),
     agentProgressTool = $bindable<string | null>(null),
     agentProgressRound = $bindable<number>(0),
+    agentProgressName = $bindable<string>(''),
+    agentProgressAgentId = $bindable<string>(''),
     agentStreamingText = $bindable<string>(''),
   }: {
     activeChatId: string;
@@ -45,12 +49,14 @@
     chatHistories: Writable<Map<string, Message[]>>;
     getPeerDisplayName: (id: string) => string;
     chatWindow: HTMLElement | null;
-    onUpdateTokenUsage: (conversationId: string, usage: { used: number; limit: number; historyTokens?: number; contextEstimated?: number }) => void;
+    onUpdateTokenUsage: (conversationId: string, usage: { used: number; limit: number; historyTokens?: number; tokensAfterLastResponse?: number; tokensAfterLastResponseAt?: string | null; contextBreakdown?: Array<{name: string, tokens: number}> | null }) => void;
     onAgentToast: (message: string, type: 'info' | 'warning' | 'error') => void;
     onRefreshAgents: () => void;
     agentProgressMessage?: string | null;
     agentProgressTool?: string | null;
     agentProgressRound?: number;
+    agentProgressName?: string;
+    agentProgressAgentId?: string;
     agentStreamingText?: string;
   } = $props();
 
@@ -67,18 +73,17 @@
 
   /**
    * Map backend message fields to frontend sender/senderName.
-   * Single source of truth — used by all 3 message-mapping paths
+   * Delegates to the canonical identity resolution (ADR-031 §5) —
+   * used by all 3 message-mapping paths
    * (initial load, agentChatMessage, agentHistoryUpdated).
    */
   function mapMessageSender(msg: any, conversationId: string, agentName: string): { sender: string; senderName: string } {
-    if (msg.role === 'assistant')
-      return { sender: conversationId, senderName: agentName };
-    const selfNodeId = $nodeStatus?.node_id || '';
-    // Local user: no sender_node_id, or sender_node_id matches own node
-    if (!msg.sender_node_id || msg.sender_node_id === selfNodeId)
-      return { sender: 'user', senderName: msg.sender_name || 'You' };
-    // External participant: CC, future agents, etc.
-    return { sender: msg.sender_node_id, senderName: msg.sender_name || msg.sender_node_id };
+    const { sender, senderName } = resolveSenderIdentity(msg, {
+      agentSelfId: conversationId,
+      agentSelfName: agentName,
+      selfNodeId: $nodeStatus?.node_id || '',
+    });
+    return { sender, senderName };
   }
 
   function getAgentName(conversationId: string): string {
@@ -160,23 +165,20 @@
                 const localById = new Map(localHistory.map((m: any) => [m.id, m]));
 
                 const msgs = histResult.messages.map((msg: any, index: number) => {
-                  const ts = msg.timestamp ? new Date(msg.timestamp).getTime() : Date.now() - (histResult.messages.length - index) * 1000;
-                  // Prefer backend UUID (msg.id) for uniqueness; fall back to timestamp-based ID
-                  const stableId = msg.id || `${conv_id}-${msg.timestamp ? ts : index}`;
-                  const local = localById.get(stableId);
                   const { sender, senderName } = mapMessageSender(msg, conv_id, agent.name || conv_id);
-                  return {
-                    id: stableId,
-                    sender,
-                    senderName,
-                    text: msg.content,
-                    timestamp: ts,
-                    attachments: msg.attachments || [],
-                    msg_index: msg.msg_index || 0,
-                    // Restore rich metadata: prefer persisted history.json fields, fall back to localStorage
-                    thinking: msg.thinking || local?.thinking,
-                    streamingRaw: msg.streaming_raw || local?.streamingRaw,
-                  };
+                  const stableId = msg.id || `${conv_id}-${msg.timestamp ? new Date(msg.timestamp).getTime() : index}`;
+                  const local = localById.get(stableId);
+                  const mapped = mapBackendMessage(msg, {
+                    fallbackSender: sender,
+                    fallbackSenderName: senderName,
+                    index,
+                    totalCount: histResult.messages.length,
+                  });
+                  mapped.id = stableId;
+                  mapped.text = msg.content;
+                  mapped.thinking = msg.thinking || local?.thinking;
+                  mapped.streamingRaw = msg.streaming_raw || local?.streamingRaw;
+                  return mapped;
                 });
                 newMap.set(conv_id, msgs);
                 return newMap;
@@ -207,6 +209,8 @@
         agentProgressMessage = message || null;
         agentProgressTool = tool_name || null;
         agentProgressRound = round || 0;
+        if ($agentProgress.agent_name) agentProgressName = $agentProgress.agent_name;
+        if ($agentProgress.agent_id) agentProgressAgentId = $agentProgress.agent_id;
 
         // Append tool call activity to streaming buffer (appears in Raw output)
         if (tool_name) {
@@ -230,16 +234,17 @@
   });
 
   // Clear progress when agent task completes/fails
+  // Always clear — even if user switched to another chat, so the Stop
+  // button doesn't stay stuck when switching back (ghost-stop bug S197).
   $effect(() => {
     if ($agentProgressClear) {
       const { conversation_id } = $agentProgressClear;
+      agentProgressMessage = null;
+      agentProgressTool = null;
+      agentProgressRound = 0;
+      agentProgressName = '';
+      agentProgressAgentId = '';
       if (isActiveChatConv(conversation_id)) {
-        agentProgressMessage = null;
-        agentProgressTool = null;
-        agentProgressRound = 0;
-        // For chain-triggered responses (CC→@Ark), there's no execute_ai_query
-        // response to capture streaming text, so clear it here to prevent
-        // the streaming indicator from staying stuck.
         const hist = get(chatHistories).get(conversation_id) || [];
         const hasPendingCommand = hist.some((m: any) => m.commandId);
         if (!hasPendingCommand) {
@@ -285,7 +290,7 @@
   // dependency, causing re-runs on every history change (infinite loop).
   $effect(() => {
     if ($agentHistoryUpdated) {
-      const { conversation_id, messages, tokens_used, token_limit, thinking, context_estimated } = $agentHistoryUpdated;
+      const { conversation_id, messages, tokens_used, token_limit, thinking, tokens_after_last_response, tokens_after_last_response_at, context_breakdown } = $agentHistoryUpdated;
 
       untrack(() => {
         // Flush pending buffer and capture accumulated streaming text before overwriting history
@@ -300,13 +305,15 @@
           if (capturedAgentStreaming) clearAgentStreaming();
         }
 
-        // Notify parent to update token usage map (include contextEstimated for Total counter)
+        // Notify parent to update token usage map (include tokensAfterLastResponse for Total counter)
         if (tokens_used !== undefined && token_limit !== undefined && token_limit > 0) {
           onUpdateTokenUsage(conversation_id, {
             used: tokens_used,
             limit: token_limit,
             historyTokens: tokens_used,
-            contextEstimated: context_estimated || 0,
+            tokensAfterLastResponse: tokens_after_last_response || 0,
+            tokensAfterLastResponseAt: tokens_after_last_response_at ?? null,
+            contextBreakdown: context_breakdown ?? null,
           });
         }
 
@@ -327,16 +334,11 @@
           const mappedMessages = (messages || []).map((msg: any, index: number) => {
             const { sender, senderName } = mapMessageSender(msg, conversation_id, getAgentName(conversation_id));
             const stableId = msg.id || `${conversation_id}-${msg.timestamp ? new Date(msg.timestamp).getTime() : index}`;
-            return {
-              id: stableId,
-              sender,
-              senderName,
-              text: msg.content,
-              timestamp: msg.timestamp ? new Date(msg.timestamp).getTime() : Date.now(),
-              attachments: msg.attachments || [],
-              msg_index: msg.msg_index || 0,
-            } as Message;
-          });
+            const mapped = mapBackendMessage(msg, { fallbackSender: sender, fallbackSenderName: senderName });
+            mapped.id = stableId;
+            mapped.text = msg.content;
+            return mapped;
+          }) as Message[];
 
           // Attach streamingRaw and thinking to the last assistant message
           const lastAssistantIdx = [...mappedMessages].reverse().findIndex(m => m.sender === conversation_id);
@@ -375,13 +377,14 @@
   $effect(() => {
     if ($agentChatMessage) {
       const { conversation_id, message_id, content, sender_name, sender_node_id, timestamp, role, thinking, streaming_raw,
-              msg_index, context_estimated, history_tokens, tokens_limit } = $agentChatMessage;
+              msg_index, tokens_after_last_response, tokens_after_last_response_at, history_tokens, tokens_limit, context_breakdown: cb } = $agentChatMessage;
 
       untrack(() => {
+        const { sender, senderName } = mapMessageSender({ role, sender_node_id, sender_name }, conversation_id, getAgentName(conversation_id));
+
         chatHistories.update(map => {
           const newMap = new Map(map);
           const existing = newMap.get(conversation_id) || [];
-          const { sender, senderName } = mapMessageSender({ role, sender_node_id, sender_name }, conversation_id, getAgentName(conversation_id));
           const stableId = message_id || `${sender}-${timestamp ? new Date(timestamp).getTime() : Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
           const newMsg: Message = {
             id: stableId,
@@ -398,13 +401,24 @@
           return newMap;
         });
 
-        // Update token usage from CC message (#4: context_estimated stale after CC messages)
-        if (context_estimated && tokens_limit) {
+        // Update token usage from CC message (#4: tokens_after_last_response stale after CC messages)
+        if (tokens_after_last_response && tokens_limit) {
           onUpdateTokenUsage(conversation_id, {
             used: history_tokens || 0,
             limit: tokens_limit,
             historyTokens: history_tokens || 0,
-            contextEstimated: context_estimated,
+            tokensAfterLastResponse: tokens_after_last_response,
+            tokensAfterLastResponseAt: tokens_after_last_response_at ?? null,
+            contextBreakdown: cb ?? null,
+          });
+        }
+
+        // Notify on agent/chain-triggered message if app is in background (skip CC auto-responses)
+        if (sender !== 'cc' && content) {
+          const preview = content.length > 80 ? content.slice(0, 80) + '...' : content;
+          showNotificationIfBackground({
+            title: senderName || 'Agent',
+            body: preview,
           });
         }
 

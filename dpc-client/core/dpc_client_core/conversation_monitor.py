@@ -100,7 +100,12 @@ class ConversationMonitor:
         self.current_token_count: int = 0
         self.token_limit: int = 100000  # Default limit, will be updated per model
         self.token_warning_threshold: float = 0.8  # Warn at 80%
-        self._last_context_estimated: int = 0
+        # tokens_after_last_response: full LLM context measured immediately after
+        # the previous response. Updated AFTER each LLM call completes — so during
+        # the current request, this is ONE REQUEST STALE. Pair with the timestamp
+        # to compute freshness. Lower bound on current; not a live counter.
+        self._tokens_after_last_response: int = 0
+        self._tokens_after_last_response_at: Optional[str] = None
 
         # Conversation history tracking (Phase 7: Conversation History)
         self.message_history: List[Dict[str, str]] = []  # List of {"role": "user/assistant", "content": "..."}
@@ -899,6 +904,42 @@ DO NOT include any text before or after the JSON. DO NOT use markdown code block
                     return text[start:i + 1]
         return None  # Unbalanced braces
 
+    def _escape_control_chars_in_strings(self, s: str) -> str:
+        """Escape raw \\n / \\r / \\t that appear inside JSON string values.
+
+        LLMs sometimes emit JSON with literal newlines inside string content,
+        which is invalid per RFC 8259. Walk the input char-by-char, track whether
+        we are inside a string, and escape control chars only when inside.
+        """
+        out = []
+        in_string = False
+        escape_next = False
+        for ch in s:
+            if escape_next:
+                out.append(ch)
+                escape_next = False
+                continue
+            if ch == '\\' and in_string:
+                out.append(ch)
+                escape_next = True
+                continue
+            if ch == '"':
+                in_string = not in_string
+                out.append(ch)
+                continue
+            if in_string:
+                if ch == '\n':
+                    out.append('\\n')
+                    continue
+                if ch == '\r':
+                    out.append('\\r')
+                    continue
+                if ch == '\t':
+                    out.append('\\t')
+                    continue
+            out.append(ch)
+        return ''.join(out)
+
     def _repair_json(self, json_str: str) -> str:
         """Attempt to repair common JSON malformations from LLM responses.
 
@@ -907,6 +948,7 @@ DO NOT include any text before or after the JSON. DO NOT use markdown code block
         - Trailing commas
         - Missing commas between array/object elements
         - Markdown code block wrappers
+        - Raw newlines/tabs/CRs inside JSON string values
 
         Args:
             json_str: Potentially malformed JSON string
@@ -919,6 +961,10 @@ DO NOT include any text before or after the JSON. DO NOT use markdown code block
         # Remove markdown code blocks
         json_str = re.sub(r'```(?:json)?\s*', '', json_str)
         json_str = json_str.strip()
+
+        # Escape raw control chars inside string values (LLM emits literal newlines
+        # in multi-line summary/content fields — this is the #1 repair-failure cause).
+        json_str = self._escape_control_chars_in_strings(json_str)
 
         # Fix invalid JSON escape sequences (e.g. \U, \e from Windows paths)
         def _fix_escape(m):
@@ -1097,6 +1143,18 @@ PARTICIPANTS' CULTURAL CONTEXTS:
             # Try to extract and parse JSON from response (with repair attempts)
             import json
             import re
+
+            # Guard: empty/whitespace-only response means the LLM produced no JSON
+            # to parse at all (commonly: thinking-budget exhausted before text
+            # generation started, see DPC chat S133 [B2]). Skip the parse loop
+            # rather than running repair on an empty string and raising a
+            # confusing "Expecting value" error.
+            if not response or not response.strip():
+                logger.warning(
+                    "LLM returned empty response for %s — skipping proposal generation",
+                    self.conversation_id,
+                )
+                raise ValueError("LLM returned empty response (no JSON to parse)")
 
             result = None
             json_str = None
@@ -1412,7 +1470,8 @@ PARTICIPANTS' CULTURAL CONTEXTS:
                     sender_name: Optional[str] = None, message_id: Optional[str] = None,
                     thinking: Optional[str] = None, streaming_raw: Optional[str] = None,
                     source: Optional[str] = None, sender_type: Optional[str] = None,
-                    agent_owner: Optional[str] = None):
+                    agent_owner: Optional[str] = None,
+                    tool_calls: Optional[List[Dict[str, Any]]] = None):
         """Add a message to the conversation history
 
         Args:
@@ -1456,6 +1515,8 @@ PARTICIPANTS' CULTURAL CONTEXTS:
             message_dict["sender_type"] = sender_type
         if agent_owner:
             message_dict["agent_owner"] = agent_owner
+        if tool_calls:
+            message_dict["tool_calls"] = tool_calls
 
         # Track message ID for deduplication (v0.20.0)
         self.message_ids.add(message_id)
@@ -1710,7 +1771,9 @@ PARTICIPANTS' CULTURAL CONTEXTS:
         self._history_dirty = False
         self.peer_context_hashes = {}
         self.current_token_count = 0
-        self._last_context_estimated = 0  # reset so token counter shows 0 on fresh session
+        # Reset both so token counter shows 0 on fresh session
+        self._tokens_after_last_response = 0
+        self._tokens_after_last_response_at = None
         self.message_buffer = []
         self.knowledge_score = 0.0
         # Clear peer context caches
@@ -2067,24 +2130,20 @@ PARTICIPANTS' CULTURAL CONTEXTS:
         settings["last_modified"] = datetime.now(timezone.utc).isoformat()
         return self._save_conversation_settings(settings)
 
-    def compute_history_hash(self) -> str:
-        """Compute SHA256 hash of current message history.
+    @staticmethod
+    def history_hash_for(messages: List[Dict[str, Any]]) -> str:
+        """SHA256 hash of a message list (MSG-CHAIN-aware).
 
-        Uses last chain_hash if available (MSG-CHAIN integration with P2P sync).
-        Falls back to sorted ID+timestamp hash for backward compatibility.
-
-        Returns:
-            Hash string like "sha256:abc123..." or "sha256:empty" if no messages
+        Uses the last chain_hash if present, else a sorted ID+timestamp hash.
+        Single source of truth so disk peeks and loaded monitors agree.
         """
-        if not self.message_history:
+        if not messages:
             return "sha256:empty"
-
-        last_chain = self.message_history[-1].get("chain_hash")
+        last_chain = messages[-1].get("chain_hash")
         if last_chain:
             return f"sha256:{last_chain[:16]}"
-
         sorted_msgs = sorted(
-            self.message_history,
+            messages,
             key=lambda m: (m.get("timestamp", ""), m.get("id", ""))
         )
         data = "|".join(
@@ -2092,6 +2151,42 @@ PARTICIPANTS' CULTURAL CONTEXTS:
             for m in sorted_msgs
         )
         return "sha256:" + hashlib.sha256(data.encode()).hexdigest()[:16]
+
+    def compute_history_hash(self) -> str:
+        """Compute SHA256 hash of current message history.
+
+        Returns:
+            Hash string like "sha256:abc123..." or "sha256:empty" if no messages
+        """
+        return ConversationMonitor.history_hash_for(self.message_history)
+
+    @staticmethod
+    def peek_group_history_stats(conversation_id: str) -> tuple:
+        """Read (message_count, history_hash) for a group straight from disk.
+
+        Used by the on-connect GROUP_HISTORY_STATUS exchange so a node advertises
+        its real history even when the group's monitor has not been loaded into
+        memory yet (chat not opened this session). Read-only: resolves the slugged
+        conversation dir without migrating or mutating state.
+        """
+        base = Path.home() / ".dpc" / "conversations"
+        target = base / conversation_id
+        if not (target / "history.json").exists() and base.exists():
+            prefix = conversation_id + "-"
+            for d in base.iterdir():
+                if d.is_dir() and d.name.startswith(prefix) and (d / "history.json").exists():
+                    target = d
+                    break
+        path = target / "history.json"
+        if not path.exists():
+            return (0, "sha256:empty")
+        try:
+            with open(path, encoding="utf-8") as f:
+                data = json.load(f)
+            messages = data.get("messages", []) if isinstance(data, dict) else []
+            return (len(messages), ConversationMonitor.history_hash_for(messages))
+        except (json.JSONDecodeError, OSError):
+            return (0, "sha256:empty")
 
     def save_history(self) -> bool:
         """Persist message history to disk
@@ -2121,7 +2216,8 @@ PARTICIPANTS' CULTURAL CONTEXTS:
                 "token_stats": {
                     "current_token_count": self.current_token_count,
                     "token_limit": self.token_limit,
-                    "context_estimated": self._last_context_estimated,
+                    "tokens_after_last_response": self._tokens_after_last_response,
+                    "tokens_after_last_response_at": self._tokens_after_last_response_at,
                 },
                 "messages": self.message_history
             }
@@ -2234,7 +2330,8 @@ PARTICIPANTS' CULTURAL CONTEXTS:
             if token_stats:
                 self.current_token_count = token_stats.get("current_token_count", self.current_token_count)
                 self.token_limit = token_stats.get("token_limit", self.token_limit)
-                self._last_context_estimated = token_stats.get("context_estimated", 0)
+                self._tokens_after_last_response = token_stats.get("tokens_after_last_response", 0)
+                self._tokens_after_last_response_at = token_stats.get("tokens_after_last_response_at")
 
             # Restore extraction buffers so end_session/extract_knowledge sees historical
             # messages, not only those added in the current in-memory session (S89 regression).

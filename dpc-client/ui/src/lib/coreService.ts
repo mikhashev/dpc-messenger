@@ -124,8 +124,8 @@ import { p2pMessages, unreadMessageCounts } from './services/messaging';
 import { availableProviders, defaultProviders, providersList, peerProviders, aiResponseWithImage, firewallRulesUpdated } from './services/providers';
 import { fileTransferOffer, fileTransferProgress, fileTransferComplete, fileTransferCancelled, activeFileTransfers, filePreparationStarted, filePreparationProgress, filePreparationCompleted } from './services/fileTransfer';
 import { voiceOfferReceived, voiceTranscriptionReceived, voiceTranscriptionComplete, voiceTranscriptionConfig, whisperModelLoadingStarted, whisperModelLoaded, whisperModelLoadingFailed, whisperModelUnloaded, whisperModelDownloadRequired, whisperModelDownloadStarted, whisperModelDownloadCompleted, whisperModelDownloadFailed } from './services/voice';
-import { groupChats, groupTextReceived, groupFileReceived, groupInviteReceived, groupUpdated, groupMemberLeft, groupDeleted, groupHistorySynced, tokenUsageUpdated } from './services/groups';
-import { agentsList, agentCreated, agentUpdated, agentDeleted, agentProfiles, agentProgress, agentProgressClear, agentTextChunk, agentChatMessage, sleepStateChanged, sleepProgress, sleepAgentStates } from './services/agents';
+import { groupChats, groupTextReceived, groupFileReceived, groupInviteReceived, groupUpdated, groupMemberLeft, groupDeleted, groupHistorySynced, groupMessageDeleted, tokenUsageUpdated } from './services/groups';
+import { agentsList, agentCreated, agentUpdated, agentDeleted, agentProfiles, agentProgress, agentProgressClear, agentLiveTools, agentTextChunk, agentChatMessage, userMessageConfirmed, sleepStateChanged, sleepProgress, sleepAgentStates } from './services/agents';
 import { telegramEnabled, telegramConnected, telegramStatus, telegramError, telegramLinkedChats, telegramMessages, telegramMessageReceived, telegramVoiceReceived, telegramImageReceived, telegramFileReceived, agentTelegramLinked, agentTelegramUnlinked, agentHistoryUpdated } from './services/telegram';
 import { personalContext, contextUpdated, peerContextUpdated, knowledgeCommitProposal, knowledgeCommitResult, extractionFailure, tokenWarning, integrityWarnings } from './services/knowledge';
 import { historyRestored, newSessionProposal, newSessionResult, conversationReset, conversationSettings, conversationSettingsChanged, conversationDeleted } from './services/session';
@@ -138,8 +138,8 @@ export { p2pMessages, unreadMessageCounts };
 export { availableProviders, defaultProviders, providersList, peerProviders, aiResponseWithImage, firewallRulesUpdated };
 export { fileTransferOffer, fileTransferProgress, fileTransferComplete, fileTransferCancelled, activeFileTransfers, filePreparationStarted, filePreparationProgress, filePreparationCompleted };
 export { voiceOfferReceived, voiceTranscriptionReceived, voiceTranscriptionComplete, voiceTranscriptionConfig, whisperModelLoadingStarted, whisperModelLoaded, whisperModelLoadingFailed, whisperModelUnloaded, whisperModelDownloadRequired, whisperModelDownloadStarted, whisperModelDownloadCompleted, whisperModelDownloadFailed };
-export { groupChats, groupTextReceived, groupFileReceived, groupInviteReceived, groupUpdated, groupMemberLeft, groupDeleted, groupHistorySynced, tokenUsageUpdated };
-export { agentsList, agentCreated, agentUpdated, agentDeleted, agentProfiles, agentProgress, agentProgressClear, agentTextChunk, agentChatMessage, sleepStateChanged, sleepProgress, sleepAgentStates };
+export { groupChats, groupTextReceived, groupFileReceived, groupInviteReceived, groupUpdated, groupMemberLeft, groupDeleted, groupHistorySynced, groupMessageDeleted, tokenUsageUpdated };
+export { agentsList, agentCreated, agentUpdated, agentDeleted, agentProfiles, agentProgress, agentProgressClear, agentLiveTools, agentTextChunk, agentChatMessage, userMessageConfirmed, sleepStateChanged, sleepProgress, sleepAgentStates };
 export { telegramEnabled, telegramConnected, telegramStatus, telegramError, telegramLinkedChats, telegramMessages, telegramMessageReceived, telegramVoiceReceived, telegramImageReceived, telegramFileReceived, agentTelegramLinked, agentTelegramUnlinked, agentHistoryUpdated };
 export { personalContext, contextUpdated, peerContextUpdated, knowledgeCommitProposal, knowledgeCommitResult, extractionFailure, tokenWarning, integrityWarnings };
 export { historyRestored, newSessionProposal, newSessionResult, conversationReset, conversationSettings, conversationSettingsChanged, conversationDeleted };
@@ -780,6 +780,28 @@ export async function connectToCoreService() {
                     console.error(`[ERROR TOAST] ${title}: ${toastMessage}`);
                 }
 
+                // Shell approval events (ADR-030 v2)
+                else if (message.event === "shell_approval_request") {
+                    console.log("Shell approval request:", message.payload);
+                    const { pendingShellApprovals } = await import("$lib/services/shellApproval");
+                    pendingShellApprovals.update((list: any[]) => [...list, message.payload]);
+                }
+                else if (message.event === "shell_execution_result") {
+                    console.log("Shell execution result:", message.payload);
+                    const { pendingShellApprovals, shellExecutionResults } = await import("$lib/services/shellApproval");
+                    pendingShellApprovals.update((list: any[]) =>
+                        list.filter((r: any) => r.request_id !== message.payload.request_id)
+                    );
+                    shellExecutionResults.update((list: any[]) => [...list, message.payload]);
+                }
+                else if (message.event === "shell_approval_expired") {
+                    console.log("Shell approval expired:", message.payload);
+                    const { pendingShellApprovals } = await import("$lib/services/shellApproval");
+                    pendingShellApprovals.update((list: any[]) =>
+                        list.filter((r: any) => r.request_id !== message.payload.request_id)
+                    );
+                }
+
                 // Whisper model loading events (v0.13.3+ model pre-loading)
                 else if (message.event === "whisper_model_loading_started") {
                     console.log("Whisper model loading started:", message.payload);
@@ -834,11 +856,26 @@ export async function connectToCoreService() {
                     // payload: {conversation_id, message, round, tool_name, ts}
                     console.log("[AgentProgress]", message.payload?.tool_name || "thinking", `round ${message.payload?.round || "?"}`);
                     agentProgress.set(message.payload);
+                    // Authoritative snapshot: when the backend sends the full tool_calls list
+                    // (on tool completion), store it per-conversation so the UI renders the
+                    // whole run directly — no lost results, survives chat switches.
+                    const _cid = message.payload?.conversation_id;
+                    const _snap = message.payload?.tool_calls;
+                    if (_cid && Array.isArray(_snap)) {
+                        agentLiveTools.update((m) => ({ ...m, [_cid]: _snap }));
+                    }
                 }
                 else if (message.event === "agent_progress_clear") {
                     // Signal to clear progress display (task completed/failed)
                     console.log("[AgentProgress] Clear for conversation:", message.payload?.conversation_id);
                     agentProgressClear.set(message.payload);
+                    const _cid = message.payload?.conversation_id;
+                    if (_cid) {
+                        agentLiveTools.update((m) => { const n = { ...m }; delete n[_cid]; return n; });
+                        if (_cid !== activeChat && !_cid.startsWith('group-')) {
+                            unreadMessageCounts.update((m) => { const n = new Map(m); n.set(_cid, (m.get(_cid) ?? 0) + 1); return n; });
+                        }
+                    }
                 }
                 else if (message.event === "agent_text_chunk") {
                     // Streaming text chunk from agent LLM response
@@ -850,6 +887,13 @@ export async function connectToCoreService() {
                     // payload: {conversation_id, message_id, role, content, sender_name, timestamp}
                     console.log("[AgentChatMessage] CC response in", message.payload?.conversation_id);
                     agentChatMessage.set(message.payload);
+                    const _ccCid = message.payload?.conversation_id;
+                    if (_ccCid && _ccCid !== activeChat) {
+                        unreadMessageCounts.update((m) => { const n = new Map(m); n.set(_ccCid, (m.get(_ccCid) ?? 0) + 1); return n; });
+                    }
+                }
+                else if (message.event === "user_message_confirmed") {
+                    userMessageConfirmed.set(message.payload);
                 }
                 // Group chat events (v0.19.0)
                 else if (message.event === "group_text_received") {
@@ -933,6 +977,11 @@ export async function connectToCoreService() {
                     console.log("Group history synced:", message.payload);
                     groupHistorySynced.set(message.payload);
                 }
+                else if (message.event === "group_message_deleted") {
+                    // Backend removed a message from group history (e.g. stale morning
+                    // brief replaced on Sleep). +page.svelte removes from chatHistories.
+                    groupMessageDeleted.set(message.payload);
+                }
                 else if (message.event === "file_preparation_progress") {
                     // Reset timeout on progress (keepalive mechanism for large file hash computation)
                     for (const [cmdId, cmd] of pendingCommands.entries()) {
@@ -993,6 +1042,7 @@ export async function connectToCoreService() {
                     console.log("[Sleep]", message.payload?.status, message.payload?.agent_id);
                     sleepStateChanged.set(message.payload);
                     const aid = message.payload?.agent_id;
+                    const originChatId = message.payload?.group_id || aid;
                     if (aid) {
                         let aName = aid;
                         agentsList.subscribe(list => { const a = list?.find((x: any) => x.agent_id === aid); if (a?.name) aName = a.name; })();
@@ -1001,7 +1051,7 @@ export async function connectToCoreService() {
                             if (message.payload?.status === "awake") {
                                 nm.delete(aid);
                             } else {
-                                nm.set(aid, { agent_id: aid, agent_name: aName, status: message.payload?.status, current: 0, total: 0, phase: '' });
+                                nm.set(aid, { agent_id: aid, agent_name: aName, origin_chat_id: originChatId, status: message.payload?.status, current: 0, total: 0, phase: '' });
                             }
                             return nm;
                         });
@@ -1013,11 +1063,12 @@ export async function connectToCoreService() {
                 else if (message.event === "sleep_progress") {
                     sleepProgress.set(message.payload);
                     const aid = message.payload?.agent_id;
+                    const originChatId = message.payload?.group_id || aid;
                     if (aid) {
                         sleepAgentStates.update(m => {
                             const nm = new Map(m);
                             const existing = nm.get(aid);
-                            nm.set(aid, { ...existing, agent_id: aid, agent_name: existing?.agent_name || aid, status: 'sleeping', current: message.payload?.current ?? 0, total: message.payload?.total ?? 0, phase: message.payload?.phase ?? '' });
+                            nm.set(aid, { ...existing, agent_id: aid, agent_name: existing?.agent_name || aid, origin_chat_id: existing?.origin_chat_id || originChatId, status: 'sleeping', current: message.payload?.current ?? 0, total: message.payload?.total ?? 0, phase: message.payload?.phase ?? '' });
                             return nm;
                         });
                     }
@@ -1100,6 +1151,7 @@ export function resetReconnection() {
     }
 }
 
+
 export function sendCommand(command: string, payload: any = {}, commandId?: string): Promise<any> | boolean {
     if (!socket || socket.readyState !== WebSocket.OPEN) {
         console.error(`Cannot send command '${command}': WebSocket not connected`);
@@ -1114,74 +1166,40 @@ export function sendCommand(command: string, payload: any = {}, commandId?: stri
             payload
         };
 
-        // For commands that expect a response, return a Promise
-        const expectsResponse = [
-            'get_personal_context',
-            'save_personal_context',
-            'reload_personal_context',
-            'get_instructions',
-            'save_instructions',
-            'reload_instructions',
-            'get_firewall_rules',
-            'save_firewall_rules',
-            'reload_firewall',
-            'validate_firewall_rules',
-            'get_providers_config',
-            'save_providers_config',
-            'get_default_providers',  // Dual provider system
-            'get_providers_list',     // Dual provider system
-            'query_ollama_model_info',
-            'send_file',
-            'send_p2p_image',  // Screenshot sending
-            'send_image',  // Vision analysis (clipboard paste)
-            'accept_file_transfer',
-            'cancel_file_transfer',
-            'get_conversation_history',  // v0.11.2 - backend→frontend sync
-            'connect_to_peer',  // v0.12.0 - async connection with error handling
-            'connect_via_dht',   // v0.12.0 - async connection with error handling
-            'get_wizard_template',  // AI wizard - load wizard configuration
-            'ai_assisted_instruction_creation',  // AI wizard - generate instruction set (local)
-            'ai_assisted_instruction_creation_remote',  // AI wizard - generate instruction set (remote)
-            'get_available_templates',  // Template import - list templates
-            'import_instruction_template',  // Template import - import template
-            'create_instruction_set',  // Instruction management
-            'delete_instruction_set',  // Instruction management
-            'rename_instruction_set',  // Instruction management
-            'set_default_instruction_set',  // Instruction management
-            'get_instruction_set',  // Instruction management
-            'transcribe_audio',  // v0.13.1 - voice message transcription
-            'get_voice_transcription_config',  // v0.13.2 - auto-transcription config
-            'save_voice_transcription_config',  // v0.13.2 - auto-transcription config
-            'set_conversation_transcription',  // v0.13.2 - per-conversation transcription control
-            'get_conversation_transcription',  // v0.13.2 - per-conversation transcription control
-            'prepare_agent',  // Pre-initialize DPC Agent and Telegram bridge
-            'query_remote_providers',  // v0.18.0 - fetch available providers from remote peer
-            'get_groups',  // v0.19.0 - group chat management
-            'create_group_chat',  // v0.19.0 - group chat creation
-            'leave_group',  // v0.19.0 - leave group
-            'delete_group',  // v0.19.0 - delete group
-            'get_conversation_settings',  // v0.21.0 - per-conversation settings
-            'set_conversation_persist_history',  // v0.21.0 - toggle history persistence
-            'delete_conversation',  // v0.21.0 - delete entire conversation
-            'create_agent',  // DPC Agent isolation - create agent with isolated storage
-            'list_agents',  // DPC Agent isolation - list all agents
-            'get_agent_config',  // DPC Agent isolation - get agent configuration
-            'update_agent_config',  // DPC Agent isolation - update agent configuration
-            'delete_agent',  // DPC Agent isolation - delete agent
-            'list_agent_profiles',  // DPC Agent isolation - list permission profiles
-            'get_agent_permissions',  // Agent permissions transparency (v0.22.0)
-            // Agent Task Board (v0.20.0)
-            'get_agent_tasks',
-            'get_agent_learning',
-            'get_agent_task_result',
-            'schedule_agent_task',
-            // Session archive (S25 Batch 1.1 fix)
-            'get_session_archive_info',
-            'clear_session_archives',
-            // Per-agent model config (AGENT-MODEL)
-            'get_agent_model_config',
-            'save_agent_model_config',
-        ].includes(command);
+        // Default = Promise. The backend's local_api dispatcher ALWAYS
+        // sends a {status, payload} response after handler completes
+        // (local_api.py:328-330), so any command we send is awaitable.
+        // The previous design used an `expectsResponse` allowlist with
+        // default = boolean — but missing entries silently failed when
+        // callers `await`-ed them (the await resolved to `true`, not the
+        // backend response, and callers fell into their error branch).
+        //
+        // Inverted to fail-safe: forgetting to register a new command
+        // means the caller correctly gets a Promise. The only commands
+        // that opt out are true fire-and-forget logging signals that
+        // a caller would never await. Keep this list minimal — when in
+        // doubt, leave the command off so it defaults to Promise.
+        //
+        // Tradeoff accepted: if a caller does NOT `await` a Promise-
+        // returning command, the returned Promise is dropped without
+        // a handler. The browser may log an unhandled rejection if the
+        // command times out (60s) — visible noise rather than silent
+        // failure, which matches our preferred debugging stance.
+        //
+        // Origin: Mike S141 / Bug A — `web_auth_*` commands were missing
+        // from the old allowlist and the UI displayed "failed to add /
+        // load domains" even though backend was returning success.
+        const fireAndForgetCommands = new Set<string>([
+            'ui_log',  // logging beacon — no semantic response, drop the await
+            // Agent loop response is routed via event stream ($coreMessages →
+            // MessageRouterPanel) rather than the pending-command promise.
+            // ChatPanel calls sendCommand without await, so the unawaited
+            // promise rejected at 60s when popup_fallback waits for user
+            // (up to 5min), surfacing as `Uncaught (in promise) Error:
+            // Command 'execute_ai_query' timed out` in DevTools.
+            'execute_ai_query',
+        ]);
+        const expectsResponse = !fireAndForgetCommands.has(command);
 
         if (expectsResponse) {
             return new Promise((resolve, reject) => {
@@ -1511,6 +1529,10 @@ export async function setConversationPersistHistory(conversationId: string, pers
     });
 }
 
+export async function updateGroupTopic(groupId: string, topic: string): Promise<any> {
+    return sendCommand('update_group_topic', { group_id: groupId, topic });
+}
+
 export async function deleteConversation(conversationId: string): Promise<any> {
     return sendCommand('delete_conversation', {
         conversation_id: conversationId
@@ -1534,6 +1556,8 @@ export async function createAgent(
     maxRounds: number = 200,
     computeHost?: string,
     contextWindow?: number,
+    retrievalVector?: string,
+    retrievalText?: string,
 ): Promise<any> {
     return sendCommand('create_agent', {
         name,
@@ -1544,6 +1568,8 @@ export async function createAgent(
         max_rounds: maxRounds,
         ...(computeHost ? { compute_host: computeHost } : {}),
         ...(contextWindow ? { context_window: contextWindow } : {}),
+        ...(retrievalVector ? { retrieval_vector: retrievalVector } : {}),
+        ...(retrievalText ? { retrieval_text: retrievalText } : {}),
     });
 }
 

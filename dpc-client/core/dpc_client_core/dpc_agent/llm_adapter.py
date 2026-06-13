@@ -19,6 +19,8 @@ import logging
 import re
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple
 
+from .pricing import compute_cost_usd
+
 if TYPE_CHECKING:
     from ..llm_manager import LLMManager
 
@@ -294,7 +296,7 @@ class DpcLlmAdapter:
                 "prompt_tokens": prompt_tokens,
                 "completion_tokens": completion_tokens,
                 "total_tokens": prompt_tokens + completion_tokens,
-                "cost": prompt_tokens + completion_tokens,
+                "cost": compute_cost_usd(self._provider_alias or "", prompt_tokens, completion_tokens),
             }
 
             return response_msg, usage
@@ -329,23 +331,21 @@ class DpcLlmAdapter:
         Returns:
             (response_message, usage_dict) tuple in Ouroboros format
         """
-        # Build text prompt from messages (for the text part)
-        prompt = self._messages_to_prompt(messages)
-
-        # Inject tools if provided
-        if tools:
-            log.debug(f"Injecting {len(tools)} tool descriptions into vision prompt")
-            tool_descriptions = self._format_tools_for_prompt(tools)
-            prompt = f"{tool_descriptions}\n\n{prompt}"
+        # Vision: only the current user message text, not full conversation history
+        prompt = self._extract_user_text(messages)
 
         try:
-            log.info(f"Using native vision support from provider '{provider.alias}'")
+            image_sizes = [len(img.get("base64", "")) for img in images]
+            log.info(
+                f"Vision request to '{provider.alias}': prompt={len(prompt)} chars, "
+                f"images={len(images)} ({image_sizes} base64 chars)"
+            )
 
-            # Call provider's generate_with_vision method
             response = await provider.generate_with_vision(
                 prompt=prompt,
                 images=images,
             )
+            log.info(f"Vision response from '{provider.alias}': {len(response)} chars")
 
             # Detect silent vision failure: some Anthropic-compatible endpoints (e.g. Z.AI)
             # accept base64 images, convert them to CDN URLs internally, but the underlying
@@ -417,7 +417,7 @@ class DpcLlmAdapter:
                 "prompt_tokens": prompt_tokens,
                 "completion_tokens": completion_tokens,
                 "total_tokens": prompt_tokens + completion_tokens,
-                "cost": prompt_tokens + completion_tokens,
+                "cost": compute_cost_usd(self._provider_alias or "", prompt_tokens, completion_tokens),
             }
 
             return response_msg, usage
@@ -482,8 +482,12 @@ class DpcLlmAdapter:
             response_msg["thinking"] = raw["thinking"]
 
         usage = raw.get("usage") or {}
-        if not usage.get("total_tokens"):
-            # Fallback if provider didn't return usage
+        provider_reported_drop = (
+            "prompt_tokens" in usage
+            and not usage.get("prompt_tokens")
+            and not usage.get("completion_tokens")
+        )
+        if not usage.get("total_tokens") and not provider_reported_drop:
             model_name = self.default_model()
             if self._token_counter:
                 prompt_tokens = self._token_counter.count_tokens(str(anthropic_messages), model_name)
@@ -495,10 +499,17 @@ class DpcLlmAdapter:
                 "prompt_tokens": prompt_tokens,
                 "completion_tokens": completion_tokens,
                 "total_tokens": prompt_tokens + completion_tokens,
-                "cost": prompt_tokens + completion_tokens,
+                "cost": compute_cost_usd(self._provider_alias or "", prompt_tokens, completion_tokens),
             }
         else:
-            usage.setdefault("cost", usage.get("total_tokens", 0))
+            usage.setdefault(
+                "cost",
+                compute_cost_usd(
+                    self._provider_alias or "",
+                    int(usage.get("prompt_tokens", 0)),
+                    int(usage.get("completion_tokens", 0)),
+                ),
+            )
 
         return response_msg, usage
 
@@ -678,7 +689,7 @@ class DpcLlmAdapter:
                     "prompt_tokens": remote_prompt_tokens,
                     "completion_tokens": remote_response_tokens,
                     "total_tokens": remote_tokens or (remote_prompt_tokens + remote_response_tokens),
-                    "cost": remote_tokens or (remote_prompt_tokens + remote_response_tokens),
+                    "cost": compute_cost_usd(self._provider_alias or "", remote_prompt_tokens, remote_response_tokens),
                 }
             elif self._token_counter:
                 # Count locally using TokenCountManager
@@ -689,15 +700,17 @@ class DpcLlmAdapter:
                     "prompt_tokens": prompt_tokens,
                     "completion_tokens": completion_tokens,
                     "total_tokens": prompt_tokens + completion_tokens,
-                    "cost": prompt_tokens + completion_tokens,
+                    "cost": compute_cost_usd(self._provider_alias or "", prompt_tokens, completion_tokens),
                 }
             else:
                 # Final fallback to character estimation
+                est_prompt_tokens = len(prompt) // 4
+                est_completion_tokens = len(response_text) // 4
                 usage: Dict[str, Any] = {
-                    "prompt_tokens": len(prompt) // 4,
-                    "completion_tokens": len(response_text) // 4,
-                    "total_tokens": (len(prompt) + len(response_text)) // 4,
-                    "cost": (len(prompt) + len(response_text)) // 4,
+                    "prompt_tokens": est_prompt_tokens,
+                    "completion_tokens": est_completion_tokens,
+                    "total_tokens": est_prompt_tokens + est_completion_tokens,
+                    "cost": compute_cost_usd(self._provider_alias or "", est_prompt_tokens, est_completion_tokens),
                 }
 
             return response_msg, usage

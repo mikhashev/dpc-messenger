@@ -189,7 +189,14 @@ class ToolContext:
 
 @dataclass
 class ToolEntry:
-    """Single tool descriptor: name, schema, handler, metadata."""
+    """Single tool descriptor: name, schema, handler, metadata.
+
+    default_enabled is the canonical default for this tool in
+    privacy_rules.json. Single source of truth — firewall.py reads
+    this when seeding new privacy_rules.json files and when merging
+    missing tools into existing files at startup. fail-closed (False)
+    by default; flip to True explicitly for safe-by-default tools.
+    """
 
     name: str
     schema: Dict[str, Any]  # OpenAI function schema
@@ -197,15 +204,14 @@ class ToolEntry:
     is_code_tool: bool = False  # Tools that modify code
     timeout_sec: int = 120
     is_core: bool = True  # Core tools loaded by default
+    default_enabled: bool = False  # Canonical default for privacy_rules.json (fail-closed)
 
 
 # Core tools that are always available
 CORE_TOOL_NAMES = {
-    # File operations (sandboxed)
-    "repo_read", "repo_list", "repo_write_commit", "repo_delete",
-    "drive_read", "drive_list", "drive_write",
-    # Extended sandbox (v0.16.0+)
-    "extended_path_read", "extended_path_list", "extended_path_write", "list_extended_sandbox_paths",
+    # File operations (sandboxed + extended)
+    "read_file", "write_file", "list_dir", "repo_delete",
+    "list_extended_sandbox_paths",
     # Search tools (v0.16.0+)
     "search_files", "search_in_file",
     # Memory/identity
@@ -218,8 +224,6 @@ CORE_TOOL_NAMES = {
     "get_dpc_context",
     # Browser tools (safe, read-only)
     "browse_page", "fetch_json", "check_url", "search_web",
-    # Review tools (safe, analysis only)
-    "self_review", "request_critique", "compare_approaches", "quality_checklist", "consensus_check",
     # Messaging tools (agent-to-user communication)
     "send_user_message",
     # Skill router (Read phase of Memento-Skills loop)
@@ -234,7 +238,7 @@ CORE_TOOL_NAMES = {
 RESTRICTED_TOOL_NAMES = {
     "run_shell",           # Shell access
     "claude_code_edit",    # Code editing via Claude
-    "repo_commit_push",    # Git push
+    "git_push",            # Git push
     "request_restart",     # Control operations
     "promote_to_stable",
     # Git tools (can modify files / history)
@@ -437,4 +441,5 @@ class ToolRegistry:
                 is_code_tool=entry.is_code_tool,
                 timeout_sec=entry.timeout_sec,
                 is_core=entry.is_core,
+                default_enabled=entry.default_enabled,
             )

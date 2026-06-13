@@ -6,6 +6,7 @@
 <script lang="ts">
   import type { Writable } from 'svelte/store';
   import { get } from 'svelte/store';
+  import { mapBackendMessage } from '$lib/utils/messageMapper';
   import {
     historyRestored,
     groupHistorySynced,
@@ -44,14 +45,17 @@
 
       chatHistories.update(map => {
         const newMap = new Map(map);
-        const restoredMessages = $historyRestored.messages.map((msg: any, index: number) => ({
-          id: `restored-${index}-${Date.now()}`,
-          sender: msg.role === 'user' ? 'user' : $historyRestored.conversation_id,
-          senderName: msg.role === 'user' ? 'You' : getPeerDisplayName($historyRestored.conversation_id),
-          text: msg.content,
-          timestamp: Date.now() - ($historyRestored.messages.length - index) * 1000,
-          attachments: msg.attachments || []
-        }));
+        const restoredMessages = $historyRestored.messages.map((msg: any, index: number) => {
+          const isSelf = msg.sender_node_id ? msg.sender_node_id === selfNodeId : msg.role === 'user';
+          return {
+            id: `restored-${index}-${Date.now()}`,
+            sender: isSelf ? 'user' : ($historyRestored.conversation_id),
+            senderName: isSelf ? (msg.sender_name || 'You') : (msg.sender_name || getPeerDisplayName($historyRestored.conversation_id)),
+            text: msg.content,
+            timestamp: Date.now() - ($historyRestored.messages.length - index) * 1000,
+            attachments: msg.attachments || []
+          };
+        });
         newMap.set($historyRestored.conversation_id, restoredMessages);
         return newMap;
       });
@@ -86,21 +90,16 @@
               chatHistories.update(map => {
                 const newMap = new Map(map);
                 const syncedMessages = response.messages.map((msg: any, index: number) => {
-                  const stableId = msg.message_id || msg.id || `synced-${index}-${Date.now()}`;
-                  const senderName = msg.sender_name || '';
                   const isAgent = msg.sender_type === 'agent' || msg.is_agent || false;
                   const isLocalHuman = !isAgent && (!msg.sender_node_id || msg.sender_node_id === selfNodeId);
-                  return {
-                    id: stableId,
-                    sender: isLocalHuman ? 'user' : (msg.sender_node_id || msg.node_id || syncedGroupId),
-                    senderName: isLocalHuman ? 'You' : (senderName || getPeerDisplayName(msg.sender_node_id || syncedGroupId)),
-                    text: msg.content || msg.text,
-                    timestamp: new Date(msg.timestamp).getTime() || Date.now() - (response.messages.length - index) * 1000,
-                    attachments: msg.attachments || [],
-                    isAgent: isAgent,
-                    agentOwner: msg.agent_owner || null,
-                    msg_index: msg.msg_index || 0,
-                  };
+                  const mapped = mapBackendMessage(msg, {
+                    fallbackSender: isLocalHuman ? 'user' : (msg.sender_node_id || msg.node_id || syncedGroupId),
+                    fallbackSenderName: isLocalHuman ? 'You' : (msg.sender_name || getPeerDisplayName(msg.sender_node_id || syncedGroupId)),
+                    index,
+                    totalCount: response.messages.length,
+                  });
+                  mapped.id = msg.message_id || msg.id || `synced-${index}-${Date.now()}`;
+                  return mapped;
                 });
 
                 syncedMessages.forEach((m: any) => {

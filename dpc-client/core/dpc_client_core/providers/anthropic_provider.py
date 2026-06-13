@@ -56,6 +56,7 @@ class AnthropicProvider(AIProvider):
         return {}
 
     async def generate_response(self, prompt: str, **kwargs) -> str:
+        self._last_thinking = None
         try:
             # Determine max_tokens value
             # When thinking is enabled, max_tokens must be > budget_tokens

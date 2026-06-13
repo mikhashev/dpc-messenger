@@ -362,6 +362,34 @@ D-PC Messenger uses an intelligent 6-tier connection fallback hierarchy for near
 - `dpc_agent/tools/` - Agent tool implementations (shell, editor, browser, etc.)
 - See [docs/agent/DPC_AGENT_GUIDE.md](docs/agent/DPC_AGENT_GUIDE.md) for usage
 
+**Retrieval Backend (`dpc_agent/retrieval/`, ADR-024 §1.6, 2026-05-18):**
+
+Composable abstraction over vector + text + fusion channels. Lets the
+graph backend (SQLite / Grafeo via ADR-024 §1.5) and the retrieval
+backend be picked independently per agent.
+
+- `dpc_agent/retrieval/base.py` — `VectorIndex`, `TextIndex`, `HybridFuser`
+  ABCs + `RetrievalBackend` composite dataclass
+- `dpc_agent/retrieval/native.py` — `NativeVectorIndex` / `NativeTextIndex`
+  / `NativeHybridFuser` wrappers over the existing `FaissIndex` +
+  `BM25Index` + `reciprocal_rank_fusion` code (default in production)
+- `dpc_agent/retrieval/grafeo.py` — `GrafeoVectorIndex` /
+  `GrafeoTextIndex` / `GrafeoHybridFuser` using Grafeo native HNSW + BM25
+  (opt-in via config flag)
+- `dpc_agent/retrieval/factory.py` — `make_backend_for_agent(agent_root)`
+  reads `<agent_root>/config.json` `retrieval_*` keys and dispatches.
+  Production call-sites use this helper, never `FaissIndex(...)` directly.
+
+Per-agent config flags (`~/.dpc/agents/<id>/config.json`, all optional):
+- `retrieval_vector`: `"native"` (default) | `"grafeo"`
+- `retrieval_text`: `"native"` (default) | `"grafeo"`
+- `retrieval_fusion`: `"custom"` (default) | `"grafeo"` (currently aliases
+  custom — Grafeo's native `db.hybrid_search` would drop our LAYER_WEIGHTS
+  policy, see ADR-024 §1.6c)
+
+Rollback: remove the keys + restart; FAISS state at
+`<agent_root>/state/memory_index/{vectors.faiss,bm25/}` is untouched.
+
 **Knowledge & Consensus System (v0.9.0+):**
 - `consensus_manager.py` - Multi-party knowledge voting
   - Devil's advocate mechanism (required dissenter for 3+ participants)
@@ -1138,6 +1166,12 @@ Access control file format (`~/.dpc/privacy_rules.json`):
   }
 }
 ```
+
+**Adding a new agent tool — `default_enabled` is required (S148):**
+
+The canonical default for whether an agent tool is enabled in `privacy_rules.json` lives on `ToolEntry.default_enabled` (single source of truth). When you register a new `ToolEntry` in any `dpc_agent/tools/*.py` module, you **must** pass `default_enabled=True|False` explicitly — there is no derived fallback. `True` = safe-by-default (read-only introspection, sandbox-confined reads, etc.); `False` = opt-in (anything destructive, network-egress, restricted, or that touches user-visible state outside the sandbox). The field defaults to `False` (fail-closed) if omitted, so a forgotten tool will be invisible to agents until the user toggles it on in the UI.
+
+On startup, `firewall.py:_seed_missing_tools_into_rules()` walks the registry and auto-adds any tool absent from `dpc_agent.tools` (global) or each `agent_profiles.<id>.tools` block with the registered `default_enabled`. Existing user values are never overwritten. This eliminates the historical drift where new tools landed in code but stayed invisible until manually added to firewall defaults (AGENT-TOOL-FIREWALL-DEFAULT-DRIFT, closed S148).
 
 ---
 

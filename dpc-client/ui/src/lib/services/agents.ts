@@ -19,15 +19,23 @@ export const agentProfiles = writable<string[]>([]);
 // Agent execution / streaming
 export const agentProgress = writable<AgentProgressEvent | null>(null);
 export const agentProgressClear = writable<AgentProgressClearEvent | null>(null);
+// Authoritative per-conversation tool-call snapshot (conversation_id -> tool_calls[]).
+// Populated from agent_progress.tool_calls so the live collapsible renders the full
+// list directly instead of accumulating a lossy event stream (no dropped results,
+// survives chat switches).
+export const agentLiveTools = writable<Record<string, any[]>>({});
 export const agentTextChunk = writable<AgentTextChunkEvent | null>(null);
 
 // CC agent chat message (injected by CC via send_cc_agent_response)
 export const agentChatMessage = writable<Record<string, any> | null>(null);
 
+// Backend confirms user message with msg_index before LLM starts thinking
+export const userMessageConfirmed = writable<{ conversation_id: string; msg_index: number; command_id: string } | null>(null);
+
 // Sleep state (ADR-014)
 export const sleepStateChanged = writable<{ agent_id: string; group_id?: string; status: string; result?: string } | null>(null);
 export const sleepProgress = writable<{ agent_id: string; group_id?: string; current: number; total: number; phase: string } | null>(null);
-export type SleepAgentState = { agent_id: string; agent_name?: string; status: string; current: number; total: number; phase: string };
+export type SleepAgentState = { agent_id: string; agent_name?: string; origin_chat_id?: string; status: string; current: number; total: number; phase: string };
 export const sleepAgentStates = writable<Map<string, SleepAgentState>>(new Map());
 
 // --- Command functions ---
@@ -43,6 +51,8 @@ export async function createAgent(
     maxRounds: number = 200,
     computeHost?: string,
     contextWindow?: number,
+    retrievalVector?: string,
+    retrievalText?: string,
 ): Promise<any> {
     return sendCmd('create_agent', {
         name,
@@ -53,6 +63,8 @@ export async function createAgent(
         max_rounds: maxRounds,
         ...(computeHost ? { compute_host: computeHost } : {}),
         ...(contextWindow ? { context_window: contextWindow } : {}),
+        ...(retrievalVector ? { retrieval_vector: retrievalVector } : {}),
+        ...(retrievalText ? { retrieval_text: retrievalText } : {}),
     });
 }
 

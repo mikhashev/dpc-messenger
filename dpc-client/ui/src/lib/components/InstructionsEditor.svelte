@@ -4,6 +4,7 @@
 <script lang="ts">
   import { createEventDispatcher } from 'svelte';
   import { sendCommand, nodeStatus, peerProviders } from '$lib/coreService';
+  import { confirmAsync } from '$lib/utils/dialog';
 
   // Svelte 5 runes mode - use $props() instead of export let
   let { open = $bindable(false) }: { open: boolean } = $props();
@@ -136,9 +137,9 @@
   }
 
   // Switch to a different instruction set
-  function switchSet(setKey: string) {
+  async function switchSet(setKey: string) {
     if (editMode) {
-      const confirmed = confirm('You have unsaved changes. Discard them and switch sets?');
+      const confirmed = await confirmAsync('You have unsaved changes. Discard them and switch sets?', { kind: 'warning' });
       if (!confirmed) return;
       editMode = false;
       editedInstructions = null;
@@ -494,7 +495,7 @@
       return;
     }
 
-    const confirmed = confirm(`Delete instruction set "${currentInstructions?.name}"? This cannot be undone.`);
+    const confirmed = await confirmAsync(`Delete instruction set "${currentInstructions?.name}"? This cannot be undone.`, { kind: 'warning' });
     if (!confirmed) return;
 
     try {
@@ -584,9 +585,9 @@
     }
   }
 
-  function close() {
+  async function close() {
     if (editMode) {
-      const confirmed = confirm('You have unsaved changes. Discard them and close?');
+      const confirmed = await confirmAsync('You have unsaved changes. Discard them and close?', { kind: 'warning' });
       if (!confirmed) return;
     }
     editMode = false;

@@ -64,7 +64,7 @@ def backfill_meta(knowledge_dir: pathlib.Path) -> Dict[str, dict]:
         if not f.is_file() or f.name in _BACKFILL_SKIP:
             continue
         try:
-            content = f.read_text(encoding="utf-8", errors="replace")[:200]
+            content = f.read_text(encoding="utf-8", errors="replace")[:1000]
         except OSError:
             content = ""
         tags = [t for t in f.stem.replace("_", "-").split("-") if len(t) > 2]
@@ -128,7 +128,7 @@ def generate_smart_index(knowledge_dir: pathlib.Path) -> str:
 
     for fname, entry in all_meta.items():
         ts = entry.get("last_accessed", "")
-        summary = entry.get("summary", "")[:80]
+        summary = entry.get("summary", "")[:160]
         title = fname.replace(".md", "").replace("_", " ").replace("-", " ").title()
         if not ts:
             reference.append((fname, title, summary, ""))
@@ -195,8 +195,63 @@ def get_embedding_provider(model_name: str = "BAAI/bge-m3", **kwargs) -> "Embedd
         return _singleton_providers[model_name]
 
 
+class _EmbeddingDiskCache:
+    """Content-addressed embedding cache shared across all agents.
+
+    Key: SHA256(text)[:16].  Value: float16 numpy vector on disk.
+    Location: ``~/.dpc/cache/embeddings/``.
+    """
+
+    def __init__(self, cache_dir: Optional[pathlib.Path] = None, dtype=None):
+        import numpy as _np
+        self._np = _np
+        self._dtype = dtype or _np.float16
+        if cache_dir is None:
+            cache_dir = pathlib.Path(os.environ.get("DPC_HOME", pathlib.Path.home() / ".dpc")) / "cache" / "embeddings"
+        self._dir = cache_dir
+        self._dir.mkdir(parents=True, exist_ok=True)
+
+    def _key(self, text: str) -> str:
+        import hashlib
+        return hashlib.sha256(text.encode()).hexdigest()[:16]
+
+    def get(self, text: str):
+        path = self._dir / f"{self._key(text)}.bin"
+        if path.exists():
+            try:
+                return self._np.fromfile(path, dtype=self._dtype)
+            except Exception:
+                return None
+        return None
+
+    def put(self, text: str, vector) -> None:
+        path = self._dir / f"{self._key(text)}.bin"
+        tmp = path.with_name(f"{self._key(text)}.{threading.get_ident()}.tmp")
+        try:
+            self._np.asarray(vector, dtype=self._dtype).tofile(tmp)
+            tmp.replace(path)
+        except Exception:
+            if tmp.exists():
+                tmp.unlink(missing_ok=True)
+
+
+_disk_cache: Optional["_EmbeddingDiskCache"] = None
+_disk_cache_lock = threading.Lock()
+
+
+def _get_disk_cache() -> "_EmbeddingDiskCache":
+    global _disk_cache
+    if _disk_cache is None:
+        with _disk_cache_lock:
+            if _disk_cache is None:
+                _disk_cache = _EmbeddingDiskCache()
+    return _disk_cache
+
+
 class EmbeddingProvider:
     """Lazy-loading embedding provider. BGE-M3 via sentence-transformers + PyTorch."""
+
+    _gpu_semaphore = threading.Semaphore(1)
 
     def __init__(self, model_name: str = "BAAI/bge-m3",
                  device: Optional[str] = None, max_tokens: int = 4096,
@@ -248,11 +303,38 @@ class EmbeddingProvider:
 
     def embed(self, text: str) -> List[float]:
         self._load_model()
-        return self._model.encode(text, normalize_embeddings=True).tolist()
+        cache = _get_disk_cache()
+        cached = cache.get(text)
+        if cached is not None:
+            return cached.tolist()
+        with self._gpu_semaphore:
+            result = self._model.encode(text, normalize_embeddings=True).tolist()
+        cache.put(text, result)
+        return result
 
     def embed_batch(self, texts: List[str]) -> List[List[float]]:
         self._load_model()
-        return self._model.encode(texts, normalize_embeddings=True).tolist()
+        import numpy as np
+        cache = _get_disk_cache()
+        results: List[Optional[List[float]]] = [None] * len(texts)
+        misses: List[tuple] = []
+        for i, text in enumerate(texts):
+            cached = cache.get(text)
+            if cached is not None:
+                results[i] = cached.tolist()
+            else:
+                misses.append((i, text))
+        if misses:
+            miss_texts = [t for _, t in misses]
+            with self._gpu_semaphore:
+                vectors = self._model.encode(miss_texts, normalize_embeddings=True).tolist()
+            for (idx, text), vec in zip(misses, vectors):
+                cache.put(text, vec)
+                results[idx] = vec
+        hits = len(texts) - len(misses)
+        if hits > 0:
+            log.debug("Embedding cache: %d hits, %d misses out of %d texts", hits, len(misses), len(texts))
+        return results
 
     @property
     def dimensions(self) -> int:
@@ -298,17 +380,9 @@ class Memory:
         """Path to identity file."""
         return self._memory_path("identity.md")
 
-    def reflection_path(self) -> pathlib.Path:
-        """Path to structured reflection file."""
-        return self._memory_path("reflection.json")
-
     def dialogue_summary_path(self) -> pathlib.Path:
         """Path to dialogue summary file."""
         return self._memory_path("dialogue_summary.md")
-
-    def journal_path(self) -> pathlib.Path:
-        """Path to scratchpad journal (history of changes)."""
-        return self._memory_path("scratchpad_journal.jsonl")
 
     def logs_path(self, name: str) -> pathlib.Path:
         """Get path to log file."""
@@ -351,44 +425,6 @@ class Memory:
         write_text(self.identity_path(), content)
         auto_commit_agent_change(self.agent_root, "identity: updated self-understanding")
 
-    def load_reflection(self) -> dict:
-        """Load structured reflection data."""
-        p = self.reflection_path()
-        if p.exists():
-            try:
-                return json.loads(read_text(p))
-            except (json.JSONDecodeError, ValueError):
-                log.warning("Invalid reflection.json, returning empty")
-                return self._default_reflection()
-        return self._default_reflection()
-
-    def save_reflection(self, data: dict) -> None:
-        """Save structured reflection data with validation."""
-        # Validate top-level keys
-        valid_keys = {"reflections", "pattern_tracking", "calibration", "meta"}
-        filtered = {k: v for k, v in data.items() if k in valid_keys}
-        if not filtered:
-            filtered = self._default_reflection()
-        write_text(self.reflection_path(), json.dumps(filtered, indent=2, ensure_ascii=False))
-
-    @staticmethod
-    def _default_reflection() -> dict:
-        """Default empty reflection structure."""
-        return {
-            "reflections": [],
-            "pattern_tracking": [],
-            "calibration": {
-                "self_assessment": None,
-                "user_feedback": None,
-                "gap": None
-            },
-            "meta": {
-                "schema_version": "1.0",
-                "max_reflections": 50,
-                "max_patterns": 20
-            }
-        }
-
     def load_dialogue_summary(self) -> str:
         """Load dialogue summary if exists."""
         p = self.dialogue_summary_path()
@@ -406,8 +442,6 @@ class Memory:
             write_text(self.scratchpad_path(), self._default_scratchpad())
         if not self.identity_path().exists():
             write_text(self.identity_path(), self._default_identity())
-        if not self.journal_path().exists():
-            write_text(self.journal_path(), "")
 
     def cleanup_old_task_results(self, max_age_days: int = 30) -> int:
         """Remove task_results files older than max_age_days. Returns count deleted."""
@@ -565,12 +599,6 @@ class Memory:
             for e in errors[-10:]:
                 lines.append(f"  {e.get('type', '?')}: {short(str(e.get('error', '')), 120)}")
         return "\n".join(lines)
-
-    # --- Journal ---
-
-    def append_journal(self, entry: Dict[str, Any]) -> None:
-        """Append an entry to the scratchpad journal."""
-        append_jsonl(self.journal_path(), entry)
 
     # --- Defaults ---
 

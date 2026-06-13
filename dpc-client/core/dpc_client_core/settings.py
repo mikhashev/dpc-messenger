@@ -122,7 +122,7 @@ class Settings:
             # Enable/disable individual connection strategies
             'enable_ipv6': 'true',  # Try IPv6 direct connections (Priority 1)
             'enable_ipv4': 'true',  # Try IPv4 direct connections (Priority 2)
-            'enable_hub_webrtc': 'true',  # Try Hub WebRTC with STUN/TURN (Priority 3)
+            'enable_hub_webrtc': 'false',  # Try Hub WebRTC with STUN/TURN (Priority 3) - requires Hub connection
             'enable_hole_punching': 'false',  # Try DHT-coordinated UDP hole punching (Priority 4) - DISABLED: lacks DTLS encryption (v0.10.0)
             'enable_relays': 'true',  # Try volunteer relay nodes (Priority 5)
             'enable_gossip': 'true',  # Use gossip store-and-forward fallback (Priority 6)
@@ -435,6 +435,35 @@ class Settings:
         """Check if cultural perspective analysis is enabled in knowledge extraction."""
         value = self.get('knowledge', 'cultural_perspectives_enabled', 'false')
         return value.lower() in ('true', '1', 'yes')
+
+    def get_hf_offline_mode(self) -> bool:
+        """Check if HuggingFace Hub offline mode is enabled (S144).
+
+        When true, run_service.py sets HF_HUB_OFFLINE=1 BEFORE any
+        huggingface_hub import so transformers / sentence-transformers /
+        gliner skip ETag-refresh HEAD requests on cached models. This
+        getter exists for symmetry — the env var is set in
+        run_service.py at startup, not via this method, because Settings
+        is loaded after the import chain that imports huggingface_hub.
+
+        Default false: first-time installs need the network to download
+        BGE-M3 / GLiNER / Whisper. Flip to true after caches are warm
+        to remove the per-startup HF HEAD-request log noise.
+        """
+        value = self.get('hf', 'offline_mode', 'false')
+        return value.lower() in ('true', '1', 'yes')
+
+    def get_kg_backend(self) -> str:
+        """Knowledge graph backend selection (ADR-024 Phase 1.5).
+
+        Returns one of "sqlite" (default, stable) or "grafeo" (Phase 1.5
+        migration target). Configured via [knowledge_graph] backend in
+        config.ini. Unknown values fall back to "sqlite" to preserve
+        backward compatibility — Grafeo migration is opt-in until Level 2
+        and Level 3 verification close (see backlog KG-GRAFEO-VERIFICATION).
+        """
+        value = self.get('knowledge_graph', 'backend', 'sqlite').strip().lower()
+        return value if value in ('sqlite', 'grafeo') else 'sqlite'
 
     def get_log_level(self) -> str:
         """Get global log level (DEBUG/INFO/WARNING/ERROR/CRITICAL)."""

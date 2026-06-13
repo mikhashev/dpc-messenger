@@ -102,65 +102,57 @@ def repo_read(ctx: ToolContext, path: str, offset: int | None = None, limit: int
     return read_file(ctx, path, offset=offset, limit=limit)
 
 
-def repo_list(ctx: ToolContext, path: str = ".", recursive: bool = False) -> str:
+def list_dir(ctx: ToolContext, path: str = ".", recursive: bool = False) -> str:
     """
-    List files in the agent sandbox.
+    List files in a directory. Relative paths list the agent sandbox,
+    absolute paths are checked against firewall (sandbox_extensions).
 
     Args:
         ctx: Tool context
-        path: Directory path relative to agent root
+        path: Relative path (sandbox) or absolute path (firewall-checked)
         recursive: List recursively
 
     Returns:
-        List of files/directories
+        Directory listing
     """
     try:
-        dir_path = ctx.repo_path(path)
+        import os
+        if os.path.isabs(path):
+            dir_path = ctx.validate_extended_path(path, require_write=False)
+        else:
+            dir_path = ctx.repo_path(path)
 
         if not dir_path.exists():
             return f"⚠️ Directory not found: {path}"
-
         if not dir_path.is_dir():
             return f"⚠️ Not a directory: {path}"
 
         items = []
-
         if recursive:
             for item in dir_path.rglob("*"):
-                rel_path = item.relative_to(dir_path)
+                rel = item.relative_to(dir_path)
                 if item.is_dir():
-                    items.append(f"[DIR]  {rel_path}/")
+                    items.append(f"📁 {rel}/")
                 else:
                     size = item.stat().st_size
-                    items.append(f"[FILE] {rel_path} ({size} bytes)")
+                    items.append(f"📄 {rel} ({size:,} bytes)")
         else:
             for item in sorted(dir_path.iterdir()):
-                name = item.name
                 if item.is_dir():
-                    items.append(f"[DIR]  {name}/")
+                    items.append(f"📁 {item.name}/")
                 else:
                     size = item.stat().st_size
-                    items.append(f"[FILE] {name} ({size} bytes)")
+                    items.append(f"📄 {item.name} ({size:,} bytes)")
 
         if not items:
-            return f"Empty directory: {path}"
+            return f"Directory '{path}' is empty"
 
-        return f"Contents of {path}:\n" + "\n".join(items)
+        return "\n".join(items[:200]) + (f"\n\n... ({len(items)} total items)" if len(items) > 200 else "")
 
     except PermissionError as e:
-        return f"⚠️ Sandbox violation: {e}"
+        return f"⚠️ Access denied: {e}"
     except Exception as e:
         return f"⚠️ Error listing directory: {e}"
-
-
-def drive_read(ctx: ToolContext, path: str, offset: int | None = None, limit: int | None = None) -> str:
-    """Legacy alias for read_file."""
-    return read_file(ctx, path, offset=offset, limit=limit)
-
-
-def drive_list(ctx: ToolContext, path: str = ".", recursive: bool = False) -> str:
-    """Alias for repo_list (compatibility with Ouroboros tools)."""
-    return repo_list(ctx, path, recursive)
 
 
 def write_file(ctx: ToolContext, path: str, content: str) -> str:
@@ -189,27 +181,40 @@ def write_file(ctx: ToolContext, path: str, content: str) -> str:
 
         file_path.write_text(content, encoding="utf-8")
 
-        # Regenerate _index.md if writing to knowledge/ dir (sandbox only)
+        # Update _meta.json + regenerate smart _index.md for knowledge writes
         if not os.path.isabs(path) and path.startswith("knowledge/") and not path.endswith("_index.md"):
-            _update_knowledge_index(ctx, Path(path).stem)
+            from ..memory import read_file_meta, write_file_meta, update_access
+            knowledge_dir = ctx.agent_root / "knowledge"
+            filename = Path(path).name
+            meta = read_file_meta(knowledge_dir, filename)
+            if not meta.summary:
+                meta.summary = content[:1000].strip()
+                meta.tags = [t for t in Path(path).stem.replace("_", "-").split("-") if len(t) > 2]
+                write_file_meta(knowledge_dir, filename, meta)
+            update_access(knowledge_dir, filename)
             # Incremental reindex for Active Recall (MEM-3.7)
             try:
                 agent = getattr(ctx, '_agent', None)
                 provider = getattr(agent, '_embedding_provider', None) if agent else None
                 if provider:
                     from ..indexing_pipeline import index_single_file
-                    from ..faiss_index import FaissIndex
-                    from ..bm25_index import BM25Index
+                    from ..retrieval import make_backend_for_agent
                     index_dir = ctx.agent_root / "state" / "memory_index"
                     if index_dir.exists():
-                        faiss_idx = FaissIndex(index_dir)
-                        bm25_idx = BM25Index(index_dir)
-                        if faiss_idx.load():
-                            bm25_idx.load()
-                            index_single_file(file_path, provider, faiss_idx, bm25_idx, source_layer="L5")
-                            faiss_idx.save()
-                            bm25_idx.save()
-                            log.info("Incremental reindex: added %s to FAISS+BM25", file_path.name)
+                        backend = make_backend_for_agent(ctx.agent_root)
+                        if backend.vector.load():
+                            backend.text.load()
+                            # L5 key shape must match agent_manager._sync_index
+                            # (base = agent_root/knowledge) so incremental adds line up
+                            # with full-rebuild keys.
+                            _knowledge_dir = ctx.agent_root / "knowledge"
+                            try:
+                                _l5_key = file_path.relative_to(_knowledge_dir).as_posix()
+                            except ValueError:
+                                _l5_key = file_path.name
+                            index_single_file(file_path, provider, backend, source_layer="L5", source_file_key=_l5_key)
+                            backend.save()
+                            log.info("Incremental reindex: added %s to retrieval backend", file_path.name)
             except Exception as e:
                 log.warning("Incremental reindex failed for %s: %s", path, e)
 
@@ -223,11 +228,6 @@ def write_file(ctx: ToolContext, path: str, content: str) -> str:
 
 # Legacy alias
 def repo_write(ctx: ToolContext, path: str, content: str) -> str:
-    return write_file(ctx, path, content)
-
-
-def drive_write(ctx: ToolContext, path: str, content: str) -> str:
-    """Legacy alias for write_file."""
     return write_file(ctx, path, content)
 
 
@@ -259,23 +259,21 @@ def repo_delete(ctx: ToolContext, path: str, recursive: bool = False) -> str:
         else:
             size = target.stat().st_size
             target.unlink()
-            # Remove from FAISS/BM25 index if knowledge file
+            # Remove from retrieval backend if knowledge file
             if path.startswith("knowledge/") and not path.endswith("_index.md"):
                 try:
-                    from ..faiss_index import FaissIndex
-                    from ..bm25_index import BM25Index
+                    from ..retrieval import make_backend_for_agent
                     index_dir = ctx.agent_root / "state" / "memory_index"
                     if index_dir.exists():
-                        faiss_idx = FaissIndex(index_dir)
-                        bm25_idx = BM25Index(index_dir)
+                        backend = make_backend_for_agent(ctx.agent_root)
                         source_file = Path(path).name
-                        if faiss_idx.load():
-                            faiss_idx.remove_by_source(source_file)
-                            faiss_idx.save()
-                        if bm25_idx.load():
-                            bm25_idx.remove_by_source(source_file)
-                            bm25_idx.save()
-                        log.info("Removed %s from FAISS+BM25 index", source_file)
+                        if backend.vector.load():
+                            backend.vector.remove_by_source(source_file)
+                            backend.vector.save()
+                        if backend.text.load():
+                            backend.text.remove_by_source(source_file)
+                            backend.text.save()
+                        log.info("Removed %s from retrieval backend", source_file)
                 except Exception as e:
                     log.warning("Index cleanup failed for %s: %s", path, e)
             return f"✓ Deleted '{path}' ({size} bytes)"
@@ -345,17 +343,6 @@ def update_scratchpad(ctx: ToolContext, content: str, mode: str = "append") -> s
 
         scratchpad_path.parent.mkdir(parents=True, exist_ok=True)
         scratchpad_path.write_text(new_content.strip(), encoding="utf-8")
-
-        # Log update
-        journal_path = ctx.memory_path("scratchpad_journal.jsonl")
-        journal_entry = {
-            "ts": datetime.now(timezone.utc).isoformat(),
-            "mode": mode,
-            "content_length": len(content),
-            "total_length": len(new_content),
-        }
-        with open(journal_path, "a", encoding="utf-8") as f:
-            f.write(json.dumps(journal_entry) + "\n")
 
         msg = f"✓ Updated scratchpad ({mode} mode, {len(new_content)} total chars)"
         if mode == "deduplicate" and duplicates_removed > 0:
@@ -672,36 +659,29 @@ def chat_history(ctx: ToolContext, limit: int = 0, offset: int = -1, include_int
 def memory_search(ctx: ToolContext, query: str, top_k: int = 5) -> str:
     """Search across knowledge base using hybrid BM25 + semantic search (ADR-010)."""
     try:
-        from ..hybrid_search import reciprocal_rank_fusion, SearchResult
-        from ..bm25_index import BM25Index
-        from ..faiss_index import FaissIndex
-        from ..memory import EmbeddingProvider
+        from ..retrieval import make_backend_for_agent
         import numpy as np
 
-        knowledge_dir = ctx.agent_root / "knowledge"
-        index_dir = ctx.agent_root / "state" / "memory_index"
+        backend = make_backend_for_agent(ctx.agent_root)
 
-        faiss_idx = FaissIndex(index_dir)
-        bm25_idx = BM25Index(index_dir)
-
-        faiss_results = []
-        if faiss_idx.load():
+        vector_results = []
+        if backend.vector.load():
             try:
                 from dpc_client_core.dpc_agent.memory import get_embedding_provider
                 provider = get_embedding_provider(local_files_only=True)
                 qvec = np.array(provider.embed(query), dtype=np.float32)
-                faiss_results = faiss_idx.search(qvec, top_k)
+                vector_results = backend.vector.search(qvec, top_k)
             except Exception as e:
-                log.warning("FAISS search failed: %s", e)
+                log.warning("Vector search failed: %s", e)
 
-        bm25_results = []
-        if bm25_idx.load():
-            bm25_results = bm25_idx.search(query, top_k)
+        text_results = []
+        if backend.text.load():
+            text_results = backend.text.search(query, top_k)
 
-        if not faiss_results and not bm25_results:
+        if not vector_results and not text_results:
             return "No memory index yet. Index builds automatically at startup when memory is enabled. Try again after restart."
 
-        merged = reciprocal_rank_fusion(faiss_results, bm25_results)
+        merged = backend.fuser.fuse(vector_results, text_results)
         lines = [f"Found {len(merged)} results for '{query}':\n"]
         for i, r in enumerate(merged[:top_k]):
             meta = r.chunk_meta
@@ -749,33 +729,6 @@ def knowledge_list(ctx: ToolContext) -> str:
         return f"⚠️ Error listing knowledge: {e}"
 
 
-def _update_knowledge_index(ctx: ToolContext, topic: str) -> None:
-    """Update the knowledge base index file."""
-    try:
-        index_path = ctx.knowledge_path("_index")
-        knowledge_dir = ctx.agent_root / "knowledge"
-
-        topics = []
-        if knowledge_dir.exists():
-            for t in knowledge_dir.glob("*.md"):
-                if t.name != "_index.md":
-                    topics.append(t.stem)
-
-        index_content = f"""# Knowledge Base Index
-
-Last updated: {datetime.now(timezone.utc).isoformat()}
-
-## Topics
-
-"""
-        for t in sorted(topics):
-            index_content += f"- [{t}]({t}.md)\n"
-
-        index_path.parent.mkdir(parents=True, exist_ok=True)
-        index_path.write_text(index_content, encoding="utf-8")
-
-    except Exception as e:
-        log.warning(f"Failed to update knowledge index: {e}")
 
 
 # ---------------------------------------------------------------------------
@@ -1262,55 +1215,6 @@ def extended_path_read(ctx: ToolContext, path: str, offset: int | None = None, l
         return f"⚠️ Error reading file: {e}"
 
 
-def extended_path_list(ctx: ToolContext, path: str, recursive: bool = False) -> str:
-    """
-    List files in an extended sandbox directory.
-
-    Args:
-        ctx: Tool context
-        path: Absolute directory path (must be in extended sandbox)
-        recursive: If True, list recursively
-
-    Returns:
-        Directory listing
-    """
-    try:
-        dir_path = ctx.validate_extended_path(path, require_write=False)
-
-        if not dir_path.exists():
-            return f"⚠️ Directory not found: {path}"
-
-        if not dir_path.is_dir():
-            return f"⚠️ Not a directory: {path}"
-
-        items = []
-        if recursive:
-            for item in dir_path.rglob("*"):
-                rel = item.relative_to(dir_path)
-                if item.is_dir():
-                    items.append(f"📁 {rel}/")
-                else:
-                    size = item.stat().st_size
-                    items.append(f"📄 {rel} ({size:,} bytes)")
-        else:
-            for item in sorted(dir_path.iterdir()):
-                if item.is_dir():
-                    items.append(f"📁 {item.name}/")
-                else:
-                    size = item.stat().st_size
-                    items.append(f"📄 {item.name} ({size:,} bytes)")
-
-        if not items:
-            return f"Directory '{path}' is empty"
-
-        return "\n".join(items[:200]) + (f"\n\n... ({len(items)} total items)" if len(items) > 200 else "")
-
-    except PermissionError as e:
-        return f"⚠️ Access denied: {e}"
-    except Exception as e:
-        return f"⚠️ Error listing directory: {e}"
-
-
 def extended_path_write(ctx: ToolContext, path: str, content: str) -> str:
     """
     Write a file to an extended sandbox path (outside ~/.dpc/agent/).
@@ -1636,19 +1540,20 @@ def get_tools() -> List[ToolEntry]:
             },
             handler=read_file,
             timeout_sec=30,
+            default_enabled=True,
         ),
 
         ToolEntry(
-            name="repo_list",
+            name="list_dir",
             schema={
-                "name": "repo_list",
-                "description": "List files in a directory within the agent sandbox",
+                "name": "list_dir",
+                "description": "List files in a directory. Relative paths list the agent sandbox; absolute paths are checked against firewall (sandbox_extensions). Use recursive=true to descend.",
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "path": {
                             "type": "string",
-                            "description": "Directory path (default: root)",
+                            "description": "Relative path (sandbox, default '.') or absolute path (firewall-checked)",
                             "default": "."
                         },
                         "recursive": {
@@ -1660,34 +1565,9 @@ def get_tools() -> List[ToolEntry]:
                     "required": []
                 }
             },
-            handler=repo_list,
+            handler=list_dir,
             timeout_sec=30,
-        ),
-
-        ToolEntry(
-            name="drive_list",
-            schema={
-                "name": "drive_list",
-                "description": "List files in the agent sandbox (alias for repo_list)",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "path": {
-                            "type": "string",
-                            "description": "Directory path (default: root)",
-                            "default": "."
-                        },
-                        "recursive": {
-                            "type": "boolean",
-                            "description": "List recursively",
-                            "default": False
-                        }
-                    },
-                    "required": []
-                }
-            },
-            handler=drive_list,
-            timeout_sec=30,
+            default_enabled=True,
         ),
 
         ToolEntry(
@@ -1713,6 +1593,7 @@ def get_tools() -> List[ToolEntry]:
             },
             handler=repo_delete,
             timeout_sec=30,
+            default_enabled=False,
         ),
 
         ToolEntry(
@@ -1738,6 +1619,7 @@ def get_tools() -> List[ToolEntry]:
             handler=write_file,
             timeout_sec=30,
             is_code_tool=True,
+            default_enabled=False,
         ),
 
         # Memory tools
@@ -1765,6 +1647,7 @@ def get_tools() -> List[ToolEntry]:
             },
             handler=update_scratchpad,
             timeout_sec=10,
+            default_enabled=True,
         ),
 
         ToolEntry(
@@ -1810,6 +1693,7 @@ def get_tools() -> List[ToolEntry]:
             },
             handler=update_identity,
             timeout_sec=10,
+            default_enabled=False,
         ),
 
         ToolEntry(
@@ -1825,6 +1709,7 @@ def get_tools() -> List[ToolEntry]:
             },
             handler=deduplicate_identity,
             timeout_sec=10,
+            default_enabled=False,
         ),
 
         ToolEntry(
@@ -1853,6 +1738,7 @@ def get_tools() -> List[ToolEntry]:
             },
             handler=chat_history,
             timeout_sec=10,
+            default_enabled=True,
         ),
 
         # Knowledge tools (knowledge_read/knowledge_write removed — use read_file/write_file)
@@ -1869,6 +1755,7 @@ def get_tools() -> List[ToolEntry]:
             },
             handler=knowledge_list,
             timeout_sec=10,
+            default_enabled=True,
         ),
 
         ToolEntry(
@@ -1891,6 +1778,7 @@ def get_tools() -> List[ToolEntry]:
             },
             handler=get_task_board,
             timeout_sec=15,
+            default_enabled=True,
         ),
 
         # extract_knowledge + get_proposal_result removed (ADR-009, S34)
@@ -1916,6 +1804,7 @@ def get_tools() -> List[ToolEntry]:
             },
             handler=get_dpc_context,
             timeout_sec=10,
+            default_enabled=True,
         ),
 
         # Task queue tools
@@ -1953,6 +1842,7 @@ def get_tools() -> List[ToolEntry]:
             },
             handler=schedule_task,
             timeout_sec=10,
+            default_enabled=False,
         ),
 
         ToolEntry(
@@ -1973,6 +1863,7 @@ def get_tools() -> List[ToolEntry]:
             },
             handler=get_task_status,
             timeout_sec=10,
+            default_enabled=True,
         ),
 
         # Task type management tools
@@ -2007,6 +1898,7 @@ def get_tools() -> List[ToolEntry]:
             },
             handler=register_task_type,
             timeout_sec=10,
+            default_enabled=False,
         ),
 
         ToolEntry(
@@ -2022,6 +1914,7 @@ def get_tools() -> List[ToolEntry]:
             },
             handler=list_task_types,
             timeout_sec=5,
+            default_enabled=True,
         ),
 
         ToolEntry(
@@ -2042,34 +1935,10 @@ def get_tools() -> List[ToolEntry]:
             },
             handler=unregister_task_type,
             timeout_sec=5,
+            default_enabled=False,
         ),
 
-        # Extended sandbox tools (v0.16.0+ — read/write merged into read_file/write_file in S31)
-        ToolEntry(
-            name="extended_path_list",
-            schema={
-                "name": "extended_path_list",
-                "description": "List files in an extended sandbox directory",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "path": {
-                            "type": "string",
-                            "description": "Absolute directory path"
-                        },
-                        "recursive": {
-                            "type": "boolean",
-                            "description": "List recursively",
-                            "default": False
-                        }
-                    },
-                    "required": ["path"]
-                }
-            },
-            handler=extended_path_list,
-            timeout_sec=30,
-        ),
-
+        # Extended sandbox tools (v0.16.0+ — read/write/list merged into read_file/write_file/list_dir)
         ToolEntry(
             name="list_extended_sandbox_paths",
             schema={
@@ -2083,6 +1952,7 @@ def get_tools() -> List[ToolEntry]:
             },
             handler=list_extended_sandbox_paths,
             timeout_sec=5,
+            default_enabled=True,
         ),
 
         # Search tools (v0.16.0+)
@@ -2121,6 +1991,7 @@ def get_tools() -> List[ToolEntry]:
             },
             handler=search_files,
             timeout_sec=60,
+            default_enabled=True,
         ),
 
         ToolEntry(
@@ -2152,6 +2023,7 @@ def get_tools() -> List[ToolEntry]:
             },
             handler=search_in_file,
             timeout_sec=30,
+            default_enabled=True,
         ),
 
         # Memory search (ADR-010)
@@ -2179,6 +2051,7 @@ def get_tools() -> List[ToolEntry]:
             },
             handler=memory_search,
             timeout_sec=60,
+            default_enabled=True,
         ),
 
     ]

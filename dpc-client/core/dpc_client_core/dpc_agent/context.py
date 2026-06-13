@@ -86,25 +86,48 @@ def _build_runtime_section(
     agent_root: pathlib.Path,
     task: Dict[str, Any],
     session_state: Optional[Dict[str, Any]] = None,
+    billing_model: str = "subscription",
 ) -> str:
-    """Build the runtime context section."""
+    """Build the runtime context section.
+
+    billing_model is the authoritative source of truth for which budget shape
+    to emit — passed down from AgentConfig so a fresh state.json (empty dict)
+    is correctly classified for pay_per_use agents before the first task has
+    written spent_usd.
+    """
+    task_info = {"id": task.get("id"), "type": task.get("type")}
+    chat_ctx = task.get("chat_context")
+    if chat_ctx:
+        task_info["chat_type"] = chat_ctx.get("chat_type", "unknown")
+        task_info["chat_name"] = chat_ctx.get("chat_name", "")
+        task_info["chat_id"] = chat_ctx.get("chat_id", "")
+        task_info["description"] = chat_ctx.get("description", "")
+        task_info["participants"] = chat_ctx.get("participants", [])
     runtime_data = {
         "utc_now": utc_now_iso(),
         "agent_root": str(agent_root),
-        "task": {"id": task.get("id"), "type": task.get("type")},
+        "task": task_info,
     }
 
-    # Budget info from agent state
+    # Budget info from agent state. Shape depends on billing model:
+    #   subscription → {"billing": "subscription", "tokens_used_total": N}
+    #   pay_per_use  → {"billing": "pay_per_use", "spent_usd", "total_usd", "remaining_usd"}
     try:
         state_path = agent_root / "state" / "state.json"
-        if state_path.exists():
-            state_data = json.loads(read_text(state_path))
-            spent = float(state_data.get("spent_usd", 0))
-            total = float(state_data.get("budget_usd", 50))
+        state_data = json.loads(read_text(state_path)) if state_path.exists() else {}
+        if billing_model == "subscription":
             runtime_data["budget"] = {
+                "billing": "subscription",
+                "tokens_used_total": int(state_data.get("tokens_used_total", 0)),
+            }
+        else:
+            spent = float(state_data.get("spent_usd", 0))
+            total = float(state_data.get("budget_usd", 0))
+            runtime_data["budget"] = {
+                "billing": "pay_per_use",
                 "spent_usd": spent,
                 "total_usd": total,
-                "remaining_usd": max(0, total - spent),
+                "remaining_usd": max(0.0, total - spent),
             }
     except Exception:
         log.debug("Failed to read budget info", exc_info=True)
@@ -113,18 +136,25 @@ def _build_runtime_section(
     if session_state:
         token_limit = session_state.get("tokens_limit") or 204800
         history_tokens = session_state.get("history_tokens", 0)
-        context_estimated = session_state.get("context_estimated", 0)
+        tokens_after_last_response = session_state.get("tokens_after_last_response", 0)
+        tokens_after_last_response_at = session_state.get("tokens_after_last_response_at")
         runtime_data["session"] = {
             "messages_count": session_state.get("messages_count", 0),
             "tokens_limit": token_limit,
             # history_tokens: conversation text only (user+assistant ÷4). Matches UI token counter.
             "history_tokens": history_tokens,
             "history_usage_percent": session_state.get("history_usage_percent", 0),
-            # context_estimated: full context from previous request (system+memory+tools+history).
-            # One request stale. Matches "Context size: X%" in dpc-client.log.
-            "context_estimated": context_estimated,
+            # tokens_after_last_response: full LLM context measured AFTER the previous response
+            # (system + memory + tools + history). ONE REQUEST STALE — during the current
+            # request this is a lower bound on actual usage. Pair with *_at timestamp for
+            # freshness. Matches "Context size: X%" in dpc-client.log.
+            "tokens_after_last_response": tokens_after_last_response,
+            "tokens_after_last_response_at": tokens_after_last_response_at,
             "context_usage_percent": session_state.get("context_usage_percent", 0),
         }
+        breakdown = session_state.get("context_breakdown")
+        if breakdown:
+            runtime_data["session"]["context_breakdown"] = breakdown
 
     return "## Runtime context\n\n" + json.dumps(runtime_data, ensure_ascii=False, indent=2)
 
@@ -167,15 +197,6 @@ def _build_memory_sections(memory: Memory) -> List[str]:
 
     identity_raw = memory.load_identity()
     sections.append("## Identity\n\n" + clip_text(identity_raw, 80000))
-
-    # Structured reflection data
-    reflection_data = memory.load_reflection()
-    reflections = reflection_data.get("reflections", [])
-    if reflections:
-        recent = reflections[-5:]  # Last 5 reflections
-        import json
-        sections.append("## Recent Reflections\n\n" + clip_text(
-            json.dumps(recent, indent=2, ensure_ascii=False), 10000))
 
     # Dialogue summary
     summary_text = memory.load_dialogue_summary()
@@ -281,7 +302,7 @@ def _build_capabilities_section(
         return "\n".join(lines)
 
     allowed = allowed_tools or set()
-    disabled = [t for t in all_tools if t not in allowed]
+    disabled = [t for t, v in all_tools.items() if isinstance(v, bool) and t not in allowed]
 
     lines.append("")
     lines.append(f"You have **{len(allowed)} enabled tools** (see tool schemas for details).")
@@ -292,6 +313,46 @@ def _build_capabilities_section(
         lines.append("These exist but are blocked. Ask Mike to enable in privacy_rules.json if needed.")
 
     return "\n".join(lines)
+
+
+def derive_history_role(
+    hist_msg: Dict[str, Any],
+    reader_identity: Dict[str, str],
+    is_group: bool,
+) -> Optional[str]:
+    """Per-reader role derivation (ADR-031 §2): the reader's own messages map
+    to assistant, everything else to user; None excludes the record.
+
+    Agent matching uses the composite key (agent_owner, sender_name) per
+    ADR-023 — agent_owner holds the owner node_id, shared by all agents of a
+    node, so only the pair is unique. The sender_name fallback for records
+    without identity fields is 1:1-only.
+    """
+    sender_type = hist_msg.get("sender_type")
+    if sender_type == "system":
+        return None
+    if sender_type == "human":
+        return "user"
+
+    sender_name = hist_msg.get("sender_name") or ""
+    reader_name = reader_identity.get("display_name") or ""
+
+    if sender_type == "agent":
+        owner = hist_msg.get("agent_owner")
+        if (owner
+                and owner in (reader_identity.get("node_id"), reader_identity.get("agent_id"))
+                and sender_name == reader_name):
+            return "assistant"
+        return "user"
+
+    if not sender_name:
+        stored = hist_msg.get("role")
+        if not is_group and stored in ("user", "assistant"):
+            return stored
+        return "user"
+    if not is_group and reader_name and sender_name == reader_name:
+        return "assistant"
+    return "user"
 
 
 def build_llm_messages(
@@ -308,6 +369,8 @@ def build_llm_messages(
     sandbox_read_only: Optional[List[str]] = None,
     sandbox_read_write: Optional[List[str]] = None,
     embedding_provider: Optional[Any] = None,
+    billing_model: str = "subscription",
+    reader_identity: Optional[Dict[str, str]] = None,
 ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
     """
     Build the full LLM message context for a task.
@@ -320,9 +383,11 @@ def build_llm_messages(
         dpc_context: Optional DPC context (personal, device)
         session_state: Optional session state from ConversationMonitor
                       (tokens_used, tokens_limit, usage_percent, etc.)
-        conversation_history: Optional list of previous user/assistant message dicts
-                              from ConversationMonitor (all turns except the current one).
-                              Each dict has at minimum {"role": "user"/"assistant", "content": "..."}
+        conversation_history: Optional list of previous message dicts from
+                              ConversationMonitor (all turns except the current one)
+        reader_identity: Reading agent identity for per-reader role derivation
+                         (ADR-031): {"agent_id", "display_name", "node_id"}.
+                         None = stored role is used (legacy callers).
         skill_store: Optional skill store for skill listing
         allowed_tools: Set of tool names allowed by firewall (None = all allowed)
         all_tools: Dict of all tool names → default enabled from firewall
@@ -387,44 +452,40 @@ def build_llm_messages(
         if _query_text:
             try:
                 from .active_recall import get_recall_block
-                from .hybrid_search import reciprocal_rank_fusion
-                from .bm25_index import BM25Index
-                from .faiss_index import FaissIndex
+                from .retrieval import make_backend_for_agent
                 from .memory import EmbeddingProvider
                 import numpy as _np
 
-                _index_dir = agent_root / "state" / "memory_index"
-                _faiss_idx = FaissIndex(_index_dir)
-                _bm25_idx = BM25Index(_index_dir)
+                _backend = make_backend_for_agent(agent_root)
 
                 _faiss_results = []
                 _q1_results = []
                 _q2_results = []
-                if _faiss_idx.load():
+                if _backend.vector.load():
                     if embedding_provider is None:
                         from .memory import get_embedding_provider
                         embedding_provider = get_embedding_provider(local_files_only=True)
                         log.info("Active Recall: created fallback EmbeddingProvider (local_files_only)")
-                    if _faiss_idx.needs_rebuild(embedding_provider.model_name):
-                        log.info("Active Recall: FAISS index needs rebuild (model changed), skipping search")
+                    if _backend.vector.needs_rebuild(embedding_provider.model_name):
+                        log.info("Active Recall: vector index needs rebuild (model changed), skipping search")
                     else:
                         if _human_text:
                             _q1_vec = _np.array(embedding_provider.embed(_human_text), dtype=_np.float32)
-                            _q1_results = _faiss_idx.search(_q1_vec, FAISS_TOP_K)
+                            _q1_results = _backend.vector.search(_q1_vec, FAISS_TOP_K)
                         if _context_text:
                             _q2_vec = _np.array(embedding_provider.embed(_context_text), dtype=_np.float32)
-                            _q2_results = _faiss_idx.search(_q2_vec, FAISS_TOP_K)
+                            _q2_results = _backend.vector.search(_q2_vec, FAISS_TOP_K)
                         _faiss_results = _q1_results + _q2_results
-                    log.debug("Active Recall FAISS: %d results (Q1=%d + Q2=%d) — %s",
+                    log.debug("Active Recall vector: %d results (Q1=%d + Q2=%d) — %s",
                               len(_faiss_results), len(_q1_results), len(_q2_results),
                               [m.get("source_file", "?") for m, _ in _faiss_results])
 
                 _keyword_results = []
                 _sparse_query = _human_text or _context_text
-                if _bm25_idx.load():
-                    _bm25_results = _bm25_idx.search(_sparse_query, BM25_TOP_K)
+                if _backend.text.load():
+                    _bm25_results = _backend.text.search(_sparse_query, BM25_TOP_K)
                     _keyword_results.extend(_bm25_results)
-                    log.debug("Active Recall BM25: %d results — %s", len(_bm25_results),
+                    log.debug("Active Recall text: %d results — %s", len(_bm25_results),
                               [m.get("source_file", "?") for m, _ in _bm25_results])
 
                 _graph_results = []
@@ -439,7 +500,7 @@ def build_llm_messages(
                 except Exception:
                     log.debug("Active Recall Graph L7: unavailable (cold start or no graph DB)")
 
-                _results = reciprocal_rank_fusion(_faiss_results, _keyword_results, graph_results=_graph_results)
+                _results = _backend.fuser.fuse(_faiss_results, _keyword_results, graph_results=_graph_results)
                 _ctx_ratio = (session_state or {}).get("context_usage_percent", 0) / 100.0
                 _recall = get_recall_block(_results, context_usage_ratio=_ctx_ratio, agent_root=agent_root)
                 if _recall:
@@ -472,7 +533,7 @@ def build_llm_messages(
 
     # Dynamic content: changes every request
     dynamic_parts = [
-        _build_runtime_section(agent_root, task, session_state),
+        _build_runtime_section(agent_root, task, session_state, billing_model=billing_model),
     ]
     dynamic_parts.extend(_build_recent_sections(memory, task_id=task.get("id", "")))
 
@@ -483,6 +544,23 @@ def build_llm_messages(
             dynamic_parts.append(dpc_context_text)
 
     dynamic_text = "\n\n".join(dynamic_parts)
+
+    # Context breakdown for UI tooltip (token estimates per component)
+    def _section_name(text: str) -> str:
+        first_line = text.split("\n", 1)[0].strip("# ").strip()
+        return first_line[:40] if first_line else "unknown"
+
+    _context_breakdown = [{"name": "system_prompt", "tokens": estimate_tokens(static_text)}]
+    for _p in semi_stable_parts:
+        name = _section_name(_p)
+        if "ACTIVE RECALL" in _p or "RECALL HINTS" in _p:
+            import re as _re
+            _files = _re.findall(r'\[(?:EXT|L\d+)\]\s*(\S+?)[:,]', _p)
+            if _files:
+                name = f"Active Recall ({', '.join(_files)})"
+        _context_breakdown.append({"name": name, "tokens": estimate_tokens(_p)})
+    for _p in dynamic_parts:
+        _context_breakdown.append({"name": _section_name(_p), "tokens": estimate_tokens(_p)})
 
     # System message with 3 content blocks for optimal caching
     messages: List[Dict[str, Any]] = [
@@ -509,21 +587,34 @@ def build_llm_messages(
 
     # Insert previous conversation turns so the agent has continuity
     if conversation_history:
+        is_group = str(task.get("id") or "").startswith("group-")
         for hist_msg in conversation_history:
-            role = hist_msg.get("role", "")
             content = hist_msg.get("content", "")
-            if role in ("user", "assistant") and content:
-                msg_index = hist_msg.get("msg_index", "")
-                timestamp = hist_msg.get("timestamp", "")
-                sender = hist_msg.get("sender_name", "")
-                prefix_parts = [f"#{msg_index}" if msg_index else ""]
-                if timestamp:
-                    ts_display = timestamp.split('T')[1][:8] if 'T' in timestamp else timestamp
-                    prefix_parts.append(ts_display)
-                if sender:
-                    prefix_parts.append(sender)
-                content = f"[{' | '.join(p for p in prefix_parts if p)}] {content}"
-                messages.append({"role": role, "content": content})
+            if not content:
+                continue
+            if reader_identity is not None:
+                role = derive_history_role(hist_msg, reader_identity, is_group)
+                if role is None:
+                    continue
+            else:
+                role = hist_msg.get("role", "")
+                if role not in ("user", "assistant"):
+                    continue
+            msg_index = hist_msg.get("msg_index", "")
+            timestamp = hist_msg.get("timestamp", "")
+            sender = hist_msg.get("sender_name", "")
+            prefix_parts = [f"#{msg_index}" if msg_index else ""]
+            if timestamp:
+                ts_display = timestamp.split('T')[1][:8] if 'T' in timestamp else timestamp
+                prefix_parts.append(ts_display)
+            if sender:
+                prefix_parts.append(sender)
+            content = f"[{' | '.join(p for p in prefix_parts if p)}] {content}"
+            messages.append({"role": role, "content": content})
+        if reader_identity is not None:
+            _assistant_turns = sum(1 for m in messages[1:] if m["role"] == "assistant")
+            log.debug("History turns for reader %s: %d total, %d assistant",
+                      reader_identity.get("display_name"), len(messages) - 1, _assistant_turns)
 
     next_idx = max((m.get("msg_index", 0) for m in conversation_history), default=0) + 1 if conversation_history else 1
     user_content = _build_user_content(task)
@@ -534,6 +625,7 @@ def build_llm_messages(
     # --- Soft-cap token trimming ---
     soft_cap = (session_state or {}).get("tokens_limit") or 204800
     messages, cap_info = apply_message_token_soft_cap(messages, soft_cap)
+    cap_info["context_breakdown"] = _context_breakdown
 
     return messages, cap_info
 
@@ -668,15 +760,30 @@ Available skills are listed below. Choose the one whose description best matches
 
 Your runtime context includes session metrics:
 - `history_tokens` — conversation messages only (matches UI counter)
-- `context_estimated` — full context size (system + memory + tools + history)
-- `context_usage_percent` — how full your context window is
+- `tokens_after_last_response` — full context size measured AFTER your previous response (system + memory + tools + history)
+- `tokens_after_last_response_at` — ISO 8601 timestamp of when `tokens_after_last_response` was measured
+- `context_usage_percent` — how full your context window is (based on `tokens_after_last_response`)
+- `context_breakdown` — per-section composition of your previous request's context: section name + estimated tokens (system prompt, scratchpad, identity, knowledge index, skills, tool capabilities, Active Recall with its file list). Token values are rough estimates — read the proportions, not the absolutes.
 
 **Thresholds:**
 - >65%: Start wrapping up open threads, save important insights
 - >85%: Warn the user. Propose knowledge extraction and new session
 - >95%: Strongly recommend immediate session reset
 
-Note: context_estimated is one request stale. Accurate enough for decisions.
+**Context composition awareness:** if `context_breakdown` shows a bloated
+section or Active Recall pulling files irrelevant to the current session,
+flag it to the user and propose a dedicated cleaning session. Never clean
+scratchpad, knowledge or identity autonomously based on this data — cleaning
+is a joint activity with the user (and other agents) in a session dedicated
+to it.
+
+Note: `tokens_after_last_response` is ONE REQUEST STALE by design — it is the
+measurement taken at the end of your previous LLM call, not a live counter for
+the current request. During the current turn, actual context usage is somewhat
+higher (this turn's user message + tool results are not yet included). Treat
+the value as a lower bound on current usage. Use `tokens_after_last_response_at`
+to judge how recent the measurement is — if many tool rounds passed since,
+the live number may be noticeably above this lower bound.
 
 ## Constraints
 

@@ -6,6 +6,8 @@
   import ImageMessage from './ImageMessage.svelte';
   import VoicePlayer from './VoicePlayer.svelte';
   import ThinkingBlock from './ThinkingBlock.svelte';
+  import AgentProgressCollapsible from './AgentProgressCollapsible.svelte';
+  import { agentLiveTools } from '$lib/coreService';
   import type { Message, Mention } from '$lib/types.js';
 
   // Props (Svelte 5 runes mode)
@@ -18,6 +20,8 @@
     agentProgressMessage = null,  // v0.15.0+: Agent progress message
     agentProgressTool = null,  // v0.15.0+: Current tool being executed
     agentProgressRound = 0,  // v0.15.0+: Current round number
+    agentProgressName = "",  // S185: Agent display name for live progress
+    agentProgressAgentId = "",  // S190: Agent ID for Stop button routing
     agentStreamingText = "",  // v0.16.0+: Streaming text from agent
     peerDisplayNames = new Map<string, string>(),  // v0.19.1+: Map of node_id -> display name
     selfNodeId = "",  // v0.19.1+: Current user's node ID
@@ -31,6 +35,8 @@
     agentProgressMessage?: string | null;
     agentProgressTool?: string | null;
     agentProgressRound?: number;
+    agentProgressName?: string;
+    agentProgressAgentId?: string;
     agentStreamingText?: string;
     peerDisplayNames?: Map<string, string>;
     selfNodeId?: string;
@@ -48,11 +54,19 @@
     return id;
   };
 
-  // Debug: Log when progress props change
-  $effect(() => {
-    if (agentProgressTool || agentProgressMessage) {
-      console.log(`[ChatMessageList] Progress props: tool=${agentProgressTool}, msg=${agentProgressMessage?.substring(0,50)}, round=${agentProgressRound}`);
-    }
+  // Live tool calls: authoritative snapshot from the backend (agent_progress.tool_calls),
+  // keyed per conversation. Renders the full run directly — no lossy accumulation, no
+  // dropped results, survives chat switches. The currently-executing tool shows via the
+  // live spinner (currentTool); completed tools come from the snapshot with their results.
+  let liveToolCalls = $derived($agentLiveTools[conversationId] ?? []);
+
+  // Filter tool_call code blocks from streaming when collapsible is active
+  let filteredStreamingText = $derived.by(() => {
+    if (!agentStreamingText || liveToolCalls.length === 0) return agentStreamingText || '';
+    return agentStreamingText
+      .replace(/```tool_call\n[\s\S]*?```\n?/g, '')
+      .replace(/[⊙✓✗] \w[\w_]*(?:\.\.\.|: [\s\S]*?\n)/g, '')
+      .trim();
   });
 
   // Auto-scroll when streaming text updates
@@ -138,8 +152,8 @@
           </strong>
           <span class="timestamp">{#if msg.msg_index}<span class="msg-index">#{msg.msg_index}</span> {/if}{new Date(msg.timestamp).toLocaleTimeString()}</span>
         </div>
-        <!-- Thinking block (v1.4+): Display AI reasoning before main response -->
-        {#if isAiSender(msg.sender, msg) && msg.thinking}
+        <!-- Thinking block hidden for all agent messages -->
+        {#if !isAiSender(msg.sender, msg) && msg.thinking}
           <ThinkingBlock thinking={msg.thinking} tokenCount={msg.thinkingTokens} />
         {/if}
 
@@ -155,8 +169,16 @@
           {/if}
         {/if}
 
-        <!-- Raw streaming output (v0.16.0+): Collapsible section showing incremental text -->
-        {#if isAiSender(msg.sender, msg) && msg.streamingRaw && msg.streamingRaw.length > 50}
+        <!-- Tool calls collapsible (ADR-030 v3 / UI-AGENT-ACTIONS-COLLAPSIBLE) -->
+        {#if isAiSender(msg.sender, msg) && msg.tool_calls && msg.tool_calls.length > 0}
+          <AgentProgressCollapsible
+            toolCalls={msg.tool_calls}
+            agentName={msg.senderName || ''}
+          />
+        {/if}
+
+        <!-- Raw streaming output hidden for all agent messages -->
+        {#if !isAiSender(msg.sender, msg) && msg.streamingRaw && msg.streamingRaw.length > 50}
           <details class="streaming-raw-details">
             <summary class="streaming-raw-summary">
               <span class="streaming-raw-icon">📝</span>
@@ -224,36 +246,20 @@
     </div>
   {/if}
 
-  <!-- Agent progress indicator (v0.15.0+) -->
-  {#if agentProgressTool || agentProgressMessage}
-    <div class="agent-progress">
-      <div class="agent-progress-spinner"></div>
-      <div class="agent-progress-content">
-        {#if agentProgressTool}
-          <span class="agent-progress-tool">🔧 {agentProgressTool}</span>
-        {/if}
-        {#if agentProgressRound > 0}
-          <span class="agent-progress-round">Round {agentProgressRound}</span>
-        {/if}
-        {#if agentProgressMessage}
-          <span class="agent-progress-message">{agentProgressMessage}</span>
-        {/if}
-      </div>
-    </div>
-  {/if}
-
-  <!-- Agent streaming text (v0.16.0+) - Shows AI response as it's generated -->
-  {#if agentStreamingText}
-    <div class="message ai-streaming">
-      <div class="message-header">
-        <strong>{conversationId?.startsWith('agent_') ? 'Agent' : 'AI Assistant'}</strong>
-        <span class="streaming-indicator">✨ Generating...</span>
-      </div>
-      <!-- Always use plain text during streaming for performance - markdown renders on final message -->
-      <div class="message-text streaming-content">
-        <pre class="streaming-plain">{agentStreamingText}</pre>
-      </div>
-    </div>
+  <!-- Unified agent collapsible: tool calls + streaming text in one block (S187).
+       liveToolCalls.length keeps it visible when switching INTO a chat with an active
+       run (snapshot present) before the next progress event arrives. -->
+  {#if agentProgressTool || agentProgressMessage || filteredStreamingText || liveToolCalls.length > 0}
+    <AgentProgressCollapsible
+      toolCalls={liveToolCalls}
+      agentName={agentProgressName}
+      isLive={true}
+      currentTool={agentProgressTool || ''}
+      currentRound={agentProgressRound}
+      streamingText={filteredStreamingText}
+      conversationId={conversationId}
+      agentId={agentProgressAgentId || (conversationId.startsWith('agent_') ? conversationId : '')}
+    />
   {/if}
 </div>
 
@@ -438,107 +444,6 @@
     border-radius: 8px;
     color: #555;
     font-size: 13px;
-  }
-
-  /* Agent progress indicator (v0.15.0+) */
-  .agent-progress {
-    display: flex;
-    align-items: center;
-    gap: 12px;
-    padding: 12px 16px;
-    margin: 8px 0;
-    background: linear-gradient(135deg, #e3f2fd 0%, #f3e5f5 100%);
-    border: 1px solid #90caf9;
-    border-radius: 12px;
-    animation: pulse 2s ease-in-out infinite;
-  }
-
-  @keyframes pulse {
-    0%, 100% { opacity: 1; }
-    50% { opacity: 0.8; }
-  }
-
-  .agent-progress-spinner {
-    width: 20px;
-    height: 20px;
-    border: 2px solid #90caf9;
-    border-top-color: #1976d2;
-    border-radius: 50%;
-    animation: spin 1s linear infinite;
-  }
-
-  @keyframes spin {
-    to { transform: rotate(360deg); }
-  }
-
-  .agent-progress-content {
-    display: flex;
-    flex-wrap: wrap;
-    align-items: center;
-    gap: 8px;
-    flex: 1;
-  }
-
-  .agent-progress-tool {
-    font-weight: 600;
-    color: #1565c0;
-  }
-
-  .agent-progress-round {
-    font-size: 0.85em;
-    color: #666;
-    background: rgba(0,0,0,0.05);
-    padding: 2px 8px;
-    border-radius: 10px;
-  }
-
-  .agent-progress-message {
-    color: #555;
-    font-size: 0.9em;
-    max-width: 300px;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-
-  /* Agent streaming text (v0.16.0+) */
-  .ai-streaming {
-    background: linear-gradient(135deg, #e8f5e9 0%, #f1f8e9 100%);
-    border: 1px solid #a5d6a7;
-    animation: fade-in 0.3s ease;
-  }
-
-  @keyframes fade-in {
-    from { opacity: 0; transform: translateY(10px); }
-    to { opacity: 1; transform: translateY(0); }
-  }
-
-  .streaming-indicator {
-    color: #4caf50;
-    font-size: 0.75rem;
-    margin-left: 8px;
-    animation: blink 1.5s ease-in-out infinite;
-  }
-
-  @keyframes blink {
-    0%, 100% { opacity: 1; }
-    50% { opacity: 0.4; }
-  }
-
-  .streaming-content {
-    min-height: 20px;
-  }
-
-  .streaming-plain {
-    margin: 0;
-    padding: 0;
-    white-space: pre-wrap;
-    word-wrap: break-word;
-    font-family: inherit;
-    font-size: inherit;
-    background: transparent;
-    color: inherit;
-    line-height: 1.5;
   }
 
   /* Collapsible raw streaming output (v0.16.0+) */

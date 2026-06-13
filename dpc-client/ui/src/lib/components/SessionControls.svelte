@@ -13,7 +13,11 @@
     estimatedTokens = 0,
     showEstimation = false,
     historyTokens = 0,
-    contextEstimated = 0,
+    tokensAfterLastResponse = 0,
+    tokensAfterLastResponseAt = null,
+    contextAgent = '',
+    contextAgents = null,
+    contextBreakdown = null,
     messageCount = 0,
     enableMarkdown = $bindable(true),
     isExtracting = false,
@@ -24,7 +28,8 @@
     sleepAgents = new Map(),
     onNewSession,
     onEndSession,
-    onToggleSleep
+    onToggleSleep,
+    onGroupSleep
   }: {
     showForChatId: string;
     isAIChat: boolean;
@@ -35,7 +40,11 @@
     estimatedTokens?: number;
     showEstimation?: boolean;
     historyTokens?: number;
-    contextEstimated?: number;
+    tokensAfterLastResponse?: number;
+    tokensAfterLastResponseAt?: string | null;
+    contextAgent?: string;
+    contextAgents?: Array<{name: string, tokens: number, limit: number, percent: number}> | null;
+    contextBreakdown?: Array<{name: string, tokens: number}> | null;
     messageCount?: number;
     enableMarkdown?: boolean;
     isExtracting?: boolean;
@@ -47,6 +56,7 @@
     onNewSession: (chatId: string) => void;
     onEndSession: (chatId: string) => void;
     onToggleSleep?: () => void;
+    onGroupSleep?: () => void;
   } = $props();
 
   // Computed properties
@@ -62,24 +72,24 @@
     effectiveLimit > 0 ? (totalTokens / effectiveLimit) : 0
   );
 
-  // Three-metric display (shown when context_estimated is available from backend)
-  let showThreeMetrics = $derived(contextEstimated > 0);
-  // historyTokens is a rough chars÷4 estimate; contextEstimated is the actual total from the LLM
+  // Three-metric display (shown when tokensAfterLastResponse is available from backend)
+  let showThreeMetrics = $derived(tokensAfterLastResponse > 0);
+  // historyTokens is a rough chars÷4 estimate; tokensAfterLastResponse is the actual total from the LLM
   // API. Clamp so the estimate never exceeds the measured total (prevents negative staticMemory).
   let effectiveHistoryTokens = $derived(
-    showThreeMetrics ? Math.min(historyTokens, contextEstimated) : historyTokens
+    showThreeMetrics ? Math.min(historyTokens, tokensAfterLastResponse) : historyTokens
   );
-  let staticMemory = $derived(showThreeMetrics ? contextEstimated - effectiveHistoryTokens : 0);
+  let staticMemory = $derived(showThreeMetrics ? tokensAfterLastResponse - effectiveHistoryTokens : 0);
   let dialogAvailable = $derived(showThreeMetrics ? effectiveLimit - staticMemory : effectiveLimit);
   let dialogPercent = $derived(dialogAvailable > 0 ? effectiveHistoryTokens / dialogAvailable : 0);
-  let totalContextPercent = $derived(effectiveLimit > 0 ? contextEstimated / effectiveLimit : 0);
+  let totalContextPercent = $derived(effectiveLimit > 0 ? tokensAfterLastResponse / effectiveLimit : 0);
 
   let dialogWithInput = $derived(showThreeMetrics && showEstimation && estimatedTokens > 0
     ? effectiveHistoryTokens + estimatedTokens
     : effectiveHistoryTokens);
   let totalWithInput = $derived(showThreeMetrics && showEstimation && estimatedTokens > 0
-    ? contextEstimated + estimatedTokens
-    : contextEstimated);
+    ? tokensAfterLastResponse + estimatedTokens
+    : tokensAfterLastResponse);
   let dialogPercentWithInput = $derived(dialogAvailable > 0 ? dialogWithInput / dialogAvailable : 0);
   let totalContextPercentWithInput = $derived(effectiveLimit > 0 ? totalWithInput / effectiveLimit : 0);
 
@@ -98,6 +108,18 @@
       ? "Peer must be online to extract knowledge (requires voting)"
       : "Extract reusable knowledge from current conversation"
   );
+
+  let staticTitle = $derived(
+    contextBreakdown && contextBreakdown.length > 0
+      ? contextBreakdown.map((c: {name: string, tokens: number}) => `${c.name}: ~${c.tokens.toLocaleString()}`).join('\n')
+      : "System prompt + contexts + tool schemas"
+  );
+
+  let agentsTooltip = $derived(
+    contextAgents && contextAgents.length > 0
+      ? contextAgents.map((a) => `${a.name}: ${a.tokens.toLocaleString()} / ${a.limit.toLocaleString()} (${a.percent}%)`).join('\n')
+      : ""
+  );
 </script>
 
 {#if isAIChat || showForChatId.startsWith('group-')}
@@ -108,13 +130,13 @@
         <span class="token-value">{historyTokens.toLocaleString()}{#if showEstimation && estimatedTokens > 0} + ~{estimatedTokens.toLocaleString()}{/if} / {dialogAvailable.toLocaleString()}</span>
         <span class="token-percentage" class:warning={dialogPercentWithInput >= 0.8}>({Math.round(dialogPercentWithInput * 100)}%)</span>
       </div>
-      <div class="token-row">
+      <div class="token-row" title={agentsTooltip}>
         <span class="token-label">Total</span>
-        <span class="token-value">{contextEstimated.toLocaleString()}{#if showEstimation && estimatedTokens > 0} + ~{estimatedTokens.toLocaleString()}{/if} / {effectiveLimit.toLocaleString()}</span>
+        <span class="token-value">{tokensAfterLastResponse.toLocaleString()}{#if showEstimation && estimatedTokens > 0} + ~{estimatedTokens.toLocaleString()}{/if} / {effectiveLimit.toLocaleString()}{#if contextAgent} — {contextAgent}{/if}</span>
         <span class="token-percentage" class:warning={totalContextPercentWithInput >= 0.8}>({Math.round(totalContextPercentWithInput * 100)}%)</span>
       </div>
-      <div class="token-row token-row--muted" title="System prompt + contexts + tool schemas">
-        <span class="token-label">Static</span>
+      <div class="token-row token-row--muted" title={staticTitle}>
+        <span class="token-label">{contextAgent ? 'Agent ctx' : 'Static'}</span>
         <span class="token-value">≈{staticMemory.toLocaleString()}</span>
         <span class="token-percentage"></span>
       </div>
@@ -191,12 +213,22 @@
         🌙 Sleep
       {/if}
     </button>
-  {:else if showForChatId?.startsWith('group-') && sleepAgents.size > 0}
-    <span class="btn-sleep-toggle active" title="Agents are consolidating session data">
-      {#each [...sleepAgents.values()] as sa}
-        <span class="sleep-agent-entry">☀️ {sa.agent_name || sa.agent_id}: {sa.total > 0 ? `${sa.current}/${sa.total}` : ''} {sa.phase === 'synthesizing' ? 'Synthesis' : 'Wakeup'}</span>
-      {/each}
-    </span>
+  {:else if showForChatId?.startsWith('group-') && onGroupSleep}
+    {#if sleepAgents.size > 0}
+      <span class="btn-sleep-toggle active" title="Agents are consolidating session data">
+        {#each [...sleepAgents.values()] as sa}
+          <span class="sleep-agent-entry">☀️ {sa.agent_name || sa.agent_id}: {sa.total > 0 ? `${sa.current}/${sa.total}` : ''} {sa.phase === 'synthesizing' ? 'Synthesis' : 'Wakeup'}</span>
+        {/each}
+      </span>
+    {:else}
+      <button
+        class="btn-sleep-toggle"
+        onclick={() => onGroupSleep?.()}
+        title="Re-run sleep for all agents in this group. Old morning briefs in the chat will be removed and replaced with fresh ones."
+      >
+        🌙 Sleep
+      </button>
+    {/if}
   {/if}
 </div>
 

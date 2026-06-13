@@ -8,6 +8,7 @@ toggle button via WebSocket command.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 from datetime import datetime, timezone
@@ -16,9 +17,7 @@ from typing import Any, Dict, List, Optional
 
 log = logging.getLogger(__name__)
 
-MAX_ARCHIVES_PER_CYCLE = 20
 SLEEP_STATE_FILE = "sleep_state.json"
-LAST_SLEEP_FILE = "last_sleep.json"
 MORNING_BRIEF_FILE = "morning_brief.json"
 SLEEP_FINDINGS_FILE = "sleep_findings.json"
 
@@ -78,14 +77,18 @@ Respond with ONLY a JSON object with two keys:
 }}
 
 Guidelines:
-- **last_session**: Extract from the MOST RECENT session only. List concrete \
-carryover items — tasks mentioned but not completed, decisions deferred, \
-things explicitly "pending" or "carryover".
+- **last_session**: Use the dedicated MOST RECENT SESSION block below. \
+Do NOT pick from --- PER-SESSION FINDINGS ---; the most recent has been \
+pre-selected for you. List concrete carryover items — tasks mentioned but \
+not completed, decisions deferred, things explicitly "pending" or "carryover".
 - Focus on CROSS-SESSION patterns: what changed, what reversed, what repeated.
 - Be factual. If sessions were unproductive, say so.
 - Language: match the language of the sessions.
 
---- PER-SESSION FINDINGS ---
+--- MOST RECENT SESSION (use this for last_session) ---
+{most_recent}
+
+--- PER-SESSION FINDINGS (newest first) ---
 {findings}
 {entity_section}"""
 
@@ -110,6 +113,68 @@ Rules:
 """
 
 
+SYNTHESIS_BUDGET_FACTOR = 0.85
+SYNTHESIS_OUTPUT_RESERVE_TOKENS = 4000
+
+
+def _compute_synthesis_budget(context_window: int, template_overhead_tokens: int) -> int:
+    """Tokens available for findings_text after reserving output + template overhead.
+
+    Single source of truth for the budget formula — both the truncation
+    helper and the observability site read from this. If the factor or
+    reserve change, only this function needs editing.
+    """
+    return int(context_window * SYNTHESIS_BUDGET_FACTOR) - SYNTHESIS_OUTPUT_RESERVE_TOKENS - template_overhead_tokens
+
+
+def _render_finding_block(seq_index: int, finding: Dict[str, Any]) -> str:
+    """Render one finding into its `Session N (date): {json}` block.
+
+    Kept as a helper so the budget accounting and the final findings_text
+    rendering use the exact same text — token count == render size.
+    """
+    date_prefix = finding.get("digest_date", "")[:10]
+    return f"Session {seq_index} ({date_prefix}):\n{json.dumps(finding, ensure_ascii=False, indent=2)}"
+
+
+def _select_findings_within_budget(
+    findings_sorted_desc: List[Dict[str, Any]],
+    llm_manager,
+    target_model: Optional[str],
+    context_window: int,
+    template_overhead_tokens: int,
+) -> tuple[List[Dict[str, Any]], int]:
+    """Select findings newest-to-oldest until adaptive synthesis budget is hit.
+
+    Budget = SYNTHESIS_BUDGET_FACTOR * context_window minus output reserve
+    minus the synthesis prompt template + most_recent block (passed in as
+    template_overhead_tokens).
+
+    Always includes at least one finding when input is non-empty, even if
+    a single finding would exceed budget — degraded but non-empty synthesis
+    is better than empty findings_text.
+
+    Returns (selected_findings, tokens_consumed_by_findings).
+    """
+    budget = _compute_synthesis_budget(context_window, template_overhead_tokens)
+    selected: List[Dict[str, Any]] = []
+    tokens_used = 0
+
+    for f in findings_sorted_desc:
+        finding_text = _render_finding_block(len(selected) + 1, f)
+        if target_model:
+            finding_tokens = llm_manager.count_tokens(finding_text, target_model)
+        else:
+            finding_tokens = len(finding_text) // 4  # rough fallback
+
+        if selected and tokens_used + finding_tokens > budget:
+            break
+        selected.append(f)
+        tokens_used += finding_tokens
+
+    return selected, tokens_used
+
+
 def _read_sleep_state(conversation_dir: Path) -> Dict[str, Any]:
     path = conversation_dir / SLEEP_STATE_FILE
     if path.exists():
@@ -125,62 +190,12 @@ def _write_sleep_state(conversation_dir: Path, state: Dict[str, Any]) -> None:
     path.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
-def _get_last_sleep_timestamp(conversation_dir: Path) -> Optional[str]:
-    path = conversation_dir / LAST_SLEEP_FILE
-    if path.exists():
-        try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-            return data.get("last_sleep_at")
-        except (json.JSONDecodeError, OSError):
-            pass
-    return None
+def _collect_group_archive_digests(group_dir: Path, agent_id: str) -> List[Dict[str, Any]]:
+    """Collect archived session digests from a specific group's archive/.
 
-
-def _collect_group_digests(
-    conversations_dir: Path, agent_id: str, since: Optional[str]
-) -> List[Dict[str, Any]]:
-    """Collect group chat history segments where this agent participated."""
-    digests = []
-    if not conversations_dir.exists() or not agent_id:
-        return digests
-    for group_dir in conversations_dir.iterdir():
-        if not group_dir.is_dir() or not group_dir.name.startswith("group-"):
-            continue
-        metadata_path = group_dir / "metadata.json"
-        history_path = group_dir / "history.json"
-        if not metadata_path.exists() or not history_path.exists():
-            continue
-        try:
-            metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
-            agents_map = metadata.get("agents", {})
-            agent_in_group = any(agent_id in ids for ids in agents_map.values())
-            if not agent_in_group and agents_map:
-                continue
-            history = json.loads(history_path.read_text(encoding="utf-8"))
-            messages = history.get("messages", [])
-            if not messages:
-                continue
-            if since:
-                messages = [m for m in messages if m.get("timestamp", "") > since]
-            if not messages:
-                continue
-            digests.append({
-                "archive_file": f"group:{group_dir.name}",
-                "date": messages[0].get("timestamp", "")[:10],
-                "message_count": len(messages),
-                "duration_mins": 0,
-                "source": "group",
-                "group_id": metadata.get("group_id", group_dir.name),
-            })
-        except (json.JSONDecodeError, OSError):
-            continue
-    return digests
-
-
-def _collect_group_archive_digests(
-    group_dir: Path, agent_id: str, since: Optional[str]
-) -> List[Dict[str, Any]]:
-    """Collect archived session digests from a specific group's archive/."""
+    Returns ALL group archives where this agent was a member. Reuse-detection
+    happens later via per-archive sha256 in `sleep_results/result_*.json`.
+    """
     digests = []
     archive_dir = group_dir / "archive"
     if not archive_dir.exists():
@@ -209,30 +224,27 @@ def _collect_group_archive_digests(
             if not messages:
                 continue
             archive_date = messages[0].get("timestamp", "")
-            if since and archive_date <= since:
-                continue
             digests.append({
                 "archive_file": f"group_archive:{group_dir.name}:{archive_path.name}",
-                "date": archive_date[:10],
+                "date": archive_date,
                 "message_count": len(messages),
                 "duration_mins": 0,
                 "source": "group_archive",
                 "group_id": data.get("conversation_id", group_id),
-                "_archive_path": str(archive_path),
+                "archive_path": str(archive_path),
             })
         except (json.JSONDecodeError, OSError):
             continue
-    if len(digests) > MAX_ARCHIVES_PER_CYCLE:
-        log.warning(
-            "Sleep: %d unprocessed group archives in %s, analyzing last %d. "
-            "%d oldest will be silently skipped (next sleep treats them as analyzed).",
-            len(digests), group_dir.name, MAX_ARCHIVES_PER_CYCLE,
-            len(digests) - MAX_ARCHIVES_PER_CYCLE,
-        )
-    return digests[-MAX_ARCHIVES_PER_CYCLE:]
+    return digests
 
 
-def _find_unprocessed_archives(conversation_dir: Path, since: Optional[str]) -> List[Dict[str, Any]]:
+def _find_archive_digests(conversation_dir: Path) -> List[Dict[str, Any]]:
+    """Read all 1:1 session digests from digest.jsonl.
+
+    Returns ALL digests in file order. Caller `run_sleep` is responsible for
+    sorting after merging with group archive digests — a single sort site
+    keeps the chronological invariant in one place.
+    """
     digest_path = conversation_dir / "digest.jsonl"
     if not digest_path.exists():
         return []
@@ -247,18 +259,7 @@ def _find_unprocessed_archives(conversation_dir: Path, since: Optional[str]) -> 
                 except json.JSONDecodeError:
                     continue
 
-    if since:
-        digests = [d for d in digests if d.get("date", "") > since]
-
-    digests.sort(key=lambda d: d.get("date", ""))
-    if len(digests) > MAX_ARCHIVES_PER_CYCLE:
-        log.warning(
-            "Sleep: %d unprocessed 1:1 archives in %s, analyzing last %d. "
-            "%d oldest will be silently skipped (next sleep treats them as analyzed).",
-            len(digests), conversation_dir.name, MAX_ARCHIVES_PER_CYCLE,
-            len(digests) - MAX_ARCHIVES_PER_CYCLE,
-        )
-    return digests[-MAX_ARCHIVES_PER_CYCLE:]
+    return digests
 
 
 def _load_archive(conversation_dir: Path, archive_filename: str) -> Optional[Dict[str, Any]]:
@@ -299,8 +300,8 @@ def _build_session_source_id(archive: str) -> tuple[str, str]:
     before persist_extracted_entities runs, or the FK violates and the
     MENTIONS edge is skipped by L5a's skip-orphan guard.
 
-    Formats handled (matching what _collect_group_digests /
-    _collect_group_archive_digests / _find_unprocessed_archives produce):
+    Formats handled (matching what _collect_group_archive_digests /
+    _find_archive_digests produce):
 
     - 1:1 archive filename ("2026-04-01T17-27-00_reset_session.json")
       → sa:2026-04-01T17-27-00 — matches the format extract_structural_edges
@@ -332,6 +333,88 @@ def _build_session_source_id(archive: str) -> tuple[str, str]:
     return f"sa:{timestamp}", timestamp
 
 
+def _result_filename(archive_file: str) -> str:
+    """Stable result filename derived from `archive_file`.
+
+    1:1 archive: `result_<archive_stem>.json` (e.g. `result_2026-05-13T17-28-25_reset_session.json`).
+    Group archive: `result_group_archive--<group_id>--<archive_stem>.json` — `:`
+    replaced by `--` for Windows path safety (drive separator). `_` is reserved
+    for timestamp segments inside the archive name and group ids may contain
+    underscores, so `--` is unambiguous as a namespace separator.
+    """
+    sanitized = archive_file.replace(":", "--")
+    if sanitized.endswith(".json"):
+        sanitized = sanitized[:-5]
+    return f"result_{sanitized}.json"
+
+
+def _compute_archive_hash(digest: Dict[str, Any], conversation_dir: Path) -> str:
+    """sha256 hex of the raw archive bytes referenced by `digest`.
+
+    Returns "" if the archive file cannot be located (orphan digest, missing
+    file, read error). Callers treat "" as "skip cache, always re-analyze".
+    """
+    source = digest.get("source")
+    archive_file = digest.get("archive_file", "")
+    if source == "group_archive":
+        path_str = digest.get("archive_path", "")
+        path = Path(path_str) if path_str else None
+    else:
+        # 1:1 archive — search via rglob (matches what _load_archive does).
+        path = None
+        if archive_file:
+            for p in (conversation_dir / "archive").rglob(archive_file):
+                path = p
+                break
+    if path is None or not path.exists():
+        return ""
+    try:
+        h = hashlib.sha256()
+        with open(path, "rb") as f:
+            for chunk in iter(lambda: f.read(8192), b""):
+                h.update(chunk)
+        return h.hexdigest()
+    except OSError:
+        return ""
+
+
+def _migrate_legacy_results(results_dir: Path) -> int:
+    """One-time rename: `session_<N>.json` → `result_<stem>.json`.
+
+    Reads the `archive_file` field inside each legacy file to derive the new
+    stable name. Idempotent: no-op when no `session_*.json` files exist, or
+    when the corresponding `result_*.json` already exists (delete legacy).
+    Returns the count of files renamed or deleted.
+    """
+    if not results_dir.exists():
+        return 0
+    migrated = 0
+    for legacy_path in results_dir.glob("session_*.json"):
+        stem = legacy_path.stem
+        # match session_<digits> exactly — avoid stomping any unrelated file.
+        if not (stem.startswith("session_") and stem[8:].isdigit()):
+            continue
+        try:
+            data = json.loads(legacy_path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            continue
+        archive_file = data.get("archive_file", "")
+        if not archive_file:
+            continue
+        new_path = results_dir / _result_filename(archive_file)
+        try:
+            if new_path.exists():
+                legacy_path.unlink()
+            else:
+                legacy_path.rename(new_path)
+            migrated += 1
+        except OSError as e:
+            log.warning("Sleep migration: %s → %s failed: %s", legacy_path.name, new_path.name, e)
+    if migrated:
+        log.info("Sleep migration: %d legacy session_*.json files mapped to result_*.json", migrated)
+    return migrated
+
+
 async def _analyze_single_session(
     digest: Dict, conversation_dir: Path, llm_manager,
     provider_alias: Optional[str] = None,
@@ -339,16 +422,10 @@ async def _analyze_single_session(
     archive_file = digest.get("archive_file", "")
 
     if digest.get("source") == "group_archive":
-        archive_path_str = digest.get("_archive_path", "")
+        archive_path_str = digest.get("archive_path", "")
         if not archive_path_str or not Path(archive_path_str).exists():
             return None
         archive = json.loads(Path(archive_path_str).read_text(encoding="utf-8"))
-    elif digest.get("source") == "group":
-        group_dir = conversation_dir.parent / archive_file.replace("group:", "")
-        history_path = group_dir / "history.json"
-        if not history_path.exists():
-            return None
-        archive = json.loads(history_path.read_text(encoding="utf-8"))
     else:
         archive = _load_archive(conversation_dir, archive_file) if archive_file else None
     if not archive:
@@ -366,9 +443,14 @@ async def _analyze_single_session(
     )
 
     response = await llm_manager.query(prompt, provider_alias=provider_alias)
+    if not response or not response.strip():
+        raise ValueError(
+            "LLM returned empty response (extended thinking may have consumed all output tokens)"
+        )
     finding = _parse_llm_json(response)
     finding["archive_file"] = archive_file
     finding["digest_date"] = digest.get("date", "")
+    finding["source"] = digest.get("source", "1:1")
     return finding
 
 
@@ -402,7 +484,11 @@ async def run_sleep(
     })
 
     try:
-        since = None if force else _get_last_sleep_timestamp(conversation_dir)
+        results_dir = conversation_dir / "sleep_results"
+        results_dir.mkdir(exist_ok=True)
+        # One-shot rename of legacy `session_<N>.json` → `result_<stem>.json`.
+        # Idempotent — no-op after the first cycle that runs the new code path.
+        _migrate_legacy_results(results_dir)
 
         if group_id:
             # Group-only mode: read only from this group's archives
@@ -415,21 +501,18 @@ async def run_sleep(
             if not group_dir:
                 _write_sleep_state(conversation_dir, {"status": "awake"})
                 return {"status": "error", "message": f"Group {group_id} not found"}
-            digests = _collect_group_archive_digests(group_dir, agent_id, since)
+            digests = _collect_group_archive_digests(group_dir, agent_id)
         else:
-            digests = _find_unprocessed_archives(conversation_dir, since)
+            digests = _find_archive_digests(conversation_dir)
 
-            # ADR-023 Task 10: include group chat sessions where this agent participates
-            group_digests = _collect_group_digests(conversation_dir.parent, agent_id, since)
-            if group_digests:
-                digests.extend(group_digests)
-                log.info("Sleep pipeline: added %d group chat segments", len(group_digests))
-
-            # Include archived group sessions (past New Session resets)
+            # Group archives — immutable, dedup'd by sha256 below.
+            # Live group history is intentionally NOT analyzed: it grows on every
+            # message, so the per-archive hash key never converges. Group analysis
+            # happens at reset_session points via group_archive entries.
             conversations_dir = conversation_dir.parent
             for group_dir in conversations_dir.iterdir():
                 if group_dir.is_dir() and group_dir.name.startswith("group-"):
-                    archive_digests = _collect_group_archive_digests(group_dir, agent_id, since)
+                    archive_digests = _collect_group_archive_digests(group_dir, agent_id)
                     if archive_digests:
                         digests.extend(archive_digests)
                         log.info("Sleep pipeline: added %d group archive sessions from %s", len(archive_digests), group_dir.name)
@@ -438,27 +521,59 @@ async def run_sleep(
             _write_sleep_state(conversation_dir, {"status": "awake"})
             return {"status": "no_new_sessions", "sessions_analyzed": 0}
 
-        log.info("Sleep pipeline: analyzing %d sessions for %s", len(digests), agent_id or conversation_dir.name)
+        # Sort ascending by `date` so downstream code can rely on chronological
+        # order: `period` uses dates[0]/dates[-1], and `most_recent_finding`
+        # below picks max(digest_date). Empty/missing dates sort first
+        # (= oldest treatment).
+        digests.sort(key=lambda d: d.get("date", ""))
 
-        results_dir = conversation_dir / "sleep_results"
-        results_dir.mkdir(exist_ok=True)
+        log.info("Sleep pipeline: %d candidate sessions for %s", len(digests), agent_id or conversation_dir.name)
 
         per_session_findings = []
+        cached_count = 0
+        analyzed_count = 0
         total = len(digests)
         for i, digest in enumerate(digests):
-            log.info("Sleep: analyzing session %d/%d (%s)", i + 1, total, digest.get("archive_file", ""))
+            archive_file = digest.get("archive_file", "")
+            archive_hash = _compute_archive_hash(digest, conversation_dir)
+            result_path = results_dir / _result_filename(archive_file) if archive_file else None
+
+            # Hash-skip path: result exists with matching archive_hash → reuse,
+            # no LLM call. Empty hash (missing archive bytes) bypasses cache and
+            # re-analyzes; force=True also bypasses cache (manual re-run after
+            # prompt change).
+            if (not force and result_path is not None and result_path.exists()
+                    and archive_hash):
+                try:
+                    cached = json.loads(result_path.read_text(encoding="utf-8"))
+                    if cached.get("archive_hash") == archive_hash:
+                        per_session_findings.append(cached)
+                        cached_count += 1
+                        if progress_callback:
+                            await progress_callback(i, total, "cached", archive_file)
+                        continue
+                except (json.JSONDecodeError, OSError):
+                    pass  # fall through to re-analyze
+
+            log.info("Sleep: analyzing session %d/%d (%s)", i + 1, total, archive_file)
             if progress_callback:
-                await progress_callback(i, total, "analyzing", digest.get("archive_file", ""))
+                await progress_callback(i, total, "analyzing", archive_file)
             try:
                 finding = await _analyze_single_session(digest, conversation_dir, llm_manager, provider_alias=provider_alias)
                 if finding:
+                    if archive_hash:
+                        finding["archive_hash"] = archive_hash
                     per_session_findings.append(finding)
-                    result_path = results_dir / f"session_{i}.json"
-                    result_path.write_text(json.dumps(finding, ensure_ascii=False, indent=2), encoding="utf-8")
+                    analyzed_count += 1
+                    if result_path is not None:
+                        result_path.write_text(json.dumps(finding, ensure_ascii=False, indent=2), encoding="utf-8")
             except Exception as e:
                 err_desc = f"{type(e).__name__}: {e}" if str(e) else type(e).__name__
                 log.warning("Sleep: failed to analyze session %d: %s", i + 1, err_desc)
-                per_session_findings.append({"error": err_desc, "archive_file": digest.get("archive_file", "")})
+                per_session_findings.append({"error": err_desc, "archive_file": archive_file})
+
+        log.info("Sleep pipeline: %d sessions ready (%d analyzed, %d cached)",
+                 len(per_session_findings), analyzed_count, cached_count)
 
         if not per_session_findings:
             _write_sleep_state(conversation_dir, {"status": "awake"})
@@ -509,9 +624,20 @@ async def run_sleep(
         dates = [d.get("date", "") for d in digests if d.get("date")]
         period = f"{dates[0][:10]} to {dates[-1][:10]}" if len(dates) >= 2 else dates[0][:10] if dates else "unknown"
 
-        findings_text = "\n\n".join(
-            f"Session {i+1} ({f.get('digest_date', '')[:10]}):\n{json.dumps(f, ensure_ascii=False, indent=2)}"
-            for i, f in enumerate(per_session_findings) if "error" not in f
+        # Pre-compute most-recent finding deterministically so the LLM only
+        # formats it, not picks it. Without this, the LLM picks `last_session`
+        # by position in the prompt rather than chronology, and the result
+        # was a 3-day-stale trivial group session over fresh 1:1 work.
+        non_error_findings = [f for f in per_session_findings if "error" not in f]
+        findings_sorted_desc = sorted(
+            non_error_findings,
+            key=lambda f: f.get("digest_date", ""),
+            reverse=True,
+        )
+        most_recent_finding = findings_sorted_desc[0] if findings_sorted_desc else None
+        most_recent_text = (
+            json.dumps(most_recent_finding, ensure_ascii=False, indent=2)
+            if most_recent_finding else "(no analyzable session)"
         )
 
         if progress_callback:
@@ -524,14 +650,80 @@ async def run_sleep(
                 entity_list=", ".join(unique_entities)
             )
 
-        synthesis_prompt = SYNTHESIS_PROMPT.format(
+        # Adaptive synthesis budget (S119): pack findings newest-to-oldest until
+        # SYNTHESIS_BUDGET_FACTOR * model context_window is reached. Bounded by
+        # the actual provider model, not a magic constant — caps growth at
+        # ~200-350 sessions without crashing into context limits.
+        target_alias = provider_alias or llm_manager.default_provider
+        target_provider = llm_manager.providers.get(target_alias) if target_alias else None
+        target_model = target_provider.model if target_provider else None
+
+        if target_model:
+            context_window = llm_manager.get_context_window(target_model)
+        else:
+            context_window = 128000  # safe default for unknown providers
+            log.warning(
+                "Sleep synthesis: target model unknown (alias=%s), using default context_window=%d",
+                target_alias, context_window,
+            )
+
+        # Estimate template overhead — SYNTHESIS_PROMPT formatted with empty
+        # findings + the most_recent block + entity_section. Anything we
+        # already commit to including before the variable findings_text.
+        template_skeleton = SYNTHESIS_PROMPT.format(
             n=len(per_session_findings),
             period=period,
+            most_recent=most_recent_text,
+            findings="",
+            entity_section=entity_section,
+        )
+        if target_model:
+            template_overhead_tokens = llm_manager.count_tokens(template_skeleton, target_model)
+        else:
+            template_overhead_tokens = len(template_skeleton) // 4
+
+        selected_findings, tokens_used = _select_findings_within_budget(
+            findings_sorted_desc,
+            llm_manager,
+            target_model,
+            context_window,
+            template_overhead_tokens,
+        )
+
+        budget_available = _compute_synthesis_budget(context_window, template_overhead_tokens)
+        synthesis_budget_info = {
+            "total_findings": len(findings_sorted_desc),
+            "included_findings": len(selected_findings),
+            "oldest_included_date": (
+                selected_findings[-1].get("digest_date", "")[:10] if selected_findings else ""
+            ),
+            "budget_tokens_used": tokens_used,
+            "budget_tokens_available": budget_available,
+        }
+
+        log.info(
+            "Sleep synthesis budget: %d/%d findings, %d/%d tokens (context_window=%d, model=%s)",
+            len(selected_findings), len(findings_sorted_desc),
+            tokens_used, budget_available, context_window, target_model or "unknown",
+        )
+
+        findings_text = "\n\n".join(
+            _render_finding_block(i + 1, f) for i, f in enumerate(selected_findings)
+        )
+
+        synthesis_prompt = SYNTHESIS_PROMPT.format(
+            n=len(selected_findings),
+            period=period,
+            most_recent=most_recent_text,
             findings=findings_text,
             entity_section=entity_section,
         )
 
         response = await llm_manager.query(synthesis_prompt, provider_alias=provider_alias)
+        if not response or not response.strip():
+            raise ValueError(
+                "LLM returned empty response (extended thinking may have consumed all output tokens)"
+            )
         result = _parse_llm_json(response)
 
         morning_brief = result.get("morning_brief", {})
@@ -574,17 +766,15 @@ async def run_sleep(
 
         morning_brief["generated_at"] = datetime.now(timezone.utc).isoformat()
         morning_brief["consumed"] = False
+        morning_brief["synthesis_budget"] = synthesis_budget_info
         sleep_findings["generated_at"] = datetime.now(timezone.utc).isoformat()
 
-        (conversation_dir / MORNING_BRIEF_FILE).write_text(
-            json.dumps(morning_brief, ensure_ascii=False, indent=2), encoding="utf-8"
-        )
+        if not group_id:
+            (conversation_dir / MORNING_BRIEF_FILE).write_text(
+                json.dumps(morning_brief, ensure_ascii=False, indent=2), encoding="utf-8"
+            )
         (conversation_dir / SLEEP_FINDINGS_FILE).write_text(
             json.dumps(sleep_findings, ensure_ascii=False, indent=2), encoding="utf-8"
-        )
-        (conversation_dir / LAST_SLEEP_FILE).write_text(
-            json.dumps({"last_sleep_at": datetime.now(timezone.utc).isoformat()}, ensure_ascii=False),
-            encoding="utf-8",
         )
 
         _write_sleep_state(conversation_dir, {

@@ -27,6 +27,36 @@ from pathlib import Path
 # Fix Windows console encoding
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
+# Single source of truth for tool names — pulled from the live ToolRegistry
+# so this CLI never drifts from the agent's actual registered tool set
+# (CORE + RESTRICTED + any other registered tools, ~46 total in S149).
+# Bridge lives next to dpc_client_core/, so the import path works when
+# invoked as `python cc_agent_bridge.py` from this directory.
+sys.path.insert(0, str(Path(__file__).parent))
+from dpc_client_core.dpc_agent.tools.registry import ToolRegistry  # noqa: E402
+
+_REGISTERED_TOOL_NAMES: frozenset | None = None
+
+
+def _get_registered_tool_names() -> frozenset:
+    """Lazy-load the full set of registered tool names from ToolRegistry.
+
+    Cached after first call. Used as the fallback substring lexicon for
+    extract_tool_calls() when the regex didn't find a tool name.
+    """
+    global _REGISTERED_TOOL_NAMES
+    if _REGISTERED_TOOL_NAMES is None:
+        try:
+            _REGISTERED_TOOL_NAMES = frozenset(ToolRegistry().available_tools())
+        except Exception:
+            # Stand-alone fallback: at least the core safe subset
+            from dpc_client_core.dpc_agent.tools.registry import (
+                CORE_TOOL_NAMES,
+                RESTRICTED_TOOL_NAMES,
+            )
+            _REGISTERED_TOOL_NAMES = CORE_TOOL_NAMES | RESTRICTED_TOOL_NAMES
+    return _REGISTERED_TOOL_NAMES
+
 DPC_HOME = Path(os.environ.get("DPC_HOME", Path.home() / ".dpc"))
 CONFIG_PATH = DPC_HOME / "config.ini"
 POLL_INTERVAL = 5
@@ -299,13 +329,10 @@ def extract_tool_calls(msg: dict) -> list:
         return []
     tools = re.findall(r'(?:calling|using|tool[_\s]call)[:\s]+(\w+)', raw, re.IGNORECASE)
     if not tools:
-        known_tools = [
-            'search_files', 'grep', 'extended_path_read', 'extended_path_list',
-            'repo_read', 'repo_write', 'git_log', 'git_diff', 'git_commit',
-            'execute_skill', 'save_to_memory',
-            'web_search', 'web_fetch', 'shell_exec'
-        ]
-        for tool in known_tools:
+        # Fallback: substring-scan against the live ToolRegistry — keeps
+        # this CLI in sync with every registered tool (core + restricted +
+        # any extras) without drift.
+        for tool in _get_registered_tool_names():
             if tool in raw:
                 tools.append(tool)
     return tools

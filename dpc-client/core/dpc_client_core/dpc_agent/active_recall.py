@@ -33,7 +33,7 @@ def format_recall_hints(results: List[SearchResult], max_results: int = 3) -> st
 
     hints = results[:max_results]
     lines = [
-        "",
+        "Active Recall",
         "--- ACTIVE RECALL ---",
         "If a recalled file looks relevant to the current discussion, call read_file() to get full content.",
     ]
@@ -68,7 +68,7 @@ def format_hints_only(results: List[SearchResult], max_results: int = 3) -> str:
     hints = results[:max_results]
     names = [f"[{r.chunk_meta.get('source_layer', 'L5')}] {r.chunk_meta.get('source_file', '?')}"
              for r in hints]
-    return f"\n--- RECALL HINTS: {', '.join(names)} ---\n"
+    return f"Active Recall\n--- RECALL HINTS: {', '.join(names)} ---\n"
 
 
 def get_recall_block(

@@ -4,6 +4,7 @@
 <script lang="ts">
   import { createEventDispatcher } from 'svelte';
   import { sendCommand } from '$lib/coreService';
+  import { confirmAsync } from '$lib/utils/dialog';
 
   export let context: PersonalContext | null = null;
   export let open: boolean = false;
@@ -148,9 +149,9 @@
     }
   }
 
-  function close() {
+  async function close() {
     if (editMode) {
-      const confirmed = confirm('You have unsaved changes. Discard them and close?');
+      const confirmed = await confirmAsync('You have unsaved changes. Discard them and close?', { kind: 'warning' });
       if (!confirmed) return;
     }
     editMode = false;

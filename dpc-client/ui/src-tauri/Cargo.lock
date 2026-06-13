@@ -892,7 +892,7 @@ checksum = "75b325c5dbd37f80359721ad39aca5a29fb04c89279657cffdda8736d0c0b9d2"
 
 [[package]]
 name = "dpc-messenger"
-version = "0.25.0"
+version = "0.26.0"
 dependencies = [
  "byteorder",
  "cpal",
@@ -904,7 +904,10 @@ dependencies = [
  "tauri-plugin-fs",
  "tauri-plugin-notification",
  "tauri-plugin-opener",
+ "tokio",
  "wav",
+ "webview2-com",
+ "windows 0.61.3",
 ]
 
 [[package]]

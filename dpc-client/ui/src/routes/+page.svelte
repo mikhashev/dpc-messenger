@@ -5,6 +5,8 @@
   import { onMount } from "svelte";
   import { writable } from "svelte/store";
   import { connectionStatus, nodeStatus, sendCommand, resetReconnection, connectToCoreService, knowledgeCommitProposal, personalContext, tokenWarning, extractionFailure, availableProviders, peerProviders, unreadMessageCounts, resetUnreadCount, setActiveChat, newSessionProposal, proposeNewSession, voteNewSession, defaultProviders, providersList, groupChats, loadGroups, listAgents, agentsList, sleepStateChanged, sleepProgress, sleepAgentStates, tokenUsageUpdated } from "$lib/coreService";
+  import { confirmAsync } from "$lib/utils/dialog";
+  import { mapBackendMessage } from "$lib/utils/messageMapper";
   import KnowledgeCommitDialog from "$lib/components/KnowledgeCommitDialog.svelte";
   import NewSessionDialog from "$lib/components/NewSessionDialog.svelte";
   import VoteResultDialog from "$lib/components/VoteResultDialog.svelte";
@@ -21,6 +23,7 @@
   import Sidebar from "$lib/components/Sidebar.svelte";
   import NewGroupDialog from "$lib/components/NewGroupDialog.svelte";
   import GroupSettingsDialog from "$lib/components/GroupSettingsDialog.svelte";
+  import ShellApprovalDialog from "$lib/components/ShellApprovalDialog.svelte";
   import ChatPanel from "$lib/panels/ChatPanel.svelte";
   import AgentPanel from "$lib/panels/AgentPanel.svelte";
   import VoicePanel from "$lib/panels/VoicePanel.svelte";
@@ -85,6 +88,8 @@
   let agentProgressMessage = $state<string | null>(null);
   let agentProgressTool = $state<string | null>(null);
   let agentProgressRound = $state<number>(0);
+  let agentProgressName = $state<string>('');
+  let agentProgressAgentId = $state<string>('');
   let agentStreamingText = $state<string>('');
   // Component ref — used to call flushAndCapture() in the AI response handler
   let agentPanelComp: AgentPanel | null = $state(null);
@@ -156,7 +161,7 @@
   // showGroupInviteDialog + pendingGroupInvite moved to GroupPanel.svelte (Step 7)
   let showGroupSettingsDialog = $state(false);  // v0.19.0: group settings/members panel
   // Token tracking state (Phase 2)
-  let tokenUsageMap = $state(new Map<string, {used: number, limit: number, historyTokens?: number, contextEstimated?: number}>());
+  let tokenUsageMap = $state(new Map<string, {used: number, limit: number, historyTokens?: number, tokensAfterLastResponse?: number, tokensAfterLastResponseAt?: string | null, contextBreakdown?: Array<{name: string, tokens: number}> | null, contextAgent?: string, contextAgents?: Array<{name: string, tokens: number, limit: number, percent: number}> | null}>());
   let showTokenWarning = $state(false);
   let tokenWarningMessage = $state("");
 
@@ -204,15 +209,23 @@
     localStorage.setItem('enableMarkdown', enableMarkdown.toString());
   });
 
-  // Sleep state (ADR-014) — derived from per-agent store, keyed by activeChatId.
-  // Prevents stale leak across chats when switching between agents (S110 SLEEP-UI-LEAK).
-  let activeAgentSleep = $derived($sleepAgentStates.get(activeChatId));
+  // Sleep state (ADR-014) — derived from per-agent store, scoped by origin chat.
+  // Origin = where sleep was initiated. Backend tags each event with origin
+  // (group_id for group sleep, agent_id for 1:1 sleep). UI shows indicator only
+  // in the chat that started the sleep, not in every other chat that happens to
+  // include the same agent (S136 SLEEP-UI-SCOPE).
+  let activeAgentSleep = $derived.by(() => {
+    const state = $sleepAgentStates.get(activeChatId);
+    if (!state) return undefined;
+    return state.origin_chat_id === activeChatId ? state : undefined;
+  });
   let isSleeping = $derived(activeAgentSleep?.status === 'sleeping');
 
   // Group-scoped sleep view — only show agents that are members of the active
-  // group, not every sleeping agent globally (S111 SLEEP-UI-GROUP-LEAK).
-  // The global $sleepAgentStates Map is unfiltered; passing it directly into
-  // SessionControls leaked agents from 1:1 chats into every group header.
+  // group AND whose sleep originated from this group (not from a 1:1 chat with
+  // the same agent). The global $sleepAgentStates Map is unfiltered; the
+  // membership check alone leaks 1:1 sleeps into group headers (S111 +
+  // S136 SLEEP-UI-SCOPE).
   let groupSleepAgents = $derived.by(() => {
     if (!activeChatId?.startsWith('group-')) return new Map();
     const group = $groupChats.get(activeChatId);
@@ -223,13 +236,27 @@
     }
     const filtered = new Map();
     for (const [aid, state] of $sleepAgentStates) {
-      if (memberAgentIds.has(aid)) filtered.set(aid, state);
+      if (memberAgentIds.has(aid) && state.origin_chat_id === activeChatId) {
+        filtered.set(aid, state);
+      }
     }
     return filtered;
   });
 
   function handleToggleSleep() {
     sendCommand('toggle_sleep', { agent_id: activeChatId });
+  }
+
+  async function handleGroupSleep() {
+    if (!activeChatId?.startsWith('group-')) return;
+    const ok = await confirmAsync(
+      'Run sleep for all agents in this group?\n\n' +
+      'Old morning briefs will be removed from the chat and replaced with fresh ones. ' +
+      'This runs the full sleep cycle for each agent (may take several minutes and tokens).',
+      { kind: 'warning' }
+    );
+    if (!ok) return;
+    sendCommand('trigger_group_sleep', { group_id: activeChatId });
   }
 
   // Reload history when active agent wakes up (side-effect only — isSleeping is derived above)
@@ -244,22 +271,12 @@
             chatHistories.update(map => {
               const newMap = new Map(map);
               const agentName = $agentsList?.find((a: any) => a.agent_id === state.agent_id)?.name || state.agent_id;
-              const msgs = result.messages.map((msg: any, index: number) => {
-                const ts = msg.timestamp ? new Date(msg.timestamp).getTime() : Date.now() - (result.messages.length - index) * 1000;
-                const stableId = msg.id || `${state.agent_id}-${ts}`;
-                const isAgent = msg.role === 'assistant' || msg.sender_name === state.agent_id;
-                return {
-                  id: stableId,
-                  sender: isAgent ? state.agent_id : 'user',
-                  senderName: msg.sender_name || (isAgent ? agentName : 'You'),
-                  text: msg.content,
-                  timestamp: ts,
-                  attachments: msg.attachments || [],
-                  thinking: msg.thinking,
-                  streamingRaw: msg.streaming_raw,
-                  msg_index: msg.msg_index || 0,
-                };
-              });
+              const msgs = result.messages.map((msg: any, index: number) =>
+                mapBackendMessage(msg, {
+                  index,
+                  totalCount: result.messages.length,
+                  identity: { agentSelfId: state.agent_id, agentSelfName: agentName, selfNodeId: $nodeStatus?.node_id || '' },
+                }));
               newMap.set(state.agent_id, msgs);
               return newMap;
             });
@@ -472,21 +489,13 @@
             const localHistory: any[] = newMap.get(activeChatId) || [];
             const localById = new Map(localHistory.map((m: any) => [m.id, m]));
             const msgs = result.messages.map((msg: any, index: number) => {
-              const ts = msg.timestamp ? new Date(msg.timestamp).getTime() : Date.now() - (result.messages.length - index) * 1000;
-              const stableId = msg.id || `${activeChatId}-${ts}`;
-              const local = localById.get(stableId);
-              const isAgent = msg.role === 'assistant' || msg.sender_name === activeChatId;
-              return {
-                id: stableId,
-                sender: isAgent ? activeChatId : 'user',
-                senderName: msg.sender_name || (isAgent ? agentName : 'You'),
-                text: msg.content,
-                timestamp: ts,
-                attachments: msg.attachments || [],
-                thinking: msg.thinking || local?.thinking,
-                streamingRaw: msg.streaming_raw || local?.streamingRaw,
-                msg_index: msg.msg_index || 0,
-              };
+              const local = localById.get(msg.id);
+              return mapBackendMessage(msg, {
+                index,
+                totalCount: result.messages.length,
+                identity: { agentSelfId: activeChatId, agentSelfName: agentName, selfNodeId: $nodeStatus?.node_id || '' },
+                local: local ? { thinking: local.thinking, streamingRaw: local.streamingRaw, tool_calls: local.tool_calls } : undefined,
+              });
             });
             newMap.set(activeChatId, msgs);
             return newMap;
@@ -525,7 +534,11 @@
     used: currentTokenUsage.used,
     limit: currentTokenUsage.limit > 0 ? currentTokenUsage.limit : DEFAULT_TOKEN_LIMIT,
     historyTokens: currentTokenUsage.historyTokens ?? 0,
-    contextEstimated: currentTokenUsage.contextEstimated ?? 0,
+    tokensAfterLastResponse: currentTokenUsage.tokensAfterLastResponse ?? 0,
+    tokensAfterLastResponseAt: currentTokenUsage.tokensAfterLastResponseAt ?? null,
+    contextBreakdown: currentTokenUsage.contextBreakdown ?? null,
+    contextAgent: currentTokenUsage.contextAgent ?? '',
+    contextAgents: currentTokenUsage.contextAgents ?? null,
   });
 
   // Reactive: Estimate token usage including current input (real-time feedback in SessionControls)
@@ -1007,7 +1020,11 @@
             estimatedTokens={estimatedUsage.estimated}
             showEstimation={estimatedUsage.isEstimated}
             historyTokens={effectiveTokenUsage.historyTokens ?? 0}
-            contextEstimated={effectiveTokenUsage.contextEstimated ?? 0}
+            tokensAfterLastResponse={effectiveTokenUsage.tokensAfterLastResponse ?? 0}
+            tokensAfterLastResponseAt={effectiveTokenUsage.tokensAfterLastResponseAt ?? null}
+            contextBreakdown={effectiveTokenUsage.contextBreakdown ?? null}
+            contextAgent={effectiveTokenUsage.contextAgent ?? ''}
+            contextAgents={effectiveTokenUsage.contextAgents ?? null}
             messageCount={$chatHistories.get(activeChatId)?.length ?? 0}
             bind:enableMarkdown
             isExtracting={isExtractingKnowledge}
@@ -1019,6 +1036,7 @@
             onNewSession={handleNewChat}
             onEndSession={handleEndSession}
             onToggleSleep={handleToggleSleep}
+            onGroupSleep={handleGroupSleep}
           />
         {/if}
       </div>
@@ -1032,6 +1050,8 @@
         agentProgressMessage={agentProgressMessage}
         agentProgressTool={agentProgressTool}
         agentProgressRound={agentProgressRound}
+        agentProgressName={agentProgressName}
+        agentProgressAgentId={agentProgressAgentId}
         agentStreamingText={agentStreamingText}
         peerDisplayNames={peerDisplayNames}
         selfNodeId={$nodeStatus?.node_id || ''}
@@ -1104,6 +1124,8 @@
   bind:agentProgressMessage
   bind:agentProgressTool
   bind:agentProgressRound
+  bind:agentProgressName
+  bind:agentProgressAgentId
   bind:agentStreamingText
 />
 
@@ -1136,6 +1158,11 @@
     tokenUsageMap = new Map(tokenUsageMap);
     tokenUsageMap.set(chatId, usage);
   }}
+  onUpdateContextBreakdown={(chatId, breakdown) => {
+    tokenUsageMap = new Map(tokenUsageMap);
+    const existing = tokenUsageMap.get(chatId) || { used: 0, limit: 0 };
+    tokenUsageMap.set(chatId, { ...existing, contextBreakdown: breakdown });
+  }}
   onMarkContextSent={(chatId, hash) => {
     lastSentContextHash = new Map(lastSentContextHash);
     lastSentContextHash.set(chatId, hash);
@@ -1151,6 +1178,11 @@
 
 <!-- ModelDownloadPanel: model download dialog + effects (Step 8) -->
 <ModelDownloadPanel />
+
+<!-- ShellApprovalDialog: ADR-030 v2 — floating approval cards for Tier 1
+     shell commands. Subscribes to pendingShellApprovals store fed by
+     coreService.ts shell_approval_request WS handler. -->
+<ShellApprovalDialog />
 
 <!-- ChatHistorySyncPanel: loads history from backend when switching to peer/agent/group chat (Step 8) -->
 <ChatHistorySyncPanel

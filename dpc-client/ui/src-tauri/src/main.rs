@@ -61,7 +61,7 @@ fn main() {
             get_ws_token,
             audio_recorder::tauri_start_recording,
             audio_recorder::tauri_stop_recording,
-            audio_recorder::tauri_get_recording_status
+            audio_recorder::tauri_get_recording_status,
         ])
         .setup(|app| {
             #[cfg(debug_assertions)]

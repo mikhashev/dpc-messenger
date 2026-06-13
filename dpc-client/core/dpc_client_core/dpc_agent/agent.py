@@ -44,11 +44,30 @@ if TYPE_CHECKING:
     from ..llm_manager import LLMManager
 log = logging.getLogger(__name__)
 
+CONTEXT_ROUND_RESERVE_TOKENS = 16384
+
+
+def select_prior_history(
+    full_history: List[Dict[str, Any]],
+    trigger_message_id: Optional[str],
+) -> Optional[List[Dict[str, Any]]]:
+    """Prior turns without the current trigger. Id-based dedup (ADR-031 T2):
+    the positional slice cuts the wrong record when another participant's
+    message lands mid-invoke."""
+    if trigger_message_id:
+        return [m for m in full_history if m.get("id") != trigger_message_id]
+    if len(full_history) > 1:
+        return full_history[:-1]
+    return None
+
 
 @dataclass
 class AgentConfig:
     """Configuration for the DPC agent."""
-    budget_usd: float = 500_000
+    # Dollar budget. None = subscription/unlimited (the default — z.ai is
+    # subscription, paid per API access not per token). Set explicitly only
+    # for pay_per_use providers where the BudgetLimitGuard must enforce a cap.
+    budget_usd: Optional[float] = None
     max_rounds: int = 200
     # Tool control is via firewall (privacy_rules.json), not config
     # Task queue settings
@@ -135,7 +154,7 @@ class DpcAgent:
         self.budget = HybridBudget(
             provider=provider_alias or "default",
             billing_model=self.config.billing_model,
-            budget_usd=self.config.budget_usd,
+            budget_usd=self.config.budget_usd or 0.0,
         )
 
         # Callback set by agent_manager to deliver scheduled task results to Telegram
@@ -168,6 +187,10 @@ class DpcAgent:
         # can propagate it into task data for automatic result delivery.
         reply_telegram_chat_id: Optional[str] = None,
         message_source: Optional[str] = None,
+        chat_context: Optional[Dict[str, Any]] = None,
+        stop_event: Optional[asyncio.Event] = None,
+        reader_identity: Optional[Dict[str, str]] = None,
+        trigger_message_id: Optional[str] = None,
     ) -> str:
         """
         Process a user message and return response.
@@ -198,17 +221,18 @@ class DpcAgent:
             "image_mime": image_mime,
             "image_caption": image_caption,
         }
+        if chat_context:
+            task["chat_context"] = chat_context
 
-        # Build LLM context — pass prior conversation turns (all except current user msg,
-        # which was added to the monitor just before this call, so it's the last entry)
         prior_history = None
         if conversation_monitor is not None:
-            full_history = conversation_monitor.get_message_history()
-            if len(full_history) > 1:
-                prior_history = full_history[:-1]  # exclude the current user message
+            prior_history = select_prior_history(
+                conversation_monitor.get_message_history(), trigger_message_id
+            )
 
         # Get firewall-controlled tool access (needed for both context and tool registry)
-        allowed_tools = self._get_allowed_tools(message_source=message_source)
+        allowed_tools = self._get_allowed_tools(message_source=message_source,
+                                                  conversation_id=conversation_id)
 
         # Collect firewall metadata for capabilities section (transparency)
         all_tools_map = None
@@ -233,6 +257,8 @@ class DpcAgent:
             sandbox_read_only=sandbox_ro,
             sandbox_read_write=sandbox_rw,
             embedding_provider=self._embedding_provider,
+            billing_model=self.config.billing_model,
+            reader_identity=reader_identity,
         )
 
         # Store cap_info for agent_manager to include in next request's session_state
@@ -241,6 +267,13 @@ class DpcAgent:
         # Log context window usage — warn if approaching limit or sections were trimmed
         _estimated = cap_info.get("estimated_tokens_before", 0)
         _ctx_window = (session_state or {}).get("tokens_limit") or 204800
+        _real_last = (session_state or {}).get("tokens_after_last_response") or 0
+        if _real_last > _estimated:
+            log.debug(
+                "Context estimate raised to last real prompt count: %d → %d tokens",
+                _estimated, _real_last,
+            )
+            _estimated = _real_last
         _trimmed = cap_info.get("trimmed_sections", [])
         if _trimmed:
             log.warning(
@@ -260,7 +293,9 @@ class DpcAgent:
 
         # Hard block: refuse to call LLM if context window is nearly full.
         # Without this guard the LLM call hangs silently (AGENT-CTX-1).
-        if _estimated > _ctx_window * 0.95:
+        _reserve = max(int(_ctx_window * 0.05),
+                       min(CONTEXT_ROUND_RESERVE_TOKENS, int(_ctx_window * 0.2)))
+        if _ctx_window - _estimated < _reserve:
             _pct = _estimated / _ctx_window * 100
             log.error(
                 "Context window overflow blocked: %d / %d tokens (%.0f%%)",
@@ -276,7 +311,7 @@ class DpcAgent:
             current_task_id=conversation_id,
             current_task_type="chat",
             tool_whitelist=allowed_tools,
-            emit_progress_fn=emit_progress or (lambda msg, tool=None, rnd=None: None),
+            emit_progress_fn=emit_progress or (lambda msg, tool=None, rnd=None, tool_calls=None: None),
             firewall=self._firewall,  # For extended sandbox paths
             conversation_monitor=conversation_monitor,  # For knowledge extraction tool
             reply_telegram_chat_id=reply_telegram_chat_id,
@@ -310,16 +345,18 @@ class DpcAgent:
             tools=self.tools,
             llm=self.llm,
             agent_root=self.agent_root,
-            emit_progress=emit_progress or (lambda msg, tool=None, rnd=None: None),
+            emit_progress=emit_progress or (lambda msg, tool=None, rnd=None, tool_calls=None: None),
             task_id=conversation_id,
             budget_remaining_usd=None if self.config.billing_model == "subscription" else self.config.budget_usd,
             max_rounds=self.config.max_rounds,
             on_stream_chunk=on_stream_chunk,
             conversation_id=conversation_id,
+            stop_event=stop_event,
         )
 
-        # Store last usage for session state access by agent_manager
+        # Store last usage and trace for session state access by agent_manager
         self._last_usage = usage
+        self._last_trace = trace
 
         # Phase 3: Skill Write phase — record outcomes, optionally reflect
         used_skills = self.skill_reflector.record_outcome(trace, usage)
@@ -372,15 +409,28 @@ class DpcAgent:
         except Exception as e:
             log.warning("Failed to save task result file: %s", e)
 
-        # Update budget
-        self._update_budget(usage.get("cost", 0))
+        # Update usage stats (tokens for subscription, cost for pay_per_use)
+        self._update_usage_stats(
+            cost=usage.get("cost", 0),
+            total_tokens=usage.get("total_tokens", 0),
+        )
 
         return response
 
-    def _update_budget(self, cost: float) -> None:
-        """Update budget tracking in state file."""
+    def _update_usage_stats(self, cost: float, total_tokens: int) -> None:
+        """Write per-task usage stats to state.json.
+
+        Subscription agents track only `tokens_used_total` (rate/concurrency
+        limits live in budget.py — dollar fields are meaningless here).
+        Pay-per-use agents track `spent_usd` against `budget_usd` so the
+        BudgetLimitGuard can enforce a real cap.
+
+        Auto-migrates old subscription state.json files that still carry
+        stale `spent_usd` / `budget_usd` (left over from when cost was
+        accidentally accumulated as token count).
+        """
         state_path = self.agent_root / "state" / "state.json"
-        state = {}
+        state: Dict[str, Any] = {}
 
         if state_path.exists():
             try:
@@ -388,8 +438,22 @@ class DpcAgent:
             except Exception:
                 log.debug("Failed to read state file", exc_info=True)
 
-        state["spent_usd"] = state.get("spent_usd", 0) + cost
-        state["budget_usd"] = self.config.budget_usd
+        is_subscription = self.config.billing_model == "subscription"
+
+        if is_subscription:
+            # Migration: drop legacy spent_usd / budget_usd keys if present.
+            if "spent_usd" in state or "budget_usd" in state:
+                legacy_spent = state.pop("spent_usd", None)
+                state.pop("budget_usd", None)
+                log.info(
+                    "Migrated subscription state.json: dropped spent_usd=%s, budget_usd",
+                    legacy_spent,
+                )
+            state["tokens_used_total"] = int(state.get("tokens_used_total", 0)) + int(total_tokens)
+        else:
+            state["spent_usd"] = state.get("spent_usd", 0) + cost
+            state["budget_usd"] = self.config.budget_usd
+
         state["last_updated"] = utc_now_iso()
 
         state_path.parent.mkdir(parents=True, exist_ok=True)
@@ -400,12 +464,17 @@ class DpcAgent:
         "read_file", "list_my_tools", "knowledge_list",
     })
 
-    def _get_allowed_tools(self, message_source: Optional[str] = None) -> Optional[set]:
+    def _get_allowed_tools(self, message_source: Optional[str] = None,
+                           conversation_id: Optional[str] = None) -> Optional[set]:
         """
-        Get set of allowed tools from firewall, restricted by message source.
+        Get set of allowed tools from firewall, restricted by message source
+        and conversation context (group vs 1:1).
 
         External sources (discord, telegram_public) get a read-only whitelist
         intersected with firewall permissions — new tools blocked by default.
+
+        Group chats restrict tools that have `{tool}_group_allowed: false`
+        in the agent's firewall profile (default: false for run_shell).
         """
         if self._firewall is None:
             if message_source in ("discord", "telegram_public"):
@@ -428,6 +497,24 @@ class DpcAgent:
         if message_source in ("discord", "telegram_public"):
             allowed = allowed & self.EXTERNAL_SOURCE_ALLOWED_TOOLS
             log.info("Source %s: restricted to %d read-only tools", message_source, len(allowed))
+
+        is_group = conversation_id and conversation_id.startswith("group-")
+        if is_group:
+            profile_tools = {}
+            if self._firewall_profile:
+                profile = self._firewall.get_agent_profile_settings(self._firewall_profile)
+                if profile:
+                    profile_tools = profile.get("tools", {})
+            group_restricted = set()
+            for tool_name in allowed:
+                key = f"{tool_name}_group_allowed"
+                if key in profile_tools and not profile_tools[key]:
+                    group_restricted.add(tool_name)
+                elif key not in profile_tools and tool_name == "run_shell":
+                    group_restricted.add(tool_name)
+            if group_restricted:
+                allowed = allowed - group_restricted
+                log.info("Group context: restricted %d tools: %s", len(group_restricted), group_restricted)
 
         return allowed
 
@@ -894,7 +981,7 @@ class DpcAgent:
             return f"Unknown task type: {task.task_type}. Register a handler with register_task_handler('{task.task_type}', handler)"
 
     async def _execute_review(self, data: Dict[str, Any]) -> str:
-        """Execute a code review task using self_review + request_critique tools."""
+        """Execute a code review task — LLM produces the review in its response."""
         target = data.get("target", data.get("text", ""))
         focus = data.get("focus", "")
         reply_conversation_id = data.get("_reply_conversation_id") or "review_task"
@@ -907,8 +994,8 @@ class DpcAgent:
         prompt = (
             f"Please review the following:{focus_clause}\n\n"
             f"{target}\n\n"
-            f"Use your self_review and request_critique tools to produce a thorough review "
-            f"covering correctness, quality, edge cases, and any improvements."
+            f"Provide a thorough review covering correctness, quality, edge cases, "
+            f"and any improvements."
         )
 
         result = await self.process(
@@ -983,13 +1070,10 @@ class DpcAgent:
             except Exception:
                 pass
 
-        return {
+        status: Dict[str, Any] = {
             "agent_root": str(self.agent_root),
-            "budget_usd": self.config.budget_usd,
-            "spent_usd": state.get("spent_usd", 0),
-            "remaining_usd": max(0, self.config.budget_usd - state.get("spent_usd", 0)),
-            "max_rounds": self.config.max_rounds,
             "billing_model": self.config.billing_model,
+            "max_rounds": self.config.max_rounds,
             "tools_available": self.tools.available_tools(),
             "memory_files": {
                 "scratchpad": self.memory.scratchpad_path().exists(),
@@ -1002,3 +1086,12 @@ class DpcAgent:
                 "stats": self.queue.get_stats(),
             },
         }
+        if self.config.billing_model == "subscription":
+            status["tokens_used_total"] = int(state.get("tokens_used_total", 0))
+        else:
+            budget = float(self.config.budget_usd or 0.0)
+            spent = float(state.get("spent_usd", 0))
+            status["budget_usd"] = budget
+            status["spent_usd"] = spent
+            status["remaining_usd"] = max(0.0, budget - spent)
+        return status

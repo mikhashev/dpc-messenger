@@ -34,9 +34,11 @@
     sendGroupImage,
     sendGroupVoiceMessage,
     sendGroupFile,
+    userMessageConfirmed,
   } from '$lib/coreService';
   import { estimateConversationUsage } from '$lib/tokenEstimator';
   import { showNotificationIfBackground } from '$lib/notificationService';
+  import { confirmAsync } from '$lib/utils/dialog';
   import type { Message, Mention, MessageAttachment } from '$lib/types.js';
 
   type AIChatMeta = {
@@ -52,7 +54,8 @@
     used: number;
     limit: number;
     historyTokens?: number;
-    contextEstimated?: number;
+    tokensAfterLastResponse?: number;
+    tokensAfterLastResponseAt?: string | null;
   };
 
   type InstructionSets = {
@@ -179,7 +182,8 @@
     used: currentTokenUsage.used,
     limit: currentTokenUsage.limit > 0 ? currentTokenUsage.limit : DEFAULT_TOKEN_LIMIT,
     historyTokens: currentTokenUsage.historyTokens ?? 0,
-    contextEstimated: currentTokenUsage.contextEstimated ?? 0,
+    tokensAfterLastResponse: currentTokenUsage.tokensAfterLastResponse ?? 0,
+    tokensAfterLastResponseAt: currentTokenUsage.tokensAfterLastResponseAt ?? null,
   });
   let estimatedUsage = $derived(estimateConversationUsage(effectiveTokenUsage, currentInput));
   let tokenWarningLevel = $derived(
@@ -371,15 +375,7 @@
   }
 
   async function handleEndSession(conversationId: string) {
-    // window.confirm() is non-blocking in Tauri WebView2 on Windows — see
-    // +page.svelte:handleEndSession comment. Use Tauri ask() with fallback.
-    let proceed: boolean;
-    try {
-      const { ask } = await import('@tauri-apps/plugin-dialog');
-      proceed = await ask('End this conversation session and extract knowledge?', { title: 'dpc-messenger', kind: 'info' });
-    } catch {
-      proceed = window.confirm('End this conversation session and extract knowledge?');
-    }
+    const proceed = await confirmAsync('End this conversation session and extract knowledge?', { kind: 'info' });
     if (proceed) {
       sendCommand('end_conversation_session', { conversation_id: conversationId });
     }
@@ -438,13 +434,50 @@
     } else if (activeChatId.startsWith('telegram-')) {
       await _sendTelegramMessage(text);
     } else if (activeChatId.startsWith('group-')) {
-      sendGroupMessage(activeChatId, text);
+      const groupChatId = activeChatId;
+      sendGroupMessage(groupChatId, text).then((resp: any) => {
+        if (resp?.msg_index) {
+          chatHistories.update(h => {
+            const m = new Map(h);
+            const hist = m.get(groupChatId) || [];
+            const lastUserIdx = hist.findLastIndex((msg: any) => msg.sender === 'user' && msg.text === text);
+            if (lastUserIdx >= 0) {
+              const updated = [...hist];
+              updated[lastUserIdx] = { ...updated[lastUserIdx], msg_index: resp.msg_index, id: resp.message_id || updated[lastUserIdx].id };
+              m.set(groupChatId, updated);
+            }
+            return m;
+          });
+        }
+      });
     } else {
       sendCommand('send_p2p_message', { target_node_id: activeChatId, text });
     }
 
     autoScroll();
   }
+
+  // Apply msg_index to user message as soon as backend confirms (before LLM responds)
+  $effect(() => {
+    const confirmed = $userMessageConfirmed;
+    if (!confirmed) return;
+    const { conversation_id, msg_index } = confirmed;
+    if (!conversation_id || !msg_index) return;
+    chatHistories.update(h => {
+      const m = new Map(h);
+      const chatId = Array.from(m.keys()).find(k => k === conversation_id || k.endsWith(conversation_id));
+      if (!chatId) return h;
+      const hist = m.get(chatId) || [];
+      const lastUserIdx = hist.findLastIndex((msg: any) => msg.sender === 'user' && !msg.msg_index);
+      if (lastUserIdx >= 0) {
+        const updated = [...hist];
+        updated[lastUserIdx] = { ...updated[lastUserIdx], msg_index };
+        m.set(chatId, updated);
+        return m;
+      }
+      return h;
+    });
+  });
 
   async function _sendImageMessage() {
     const text = currentInput.trim();
@@ -547,7 +580,7 @@
       // P2P screenshot
       try {
         const imageSizeMB = (imageData.dataUrl.length * 0.75) / (1024 * 1024);
-        if (imageSizeMB > 25 && !window.confirm(`This screenshot is ${imageSizeMB.toFixed(1)} MB. Continue?`)) {
+        if (imageSizeMB > 25 && !(await confirmAsync(`This screenshot is ${imageSizeMB.toFixed(1)} MB. Continue?`))) {
           pendingImage = null;
           return;
         }

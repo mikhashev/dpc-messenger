@@ -5,6 +5,7 @@
    */
   import { sendCommand } from '$lib/coreService';
   import { openPath } from '@tauri-apps/plugin-opener';
+  import { onMount } from 'svelte';
 
   export let displaySettings: any = null;  // Settings for display mode
   export let editSettings: any = null;     // Settings for edit mode (bindable)
@@ -17,16 +18,21 @@
   export let archiveInfo: { count: number; max_sessions: number; archive_path: string; sessions: any[] } | null = null;
   export let conversationId: string = '';  // agent_id used as conversation_id for archive commands
 
+  // Backend-discovered registry tools (populated on mount via list_all_tools).
+  // Lets the panel surface tools that exist in code but aren't in any
+  // hardcoded category below — closes the AGENT-TOOL-FIREWALL-DEFAULT-DRIFT
+  // gap from S145 backlog (Mike picked Option 2 in S147 chat).
+  let allRegisteredTools: Array<{name: string; description: string; default_enabled: boolean; is_restricted: boolean}> = [];
+
   // Tool definitions by category
   const toolCategories = [
     {
       name: 'File Operations',
       tools: [
-        { key: 'read_file', label: 'Read Files', desc: 'Read files from agent sandbox' },
-        { key: 'write_file', label: 'Write Files', desc: 'Write files to agent sandbox' },
-        { key: 'repo_list', label: 'List Files', desc: 'List directory contents' },
+        { key: 'read_file', label: 'Read Files', desc: 'Read files from sandbox or absolute extended paths' },
+        { key: 'write_file', label: 'Write Files', desc: 'Write files to sandbox or absolute extended paths' },
+        { key: 'list_dir', label: 'List Directory', desc: 'List sandbox or absolute extended path contents' },
         { key: 'repo_delete', label: 'Delete Files', desc: 'Delete files/directories in sandbox' },
-        { key: 'extended_path_list', label: 'Extended List', desc: 'List directories in custom paths' },
         { key: 'list_extended_sandbox_paths', label: 'List Extended Paths', desc: 'View configured extended paths' },
       ]
     },
@@ -40,11 +46,28 @@
     {
       name: 'Web Tools',
       tools: [
-        { key: 'search_web', label: 'Web Search', desc: 'Search the web via DuckDuckGo' },
+        { key: 'search_web', label: 'Web Search', desc: 'Search the web (DuckDuckGo, Bing, Brave, Google, Yandex, and more)' },
         { key: 'browse_page', label: 'Browse Page', desc: 'Fetch and parse web pages' },
         { key: 'fetch_json', label: 'Fetch JSON', desc: 'Fetch JSON from APIs' },
         { key: 'extract_links', label: 'Extract Links', desc: 'Extract links from pages' },
         { key: 'check_url', label: 'Check URL', desc: 'Check if URL is accessible' },
+        { key: 'list_auth_domains', label: 'Auth Domains', desc: 'List domains where agent has stored credentials' },
+      ]
+    },
+    {
+      name: 'Browser Automation (Camoufox interactive)',
+      tools: [
+        { key: 'browser_snapshot', label: 'Snapshot', desc: 'Take accessibility snapshot of current page' },
+        { key: 'browser_navigate', label: 'Navigate', desc: 'Navigate to URL in active browser session' },
+        { key: 'browser_scroll', label: 'Scroll', desc: 'Scroll page up/down' },
+        { key: 'browser_click', label: 'Click', desc: 'Click element on page' },
+        { key: 'browser_fill', label: 'Fill', desc: 'Fill input field with text' },
+        { key: 'browser_wait_for', label: 'Wait For', desc: 'Wait for element or condition' },
+        { key: 'browser_extract', label: 'Extract', desc: 'Extract data from page elements' },
+        { key: 'browser_screenshot', label: 'Screenshot', desc: 'Take screenshot of current page' },
+        { key: 'browser_switch_tab', label: 'Switch Tab', desc: 'Switch between browser tabs' },
+        { key: 'browser_collect', label: 'Collect', desc: 'Collect structured data from page' },
+        { key: 'browser_close', label: 'Close', desc: 'Close browser session' },
       ]
     },
     {
@@ -81,17 +104,7 @@
         { key: 'git_tag', label: 'Git Tag', desc: 'Create milestone tags' },
         { key: 'git_reset', label: 'Git Reset', desc: 'Rollback files or commits (hard=true is destructive)', isDanger: true },
         { key: 'git_snapshot', label: 'Git Snapshot', desc: 'Quick save: stage all + commit with UTC timestamp' },
-        { key: 'repo_commit_push', label: 'Git Push', desc: 'Push to remote (not used — local only)', isDanger: true },
-      ]
-    },
-    {
-      name: 'Review Tools (safe analysis)',
-      tools: [
-        { key: 'self_review', label: 'Self Review', desc: 'Review own work' },
-        { key: 'request_critique', label: 'Request Critique', desc: 'Request feedback' },
-        { key: 'compare_approaches', label: 'Compare Approaches', desc: 'Compare solutions' },
-        { key: 'quality_checklist', label: 'Quality Checklist', desc: 'Run quality checks' },
-        { key: 'consensus_check', label: 'Consensus Check', desc: 'Check consensus' },
+        { key: 'git_push', label: 'Git Push', desc: 'Push to remote (not used — local only)', isDanger: true },
       ]
     },
     {
@@ -99,7 +112,7 @@
       isDanger: true,
       tools: [
         { key: 'run_shell', label: 'Shell Access', desc: 'Execute shell commands' },
-        { key: 'claude_code_edit', label: 'Code Editing', desc: 'Edit code via Claude Code' },
+        { key: 'claude_code_edit', label: 'Code Editing', desc: 'Not implemented — placeholder. Code edits currently coordinated via CC (Claude Code) in group chat. See docs/agent/CC_INTEGRATION_GUIDE.md' },
       ]
     },
     {
@@ -118,7 +131,38 @@
         { key: 'send_user_message', label: 'Send User Message', desc: 'Send Telegram messages to user (agent-initiated)' },
       ]
     },
+    {
+      name: 'ComfyUI Tools (image/video generation)',
+      tools: [
+        { key: 'comfyui_submit', label: 'Submit Workflow', desc: 'Submit ComfyUI workflow for execution' },
+        { key: 'comfyui_check', label: 'Check Status', desc: 'Check status of submitted workflow' },
+        { key: 'comfyui_wait', label: 'Wait Complete', desc: 'Wait for workflow to complete (blocking)' },
+        { key: 'comfyui_queue_status', label: 'Queue Status', desc: 'Check ComfyUI queue length and running jobs' },
+        { key: 'comfyui_progress', label: 'Progress', desc: 'Get real-time progress of running workflow' },
+        { key: 'comfyui_convert', label: 'Convert Workflow', desc: 'Convert UI-format workflow to API format' },
+      ]
+    },
+    {
+      name: 'Session Archives (read-only)',
+      tools: [
+        { key: 'read_session_archive', label: 'Read Archive', desc: 'Read archived session summary' },
+        { key: 'read_session_detail', label: 'Read Detail', desc: 'Read full session detail from archive' },
+        { key: 'search_session_archives', label: 'Search Archives', desc: 'Search across all archived sessions' },
+      ]
+    },
   ];
+
+  // Set of every tool key already rendered by the hardcoded categories.
+  // Anything in allRegisteredTools NOT in this set is shown in a separate
+  // "Other Registered Tools" section so new ToolEntry registrations
+  // never go invisible (the S145 lesson — see AGENT-TOOL-FIREWALL-DEFAULT-DRIFT).
+  const hardcodedToolKeys: Set<string> = new Set(
+    toolCategories.flatMap(cat => cat.tools.map((t: { key: string }) => t.key))
+  );
+
+  // Derived: tools known to the backend registry but not in any hardcoded category.
+  // Reactive — repopulates when allRegisteredTools arrives from list_all_tools.
+  $: unmanagedTools = allRegisteredTools.filter(t => !hardcodedToolKeys.has(t.name));
 
   // Helper to get sandbox extensions safely
   function getSandboxExtensions(settings: any, type: 'read_only' | 'read_write'): string[] {
@@ -272,6 +316,22 @@
     ? Math.round((archiveInfo.count / archiveInfo.max_sessions) * 100)
     : 0;
   $: archiveUnlimited = archiveInfo ? archiveInfo.max_sessions === 0 : false;
+
+  onMount(() => {
+    (async () => {
+      try {
+        const result = sendCommand('list_all_tools', {});
+        if (result === false) return;
+        const resp = await (result as Promise<any>);
+        if (resp?.status === 'success' && Array.isArray(resp.tools)) {
+          allRegisteredTools = resp.tools;
+        }
+      } catch (e) {
+        console.warn('[AgentPermissionsPanel] list_all_tools failed:', e);
+      }
+    })();
+  });
+
 </script>
 
 {#if displaySettings}
@@ -631,6 +691,57 @@
                       <p class="help-text-small" style="margin: 0;">{tool.desc}</p>
                     </div>
                   </label>
+                  {#if tool.key === 'run_shell' && editSettings.tools[tool.key]}
+                    <p class="help-text-small" style="margin: 4px 0 6px 28px; color: var(--warning, #e6a700);">&#9888; Shell access allows agents to bypass firewall restrictions — including file access, network access, process control, and more. All commands outside auto-approved patterns require your approval.</p>
+                    <label for="agent-tool-run_shell_group_allowed" class="sub-checkbox">
+                      <input
+                        type="checkbox"
+                        id="agent-tool-run_shell_group_allowed"
+                        bind:checked={editSettings.tools.run_shell_group_allowed}
+                      />
+                      <div>
+                        <span class="event-name">Allow in group chats</span>
+                        <p class="help-text-small" style="margin: 0;">By default run_shell is restricted to 1:1 chats only</p>
+                      </div>
+                    </label>
+                    <!-- ADR-030 v2: Tier 1 whitelist management -->
+                    <div class="whitelist-section">
+                      <span class="event-name" style="font-size: 0.85em;">Command Whitelist (auto-approved)</span>
+                      <div class="whitelist-entries">
+                        {#each (editSettings.tools.run_shell_tier1_whitelist || []) as entry, i}
+                          <div class="whitelist-entry">
+                            <code>{entry}</code>
+                            <button class="btn-remove-wl" on:click={() => {
+                              const wl: string[] = editSettings.tools.run_shell_tier1_whitelist || [];
+                              editSettings.tools.run_shell_tier1_whitelist = wl.filter((_entry: string, idx: number) => idx !== i);
+                            }}>×</button>
+                          </div>
+                        {/each}
+                      </div>
+                      <div class="whitelist-add">
+                        <input
+                          type="text"
+                          placeholder="e.g. pip install"
+                          class="wl-input"
+                          on:keydown={(e) => {
+                            const target = e.target as HTMLInputElement;
+                            if (e.key === 'Enter' && target.value.trim()) {
+                              const val = target.value.trim();
+                              const tier2warn = ['rm', 'rmdir', 'del', 'format', 'mkfs', 'shutdown', 'reboot', 'docker', 'wsl'];
+                              if (tier2warn.some(t => val.toLowerCase().startsWith(t))) {
+                                alert(`Warning: "${val}" matches a Tier 2 (blocked) command. Adding to whitelist will NOT override Tier 2 blocks.`);
+                              }
+                              const wl: string[] = editSettings.tools.run_shell_tier1_whitelist || [];
+                              if (!wl.includes(val)) {
+                                editSettings.tools.run_shell_tier1_whitelist = [...wl, val];
+                              }
+                              target.value = '';
+                            }
+                          }}
+                        />
+                      </div>
+                    </div>
+                  {/if}
                 {:else}
                   <label for="agent-tool-{tool.key}">
                     <input
@@ -644,11 +755,101 @@
                       <p class="help-text-small" style="margin: 0;">{tool.desc}</p>
                     </div>
                   </label>
+                  {#if tool.key === 'run_shell' && displaySettings.tools?.[tool.key]}
+                    <p class="help-text-small" style="margin: 4px 0 6px 28px; color: var(--warning, #e6a700);">&#9888; Shell access allows agents to bypass firewall restrictions — including file access, network access, process control, and more. All commands outside auto-approved patterns require your approval.</p>
+                    <label for="agent-tool-run_shell_group_allowed-ro" class="sub-checkbox">
+                      <input
+                        type="checkbox"
+                        id="agent-tool-run_shell_group_allowed-ro"
+                        checked={displaySettings.tools?.run_shell_group_allowed}
+                        disabled
+                      />
+                      <div>
+                        <span class="event-name">Allow in group chats</span>
+                        <p class="help-text-small" style="margin: 0;">By default run_shell is restricted to 1:1 chats only</p>
+                      </div>
+                    </label>
+                    {#if (displaySettings.tools?.run_shell_tier1_whitelist || []).length > 0}
+                      <div class="whitelist-section" style="opacity: 0.7;">
+                        <span class="event-name" style="font-size: 0.85em;">Whitelisted commands:</span>
+                        <div class="whitelist-entries">
+                          {#each displaySettings.tools.run_shell_tier1_whitelist as entry}
+                            <div class="whitelist-entry"><code>{entry}</code></div>
+                          {/each}
+                        </div>
+                      </div>
+                    {/if}
+                  {/if}
                 {/if}
               </div>
             {/each}
           </div>
         {/each}
+
+        <!--
+          Unmanaged tools — anything in the ToolRegistry not covered by
+          the hardcoded categories above. New ToolEntry registrations
+          land here automatically after backend restart so they're never
+          invisible. Toggling them writes to privacy_rules.json via the
+          same editSettings.tools path; on next save they're "managed".
+          Backlog: AGENT-TOOL-FIREWALL-DEFAULT-DRIFT.
+        -->
+        {#if unmanagedTools.length > 0}
+          <h5 style="margin-top: 1rem; margin-bottom: 0.5rem; color: var(--text-secondary);">
+            Other Registered Tools
+            <span class="help-text-small" style="font-weight: normal;">
+              ({unmanagedTools.length} discovered from backend registry, not in categories above)
+            </span>
+          </h5>
+          <div class="notification-events">
+            {#each unmanagedTools as tool}
+              <div class="notification-event-item">
+                {#if editMode && editSettings?.tools}
+                  <label for="agent-tool-{tool.name}">
+                    <input
+                      type="checkbox"
+                      id="agent-tool-{tool.name}"
+                      bind:checked={editSettings.tools[tool.name]}
+                    />
+                    <div>
+                      <span class="event-name" style={tool.is_restricted ? 'color: var(--danger);' : ''}>
+                        {tool.name}
+                        {#if tool.default_enabled}
+                          <span class="help-text-small" style="font-weight: normal; margin-left: 0.5rem;">(recommended: on)</span>
+                        {/if}
+                        {#if !(tool.name in (editSettings?.tools ?? {}))}
+                          <span class="help-text-small" style="font-weight: normal; margin-left: 0.5rem; color: var(--text-secondary);" title="Not in privacy_rules.json yet — toggle to persist">⚠ unmanaged</span>
+                        {/if}
+                      </span>
+                      <p class="help-text-small" style="margin: 0;">{tool.description || 'No description'}</p>
+                    </div>
+                  </label>
+                {:else}
+                  <label for="agent-tool-{tool.name}">
+                    <input
+                      type="checkbox"
+                      id="agent-tool-{tool.name}"
+                      checked={displaySettings?.tools?.[tool.name] ?? false}
+                      disabled
+                    />
+                    <div>
+                      <span class="event-name" style={tool.is_restricted ? 'color: var(--danger);' : ''}>
+                        {tool.name}
+                        {#if tool.default_enabled}
+                          <span class="help-text-small" style="font-weight: normal; margin-left: 0.5rem;">(recommended: on)</span>
+                        {/if}
+                        {#if !(tool.name in (displaySettings?.tools ?? {}))}
+                          <span class="help-text-small" style="font-weight: normal; margin-left: 0.5rem; color: var(--text-secondary);" title="Not in privacy_rules.json yet — toggle to persist">⚠ unmanaged</span>
+                        {/if}
+                      </span>
+                      <p class="help-text-small" style="margin: 0;">{tool.description || 'No description'}</p>
+                    </div>
+                  </label>
+                {/if}
+              </div>
+            {/each}
+          </div>
+        {/if}
 
         {#if !isGlobal}
           <!-- Sandbox Path Configuration (per-agent) -->
@@ -822,6 +1023,7 @@
           {:else}
             <p class="help-text-small" style="font-style: italic;">No extended paths configured</p>
           {/if}
+
         {/if}
       </div>
     {/if}
@@ -958,6 +1160,12 @@
     align-items: flex-start;
     gap: 0.75rem;
     cursor: pointer;
+  }
+
+  .notification-event-item label.sub-checkbox {
+    margin-left: 2rem;
+    margin-top: 0.4rem;
+    opacity: 0.85;
   }
 
   .event-name {
@@ -1176,5 +1384,51 @@
 
   .btn-archive-danger {
     background: var(--danger, #ef4444);
+  }
+
+  .whitelist-section {
+    margin: 8px 0 4px 28px;
+    padding: 8px;
+    border-left: 2px solid var(--border, #333);
+  }
+
+  .whitelist-entries {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+    margin: 4px 0;
+  }
+
+  .whitelist-entry {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    background: var(--bg-tertiary, #e8e8e8);
+    color: var(--text-primary, #1a1a2e);
+    padding: 2px 8px;
+    border-radius: 4px;
+    font-size: 0.85em;
+  }
+
+  .btn-remove-wl {
+    background: none;
+    border: none;
+    color: var(--danger, #ef4444);
+    cursor: pointer;
+    font-size: 1em;
+    padding: 0 2px;
+    opacity: 0.6;
+  }
+  .btn-remove-wl:hover { opacity: 1; }
+
+  .wl-input {
+    margin-top: 4px;
+    padding: 4px 8px;
+    border: 1px solid var(--border, #333);
+    border-radius: 4px;
+    background: var(--bg-tertiary, #11111b);
+    color: var(--text-primary, #cdd6f4);
+    font-size: 0.85em;
+    width: 200px;
   }
 </style>

@@ -5,6 +5,7 @@
   import { createEventDispatcher } from 'svelte';
   import { sendCommand } from '$lib/coreService';
   import AgentPermissionsPanel from './AgentPermissionsPanel.svelte';
+  import { confirmAsync } from '$lib/utils/dialog';
 
   export let open: boolean = false;
 
@@ -269,7 +270,7 @@
           tools: {
             read_file: true,
             write_file: false,
-            repo_list: true,
+            list_dir: true,
             update_scratchpad: true,
             browse_page: true,
             search_web: true,
@@ -332,9 +333,9 @@
     }
   }
 
-  function close() {
+  async function close() {
     if (editMode) {
-      const confirmed = confirm('You have unsaved changes. Discard them and close?');
+      const confirmed = await confirmAsync('You have unsaved changes. Discard them and close?', { kind: 'warning' });
       if (!confirmed) return;
     }
     editMode = false;
@@ -584,7 +585,7 @@
       tools: {
         read_file: true,
         write_file: false,
-        repo_list: true,
+        list_dir: true,
         update_scratchpad: true,
       },
     };
@@ -675,7 +676,7 @@
         personal_context_access: true,
         device_context_access: true,
         human_knowledge_access: true,
-        tools: { read_file: true, write_file: false, repo_list: true, update_scratchpad: true, browse_page: true, search_web: true },
+        tools: { read_file: true, write_file: false, list_dir: true, update_scratchpad: true, browse_page: true, search_web: true },
       })
     );
     editedRules = editedRules;  // Trigger reactivity

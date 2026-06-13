@@ -923,17 +923,18 @@ Respond in JSON format:
                         agent = agent_mgr._agent
                         if agent and hasattr(agent, '_embedding_provider') and agent._embedding_provider:
                             from .dpc_agent.indexing_pipeline import index_single_file
-                            from .dpc_agent.faiss_index import FaissIndex
-                            from .dpc_agent.bm25_index import BM25Index
+                            from .dpc_agent.retrieval import make_backend_for_agent
                             index_dir = agent_mgr.agent_root / "state" / "memory_index"
                             if index_dir.exists():
-                                faiss_idx = FaissIndex(index_dir)
-                                bm25_idx = BM25Index(index_dir)
-                                if faiss_idx.load():
-                                    bm25_idx.load()
-                                    index_single_file(commit_path, agent._embedding_provider, faiss_idx, bm25_idx, source_layer="L6")
-                                    faiss_idx.save()
-                                    bm25_idx.save()
+                                backend = make_backend_for_agent(agent_mgr.agent_root)
+                                if backend.vector.load():
+                                    backend.text.load()
+                                    # L6 key shape must match agent_manager._sync_index
+                                    # (l6_dir = dpc_home / "knowledge") so this incremental
+                                    # add doesn't collide with the full-rebuild path.
+                                    _l6_key = f"L6/{commit_path.relative_to(self.dpc_home_dir / 'knowledge').as_posix()}"
+                                    index_single_file(commit_path, agent._embedding_provider, backend, source_layer="L6", source_file_key=_l6_key)
+                                    backend.save()
                                     logger.info("MEM-3.7: reindexed L6 commit %s for agent %s", commit_path.name, agent_mgr.agent_id)
         except Exception as e:
             logger.warning("MEM-3.7 L6 reindex failed for commit %s: %s", commit.commit_id, e)
@@ -1251,10 +1252,18 @@ Respond in JSON format:
     async def _broadcast_commit_result(
         self, result_payload: dict, participants: List[str]
     ) -> None:
-        """Broadcast KNOWLEDGE_COMMIT_RESULT to all participants."""
-        message = {"command": "KNOWLEDGE_COMMIT_RESULT", "payload": result_payload}
+        """Broadcast KNOWLEDGE_COMMIT_RESULT to remote participants and emit UI event.
 
-        for node_id in participants:
+        Solo-vote conversations (agent_*, local_ai, ai_*, telegram-*) reduce
+        participants to [local_node_id] for voting. The local node is never in
+        p2p_manager.peers, so iterating it produced a misleading "Broadcasted"
+        log with zero recipients. Filter self out before iterating.
+        """
+        message = {"command": "KNOWLEDGE_COMMIT_RESULT", "payload": result_payload}
+        local_node_id = self.p2p_manager.node_id
+        remote_participants = [p for p in participants if p != local_node_id]
+
+        for node_id in remote_participants:
             if node_id in self.p2p_manager.peers:
                 try:
                     await self.p2p_manager.send_message_to_peer(node_id, message)

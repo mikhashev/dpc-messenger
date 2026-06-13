@@ -729,5 +729,49 @@ def test_validate_config_with_nested_comments():
     assert len(errors) == 0, f"Validation should have no errors, but got: {errors}"
 
 
+class TestAgentContextDefaultDeny:
+    """Agents must NOT get personal/device context access by default (S204)."""
+
+    @pytest.fixture
+    def firewall_minimal(self, tmp_path):
+        import json
+        rules_file = tmp_path / "privacy_rules.json"
+        rules_file.write_text(json.dumps({"dpc_agent": {"enabled": True}}))
+        return ContextFirewall(rules_file)
+
+    def test_global_fallback_denies_personal_and_device(self, firewall_minimal):
+        assert firewall_minimal.can_agent_access_context('personal', profile_name='agent_x') is False
+        assert firewall_minimal.can_agent_access_context('device', profile_name='agent_x') is False
+
+    def test_new_profile_safe_defaults_deny(self, firewall_minimal):
+        firewall_minimal.create_agent_profile('agent_new', copy_from_global=False)
+        profile = firewall_minimal.rules['agent_profiles']['agent_new']
+        assert profile['personal_context_access'] is False
+        assert profile['device_context_access'] is False
+
+    def test_new_profile_copied_from_global_denies(self, firewall_minimal):
+        firewall_minimal.create_agent_profile('agent_copy', copy_from_global=True)
+        firewall_minimal._parse_dpc_agent_settings()
+        assert firewall_minimal.can_agent_access_context('personal', profile_name='agent_copy') is False
+        assert firewall_minimal.can_agent_access_context('device', profile_name='agent_copy') is False
+
+    def test_explicit_allow_still_works(self, tmp_path):
+        import json
+        rules_file = tmp_path / "privacy_rules.json"
+        rules_file.write_text(json.dumps({
+            "dpc_agent": {"enabled": True},
+            "agent_profiles": {
+                "agent_allowed": {
+                    "enabled": True,
+                    "personal_context_access": True,
+                    "device_context_access": True,
+                }
+            }
+        }))
+        fw = ContextFirewall(rules_file)
+        assert fw.can_agent_access_context('personal', profile_name='agent_allowed') is True
+        assert fw.can_agent_access_context('device', profile_name='agent_allowed') is True
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

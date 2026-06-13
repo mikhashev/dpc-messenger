@@ -22,7 +22,17 @@ export const groupUpdated = writable<GroupChat | null>(null);
 export const groupMemberLeft = writable<GroupMemberLeftEvent | null>(null);
 export const groupDeleted = writable<GroupDeletedEvent | null>(null);
 export const groupHistorySynced = writable<GroupHistorySyncedEvent | null>(null);
-export const tokenUsageUpdated = writable<{conversation_id: string; tokens_used: number; token_limit: number; history_tokens: number; context_estimated: number} | null>(null);
+// Emitted when backend removes a message from group history (e.g. stale morning brief
+// being replaced on Sleep button press). MessageRouterPanel reacts and removes from chatHistories.
+// `sender_name` + `content_prefix` are optional pattern-match hints for legacy messages
+// whose backend message_id was never stored on the frontend side.
+export const groupMessageDeleted = writable<{
+    group_id: string;
+    message_id: string;
+    sender_name?: string;
+    content_prefix?: string;
+} | null>(null);
+export const tokenUsageUpdated = writable<{conversation_id: string; tokens_used: number; token_limit: number; history_tokens: number; tokens_after_last_response: number; tokens_after_last_response_at: string | null; context_agent?: string; context_agents?: Array<{name: string, tokens: number, limit: number, percent: number}>} | null>(null);
 
 // --- Command functions ---
 type SendCommandFn = (command: string, payload?: any) => Promise<any> | boolean;

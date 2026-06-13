@@ -6,10 +6,12 @@
 
 <script lang="ts">
   import type { Writable } from 'svelte/store';
+  import { mapBackendMessage } from '$lib/utils/messageMapper';
   import {
     p2pMessages,
     groupTextReceived,
     groupFileReceived,
+    groupMessageDeleted,
     aiResponseWithImage,
     coreMessages,
   } from '$lib/coreService';
@@ -29,6 +31,7 @@
     aiChats,
     onSetChatLoading,
     onUpdateTokenUsage,
+    onUpdateContextBreakdown,
     onMarkContextSent,
     onAgentToast,
     getStreamingText,
@@ -42,7 +45,8 @@
     currentContextHash: string;
     aiChats: Writable<Map<string, any>>;
     onSetChatLoading: (chatId: string, loading: boolean) => void;
-    onUpdateTokenUsage: (chatId: string, usage: { used: number; limit: number; historyTokens?: number; contextEstimated?: number }) => void;
+    onUpdateTokenUsage: (chatId: string, usage: { used: number; limit: number; historyTokens?: number; tokensAfterLastResponse?: number; tokensAfterLastResponseAt?: string | null; contextBreakdown?: Array<{name: string, tokens: number}> | null }) => void;
+    onUpdateContextBreakdown: (chatId: string, breakdown: Array<{name: string, tokens: number}>) => void;
     onMarkContextSent: (chatId: string, hash: string) => void;
     onAgentToast: (message: string, type: 'info' | 'warning' | 'error') => void;
     getStreamingText: () => string;
@@ -139,17 +143,14 @@
         chatHistories.update(h => {
           const newMap = new Map(h);
           const hist = newMap.get(msg.group_id) || [];
-          newMap.set(msg.group_id, [...hist, {
-            id: crypto.randomUUID(),
-            sender: msg.sender_node_id,
-            senderName: msg.sender_name,
-            text: msg.text,
-            timestamp: Date.now(),
-            mentions: msg.mentions || [],
-            isAgent: msg.sender_type === 'agent' || msg.is_agent || false,
-            agentOwner: msg.agent_owner || null,
-            msg_index: msg.msg_index || 0,
-          }]);
+          // Preserve backend message_id as the local id when available — enables
+          // group_message_deleted to find this message later (e.g. stale morning
+          // brief cleanup on Sleep button).
+          const mapped = mapBackendMessage(msg, { fallbackSender: msg.sender_node_id, fallbackSenderName: msg.sender_name });
+          mapped.id = msg.message_id || crypto.randomUUID();
+          mapped.text = msg.text;
+          mapped.timestamp = Date.now();
+          newMap.set(msg.group_id, [...hist, mapped]);
           return newMap;
         });
 
@@ -162,6 +163,34 @@
           if (firstId) processedMessageIds.delete(firstId);
         }
       }
+    }
+  });
+
+  // Group message deletion routing — backend removes a message from group history
+  // (e.g. trigger_group_sleep replaces stale morning briefs). Filter by ID first;
+  // fall back to sender + content_prefix match for legacy messages whose backend
+  // message_id was never stored on the frontend (added before this change shipped).
+  $effect(() => {
+    if ($groupMessageDeleted) {
+      const evt = $groupMessageDeleted;
+      chatHistories.update(h => {
+        const hist = h.get(evt.group_id);
+        if (!hist) return h;
+        const filtered = hist.filter(m => {
+          if (m.id === evt.message_id) return false;
+          if (evt.content_prefix && evt.sender_name
+              && m.senderName === evt.sender_name
+              && typeof m.text === 'string'
+              && m.text.startsWith(evt.content_prefix)) {
+            return false;
+          }
+          return true;
+        });
+        if (filtered.length === hist.length) return h;
+        const newMap = new Map(h);
+        newMap.set(evt.group_id, filtered);
+        return newMap;
+      });
     }
   });
 
@@ -227,7 +256,9 @@
         return newMap;
       });
 
-      autoScroll();
+      if (response.conversation_id === activeChatId) {
+        autoScroll();
+      }
       aiResponseWithImage.set(null);
     }
   });
@@ -280,6 +311,7 @@
         // v1.4+: Extract thinking fields for reasoning models
         const thinkingContent = message.status === 'OK' ? message.payload.thinking : undefined;
         const thinkingTokenCount = message.status === 'OK' ? message.payload.thinking_tokens : undefined;
+        const toolCallsData = message.status === 'OK' ? (message.payload.tool_calls || []) : [];
 
         // Show toast notification for errors (helps remote users see host failures)
         if (message.status !== 'OK') {
@@ -342,6 +374,7 @@
                   msg_index: assistantMsgIndex || m.msg_index || 0,
                   thinking: thinkingContent,
                   thinkingTokens: thinkingTokenCount,
+                  tool_calls: toolCallsData.length > 0 ? toolCallsData : undefined,
                   streamingRaw: capturedStreamingText || undefined,
                   commandId: undefined,
                 };
@@ -362,14 +395,30 @@
               used: message.payload.tokens_used,
               limit: message.payload.token_limit,
               historyTokens: message.payload.history_tokens ?? 0,
-              contextEstimated: message.payload.context_estimated ?? 0,
+              tokensAfterLastResponse: message.payload.tokens_after_last_response ?? 0,
+              tokensAfterLastResponseAt: message.payload.tokens_after_last_response_at ?? null,
+              contextBreakdown: message.payload.context_breakdown ?? null,
             });
+          }
+          // Context breakdown arrives even when tokens_used is absent (agent queries)
+          if (message.status === 'OK' && message.payload.context_breakdown) {
+            onUpdateContextBreakdown(chatId, message.payload.context_breakdown);
           }
 
           // Phase 7: Mark context as sent (clears "Updated" status)
           if (message.status === 'OK' && currentContextHash) {
             onMarkContextSent(chatId, currentContextHash);
             console.log(`[Context Sent] Marked context as sent for ${chatId}`);
+          }
+
+          // Notify on agent response if app is in background
+          if (message.status === 'OK' && chatId?.startsWith('agent_') && newSender !== 'cc') {
+            const preview = newText.length > 80 ? newText.slice(0, 80) + '...' : newText;
+            const notifName = $aiChats.get(chatId)?.name || 'Agent';
+            showNotificationIfBackground({
+              title: notifName,
+              body: preview,
+            });
           }
 
           // Clean up the command mapping
@@ -383,7 +432,9 @@
           if (firstId) processedMessageIds.delete(firstId);
         }
 
-        autoScroll();
+        if (chatId === activeChatId) {
+          autoScroll();
+        }
       }
     }
   });

@@ -117,6 +117,8 @@ class AgentService:
         budget_usd: float = 50.0,
         max_rounds: int = 200,
         compute_host: str = "",
+        retrieval_vector: str = "",
+        retrieval_text: str = "",
     ) -> Dict[str, Any]:
         """
         Create a new DPC Agent with isolated storage.
@@ -140,6 +142,16 @@ class AgentService:
             agent_id = generate_agent_id(name)
             actual_profile_name = profile_name if profile_name else agent_id
 
+            extras = {}
+            if compute_host:
+                extras["compute_host"] = compute_host
+                peer_cw = self._peer_provider_context_window(compute_host, provider_alias)
+                if peer_cw:
+                    extras["context_window"] = peer_cw
+            if retrieval_vector:
+                extras["retrieval_vector"] = retrieval_vector
+            if retrieval_text:
+                extras["retrieval_text"] = retrieval_text
             config = create_agent_storage(
                 agent_id=agent_id,
                 name=name,
@@ -148,7 +160,7 @@ class AgentService:
                 instruction_set_name=instruction_set_name,
                 budget_usd=budget_usd,
                 max_rounds=max_rounds,
-                **({"compute_host": compute_host} if compute_host else {}),
+                **extras,
             )
 
             self.firewall.create_agent_profile(actual_profile_name, copy_from_global=True)
@@ -726,6 +738,20 @@ class AgentService:
 
     # --- Utility Methods ---
 
+    def _peer_provider_context_window(self, compute_host: str, provider_alias: str) -> Optional[int]:
+        """Context window of a peer's provider from the peer_metadata cache, if known."""
+        peer_providers = self.peer_metadata.get(compute_host, {}).get("providers", [])
+        for p in peer_providers:
+            if p.get("alias") == provider_alias:
+                cw = p.get("context_window")
+                if cw:
+                    try:
+                        return int(cw)
+                    except (ValueError, TypeError):
+                        return None
+                return None
+        return None
+
     def _resolve_agent_token_limit(self, agent_id: str) -> int:
         """Resolve the context window for an agent using its stored config.
 
@@ -768,7 +794,8 @@ class AgentService:
         return datetime.now(timezone.utc).isoformat()
 
     async def get_agent_model_config(self, agent_id: str, providers_getter) -> Dict[str, Any]:
-        """Get per-agent model configuration (Main LLM + Sleep LLM)."""
+        """Get per-agent model configuration (Main LLM + Sleep LLM +
+        snapshot summarization LLM + threshold + retrieval backends)."""
         try:
             from dpc_client_core.dpc_agent.utils import load_agent_config, AgentRegistry
             registry = AgentRegistry()
@@ -776,13 +803,25 @@ class AgentService:
                 return {"status": "error", "message": f"Agent not found: {agent_id}"}
             config = load_agent_config(agent_id)
             providers_data = await providers_getter()
+            providers_list = list(providers_data.get("providers", []))
+            for peer_id, meta in self.peer_metadata.items():
+                for p in meta.get("providers", []):
+                    entry = dict(p)
+                    entry["is_remote"] = True
+                    entry["peer_id"] = peer_id
+                    providers_list.append(entry)
             return {
                 "status": "ok",
                 "agent_id": agent_id,
                 "provider_alias": config.get("provider_alias"),
                 "sleep_provider_alias": config.get("sleep_provider_alias"),
-                "providers": providers_data.get("providers", []),
+                "snapshot_summarize_provider": config.get("snapshot_summarize_provider"),
+                "snapshot_summarize_threshold": config.get("snapshot_summarize_threshold"),
+                "retrieval_vector": config.get("retrieval_vector", "native"),
+                "retrieval_text": config.get("retrieval_text", "native"),
+                "providers": providers_list,
                 "default_provider": providers_data.get("default_provider", ""),
+                "compute_host": config.get("compute_host", ""),
             }
         except Exception as e:
             logger.error("get_agent_model_config failed: %s", e, exc_info=True)
@@ -792,9 +831,14 @@ class AgentService:
         self, agent_id: str,
         provider_alias: str = None,
         sleep_provider_alias: str = None,
+        snapshot_summarize_provider: str = None,
+        snapshot_summarize_threshold: int = None,
+        retrieval_vector: str = None,
+        retrieval_text: str = None,
         providers_getter=None,
     ) -> Dict[str, Any]:
-        """Save per-agent model configuration (Main LLM + Sleep LLM)."""
+        """Save per-agent model configuration (Main LLM + Sleep LLM +
+        snapshot summarization LLM + threshold + retrieval backend)."""
         try:
             from dpc_client_core.dpc_agent.utils import load_agent_config, save_agent_config, AgentRegistry
             registry = AgentRegistry()
@@ -804,8 +848,31 @@ class AgentService:
             if provider_alias is not None:
                 config["provider_alias"] = provider_alias
                 registry.update_agent(agent_id, {"provider_alias": provider_alias})
+                resolved_peer = None
+                for peer_id, meta in self.peer_metadata.items():
+                    if any(p.get("alias") == provider_alias for p in meta.get("providers", [])):
+                        resolved_peer = peer_id
+                        break
+                if resolved_peer:
+                    config["compute_host"] = resolved_peer
+                    cw = self._peer_provider_context_window(resolved_peer, provider_alias)
+                    if cw:
+                        config["context_window"] = cw
+                    registry.update_agent(agent_id, {"compute_host": resolved_peer})
+                else:
+                    config["compute_host"] = ""
+                    config.pop("context_window", None)
+                    registry.update_agent(agent_id, {"compute_host": ""})
             if sleep_provider_alias is not None:
                 config["sleep_provider_alias"] = sleep_provider_alias
+            if snapshot_summarize_provider is not None:
+                config["snapshot_summarize_provider"] = snapshot_summarize_provider
+            if snapshot_summarize_threshold is not None:
+                config["snapshot_summarize_threshold"] = snapshot_summarize_threshold
+            if retrieval_vector is not None:
+                config["retrieval_vector"] = retrieval_vector
+            if retrieval_text is not None:
+                config["retrieval_text"] = retrieval_text
             save_agent_config(agent_id, config)
             providers_data = await providers_getter() if providers_getter else {"providers": [], "default_provider": ""}
             return {
@@ -813,6 +880,10 @@ class AgentService:
                 "agent_id": agent_id,
                 "provider_alias": config.get("provider_alias"),
                 "sleep_provider_alias": config.get("sleep_provider_alias"),
+                "snapshot_summarize_provider": config.get("snapshot_summarize_provider"),
+                "snapshot_summarize_threshold": config.get("snapshot_summarize_threshold"),
+                "retrieval_vector": config.get("retrieval_vector", "native"),
+                "retrieval_text": config.get("retrieval_text", "native"),
                 "providers": providers_data.get("providers", []),
                 "default_provider": providers_data.get("default_provider", ""),
             }

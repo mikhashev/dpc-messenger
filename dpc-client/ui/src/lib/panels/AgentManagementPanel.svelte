@@ -12,6 +12,7 @@
     deleteAgent,
     listAgents,
   } from '$lib/coreService';
+  import { confirmAsync } from '$lib/utils/dialog';
 
   // ---------------------------------------------------------------------------
   // Types
@@ -109,18 +110,13 @@
     console.log('Created new agent chat:', agentId);
   }
 
-  export async function handleDeleteAgent(agentId: string, ask: any, activeChatId: string) {
+  export async function handleDeleteAgent(agentId: string, _ask: any, activeChatId: string) {
     console.log('Delete agent:', agentId);
 
-    let shouldDelete = false;
-    if (ask) {
-      shouldDelete = await ask(
-        "Delete this agent? This will permanently remove the agent's memory, knowledge, and all associated data.",
-        { title: 'Confirm Agent Deletion', kind: 'warning' }
-      );
-    } else {
-      shouldDelete = confirm("Delete this agent? This will permanently remove the agent's memory, knowledge, and all associated data.");
-    }
+    const shouldDelete = await confirmAsync(
+      "Delete this agent? This will permanently remove the agent's memory, knowledge, and all associated data.",
+      { title: 'Confirm Agent Deletion', kind: 'warning' }
+    );
 
     if (!shouldDelete) return;
 

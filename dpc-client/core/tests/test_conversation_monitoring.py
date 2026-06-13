@@ -215,5 +215,44 @@ class TestIntegrationScenarios:
         assert monitor.conversation_id == "peer123"
         assert len(monitor.participants) == 2
 
+class TestGroupHistorySyncPeek:
+    """GROUP-HISTORY-CROSS-NODE-SYNC: disk-peek must agree with a loaded monitor."""
+
+    def test_history_hash_for_empty(self):
+        assert ConversationMonitor.history_hash_for([]) == "sha256:empty"
+
+    def test_history_hash_for_uses_last_chain_hash(self):
+        msgs = [{"id": "a", "chain_hash": "deadbeefcafe0001xx"}]
+        assert ConversationMonitor.history_hash_for(msgs) == "sha256:deadbeefcafe0001"
+
+    def test_history_hash_for_fallback_is_order_independent(self):
+        a = [{"id": "1", "timestamp": "t1"}, {"id": "2", "timestamp": "t2"}]
+        b = [{"id": "2", "timestamp": "t2"}, {"id": "1", "timestamp": "t1"}]
+        h = ConversationMonitor.history_hash_for(a)
+        assert h == ConversationMonitor.history_hash_for(b)
+        assert h.startswith("sha256:")
+
+    def test_peek_matches_loaded_monitor(self, tmp_path, monkeypatch):
+        import json
+        from pathlib import Path
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        gid = "group-abc123"
+        gdir = tmp_path / ".dpc" / "conversations" / f"{gid}-mygroup"
+        gdir.mkdir(parents=True)
+        msgs = [
+            {"id": "m1", "timestamp": "2026-06-12T10:00:00Z", "content": "hi"},
+            {"id": "m2", "timestamp": "2026-06-12T10:01:00Z", "content": "yo"},
+        ]
+        (gdir / "history.json").write_text(json.dumps({"messages": msgs}), encoding="utf-8")
+        count, h = ConversationMonitor.peek_group_history_stats(gid)
+        assert count == 2
+        assert h == ConversationMonitor.history_hash_for(msgs)
+
+    def test_peek_missing_group_is_empty(self, tmp_path, monkeypatch):
+        from pathlib import Path
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        assert ConversationMonitor.peek_group_history_stats("group-nope") == (0, "sha256:empty")
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

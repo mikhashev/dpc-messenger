@@ -99,6 +99,7 @@ class OllamaProvider(AIProvider):
         Returns:
             str: AI response text
         """
+        self._last_thinking = None
         try:
             # Build image list (Ollama accepts paths or base64)
             image_inputs = []
@@ -137,6 +138,7 @@ class OllamaProvider(AIProvider):
                     messages=[message],
                     options=options if options else None,
                     think=True if self.supports_thinking() else None,
+                    keep_alive=self.config.get("vision_keep_alive", 0),
                 ),
                 timeout=timeout
             )
@@ -212,7 +214,8 @@ class OllamaProvider(AIProvider):
         return int(match.group(1)) if match else None
 
     async def close(self) -> None:
-        """Close the Ollama async client connection."""
+        """Close the Ollama async client. Model stays loaded — Ollama manages
+        VRAM via its own keep_alive TTL (default 5 min idle → auto-unload)."""
         if hasattr(self.client, 'close'):
             await self.client.close()
-            logger.debug(f"OllamaProvider '{self.alias}': Client closed")
+        logger.debug(f"OllamaProvider '{self.alias}': Client closed")

@@ -127,6 +127,7 @@ class NewSessionResultHandler(MessageHandler):
             self.logger.info("Clearing local conversation history for %s", conversation_id[:20])
             monitor = self.service._get_or_create_conversation_monitor(conversation_id)
             monitor.reset_conversation()
+            self.service._group_agent_context.pop(conversation_id, None)
 
         # Update session manager (if session exists)
         session = self.service.session_manager.get_session(proposal_id)

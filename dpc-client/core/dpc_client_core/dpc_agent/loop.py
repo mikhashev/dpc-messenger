@@ -38,7 +38,7 @@ from .guards import (
 )
 
 if TYPE_CHECKING:
-    from .tools.registry import ToolRegistry
+    from .tools.registry import ToolContext, ToolRegistry
 
 log = logging.getLogger(__name__)
 
@@ -341,6 +341,8 @@ async def _execute_with_timeout(
     # Use shared executor to avoid memory leak from creating new executors
     executor = _get_shared_executor()
     loop = asyncio.get_running_loop()
+    if ctx is not None:
+        ctx._event_loop = loop
 
     t0 = time.monotonic()
     try:
@@ -434,12 +436,13 @@ async def run_llm_loop(
     tools: "ToolRegistry",
     llm: DpcLlmAdapter,
     agent_root: pathlib.Path,
-    emit_progress: Callable[[str, Optional[str], Optional[int]], None],
+    emit_progress: Callable[..., None],
     task_id: str = "",
     budget_remaining_usd: Optional[float] = None,
     max_rounds: int = DEFAULT_MAX_ROUNDS,
     on_stream_chunk: Optional[Callable[[str, str], None]] = None,
     conversation_id: Optional[str] = None,
+    stop_event: Optional[asyncio.Event] = None,
 ) -> Tuple[str, Dict[str, Any], Dict[str, Any]]:
     """
     Core LLM-with-tools loop.
@@ -472,6 +475,8 @@ async def run_llm_loop(
         "assistant_notes": [],
         "tool_calls": [],
     }
+    _accumulated_tool_calls: list[dict] = []
+    llm_trace["accumulated_tool_calls"] = _accumulated_tool_calls
     accumulated_usage: Dict[str, Any] = {
         "prompt_tokens": 0,        # cumulative across all rounds (for cost/billing)
         "first_prompt_tokens": 0,  # round-1 only — baseline context before tool results inflate it
@@ -486,8 +491,6 @@ async def run_llm_loop(
     # (git write, shell, etc.) are presented to the LLM when the firewall allows them.
     # The whitelist check inside schemas() still enforces per-agent authorization.
     tool_schemas = tools.schemas(core_only=False, include_restricted=True)
-
-    _pre_tool_content: list = []  # Accumulate content from tool-call rounds (lost otherwise)
 
     # Hooks & middleware infrastructure (ADR-007). One registry per
     # run_llm_loop call — guard state is scoped to the task.
@@ -507,10 +510,19 @@ async def run_llm_loop(
     )
 
     round_idx = 0
+    empty_retry_count = 0
+    MAX_EMPTY_RETRIES = 3
     try:
         while True:
             round_idx += 1
             ctx.round_idx = round_idx
+
+            # User-initiated stop (L1 Interrupt API).
+            if stop_event and stop_event.is_set():
+                log.info("Agent stopped by user after %d rounds", round_idx - 1)
+                llm_trace["stopped_by_user"] = True
+                llm_trace["accumulated_tool_calls"] = list(_accumulated_tool_calls)
+                return f"⚠️ Stopped by user after {round_idx - 1} rounds.", accumulated_usage, llm_trace
 
             # RoundLimitGuard + BudgetLimitGuard checkpoint.
             if await hooks.fire(HookLifecycle.BETWEEN_ROUNDS, ctx) is not None:
@@ -602,22 +614,47 @@ async def run_llm_loop(
             if not tool_calls:
                 if content and content.strip():
                     clean_content = _strip_role_boundaries(content)
-                    # Prepend any content from tool-call rounds that was otherwise lost
-                    if _pre_tool_content:
-                        full_content = "\n\n".join(_pre_tool_content) + "\n\n" + clean_content
-                        clean_content = full_content
-                        _pre_tool_content.clear()
+                    # Intermediate per-round text is shown per-round (round_text), not
+                    # assembled into the final answer (Variant 2). Final = this last round.
                     llm_trace["assistant_notes"].append(clean_content.strip()[:320])
                     return clean_content, accumulated_usage, llm_trace
+                if ("prompt_tokens" in usage
+                        and usage.get("prompt_tokens") == 0
+                        and usage.get("completion_tokens") == 0):
+                    log.error(
+                        "LLM returned empty response with zero usage — provider "
+                        "dropped the request (likely context overflow). Skipping retries."
+                    )
+                    return (
+                        "⚠️ Провайдер отбросил запрос без обработки (zero token usage) — "
+                        "вероятно, контекст разговора превысил лимит модели. "
+                        "Начните новую сессию (New Session) или сократите историю.",
+                        accumulated_usage,
+                        llm_trace,
+                    )
                 # LLM returned empty content (e.g. GLM thinking-only with no text).
-                # Inject a re-prompt and retry once so the user gets a real answer.
-                if round_idx == 1:
-                    log.warning("LLM returned empty content with no tool calls — re-prompting for text response")
-                    messages.append({
-                        "role": "user",
-                        "content": "Please provide your answer as text. Your previous response was empty.",
-                    })
+                # Retry the same call without prompt modification.
+                # Diagnose the empty: non-empty thinking + empty content points at
+                # thinking-budget exhaustion (CoT consumed the output-token budget);
+                # empty thinking too points at a transient provider/network blip. The
+                # retry is a blind re-send, so a deterministic cause repeats identically.
+                _empty_thinking = (msg.get("thinking") or "").strip()
+                _empty_diag = (
+                    "thinking-budget (CoT present, no output text)"
+                    if _empty_thinking
+                    else "transient (no CoT either)"
+                )
+                if empty_retry_count < MAX_EMPTY_RETRIES:
+                    empty_retry_count += 1
+                    log.warning(
+                        "LLM returned empty content — retry %d/%d [thinking_len=%d → %s]",
+                        empty_retry_count, MAX_EMPTY_RETRIES, len(_empty_thinking), _empty_diag,
+                    )
                     continue
+                log.warning(
+                    "LLM returned empty content after %d retries [thinking_len=%d → %s]",
+                    MAX_EMPTY_RETRIES, len(_empty_thinking), _empty_diag,
+                )
                 return "", accumulated_usage, llm_trace
 
             # Process tool calls — strip hallucinated post-tool-call content before storing
@@ -632,20 +669,46 @@ async def run_llm_loop(
             sgr_quality["task_id"] = task_id
             append_jsonl(logs_dir / "reasoning.jsonl", sgr_quality)
 
-            if thinking and thinking.strip():
-                emit_progress(thinking.strip(), None, round_idx)
-                llm_trace["assistant_notes"].append(thinking.strip()[:320])
-                _pre_tool_content.append(thinking.strip())  # Save for final response
+            # round_reasoning: everything the model produced this round for display —
+            # CoT (extended thinking) + content preamble, deduped. Shown per-round in the
+            # collapsible (round_text) and emitted live. Per Variant 2 this is the ONLY
+            # home for intermediate text — it is no longer folded into the final answer.
+            round_reasoning = "\n\n".join(
+                dict.fromkeys(
+                    s.strip() for s in (msg.get("thinking"), thinking, content) if s and s.strip()
+                )
+            )
+
+            if round_reasoning:
+                emit_progress(round_reasoning, None, round_idx)
             elif tool_calls:
-                # Native tool calling returns no text preamble — emit tool names so the
-                # UI shows activity rather than a silent "Thinking..." placeholder.
+                # No reasoning at all — emit tool names so the UI shows activity.
                 names = ", ".join(tc["function"]["name"] for tc in tool_calls)
                 emit_progress(f"→ {names}", None, round_idx)
 
+            # content-prefix is shown per-round via round_text (Variant 2), not folded into
+            # the final answer — keep only the trace note here.
+            if thinking and thinking.strip():
+                llm_trace["assistant_notes"].append(thinking.strip()[:320])
+
             # Execute tool calls
             for tc in tool_calls:
+                if stop_event and stop_event.is_set():
+                    log.info("Agent stopped by user mid-round %d (between tool calls)", round_idx)
+                    llm_trace["stopped_by_user"] = True
+                    llm_trace["accumulated_tool_calls"] = list(_accumulated_tool_calls)
+                    return f"⚠️ Stopped by user after {round_idx} rounds.", accumulated_usage, llm_trace
                 tool_name = tc["function"]["name"]
-                emit_progress(f"Executing {tool_name}...", tool_name, round_idx)
+                # Emit the tool's arguments (JSON) so the live row shows WHAT the agent is
+                # doing — which file it reads, which pattern it searches — not just "Executing".
+                _raw_args = tc.get("function", {}).get("arguments")
+                if isinstance(_raw_args, str):
+                    _args_msg = _raw_args
+                elif _raw_args:
+                    _args_msg = json.dumps(_raw_args, default=str)
+                else:
+                    _args_msg = ""
+                emit_progress(_args_msg or f"Executing {tool_name}...", tool_name, round_idx)
                 timeout = tools.get_timeout(tc["function"]["name"])
                 exec_result = await _execute_with_timeout(
                     tools, tc, logs_dir, timeout, task_id,
@@ -681,6 +744,18 @@ async def run_llm_loop(
                     "result": truncate_for_log(exec_result["result"], 700),
                     "is_error": exec_result["is_error"],
                 })
+                _accumulated_tool_calls.append({
+                    "tool": exec_result["fn_name"],
+                    "input": json.dumps(exec_result["args_for_log"], default=str),
+                    "output": exec_result["result"],
+                    "is_error": exec_result["is_error"],
+                    "duration_ms": exec_result.get("duration_ms", 0),
+                    "round": round_idx,
+                    # per-round reasoning text (same for every tool in the round) so the
+                    # collapsible can show the agent's "thought -> did -> got" flow.
+                    # round_reasoning prefers the model's CoT so every round has reasoning.
+                    "round_text": round_reasoning,
+                })
 
                 # Emit tool result so frontend can show it in Raw output
                 status_icon = "❌" if exec_result["is_error"] else "✓"
@@ -689,6 +764,7 @@ async def run_llm_loop(
                     f"{status_icon} {exec_result['fn_name']}: {result_preview}",
                     None,
                     round_idx,
+                    list(_accumulated_tool_calls),  # full snapshot so the UI renders authoritatively
                 )
 
             # BudgetLimitGuard fires via BETWEEN_ROUNDS at the top of the
