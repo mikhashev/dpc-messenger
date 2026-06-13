@@ -842,7 +842,7 @@
                           bind:value={editedConfig.providers[i].max_tokens}
                           placeholder="8192"
                         />
-                        <p class="help-text">Max output tokens per response (GLM-5.2 supports up to 131072)</p>
+                        <p class="help-text">Max output tokens per response (model-dependent; GLM-5.x up to 131072)</p>
                       </div>
 
                       <div class="form-group">
