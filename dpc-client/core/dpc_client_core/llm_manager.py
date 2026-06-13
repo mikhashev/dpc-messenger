@@ -399,9 +399,21 @@ class LLMManager:
                 json.dump(config_dict, f, indent=2)
             logger.info("Provider configuration saved to %s", self.config_path)
 
+            preserved_managers = {
+                alias: provider._managers
+                for alias, provider in list(self.providers.items())
+                if getattr(provider, "_managers", None)
+            }
+
             # Reload providers
             self.providers.clear()
             self._load_providers_from_config()
+
+            for alias, managers in preserved_managers.items():
+                new_provider = self.providers.get(alias)
+                if new_provider is not None and hasattr(new_provider, "_managers"):
+                    new_provider._managers.update(managers)
+                    logger.info("Preserved %d agent manager(s) for '%s' across providers reload", len(managers), alias)
 
             # Restore Whisper model state for providers that were loaded
             for alias, state in whisper_state.items():

@@ -69,6 +69,7 @@ import re
 from pathlib import Path
 from dpc_client_core.service import CoreService
 from dpc_client_core.__version__ import __version__
+from dpc_client_core import single_instance
 
 logger = logging.getLogger(__name__)
 
@@ -309,8 +310,11 @@ async def main():
 
 if __name__ == "__main__":
     try:
+        single_instance.acquire()  # exits if another backend is already running
         print(f"D-PC Messenger v{__version__} - Starting Core Service (press Ctrl+C to stop)")
         asyncio.run(main())
     except KeyboardInterrupt:
         # This is the primary shutdown mechanism on Windows
         print("Shutdown requested by user (KeyboardInterrupt)")
+    finally:
+        single_instance.release()
