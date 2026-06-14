@@ -767,6 +767,15 @@ async def run_llm_loop(
                     list(_accumulated_tool_calls),  # full snapshot so the UI renders authoritatively
                 )
 
+            # Snapshot this round's tool results so LoopGuard can tell a
+            # genuinely-stuck poll (identical output) from a long-running one
+            # whose progress is still advancing (output changes each poll).
+            ctx.state.recent_tool_results = [
+                {"name": e["tool"], "output": e.get("output", "")}
+                for e in _accumulated_tool_calls
+                if e.get("round") == round_idx
+            ]
+
             # BudgetLimitGuard fires via BETWEEN_ROUNDS at the top of the
             # next iteration; ctx.state.accumulated_cost_usd has been kept
             # current after the LLM call above.

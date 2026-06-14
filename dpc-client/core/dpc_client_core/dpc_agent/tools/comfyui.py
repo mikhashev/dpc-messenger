@@ -331,6 +331,53 @@ def comfyui_queue_status(ctx: ToolContext, api_url: str = DEFAULT_API_URL) -> st
     return future.result(timeout=10)
 
 
+# Last progress sample per api_url: (step, max, loop_time). Lets a poll
+# estimate sec/iteration + ETA across calls when a single snapshot only
+# catches one step (common on slow renders). Loop time is monotonic and
+# comparable across calls because the agent reuses one event loop.
+# Module-level and keyed only by api_url: two agents polling the same URL
+# concurrently could race here — acceptable while one agent drives renders;
+# revisit (per-agent state) if concurrent generation lands.
+_LAST_PROGRESS: dict = {}
+
+
+def _fmt_dur(sec: float) -> str:
+    sec = int(max(0, sec))
+    return f"{sec}s" if sec < 90 else f"{sec // 60}m{sec % 60:02d}s"
+
+
+def _format_progress_timing(samples: list, api_url: str) -> str:
+    """Build a 'timing:' line (step, sec/it, ETA) from progress samples.
+
+    ``samples`` are (step, max, loop_time) tuples collected this call.
+    Rate comes from within-call samples when >=2 are seen, else from the
+    last stored sample across calls. Returns '' when nothing is known.
+    """
+    if not samples:
+        return ""
+    cur_step, cur_max, cur_t = samples[-1]
+    rate = None  # seconds per step
+    if len(samples) >= 2:
+        s0, _, t0 = samples[0]
+        if cur_step - s0 > 0:
+            rate = (cur_t - t0) / (cur_step - s0)
+    if rate is None:
+        prev = _LAST_PROGRESS.get(api_url)
+        if prev:
+            p_step, _, p_t = prev
+            if cur_step - p_step > 0 and cur_t - p_t > 0:
+                rate = (cur_t - p_t) / (cur_step - p_step)
+    _LAST_PROGRESS[api_url] = (cur_step, cur_max, cur_t)
+    parts = [f"step {cur_step}/{cur_max}"]
+    if rate:
+        eta = max(0, (cur_max or 0) - cur_step) * rate
+        parts.append(f"~{rate:.1f}s/it")
+        parts.append(f"ETA ~{_fmt_dur(eta)}")
+    else:
+        parts.append("(poll again in a few s for s/it & ETA)")
+    return "timing: " + " | ".join(parts)
+
+
 def comfyui_progress(ctx: ToolContext, timeout: int = 10, api_url: str = DEFAULT_API_URL) -> str:
     """One-shot WebSocket snapshot of ComfyUI generation progress."""
     loop = ctx.agent_event_loop
@@ -343,6 +390,7 @@ def comfyui_progress(ctx: ToolContext, timeout: int = 10, api_url: str = DEFAULT
         ws_url = api_url.replace("http://", "ws://").replace("https://", "wss://")
         ws_url = f"{ws_url.rstrip('/')}/ws?clientId=dpc-forge-progress"
         events = []
+        prog_samples = []
         try:
             async with websockets.connect(ws_url, close_timeout=3) as ws:
                 deadline = asyncio.get_event_loop().time() + timeout
@@ -358,6 +406,7 @@ def comfyui_progress(ctx: ToolContext, timeout: int = 10, api_url: str = DEFAULT
                         if msg_type == "progress":
                             val = msg_data.get("value", 0)
                             mx = msg_data.get("max", 0)
+                            prog_samples.append((val, mx, asyncio.get_event_loop().time()))
                             events.append(f"progress: step {val}/{mx}")
                         elif msg_type == "executing":
                             node = msg_data.get("node", "")
@@ -382,6 +431,9 @@ def comfyui_progress(ctx: ToolContext, timeout: int = 10, api_url: str = DEFAULT
                 return f"Error: cannot connect to ComfyUI WebSocket: {e}"
             events.append(f"(connection closed: {e})")
 
+        timing = _format_progress_timing(prog_samples, api_url)
+        if timing:
+            events.append(timing)
         if not events:
             return "No activity detected (ComfyUI idle or timeout too short)."
         return "\n".join(events)
