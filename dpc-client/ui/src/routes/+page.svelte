@@ -4,7 +4,7 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { writable } from "svelte/store";
-  import { connectionStatus, nodeStatus, sendCommand, resetReconnection, connectToCoreService, knowledgeCommitProposal, personalContext, tokenWarning, extractionFailure, availableProviders, peerProviders, unreadMessageCounts, resetUnreadCount, setActiveChat, newSessionProposal, proposeNewSession, voteNewSession, defaultProviders, providersList, groupChats, loadGroups, listAgents, agentsList, sleepStateChanged, sleepProgress, sleepAgentStates, tokenUsageUpdated } from "$lib/coreService";
+  import { connectionStatus, nodeStatus, sendCommand, resetReconnection, connectToCoreService, knowledgeCommitProposal, personalContext, tokenWarning, extractionFailure, availableProviders, peerProviders, unreadMessageCounts, resetUnreadCount, setActiveChat, newSessionProposal, proposeNewSession, voteNewSession, defaultProviders, providersList, groupChats, listAgents, agentsList, sleepStateChanged, sleepProgress, sleepAgentStates, tokenUsageUpdated } from "$lib/coreService";
   import { confirmAsync } from "$lib/utils/dialog";
   import { mapBackendMessage } from "$lib/utils/messageMapper";
   import KnowledgeCommitDialog from "$lib/components/KnowledgeCommitDialog.svelte";
@@ -336,15 +336,9 @@
       }
     }
 
-    // Load instruction sets for conversation creation dialog
-    try {
-      const result = await sendCommand('get_instructions', {});
-      if (result && result.status === 'success') {
-        availableInstructionSets = result.instruction_sets;
-      }
-    } catch (error) {
-      console.error('Failed to load instruction sets:', error);
-    }
+    // Instruction sets load once the WebSocket is connected — see the
+    // connection-gated $effect below (avoids the startup race where this
+    // fired before the socket opened and logged "WebSocket not connected").
 
     // Restore Telegram chats from localStorage (for page refresh recovery)
     try {
@@ -463,14 +457,31 @@
       console.error('[AI Chats] Failed to restore chat histories from localStorage:', error);
     }
 
-    // Load group chats from backend (v0.19.0)
-    try {
-      await loadGroups();
-      console.log('[Groups] Loaded group chats from backend');
-    } catch (error) {
-      console.error('[Groups] Failed to load group chats:', error);
-    }
+    // Group chats are loaded by the WebSocket open handler (coreService.ts)
+    // on every (re)connect — no eager load here (it raced the socket open).
 
+  });
+
+  // Load instruction sets once the backend WebSocket is connected.
+  // Runs on initial connect and any reconnect; guarded so a single
+  // 'connected' state doesn't trigger duplicate loads.
+  let instructionsLoaded = false;
+  $effect(() => {
+    if ($connectionStatus === 'connected' && !instructionsLoaded) {
+      instructionsLoaded = true;
+      (async () => {
+        try {
+          const result = await sendCommand('get_instructions', {});
+          if (result && result.status === 'success') {
+            availableInstructionSets = result.instruction_sets;
+          }
+        } catch (error) {
+          console.error('Failed to load instruction sets:', error);
+        }
+      })();
+    } else if ($connectionStatus !== 'connected') {
+      instructionsLoaded = false;
+    }
   });
 
   // Reactive: Update active chat in coreService to prevent unread badges on open chats
