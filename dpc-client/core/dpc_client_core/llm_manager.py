@@ -11,7 +11,7 @@ from .providers import (
     AIProvider, ModelNotCachedError, parse_thinking_tags,
     OPENAI_THINKING_MODELS, ANTHROPIC_THINKING_MODELS,
     OllamaProvider, OLLAMA_VISION_MODELS, OLLAMA_THINKING_MODELS,
-    OpenAICompatibleProvider, AnthropicProvider, ZaiProvider,
+    OpenAICompatibleProvider, AnthropicProvider, ZaiProvider, ZaiCodingProvider,
     LocalWhisperProvider, RemotePeerProvider, DpcAgentProvider,
     GeminiProvider, GitHubModelsProvider, GigaChatProvider,
 )
@@ -41,6 +41,7 @@ PROVIDER_MAP = {
     "openai_compatible": OpenAICompatibleProvider,
     "anthropic": AnthropicProvider,
     "zai": ZaiProvider,
+    "zai_coding": ZaiCodingProvider,  # Z.AI GLM Coding Plan (OpenAI-compatible coding/paas/v4)
     "local_whisper": LocalWhisperProvider,  # v0.13.1+: Local Whisper transcription
     "dpc_agent": DpcAgentProvider,  # Embedded autonomous AI agent
     "remote_peer": RemotePeerProvider,  # v0.18.0+: Remote peer inference

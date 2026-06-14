@@ -5,6 +5,7 @@ from .ollama_provider import OllamaProvider, OLLAMA_VISION_MODELS, OLLAMA_THINKI
 from .openai_provider import OpenAICompatibleProvider
 from .anthropic_provider import AnthropicProvider
 from .zai_provider import ZaiProvider
+from .zai_coding_provider import ZaiCodingProvider
 from .whisper_provider import LocalWhisperProvider
 from .remote_peer_provider import RemotePeerProvider
 from .dpc_agent_provider import DpcAgentProvider
@@ -24,6 +25,7 @@ __all__ = [
     "OpenAICompatibleProvider",
     "AnthropicProvider",
     "ZaiProvider",
+    "ZaiCodingProvider",
     "LocalWhisperProvider",
     "RemotePeerProvider",
     "DpcAgentProvider",

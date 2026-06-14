@@ -34,7 +34,7 @@ from .__version__ import __version__
 from .firewall import ContextFirewall
 from .hub_client import HubClient
 from .p2p_manager import P2PManager
-from .llm_manager import LLMManager
+from .llm_manager import LLMManager, PROVIDER_MAP
 from .local_api import LocalApiServer
 from .file_server import FileServer
 from .context_cache import ContextCache
@@ -2150,7 +2150,7 @@ class CoreService:
 
             if "type" not in provider:
                 errors.append(f"{prefix}: Missing 'type'")
-            elif provider["type"] not in ["ollama", "openai_compatible", "anthropic", "zai", "local_whisper", "dpc_agent", "remote_peer"]:
+            elif provider["type"] not in PROVIDER_MAP:
                 errors.append(f"{prefix}: Invalid type '{provider['type']}'")
 
             # Model is required for all types except dpc_agent and remote_peer
