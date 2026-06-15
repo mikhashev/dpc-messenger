@@ -90,29 +90,52 @@ def test_resolve_workflow_not_found(tmp_path):
     assert _resolve_workflow_path(ctx, "missing.json") is None
 
 
-def _queue_entry(prompt_id, save_class=None, prefix=None):
+def _queue_entry(prompt_id, save_class=None, prefix=None, load_image=None):
     """Build a /queue entry: [number, prompt_id, prompt_dict, extra, outputs]."""
     prompt = {"1": {"class_type": "KSampler", "inputs": {"steps": 40}}}
+    if load_image is not None:
+        prompt["3"] = {"class_type": "LoadImage", "inputs": {"image": load_image}}
     if save_class:
         prompt["9"] = {"class_type": save_class, "inputs": {"filename_prefix": prefix}}
     return [0, prompt_id, prompt, {}, []]
 
 
-def test_queue_item_label_from_save_node():
-    item = _queue_entry("abc123def456", "BerniniRSaveVideo", "C2_ship_approaching")
+def test_queue_item_label_prefers_input_frame():
+    # Input frame (LoadImage.image) identifies the clip; it wins over the
+    # save prefix, which is often a constant across clips.
+    item = _queue_entry(
+        "abc123def456", "BerniniRSaveVideo", "BerniniR_i2v_1.3B", load_image="C3_00012.png"
+    )
     pid, label = _queue_item_label(item)
     assert pid == "abc123def456"  # full id preserved (feeds comfyui_check/_wait)
-    assert label == "C2_ship_approaching"
+    assert label == "C3_00012.png"
 
 
-def test_queue_item_label_saveimage_prefix():
+def test_queue_item_label_falls_back_to_save_prefix():
+    # No LoadImage → fall back to the save node's filename_prefix.
     item = _queue_entry("pid-1", "SaveImage", "C3_iceberg")
     pid, label = _queue_item_label(item)
     assert pid == "pid-1" and label == "C3_iceberg"
 
 
-def test_queue_item_label_no_save_node():
-    # A graph with no recognised save node yields the id but an empty label.
+def test_queue_item_label_fallback_is_duck_typed():
+    # The save-node fallback is detected by the presence of a filename_prefix
+    # input, NOT a hardcoded class list — an unknown/custom saver still works.
+    item = _queue_entry("pid-1c", "SomeFutureCustomSaver", "C9_label")
+    pid, label = _queue_item_label(item)
+    assert pid == "pid-1c" and label == "C9_label"
+
+
+def test_queue_item_label_ignores_linked_image_input():
+    # LoadImage.image as a [node, slot] link (not a filename) is skipped;
+    # label falls back to the save prefix.
+    item = _queue_entry("pid-1b", "SaveVideo", "out", load_image=["12", 0])
+    pid, label = _queue_item_label(item)
+    assert pid == "pid-1b" and label == "out"
+
+
+def test_queue_item_label_no_label_sources():
+    # No LoadImage and no save node → id only, empty label.
     pid, label = _queue_item_label(_queue_entry("pid-2"))
     assert pid == "pid-2" and label == ""
 

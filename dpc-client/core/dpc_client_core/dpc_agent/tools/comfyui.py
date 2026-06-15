@@ -363,25 +363,24 @@ def comfyui_wait(ctx: ToolContext, prompt_id: str, timeout: int = 300, api_url: 
     return future.result(timeout=timeout + 10)
 
 
-# Save-node class types whose filename_prefix is the most human-readable
-# label for a queued job (e.g. "C2_ship_approaching"). Checked in order of
-# preference is not needed — any match wins, one save node per graph in practice.
-_SAVE_NODE_TYPES = {
-    "BerniniRSaveVideo", "SaveVideo", "CreateVideo", "SaveWEBM",
-    "SaveAnimatedWEBP", "VHS_VideoCombine", "SaveImage",
-}
-
-
 def _queue_item_label(item) -> tuple:
     """From a /queue entry ``[number, prompt_id, prompt, ...]`` return
-    ``(prompt_id, label)`` where label is a save node's filename_prefix.
+    ``(prompt_id, label)`` identifying *which* job it is.
+
+    The input frame (``LoadImage.image``, e.g. 'C3_00012.png') is preferred
+    as the label because it differs per clip. The fallback is a save node's
+    ``filename_prefix`` — detected by duck-typing (any node carrying that
+    input), not a hardcoded class-name list, so new/custom save nodes are
+    picked up without drift. Note the prefix is often a constant across
+    clips (e.g. 'BerniniR_i2v_1.3B'), which is why the input frame wins.
 
     Returns ('', '') on any malformed item — the queue display degrades to
     counts rather than raising. The full prompt_id is preserved (not
     truncated) so the agent can feed it straight into comfyui_check/_wait.
     """
     prompt_id = ""
-    label = ""
+    input_label = ""
+    save_label = ""
     try:
         if isinstance(item, (list, tuple)) and len(item) > 1:
             prompt_id = str(item[1])
@@ -390,57 +389,30 @@ def _queue_item_label(item) -> tuple:
             for node in prompt.values():
                 if not isinstance(node, dict):
                     continue
-                if node.get("class_type") in _SAVE_NODE_TYPES:
-                    fp = node.get("inputs", {}).get("filename_prefix")
+                inputs = node.get("inputs", {})
+                if not isinstance(inputs, dict):
+                    continue
+                if not input_label and node.get("class_type") == "LoadImage":
+                    img = inputs.get("image")
+                    if isinstance(img, str) and img:  # str = a filename, not a [node,slot] link
+                        input_label = img
+                elif not save_label and isinstance(inputs.get("filename_prefix"), str):
+                    fp = inputs.get("filename_prefix")
                     if fp:
-                        label = str(fp)
-                        break
+                        save_label = fp
     except Exception:
         pass
-    return prompt_id, label
-
-
-async def _peek_progress_step(api_url: str, timeout: float = 3.0) -> str:
-    """Best-effort: grab the latest progress step of the running job via WS.
-
-    Returns 'step X/Y' or '' (never raises). Bounded by ``timeout`` so a
-    queue poll stays fast even if the WS is unresponsive.
-    """
-    import websockets
-
-    ws_url = api_url.replace("http://", "ws://").replace("https://", "wss://")
-    ws_url = f"{ws_url.rstrip('/')}/ws?clientId=dpc-forge-queuepeek"
-    latest = None
-    try:
-        async with websockets.connect(ws_url, close_timeout=2) as ws:
-            deadline = asyncio.get_event_loop().time() + timeout
-            while asyncio.get_event_loop().time() < deadline:
-                remaining = deadline - asyncio.get_event_loop().time()
-                if remaining <= 0:
-                    break
-                try:
-                    raw = await asyncio.wait_for(ws.recv(), timeout=min(remaining, 1.5))
-                    d = json.loads(raw)
-                    if d.get("type") == "progress":
-                        md = d.get("data", {})
-                        latest = (md.get("value", 0), md.get("max", 0))
-                except asyncio.TimeoutError:
-                    if latest is not None:
-                        break
-                    continue
-    except Exception:
-        return ""
-    return f"step {latest[0]}/{latest[1]}" if latest else ""
+    return prompt_id, (input_label or save_label)
 
 
 def comfyui_queue_status(ctx: ToolContext, api_url: str = DEFAULT_API_URL) -> str:
     """Check ComfyUI queue — counts plus what each task actually is.
 
-    Reports the running/pending counts and, for every queued job, its
-    prompt_id and label (the save node's filename_prefix, e.g.
-    'C2_ship_approaching'), so the agent knows exactly what is rendering
-    instead of guessing from bare counts. The running job is annotated with
-    a live 'step X/Y' progress sample when available.
+    Reports the running/pending counts and, for every queued job, its full
+    prompt_id and a label = its input frame (LoadImage.image, e.g.
+    'C3_00012.png'), so the agent knows exactly which clip is rendering
+    instead of guessing from bare counts. Fast (single GET, no WS) — for the
+    live step X/Y + ETA of the running job, call comfyui_progress.
     """
     loop = ctx.agent_event_loop
     if loop is None:
@@ -455,14 +427,14 @@ def comfyui_queue_status(ctx: ToolContext, api_url: str = DEFAULT_API_URL) -> st
             running = data.get("queue_running", []) or []
             pending = data.get("queue_pending", []) or []
             lines = [f"running={len(running)}, pending={len(pending)}"]
-            step_txt = await _peek_progress_step(api_url) if running else ""
-            for i, item in enumerate(running):
+            for item in running:
                 pid, label = _queue_item_label(item)
-                extra = f"  [{step_txt}]" if (i == 0 and step_txt) else ""
-                lines.append(f"  RUNNING  {pid or '?'}  {label or '(unlabeled)'}{extra}")
+                lines.append(f"  RUNNING  {pid or '?'}  {label or '(unlabeled)'}")
             for item in pending:
                 pid, label = _queue_item_label(item)
                 lines.append(f"  PENDING  {pid or '?'}  {label or '(unlabeled)'}")
+            if running:
+                lines.append("  (call comfyui_progress for live step X/Y + ETA)")
             return "\n".join(lines)
         except httpx.ConnectError:
             return f"Error: cannot connect to ComfyUI at {api_url}."
@@ -470,7 +442,7 @@ def comfyui_queue_status(ctx: ToolContext, api_url: str = DEFAULT_API_URL) -> st
             return f"Error: {e}"
 
     future = asyncio.run_coroutine_threadsafe(_status(), loop)
-    return future.result(timeout=15)
+    return future.result(timeout=10)
 
 
 # Last progress sample per api_url: (step, max, loop_time). Lets a poll
@@ -521,11 +493,21 @@ def _format_progress_timing(samples: list, api_url: str) -> str:
 
 
 def comfyui_progress(ctx: ToolContext, timeout: int = 10, api_url: str = DEFAULT_API_URL) -> str:
-    """One-shot WebSocket snapshot of ComfyUI generation progress."""
+    """Report ComfyUI generation progress, waiting for a real sampler step.
+
+    Slow models (Bernini ~27s/step) emit a 'progress' event only once per
+    step, so a short fixed window would catch only the periodic status
+    heartbeat (queue_remaining) and no step — useless to the agent. This
+    keeps listening until it actually sees a progress step (or the run
+    ends), then grabs one more sample for an s/it + ETA estimate. ``timeout``
+    is the *minimum* listen window once a step is seen; a hard cap
+    (HARD_CAP) bounds the wait so it never hangs even between slow steps.
+    """
     loop = ctx.agent_event_loop
     if loop is None:
         return "Error: no event loop available."
-    timeout = max(3, min(timeout, 30))
+    timeout = max(3, min(timeout, 60))
+    HARD_CAP = 45.0  # must exceed one slow step (~27s) so we catch a tick
 
     async def _progress():
         import websockets
@@ -535,13 +517,19 @@ def comfyui_progress(ctx: ToolContext, timeout: int = 10, api_url: str = DEFAULT
         prog_samples = []
         try:
             async with websockets.connect(ws_url, close_timeout=3) as ws:
-                deadline = asyncio.get_event_loop().time() + timeout
-                while asyncio.get_event_loop().time() < deadline:
-                    remaining = deadline - asyncio.get_event_loop().time()
-                    if remaining <= 0:
+                start = asyncio.get_event_loop().time()
+                while True:
+                    elapsed = asyncio.get_event_loop().time() - start
+                    # Stop when: hard cap hit (safety); we have a step AND the
+                    # nominal window elapsed; or we have 2 samples (step+rate).
+                    if elapsed >= HARD_CAP:
+                        break
+                    if prog_samples and elapsed >= timeout:
+                        break
+                    if len(prog_samples) >= 2:
                         break
                     try:
-                        raw = await asyncio.wait_for(ws.recv(), timeout=min(remaining, 2.0))
+                        raw = await asyncio.wait_for(ws.recv(), timeout=2.0)
                         data = json.loads(raw)
                         msg_type = data.get("type", "")
                         msg_data = data.get("data", {})
@@ -565,6 +553,7 @@ def comfyui_progress(ctx: ToolContext, timeout: int = 10, api_url: str = DEFAULT
                         elif msg_type == "status":
                             q = msg_data.get("status", {}).get("exec_info", {})
                             remaining_q = q.get("queue_remaining", 0)
+                            # Heartbeat only — keep as context, not a stop signal.
                             events.append(f"queue_remaining={remaining_q}")
                     except asyncio.TimeoutError:
                         continue
@@ -575,13 +564,20 @@ def comfyui_progress(ctx: ToolContext, timeout: int = 10, api_url: str = DEFAULT
 
         timing = _format_progress_timing(prog_samples, api_url)
         if timing:
+            # We have a real step/ETA: drop the heartbeat noise so the agent
+            # sees the signal, not 'queue_remaining=1' lines, then append it.
+            events = [e for e in events if not e.startswith("queue_remaining=")]
             events.append(timing)
         if not events:
-            return "No activity detected (ComfyUI idle or timeout too short)."
+            return (
+                "No sampler step seen within the wait window — the running job "
+                "may be between nodes (model load / VAE decode) or the queue is "
+                "idle. Call again in a few seconds."
+            )
         return "\n".join(events)
 
     future = asyncio.run_coroutine_threadsafe(_progress(), loop)
-    return future.result(timeout=timeout + 5)
+    return future.result(timeout=HARD_CAP + 10)
 
 
 def comfyui_convert(ctx: ToolContext, input_path: str, output_path: str = "", fps: int = 16, codec: str = "libx264") -> str:
