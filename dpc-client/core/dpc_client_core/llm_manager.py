@@ -12,6 +12,7 @@ from .providers import (
     OPENAI_THINKING_MODELS, ANTHROPIC_THINKING_MODELS,
     OllamaProvider, OLLAMA_VISION_MODELS, OLLAMA_THINKING_MODELS,
     OpenAICompatibleProvider, AnthropicProvider, ZaiProvider, ZaiCodingProvider,
+    DeepSeekProvider,
     LocalWhisperProvider, RemotePeerProvider, DpcAgentProvider,
     GeminiProvider, GitHubModelsProvider, GigaChatProvider,
 )
@@ -42,6 +43,7 @@ PROVIDER_MAP = {
     "anthropic": AnthropicProvider,
     "zai": ZaiProvider,
     "zai_coding": ZaiCodingProvider,  # Z.AI GLM Coding Plan (OpenAI-compatible coding/paas/v4)
+    "deepseek": DeepSeekProvider,  # DeepSeek pay-per-token (OpenAI-compatible, V4 thinking)
     "local_whisper": LocalWhisperProvider,  # v0.13.1+: Local Whisper transcription
     "dpc_agent": DpcAgentProvider,  # Embedded autonomous AI agent
     "remote_peer": RemotePeerProvider,  # v0.18.0+: Remote peer inference

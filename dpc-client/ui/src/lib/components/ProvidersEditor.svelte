@@ -10,7 +10,7 @@
 
   const dispatch = createEventDispatcher();
 
-  type ProviderType = 'ollama' | 'openai_compatible' | 'anthropic' | 'zai' | 'zai_coding' | 'local_whisper' | 'dpc_agent' | 'gemini' | 'github_models' | 'gigachat';
+  type ProviderType = 'ollama' | 'openai_compatible' | 'anthropic' | 'zai' | 'zai_coding' | 'deepseek' | 'local_whisper' | 'dpc_agent' | 'gemini' | 'github_models' | 'gigachat';
 
   type Provider = {
     alias: string;
@@ -372,6 +372,11 @@
       provider.model = newProvider.model || 'glm-5.2';
       provider.base_url = 'https://api.z.ai/api/coding/paas/v4';
       provider.context_window = 200000;
+    } else if (newProvider.type === 'deepseek') {
+      provider.api_key_env = 'DEEPSEEK_API_KEY';
+      provider.model = newProvider.model || 'deepseek-v4-flash';
+      provider.base_url = 'https://api.deepseek.com';
+      provider.context_window = 1000000;
     } else if (newProvider.type === 'local_whisper') {
       provider.device = 'auto';
       provider.compile_model = true;
@@ -613,6 +618,7 @@
                         <option value="anthropic">Anthropic</option>
                         <option value="zai">Z.AI</option>
                         <option value="zai_coding">Z.AI Coding Plan</option>
+                        <option value="deepseek">DeepSeek</option>
                         <option value="local_whisper">Local Whisper</option>
                         <option value="dpc_agent">DPC Agent</option>
                         <option value="gemini">Google Gemini</option>
@@ -827,7 +833,20 @@
                       </div>
                     {/if}
 
-                    {#if editedConfig.providers[i].type === 'zai' || editedConfig.providers[i].type === 'zai_coding'}
+                    {#if editedConfig.providers[i].type === 'deepseek'}
+                      <div class="form-group">
+                        <label for="base-url-{i}">Base URL</label>
+                        <input
+                          id="base-url-{i}"
+                          type="text"
+                          bind:value={editedConfig.providers[i].base_url}
+                          placeholder="https://api.deepseek.com"
+                        />
+                        <p class="help-text">DeepSeek OpenAI-compatible endpoint</p>
+                      </div>
+                    {/if}
+
+                    {#if editedConfig.providers[i].type === 'zai' || editedConfig.providers[i].type === 'zai_coding' || editedConfig.providers[i].type === 'deepseek'}
                       <div class="form-group">
                         <label for="api-key-env-{i}">API Key Environment Variable</label>
                         <input
@@ -1242,6 +1261,7 @@
                 <option value="anthropic">Anthropic</option>
                 <option value="zai">Z.AI</option>
                 <option value="zai_coding">Z.AI Coding Plan</option>
+                <option value="deepseek">DeepSeek</option>
                 <option value="local_whisper">Local Whisper</option>
                 <option value="dpc_agent">DPC Agent</option>
                 <option value="gemini">Google Gemini</option>
@@ -1263,6 +1283,7 @@
                     newProvider.type === 'local_whisper' ? 'openai/whisper-large-v3' :
                     newProvider.type === 'zai' ? 'glm-4.7' :
                     newProvider.type === 'zai_coding' ? 'glm-5.2' :
+                    newProvider.type === 'deepseek' ? 'deepseek-v4-flash' :
                     newProvider.type === 'gemini' ? 'gemini-2.0-flash' :
                     newProvider.type === 'github_models' ? 'gpt-4o' :
                     newProvider.type === 'gigachat' ? 'GigaChat-2-Pro' :
@@ -1272,7 +1293,7 @@
               </div>
             {/if}
 
-            {#if newProvider.type === 'anthropic' || newProvider.type === 'zai' || newProvider.type === 'zai_coding' || newProvider.type === 'gemini' || newProvider.type === 'github_models' || newProvider.type === 'gigachat'}
+            {#if newProvider.type === 'anthropic' || newProvider.type === 'zai' || newProvider.type === 'zai_coding' || newProvider.type === 'deepseek' || newProvider.type === 'gemini' || newProvider.type === 'github_models' || newProvider.type === 'gigachat'}
               <div class="form-group">
                 <label for="new-api-key-env">API Key Environment Variable</label>
                 <input
@@ -1281,6 +1302,7 @@
                   bind:value={newProvider.api_key_env}
                   placeholder={
                     newProvider.type === 'zai' || newProvider.type === 'zai_coding' ? 'ZAI_API_KEY' :
+                    newProvider.type === 'deepseek' ? 'DEEPSEEK_API_KEY' :
                     newProvider.type === 'anthropic' ? 'ANTHROPIC_API_KEY' :
                     newProvider.type === 'gemini' ? 'GEMINI_API_KEY' :
                     newProvider.type === 'github_models' ? 'GITHUB_TOKEN' :
