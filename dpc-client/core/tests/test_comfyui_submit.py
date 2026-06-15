@@ -13,6 +13,7 @@ import pytest
 from dpc_client_core.dpc_agent.tools.comfyui import (
     _convert_ui_to_api,
     _is_ui_format,
+    _queue_item_label,
     _resolve_workflow_path,
 )
 
@@ -87,3 +88,39 @@ def test_resolve_workflow_under_agent_root(tmp_path):
 def test_resolve_workflow_not_found(tmp_path):
     ctx = types.SimpleNamespace(agent_root=tmp_path)
     assert _resolve_workflow_path(ctx, "missing.json") is None
+
+
+def _queue_entry(prompt_id, save_class=None, prefix=None):
+    """Build a /queue entry: [number, prompt_id, prompt_dict, extra, outputs]."""
+    prompt = {"1": {"class_type": "KSampler", "inputs": {"steps": 40}}}
+    if save_class:
+        prompt["9"] = {"class_type": save_class, "inputs": {"filename_prefix": prefix}}
+    return [0, prompt_id, prompt, {}, []]
+
+
+def test_queue_item_label_from_save_node():
+    item = _queue_entry("abc123def456", "BerniniRSaveVideo", "C2_ship_approaching")
+    pid, label = _queue_item_label(item)
+    assert pid == "abc123def456"  # full id preserved (feeds comfyui_check/_wait)
+    assert label == "C2_ship_approaching"
+
+
+def test_queue_item_label_saveimage_prefix():
+    item = _queue_entry("pid-1", "SaveImage", "C3_iceberg")
+    pid, label = _queue_item_label(item)
+    assert pid == "pid-1" and label == "C3_iceberg"
+
+
+def test_queue_item_label_no_save_node():
+    # A graph with no recognised save node yields the id but an empty label.
+    pid, label = _queue_item_label(_queue_entry("pid-2"))
+    assert pid == "pid-2" and label == ""
+
+
+def test_queue_item_label_malformed_item():
+    # Short/garbage entries degrade to ('', '') rather than raising.
+    assert _queue_item_label([]) == ("", "")
+    assert _queue_item_label([0]) == ("", "")
+    assert _queue_item_label("notalist") == ("", "")
+    pid, label = _queue_item_label([0, "pid-3", "promptnotadict"])
+    assert pid == "pid-3" and label == ""

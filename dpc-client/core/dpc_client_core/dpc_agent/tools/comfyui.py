@@ -363,8 +363,85 @@ def comfyui_wait(ctx: ToolContext, prompt_id: str, timeout: int = 300, api_url: 
     return future.result(timeout=timeout + 10)
 
 
+# Save-node class types whose filename_prefix is the most human-readable
+# label for a queued job (e.g. "C2_ship_approaching"). Checked in order of
+# preference is not needed — any match wins, one save node per graph in practice.
+_SAVE_NODE_TYPES = {
+    "BerniniRSaveVideo", "SaveVideo", "CreateVideo", "SaveWEBM",
+    "SaveAnimatedWEBP", "VHS_VideoCombine", "SaveImage",
+}
+
+
+def _queue_item_label(item) -> tuple:
+    """From a /queue entry ``[number, prompt_id, prompt, ...]`` return
+    ``(prompt_id, label)`` where label is a save node's filename_prefix.
+
+    Returns ('', '') on any malformed item — the queue display degrades to
+    counts rather than raising. The full prompt_id is preserved (not
+    truncated) so the agent can feed it straight into comfyui_check/_wait.
+    """
+    prompt_id = ""
+    label = ""
+    try:
+        if isinstance(item, (list, tuple)) and len(item) > 1:
+            prompt_id = str(item[1])
+        prompt = item[2] if isinstance(item, (list, tuple)) and len(item) > 2 else None
+        if isinstance(prompt, dict):
+            for node in prompt.values():
+                if not isinstance(node, dict):
+                    continue
+                if node.get("class_type") in _SAVE_NODE_TYPES:
+                    fp = node.get("inputs", {}).get("filename_prefix")
+                    if fp:
+                        label = str(fp)
+                        break
+    except Exception:
+        pass
+    return prompt_id, label
+
+
+async def _peek_progress_step(api_url: str, timeout: float = 3.0) -> str:
+    """Best-effort: grab the latest progress step of the running job via WS.
+
+    Returns 'step X/Y' or '' (never raises). Bounded by ``timeout`` so a
+    queue poll stays fast even if the WS is unresponsive.
+    """
+    import websockets
+
+    ws_url = api_url.replace("http://", "ws://").replace("https://", "wss://")
+    ws_url = f"{ws_url.rstrip('/')}/ws?clientId=dpc-forge-queuepeek"
+    latest = None
+    try:
+        async with websockets.connect(ws_url, close_timeout=2) as ws:
+            deadline = asyncio.get_event_loop().time() + timeout
+            while asyncio.get_event_loop().time() < deadline:
+                remaining = deadline - asyncio.get_event_loop().time()
+                if remaining <= 0:
+                    break
+                try:
+                    raw = await asyncio.wait_for(ws.recv(), timeout=min(remaining, 1.5))
+                    d = json.loads(raw)
+                    if d.get("type") == "progress":
+                        md = d.get("data", {})
+                        latest = (md.get("value", 0), md.get("max", 0))
+                except asyncio.TimeoutError:
+                    if latest is not None:
+                        break
+                    continue
+    except Exception:
+        return ""
+    return f"step {latest[0]}/{latest[1]}" if latest else ""
+
+
 def comfyui_queue_status(ctx: ToolContext, api_url: str = DEFAULT_API_URL) -> str:
-    """Check ComfyUI queue status — how many tasks pending/running."""
+    """Check ComfyUI queue — counts plus what each task actually is.
+
+    Reports the running/pending counts and, for every queued job, its
+    prompt_id and label (the save node's filename_prefix, e.g.
+    'C2_ship_approaching'), so the agent knows exactly what is rendering
+    instead of guessing from bare counts. The running job is annotated with
+    a live 'step X/Y' progress sample when available.
+    """
     loop = ctx.agent_event_loop
     if loop is None:
         return "Error: no event loop available."
@@ -375,16 +452,25 @@ def comfyui_queue_status(ctx: ToolContext, api_url: str = DEFAULT_API_URL) -> st
             resp = await client.get(f"{api_url.rstrip('/')}/queue")
             resp.raise_for_status()
             data = resp.json()
-            running = len(data.get("queue_running", []))
-            pending = len(data.get("queue_pending", []))
-            return f"running={running}, pending={pending}"
+            running = data.get("queue_running", []) or []
+            pending = data.get("queue_pending", []) or []
+            lines = [f"running={len(running)}, pending={len(pending)}"]
+            step_txt = await _peek_progress_step(api_url) if running else ""
+            for i, item in enumerate(running):
+                pid, label = _queue_item_label(item)
+                extra = f"  [{step_txt}]" if (i == 0 and step_txt) else ""
+                lines.append(f"  RUNNING  {pid or '?'}  {label or '(unlabeled)'}{extra}")
+            for item in pending:
+                pid, label = _queue_item_label(item)
+                lines.append(f"  PENDING  {pid or '?'}  {label or '(unlabeled)'}")
+            return "\n".join(lines)
         except httpx.ConnectError:
             return f"Error: cannot connect to ComfyUI at {api_url}."
         except Exception as e:
             return f"Error: {e}"
 
     future = asyncio.run_coroutine_threadsafe(_status(), loop)
-    return future.result(timeout=10)
+    return future.result(timeout=15)
 
 
 # Last progress sample per api_url: (step, max, loop_time). Lets a poll
