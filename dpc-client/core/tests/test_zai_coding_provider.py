@@ -149,11 +149,26 @@ async def test_generate_with_tools_maps_response_to_contract():
     assert tc.name == "list_dir"
     assert tc.input == {"path": "/tmp"}  # arguments JSON string parsed to dict
 
-    # thinking enabled by default -> extra_body carries the thinking flag, temp forced to 1.0
+    # thinking enabled by default -> extra_body carries the thinking flag; explicit
+    # config temperature (0.7) is respected (override > config > z.ai 1.0 default)
     _, kwargs = p.client.chat.completions.create.call_args
     assert kwargs["extra_body"] == {"thinking": {"type": "enabled"}}
-    assert kwargs["temperature"] == 1.0
+    assert kwargs["temperature"] == 0.7
     assert kwargs["tool_choice"] == "auto"
+
+
+def test_effective_temperature_resolution():
+    """override > explicit config temperature > z.ai 1.0 (thinking) > base default."""
+    p = _make({"temperature": 0.5})
+    assert p._effective_temperature() == 0.5
+    assert p._effective_temperature(0.2) == 0.2
+
+    p_no_temp = ZaiCodingProvider(
+        "zai_no_temp",
+        {"api_key": "k", "model": "glm-5.2", "thinking": {"enabled": True}},
+    )
+    assert p_no_temp._temperature_explicit is None
+    assert p_no_temp._effective_temperature() == 1.0
 
 
 @pytest.mark.asyncio

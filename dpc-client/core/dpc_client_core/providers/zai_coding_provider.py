@@ -51,6 +51,7 @@ class ZaiCodingProvider(AIProvider):
         self.thinking_enabled = config.get("thinking", {}).get("enabled", True)
 
         self.top_p = config.get("top_p")  # None => API default
+        self._temperature_explicit = config.get("temperature")  # None unless user set it
 
         # Exponential backoff with a time budget (default 10 min)
         self.max_retry_seconds = config.get("max_retry_seconds", 600)
@@ -119,10 +120,11 @@ class ZaiCodingProvider(AIProvider):
         return None
 
     def _effective_temperature(self, override: Optional[float] = None) -> float:
-        # Z.AI docs: temperature should be 1.0 when deep thinking is enabled.
-        if self.thinking_enabled:
-            return 1.0
-        return override if override is not None else self.temperature
+        if override is not None:
+            return override
+        if self._temperature_explicit is not None:
+            return self._temperature_explicit
+        return 1.0
 
     # --- plain text generation ---
 
