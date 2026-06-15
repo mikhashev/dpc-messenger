@@ -65,8 +65,26 @@ def _collect_outputs(entry: dict) -> List[str]:
     return outputs
 
 
+# Node class_types whose widgets_values this converter knows how to map to
+# named API inputs. A UI-format node OUTSIDE this set that carries
+# widgets_values would silently lose them (e.g. LoadImage's image filename),
+# producing an invalid graph. _convert_ui_to_api raises instead of dropping —
+# the caller should export such workflows in API format ("Save (API Format)").
+_HANDLED_WIDGET_TYPES = {
+    "UNETLoader", "CLIPLoader", "VAELoader", "CLIPTextEncode",
+    "EmptyLatentImage", "EmptySD3LatentImage", "EmptyHunyuanLatentVideo",
+    "KSampler", "SaveImage", "SaveAnimatedWEBP", "CreateVideo",
+    "SaveVideo", "SaveWEBM",
+}
+
+
 def _convert_ui_to_api(wf: dict) -> dict:
-    """Convert ComfyUI UI/graph format (nodes+links) to API prompt format."""
+    """Convert ComfyUI UI/graph format (nodes+links) to API prompt format.
+
+    Raises ValueError if the graph contains node types whose widget values
+    cannot be mapped (the converter only knows a fixed set; custom nodes like
+    Bernini-R are unsupported). Callers should export those in API format.
+    """
     nodes = wf.get("nodes", [])
     links = wf.get("links", [])
     if not nodes:
@@ -78,11 +96,15 @@ def _convert_ui_to_api(wf: dict) -> dict:
         link_map[link_id] = (str(src_node), src_slot)
 
     api = {}
+    unconvertible = set()
     for node in nodes:
         nid = str(node["id"])
         ct = node.get("class_type") or node.get("type", "")
         wv = node.get("widgets_values", [])
         inp_defs = node.get("inputs", [])
+
+        if wv and ct not in _HANDLED_WIDGET_TYPES:
+            unconvertible.add(ct)
 
         inputs = {}
         for inp in inp_defs:
@@ -141,12 +163,42 @@ def _convert_ui_to_api(wf: dict) -> dict:
 
         api[nid] = {"class_type": ct, "inputs": inputs}
 
+    if unconvertible:
+        raise ValueError(
+            "UI-format workflow contains node types this tool cannot convert "
+            "(their widget values would be lost): "
+            + ", ".join(sorted(unconvertible))
+            + ". Re-export it in API format via ComfyUI 'Save (API Format)' and "
+            "submit that file (or pass it as workflow_json) — API-format graphs "
+            "are submitted as-is with no lossy conversion."
+        )
+
     return api
 
 
 def _is_ui_format(wf: dict) -> bool:
     """Detect if workflow is in UI/graph format (has nodes array) vs API format."""
     return "nodes" in wf and isinstance(wf["nodes"], list)
+
+
+def _resolve_workflow_path(ctx: ToolContext, workflow: str) -> Optional[pathlib.Path]:
+    """Resolve a workflow filename to an existing path.
+
+    Order: (1) absolute path as given, (2) path as given relative to cwd,
+    (3) under <agent_root>/comfy-ui-workflows/. Returns None if not found.
+    Absolute paths let agents reference workflows kept outside the sandbox
+    (e.g. a project repo's comfy-workflows/ dir).
+    """
+    p = pathlib.Path(workflow)
+    if p.is_absolute() and p.exists():
+        return p
+    if p.exists():
+        return p
+    if ctx.agent_root:
+        candidate = pathlib.Path(ctx.agent_root) / "comfy-ui-workflows" / workflow
+        if candidate.exists():
+            return candidate
+    return None
 
 
 def comfyui_submit(ctx: ToolContext, workflow: str = "", prompt: str = "", workflow_json: dict = None, api_url: str = DEFAULT_API_URL) -> str:
@@ -157,12 +209,13 @@ def comfyui_submit(ctx: ToolContext, workflow: str = "", prompt: str = "", workf
 
     wf_data = workflow_json if not workflow else None
     if workflow:
-        wf_dir = pathlib.Path(ctx.agent_root) / "comfy-ui-workflows" if ctx.agent_root else None
-        if not wf_dir:
-            return "Error: agent_root not set, cannot resolve workflow path."
-        wf_path = wf_dir / workflow
-        if not wf_path.exists():
-            return f"Error: workflow file not found: {wf_path}"
+        wf_path = _resolve_workflow_path(ctx, workflow)
+        if wf_path is None:
+            return (
+                f"Error: workflow file not found: {workflow} "
+                f"(searched: absolute path, cwd, <agent_root>/comfy-ui-workflows/). "
+                f"Pass an absolute path for workflows kept elsewhere."
+            )
         try:
             wf_data = json.loads(wf_path.read_text(encoding="utf-8"))
         except Exception as e:
@@ -172,7 +225,10 @@ def comfyui_submit(ctx: ToolContext, workflow: str = "", prompt: str = "", workf
         return "Error: provide either workflow (filename) or workflow_json (dict)."
 
     if _is_ui_format(wf_data):
-        wf_data = _convert_ui_to_api(wf_data)
+        try:
+            wf_data = _convert_ui_to_api(wf_data)
+        except ValueError as e:
+            return f"Error: {e}"
 
     if prompt:
         for node in wf_data.values():
@@ -509,16 +565,24 @@ def get_tools() -> List[ToolEntry]:
                 "name": "comfyui_submit",
                 "description": (
                     "Submit a ComfyUI workflow for generation. "
-                    "Preferred: pass workflow (filename from comfy-ui-workflows/) + prompt (text). "
-                    "Tool reads file, injects prompt into CLIPTextEncode node, submits to ComfyUI. "
-                    "Alternative: pass workflow_json directly (legacy, error-prone)."
+                    "Pass workflow (filename or absolute path) + prompt (text); the tool "
+                    "reads the file, injects prompt into the positive CLIPTextEncode node, submits. "
+                    "For workflows with custom nodes (e.g. Bernini-R) export them in API format "
+                    "via ComfyUI 'Save (API Format)' — API-format graphs are submitted as-is "
+                    "(no lossy UI->API conversion). UI-format graphs with unsupported custom "
+                    "nodes are rejected with a clear message rather than silently mangled. "
+                    "Alternative: pass workflow_json directly (a dict already in API format)."
                 ),
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "workflow": {
                             "type": "string",
-                            "description": "Workflow JSON filename from comfy-ui-workflows/ dir (e.g. 'wan22_ti2v_5B.json').",
+                            "description": (
+                                "Workflow JSON filename resolved under <agent_root>/comfy-ui-workflows/, "
+                                "OR an absolute path to a workflow kept elsewhere "
+                                "(e.g. a project repo's comfy-workflows/ dir)."
+                            ),
                         },
                         "prompt": {
                             "type": "string",
@@ -526,7 +590,7 @@ def get_tools() -> List[ToolEntry]:
                         },
                         "workflow_json": {
                             "type": "object",
-                            "description": "Raw ComfyUI workflow JSON (legacy — prefer workflow + prompt).",
+                            "description": "Raw ComfyUI workflow JSON in API format (submitted as-is).",
                         },
                         "api_url": {
                             "type": "string",

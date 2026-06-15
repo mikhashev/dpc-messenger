@@ -1,0 +1,89 @@
+"""Tests for comfyui_submit path resolution and UI->API conversion guard.
+
+Covers the S11 fix (AI Studio): absolute-path workflow resolution and a loud
+error when a UI-format graph carries unsupported custom-node widgets (instead
+of silently dropping them, which produced invalid Bernini-R graphs).
+"""
+
+import json
+import types
+
+import pytest
+
+from dpc_client_core.dpc_agent.tools.comfyui import (
+    _convert_ui_to_api,
+    _is_ui_format,
+    _resolve_workflow_path,
+)
+
+
+def test_is_ui_format():
+    assert _is_ui_format({"nodes": [], "links": []}) is True
+    # API format is a flat {node_id: {class_type, inputs}} dict — no "nodes"
+    assert _is_ui_format({"1": {"class_type": "KSampler", "inputs": {}}}) is False
+    assert _is_ui_format({"nodes": "notalist"}) is False
+
+
+def test_convert_ui_known_nodes_ok():
+    wf = {
+        "nodes": [
+            {"id": 1, "type": "CLIPTextEncode", "widgets_values": ["a prompt"], "inputs": []},
+            {"id": 2, "type": "SaveImage", "widgets_values": ["out"], "inputs": []},
+        ],
+        "links": [],
+    }
+    api = _convert_ui_to_api(wf)
+    assert api["1"]["class_type"] == "CLIPTextEncode"
+    assert api["1"]["inputs"]["text"] == "a prompt"
+    assert api["2"]["inputs"]["filename_prefix"] == "out"
+
+
+def test_convert_ui_unsupported_custom_node_raises():
+    # A Bernini-R node carrying widget values is not in the whitelist:
+    # converting would drop them, so the tool must refuse loudly.
+    wf = {
+        "nodes": [
+            {"id": 1, "type": "BerniniRGuider", "widgets_values": ["auto", 4.5], "inputs": []},
+            {"id": 2, "type": "LoadImage", "widgets_values": ["start.png"], "inputs": []},
+        ],
+        "links": [],
+    }
+    with pytest.raises(ValueError) as exc:
+        _convert_ui_to_api(wf)
+    msg = str(exc.value)
+    assert "BerniniRGuider" in msg and "LoadImage" in msg
+    assert "API format" in msg
+
+
+def test_convert_ui_node_without_widgets_not_flagged():
+    # A custom node with NO widget values loses nothing — allowed.
+    wf = {
+        "nodes": [
+            {"id": 1, "type": "VAEDecode", "widgets_values": [], "inputs": []},
+        ],
+        "links": [],
+    }
+    api = _convert_ui_to_api(wf)
+    assert api["1"]["class_type"] == "VAEDecode"
+
+
+def test_resolve_workflow_absolute_path(tmp_path):
+    wf_file = tmp_path / "graph.json"
+    wf_file.write_text(json.dumps({"1": {"class_type": "KSampler", "inputs": {}}}), encoding="utf-8")
+    ctx = types.SimpleNamespace(agent_root=tmp_path / "agent")
+    resolved = _resolve_workflow_path(ctx, str(wf_file))
+    assert resolved == wf_file
+
+
+def test_resolve_workflow_under_agent_root(tmp_path):
+    wf_dir = tmp_path / "comfy-ui-workflows"
+    wf_dir.mkdir()
+    (wf_dir / "g.json").write_text("{}", encoding="utf-8")
+    ctx = types.SimpleNamespace(agent_root=tmp_path)
+    resolved = _resolve_workflow_path(ctx, "g.json")
+    assert resolved == wf_dir / "g.json"
+
+
+def test_resolve_workflow_not_found(tmp_path):
+    ctx = types.SimpleNamespace(agent_root=tmp_path)
+    assert _resolve_workflow_path(ctx, "missing.json") is None
