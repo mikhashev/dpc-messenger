@@ -301,7 +301,7 @@ class DpcLlmAdapter:
                 "prompt_tokens": prompt_tokens,
                 "completion_tokens": completion_tokens,
                 "total_tokens": prompt_tokens + completion_tokens,
-                "cost": compute_cost_usd(self._provider_alias or "", prompt_tokens, completion_tokens),
+                "cost": compute_cost_usd(self._provider_alias or "", prompt_tokens, completion_tokens, model=model_name),
             }
 
             return response_msg, usage
@@ -422,7 +422,7 @@ class DpcLlmAdapter:
                 "prompt_tokens": prompt_tokens,
                 "completion_tokens": completion_tokens,
                 "total_tokens": prompt_tokens + completion_tokens,
-                "cost": compute_cost_usd(self._provider_alias or "", prompt_tokens, completion_tokens),
+                "cost": compute_cost_usd(self._provider_alias or "", prompt_tokens, completion_tokens, model=model_name),
             }
 
             return response_msg, usage
@@ -504,7 +504,7 @@ class DpcLlmAdapter:
                 "prompt_tokens": prompt_tokens,
                 "completion_tokens": completion_tokens,
                 "total_tokens": prompt_tokens + completion_tokens,
-                "cost": compute_cost_usd(self._provider_alias or "", prompt_tokens, completion_tokens),
+                "cost": compute_cost_usd(self._provider_alias or "", prompt_tokens, completion_tokens, model=model_name),
             }
         else:
             usage.setdefault(
@@ -513,6 +513,13 @@ class DpcLlmAdapter:
                     self._provider_alias or "",
                     int(usage.get("prompt_tokens", 0)),
                     int(usage.get("completion_tokens", 0)),
+                    model=self.default_model(),
+                    cache_hit_tokens=int(usage.get("prompt_cache_hit_tokens", 0) or 0),
+                    cache_miss_tokens=(
+                        int(usage["prompt_cache_miss_tokens"])
+                        if usage.get("prompt_cache_miss_tokens") is not None
+                        else None
+                    ),
                 ),
             )
 
@@ -705,7 +712,7 @@ class DpcLlmAdapter:
                     "prompt_tokens": prompt_tokens,
                     "completion_tokens": completion_tokens,
                     "total_tokens": prompt_tokens + completion_tokens,
-                    "cost": compute_cost_usd(self._provider_alias or "", prompt_tokens, completion_tokens),
+                    "cost": compute_cost_usd(self._provider_alias or "", prompt_tokens, completion_tokens, model=model_name),
                 }
             else:
                 # Final fallback to character estimation

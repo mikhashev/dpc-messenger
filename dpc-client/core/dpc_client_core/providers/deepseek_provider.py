@@ -402,18 +402,30 @@ class DeepSeekProvider(AIProvider):
                 await on_chunk(content, conversation_id)
 
             u = resp.usage
-            _details = getattr(u, "prompt_tokens_details", None)
-            _cached = getattr(_details, "cached_tokens", 0) if _details else 0
+            prompt_tokens = getattr(u, "prompt_tokens", 0) or 0
+            # DeepSeek reports the cache split natively (prompt_tokens = hit + miss)
+            # and leaves the OpenAI-compat prompt_tokens_details.cached_tokens at 0,
+            # so prefer the native fields and fall back only if they are absent.
+            _hit = getattr(u, "prompt_cache_hit_tokens", None)
+            _miss = getattr(u, "prompt_cache_miss_tokens", None)
+            if _hit is None:
+                _details = getattr(u, "prompt_tokens_details", None)
+                _hit = getattr(_details, "cached_tokens", 0) if _details else 0
+            if _miss is None:
+                _miss = max(0, prompt_tokens - (_hit or 0))
             usage = {
-                "prompt_tokens": getattr(u, "prompt_tokens", 0) or 0,
+                "prompt_tokens": prompt_tokens,
                 "completion_tokens": getattr(u, "completion_tokens", 0) or 0,
                 "total_tokens": getattr(u, "total_tokens", 0) or 0,
-                "cache_read_input_tokens": _cached or 0,
+                "cache_read_input_tokens": _hit or 0,
+                "prompt_cache_hit_tokens": _hit or 0,
+                "prompt_cache_miss_tokens": _miss or 0,
             }
             logger.info(
-                "DeepSeek usage: prompt=%d, completion=%d, cache_read=%d, tool_calls=%d",
-                usage["prompt_tokens"], usage["completion_tokens"],
-                usage["cache_read_input_tokens"], len(tool_calls_raw),
+                "DeepSeek usage: prompt=%d (hit=%d/miss=%d), completion=%d, tool_calls=%d",
+                usage["prompt_tokens"], usage["prompt_cache_hit_tokens"],
+                usage["prompt_cache_miss_tokens"], usage["completion_tokens"],
+                len(tool_calls_raw),
             )
             return {
                 "content": content,

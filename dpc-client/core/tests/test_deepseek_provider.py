@@ -190,9 +190,12 @@ async def test_generate_with_tools_maps_response_to_contract():
 
     assert result["content"] == "working on it"
     assert result["thinking"] == "thinking about dirs"
+    # No native cache fields on the response → hit=0, miss=prompt_tokens (conservative)
     assert result["usage"] == {
         "prompt_tokens": 100, "completion_tokens": 20, "total_tokens": 120,
         "cache_read_input_tokens": 0,
+        "prompt_cache_hit_tokens": 0,
+        "prompt_cache_miss_tokens": 100,
     }
     assert len(result["tool_calls_raw"]) == 1
     tc = result["tool_calls_raw"][0]
@@ -221,6 +224,28 @@ async def test_generate_with_tools_captures_cached_tokens():
     p.client.chat.completions.create = AsyncMock(return_value=fake_resp)
     result = await p.generate_with_tools(messages=[{"role": "user", "content": "hi"}], tools=[])
     assert result["usage"]["cache_read_input_tokens"] == 64
+
+
+@pytest.mark.asyncio
+async def test_generate_with_tools_prefers_native_cache_split():
+    """DeepSeek-native prompt_cache_hit/miss_tokens win over the OpenAI-compat
+    prompt_tokens_details.cached_tokens (which DeepSeek leaves at 0)."""
+    p = _make()
+    fake_msg = SimpleNamespace(content="ok", reasoning_content=None, tool_calls=[])
+    fake_resp = SimpleNamespace(
+        choices=[SimpleNamespace(message=fake_msg)],
+        usage=SimpleNamespace(
+            prompt_tokens=1000, completion_tokens=50, total_tokens=1050,
+            prompt_tokens_details=SimpleNamespace(cached_tokens=0),
+            prompt_cache_hit_tokens=320, prompt_cache_miss_tokens=680,
+        ),
+    )
+    p.client.chat.completions.create = AsyncMock(return_value=fake_resp)
+    result = await p.generate_with_tools(messages=[{"role": "user", "content": "hi"}], tools=[])
+    u = result["usage"]
+    assert u["prompt_cache_hit_tokens"] == 320
+    assert u["prompt_cache_miss_tokens"] == 680
+    assert u["cache_read_input_tokens"] == 320  # mirrors hit for back-compat
 
 
 def test_effective_temperature_resolution():
