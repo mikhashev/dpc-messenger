@@ -86,6 +86,10 @@ class DeepSeekProvider(AIProvider):
 
         self._last_thinking: Optional[str] = None
 
+        # CoT replay cache (Phase 3): reasoning_content keyed by tool_call id so a
+        # later round can resend the real chain-of-thought instead of a placeholder.
+        self._cot_cache: Dict[str, str] = {}
+
     def supports_vision(self) -> bool:
         """DeepSeek V4 text/reasoning models are not multimodal."""
         return False
@@ -394,6 +398,20 @@ class DeepSeekProvider(AIProvider):
         )
         openai_tools = self._anthropic_to_openai_tools(tools)
 
+        # Restore the REAL reasoning_content on replayed assistant tool-call messages.
+        # _anthropic_to_openai_messages pads with " " because the agent adapter drops
+        # thinking on replay; look the CoT back up by tool_call id (cached when we first
+        # produced those calls) so DeepSeek sees its own prior reasoning across rounds,
+        # not a placeholder. Falls back to " " when the CoT is not cached. (Phase 3)
+        if self.thinking_enabled and self._cot_cache:
+            for m in openai_messages:
+                if m.get("role") == "assistant" and m.get("tool_calls") and m.get("reasoning_content") in (None, "", " "):
+                    for tc in m["tool_calls"]:
+                        cot = self._cot_cache.get(tc.get("id"))
+                        if cot:
+                            m["reasoning_content"] = cot
+                            break
+
         async def _call():
             params: Dict[str, Any] = {
                 "model": self.model,
@@ -423,6 +441,15 @@ class DeepSeekProvider(AIProvider):
                 tool_calls_raw.append(
                     SimpleNamespace(id=tc.id, name=tc.function.name, input=input_data)
                 )
+
+            # Cache this round's reasoning_content keyed by tool_call id so the NEXT
+            # round replays the real CoT (see the injection above). Bounded to avoid
+            # unbounded growth across tasks. (Phase 3)
+            if thinking and tool_calls_raw:
+                for tcr in tool_calls_raw:
+                    self._cot_cache[tcr.id] = thinking
+                if len(self._cot_cache) > 1000:
+                    self._cot_cache.clear()
 
             if on_chunk and content:
                 await on_chunk(content, conversation_id)

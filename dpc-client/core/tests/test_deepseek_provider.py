@@ -372,3 +372,72 @@ async def test_get_balance_strips_v1_from_base_url(monkeypatch):
     monkeypatch.setattr(httpx, "AsyncClient", _Client)
     await p.get_balance()
     assert captured["url"] == "https://api.deepseek.com/user/balance"
+
+
+# --- thinking-CoT replay (Phase 3) ---
+
+@pytest.mark.asyncio
+async def test_cot_replay_restores_real_reasoning_not_placeholder():
+    """A tool-call round caches its reasoning_content by tool_call id, and the next
+    round replays the REAL CoT instead of the ' ' placeholder."""
+    p = _make()
+
+    # Round 1: model returns a tool call + reasoning_content.
+    tc = SimpleNamespace(id="call_X", function=SimpleNamespace(name="ls", arguments="{}"))
+    msg1 = SimpleNamespace(content="", reasoning_content="my real CoT", tool_calls=[tc])
+    resp1 = SimpleNamespace(
+        choices=[SimpleNamespace(message=msg1)],
+        usage=SimpleNamespace(prompt_tokens=10, completion_tokens=5, total_tokens=15),
+    )
+    p.client.chat.completions.create = AsyncMock(return_value=resp1)
+    await p.generate_with_tools(
+        messages=[{"role": "user", "content": "hi"}],
+        tools=[{"name": "ls", "description": "", "input_schema": {"type": "object"}}],
+    )
+    assert p._cot_cache.get("call_X") == "my real CoT"
+
+    # Round 2: replay carries the round-1 assistant tool_use(call_X) + a tool result.
+    captured = {}
+
+    async def _capture(**kwargs):
+        captured["messages"] = kwargs["messages"]
+        return SimpleNamespace(
+            choices=[SimpleNamespace(message=SimpleNamespace(content="done", reasoning_content=None, tool_calls=[]))],
+            usage=SimpleNamespace(prompt_tokens=20, completion_tokens=3, total_tokens=23),
+        )
+
+    p.client.chat.completions.create = _capture
+    replay = [
+        {"role": "user", "content": [{"type": "text", "text": "hi"}]},
+        {"role": "assistant", "content": [{"type": "tool_use", "id": "call_X", "name": "ls", "input": {}}]},
+        {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "call_X", "content": "ok"}]},
+    ]
+    await p.generate_with_tools(messages=replay, tools=[])
+    asst = [m for m in captured["messages"] if m.get("role") == "assistant" and m.get("tool_calls")]
+    assert asst, "expected an assistant tool-call message in the replayed request"
+    assert asst[0]["reasoning_content"] == "my real CoT"  # real CoT, not " "
+
+
+@pytest.mark.asyncio
+async def test_cot_replay_falls_back_to_placeholder_when_uncached():
+    """When the CoT for a replayed tool call is not cached, reasoning_content stays
+    the ' ' placeholder (avoids the 400, no crash)."""
+    p = _make()
+    captured = {}
+
+    async def _capture(**kwargs):
+        captured["messages"] = kwargs["messages"]
+        return SimpleNamespace(
+            choices=[SimpleNamespace(message=SimpleNamespace(content="done", reasoning_content=None, tool_calls=[]))],
+            usage=SimpleNamespace(prompt_tokens=5, completion_tokens=2, total_tokens=7),
+        )
+
+    p.client.chat.completions.create = _capture
+    replay = [
+        {"role": "user", "content": [{"type": "text", "text": "hi"}]},
+        {"role": "assistant", "content": [{"type": "tool_use", "id": "unknown_id", "name": "ls", "input": {}}]},
+        {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "unknown_id", "content": "ok"}]},
+    ]
+    await p.generate_with_tools(messages=replay, tools=[])
+    asst = [m for m in captured["messages"] if m.get("role") == "assistant" and m.get("tool_calls")]
+    assert asst[0]["reasoning_content"] == " "
