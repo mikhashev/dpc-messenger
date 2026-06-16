@@ -1583,13 +1583,14 @@
 {/if}
 
 <style>
-  /* Account balance card (Phase 2b) */
+  /* Account balance card (Phase 2b) — dark theme, matches .provider-card */
   .balance-card {
     margin: 0 0 1rem;
     padding: 0.6rem 0.85rem;
-    border: 1px solid var(--border-color, #444);
+    border: 1px solid #333;
     border-radius: 8px;
-    background: var(--surface-2, rgba(255, 255, 255, 0.03));
+    background: #252525;
+    color: #fff;
   }
   .balance-row {
     display: flex;
@@ -1597,16 +1598,16 @@
     justify-content: space-between;
     gap: 0.75rem;
   }
-  .balance-label { font-weight: 600; opacity: 0.85; }
-  .balance-value { margin-top: 0.4rem; font-size: 1.05rem; font-variant-numeric: tabular-nums; }
-  .balance-flag { margin-left: 0.5rem; font-size: 0.85rem; opacity: 0.9; }
-  .balance-muted { opacity: 0.6; font-size: 0.9rem; }
-  .balance-err { color: #e57373; }
+  .balance-label { font-weight: 600; color: #fff; }
+  .balance-value { margin-top: 0.4rem; font-size: 1.05rem; color: #fff; font-variant-numeric: tabular-nums; }
+  .balance-flag { margin-left: 0.5rem; font-size: 0.85rem; color: #bbb; }
+  .balance-muted { color: #aaa; font-size: 0.9rem; }
+  .balance-err { color: #ef9a9a; }
   .balance-ok { border-left: 4px solid #4caf50; }
   .balance-low { border-left: 4px solid #ffb300; }
-  .balance-low .balance-value { color: #ffb300; }
+  .balance-low .balance-value { color: #ffc107; }
   .balance-critical { border-left: 4px solid #e53935; }
-  .balance-critical .balance-value { color: #e53935; }
+  .balance-critical .balance-value { color: #ff6b6b; }
   .modal-overlay {
     position: fixed;
     top: 0;
