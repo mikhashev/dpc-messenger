@@ -478,19 +478,27 @@ class DeepSeekProvider(AIProvider):
                 _hit = getattr(_details, "cached_tokens", 0) if _details else 0
             if _miss is None:
                 _miss = max(0, prompt_tokens - (_hit or 0))
+            _completion = getattr(u, "completion_tokens", 0) or 0
+            _ctd = getattr(u, "completion_tokens_details", None)
+            _reasoning = (getattr(_ctd, "reasoning_tokens", 0) or 0) if _ctd else 0
             usage = {
                 "prompt_tokens": prompt_tokens,
-                "completion_tokens": getattr(u, "completion_tokens", 0) or 0,
+                "completion_tokens": _completion,
+                "reasoning_tokens": _reasoning,
+                "content_tokens": max(0, _completion - _reasoning),
                 "total_tokens": getattr(u, "total_tokens", 0) or 0,
                 "cache_read_input_tokens": _hit or 0,
                 "prompt_cache_hit_tokens": _hit or 0,
                 "prompt_cache_miss_tokens": _miss or 0,
             }
             logger.info(
-                "DeepSeek usage: prompt=%d (hit=%d/miss=%d), completion=%d, tool_calls=%d, effort=%s",
-                usage["prompt_tokens"], usage["prompt_cache_hit_tokens"],
-                usage["prompt_cache_miss_tokens"], usage["completion_tokens"],
-                len(tool_calls_raw), extra_body.get("reasoning_effort", "server-default"),
+                "DeepSeek usage: alias=%s conv=%s prompt=%d (hit=%d/miss=%d), "
+                "completion=%d (reasoning=%d/content=%d), tool_calls=%d, effort=%s",
+                self.alias, conversation_id or "-", usage["prompt_tokens"],
+                usage["prompt_cache_hit_tokens"], usage["prompt_cache_miss_tokens"],
+                usage["completion_tokens"], usage["reasoning_tokens"],
+                usage["content_tokens"], len(tool_calls_raw),
+                extra_body.get("reasoning_effort", "server-default"),
             )
             return {
                 "content": content,

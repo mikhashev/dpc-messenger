@@ -213,9 +213,12 @@ async def test_generate_with_tools_maps_response_to_contract():
 
     assert result["content"] == "working on it"
     assert result["thinking"] == "thinking about dirs"
-    # No native cache fields on the response → hit=0, miss=prompt_tokens (conservative)
+    # No native cache fields on the response → hit=0, miss=prompt_tokens (conservative).
+    # No completion_tokens_details → reasoning=0, content=completion.
     assert result["usage"] == {
-        "prompt_tokens": 100, "completion_tokens": 20, "total_tokens": 120,
+        "prompt_tokens": 100, "completion_tokens": 20,
+        "reasoning_tokens": 0, "content_tokens": 20,
+        "total_tokens": 120,
         "cache_read_input_tokens": 0,
         "prompt_cache_hit_tokens": 0,
         "prompt_cache_miss_tokens": 100,
@@ -247,6 +250,26 @@ async def test_generate_with_tools_captures_cached_tokens():
     p.client.chat.completions.create = AsyncMock(return_value=fake_resp)
     result = await p.generate_with_tools(messages=[{"role": "user", "content": "hi"}], tools=[])
     assert result["usage"]["cache_read_input_tokens"] == 64
+
+
+@pytest.mark.asyncio
+async def test_generate_with_tools_captures_reasoning_tokens():
+    """completion_tokens_details.reasoning_tokens splits completion into
+    reasoning vs content (observability for effort efficiency)."""
+    p = _make()
+    fake_msg = SimpleNamespace(content="answer", reasoning_content="long cot", tool_calls=[])
+    fake_resp = SimpleNamespace(
+        choices=[SimpleNamespace(message=fake_msg)],
+        usage=SimpleNamespace(
+            prompt_tokens=100, completion_tokens=900, total_tokens=1000,
+            completion_tokens_details=SimpleNamespace(reasoning_tokens=850),
+        ),
+    )
+    p.client.chat.completions.create = AsyncMock(return_value=fake_resp)
+    result = await p.generate_with_tools(messages=[{"role": "user", "content": "hi"}], tools=[])
+    u = result["usage"]
+    assert u["reasoning_tokens"] == 850
+    assert u["content_tokens"] == 50  # 900 - 850
 
 
 @pytest.mark.asyncio
