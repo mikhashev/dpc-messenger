@@ -201,6 +201,8 @@ class AgentService:
                         agent["name"] = cfg["name"]
                     if cfg.get("compute_host"):
                         agent["compute_host"] = cfg["compute_host"]
+                    if cfg.get("reasoning_effort"):
+                        agent["reasoning_effort"] = cfg["reasoning_effort"]
 
             return {
                 "status": "success",

@@ -4,7 +4,7 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { writable } from "svelte/store";
-  import { connectionStatus, nodeStatus, sendCommand, resetReconnection, connectToCoreService, knowledgeCommitProposal, personalContext, tokenWarning, extractionFailure, availableProviders, peerProviders, unreadMessageCounts, resetUnreadCount, setActiveChat, newSessionProposal, proposeNewSession, voteNewSession, defaultProviders, providersList, groupChats, listAgents, agentsList, sleepStateChanged, sleepProgress, sleepAgentStates, tokenUsageUpdated } from "$lib/coreService";
+  import { connectionStatus, nodeStatus, sendCommand, resetReconnection, connectToCoreService, knowledgeCommitProposal, personalContext, tokenWarning, extractionFailure, availableProviders, peerProviders, unreadMessageCounts, resetUnreadCount, setActiveChat, newSessionProposal, proposeNewSession, voteNewSession, defaultProviders, providersList, groupChats, listAgents, agentsList, sleepStateChanged, sleepProgress, sleepAgentStates, tokenUsageUpdated, setGroupReasoningEffort, updateAgentConfig } from "$lib/coreService";
   import { confirmAsync } from "$lib/utils/dialog";
   import { mapBackendMessage } from "$lib/utils/messageMapper";
   import KnowledgeCommitDialog from "$lib/components/KnowledgeCommitDialog.svelte";
@@ -977,6 +977,40 @@
             <div class="group-topic">{$groupChats.get(activeChatId)?.topic}</div>
           {/if}
 
+          {#if !chatHeaderCollapsed && isGroupChat}
+            <div class="group-effort">
+              <span class="group-effort-label">Thinking effort:</span>
+              <select
+                class="group-effort-select"
+                value={$groupChats.get(activeChatId)?.reasoning_effort || ''}
+                onchange={(e: Event) => setGroupReasoningEffort(activeChatId, (e.currentTarget as HTMLSelectElement).value)}
+              >
+                <option value="">Config</option>
+                <option value="low">Low</option>
+                <option value="medium">Medium</option>
+                <option value="high">High</option>
+                <option value="max">Max</option>
+              </select>
+            </div>
+          {/if}
+
+          {#if !chatHeaderCollapsed && isActuallyAIChat}
+            <div class="group-effort">
+              <span class="group-effort-label">Thinking effort:</span>
+              <select
+                class="group-effort-select"
+                value={$agentsList.find((a: any) => a.agent_id === activeChatId)?.reasoning_effort || ''}
+                onchange={async (e: Event) => { await updateAgentConfig(activeChatId, { reasoning_effort: (e.currentTarget as HTMLSelectElement).value }); await listAgents(); }}
+              >
+                <option value="">Config</option>
+                <option value="low">Low</option>
+                <option value="medium">Medium</option>
+                <option value="high">High</option>
+                <option value="max">Max</option>
+              </select>
+            </div>
+          {/if}
+
           <!-- Auto Transcribe toggle (P2P and Telegram chats, NOT AI or group chats — groups have it in Settings) -->
           {#if !$aiChats.has(activeChatId) && activeChatId !== 'local_ai' && !activeChatId.startsWith('group-')}
             <label class="auto-transcribe-toggle" title="Automatically transcribe received voice messages">
@@ -1686,6 +1720,27 @@
     color: #aaa;
     padding: 0.2rem 0.8rem;
     font-style: italic;
+  }
+
+  .group-effort {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    padding: 0.1rem 0.8rem 0.3rem;
+    font-size: 0.8rem;
+  }
+  .group-effort-label {
+    color: #89b4fa;
+    font-weight: 600;
+  }
+  .group-effort-select {
+    font-size: 0.8rem;
+    color: #ddd;
+    background: #2a2a2a;
+    border: 1px solid #444;
+    border-radius: 3px;
+    padding: 1px 4px;
+    cursor: pointer;
   }
 
   .collapse-indicator {
