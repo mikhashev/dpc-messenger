@@ -122,6 +122,7 @@ export type {
 import { connectionStatus, nodeStatus, coreMessages } from './services/connection';
 import { p2pMessages, unreadMessageCounts } from './services/messaging';
 import { availableProviders, defaultProviders, providersList, peerProviders, aiResponseWithImage, firewallRulesUpdated, providerBalance } from './services/providers';
+import { showNotificationIfBackground } from './notificationService';
 import { fileTransferOffer, fileTransferProgress, fileTransferComplete, fileTransferCancelled, activeFileTransfers, filePreparationStarted, filePreparationProgress, filePreparationCompleted } from './services/fileTransfer';
 import { voiceOfferReceived, voiceTranscriptionReceived, voiceTranscriptionComplete, voiceTranscriptionConfig, whisperModelLoadingStarted, whisperModelLoaded, whisperModelLoadingFailed, whisperModelUnloaded, whisperModelDownloadRequired, whisperModelDownloadStarted, whisperModelDownloadCompleted, whisperModelDownloadFailed } from './services/voice';
 import { groupChats, groupTextReceived, groupFileReceived, groupInviteReceived, groupUpdated, groupMemberLeft, groupDeleted, groupHistorySynced, groupMessageDeleted, tokenUsageUpdated } from './services/groups';
@@ -279,6 +280,7 @@ export async function connectToCoreService() {
             sendCommand("get_providers_list");     // Fetch full provider list with vision flags
             sendCommand("get_telegram_status");    // Fetch Telegram status including conversation links
             loadGroups();                             // Fetch group chats (v0.19.0)
+            startBalancePolling();                    // DeepSeek balance poll + low-balance alerts (Phase 2b)
 
             // Stop polling
             if (pollingInterval) {
@@ -1300,6 +1302,49 @@ export async function getProviderBalance(alias?: string): Promise<any> {
         providerBalance.set(r);
         return r;
     }
+}
+
+// --- DeepSeek balance polling + threshold alerts (Phase 2b cut 2) ---
+// 5 min: no documented /user/balance rate limit; balance only moves on spend.
+const BALANCE_POLL_MS = 5 * 60 * 1000;
+let balancePollTimer: ReturnType<typeof setInterval> | null = null;
+let lastBalanceLevel: 'ok' | 'low' | 'critical' | null = null;
+
+function balanceLevelOf(result: any): 'ok' | 'low' | 'critical' | null {
+    if (!result || result.status !== 'success' || !result.balance) return null;
+    const infos = result.balance.balance_infos;
+    const info = Array.isArray(infos) && infos.length ? infos[0] : null;
+    const total = info ? parseFloat(info.total_balance) : NaN;
+    const available = result.balance.is_available !== false;
+    if (!available || (!isNaN(total) && total < 1)) return 'critical';
+    if (!isNaN(total) && total < 3) return 'low';
+    return 'ok';
+}
+
+async function pollBalanceOnce() {
+    if (get(connectionStatus) !== 'connected') return;
+    const list: any[] = get(providersList) || [];
+    if (!list.some((p) => p && p.type === 'deepseek')) return;  // only poll when a pay-per-use provider exists
+    const result = await getProviderBalance();
+    const level = balanceLevelOf(result);
+    // Notify once per crossing into low/critical; the colored global indicator
+    // covers the foreground case, this covers backgrounded windows.
+    if ((level === 'low' || level === 'critical') && level !== lastBalanceLevel) {
+        const info = result?.balance?.balance_infos?.[0];
+        const amount = info ? `${info.currency || 'USD'} ${info.total_balance}` : '';
+        showNotificationIfBackground({
+            title: level === 'critical' ? 'DeepSeek balance critical' : 'DeepSeek balance low',
+            body: `Balance ${amount} — ${level === 'critical' ? 'below $1 / insufficient' : 'below $3'}. Top up to keep agents running.`,
+        });
+    }
+    if (level) lastBalanceLevel = level;
+}
+
+/** Start periodic DeepSeek balance polling. Idempotent — safe to call on each (re)connect. */
+export function startBalancePolling() {
+    if (balancePollTimer) return;
+    pollBalanceOnce();  // initial check shortly after connect
+    balancePollTimer = setInterval(pollBalanceOnce, BALANCE_POLL_MS);
 }
 
 // Helper function to set the currently active chat (prevents unread badges on open chats)

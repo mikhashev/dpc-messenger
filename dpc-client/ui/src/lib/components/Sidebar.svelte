@@ -2,6 +2,22 @@
 <!-- Displays connection status, node info, peer list, chat list, and action buttons -->
 
 <script lang="ts">
+  import { providerBalance, getProviderBalance } from '$lib/coreService';
+
+  // DeepSeek account balance pill (Phase 2b cut 2) — always-visible operational indicator.
+  let balPill = $derived.by(() => {
+    const b = $providerBalance;
+    if (!b || b.status !== 'success' || !b.balance) return null;
+    const infos = b.balance.balance_infos;
+    const info = Array.isArray(infos) && infos.length ? infos[0] : null;
+    if (!info) return null;
+    const total = parseFloat(info.total_balance);
+    const available = b.balance.is_available !== false;
+    const level = (!available || (!isNaN(total) && total < 1)) ? 'critical'
+      : (!isNaN(total) && total < 3) ? 'low' : 'ok';
+    return { currency: info.currency || 'USD', total: info.total_balance, level };
+  });
+
   // State for Telegram linking dialog
   let showTelegramLinkDialog = $state(false);
   let linkingAgentId = $state('');
@@ -516,6 +532,17 @@
       <button class="btn-context" onclick={onOpenFirewallEditor}>
         Firewall and Privacy Rules
       </button>
+
+      {#if balPill}
+        <button
+          class="balance-pill balance-pill-{balPill.level}"
+          onclick={() => getProviderBalance()}
+          title="DeepSeek account balance — click to refresh"
+        >
+          <span class="balance-pill-label">💰 Balance</span>
+          <span class="balance-pill-amount">{balPill.currency} {balPill.total}</span>
+        </button>
+      {/if}
 
       <button class="btn-context" onclick={onOpenProvidersEditor}>
         AI Providers
@@ -1280,6 +1307,31 @@
   }
 
   /* Knowledge Architecture - Context Button */
+  /* DeepSeek balance pill (Phase 2b cut 2) */
+  .balance-pill {
+    width: 100%;
+    padding: 0.5rem 1rem;
+    margin-bottom: 0.5rem;
+    background: #2d3142;
+    color: #fff;
+    border: none;
+    border-left: 4px solid #4caf50;
+    border-radius: 6px;
+    font-size: 0.9rem;
+    cursor: pointer;
+    transition: all 0.2s;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
+  .balance-pill:hover { background: #353a4d; }
+  .balance-pill-label { opacity: 0.85; }
+  .balance-pill-amount { font-weight: 600; font-variant-numeric: tabular-nums; }
+  .balance-pill-low { border-left-color: #ffb300; }
+  .balance-pill-low .balance-pill-amount { color: #ffc107; }
+  .balance-pill-critical { border-left-color: #e53935; }
+  .balance-pill-critical .balance-pill-amount { color: #ff6b6b; }
+
   .btn-context {
     width: 100%;
     padding: 0.75rem 1rem;
