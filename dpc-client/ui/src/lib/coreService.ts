@@ -121,7 +121,7 @@ export type {
 
 import { connectionStatus, nodeStatus, coreMessages } from './services/connection';
 import { p2pMessages, unreadMessageCounts } from './services/messaging';
-import { availableProviders, defaultProviders, providersList, peerProviders, aiResponseWithImage, firewallRulesUpdated } from './services/providers';
+import { availableProviders, defaultProviders, providersList, peerProviders, aiResponseWithImage, firewallRulesUpdated, providerBalance } from './services/providers';
 import { fileTransferOffer, fileTransferProgress, fileTransferComplete, fileTransferCancelled, activeFileTransfers, filePreparationStarted, filePreparationProgress, filePreparationCompleted } from './services/fileTransfer';
 import { voiceOfferReceived, voiceTranscriptionReceived, voiceTranscriptionComplete, voiceTranscriptionConfig, whisperModelLoadingStarted, whisperModelLoaded, whisperModelLoadingFailed, whisperModelUnloaded, whisperModelDownloadRequired, whisperModelDownloadStarted, whisperModelDownloadCompleted, whisperModelDownloadFailed } from './services/voice';
 import { groupChats, groupTextReceived, groupFileReceived, groupInviteReceived, groupUpdated, groupMemberLeft, groupDeleted, groupHistorySynced, groupMessageDeleted, tokenUsageUpdated } from './services/groups';
@@ -135,7 +135,7 @@ import { historyRestored, newSessionProposal, newSessionResult, conversationRese
 // services/providers.ts and re-export it here. See CLAUDE.md "UI Integration Pattern".
 export { connectionStatus, nodeStatus, coreMessages };
 export { p2pMessages, unreadMessageCounts };
-export { availableProviders, defaultProviders, providersList, peerProviders, aiResponseWithImage, firewallRulesUpdated };
+export { availableProviders, defaultProviders, providersList, peerProviders, aiResponseWithImage, firewallRulesUpdated, providerBalance };
 export { fileTransferOffer, fileTransferProgress, fileTransferComplete, fileTransferCancelled, activeFileTransfers, filePreparationStarted, filePreparationProgress, filePreparationCompleted };
 export { voiceOfferReceived, voiceTranscriptionReceived, voiceTranscriptionComplete, voiceTranscriptionConfig, whisperModelLoadingStarted, whisperModelLoaded, whisperModelLoadingFailed, whisperModelUnloaded, whisperModelDownloadRequired, whisperModelDownloadStarted, whisperModelDownloadCompleted, whisperModelDownloadFailed };
 export { groupChats, groupTextReceived, groupFileReceived, groupInviteReceived, groupUpdated, groupMemberLeft, groupDeleted, groupHistorySynced, groupMessageDeleted, tokenUsageUpdated };
@@ -1275,6 +1275,30 @@ export function sendCommand(command: string, payload: any = {}, commandId?: stri
     } catch (error) {
         console.error(`Error sending command '${command}':`, error);
         return false;
+    }
+}
+
+/**
+ * Fetch a pay-per-use provider's account balance (DeepSeek /user/balance) and
+ * publish it to the providerBalance store. Pass an alias to target a specific
+ * provider; omit it to use the active agent/default provider. Returns the
+ * backend result { status, alias?, balance?, message? }; never throws.
+ */
+export async function getProviderBalance(alias?: string): Promise<any> {
+    const pending = sendCommand('get_provider_balance', alias ? { alias } : {});
+    if (pending === false) {
+        const r = { status: 'error', message: 'WebSocket not connected' };
+        providerBalance.set(r);
+        return r;
+    }
+    try {
+        const result = await pending;  // { status, alias, balance } | { status, message }
+        providerBalance.set(result);
+        return result;
+    } catch (e) {
+        const r = { status: 'error', message: e instanceof Error ? e.message : String(e) };
+        providerBalance.set(r);
+        return r;
     }
 }
 

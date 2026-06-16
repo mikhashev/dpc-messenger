@@ -3,7 +3,7 @@
 
 <script lang="ts">
   import { createEventDispatcher } from 'svelte';
-  import { sendCommand, peerProviders } from '$lib/coreService';
+  import { sendCommand, peerProviders, providerBalance, getProviderBalance } from '$lib/coreService';
   import { confirmAsync } from '$lib/utils/dialog';
 
   export let open: boolean = false;
@@ -209,6 +209,35 @@
 
   // Get the config to display (edited or original)
   $: displayConfig = editedConfig || config;
+
+  // --- Account balance (pay-per-use providers, e.g. DeepSeek) — Phase 2b ---
+  const LOW_BALANCE_USD = 3;       // early-warning threshold
+  const CRITICAL_BALANCE_USD = 1;  // urgent threshold
+  let balanceLoading = false;
+
+  async function refreshBalance() {
+    balanceLoading = true;
+    try {
+      await getProviderBalance();
+    } finally {
+      balanceLoading = false;
+    }
+  }
+
+  $: hasPayPerUseProvider = !!displayConfig?.providers?.some((p) => p.type === 'deepseek');
+  $: balResult = $providerBalance;
+  $: balanceUnsupported = !!balResult && balResult.status === 'unsupported';
+  $: balanceError = balResult && balResult.status === 'error' ? (balResult.message || 'error') : '';
+  $: balanceInfo = balResult && balResult.status === 'success' && balResult.balance && Array.isArray(balResult.balance.balance_infos)
+    ? balResult.balance.balance_infos[0] : null;
+  $: balanceAlias = (balResult && balResult.alias) || '';
+  $: balanceCurrency = balanceInfo ? (balanceInfo.currency || 'USD') : 'USD';
+  $: balanceTotal = balanceInfo ? balanceInfo.total_balance : null;
+  $: balanceAvailable = balResult && balResult.balance ? balResult.balance.is_available !== false : true;
+  $: balanceNum = balanceTotal !== null && balanceTotal !== undefined ? parseFloat(balanceTotal) : NaN;
+  $: balanceLevel = (!balanceAvailable || (!isNaN(balanceNum) && balanceNum < CRITICAL_BALANCE_USD)) ? 'critical'
+    : (!isNaN(balanceNum) && balanceNum < LOW_BALANCE_USD) ? 'low'
+    : 'ok';
 
   // Delete provider
   async function deleteProvider(index: number) {
@@ -576,6 +605,34 @@
 
       <div class="modal-body">
         {#if selectedTab === 'list'}
+          <!-- Account balance (pay-per-use providers, e.g. DeepSeek) — Phase 2b -->
+          {#if hasPayPerUseProvider}
+            <div class="balance-card balance-{balanceLevel}">
+              <div class="balance-row">
+                <span class="balance-label">
+                  Account balance{balanceAlias ? ` (${balanceAlias})` : ''}
+                </span>
+                <button class="btn btn-edit" on:click={refreshBalance} disabled={balanceLoading}>
+                  {balanceLoading ? 'Checking…' : 'Check balance'}
+                </button>
+              </div>
+              {#if balanceError}
+                <div class="balance-value balance-err">⚠ {balanceError}</div>
+              {:else if balanceUnsupported}
+                <div class="balance-value balance-muted">No balance-capable provider</div>
+              {:else if balanceTotal !== null && balanceTotal !== undefined}
+                <div class="balance-value">
+                  {balanceCurrency} {balanceTotal}
+                  {#if balanceLevel === 'critical'}<span class="balance-flag">⚠ critical (&lt; ${CRITICAL_BALANCE_USD})</span>
+                  {:else if balanceLevel === 'low'}<span class="balance-flag">low (&lt; ${LOW_BALANCE_USD})</span>{/if}
+                  {#if !balanceAvailable}<span class="balance-flag">— insufficient</span>{/if}
+                </div>
+              {:else}
+                <div class="balance-value balance-muted">Not checked yet — click “Check balance”.</div>
+              {/if}
+            </div>
+          {/if}
+
           <!-- Provider Cards -->
           <div class="providers-list">
             {#each displayConfig.providers as provider, i (i)}
@@ -1526,6 +1583,30 @@
 {/if}
 
 <style>
+  /* Account balance card (Phase 2b) */
+  .balance-card {
+    margin: 0 0 1rem;
+    padding: 0.6rem 0.85rem;
+    border: 1px solid var(--border-color, #444);
+    border-radius: 8px;
+    background: var(--surface-2, rgba(255, 255, 255, 0.03));
+  }
+  .balance-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.75rem;
+  }
+  .balance-label { font-weight: 600; opacity: 0.85; }
+  .balance-value { margin-top: 0.4rem; font-size: 1.05rem; font-variant-numeric: tabular-nums; }
+  .balance-flag { margin-left: 0.5rem; font-size: 0.85rem; opacity: 0.9; }
+  .balance-muted { opacity: 0.6; font-size: 0.9rem; }
+  .balance-err { color: #e57373; }
+  .balance-ok { border-left: 4px solid #4caf50; }
+  .balance-low { border-left: 4px solid #ffb300; }
+  .balance-low .balance-value { color: #ffb300; }
+  .balance-critical { border-left: 4px solid #e53935; }
+  .balance-critical .balance-value { color: #e53935; }
   .modal-overlay {
     position: fixed;
     top: 0;

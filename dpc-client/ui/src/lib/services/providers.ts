@@ -21,3 +21,9 @@ export const aiResponseWithImage = writable<AIResponseWithImageEvent | null>(nul
 // Free-form JSON (full privacy_rules.json object).
 // See CLAUDE.md "UI Integration Pattern for New Firewall Fields" for usage pattern.
 export const firewallRulesUpdated = writable<Record<string, any> | null>(null);
+
+// Pay-per-use provider account balance (DeepSeek /user/balance), populated by
+// getProviderBalance() in coreService. Free-form: the backend result dict
+// { status: 'success'|'unsupported'|'error', alias?, balance?, message? } where
+// balance = { is_available, balance_infos: [{currency, total_balance, ...}] }.
+export const providerBalance = writable<any>(null);
