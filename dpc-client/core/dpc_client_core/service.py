@@ -1943,7 +1943,7 @@ class CoreService:
             provider_dict = {
                 "alias": alias,
                 "model": provider.model,
-                "type": provider.__class__.__name__.replace("Provider", ""),  # "Ollama", "OpenAICompatible", etc.
+                "type": provider.config.get("type", "unknown"),
                 "supports_vision": provider.supports_vision(),
                 "context_window": self.llm_manager.get_context_window(provider.model),
             }
