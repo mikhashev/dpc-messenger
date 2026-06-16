@@ -287,3 +287,88 @@ async def test_generate_with_vision_builds_image_url():
     img_block = kwargs["messages"][0]["content"][1]
     assert img_block["type"] == "image_url"
     assert img_block["image_url"]["url"].startswith("data:image/png;base64,")
+
+
+# --- balance endpoint (Phase 2: balance-poll) ---
+
+def test_supports_balance():
+    assert _make().supports_balance() is True
+
+
+@pytest.mark.asyncio
+async def test_get_balance_calls_user_balance_endpoint(monkeypatch):
+    """get_balance() GETs {base_url}/user/balance with a bearer token and returns
+    the raw DeepSeek payload."""
+    p = _make()
+    captured = {}
+
+    class _Resp:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {
+                "is_available": True,
+                "balance_infos": [{
+                    "currency": "USD", "total_balance": "7.52",
+                    "granted_balance": "0.00", "topped_up_balance": "7.52",
+                }],
+            }
+
+    class _Client:
+        def __init__(self, *a, **k):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def get(self, url, headers=None):
+            captured["url"] = url
+            captured["headers"] = headers
+            return _Resp()
+
+    import httpx
+    monkeypatch.setattr(httpx, "AsyncClient", _Client)
+
+    result = await p.get_balance()
+    assert result["is_available"] is True
+    assert result["balance_infos"][0]["total_balance"] == "7.52"
+    assert captured["url"] == "https://api.deepseek.com/user/balance"
+    assert captured["headers"]["Authorization"] == "Bearer test-key"
+
+
+@pytest.mark.asyncio
+async def test_get_balance_strips_v1_from_base_url(monkeypatch):
+    """A /v1 base_url (valid for chat) must not leak into the balance URL —
+    /user/balance lives at the API root, not under /v1."""
+    p = _make({"base_url": "https://api.deepseek.com/v1"})
+    captured = {}
+
+    class _Resp:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {"is_available": True, "balance_infos": []}
+
+    class _Client:
+        def __init__(self, *a, **k):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def get(self, url, headers=None):
+            captured["url"] = url
+            return _Resp()
+
+    import httpx
+    monkeypatch.setattr(httpx, "AsyncClient", _Client)
+    await p.get_balance()
+    assert captured["url"] == "https://api.deepseek.com/user/balance"

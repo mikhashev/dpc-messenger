@@ -61,6 +61,9 @@ class DeepSeekProvider(AIProvider):
 
         base_url = config.get("base_url", DEEPSEEK_DEFAULT_BASE_URL)
         self.client = AsyncOpenAI(api_key=api_key, base_url=base_url)
+        # Kept for the REST balance endpoint (/user/balance); the openai SDK doesn't cover it.
+        self._api_key = api_key
+        self._base_url = base_url
 
         self.max_tokens = config.get("max_tokens", 8192)
 
@@ -97,6 +100,29 @@ class DeepSeekProvider(AIProvider):
 
     def get_last_thinking(self) -> Optional[str]:
         return self._last_thinking
+
+    def supports_balance(self) -> bool:
+        return True
+
+    async def get_balance(self) -> Dict[str, Any]:
+        """Query the DeepSeek account balance via GET /user/balance.
+
+        Returns the raw DeepSeek payload: {is_available, balance_infos: [{currency,
+        total_balance, granted_balance, topped_up_balance}]}. Balance is shared across
+        every provider on the same key (cost lands on the account, not the model).
+        The balance endpoint lives at the API root, so a trailing /v1 in base_url (a
+        valid chat base_url) is stripped. Raises on transport/HTTP errors.
+        """
+        import httpx
+        base = self._base_url.rstrip("/")
+        if base.endswith("/v1"):
+            base = base[: -len("/v1")]
+        url = base + "/user/balance"
+        headers = {"Authorization": f"Bearer {self._api_key}"}
+        async with httpx.AsyncClient(timeout=20) as client:
+            resp = await client.get(url, headers=headers)
+            resp.raise_for_status()
+            return resp.json()
 
     # --- retry helpers (DeepSeek is pay-per-token; no 1313 Fair-Usage penalty) ---
 

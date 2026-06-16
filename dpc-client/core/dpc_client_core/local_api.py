@@ -53,6 +53,7 @@ ALLOWED_COMMANDS: frozenset = frozenset({
     "save_providers_config",
     "query_ollama_model_info",
     "query_remote_providers",
+    "get_provider_balance",
     # Personal context & instructions
     "get_personal_context",
     "save_personal_context",

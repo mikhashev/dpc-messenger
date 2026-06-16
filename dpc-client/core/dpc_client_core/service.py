@@ -1869,6 +1869,45 @@ class CoreService:
                 "message": str(e)
             }
 
+    async def get_provider_balance(self, alias: Optional[str] = None) -> Dict[str, Any]:
+        """
+        Query a pay-per-use provider's account balance (e.g. DeepSeek /user/balance).
+
+        Resolves `alias` (or the agent/default provider) to a provider instance and
+        calls its get_balance(). Subscription/local providers report 'unsupported'.
+
+        Returns {status: success|unsupported|error, alias, balance|message}.
+        """
+        def _can(p) -> bool:
+            return bool(getattr(p, "supports_balance", lambda: False)())
+
+        try:
+            providers = getattr(self.llm_manager, "providers", {}) or {}
+            provider = None
+            if alias:
+                provider = providers.get(alias)
+                if provider is None:
+                    return {"status": "error", "message": f"Unknown provider alias '{alias}'"}
+            else:
+                for cand in (getattr(self.llm_manager, "agent_provider", None),
+                             self.llm_manager.default_provider):
+                    p = providers.get(cand) if cand else None
+                    if p is not None and _can(p):
+                        provider, alias = p, cand
+                        break
+                if provider is None:
+                    for a, p in providers.items():
+                        if _can(p):
+                            provider, alias = p, a
+                            break
+            if provider is None or not _can(provider):
+                return {"status": "unsupported", "message": "No balance-capable provider configured"}
+            balance = await provider.get_balance()
+            return {"status": "success", "alias": alias, "balance": balance}
+        except Exception as e:
+            logger.error("get_provider_balance failed: %s", e)
+            return {"status": "error", "message": str(e)}
+
     async def get_default_providers(self) -> Dict[str, Any]:
         """
         Get default provider configuration for UI initialization.

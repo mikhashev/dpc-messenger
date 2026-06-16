@@ -140,5 +140,21 @@ class AIProvider:
         """
         return {}
 
+    def supports_balance(self) -> bool:
+        """Returns True if this provider can report account balance (pay-per-use APIs)."""
+        return False
+
+    async def get_balance(self) -> Dict[str, Any]:
+        """
+        Return the provider account balance.
+
+        Returns:
+            Provider-specific balance payload.
+
+        Raises:
+            NotImplementedError: If the provider has no balance API (subscription/local).
+        """
+        raise NotImplementedError(f"Balance API not implemented for {self.__class__.__name__}")
+
     def get_state(self) -> dict:
         return {"alias": self.alias, "model": self.model, "type": self.config.get("type")}
