@@ -142,7 +142,7 @@ class DpcLlmAdapter:
         messages: List[Dict[str, Any]],
         model: Optional[str] = None,
         tools: Optional[List[Dict[str, Any]]] = None,
-        reasoning_effort: str = "medium",
+        reasoning_effort: Optional[str] = None,
         max_tokens: int = 4096,
         on_stream_chunk: Optional[Callable[[str, str], None]] = None,
         conversation_id: Optional[str] = None,
@@ -235,7 +235,7 @@ class DpcLlmAdapter:
             log.debug("Using native tool calling path for provider '%s'", alias)
             try:
                 return await self._chat_native_tools(
-                    provider, messages, tools, on_stream_chunk, conversation_id
+                    provider, messages, tools, on_stream_chunk, conversation_id, reasoning_effort
                 )
             except Exception as e:
                 log.warning(
@@ -438,6 +438,7 @@ class DpcLlmAdapter:
         tools: List[Dict[str, Any]],
         on_stream_chunk: Optional[Callable[[str, str], None]] = None,
         conversation_id: Optional[str] = None,
+        reasoning_effort: Optional[str] = None,
     ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         """
         Native Anthropic SDK tool calling path.
@@ -456,12 +457,16 @@ class DpcLlmAdapter:
             len(messages), len(anthropic_messages), len(anthropic_tools),
         )
 
+        gw_kwargs: Dict[str, Any] = {}
+        if reasoning_effort is not None:
+            gw_kwargs["reasoning_effort"] = reasoning_effort
         raw = await provider.generate_with_tools(
             messages=anthropic_messages,
             tools=anthropic_tools,
             system=system,
             on_chunk=on_stream_chunk,
             conversation_id=conversation_id,
+            **gw_kwargs,
         )
 
         # Convert Anthropic tool_use blocks → Ouroboros tool_calls format

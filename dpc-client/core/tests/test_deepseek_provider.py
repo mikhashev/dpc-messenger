@@ -69,6 +69,29 @@ def test_reasoning_effort_mapping():
     assert "reasoning_effort" not in p_off._build_extra_body()
 
 
+def test_reasoning_effort_per_call_override():
+    """A per-call reasoning_effort (e.g. a UI toggle) wins over the provider-config
+    default; None/invalid falls back to config so callers passing nothing keep it.
+    Regression guard: chat()'s old 'medium' default must not silently downgrade max."""
+    p = _make({"reasoning_effort": "max"})
+    # No override / None -> config value survives.
+    assert p._build_extra_body()["reasoning_effort"] == "max"
+    assert p._build_extra_body(None)["reasoning_effort"] == "max"
+    # Explicit override wins.
+    assert p._build_extra_body("high")["reasoning_effort"] == "high"
+    assert p._build_extra_body("xhigh")["reasoning_effort"] == "max"
+    # Invalid / "auto" override -> fall back to config (graceful, no downgrade).
+    assert p._build_extra_body("auto")["reasoning_effort"] == "max"
+    assert p._build_extra_body("bogus")["reasoning_effort"] == "max"
+    # No config effort: omit unless overridden per-call.
+    p2 = _make()
+    assert "reasoning_effort" not in p2._build_extra_body()
+    assert p2._build_extra_body("high")["reasoning_effort"] == "high"
+    # Per-call effort still suppressed when thinking disabled.
+    p_off = _make({"thinking": {"enabled": False}})
+    assert "reasoning_effort" not in p_off._build_extra_body("max")
+
+
 # --- reasoning_content echo (THE critical DeepSeek quirk) ---
 
 def test_reasoning_content_echo_pads_placeholder_on_tool_calls():

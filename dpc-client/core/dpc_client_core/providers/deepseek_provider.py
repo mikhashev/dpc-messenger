@@ -73,10 +73,7 @@ class DeepSeekProvider(AIProvider):
         self.thinking_enabled = config.get("thinking", {}).get("enabled", True)
 
         # Optional reasoning effort (top-of-body via extra_body). xhigh -> max.
-        raw_effort = (config.get("reasoning_effort") or "").strip().lower()
-        if raw_effort == "xhigh":
-            raw_effort = "max"
-        self._reasoning_effort = raw_effort if raw_effort in _VALID_REASONING_EFFORT else None
+        self._reasoning_effort = self._normalize_effort(config.get("reasoning_effort"))
 
         self.top_p = config.get("top_p")  # None => API default
         self._temperature_explicit = config.get("temperature")  # None unless user set it
@@ -167,14 +164,27 @@ class DeepSeekProvider(AIProvider):
             f"({elapsed}s elapsed): {last_error}"
         ) from last_error
 
-    def _build_extra_body(self) -> Dict[str, Any]:
+    @staticmethod
+    def _normalize_effort(value: Optional[str]) -> Optional[str]:
+        """Strip/lowercase, map xhigh -> max, validate against the accepted set.
+        Returns None for empty/invalid (-> server default)."""
+        raw = (value or "").strip().lower()
+        if raw == "xhigh":
+            raw = "max"
+        return raw if raw in _VALID_REASONING_EFFORT else None
+
+    def _build_extra_body(self, reasoning_effort: Optional[str] = None) -> Dict[str, Any]:
         """DeepSeek thinking toggle. Always sent — {type: disabled} is required to
-        override the default-on thinking; reasoning_effort only when enabled."""
+        override the default-on thinking. A per-call reasoning_effort (e.g. a UI
+        toggle) wins over the provider-config default; a None/invalid override falls
+        back to the config value, so callers that pass nothing keep the configured
+        effort (no silent downgrade). Either is only sent when thinking is enabled."""
         body: Dict[str, Any] = {
             "thinking": {"type": "enabled" if self.thinking_enabled else "disabled"}
         }
-        if self.thinking_enabled and self._reasoning_effort:
-            body["reasoning_effort"] = self._reasoning_effort
+        effort = self._normalize_effort(reasoning_effort) or self._reasoning_effort
+        if self.thinking_enabled and effort:
+            body["reasoning_effort"] = effort
         return body
 
     def _effective_temperature(self, override: Optional[float] = None) -> float:
@@ -386,6 +396,7 @@ class DeepSeekProvider(AIProvider):
         system: Union[str, List[Dict[str, Any]]] = "",
         on_chunk: Optional[callable] = None,
         conversation_id: Optional[str] = None,
+        reasoning_effort: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Native tool calling. Returns {content, tool_calls_raw, thinking, usage}
@@ -413,6 +424,7 @@ class DeepSeekProvider(AIProvider):
                             break
 
         async def _call():
+            extra_body = self._build_extra_body(reasoning_effort)
             params: Dict[str, Any] = {
                 "model": self.model,
                 "max_tokens": self.max_tokens,
@@ -420,7 +432,7 @@ class DeepSeekProvider(AIProvider):
                 "tools": openai_tools,
                 "tool_choice": "auto",
                 "temperature": self._effective_temperature(),
-                "extra_body": self._build_extra_body(),
+                "extra_body": extra_body,
             }
             if self.top_p is not None:
                 params["top_p"] = self.top_p
@@ -475,10 +487,10 @@ class DeepSeekProvider(AIProvider):
                 "prompt_cache_miss_tokens": _miss or 0,
             }
             logger.info(
-                "DeepSeek usage: prompt=%d (hit=%d/miss=%d), completion=%d, tool_calls=%d",
+                "DeepSeek usage: prompt=%d (hit=%d/miss=%d), completion=%d, tool_calls=%d, effort=%s",
                 usage["prompt_tokens"], usage["prompt_cache_hit_tokens"],
                 usage["prompt_cache_miss_tokens"], usage["completion_tokens"],
-                len(tool_calls_raw),
+                len(tool_calls_raw), extra_body.get("reasoning_effort", "server-default"),
             )
             return {
                 "content": content,
