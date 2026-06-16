@@ -913,6 +913,19 @@ class DpcAgentManager:
                 if self._daily_tokens_used >= quota_limit:
                     return f"⚠️ Agent quota exceeded ({self._daily_tokens_used:,}/{quota_limit:,} tokens today). Reset at midnight UTC."
 
+            reasoning_effort = None
+            try:
+                if conversation_id and conversation_id.startswith("group-"):
+                    gm = getattr(self.service, "group_manager", None)
+                    grp = gm.get_group(conversation_id) if gm else None
+                    if grp is not None:
+                        reasoning_effort = getattr(grp, "reasoning_effort", None)
+                if not reasoning_effort and self.agent_id:
+                    from dpc_client_core.dpc_agent.utils import load_agent_config
+                    reasoning_effort = (load_agent_config(self.agent_id) or {}).get("reasoning_effort")
+            except Exception:
+                reasoning_effort = None
+
             try:
                 interrupt_ev = asyncio.Event()
                 self._interrupt_events[conversation_id] = interrupt_ev
@@ -939,6 +952,7 @@ class DpcAgentManager:
                         "node_id": getattr(self.service.p2p_manager, "node_id", "") or "",
                     },
                     trigger_message_id=trigger_message_id,
+                    reasoning_effort=reasoning_effort,
                 )
             finally:
                 self._interrupt_events.pop(conversation_id, None)

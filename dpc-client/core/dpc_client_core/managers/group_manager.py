@@ -32,6 +32,7 @@ class GroupMetadata:
     agent_names: Dict[str, Dict[str, str]] = field(default_factory=dict)
     version: int = 1
     is_discord_bridge: bool = False
+    reasoning_effort: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -49,6 +50,7 @@ class GroupMetadata:
             agent_names=data.get("agent_names", {}),
             version=data.get("version", 1),
             is_discord_bridge=data.get("is_discord_bridge", False),
+            reasoning_effort=data.get("reasoning_effort"),
         )
 
 
@@ -366,6 +368,16 @@ class GroupManager:
         self._save_group(group_id)
         return group
 
+    def set_group_reasoning_effort(self, group_id: str, effort: Optional[str]) -> Optional[GroupMetadata]:
+        """Set (or clear, when effort is None) a group's reasoning_effort override."""
+        group = self._groups.get(group_id)
+        if not group:
+            return None
+        group.reasoning_effort = effort
+        group.version += 1
+        self._save_group(group_id)
+        return group
+
     def get_group(self, group_id: str) -> Optional[GroupMetadata]:
         """Get group metadata by ID."""
         return self._groups.get(group_id)
@@ -508,6 +520,7 @@ class GroupManager:
         remote = GroupMetadata.from_dict(remote_group)
 
         local = self._groups.get(remote.group_id)
+        remote.reasoning_effort = local.reasoning_effort if local else None
         if local and local.version > remote.version:
             logger.debug(
                 "Ignoring GROUP_SYNC for %s: local v%d > remote v%d",

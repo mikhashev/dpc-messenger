@@ -5013,6 +5013,26 @@ class CoreService:
         })
         return {"status": "success", "topic": topic}
 
+    async def set_group_reasoning_effort(self, group_id: str, reasoning_effort: Optional[str] = None) -> Dict[str, Any]:
+        """Set a local, group-scoped reasoning_effort override for this node's agents
+        (low/medium/high/max, or 'auto'/empty to clear -> fall back to provider config).
+        Local operational knob — applies only to this node's agents, not synced to peers."""
+        group = self.group_manager.get_group(group_id)
+        if not group:
+            return {"status": "error", "message": f"Group {group_id} not found"}
+        effort = (reasoning_effort or "").strip().lower() or None
+        if effort in ("auto", "default"):
+            effort = None
+        if effort is not None and effort not in ("low", "medium", "high", "max"):
+            return {"status": "error", "message": f"Invalid reasoning_effort: {reasoning_effort}"}
+        updated = self.group_manager.set_group_reasoning_effort(group_id, effort)
+        if not updated:
+            return {"status": "error", "message": "Failed to set reasoning_effort"}
+        await self.local_api.broadcast_event("group_updated", {
+            "group_id": group_id, "reasoning_effort": effort,
+        })
+        return {"status": "success", "reasoning_effort": effort}
+
     async def leave_group(self, group_id: str) -> Dict[str, Any]:
         """Leave a group and notify remaining members."""
         try:

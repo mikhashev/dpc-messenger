@@ -443,6 +443,7 @@ async def run_llm_loop(
     on_stream_chunk: Optional[Callable[[str, str], None]] = None,
     conversation_id: Optional[str] = None,
     stop_event: Optional[asyncio.Event] = None,
+    reasoning_effort: Optional[str] = None,
 ) -> Tuple[str, Dict[str, Any], Dict[str, Any]]:
     """
     Core LLM-with-tools loop.
@@ -543,6 +544,7 @@ async def run_llm_loop(
                     tools=tool_schemas,
                     on_stream_chunk=on_stream_chunk,
                     conversation_id=conversation_id,
+                    reasoning_effort=reasoning_effort,
                 )
                 round_prompt_tokens = usage.get("prompt_tokens", 0)
                 accumulated_usage["prompt_tokens"] += round_prompt_tokens

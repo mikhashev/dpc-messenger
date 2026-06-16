@@ -196,6 +196,7 @@ class DpcAgent:
         stop_event: Optional[asyncio.Event] = None,
         reader_identity: Optional[Dict[str, str]] = None,
         trigger_message_id: Optional[str] = None,
+        reasoning_effort: Optional[str] = None,
     ) -> str:
         """
         Process a user message and return response.
@@ -357,6 +358,7 @@ class DpcAgent:
             on_stream_chunk=on_stream_chunk,
             conversation_id=conversation_id,
             stop_event=stop_event,
+            reasoning_effort=reasoning_effort,
         )
 
         # Store last usage and trace for session state access by agent_manager
