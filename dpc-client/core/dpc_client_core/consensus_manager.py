@@ -352,11 +352,8 @@ class ConsensusManager:
                 },
                 "votes": [],
             }
-            if self.broadcast:
-                await self.broadcast({
-                    "command": "KNOWLEDGE_COMMIT_RESULT",
-                    "payload": result_payload
-                })
+            if self.on_result_broadcast:
+                await self.on_result_broadcast(result_payload, proposal.participants)
             return
 
         # Determine outcome
