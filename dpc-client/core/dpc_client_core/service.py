@@ -4039,6 +4039,7 @@ class CoreService:
                         tokens_after_last_response_at = token_stats.get("tokens_after_last_response_at")
                         return {
                             "status": "success",
+                            "conversation_id": conversation_id,
                             "messages": messages,
                             "message_count": len(messages),
                             "tokens_used": token_stats.get("current_token_count", history_tokens),
@@ -4075,6 +4076,7 @@ class CoreService:
                         logger.info("Loaded %d messages from disk for %s (%s)", len(messages), conversation_id, conv_dir.name)
                         return {
                             "status": "success",
+                            "conversation_id": conversation_id,
                             "messages": messages,
                             "message_count": len(messages),
                             "tokens_used": history_tokens,
@@ -4088,6 +4090,7 @@ class CoreService:
                 logger.debug("No conversation monitor found for %s, returning empty history", conversation_id)
                 return {
                     "status": "success",
+                    "conversation_id": conversation_id,
                     "messages": [],
                     "message_count": 0
                 }
@@ -4167,6 +4170,7 @@ class CoreService:
                 context_agents = self._group_agent_context_list(conversation_id)
             return {
                 "status": "success",
+                "conversation_id": conversation_id,
                 "messages": messages,
                 "message_count": len(messages),
                 "tokens_used": tokens_used,
