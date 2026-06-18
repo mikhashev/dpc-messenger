@@ -122,6 +122,12 @@ docs/BACKUP_RESTORE.md
 dpc-client/core/dpc_client_core/backup_manager.py
 dpc-client/core/dpc_client_core/cli_backup.py
 
+# 17b. Local AR-evaluation diagnostic scripts (internal tooling, not for public repo)
+dpc-client/core/analyze_active_recall.py
+dpc-client/core/ar_phase1_retriever.py
+dpc-client/core/ar_phase2_faithfulness.py
+dpc-client/core/ar_disc_test_iris.py
+
 # 18. Internal backlog (security-sensitive, not for public repo)
 # Triaged task list for Mike + Ark + CC. Contains unpatched security findings
 # and WIP architecture decisions. See conversations/ for decision history.
