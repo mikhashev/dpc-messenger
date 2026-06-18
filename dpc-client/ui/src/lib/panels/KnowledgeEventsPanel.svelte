@@ -139,24 +139,30 @@
     }
   });
 
-  // Handle personal context updates (Phase 7 — "Updated" status indicator)
+  // Handle personal context updates (Phase 7 — "Updated" status indicator).
+  // Dedup on hash: acting on an unchanged hash feeds the upstream $state write
+  // back into the reactive graph (see peer effect below — observed loop).
+  let lastContextHash = '';
   $effect(() => {
     if ($contextUpdated) {
       const { context_hash } = $contextUpdated;
-      if (context_hash) {
+      if (context_hash && context_hash !== lastContextHash) {
+        lastContextHash = context_hash;
         onUpdateContextHash(context_hash);
-        console.log(`[Context Updated] New hash: ${context_hash.slice(0, 8)}...`);
       }
     }
   });
 
-  // Handle peer context updates (Phase 7 — "Updated" status indicators)
+  // Handle peer context updates (Phase 7 — "Updated" status indicators).
+  // Dedup is load-bearing: onUpdatePeerContextHash reassigns a new Map upstream,
+  // which without this guard spun the effect ~3000x/s on a single update.
+  const lastPeerContextHash = new Map<string, string>();
   $effect(() => {
     if ($peerContextUpdated) {
       const { node_id, context_hash } = $peerContextUpdated;
-      if (node_id && context_hash) {
+      if (node_id && context_hash && lastPeerContextHash.get(node_id) !== context_hash) {
+        lastPeerContextHash.set(node_id, context_hash);
         onUpdatePeerContextHash(node_id, context_hash);
-        console.log(`[Peer Context Updated] ${node_id.slice(0, 15)}... - hash: ${context_hash.slice(0, 8)}...`);
       }
     }
   });

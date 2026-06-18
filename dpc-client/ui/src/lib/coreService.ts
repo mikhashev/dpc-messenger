@@ -420,7 +420,6 @@ export async function connectToCoreService() {
                 }
                 // Phase 7: Handle peer context update (for status indicators)
                 else if (message.event === "peer_context_updated") {
-                    console.log("Peer context updated:", message.payload);
                     peerContextUpdated.set(message.payload);
                 }
                 // Knowledge integrity warnings (v0.19.2 - startup tamper/corruption detection)
@@ -1214,6 +1213,9 @@ export function sendCommand(command: string, payload: any = {}, commandId?: stri
                 } else if (command === 'ai_assisted_instruction_creation_remote') {
                     // AI instruction creation timeout: 60s (remote LLM processing can take time)
                     timeout = 60000;
+                } else if (command === 'end_conversation_session') {
+                    // 180s: knowledge extraction + consensus exceeds the 60s default on groups
+                    timeout = 180000;
                 } else if (command === 'transcribe_audio') {
                     // Voice transcription timeout: 240s (v0.13.1+)
                     // First use: model download (~3GB, 1-2min) + load (~20s) + compile (~30s) + transcribe (~5s)

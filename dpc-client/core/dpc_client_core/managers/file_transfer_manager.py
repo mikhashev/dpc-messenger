@@ -605,6 +605,16 @@ class FileTransferManager:
                     logger.error(f"Chunk {chunk_index} failed {transfer.max_retries} times, aborting transfer")
                     transfer.status = TransferStatus.FAILED
                     await self._send_file_cancel(node_id, transfer_id, "chunk_verification_failed")
+                    # Notify local UI so the progress toast resolves (other cancel paths do this)
+                    if self.local_api:
+                        await self.local_api.broadcast_event("file_transfer_cancelled", {
+                            "transfer_id": transfer_id,
+                            "node_id": node_id,
+                            "filename": transfer.filename,
+                            "direction": transfer.direction,
+                            "reason": "chunk_verification_failed",
+                            "status": "cancelled"
+                        })
                     return
                 else:
                     # Send retry request for this chunk
