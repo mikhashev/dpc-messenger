@@ -110,6 +110,7 @@ export interface AgentInfo {
     created_at: string;
     updated_at?: string;
     compute_host?: string;
+    reasoning_effort?: string;
     // Telegram integration fields (v0.22.0+)
     telegram_enabled?: boolean;
     telegram_bot_token?: string;
@@ -133,6 +134,7 @@ export interface AgentConfig {
     updated_at?: string;
     budget_usd?: number;
     max_rounds?: number;
+    reasoning_effort?: string;
 }
 
 // --- File Transfer ---
@@ -159,6 +161,7 @@ export interface GroupChat {
     agents?: Record<string, string[]>; // node_id -> agent_ids
     agent_names?: Record<string, Record<string, string>>; // node_id -> {agent_id -> name}
     version?: number;
+    reasoning_effort?: string;
 }
 
 // --- Node / Connection Status ---

@@ -162,6 +162,28 @@
       "_rate_limits": "Concurrency-based (2-20 concurrent requests depending on model)"
     },
 
+    "deepseek": {
+      "_comment": "DeepSeek pay-per-token (OpenAI-compatible) - agents' fallback when Z.AI GLM Coding Plan trips Fair-Usage 1313. High concurrency (V4-Flash 2500 / V4-Pro 500), 1M context.",
+      "alias": "deepseek_flash",
+      "type": "deepseek",
+      "model": "deepseek-v4-flash",
+      "api_key_env": "DEEPSEEK_API_KEY",
+      "base_url": "https://api.deepseek.com",
+      "max_tokens": 8192,
+      "thinking": {
+        "enabled": true
+      },
+      "context_window": 1000000,
+      "_setup": "Get API key at https://platform.deepseek.com — set: export DEEPSEEK_API_KEY='sk-...'",
+      "_note": "OpenAI-compatible endpoint. V4 thinking is default-on; the provider auto-echoes reasoning_content on tool-call replays (DeepSeek requires it, else round-2 HTTP 400).",
+      "_models": {
+        "deepseek-v4-flash": "Cheap default — in $0.14/1M (cache-miss), out $0.28/1M, concurrency 2500",
+        "deepseek-v4-pro": "Higher quality — in $0.435/1M, out $0.87/1M, concurrency 500"
+      },
+      "_thinking": "thinking.enabled=false uses non-thinking mode (sends {type: disabled}); optional reasoning_effort: 'high' | 'max'",
+      "_pricing_note": "Pay-per-token, no Fair-Usage throttle (unlike Z.AI Coding Plan)"
+    },
+
     "openrouter": {
       "alias": "openrouter",
       "type": "openai_compatible",
@@ -284,7 +306,7 @@
     "_comment": "Reference guide for provider configuration fields",
     "common_fields": {
       "alias": "User-friendly name for the provider (must be unique)",
-      "type": "Provider type: 'ollama', 'openai_compatible', 'anthropic', 'zai', 'local_whisper', 'gemini', 'github_models', or 'gigachat'",
+      "type": "Provider type: 'ollama', 'openai_compatible', 'anthropic', 'zai', 'zai_coding', 'deepseek', 'local_whisper', 'gemini', 'github_models', or 'gigachat'",
       "model": "Model identifier (e.g., 'llama3.1:8b', 'gpt-4o', 'claude-3-5-sonnet-20240620', 'glm-4.7', 'openai/whisper-large-v3')",
       "context_window": "Optional: Override default context window size in tokens",
       "temperature": "Optional: Model creativity/randomness (0.0-2.0, default: 0.7). Lower = deterministic, higher = creative"
@@ -306,6 +328,14 @@
       "base_url": "API endpoint URL (default: https://api.z.ai/api/anthropic)",
       "max_tokens": "Maximum tokens in response (default: 8192)",
       "thinking": "Object with 'enabled' (bool) and 'budget_tokens' (int, default: 10000) for extended thinking"
+    },
+    "deepseek_fields": {
+      "api_key": "API key (plaintext - alternative to api_key_env)",
+      "api_key_env": "Environment variable containing DeepSeek API key (default: DEEPSEEK_API_KEY)",
+      "base_url": "API endpoint URL (default: https://api.deepseek.com, OpenAI-compatible)",
+      "max_tokens": "Maximum tokens in response (default: 8192; DeepSeek V4 max output up to 384K)",
+      "thinking": "Object with 'enabled' (bool, default true). V4 thinking is default-on; disabled sends {type: disabled} to the API",
+      "reasoning_effort": "Optional: 'low' | 'medium' | 'high' | 'max' (xhigh maps to max), applied when thinking enabled"
     },
     "gemini_fields": {
       "api_key_env": "Environment variable containing Google AI Studio API key (default: GEMINI_API_KEY)"

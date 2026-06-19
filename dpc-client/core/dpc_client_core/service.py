@@ -34,7 +34,7 @@ from .__version__ import __version__
 from .firewall import ContextFirewall
 from .hub_client import HubClient
 from .p2p_manager import P2PManager
-from .llm_manager import LLMManager
+from .llm_manager import LLMManager, PROVIDER_MAP
 from .local_api import LocalApiServer
 from .file_server import FileServer
 from .context_cache import ContextCache
@@ -1869,6 +1869,45 @@ class CoreService:
                 "message": str(e)
             }
 
+    async def get_provider_balance(self, alias: Optional[str] = None) -> Dict[str, Any]:
+        """
+        Query a pay-per-use provider's account balance (e.g. DeepSeek /user/balance).
+
+        Resolves `alias` (or the agent/default provider) to a provider instance and
+        calls its get_balance(). Subscription/local providers report 'unsupported'.
+
+        Returns {status: success|unsupported|error, alias, balance|message}.
+        """
+        def _can(p) -> bool:
+            return bool(getattr(p, "supports_balance", lambda: False)())
+
+        try:
+            providers = getattr(self.llm_manager, "providers", {}) or {}
+            provider = None
+            if alias:
+                provider = providers.get(alias)
+                if provider is None:
+                    return {"status": "error", "message": f"Unknown provider alias '{alias}'"}
+            else:
+                for cand in (getattr(self.llm_manager, "agent_provider", None),
+                             self.llm_manager.default_provider):
+                    p = providers.get(cand) if cand else None
+                    if p is not None and _can(p):
+                        provider, alias = p, cand
+                        break
+                if provider is None:
+                    for a, p in providers.items():
+                        if _can(p):
+                            provider, alias = p, a
+                            break
+            if provider is None or not _can(provider):
+                return {"status": "unsupported", "message": "No balance-capable provider configured"}
+            balance = await provider.get_balance()
+            return {"status": "success", "alias": alias, "balance": balance}
+        except Exception as e:
+            logger.error("get_provider_balance failed: %s", e)
+            return {"status": "error", "message": str(e)}
+
     async def get_default_providers(self) -> Dict[str, Any]:
         """
         Get default provider configuration for UI initialization.
@@ -1904,7 +1943,7 @@ class CoreService:
             provider_dict = {
                 "alias": alias,
                 "model": provider.model,
-                "type": provider.__class__.__name__.replace("Provider", ""),  # "Ollama", "OpenAICompatible", etc.
+                "type": provider.config.get("type", "unknown"),
                 "supports_vision": provider.supports_vision(),
                 "context_window": self.llm_manager.get_context_window(provider.model),
             }
@@ -2150,7 +2189,7 @@ class CoreService:
 
             if "type" not in provider:
                 errors.append(f"{prefix}: Missing 'type'")
-            elif provider["type"] not in ["ollama", "openai_compatible", "anthropic", "zai", "local_whisper", "dpc_agent", "remote_peer"]:
+            elif provider["type"] not in PROVIDER_MAP:
                 errors.append(f"{prefix}: Invalid type '{provider['type']}'")
 
             # Model is required for all types except dpc_agent and remote_peer
@@ -4000,6 +4039,7 @@ class CoreService:
                         tokens_after_last_response_at = token_stats.get("tokens_after_last_response_at")
                         return {
                             "status": "success",
+                            "conversation_id": conversation_id,
                             "messages": messages,
                             "message_count": len(messages),
                             "tokens_used": token_stats.get("current_token_count", history_tokens),
@@ -4036,6 +4076,7 @@ class CoreService:
                         logger.info("Loaded %d messages from disk for %s (%s)", len(messages), conversation_id, conv_dir.name)
                         return {
                             "status": "success",
+                            "conversation_id": conversation_id,
                             "messages": messages,
                             "message_count": len(messages),
                             "tokens_used": history_tokens,
@@ -4049,6 +4090,7 @@ class CoreService:
                 logger.debug("No conversation monitor found for %s, returning empty history", conversation_id)
                 return {
                     "status": "success",
+                    "conversation_id": conversation_id,
                     "messages": [],
                     "message_count": 0
                 }
@@ -4128,6 +4170,7 @@ class CoreService:
                 context_agents = self._group_agent_context_list(conversation_id)
             return {
                 "status": "success",
+                "conversation_id": conversation_id,
                 "messages": messages,
                 "message_count": len(messages),
                 "tokens_used": tokens_used,
@@ -4638,6 +4681,26 @@ class CoreService:
                             datetime.now(timezone.utc).isoformat(),
                             display_name or agent_id)
 
+    async def broadcast_group_token_usage(self, group_id: str) -> None:
+        """Recompute the worst-agent group counter and push it to the UI (used after a live model switch)."""
+        worst = self._worst_group_agent_context(group_id)
+        if not worst:
+            return
+        tokens_after_last_response, token_limit, tokens_after_last_response_at = worst[:3]
+        context_agent = worst[3] if len(worst) > 3 else ""
+        monitor = self.knowledge_service._get_or_create_conversation_monitor(group_id)
+        history_tokens = sum(len(m.get("content", "") or "") for m in monitor.get_message_history()) // 4
+        await self.local_api.broadcast_event("token_usage_updated", {
+            "conversation_id": group_id,
+            "tokens_used": max(history_tokens, tokens_after_last_response),
+            "token_limit": token_limit,
+            "history_tokens": history_tokens,
+            "tokens_after_last_response": tokens_after_last_response,
+            "tokens_after_last_response_at": tokens_after_last_response_at,
+            "context_agent": context_agent,
+            "context_agents": self._group_agent_context_list(group_id),
+        })
+
     def get_group_agent_context(self, group_id: str, agent_id: str) -> Optional[tuple]:
         return self._group_agent_context.get(group_id, {}).get(agent_id)
 
@@ -4953,6 +5016,26 @@ class CoreService:
             "group_id": group_id, "topic": topic,
         })
         return {"status": "success", "topic": topic}
+
+    async def set_group_reasoning_effort(self, group_id: str, reasoning_effort: Optional[str] = None) -> Dict[str, Any]:
+        """Set a local, group-scoped reasoning_effort override for this node's agents
+        (low/medium/high/max, or 'auto'/empty to clear -> fall back to provider config).
+        Local operational knob — applies only to this node's agents, not synced to peers."""
+        group = self.group_manager.get_group(group_id)
+        if not group:
+            return {"status": "error", "message": f"Group {group_id} not found"}
+        effort = (reasoning_effort or "").strip().lower() or None
+        if effort in ("auto", "default"):
+            effort = None
+        if effort is not None and effort not in ("low", "medium", "high", "max"):
+            return {"status": "error", "message": f"Invalid reasoning_effort: {reasoning_effort}"}
+        updated = self.group_manager.set_group_reasoning_effort(group_id, effort)
+        if not updated:
+            return {"status": "error", "message": "Failed to set reasoning_effort"}
+        await self.local_api.broadcast_event("group_updated", {
+            "group_id": group_id, "reasoning_effort": effort,
+        })
+        return {"status": "success", "reasoning_effort": effort}
 
     async def leave_group(self, group_id: str) -> Dict[str, Any]:
         """Leave a group and notify remaining members."""

@@ -30,6 +30,7 @@ class TestGroupMetadata:
             created_at="2026-03-01T10:00:00Z",
             members=["dpc-node-self-abc", "dpc-node-alice-123"],
             version=1,
+            reasoning_effort="high",
         )
         d = group.to_dict()
         restored = GroupMetadata.from_dict(d)
@@ -38,12 +39,49 @@ class TestGroupMetadata:
         assert restored.topic == group.topic
         assert restored.members == group.members
         assert restored.version == group.version
+        assert restored.reasoning_effort == "high"
 
     def test_from_dict_defaults(self):
         group = GroupMetadata.from_dict({"group_id": "group-x", "name": "X"})
         assert group.topic == ""
         assert group.members == []
         assert group.version == 1
+        assert group.reasoning_effort is None
+
+
+class TestGroupReasoningEffort:
+    def test_set_and_clear_effort(self, manager):
+        group = manager.create_group("Effort", "", [])
+        gid = group.group_id
+        v0 = group.version
+        updated = manager.set_group_reasoning_effort(gid, "max")
+        assert updated.reasoning_effort == "max"
+        assert updated.version == v0 + 1
+        cleared = manager.set_group_reasoning_effort(gid, None)
+        assert cleared.reasoning_effort is None
+
+    def test_effort_persists(self, tmp_dpc_home):
+        m1 = GroupManager(tmp_dpc_home, node_id="dpc-node-self-abc")
+        g = m1.create_group("P", "", [])
+        m1.set_group_reasoning_effort(g.group_id, "high")
+        m2 = GroupManager(tmp_dpc_home, node_id="dpc-node-self-abc")
+        m2.load_from_disk()
+        assert m2.get_group(g.group_id).reasoning_effort == "high"
+
+    def test_set_effort_nonexistent_group(self, manager):
+        assert manager.set_group_reasoning_effort("group-nope", "max") is None
+
+    def test_apply_sync_preserves_local_effort(self, manager):
+        group = manager.create_group("Sync", "", [])
+        gid = group.group_id
+        manager.set_group_reasoning_effort(gid, "low")
+        remote = manager.get_group(gid).to_dict()
+        remote["version"] = remote["version"] + 5
+        remote["reasoning_effort"] = "max"
+        remote["topic"] = "changed remotely"
+        manager.apply_sync(remote)
+        assert manager.get_group(gid).reasoning_effort == "low"
+        assert manager.get_group(gid).topic == "changed remotely"
 
 
 class TestGroupManagerCreate:

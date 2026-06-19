@@ -1,6 +1,6 @@
 # D-PC Messenger Development Roadmap
 
-> **Status:** Alpha | **Last Updated:** June 2026 | **Current Version:** 0.26.0 | **Current Phase:** Phase 2 - Agent Maturity (Track 1 mostly complete, Track 2 in progress, Discord community live)
+> **Status:** Alpha | **Last Updated:** June 2026 | **Current Version:** 0.27.0 | **Current Phase:** Phase 2 - Agent Maturity (Track 1 mostly complete, Track 2 in progress, Discord community live)
 
 ---
 
@@ -21,7 +21,7 @@ D-PC Messenger development:
 **Timeline:** Completed November 2025
 **Scope:** Individual users + 1:1 peer collaboration
 
-**Features:** Direct TLS connections (IPv4/IPv6), WebRTC NAT traversal, Federation Hub (OAuth, signaling), cryptographic node identity (RSA/X.509), encrypted backups (AES-256-GCM), context firewall, AI scope filtering, offline mode, local AI integration (Ollama, OpenAI, Anthropic, Z.AI), remote inference (P2P compute sharing), knowledge commit system (git-like versioning with bias mitigation), personal context model v2.0
+**Features:** Direct TLS connections (IPv4/IPv6), WebRTC NAT traversal, Federation Hub (OAuth, signaling), cryptographic node identity (RSA/X.509), encrypted backups (AES-256-GCM), context firewall, AI scope filtering, offline mode, local AI integration (Ollama, OpenAI, Anthropic, Z.AI incl. GLM Coding Plan, DeepSeek pay-per-token), remote inference (P2P compute sharing), knowledge commit system (git-like versioning with bias mitigation), personal context model v2.0
 
 ---
 

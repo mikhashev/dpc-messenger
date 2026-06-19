@@ -11,7 +11,8 @@ from .providers import (
     AIProvider, ModelNotCachedError, parse_thinking_tags,
     OPENAI_THINKING_MODELS, ANTHROPIC_THINKING_MODELS,
     OllamaProvider, OLLAMA_VISION_MODELS, OLLAMA_THINKING_MODELS,
-    OpenAICompatibleProvider, AnthropicProvider, ZaiProvider,
+    OpenAICompatibleProvider, AnthropicProvider, ZaiProvider, ZaiCodingProvider,
+    DeepSeekProvider,
     LocalWhisperProvider, RemotePeerProvider, DpcAgentProvider,
     GeminiProvider, GitHubModelsProvider, GigaChatProvider,
 )
@@ -41,6 +42,8 @@ PROVIDER_MAP = {
     "openai_compatible": OpenAICompatibleProvider,
     "anthropic": AnthropicProvider,
     "zai": ZaiProvider,
+    "zai_coding": ZaiCodingProvider,  # Z.AI GLM Coding Plan (OpenAI-compatible coding/paas/v4)
+    "deepseek": DeepSeekProvider,  # DeepSeek pay-per-token (OpenAI-compatible, V4 thinking)
     "local_whisper": LocalWhisperProvider,  # v0.13.1+: Local Whisper transcription
     "dpc_agent": DpcAgentProvider,  # Embedded autonomous AI agent
     "remote_peer": RemotePeerProvider,  # v0.18.0+: Remote peer inference
@@ -111,6 +114,13 @@ MODEL_CONTEXT_WINDOWS = {
     "glm-4-128-0414-128k": 131072,  # 128K explicit in name
     "autoglm-phone-multilingal": 32768,  # Conservative estimate
 
+    # GLM-5 series (standalone-API window unconfirmed; [1m] 1M variant is Coding-Plan-only.
+    # Conservative fallback — set context_window in providers.json to override per provider.)
+    "glm-5": 200000,
+    "glm-5.1": 204800,
+    "glm-5.2": 200000,
+    "glm-5-turbo": 200000,
+
     # Default fallback
     "default": 4096
 }
@@ -125,7 +135,6 @@ class LLMManager:
         self.default_provider: str | None = None
         self.vision_provider: str | None = None  # Vision-specific provider for auto-selection
         self.voice_provider: str | None = None  # v0.13.0+: Voice transcription provider for auto-selection
-        self.background_provider: str | None = None  # v0.21.0+: Background tasks provider (sleep consolidation)
 
         # Callback for re-injecting CoreService after providers reload (v0.18.0+)
         self._on_providers_reload_callback: Optional[Callable[[], None]] = None
@@ -162,7 +171,6 @@ class LLMManager:
                 "vision_provider": "ollama_vision",
                 "voice_provider": "local_whisper_large",  # v0.13.0+: Local Whisper or OpenAI-compatible
                 "agent_provider": "dpc_agent",  # v0.18.0+: AI Agent provider (dpc_agent or any other provider)
-                "background_provider": None,  # v0.21.0+: Separate provider for agent background tasks (sleep consolidation)
                 "providers": [
                     {
                         "alias": "ollama_text",
@@ -329,7 +337,6 @@ class LLMManager:
             self.vision_provider = config.get("vision_provider")  # Load vision provider for auto-selection
             self.voice_provider = config.get("voice_provider")  # v0.13.0+: Load voice provider for auto-selection
             self.agent_provider = config.get("agent_provider")  # v0.18.0+: Load agent provider for AI agent
-            self.background_provider = config.get("background_provider")  # v0.21.0+: Separate provider for agent background tasks (sleep consolidation)
 
             for provider_config in config.get("providers", []):
                 alias = provider_config.get("alias")
@@ -356,10 +363,6 @@ class LLMManager:
             if self.agent_provider and self.agent_provider not in self.providers:
                 logger.warning("Agent provider '%s' not found in loaded providers", self.agent_provider)
                 self.agent_provider = None
-
-            if self.background_provider and self.background_provider not in self.providers:
-                logger.warning("Background provider '%s' not found in loaded providers", self.background_provider)
-                self.background_provider = None
 
         except Exception as e:
             logger.error("Error parsing provider config file: %s", e, exc_info=True)
@@ -392,9 +395,21 @@ class LLMManager:
                 json.dump(config_dict, f, indent=2)
             logger.info("Provider configuration saved to %s", self.config_path)
 
+            preserved_managers = {
+                alias: provider._managers
+                for alias, provider in list(self.providers.items())
+                if getattr(provider, "_managers", None)
+            }
+
             # Reload providers
             self.providers.clear()
             self._load_providers_from_config()
+
+            for alias, managers in preserved_managers.items():
+                new_provider = self.providers.get(alias)
+                if new_provider is not None and hasattr(new_provider, "_managers"):
+                    new_provider._managers.update(managers)
+                    logger.info("Preserved %d agent manager(s) for '%s' across providers reload", len(managers), alias)
 
             # Restore Whisper model state for providers that were loaded
             for alias, state in whisper_state.items():

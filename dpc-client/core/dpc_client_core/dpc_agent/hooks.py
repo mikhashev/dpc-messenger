@@ -63,6 +63,10 @@ class LoopState:
     tool_calls_this_round: int = 0
     #: Current round index (alias for observer compat).
     current_round: int = 0
+    #: This round's executed tool results [{"name", "output"}, ...]. Lets
+    #: LoopGuard tell a stuck poll (identical output) from a long-running one
+    #: whose progress still advances (output changes each poll).
+    recent_tool_results: list[dict] = field(default_factory=list)
 
 
 @dataclass
@@ -94,6 +98,10 @@ class HookContext:
     @property
     def recent_tool_args(self) -> list:
         return self.state.recent_tool_args
+
+    @property
+    def recent_tool_results(self) -> list:
+        return self.state.recent_tool_results
 
     @property
     def last_assistant_text(self) -> str:

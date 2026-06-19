@@ -58,6 +58,11 @@ class DpcLlmAdapter:
         if self._token_counter is None:
             log.warning("TokenCountManager not available - using character estimation")
 
+    def set_provider_alias(self, provider_alias: Optional[str]) -> None:
+        """Update the per-agent provider override at runtime (Main LLM switch) and drop the cached model so the next call re-resolves."""
+        self._provider_alias = provider_alias
+        self._default_model = None
+
     def _get_agent_provider_alias(self) -> Optional[str]:
         """
         Get the provider alias to use for agent inference.
@@ -88,19 +93,6 @@ class DpcLlmAdapter:
             return default_provider
 
         return None
-
-    def _get_background_provider_alias(self) -> Optional[str]:
-        """
-        Get the provider alias for background tasks (sleep consolidation).
-
-        Falls back to agent provider if no background_provider configured.
-        """
-        bg_provider = getattr(self._llm_manager, 'background_provider', None)
-        if bg_provider and bg_provider in self._llm_manager.providers:
-            log.debug(f"Using background_provider: {bg_provider}")
-            return bg_provider
-        # Fall back to normal agent provider
-        return self._get_agent_provider_alias()
 
     def _get_agent_provider(self) -> Optional[Any]:
         """Get the agent's provider instance."""
@@ -137,11 +129,10 @@ class DpcLlmAdapter:
         messages: List[Dict[str, Any]],
         model: Optional[str] = None,
         tools: Optional[List[Dict[str, Any]]] = None,
-        reasoning_effort: str = "medium",
+        reasoning_effort: Optional[str] = None,
         max_tokens: int = 4096,
         on_stream_chunk: Optional[Callable[[str, str], None]] = None,
         conversation_id: Optional[str] = None,
-        background: bool = False,
     ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         """
         Send chat request through DPC's LLMManager.
@@ -154,7 +145,6 @@ class DpcLlmAdapter:
             max_tokens: Max completion tokens
             on_stream_chunk: Optional async callback for streaming: await on_stream_chunk(chunk, conversation_id)
             conversation_id: Optional conversation ID for streaming callbacks
-            background: If True, use background_provider for sleep consolidation tasks
 
         Returns:
             (response_message, usage_dict) tuple in Ouroboros format
@@ -217,8 +207,7 @@ class DpcLlmAdapter:
                     dpc_agent_provider, messages, tools, on_stream_chunk, conversation_id
                 )
 
-        # Get the agent's provider (or background provider for sleep consolidation)
-        alias = self._get_background_provider_alias() if background else self._get_agent_provider_alias()
+        alias = self._get_agent_provider_alias()
         if not alias:
             raise RuntimeError("No AI provider configured in DPC Messenger (check agent_provider or default_provider)")
         provider = self._llm_manager.providers[alias]
@@ -230,7 +219,7 @@ class DpcLlmAdapter:
             log.debug("Using native tool calling path for provider '%s'", alias)
             try:
                 return await self._chat_native_tools(
-                    provider, messages, tools, on_stream_chunk, conversation_id
+                    provider, messages, tools, on_stream_chunk, conversation_id, reasoning_effort
                 )
             except Exception as e:
                 log.warning(
@@ -296,7 +285,7 @@ class DpcLlmAdapter:
                 "prompt_tokens": prompt_tokens,
                 "completion_tokens": completion_tokens,
                 "total_tokens": prompt_tokens + completion_tokens,
-                "cost": compute_cost_usd(self._provider_alias or "", prompt_tokens, completion_tokens),
+                "cost": compute_cost_usd(self._provider_alias or "", prompt_tokens, completion_tokens, model=model_name),
             }
 
             return response_msg, usage
@@ -417,7 +406,7 @@ class DpcLlmAdapter:
                 "prompt_tokens": prompt_tokens,
                 "completion_tokens": completion_tokens,
                 "total_tokens": prompt_tokens + completion_tokens,
-                "cost": compute_cost_usd(self._provider_alias or "", prompt_tokens, completion_tokens),
+                "cost": compute_cost_usd(self._provider_alias or "", prompt_tokens, completion_tokens, model=model_name),
             }
 
             return response_msg, usage
@@ -433,6 +422,7 @@ class DpcLlmAdapter:
         tools: List[Dict[str, Any]],
         on_stream_chunk: Optional[Callable[[str, str], None]] = None,
         conversation_id: Optional[str] = None,
+        reasoning_effort: Optional[str] = None,
     ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         """
         Native Anthropic SDK tool calling path.
@@ -451,12 +441,16 @@ class DpcLlmAdapter:
             len(messages), len(anthropic_messages), len(anthropic_tools),
         )
 
+        gw_kwargs: Dict[str, Any] = {}
+        if reasoning_effort is not None:
+            gw_kwargs["reasoning_effort"] = reasoning_effort
         raw = await provider.generate_with_tools(
             messages=anthropic_messages,
             tools=anthropic_tools,
             system=system,
             on_chunk=on_stream_chunk,
             conversation_id=conversation_id,
+            **gw_kwargs,
         )
 
         # Convert Anthropic tool_use blocks → Ouroboros tool_calls format
@@ -499,7 +493,7 @@ class DpcLlmAdapter:
                 "prompt_tokens": prompt_tokens,
                 "completion_tokens": completion_tokens,
                 "total_tokens": prompt_tokens + completion_tokens,
-                "cost": compute_cost_usd(self._provider_alias or "", prompt_tokens, completion_tokens),
+                "cost": compute_cost_usd(self._provider_alias or "", prompt_tokens, completion_tokens, model=model_name),
             }
         else:
             usage.setdefault(
@@ -508,6 +502,13 @@ class DpcLlmAdapter:
                     self._provider_alias or "",
                     int(usage.get("prompt_tokens", 0)),
                     int(usage.get("completion_tokens", 0)),
+                    model=self.default_model(),
+                    cache_hit_tokens=int(usage.get("prompt_cache_hit_tokens", 0) or 0),
+                    cache_miss_tokens=(
+                        int(usage["prompt_cache_miss_tokens"])
+                        if usage.get("prompt_cache_miss_tokens") is not None
+                        else None
+                    ),
                 ),
             )
 
@@ -700,7 +701,7 @@ class DpcLlmAdapter:
                     "prompt_tokens": prompt_tokens,
                     "completion_tokens": completion_tokens,
                     "total_tokens": prompt_tokens + completion_tokens,
-                    "cost": compute_cost_usd(self._provider_alias or "", prompt_tokens, completion_tokens),
+                    "cost": compute_cost_usd(self._provider_alias or "", prompt_tokens, completion_tokens, model=model_name),
                 }
             else:
                 # Final fallback to character estimation

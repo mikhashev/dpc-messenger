@@ -65,8 +65,26 @@ def _collect_outputs(entry: dict) -> List[str]:
     return outputs
 
 
+# Node class_types whose widgets_values this converter knows how to map to
+# named API inputs. A UI-format node OUTSIDE this set that carries
+# widgets_values would silently lose them (e.g. LoadImage's image filename),
+# producing an invalid graph. _convert_ui_to_api raises instead of dropping —
+# the caller should export such workflows in API format ("Save (API Format)").
+_HANDLED_WIDGET_TYPES = {
+    "UNETLoader", "CLIPLoader", "VAELoader", "CLIPTextEncode",
+    "EmptyLatentImage", "EmptySD3LatentImage", "EmptyHunyuanLatentVideo",
+    "KSampler", "SaveImage", "SaveAnimatedWEBP", "CreateVideo",
+    "SaveVideo", "SaveWEBM",
+}
+
+
 def _convert_ui_to_api(wf: dict) -> dict:
-    """Convert ComfyUI UI/graph format (nodes+links) to API prompt format."""
+    """Convert ComfyUI UI/graph format (nodes+links) to API prompt format.
+
+    Raises ValueError if the graph contains node types whose widget values
+    cannot be mapped (the converter only knows a fixed set; custom nodes like
+    Bernini-R are unsupported). Callers should export those in API format.
+    """
     nodes = wf.get("nodes", [])
     links = wf.get("links", [])
     if not nodes:
@@ -78,11 +96,15 @@ def _convert_ui_to_api(wf: dict) -> dict:
         link_map[link_id] = (str(src_node), src_slot)
 
     api = {}
+    unconvertible = set()
     for node in nodes:
         nid = str(node["id"])
         ct = node.get("class_type") or node.get("type", "")
         wv = node.get("widgets_values", [])
         inp_defs = node.get("inputs", [])
+
+        if wv and ct not in _HANDLED_WIDGET_TYPES:
+            unconvertible.add(ct)
 
         inputs = {}
         for inp in inp_defs:
@@ -141,12 +163,42 @@ def _convert_ui_to_api(wf: dict) -> dict:
 
         api[nid] = {"class_type": ct, "inputs": inputs}
 
+    if unconvertible:
+        raise ValueError(
+            "UI-format workflow contains node types this tool cannot convert "
+            "(their widget values would be lost): "
+            + ", ".join(sorted(unconvertible))
+            + ". Re-export it in API format via ComfyUI 'Save (API Format)' and "
+            "submit that file (or pass it as workflow_json) — API-format graphs "
+            "are submitted as-is with no lossy conversion."
+        )
+
     return api
 
 
 def _is_ui_format(wf: dict) -> bool:
     """Detect if workflow is in UI/graph format (has nodes array) vs API format."""
     return "nodes" in wf and isinstance(wf["nodes"], list)
+
+
+def _resolve_workflow_path(ctx: ToolContext, workflow: str) -> Optional[pathlib.Path]:
+    """Resolve a workflow filename to an existing path.
+
+    Order: (1) absolute path as given, (2) path as given relative to cwd,
+    (3) under <agent_root>/comfy-ui-workflows/. Returns None if not found.
+    Absolute paths let agents reference workflows kept outside the sandbox
+    (e.g. a project repo's comfy-workflows/ dir).
+    """
+    p = pathlib.Path(workflow)
+    if p.is_absolute() and p.exists():
+        return p
+    if p.exists():
+        return p
+    if ctx.agent_root:
+        candidate = pathlib.Path(ctx.agent_root) / "comfy-ui-workflows" / workflow
+        if candidate.exists():
+            return candidate
+    return None
 
 
 def comfyui_submit(ctx: ToolContext, workflow: str = "", prompt: str = "", workflow_json: dict = None, api_url: str = DEFAULT_API_URL) -> str:
@@ -157,12 +209,13 @@ def comfyui_submit(ctx: ToolContext, workflow: str = "", prompt: str = "", workf
 
     wf_data = workflow_json if not workflow else None
     if workflow:
-        wf_dir = pathlib.Path(ctx.agent_root) / "comfy-ui-workflows" if ctx.agent_root else None
-        if not wf_dir:
-            return "Error: agent_root not set, cannot resolve workflow path."
-        wf_path = wf_dir / workflow
-        if not wf_path.exists():
-            return f"Error: workflow file not found: {wf_path}"
+        wf_path = _resolve_workflow_path(ctx, workflow)
+        if wf_path is None:
+            return (
+                f"Error: workflow file not found: {workflow} "
+                f"(searched: absolute path, cwd, <agent_root>/comfy-ui-workflows/). "
+                f"Pass an absolute path for workflows kept elsewhere."
+            )
         try:
             wf_data = json.loads(wf_path.read_text(encoding="utf-8"))
         except Exception as e:
@@ -172,7 +225,10 @@ def comfyui_submit(ctx: ToolContext, workflow: str = "", prompt: str = "", workf
         return "Error: provide either workflow (filename) or workflow_json (dict)."
 
     if _is_ui_format(wf_data):
-        wf_data = _convert_ui_to_api(wf_data)
+        try:
+            wf_data = _convert_ui_to_api(wf_data)
+        except ValueError as e:
+            return f"Error: {e}"
 
     if prompt:
         for node in wf_data.values():
@@ -307,8 +363,57 @@ def comfyui_wait(ctx: ToolContext, prompt_id: str, timeout: int = 300, api_url: 
     return future.result(timeout=timeout + 10)
 
 
+def _queue_item_label(item) -> tuple:
+    """From a /queue entry ``[number, prompt_id, prompt, ...]`` return
+    ``(prompt_id, label)`` identifying *which* job it is.
+
+    The input frame (``LoadImage.image``, e.g. 'C3_00012.png') is preferred
+    as the label because it differs per clip. The fallback is a save node's
+    ``filename_prefix`` — detected by duck-typing (any node carrying that
+    input), not a hardcoded class-name list, so new/custom save nodes are
+    picked up without drift. Note the prefix is often a constant across
+    clips (e.g. 'BerniniR_i2v_1.3B'), which is why the input frame wins.
+
+    Returns ('', '') on any malformed item — the queue display degrades to
+    counts rather than raising. The full prompt_id is preserved (not
+    truncated) so the agent can feed it straight into comfyui_check/_wait.
+    """
+    prompt_id = ""
+    input_label = ""
+    save_label = ""
+    try:
+        if isinstance(item, (list, tuple)) and len(item) > 1:
+            prompt_id = str(item[1])
+        prompt = item[2] if isinstance(item, (list, tuple)) and len(item) > 2 else None
+        if isinstance(prompt, dict):
+            for node in prompt.values():
+                if not isinstance(node, dict):
+                    continue
+                inputs = node.get("inputs", {})
+                if not isinstance(inputs, dict):
+                    continue
+                if not input_label and node.get("class_type") == "LoadImage":
+                    img = inputs.get("image")
+                    if isinstance(img, str) and img:  # str = a filename, not a [node,slot] link
+                        input_label = img
+                elif not save_label and isinstance(inputs.get("filename_prefix"), str):
+                    fp = inputs.get("filename_prefix")
+                    if fp:
+                        save_label = fp
+    except Exception:
+        pass
+    return prompt_id, (input_label or save_label)
+
+
 def comfyui_queue_status(ctx: ToolContext, api_url: str = DEFAULT_API_URL) -> str:
-    """Check ComfyUI queue status — how many tasks pending/running."""
+    """Check ComfyUI queue — counts plus what each task actually is.
+
+    Reports the running/pending counts and, for every queued job, its full
+    prompt_id and a label = its input frame (LoadImage.image, e.g.
+    'C3_00012.png'), so the agent knows exactly which clip is rendering
+    instead of guessing from bare counts. Fast (single GET, no WS) — for the
+    live step X/Y + ETA of the running job, call comfyui_progress.
+    """
     loop = ctx.agent_event_loop
     if loop is None:
         return "Error: no event loop available."
@@ -319,9 +424,18 @@ def comfyui_queue_status(ctx: ToolContext, api_url: str = DEFAULT_API_URL) -> st
             resp = await client.get(f"{api_url.rstrip('/')}/queue")
             resp.raise_for_status()
             data = resp.json()
-            running = len(data.get("queue_running", []))
-            pending = len(data.get("queue_pending", []))
-            return f"running={running}, pending={pending}"
+            running = data.get("queue_running", []) or []
+            pending = data.get("queue_pending", []) or []
+            lines = [f"running={len(running)}, pending={len(pending)}"]
+            for item in running:
+                pid, label = _queue_item_label(item)
+                lines.append(f"  RUNNING  {pid or '?'}  {label or '(unlabeled)'}")
+            for item in pending:
+                pid, label = _queue_item_label(item)
+                lines.append(f"  PENDING  {pid or '?'}  {label or '(unlabeled)'}")
+            if running:
+                lines.append("  (call comfyui_progress for live step X/Y + ETA)")
+            return "\n".join(lines)
         except httpx.ConnectError:
             return f"Error: cannot connect to ComfyUI at {api_url}."
         except Exception as e:
@@ -331,33 +445,98 @@ def comfyui_queue_status(ctx: ToolContext, api_url: str = DEFAULT_API_URL) -> st
     return future.result(timeout=10)
 
 
+# Last progress sample per api_url: (step, max, loop_time). Lets a poll
+# estimate sec/iteration + ETA across calls when a single snapshot only
+# catches one step (common on slow renders). Loop time is monotonic and
+# comparable across calls because the agent reuses one event loop.
+# Module-level and keyed only by api_url: two agents polling the same URL
+# concurrently could race here — acceptable while one agent drives renders;
+# revisit (per-agent state) if concurrent generation lands.
+_LAST_PROGRESS: dict = {}
+
+
+def _fmt_dur(sec: float) -> str:
+    sec = int(max(0, sec))
+    return f"{sec}s" if sec < 90 else f"{sec // 60}m{sec % 60:02d}s"
+
+
+def _format_progress_timing(samples: list, api_url: str) -> str:
+    """Build a 'timing:' line (step, sec/it, ETA) from progress samples.
+
+    ``samples`` are (step, max, loop_time) tuples collected this call.
+    Rate comes from within-call samples when >=2 are seen, else from the
+    last stored sample across calls. Returns '' when nothing is known.
+    """
+    if not samples:
+        return ""
+    cur_step, cur_max, cur_t = samples[-1]
+    rate = None  # seconds per step
+    if len(samples) >= 2:
+        s0, _, t0 = samples[0]
+        if cur_step - s0 > 0:
+            rate = (cur_t - t0) / (cur_step - s0)
+    if rate is None:
+        prev = _LAST_PROGRESS.get(api_url)
+        if prev:
+            p_step, _, p_t = prev
+            if cur_step - p_step > 0 and cur_t - p_t > 0:
+                rate = (cur_t - p_t) / (cur_step - p_step)
+    _LAST_PROGRESS[api_url] = (cur_step, cur_max, cur_t)
+    parts = [f"step {cur_step}/{cur_max}"]
+    if rate:
+        eta = max(0, (cur_max or 0) - cur_step) * rate
+        parts.append(f"~{rate:.1f}s/it")
+        parts.append(f"ETA ~{_fmt_dur(eta)}")
+    else:
+        parts.append("(poll again in a few s for s/it & ETA)")
+    return "timing: " + " | ".join(parts)
+
+
 def comfyui_progress(ctx: ToolContext, timeout: int = 10, api_url: str = DEFAULT_API_URL) -> str:
-    """One-shot WebSocket snapshot of ComfyUI generation progress."""
+    """Report ComfyUI generation progress, waiting for a real sampler step.
+
+    Slow models (Bernini ~27s/step) emit a 'progress' event only once per
+    step, so a short fixed window would catch only the periodic status
+    heartbeat (queue_remaining) and no step — useless to the agent. This
+    keeps listening until it actually sees a progress step (or the run
+    ends), then grabs one more sample for an s/it + ETA estimate. ``timeout``
+    is the *minimum* listen window once a step is seen; a hard cap
+    (HARD_CAP) bounds the wait so it never hangs even between slow steps.
+    """
     loop = ctx.agent_event_loop
     if loop is None:
         return "Error: no event loop available."
-    timeout = max(3, min(timeout, 30))
+    timeout = max(3, min(timeout, 60))
+    HARD_CAP = 45.0  # must exceed one slow step (~27s) so we catch a tick
 
     async def _progress():
         import websockets
         ws_url = api_url.replace("http://", "ws://").replace("https://", "wss://")
         ws_url = f"{ws_url.rstrip('/')}/ws?clientId=dpc-forge-progress"
         events = []
+        prog_samples = []
         try:
             async with websockets.connect(ws_url, close_timeout=3) as ws:
-                deadline = asyncio.get_event_loop().time() + timeout
-                while asyncio.get_event_loop().time() < deadline:
-                    remaining = deadline - asyncio.get_event_loop().time()
-                    if remaining <= 0:
+                start = asyncio.get_event_loop().time()
+                while True:
+                    elapsed = asyncio.get_event_loop().time() - start
+                    # Stop when: hard cap hit (safety); we have a step AND the
+                    # nominal window elapsed; or we have 2 samples (step+rate).
+                    if elapsed >= HARD_CAP:
+                        break
+                    if prog_samples and elapsed >= timeout:
+                        break
+                    if len(prog_samples) >= 2:
                         break
                     try:
-                        raw = await asyncio.wait_for(ws.recv(), timeout=min(remaining, 2.0))
+                        raw = await asyncio.wait_for(ws.recv(), timeout=2.0)
                         data = json.loads(raw)
                         msg_type = data.get("type", "")
                         msg_data = data.get("data", {})
                         if msg_type == "progress":
                             val = msg_data.get("value", 0)
                             mx = msg_data.get("max", 0)
+                            prog_samples.append((val, mx, asyncio.get_event_loop().time()))
                             events.append(f"progress: step {val}/{mx}")
                         elif msg_type == "executing":
                             node = msg_data.get("node", "")
@@ -374,6 +553,7 @@ def comfyui_progress(ctx: ToolContext, timeout: int = 10, api_url: str = DEFAULT
                         elif msg_type == "status":
                             q = msg_data.get("status", {}).get("exec_info", {})
                             remaining_q = q.get("queue_remaining", 0)
+                            # Heartbeat only — keep as context, not a stop signal.
                             events.append(f"queue_remaining={remaining_q}")
                     except asyncio.TimeoutError:
                         continue
@@ -382,12 +562,22 @@ def comfyui_progress(ctx: ToolContext, timeout: int = 10, api_url: str = DEFAULT
                 return f"Error: cannot connect to ComfyUI WebSocket: {e}"
             events.append(f"(connection closed: {e})")
 
+        timing = _format_progress_timing(prog_samples, api_url)
+        if timing:
+            # We have a real step/ETA: drop the heartbeat noise so the agent
+            # sees the signal, not 'queue_remaining=1' lines, then append it.
+            events = [e for e in events if not e.startswith("queue_remaining=")]
+            events.append(timing)
         if not events:
-            return "No activity detected (ComfyUI idle or timeout too short)."
+            return (
+                "No sampler step seen within the wait window — the running job "
+                "may be between nodes (model load / VAE decode) or the queue is "
+                "idle. Call again in a few seconds."
+            )
         return "\n".join(events)
 
     future = asyncio.run_coroutine_threadsafe(_progress(), loop)
-    return future.result(timeout=timeout + 5)
+    return future.result(timeout=HARD_CAP + 10)
 
 
 def comfyui_convert(ctx: ToolContext, input_path: str, output_path: str = "", fps: int = 16, codec: str = "libx264") -> str:
@@ -457,16 +647,24 @@ def get_tools() -> List[ToolEntry]:
                 "name": "comfyui_submit",
                 "description": (
                     "Submit a ComfyUI workflow for generation. "
-                    "Preferred: pass workflow (filename from comfy-ui-workflows/) + prompt (text). "
-                    "Tool reads file, injects prompt into CLIPTextEncode node, submits to ComfyUI. "
-                    "Alternative: pass workflow_json directly (legacy, error-prone)."
+                    "Pass workflow (filename or absolute path) + prompt (text); the tool "
+                    "reads the file, injects prompt into the positive CLIPTextEncode node, submits. "
+                    "For workflows with custom nodes (e.g. Bernini-R) export them in API format "
+                    "via ComfyUI 'Save (API Format)' — API-format graphs are submitted as-is "
+                    "(no lossy UI->API conversion). UI-format graphs with unsupported custom "
+                    "nodes are rejected with a clear message rather than silently mangled. "
+                    "Alternative: pass workflow_json directly (a dict already in API format)."
                 ),
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "workflow": {
                             "type": "string",
-                            "description": "Workflow JSON filename from comfy-ui-workflows/ dir (e.g. 'wan22_ti2v_5B.json').",
+                            "description": (
+                                "Workflow JSON filename resolved under <agent_root>/comfy-ui-workflows/, "
+                                "OR an absolute path to a workflow kept elsewhere "
+                                "(e.g. a project repo's comfy-workflows/ dir)."
+                            ),
                         },
                         "prompt": {
                             "type": "string",
@@ -474,7 +672,7 @@ def get_tools() -> List[ToolEntry]:
                         },
                         "workflow_json": {
                             "type": "object",
-                            "description": "Raw ComfyUI workflow JSON (legacy — prefer workflow + prompt).",
+                            "description": "Raw ComfyUI workflow JSON in API format (submitted as-is).",
                         },
                         "api_url": {
                             "type": "string",

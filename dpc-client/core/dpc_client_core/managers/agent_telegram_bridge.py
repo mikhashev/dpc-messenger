@@ -38,6 +38,10 @@ from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Set
 
 from ..dpc_agent.events import AgentEvent, EventType
 
+# Bot tokens currently polled by a live bridge in this process. A second bridge on
+# the same token would trigger a Telegram getUpdates Conflict.
+_ACTIVE_BOT_TOKENS: Set[str] = set()
+
 if TYPE_CHECKING:
     from .agent_manager import DpcAgentManager
 
@@ -134,6 +138,8 @@ class AgentTelegramBridge:
         self._bot = None
         self._application = None  # telegram.ext.Application
         self._enabled = False
+        self._conflict_logged = False
+        self._bot_username: Optional[str] = None
         self._session = None
 
         # Rate limiting state
@@ -199,6 +205,13 @@ class AgentTelegramBridge:
             log.warning("No bot token configured, Telegram bridge disabled")
             return False
 
+        if self.bot_token in _ACTIVE_BOT_TOKENS:
+            log.error(
+                "A Telegram bridge is already polling this bot token in this process — "
+                "refusing to start a second poller (would cause getUpdates Conflict)."
+            )
+            return False
+
         if not self.allowed_chat_ids:
             log.warning("No chat IDs configured, Telegram bridge disabled")
             return False
@@ -241,6 +254,21 @@ class AgentTelegramBridge:
             # Add handler for photo messages (vision analysis)
             self._application.add_handler(MessageHandler(filters.PHOTO, self._handle_photo_message))
 
+            async def _on_error(update, context):
+                from telegram.error import Conflict
+                if isinstance(context.error, Conflict):
+                    if not self._conflict_logged:
+                        self._conflict_logged = True
+                        log.error(
+                            "Telegram getUpdates Conflict for @%s — another poller holds this token; "
+                            "stopping this bridge to avoid an infinite retry loop.",
+                            self._bot_username or "?",
+                        )
+                    asyncio.create_task(self.stop())
+                    return
+                raise context.error
+            self._application.add_error_handler(_on_error)
+
             # Initialize application (creates bot instance internally)
             await self._application.initialize()
 
@@ -250,6 +278,7 @@ class AgentTelegramBridge:
 
             # Verify bot is valid
             me = await self._bot.get_me()
+            self._bot_username = me.username
             log.info(f"Agent Telegram bridge started: @{me.username}")
 
             # Start polling
@@ -257,6 +286,7 @@ class AgentTelegramBridge:
             await self._application.updater.start_polling(drop_pending_updates=True)
 
             self._enabled = True
+            _ACTIVE_BOT_TOKENS.add(self.bot_token)
             log.info("Agent Telegram bridge polling started (two-way communication enabled)")
             return True
 
@@ -270,6 +300,7 @@ class AgentTelegramBridge:
     async def stop(self) -> None:
         """Stop the bridge and polling."""
         self._enabled = False
+        _ACTIVE_BOT_TOKENS.discard(self.bot_token)
 
         # Stop the application and updater
         if self._application:
@@ -730,8 +761,11 @@ Send a voice message and it will be transcribed and processed\\.
             await update.message.reply_text("⚠️ Message handler not configured. Cannot process message.")
             return
 
-        # Send "processing" indicator
-        await context.bot.send_chat_action(chat_id=chat_id, action="typing")
+        # Send "processing" indicator (best-effort — a failed typing action must not drop the message)
+        try:
+            await context.bot.send_chat_action(chat_id=chat_id, action="typing")
+        except Exception as e:
+            log.debug(f"send_chat_action(typing) failed, continuing: {e}")
 
         # Build sender attribution for history (shown in DPC chat UI)
         tg_user = update.effective_user

@@ -218,6 +218,7 @@ class DpcAgentManager:
             firewall=self.firewall,           # Firewall controls tool access
             firewall_profile=self.agent_id,  # Per-agent profile key for per-agent permissions
             service=self.service,             # For tools that need firewall access
+            provider_alias=self.config.get("provider_alias"),  # Per-agent Main LLM for inference
             compute_host=self.config.get("compute_host", ""),  # Remote peer for LLM inference
         )
 
@@ -912,6 +913,19 @@ class DpcAgentManager:
                 if self._daily_tokens_used >= quota_limit:
                     return f"⚠️ Agent quota exceeded ({self._daily_tokens_used:,}/{quota_limit:,} tokens today). Reset at midnight UTC."
 
+            reasoning_effort = None
+            try:
+                if conversation_id and conversation_id.startswith("group-"):
+                    gm = getattr(self.service, "group_manager", None)
+                    grp = gm.get_group(conversation_id) if gm else None
+                    if grp is not None:
+                        reasoning_effort = getattr(grp, "reasoning_effort", None)
+                if not reasoning_effort and self.agent_id:
+                    from dpc_client_core.dpc_agent.utils import load_agent_config
+                    reasoning_effort = (load_agent_config(self.agent_id) or {}).get("reasoning_effort")
+            except Exception:
+                reasoning_effort = None
+
             try:
                 interrupt_ev = asyncio.Event()
                 self._interrupt_events[conversation_id] = interrupt_ev
@@ -938,6 +952,7 @@ class DpcAgentManager:
                         "node_id": getattr(self.service.p2p_manager, "node_id", "") or "",
                     },
                     trigger_message_id=trigger_message_id,
+                    reasoning_effort=reasoning_effort,
                 )
             finally:
                 self._interrupt_events.pop(conversation_id, None)
@@ -1023,38 +1038,8 @@ class DpcAgentManager:
             else:
                 conversation_tokens = len(_history_text) // 4
             if conversation_tokens:
-                llm_manager = getattr(self.service, "llm_manager", None)
-                if llm_manager:
-                    # Use stored context_window from agent config when available
-                    # (remote agents have a different context window than the local default model)
-                    stored_cw = self.config.get("context_window")
-                    if stored_cw:
-                        context_window = int(stored_cw)
-                    else:
-                        # Try to resolve context window without stored value.
-                        # This handles agents created before context_window was persisted.
-                        provider_alias = self.config.get("provider_alias", "")
-                        compute_host = self.config.get("compute_host", "")
-                        context_window = None
-                        if provider_alias and provider_alias in llm_manager.providers:
-                            # Local provider: resolve model name then look up window
-                            model = llm_manager.providers[provider_alias].model
-                            context_window = llm_manager.get_context_window(model)
-                        elif compute_host and provider_alias:
-                            # Remote provider: check peer_metadata cache for the provider
-                            peer_meta = getattr(self.service, "peer_metadata", {})
-                            peer_providers = peer_meta.get(compute_host, {}).get("providers", [])
-                            for p in peer_providers:
-                                if p.get("alias") == provider_alias:
-                                    cw = p.get("context_window")
-                                    if cw:
-                                        context_window = int(cw)
-                                    elif p.get("model"):
-                                        context_window = llm_manager.get_context_window(p["model"])
-                                    break
-                        if not context_window:
-                            model = llm_manager.get_active_model_name()
-                            context_window = llm_manager.get_context_window(model)
+                context_window = self._resolve_context_window()
+                if context_window:
                     monitor.set_token_limit(context_window)
                 monitor.set_token_count(conversation_tokens)
 
@@ -1189,22 +1174,63 @@ class DpcAgentManager:
                 # in-memory session and miss all historical context.
                 monitor.rebuild_extraction_buffers_from_history()
 
-            if llm_manager:
-                stored_cw = self.config.get("context_window")
-                if stored_cw:
-                    monitor.set_token_limit(int(stored_cw))
-                else:
-                    provider_alias = self.config.get("provider_alias", "")
-                    if provider_alias and provider_alias in llm_manager.providers:
-                        model = llm_manager.providers[provider_alias].model
-                        cw = llm_manager.get_context_window(model)
-                        if cw:
-                            monitor.set_token_limit(cw)
+            cw = self._resolve_context_window()
+            if cw:
+                monitor.set_token_limit(cw)
 
             self._agent_monitors[conversation_id] = monitor
             log.debug(f"Created ConversationMonitor for agent conversation: {conversation_id}")
 
         return self._agent_monitors[conversation_id]
+
+    def _resolve_context_window(self) -> Optional[int]:
+        """Resolve this agent's context window from its current config (override -> local provider -> peer metadata -> active model)."""
+        llm_manager = getattr(self.service, "llm_manager", None)
+        if not llm_manager:
+            return None
+        stored_cw = self.config.get("context_window")
+        if stored_cw:
+            return int(stored_cw)
+        provider_alias = self.config.get("provider_alias", "")
+        compute_host = self.config.get("compute_host", "")
+        if provider_alias and provider_alias in llm_manager.providers:
+            return llm_manager.get_context_window(llm_manager.providers[provider_alias].model)
+        if compute_host and provider_alias:
+            peer_providers = getattr(self.service, "peer_metadata", {}).get(compute_host, {}).get("providers", [])
+            for p in peer_providers:
+                if p.get("alias") == provider_alias:
+                    cw = p.get("context_window")
+                    if cw:
+                        return int(cw)
+                    if p.get("model"):
+                        return llm_manager.get_context_window(p["model"])
+                    break
+        return llm_manager.get_context_window(llm_manager.get_active_model_name())
+
+    def apply_model_config(self, new_config: Dict[str, Any]) -> Optional[int]:
+        """Apply an updated config to this live manager and re-resolve every active monitor's window so a model switch needs no restart; returns the window."""
+        self.config = new_config
+        if self._agent is not None:
+            self._agent.set_provider_alias(new_config.get("provider_alias"))
+        window = self._resolve_context_window()
+        if window:
+            for monitor in self._agent_monitors.values():
+                monitor.set_token_limit(window)
+        return window
+
+    async def apply_model_config_live(self, new_config: Dict[str, Any]) -> Optional[int]:
+        """apply_model_config plus an immediate push of the new window to every group counter this agent appears in, so a switch updates 1:1 and group UIs without a restart."""
+        window = self.apply_model_config(new_config)
+        if window and self.service and self.agent_id:
+            ctx = getattr(self.service, "_group_agent_context", {})
+            affected = [gid for gid, agents in ctx.items() if self.agent_id in agents]
+            broadcast = getattr(self.service, "broadcast_group_token_usage", None)
+            for gid in affected:
+                prompt_tokens, _old_limit, ts, name = ctx[gid][self.agent_id]
+                ctx[gid][self.agent_id] = (prompt_tokens, window, ts, name)
+                if broadcast:
+                    await broadcast(gid)
+        return window
 
     def get_session_state(self, conversation_id: str) -> Dict[str, Any]:
         """

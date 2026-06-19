@@ -161,7 +161,7 @@ Users can authenticate with either provider using the same email. The Hub automa
 Set OAuth preferences in `~/.dpc/config.ini`:
 ```ini
 [hub]
-auto_connect = true  # Auto-connect to Hub on startup (default: true)
+auto_connect = false  # Auto-connect to Hub on startup (default: false)
 
 [oauth]
 default_provider = github  # Provider for auto-connect: 'google' or 'github' (default: google)
@@ -170,7 +170,7 @@ default_provider = github  # Provider for auto-connect: 'google' or 'github' (de
 **Auto-Connect Behavior:**
 - When `auto_connect = true`: Client automatically connects to Hub on startup using `default_provider`
 - When `auto_connect = false`: Client starts in offline mode; users must click a login button manually
-- Default: Auto-connects with Google on startup
+- Default: auto-connect is **off** (`auto_connect = false`, `settings.py`) — client starts offline; users click a login button. Set `auto_connect = true` to enable startup auto-connect.
 
 **Example Configurations:**
 ```ini
@@ -228,7 +228,7 @@ D-PC Messenger uses an intelligent 6-tier connection fallback hierarchy for near
    - NAT type detection (cone vs symmetric)
    - Success rate: 60-70% for cone NAT (fails gracefully for symmetric NAT)
    - Timeout: 15s
-   - **Status**: Experimental (PoC) with DTLS encryption (enabled by default in v0.10.1)
+   - **Status**: Experimental (PoC) with DTLS encryption; **disabled by default** (`enable_hole_punching = false` in `settings.py`) — opt-in
    - Location: `connection_strategies/udp_hole_punch.py`, `managers/hole_punch_manager.py`
    - Testing: See `docs/MANUAL_TESTING_GUIDE.md`
 
@@ -294,9 +294,9 @@ D-PC Messenger uses an intelligent 6-tier connection fallback hierarchy for near
 - `message_handlers/hello_handler.py` - HELLO command (initial handshake)
 - `message_handlers/text_handler.py` - SEND_TEXT command (chat messages)
 - `message_handlers/context_handler.py` - Context request/response handlers
-  - RequestContextHandler - GET_CONTEXT requests
+  - RequestContextHandler - REQUEST_CONTEXT requests
   - ContextResponseHandler - CONTEXT_RESPONSE handling
-  - RequestDeviceContextHandler - GET_DEVICE_CONTEXT requests
+  - RequestDeviceContextHandler - REQUEST_DEVICE_CONTEXT requests
   - DeviceContextResponseHandler - DEVICE_CONTEXT_RESPONSE handling
 - `message_handlers/inference_handler.py` - AI inference handlers
   - RemoteInferenceRequestHandler - REMOTE_INFERENCE_REQUEST
@@ -354,7 +354,6 @@ D-PC Messenger uses an intelligent 6-tier connection fallback hierarchy for near
 - `dpc_agent/agent.py` - Core agent class (tool dispatch, memory, task execution)
 - `dpc_agent/loop.py` - Autonomous agent run loop
 - `dpc_agent/memory.py` - Per-agent persistent memory
-- `dpc_agent/evolution.py` - Agent skill evolution and self-improvement
 - `dpc_agent/sleep_pipeline.py` - Sleep consolidation, morning brief generation
 - `dpc_agent/task_queue.py` - Async task queue with priority scheduling
 - `dpc_agent/budget.py` - Token/compute budget enforcement
@@ -520,7 +519,7 @@ Messages use binary framing: 10-byte ASCII length header + JSON payload
 **Example Message Types:**
 ```python
 {"command": "HELLO", "payload": {"node_id": "...", "display_name": "..."}}
-{"command": "GET_CONTEXT", "payload": {"tags": [...]}}
+{"command": "REQUEST_CONTEXT", "payload": {"request_id": "...", "query": "..."}}
 {"command": "SEND_TEXT", "payload": {"text": "..."}}
 {"command": "AI_QUERY", "payload": {"query": "...", "use_context": [...]}}
 
@@ -733,7 +732,7 @@ This means if you enable context for one message and disable it for the next, th
 
 ### Node Identity System
 
-- Node IDs: `dpc-node-[16 hex chars]` (SHA256 hash of RSA public key)
+- Node IDs: `dpc-node-[32 hex chars]` (SHA256 hash of RSA public key)
 - Cryptographic files stored in `~/.dpc/`:
   - `node.key` - RSA private key (2048-bit)
   - `node.crt` - X.509 self-signed certificate
@@ -1289,7 +1288,9 @@ D-PC Messenger supports multiple AI providers for local and cloud-based inferenc
 - **Ollama**: Local models (llama3, mistral, qwen, etc.) via Ollama API
 - **OpenAI Compatible**: OpenAI and compatible APIs (OpenAI, LM Studio, etc.)
 - **Anthropic**: Claude models (Claude 3.5 Sonnet, Claude Opus, etc.)
+- **DeepSeek**: Pay-per-token V4 models (`deepseek-v4-flash` / `deepseek-v4-pro`) via OpenAI-compatible endpoint; native pay-per-token cost + account-balance tracking and per-call reasoning-effort control (`deepseek` provider type, `deepseek_provider.py`)
 - **Z.AI**: GLM models (GLM-4.7, GLM-4.6, GLM-4.5, etc.)
+- **Z.AI Coding Plan**: GLM Coding Plan (subscription) via the `zai_coding` provider type — separate from the pay-per-token **Z.AI** above
 - **Gemini**: Google Gemini models via `gemini_provider.py`
 - **GigaChat**: Sber GigaChat models via `gigachat_provider.py`
 - **GitHub Models**: GitHub-hosted models via `github_models_provider.py`

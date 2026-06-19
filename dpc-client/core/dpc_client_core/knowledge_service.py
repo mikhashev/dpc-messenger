@@ -750,6 +750,15 @@ Respond in JSON format:
                                 )
                                 break
 
+            monitor.full_conversation = []
+            monitor.message_buffer = []
+            monitor.rebuild_extraction_buffers_from_history()
+            logger.info(
+                "Re-sourced extraction from history (%d messages) for %s",
+                len(monitor.full_conversation),
+                conversation_id,
+            )
+
             proposal = await monitor.generate_commit_proposal(
                 force=True,
                 proposed_by=self.p2p_manager.node_id,

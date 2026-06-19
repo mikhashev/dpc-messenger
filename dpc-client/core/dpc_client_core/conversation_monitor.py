@@ -1775,6 +1775,7 @@ PARTICIPANTS' CULTURAL CONTEXTS:
         self._tokens_after_last_response = 0
         self._tokens_after_last_response_at = None
         self.message_buffer = []
+        self.full_conversation = []
         self.knowledge_score = 0.0
         # Clear peer context caches
         self.peer_context_cache = {}

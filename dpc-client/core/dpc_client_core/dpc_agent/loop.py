@@ -443,6 +443,7 @@ async def run_llm_loop(
     on_stream_chunk: Optional[Callable[[str, str], None]] = None,
     conversation_id: Optional[str] = None,
     stop_event: Optional[asyncio.Event] = None,
+    reasoning_effort: Optional[str] = None,
 ) -> Tuple[str, Dict[str, Any], Dict[str, Any]]:
     """
     Core LLM-with-tools loop.
@@ -543,6 +544,7 @@ async def run_llm_loop(
                     tools=tool_schemas,
                     on_stream_chunk=on_stream_chunk,
                     conversation_id=conversation_id,
+                    reasoning_effort=reasoning_effort,
                 )
                 round_prompt_tokens = usage.get("prompt_tokens", 0)
                 accumulated_usage["prompt_tokens"] += round_prompt_tokens
@@ -766,6 +768,15 @@ async def run_llm_loop(
                     round_idx,
                     list(_accumulated_tool_calls),  # full snapshot so the UI renders authoritatively
                 )
+
+            # Snapshot this round's tool results so LoopGuard can tell a
+            # genuinely-stuck poll (identical output) from a long-running one
+            # whose progress is still advancing (output changes each poll).
+            ctx.state.recent_tool_results = [
+                {"name": e["tool"], "output": e.get("output", "")}
+                for e in _accumulated_tool_calls
+                if e.get("round") == round_idx
+            ]
 
             # BudgetLimitGuard fires via BETWEEN_ROUNDS at the top of the
             # next iteration; ctx.state.accumulated_cost_usd has been kept

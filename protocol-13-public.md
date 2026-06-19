@@ -1,6 +1,6 @@
 # Protocol 13: Triple-Agent Collaborative Development
 
-**Version:** 1.1-public (derived from internal Protocol 13 v1.12)
+**Version:** 1.2-public (derived from internal Protocol 13 v1.14)
 
 A practical operating agreement for software development teams that include AI agents as first-class participants.
 
@@ -285,8 +285,9 @@ Through real usage, several LLM behavioral patterns were identified that affect 
 2. **Saving Without Commitment** — Agent says "this is valuable" but doesn't persist it to memory
 3. **Action Without Consideration** — Agent executes destructive operations without checking consequences first
 4. **Narrative Fabrication** — When faced with conflicting data, LLM constructs a plausible but false story instead of saying "I don't know"
+5. **Presenting Inference as Observation** — Agent states a hypothesis with the grammar of a fact ("this is a real X bug") instead of separating what was observed from what was inferred. The failure mode is confidence without verification, not merely incomplete data.
 
-**Mitigation:** Human-in-the-loop verification, explicit "save it now" rules in agent prompts, fact-checking agent claims against actual data.
+**Mitigation:** Human-in-the-loop verification, explicit "save it now" rules in agent prompts, fact-checking agent claims against actual data, and the Evidence Discipline checks in §11.
 
 ---
 
@@ -330,6 +331,23 @@ Purpose: co-evolution history is valuable. Losing "who contributed what" = losin
 Act only after explicit action verb ("do", "commit", "implement").
 "Agree", "fine", "makes sense" ≠ authorization to act.
 Ambiguous consent = no consent.
+
+### Evidence Discipline
+
+Borrowed from multi-agent research methodology (separate data-gathering from synthesis, verify independently, register criteria before scoring). These four checks apply to any claim about cause, and are cheap relative to the rework a wrong claim triggers: a wrong diagnosis leads to a wrong fix, discovered later, re-analyzed, re-fixed.
+
+**Observed / Inferred Separation** — before any "the root cause is X," split the claim:
+- *Observed* — facts from logs, code, or tests, each anchored to its source
+- *Inferred* — the hypothesis, plus the check that would confirm it
+- *Verified by* — which check was actually run, or "NOT YET"
+
+If the Inferred part is non-empty and verification has not run, confidence is no higher than "hypothesis."
+
+**Minimal Disproof Before Claim** — before naming something a bug or a root cause, ask "which single test would prove this wrong?" If that test is cheap (reproduce in two environments, read the documentation, add a trace), run it before the claim — not after.
+
+**Verify the Data Source** — before judging whether a fix is proportionate, confirm the evidence comes from the right source: the right machine, the right log, the right time window. A correct analysis fed the wrong input produces a confident wrong answer.
+
+**Runtime Verification Before Close** — a logically sound fix is not the same as a working fix. If reproducing the problem is available and cheap, do it before calling the fix "confirmed." If it is not, mark the result "pending" — never "confirmed."
 
 ---
 

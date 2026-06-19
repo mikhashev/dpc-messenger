@@ -53,6 +53,7 @@ ALLOWED_COMMANDS: frozenset = frozenset({
     "save_providers_config",
     "query_ollama_model_info",
     "query_remote_providers",
+    "get_provider_balance",
     # Personal context & instructions
     "get_personal_context",
     "save_personal_context",
@@ -117,6 +118,7 @@ ALLOWED_COMMANDS: frozenset = frozenset({
     "delete_group",
     "get_groups",
     "update_group_topic",
+    "set_group_reasoning_effort",
     # Knowledge
     "vote_knowledge_commit",
     # Telegram

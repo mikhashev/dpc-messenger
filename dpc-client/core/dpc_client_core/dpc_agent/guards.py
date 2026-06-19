@@ -115,6 +115,12 @@ class ResearchLimitGuard(GuardMiddleware):
         )
 
 
+# Tools whose whole job is to poll a long-running external task. Calling
+# them with identical args is legitimate while a generation runs — what
+# matters is whether the OUTPUT keeps advancing, not the call signature.
+_POLLING_TOOLS = frozenset({"comfyui_progress", "comfyui_wait", "comfyui_check"})
+
+
 class LoopGuard(GuardMiddleware):
     """Stop if a single (tool, args) fingerprint repeats too many times.
 
@@ -123,12 +129,21 @@ class LoopGuard(GuardMiddleware):
     loop. Tool-call dicts are shaped ``{"name": str, "args": dict}``;
     ``args`` may arrive as a JSON string from some providers and is
     normalised before fingerprinting.
+
+    Exception for :data:`_POLLING_TOOLS`: when a poll's output advances vs
+    the previous poll (new progress = new information), the repeat counter
+    for that tool is reset, so monitoring a slow generation is not killed.
+    A poll whose output stops changing (done/stuck) still trips the cap.
     """
 
     def __init__(self, max_duplicate_calls: int = 5) -> None:
         self._max = max_duplicate_calls
         self._counts: dict[str, int] = {}
         self._last_stuck: list[str] = []
+        # Keyed by tool name (one entry per polling tool). Assumes a single
+        # ComfyUI instance per agent; a multi-instance setup would need to key
+        # by (name, api_url) to avoid cross-instance output clobbering.
+        self._last_poll_output: dict[str, str] = {}
 
     @staticmethod
     def _fingerprint(call: dict) -> str:
@@ -146,6 +161,22 @@ class LoopGuard(GuardMiddleware):
         return f"{name}::{args_key}"
 
     async def after_llm_call(self, ctx: HookContext) -> Optional[HookAction]:
+        # A polling tool whose output advanced since the last poll produced
+        # NEW information — reset its repeat counter so live monitoring of a
+        # long task is not mistaken for a stuck loop.
+        for res in (ctx.state.recent_tool_results or []):
+            if not isinstance(res, dict):
+                continue
+            name = res.get("name", "")
+            if name not in _POLLING_TOOLS:
+                continue
+            out = res.get("output", "")
+            if self._last_poll_output.get(name) not in (None, out):
+                for k in list(self._counts):
+                    if k.startswith(f"{name}::"):
+                        self._counts[k] = 0
+            self._last_poll_output[name] = out
+
         for call in ctx.recent_tool_args:
             if not isinstance(call, dict):
                 continue

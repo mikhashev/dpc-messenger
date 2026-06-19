@@ -3,14 +3,14 @@
 
 <script lang="ts">
   import { createEventDispatcher } from 'svelte';
-  import { sendCommand, peerProviders } from '$lib/coreService';
+  import { sendCommand, peerProviders, providerBalance, getProviderBalance } from '$lib/coreService';
   import { confirmAsync } from '$lib/utils/dialog';
 
   export let open: boolean = false;
 
   const dispatch = createEventDispatcher();
 
-  type ProviderType = 'ollama' | 'openai_compatible' | 'anthropic' | 'zai' | 'local_whisper' | 'dpc_agent' | 'gemini' | 'github_models' | 'gigachat';
+  type ProviderType = 'ollama' | 'openai_compatible' | 'anthropic' | 'zai' | 'zai_coding' | 'deepseek' | 'local_whisper' | 'dpc_agent' | 'gemini' | 'github_models' | 'gigachat';
 
   type Provider = {
     alias: string;
@@ -22,6 +22,8 @@
     api_key_env?: string;    // Environment variable (cloud providers)
     context_window?: number; // Optional override
     temperature?: number;    // Model creativity (0.0-2.0, default 0.7)
+    max_tokens?: number;     // Max output tokens (zai/anthropic)
+    top_p?: number;          // Nucleus sampling (zai)
     // Local Whisper specific (v0.13.1+)
     device?: string;         // 'cuda', 'cpu', or 'auto'
     compile_model?: boolean; // torch.compile optimization
@@ -87,6 +89,8 @@
     { label: '64K tokens', value: 65536 },
     { label: '128K tokens', value: 131072 },
     { label: '256K tokens', value: 262144 },
+    { label: '512K tokens', value: 524288 },
+    { label: '1M tokens', value: 1000000 },
   ];
 
   // Temperature presets for model creativity
@@ -205,6 +209,35 @@
 
   // Get the config to display (edited or original)
   $: displayConfig = editedConfig || config;
+
+  // --- Account balance (pay-per-use providers, e.g. DeepSeek) — Phase 2b ---
+  const LOW_BALANCE_USD = 3;       // early-warning threshold
+  const CRITICAL_BALANCE_USD = 1;  // urgent threshold
+  let balanceLoading = false;
+
+  async function refreshBalance() {
+    balanceLoading = true;
+    try {
+      await getProviderBalance();
+    } finally {
+      balanceLoading = false;
+    }
+  }
+
+  $: hasPayPerUseProvider = !!displayConfig?.providers?.some((p) => p.type === 'deepseek');
+  $: balResult = $providerBalance;
+  $: balanceUnsupported = !!balResult && balResult.status === 'unsupported';
+  $: balanceError = balResult && balResult.status === 'error' ? (balResult.message || 'error') : '';
+  $: balanceInfo = balResult && balResult.status === 'success' && balResult.balance && Array.isArray(balResult.balance.balance_infos)
+    ? balResult.balance.balance_infos[0] : null;
+  $: balanceAlias = (balResult && balResult.alias) || '';
+  $: balanceCurrency = balanceInfo ? (balanceInfo.currency || 'USD') : 'USD';
+  $: balanceTotal = balanceInfo ? balanceInfo.total_balance : null;
+  $: balanceAvailable = balResult && balResult.balance ? balResult.balance.is_available !== false : true;
+  $: balanceNum = balanceTotal !== null && balanceTotal !== undefined ? parseFloat(balanceTotal) : NaN;
+  $: balanceLevel = (!balanceAvailable || (!isNaN(balanceNum) && balanceNum < CRITICAL_BALANCE_USD)) ? 'critical'
+    : (!isNaN(balanceNum) && balanceNum < LOW_BALANCE_USD) ? 'low'
+    : 'ok';
 
   // Delete provider
   async function deleteProvider(index: number) {
@@ -361,8 +394,18 @@
       provider.api_key_env = 'ANTHROPIC_API_KEY';
     } else if (newProvider.type === 'zai') {
       provider.api_key_env = 'ZAI_API_KEY';
-      provider.model = 'glm-4.7';
-      provider.context_window = 128000;
+      provider.model = newProvider.model || 'glm-5.2';
+      provider.base_url = 'https://api.z.ai/api/anthropic';
+    } else if (newProvider.type === 'zai_coding') {
+      provider.api_key_env = 'ZAI_API_KEY';
+      provider.model = newProvider.model || 'glm-5.2';
+      provider.base_url = 'https://api.z.ai/api/coding/paas/v4';
+      provider.context_window = 200000;
+    } else if (newProvider.type === 'deepseek') {
+      provider.api_key_env = 'DEEPSEEK_API_KEY';
+      provider.model = newProvider.model || 'deepseek-v4-flash';
+      provider.base_url = 'https://api.deepseek.com';
+      provider.context_window = 1000000;
     } else if (newProvider.type === 'local_whisper') {
       provider.device = 'auto';
       provider.compile_model = true;
@@ -388,6 +431,14 @@
       provider.verify_ssl = true;
       provider.context_window = 128000;
     }
+
+    // Carry over user-entered optional settings (override type defaults where set)
+    if (newProvider.api_key_env) provider.api_key_env = newProvider.api_key_env;
+    if (newProvider.context_window !== undefined) provider.context_window = newProvider.context_window;
+    if (newProvider.temperature !== undefined) provider.temperature = newProvider.temperature;
+    if (newProvider.max_tokens !== undefined) provider.max_tokens = newProvider.max_tokens;
+    if (newProvider.top_p !== undefined) provider.top_p = newProvider.top_p;
+    if (newProvider.thinking !== undefined) provider.thinking = newProvider.thinking;
 
     editedConfig.providers.push(provider);
     editedConfig = editedConfig; // Trigger reactivity
@@ -554,6 +605,34 @@
 
       <div class="modal-body">
         {#if selectedTab === 'list'}
+          <!-- Account balance (pay-per-use providers, e.g. DeepSeek) — Phase 2b -->
+          {#if hasPayPerUseProvider}
+            <div class="balance-card balance-{balanceLevel}">
+              <div class="balance-row">
+                <span class="balance-label">
+                  Account balance{balanceAlias ? ` (${balanceAlias})` : ''}
+                </span>
+                <button class="btn btn-edit" on:click={refreshBalance} disabled={balanceLoading}>
+                  {balanceLoading ? 'Checking…' : 'Check balance'}
+                </button>
+              </div>
+              {#if balanceError}
+                <div class="balance-value balance-err">⚠ {balanceError}</div>
+              {:else if balanceUnsupported}
+                <div class="balance-value balance-muted">No balance-capable provider</div>
+              {:else if balanceTotal !== null && balanceTotal !== undefined}
+                <div class="balance-value">
+                  {balanceCurrency} {balanceTotal}
+                  {#if balanceLevel === 'critical'}<span class="balance-flag">⚠ critical (&lt; ${CRITICAL_BALANCE_USD})</span>
+                  {:else if balanceLevel === 'low'}<span class="balance-flag">low (&lt; ${LOW_BALANCE_USD})</span>{/if}
+                  {#if !balanceAvailable}<span class="balance-flag">— insufficient</span>{/if}
+                </div>
+              {:else}
+                <div class="balance-value balance-muted">Not checked yet — click “Check balance”.</div>
+              {/if}
+            </div>
+          {/if}
+
           <!-- Provider Cards -->
           <div class="providers-list">
             {#each displayConfig.providers as provider, i (i)}
@@ -595,6 +674,8 @@
                         <option value="openai_compatible">OpenAI Compatible</option>
                         <option value="anthropic">Anthropic</option>
                         <option value="zai">Z.AI</option>
+                        <option value="zai_coding">Z.AI Coding Plan</option>
+                        <option value="deepseek">DeepSeek</option>
                         <option value="local_whisper">Local Whisper</option>
                         <option value="dpc_agent">DPC Agent</option>
                         <option value="gemini">Google Gemini</option>
@@ -796,7 +877,33 @@
                       </div>
                     {/if}
 
-                    {#if editedConfig.providers[i].type === 'zai'}
+                    {#if editedConfig.providers[i].type === 'zai_coding'}
+                      <div class="form-group">
+                        <label for="base-url-{i}">Base URL (Coding Plan)</label>
+                        <input
+                          id="base-url-{i}"
+                          type="text"
+                          bind:value={editedConfig.providers[i].base_url}
+                          placeholder="https://api.z.ai/api/coding/paas/v4"
+                        />
+                        <p class="help-text">GLM Coding Plan endpoint (OpenAI-compatible)</p>
+                      </div>
+                    {/if}
+
+                    {#if editedConfig.providers[i].type === 'deepseek'}
+                      <div class="form-group">
+                        <label for="base-url-{i}">Base URL</label>
+                        <input
+                          id="base-url-{i}"
+                          type="text"
+                          bind:value={editedConfig.providers[i].base_url}
+                          placeholder="https://api.deepseek.com"
+                        />
+                        <p class="help-text">DeepSeek OpenAI-compatible endpoint</p>
+                      </div>
+                    {/if}
+
+                    {#if editedConfig.providers[i].type === 'zai' || editedConfig.providers[i].type === 'zai_coding' || editedConfig.providers[i].type === 'deepseek'}
                       <div class="form-group">
                         <label for="api-key-env-{i}">API Key Environment Variable</label>
                         <input
@@ -820,6 +927,70 @@
                           />
                         </form>
                         <p class="help-text warn">⚠️ Not recommended: Stores key in config file</p>
+                      </div>
+
+                      <div class="form-group">
+                        <label for="zai-max-tokens-{i}">Max Tokens (output)</label>
+                        <input
+                          id="zai-max-tokens-{i}"
+                          type="number"
+                          bind:value={editedConfig.providers[i].max_tokens}
+                          placeholder="8192"
+                        />
+                        <p class="help-text">Max output tokens per response (model-dependent; GLM-5.x up to 131072)</p>
+                      </div>
+
+                      <div class="form-group">
+                        <label for="zai-thinking-{i}">
+                          <input
+                            id="zai-thinking-{i}"
+                            type="checkbox"
+                            checked={editedConfig.providers[i].thinking?.enabled ?? false}
+                            on:change={(e) => {
+                              if (!editedConfig) return;
+                              const p = editedConfig.providers[i];
+                              if (!p.thinking) p.thinking = {};
+                              p.thinking.enabled = (e.target as HTMLInputElement).checked;
+                              editedConfig = editedConfig;
+                            }}
+                          />
+                          Enable extended thinking
+                        </label>
+                      </div>
+
+                      {#if editedConfig.providers[i].thinking?.enabled}
+                        <div class="form-group">
+                          <label for="zai-thinking-budget-{i}">Thinking Budget (tokens)</label>
+                          <input
+                            id="zai-thinking-budget-{i}"
+                            type="number"
+                            value={editedConfig.providers[i].thinking?.budget_tokens ?? ''}
+                            on:input={(e) => {
+                              if (!editedConfig) return;
+                              const p = editedConfig.providers[i];
+                              if (!p.thinking) p.thinking = {};
+                              const v = (e.target as HTMLInputElement).value;
+                              p.thinking.budget_tokens = v === '' ? undefined : parseInt(v);
+                              editedConfig = editedConfig;
+                            }}
+                            placeholder="10000"
+                          />
+                          <p class="help-text">Reasoning budget; must be less than Max Tokens</p>
+                        </div>
+                      {/if}
+
+                      <div class="form-group">
+                        <label for="zai-top-p-{i}">Top P (optional)</label>
+                        <input
+                          id="zai-top-p-{i}"
+                          type="number"
+                          step="0.05"
+                          min="0"
+                          max="1"
+                          bind:value={editedConfig.providers[i].top_p}
+                          placeholder="e.g. 0.9"
+                        />
+                        <p class="help-text">Nucleus sampling; lower reduces language mixing</p>
                       </div>
                     {/if}
 
@@ -963,13 +1134,7 @@
                         on:change={(e) => {
                           if (!editedConfig) return;
                           const val = (e.target as HTMLSelectElement).value;
-                          if (val === 'custom') {
-                            editedConfig.providers[i].context_window = undefined;
-                          } else if (val === '') {
-                            editedConfig.providers[i].context_window = undefined;
-                          } else {
-                            editedConfig.providers[i].context_window = parseInt(val);
-                          }
+                          editedConfig.providers[i].context_window = val === '' ? undefined : parseInt(val);
                           editedConfig = editedConfig;
                         }}
                       >
@@ -977,18 +1142,15 @@
                         {#each CONTEXT_WINDOW_PRESETS as preset}
                           <option value={preset.value}>{preset.label}</option>
                         {/each}
-                        <option value="custom">Custom...</option>
                       </select>
 
-                      {#if editedConfig.providers[i].context_window && !CONTEXT_WINDOW_PRESETS.some(p => p.value === editedConfig?.providers[i].context_window)}
-                        <input
-                          id="context-window-custom-{i}"
-                          type="number"
-                          bind:value={editedConfig.providers[i].context_window}
-                          placeholder="Enter custom value"
-                          class="custom-context-input"
-                        />
-                      {/if}
+                      <input
+                        id="context-window-custom-{i}"
+                        type="number"
+                        bind:value={editedConfig.providers[i].context_window}
+                        placeholder="Or enter exact value (tokens)"
+                        class="custom-context-input"
+                      />
                     </div>
 
                     <!-- Temperature Setting -->
@@ -1155,6 +1317,8 @@
                 <option value="openai_compatible">OpenAI Compatible</option>
                 <option value="anthropic">Anthropic</option>
                 <option value="zai">Z.AI</option>
+                <option value="zai_coding">Z.AI Coding Plan</option>
+                <option value="deepseek">DeepSeek</option>
                 <option value="local_whisper">Local Whisper</option>
                 <option value="dpc_agent">DPC Agent</option>
                 <option value="gemini">Google Gemini</option>
@@ -1175,6 +1339,8 @@
                     newProvider.type === 'openai_compatible' ? 'gpt-4o' :
                     newProvider.type === 'local_whisper' ? 'openai/whisper-large-v3' :
                     newProvider.type === 'zai' ? 'glm-4.7' :
+                    newProvider.type === 'zai_coding' ? 'glm-5.2' :
+                    newProvider.type === 'deepseek' ? 'deepseek-v4-flash' :
                     newProvider.type === 'gemini' ? 'gemini-2.0-flash' :
                     newProvider.type === 'github_models' ? 'gpt-4o' :
                     newProvider.type === 'gigachat' ? 'GigaChat-2-Pro' :
@@ -1184,8 +1350,105 @@
               </div>
             {/if}
 
+            {#if newProvider.type === 'anthropic' || newProvider.type === 'zai' || newProvider.type === 'zai_coding' || newProvider.type === 'deepseek' || newProvider.type === 'gemini' || newProvider.type === 'github_models' || newProvider.type === 'gigachat'}
+              <div class="form-group">
+                <label for="new-api-key-env">API Key Environment Variable</label>
+                <input
+                  id="new-api-key-env"
+                  type="text"
+                  bind:value={newProvider.api_key_env}
+                  placeholder={
+                    newProvider.type === 'zai' || newProvider.type === 'zai_coding' ? 'ZAI_API_KEY' :
+                    newProvider.type === 'deepseek' ? 'DEEPSEEK_API_KEY' :
+                    newProvider.type === 'anthropic' ? 'ANTHROPIC_API_KEY' :
+                    newProvider.type === 'gemini' ? 'GEMINI_API_KEY' :
+                    newProvider.type === 'github_models' ? 'GITHUB_TOKEN' :
+                    'GIGACHAT_CREDENTIALS'
+                  }
+                />
+              </div>
+            {/if}
+
+            {#if newProvider.type !== 'dpc_agent' && newProvider.type !== 'local_whisper'}
+              <div class="form-group">
+                <label for="new-context-window-select">Context Window (optional)</label>
+                <select
+                  id="new-context-window-select"
+                  value={newProvider.context_window || ''}
+                  on:change={(e) => {
+                    const val = (e.target as HTMLSelectElement).value;
+                    newProvider.context_window = val === '' ? undefined : parseInt(val);
+                  }}
+                >
+                  <option value="">Auto-detected</option>
+                  {#each CONTEXT_WINDOW_PRESETS as preset}
+                    <option value={preset.value}>{preset.label}</option>
+                  {/each}
+                </select>
+                <input
+                  type="number"
+                  bind:value={newProvider.context_window}
+                  placeholder="Or enter exact value (tokens)"
+                  class="custom-context-input"
+                />
+              </div>
+            {/if}
+
+            {#if newProvider.type === 'zai'}
+              <div class="form-group">
+                <label for="new-max-tokens">Max Tokens (output)</label>
+                <input id="new-max-tokens" type="number" bind:value={newProvider.max_tokens} placeholder="8192" />
+              </div>
+
+              <div class="form-group">
+                <label for="new-thinking">
+                  <input
+                    id="new-thinking"
+                    type="checkbox"
+                    checked={newProvider.thinking?.enabled ?? false}
+                    on:change={(e) => {
+                      if (!newProvider.thinking) newProvider.thinking = {};
+                      newProvider.thinking.enabled = (e.target as HTMLInputElement).checked;
+                      newProvider = newProvider;
+                    }}
+                  />
+                  Enable extended thinking
+                </label>
+              </div>
+
+              {#if newProvider.thinking?.enabled}
+                <div class="form-group">
+                  <label for="new-thinking-budget">Thinking Budget (tokens)</label>
+                  <input
+                    id="new-thinking-budget"
+                    type="number"
+                    value={newProvider.thinking?.budget_tokens ?? ''}
+                    on:input={(e) => {
+                      if (!newProvider.thinking) newProvider.thinking = {};
+                      const v = (e.target as HTMLInputElement).value;
+                      newProvider.thinking.budget_tokens = v === '' ? undefined : parseInt(v);
+                      newProvider = newProvider;
+                    }}
+                    placeholder="10000"
+                  />
+                </div>
+              {/if}
+
+              <div class="form-group">
+                <label for="new-top-p">Top P (optional)</label>
+                <input id="new-top-p" type="number" step="0.05" min="0" max="1" bind:value={newProvider.top_p} placeholder="e.g. 0.9" />
+              </div>
+            {/if}
+
+            {#if newProvider.type !== 'dpc_agent' && newProvider.type !== 'local_whisper'}
+              <div class="form-group">
+                <label for="new-temperature">Temperature (optional)</label>
+                <input id="new-temperature" type="number" step="0.1" min="0" max="2" bind:value={newProvider.temperature} placeholder="0.7" />
+              </div>
+            {/if}
+
             <div class="form-info">
-              <p><strong>Note:</strong> After adding the provider, you can configure additional settings in the edit mode.</p>
+              <p><strong>Note:</strong> All settings can also be changed later in edit mode.</p>
               {#if newProvider.type === 'ollama'}
                 <p>Default host will be: http://127.0.0.1:11434</p>
               {:else if newProvider.type === 'openai_compatible'}
@@ -1320,6 +1583,31 @@
 {/if}
 
 <style>
+  /* Account balance card (Phase 2b) — dark theme, matches .provider-card */
+  .balance-card {
+    margin: 0 0 1rem;
+    padding: 0.6rem 0.85rem;
+    border: 1px solid #333;
+    border-radius: 8px;
+    background: #252525;
+    color: #fff;
+  }
+  .balance-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.75rem;
+  }
+  .balance-label { font-weight: 600; color: #fff; }
+  .balance-value { margin-top: 0.4rem; font-size: 1.05rem; color: #fff; font-variant-numeric: tabular-nums; }
+  .balance-flag { margin-left: 0.5rem; font-size: 0.85rem; color: #bbb; }
+  .balance-muted { color: #aaa; font-size: 0.9rem; }
+  .balance-err { color: #ef9a9a; }
+  .balance-ok { border-left: 4px solid #4caf50; }
+  .balance-low { border-left: 4px solid #ffb300; }
+  .balance-low .balance-value { color: #ffc107; }
+  .balance-critical { border-left: 4px solid #e53935; }
+  .balance-critical .balance-value { color: #ff6b6b; }
   .modal-overlay {
     position: fixed;
     top: 0;

@@ -4,7 +4,7 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { writable } from "svelte/store";
-  import { connectionStatus, nodeStatus, sendCommand, resetReconnection, connectToCoreService, knowledgeCommitProposal, personalContext, tokenWarning, extractionFailure, availableProviders, peerProviders, unreadMessageCounts, resetUnreadCount, setActiveChat, newSessionProposal, proposeNewSession, voteNewSession, defaultProviders, providersList, groupChats, loadGroups, listAgents, agentsList, sleepStateChanged, sleepProgress, sleepAgentStates, tokenUsageUpdated } from "$lib/coreService";
+  import { connectionStatus, nodeStatus, sendCommand, resetReconnection, connectToCoreService, knowledgeCommitProposal, personalContext, tokenWarning, extractionFailure, availableProviders, peerProviders, unreadMessageCounts, resetUnreadCount, setActiveChat, newSessionProposal, proposeNewSession, voteNewSession, defaultProviders, providersList, groupChats, listAgents, agentsList, sleepStateChanged, sleepProgress, sleepAgentStates, tokenUsageUpdated, setGroupReasoningEffort, updateAgentConfig } from "$lib/coreService";
   import { confirmAsync } from "$lib/utils/dialog";
   import { mapBackendMessage } from "$lib/utils/messageMapper";
   import KnowledgeCommitDialog from "$lib/components/KnowledgeCommitDialog.svelte";
@@ -336,15 +336,9 @@
       }
     }
 
-    // Load instruction sets for conversation creation dialog
-    try {
-      const result = await sendCommand('get_instructions', {});
-      if (result && result.status === 'success') {
-        availableInstructionSets = result.instruction_sets;
-      }
-    } catch (error) {
-      console.error('Failed to load instruction sets:', error);
-    }
+    // Instruction sets load once the WebSocket is connected — see the
+    // connection-gated $effect below (avoids the startup race where this
+    // fired before the socket opened and logged "WebSocket not connected").
 
     // Restore Telegram chats from localStorage (for page refresh recovery)
     try {
@@ -463,14 +457,31 @@
       console.error('[AI Chats] Failed to restore chat histories from localStorage:', error);
     }
 
-    // Load group chats from backend (v0.19.0)
-    try {
-      await loadGroups();
-      console.log('[Groups] Loaded group chats from backend');
-    } catch (error) {
-      console.error('[Groups] Failed to load group chats:', error);
-    }
+    // Group chats are loaded by the WebSocket open handler (coreService.ts)
+    // on every (re)connect — no eager load here (it raced the socket open).
 
+  });
+
+  // Load instruction sets once the backend WebSocket is connected.
+  // Runs on initial connect and any reconnect; guarded so a single
+  // 'connected' state doesn't trigger duplicate loads.
+  let instructionsLoaded = false;
+  $effect(() => {
+    if ($connectionStatus === 'connected' && !instructionsLoaded) {
+      instructionsLoaded = true;
+      (async () => {
+        try {
+          const result = await sendCommand('get_instructions', {});
+          if (result && result.status === 'success') {
+            availableInstructionSets = result.instruction_sets;
+          }
+        } catch (error) {
+          console.error('Failed to load instruction sets:', error);
+        }
+      })();
+    } else if ($connectionStatus !== 'connected') {
+      instructionsLoaded = false;
+    }
   });
 
   // Reactive: Update active chat in coreService to prevent unread badges on open chats
@@ -922,7 +933,7 @@
       onLinkAgentTelegram={handleLinkAgentTelegram}
       onUnlinkAgentTelegram={handleUnlinkAgentTelegram}
       onGetAgentModelConfig={async (agentId) => await sendCommand('get_agent_model_config', { agent_id: agentId })}
-      onSaveAgentModelConfig={async (agentId, config) => { await sendCommand('save_agent_model_config', { agent_id: agentId, ...config }); const r = await listAgents(); if (r?.status === 'success' && r.agents) agentsList.set(r.agents); if (config.provider_alias) aiChats.update(m => { const e = m.get(agentId); if (e) { e.llm_provider = config.provider_alias; } return new Map(m); }); }}
+      onSaveAgentModelConfig={async (agentId, config) => { const res = await sendCommand('save_agent_model_config', { agent_id: agentId, ...config }); const r = await listAgents(); if (r?.status === 'success' && r.agents) agentsList.set(r.agents); if (config.provider_alias) aiChats.update(m => { const e = m.get(agentId); if (e) { e.llm_provider = config.provider_alias; } return new Map(m); }); if (config.provider_alias && res?.context_window) { tokenUsageMap = new Map(tokenUsageMap); const cur = tokenUsageMap.get(agentId); tokenUsageMap.set(agentId, { ...cur, used: cur?.used ?? 0, limit: Number(res.context_window) }); } }}
     />
 
 
@@ -964,6 +975,40 @@
           <!-- Group topic display (v0.19.0) - inside title section for proper positioning -->
           {#if !chatHeaderCollapsed && isGroupChat && $groupChats.get(activeChatId)?.topic}
             <div class="group-topic">{$groupChats.get(activeChatId)?.topic}</div>
+          {/if}
+
+          {#if !chatHeaderCollapsed && isGroupChat}
+            <div class="group-effort">
+              <span class="group-effort-label">Thinking effort:</span>
+              <select
+                class="group-effort-select"
+                value={$groupChats.get(activeChatId)?.reasoning_effort || ''}
+                onchange={(e: Event) => setGroupReasoningEffort(activeChatId, (e.currentTarget as HTMLSelectElement).value)}
+              >
+                <option value="">Config</option>
+                <option value="low">Low</option>
+                <option value="medium">Medium</option>
+                <option value="high">High</option>
+                <option value="max">Max</option>
+              </select>
+            </div>
+          {/if}
+
+          {#if !chatHeaderCollapsed && isActuallyAIChat}
+            <div class="group-effort">
+              <span class="group-effort-label">Thinking effort:</span>
+              <select
+                class="group-effort-select"
+                value={$agentsList.find((a: any) => a.agent_id === activeChatId)?.reasoning_effort || ''}
+                onchange={async (e: Event) => { await updateAgentConfig(activeChatId, { reasoning_effort: (e.currentTarget as HTMLSelectElement).value }); await listAgents(); }}
+              >
+                <option value="">Config</option>
+                <option value="low">Low</option>
+                <option value="medium">Medium</option>
+                <option value="high">High</option>
+                <option value="max">Max</option>
+              </select>
+            </div>
           {/if}
 
           <!-- Auto Transcribe toggle (P2P and Telegram chats, NOT AI or group chats — groups have it in Settings) -->
@@ -1675,6 +1720,27 @@
     color: #aaa;
     padding: 0.2rem 0.8rem;
     font-style: italic;
+  }
+
+  .group-effort {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    padding: 0.1rem 0.8rem 0.3rem;
+    font-size: 0.8rem;
+  }
+  .group-effort-label {
+    color: #89b4fa;
+    font-weight: 600;
+  }
+  .group-effort-select {
+    font-size: 0.8rem;
+    color: #ddd;
+    background: #2a2a2a;
+    border: 1px solid #444;
+    border-radius: 3px;
+    padding: 1px 4px;
+    cursor: pointer;
   }
 
   .collapse-indicator {

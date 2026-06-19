@@ -167,6 +167,11 @@ class DpcAgent:
 
         log.info(f"DpcAgent initialized with storage at {self.agent_root}")
 
+    def set_provider_alias(self, provider_alias: Optional[str]) -> None:
+        """Switch this agent's inference provider at runtime (Main LLM change) without recreating the agent, so the task processor, memory and Telegram bridge stay intact."""
+        self._provider_alias = provider_alias
+        self.llm.set_provider_alias(provider_alias)
+
     async def process(
         self,
         message: str,
@@ -191,6 +196,7 @@ class DpcAgent:
         stop_event: Optional[asyncio.Event] = None,
         reader_identity: Optional[Dict[str, str]] = None,
         trigger_message_id: Optional[str] = None,
+        reasoning_effort: Optional[str] = None,
     ) -> str:
         """
         Process a user message and return response.
@@ -352,6 +358,7 @@ class DpcAgent:
             on_stream_chunk=on_stream_chunk,
             conversation_id=conversation_id,
             stop_event=stop_event,
+            reasoning_effort=reasoning_effort,
         )
 
         # Store last usage and trace for session state access by agent_manager

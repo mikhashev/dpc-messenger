@@ -191,6 +191,42 @@ class TestManualExtraction:
             # Verify local_ai monitor was created
             assert "local_ai" in core_service.conversation_monitors
 
+    def test_reset_clears_full_conversation(self, core_service):
+        """reset_conversation must clear full_conversation (the manual-extraction
+        source) so knowledge does not bleed across New-Session boundaries."""
+        monitor = core_service._get_or_create_conversation_monitor("group-resettest-bleed")
+        for i in range(3):
+            m = ConvMessage(
+                message_id=f"old{i}", conversation_id="group-resettest-bleed",
+                sender_node_id="n", sender_name="X", text=f"old {i}",
+                timestamp=datetime.now(timezone.utc).isoformat(),
+            )
+            monitor.full_conversation.append(m)
+            monitor.message_buffer.append(m)
+            monitor.message_history.append({"id": f"old{i}", "role": "user", "content": f"old {i}"})
+        assert len(monitor.full_conversation) == 3
+
+        monitor.reset_conversation(preserve=False)
+        assert monitor.full_conversation == []
+        assert monitor.message_buffer == []
+        assert monitor.message_history == []
+
+    def test_extraction_source_excludes_pre_reset_messages(self, core_service):
+        """After reset, rebuilding extraction buffers from history yields only
+        current-session messages — pre-reset content must not reappear."""
+        monitor = core_service._get_or_create_conversation_monitor("group-resettest-rebuild")
+        monitor.full_conversation.append(ConvMessage(
+            message_id="old", conversation_id="group-resettest-rebuild",
+            sender_node_id="n", sender_name="X", text="PRE-RESET topic",
+            timestamp=datetime.now(timezone.utc).isoformat(),
+        ))
+        monitor.reset_conversation(preserve=False)
+        monitor.message_history.append({"id": "new", "role": "user", "content": "CURRENT topic"})
+        monitor.rebuild_extraction_buffers_from_history()
+        texts = [m.text for m in monitor.full_conversation]
+        assert texts == ["CURRENT topic"]
+        assert "PRE-RESET topic" not in texts
+
 
 class TestIntegrationScenarios:
     """Test complete workflows"""
