@@ -1,7 +1,10 @@
 # dpc_client_core/providers/ollama_provider.py
 
 import asyncio
+import json
 import logging
+import uuid
+from types import SimpleNamespace
 from typing import Dict, Any, Optional, List
 
 import ollama
@@ -73,7 +76,10 @@ class OllamaProvider(AIProvider):
                 timeout=timeout
             )
             self._last_thinking = response['message'].thinking
-            return response['message']['content']
+            content = response['message']['content']
+            if not content and self._last_thinking:
+                content = self._last_thinking
+            return content
         except asyncio.TimeoutError:
             raise RuntimeError(f"Ollama provider '{self.alias}' timed out after {timeout}s.")
         except Exception as e:
@@ -143,11 +149,166 @@ class OllamaProvider(AIProvider):
                 timeout=timeout
             )
             self._last_thinking = response['message'].thinking
-            return response['message']['content']
+            content = response['message']['content']
+            if not content and self._last_thinking:
+                content = self._last_thinking
+            return content
         except asyncio.TimeoutError:
             raise RuntimeError(f"Ollama vision query '{self.alias}' timed out after {timeout}s.")
         except Exception as e:
             raise RuntimeError(f"Ollama vision API failed for '{self.alias}': {e}") from e
+
+    @staticmethod
+    def _anthropic_to_openai_tools(tools: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        out = []
+        for t in tools:
+            if "function" in t:
+                out.append(t)
+                continue
+            out.append({
+                "type": "function",
+                "function": {
+                    "name": t.get("name"),
+                    "description": t.get("description", ""),
+                    "parameters": t.get("input_schema") or {"type": "object", "properties": {}},
+                },
+            })
+        return out
+
+    @staticmethod
+    def _anthropic_to_openai_messages(system: Any, messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        out: List[Dict[str, Any]] = []
+        if system:
+            sys_text = system if isinstance(system, str) else "".join(
+                b.get("text", "") for b in system if isinstance(b, dict)
+            )
+            if sys_text:
+                out.append({"role": "system", "content": sys_text})
+        for m in messages:
+            role = m.get("role")
+            content = m.get("content")
+            if isinstance(content, str):
+                out.append({"role": role, "content": content})
+                continue
+            blocks = content if isinstance(content, list) else []
+            if role == "assistant":
+                text_parts: List[str] = []
+                tool_calls: List[Dict[str, Any]] = []
+                for b in blocks:
+                    if not isinstance(b, dict):
+                        continue
+                    bt = b.get("type")
+                    if bt == "text":
+                        text_parts.append(b.get("text", ""))
+                    elif bt == "tool_use":
+                        tool_calls.append({
+                            "type": "function",
+                            "function": {
+                                "name": b.get("name", ""),
+                                "arguments": b.get("input", {}),
+                            },
+                        })
+                msg: Dict[str, Any] = {"role": "assistant", "content": "".join(text_parts)}
+                if tool_calls:
+                    msg["tool_calls"] = tool_calls
+                out.append(msg)
+                continue
+            if role == "user":
+                tool_results = [
+                    b for b in blocks
+                    if isinstance(b, dict) and b.get("type") == "tool_result"
+                ]
+                if tool_results:
+                    for tr in tool_results:
+                        tr_content = tr.get("content", "")
+                        if isinstance(tr_content, list):
+                            tr_content = "".join(
+                                b.get("text", "") for b in tr_content if isinstance(b, dict)
+                            )
+                        out.append({"role": "tool", "content": str(tr_content)})
+                else:
+                    text_parts = [
+                        b.get("text", "") for b in blocks
+                        if isinstance(b, dict) and b.get("type") == "text"
+                    ]
+                    out.append({"role": "user", "content": "".join(text_parts)})
+                continue
+            out.append({"role": role or "user", "content": json.dumps(blocks)})
+        return out
+
+    async def generate_with_tools(
+        self,
+        messages: List[Dict[str, Any]],
+        tools: List[Dict[str, Any]],
+        system: Any = "",
+        on_chunk: Optional[Any] = None,
+        conversation_id: Optional[str] = None,
+        **kwargs,
+    ) -> Dict[str, Any]:
+        self._last_thinking = None
+        ollama_messages = self._anthropic_to_openai_messages(system, messages)
+        ollama_tools = self._anthropic_to_openai_tools(tools)
+
+        options = {}
+        if self.config.get("context_window"):
+            options["num_ctx"] = self.config["context_window"]
+        temp = kwargs.get("temperature", self.temperature)
+        if temp != 0.7:
+            options["temperature"] = temp
+        timeout = self.config.get("timeout", 300.0)
+
+        try:
+            response = await asyncio.wait_for(
+                self.client.chat(
+                    model=self.model,
+                    messages=ollama_messages,
+                    tools=ollama_tools,
+                    options=options if options else None,
+                    think=True if self.supports_thinking() else None,
+                ),
+                timeout=timeout,
+            )
+        except asyncio.TimeoutError:
+            raise RuntimeError(f"Ollama provider '{self.alias}' timed out after {timeout}s.")
+        except Exception as e:
+            raise RuntimeError(f"Ollama tool call '{self.alias}' failed: {e}") from e
+
+        msg = response['message']
+        self._last_thinking = getattr(msg, 'thinking', None)
+        content = getattr(msg, 'content', None) or ''
+
+        tool_calls_raw = []
+        for tc in (getattr(msg, 'tool_calls', None) or []):
+            args = tc.function.arguments
+            if isinstance(args, str):
+                try:
+                    args = json.loads(args) if args else {}
+                except (json.JSONDecodeError, TypeError):
+                    args = {}
+            tool_calls_raw.append(SimpleNamespace(
+                id=getattr(tc, 'id', None) or f"call_{uuid.uuid4().hex[:8]}",
+                name=tc.function.name,
+                input=args or {},
+            ))
+
+        if not content and not tool_calls_raw and self._last_thinking:
+            content = self._last_thinking
+        if on_chunk and content:
+            await on_chunk(content, conversation_id)
+
+        prompt_tokens = getattr(response, 'prompt_eval_count', 0) or 0
+        completion_tokens = getattr(response, 'eval_count', 0) or 0
+        usage = {
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": completion_tokens,
+            "total_tokens": prompt_tokens + completion_tokens,
+        }
+        return {
+            "content": content,
+            "tool_calls_raw": tool_calls_raw,
+            "thinking": self._last_thinking,
+            "usage": usage,
+        }
 
     async def get_model_info(self) -> Dict[str, Any]:
         """Query Ollama for model information including parameters.
