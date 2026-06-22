@@ -1093,6 +1093,15 @@ class AuthBrowser:
     def _save_storage_state(self) -> None:
         if self._context is None:
             return
+        if self._disconnected:
+            # Browser already detached (e.g. user closed the window): the
+            # context is dead, so storage_state() would only raise and the
+            # cookies are unreadable. Skip quietly instead of WARNING-spamming.
+            log.debug(
+                "storage_state save skipped for agent=%s (browser already closed)",
+                self._agent_id,
+            )
+            return
         try:
             state_path = self._state_path()
             state_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1110,10 +1119,19 @@ class AuthBrowser:
             if state is not None:
                 self._sync_cookies_to_vault(state.get("cookies", []))
         except Exception as e:
-            log.warning(
-                "storage_state save failed for agent=%s: %s",
-                self._agent_id, e,
-            )
+            if self._disconnected:
+                # Disconnect fired *during* storage_state() (manual close
+                # race): expected, not a real failure — keep it at DEBUG.
+                log.debug(
+                    "storage_state save skipped for agent=%s "
+                    "(browser closed mid-save): %s",
+                    self._agent_id, e,
+                )
+            else:
+                log.warning(
+                    "storage_state save failed for agent=%s: %s",
+                    self._agent_id, e,
+                )
 
     def _install_domain_route_handler(self) -> None:
         if self._context is None:
@@ -1657,12 +1675,17 @@ class AuthBrowser:
     def close(self) -> None:
         """Release browser resources. Safe to call multiple times.
 
-        Idempotent + race-tolerant: every Playwright call is guarded
-        by a fresh `_disconnected` check so a disconnect event firing
-        mid-close skips the doomed IPC (the failure mode behind the
-        S155 Ctrl+C hang). Registry / lock / executor teardown always
-        runs in the finally block so a stuck close() never leaves
-        orphan threads keeping the Python process alive."""
+        Idempotent + race-tolerant: the live-only work (audit + cookie
+        writeback) is guarded by `_disconnected` so a disconnect event
+        firing mid-close skips the doomed IPC (the failure mode behind the
+        S155 Ctrl+C hang). The Camoufox `__exit__` (driver-subprocess
+        teardown) runs unconditionally in the finally block — even after a
+        disconnect — so the subprocess and its OS pipe are always released;
+        skipping it orphaned the pipe and left a Windows IOCP overlapped
+        read pending → ProactorEventLoop spin at shutdown. It is bounded by
+        the caller's `_run_in_session` timeout + the daemon executor, so a
+        doomed IPC here can never block process exit. Registry / lock /
+        executor teardown always runs too."""
         try:
             if not self._disconnected:
                 url = ""
@@ -1672,25 +1695,27 @@ class AuthBrowser:
                     except Exception:
                         pass
                 self._audit_action("close", url, "ok")
-            if self._disconnected:
-                return
-            if self._context is not None and not self._disconnected:
-                try:
-                    self._save_storage_state()
-                except Exception as exc:
-                    log.warning(
-                        "storage_state save during close failed for agent=%s: %s",
-                        self._agent_id, exc,
-                    )
-            if self._cm is not None and not self._disconnected:
+                if self._context is not None:
+                    try:
+                        self._save_storage_state()
+                    except Exception as exc:
+                        log.warning(
+                            "storage_state save during close failed for agent=%s: %s",
+                            self._agent_id, exc,
+                        )
+        finally:
+            # Tear down the Camoufox context manager regardless of
+            # `_disconnected` — this is what kills the driver subprocess and
+            # drains its pipe. Best-effort: log at DEBUG since a disconnected
+            # browser's __exit__ commonly raises (connection already gone).
+            if self._cm is not None:
                 try:
                     self._cm.__exit__(None, None, None)
                 except Exception as exc:
-                    log.warning(
-                        "Camoufox __exit__ failed for agent=%s: %s",
+                    log.debug(
+                        "Camoufox __exit__ during close (agent=%s): %s",
                         self._agent_id, exc,
                     )
-        finally:
             self._cm = None
             self._browser = None
             self._context = None

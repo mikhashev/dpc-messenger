@@ -871,6 +871,48 @@ def test_close_triggers_save_when_context_live(vault_home):
     assert saved == [True]
 
 
+def test_save_storage_state_skips_quietly_when_disconnected(vault_home, caplog):
+    """When the browser already disconnected (e.g. user closed the window),
+    `_save_storage_state` must skip without raising and WITHOUT a WARNING —
+    the dead context is unreadable, so the failure is expected, not a fault."""
+    import logging as _logging
+    from dpc_client_core.dpc_agent.tools.browser import AuthBrowser
+
+    ab = AuthBrowser(agent_id="agent_a", domains=[f"{TEST_DOMAIN}"])
+
+    class _BrokenContext:
+        def storage_state(self, path=None):
+            raise RuntimeError("Target page, context or browser has been closed")
+
+    ab._context = _BrokenContext()
+    ab._disconnected = True
+    with caplog.at_level(_logging.DEBUG):
+        ab._save_storage_state()  # must not raise
+    assert not any(rec.levelno >= _logging.WARNING for rec in caplog.records)
+
+
+def test_close_runs_cm_exit_even_when_disconnected(vault_home):
+    """close() must tear down the Camoufox cm (`__exit__`) even after a
+    disconnect, so the driver subprocess + its OS pipe are released. Skipping
+    it orphaned the pipe → Windows IocpProactor spin at shutdown."""
+    from dpc_client_core.dpc_agent.tools.browser import AuthBrowser
+
+    ab = AuthBrowser(agent_id="agent_a", domains=[f"{TEST_DOMAIN}"])
+    exited: list[bool] = []
+
+    class _FakeCM:
+        def __exit__(self, *args):
+            exited.append(True)
+            return False
+
+    ab._cm = _FakeCM()
+    ab._disconnected = True  # browser already detached
+
+    ab.close()
+    assert exited == [True]  # subprocess teardown ran despite disconnect
+    assert ab._cm is None
+
+
 def test_open_uses_storage_state_when_file_valid(vault_home, monkeypatch):
     """When `browser_state.json` exists + parses, _open() passes
     `storage_state=<path>` to new_context() and skips the vault
