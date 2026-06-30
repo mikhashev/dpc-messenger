@@ -5323,6 +5323,42 @@ class CoreService:
                 "recorded_at": datetime.now(timezone.utc).isoformat()
             }
 
+            # Local-first echo + history on send (ADR-032 Part A); dedup key pre-seed
+            # makes file_complete_handler's later echo skip.
+            import hashlib
+            final_filename = file_path.name
+            size_mb = round(len(audio_data) / (1024 * 1024), 2)
+            attachment = {
+                "type": "voice",
+                "filename": final_filename,
+                "size_bytes": len(audio_data),
+                "size_mb": size_mb,
+                "mime_type": mime_type,
+                "status": "completed",
+                "file_path": str(file_path),
+                "voice_metadata": voice_metadata,
+            }
+            ui_dedup_key = f"group_file_ui:{group_id}:{final_filename}"
+            if ui_dedup_key not in self._processed_message_ids:
+                self._processed_message_ids.add(ui_dedup_key)
+                message_id = hashlib.sha256(
+                    f"{self.p2p_manager.node_id}:group-voice-send:{group_id}:{final_filename}".encode()
+                ).hexdigest()[:16]
+                await self.local_api.broadcast_event("group_file_received", {
+                    "sender_node_id": "user",
+                    "sender_name": "You",
+                    "text": "",
+                    "message_id": message_id,
+                    "attachments": [attachment],
+                    "group_id": group_id,
+                })
+                if _group_monitor:
+                    _group_monitor.add_message(
+                        "user",
+                        f"Sent voice message: {final_filename} ({size_mb} MB)",
+                        [attachment],
+                    )
+
             # Fan-out to connected members
             connected_peers = self.p2p_coordinator.get_connected_peers()
             transfer_ids = []

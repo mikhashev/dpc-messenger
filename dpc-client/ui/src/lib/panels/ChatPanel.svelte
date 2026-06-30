@@ -842,6 +842,12 @@
           return m;
         });
       } else if (activeChatId.startsWith('group-')) {
+        // ≤1 node (agents are node-less) → dictation into input, not a voice message (ADR-032 Part B)
+        const group = get(groupChats).get(activeChatId);
+        if ((group?.members?.length ?? 1) <= 1) {
+          await handleTranscribeVoiceMessage();
+          return;
+        }
         const base64Audio = await _blobToBase64(blob);
         await sendGroupVoiceMessage(activeChatId, base64Audio, duration, blob.type || 'audio/webm');
       } else if (activeChatId === 'local_ai' || activeChatId.startsWith('ai_') || activeChatId.startsWith('agent_')) {
