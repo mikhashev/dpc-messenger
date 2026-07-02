@@ -25,6 +25,12 @@ winget install OpenJS.NodeJS.LTS
 
 Install Rust from [rustup.rs](https://rustup.rs/) (download and run the installer).
 
+> **Build prerequisites (Windows):** the frontend (`npm run tauri dev`)
+> compiles Rust, which needs the **MSVC C++ Build Tools**. The rustup
+> installer prompts to install them — accept it. **WebView2** (required
+> by Tauri) is preinstalled on Windows 11; on Windows 10 install it from
+> Microsoft if the app window stays blank.
+
 ### Step 2: Clone and install
 
 ```powershell
@@ -37,6 +43,11 @@ uv sync
 cd ../ui
 npm install
 ```
+
+> **NVIDIA GPU users:** `uv sync` installs a CUDA build of PyTorch. If
+> you have a very new card (Blackwell — RTX 50-series, RTX PRO 4500,
+> etc.) and later see a `sm_120 is not compatible` warning, see
+> [GPU acceleration](#gpu-acceleration) below for the one-line fix.
 
 ### Step 3: Run
 
@@ -161,11 +172,68 @@ A desktop window will open — that's the app.
 
 Your private data is stored in `~/.dpc/`.
 
-**AMD GPU (ROCm):** If you have an AMD GPU and want GPU-accelerated inference:
+---
+
+## First run: model downloads
+
+The first time an agent uses its memory, the backend downloads an
+embedding model (`BAAI/bge-m3`, ~2.3 GB) from Hugging Face. This needs
+an internet connection and can make the first launch — and the first
+click on some UI panels — appear to **hang for a minute or two**. This
+is normal, happens **once**, and the model is cached in
+`~/.cache/huggingface/` and reused afterward.
+
+---
+
+## GPU acceleration
+
+`uv sync` installs a CUDA build of PyTorch for NVIDIA GPUs (used for
+local Whisper transcription and agent-memory embeddings). No NVIDIA GPU?
+The app still runs — PyTorch falls back to CPU, just slower.
+
+**Troubleshooting — `NVIDIA ... with CUDA capability sm_120 is not
+compatible` or `no kernel image is available for execution on the
+device`:** your PyTorch build is older than your GPU (common on brand-new
+**Blackwell** cards). Check your GPU with `nvidia-smi`, then reinstall
+PyTorch from a newer CUDA index. For Blackwell (compute capability 12.0),
+use `cu128`:
+
+```bash
+cd dpc-client/core
+uv pip install --index-url https://download.pytorch.org/whl/cu128 "torch>=2.7" torchvision
+```
+
+Note: `Loaded ... on cuda` in the logs does **not** confirm the GPU
+works — allocation can succeed while compute kernels are missing. Verify
+with a quick `torch.randn(64,64,device="cuda") @ ...` if unsure.
+
+**AMD GPU (Linux/ROCm):**
+
 ```bash
 cd dpc-client/core
 uv pip install torch torchvision --index-url https://download.pytorch.org/whl/rocm6.2
 ```
+
+---
+
+## Optional features
+
+The default `uv sync` stays lean. Enable extras as needed — they can be
+added later without reinstalling, and combined
+(`uv sync --extra graph-grafeo --extra browser`):
+
+```bash
+cd dpc-client/core
+uv sync --extra graph-grafeo   # Grafeo retrieval backend for agent memory (opt-in; default is native FAISS)
+uv sync --extra browser        # camoufox — headless browser tool for agents
+uv sync --extra graph-ner      # gliner — named-entity extraction
+uv sync --extra mlx            # macOS Apple Silicon — GPU Whisper via MLX
+```
+
+> If an agent is configured for the Grafeo backend but the package is
+> missing, the log shows
+> `Background memory indexing failed: Grafeo retrieval requires the grafeo package`
+> — install `--extra graph-grafeo` to enable it.
 
 ---
 
