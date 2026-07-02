@@ -75,27 +75,12 @@
   // Handlers
   // ---------------------------------------------------------------------------
 
-  async function handleModelDownload(event: CustomEvent) {
+  function handleModelDownload(event: CustomEvent) {
+    // Fire-and-forget: the backend downloads in a thread pool; the started/
+    // completed/failed effects above drive the UI. No blocking await.
     const { provider_alias } = event.detail;
-    console.log('[ModelDownload] Starting download for provider:', provider_alias);
-    try {
-      const result = await sendCommand('download_whisper_model', { provider_alias });
-      if (result.status === 'success') {
-        console.log('[ModelDownload] Download initiated successfully');
-      } else {
-        console.error('[ModelDownload] Download failed:', result.error);
-        modelDownloadToastMessage = `❌ Download failed: ${result.error}`;
-        modelDownloadToastType = 'error';
-        showModelDownloadToast = true;
-        isDownloadingModel = false;
-      }
-    } catch (error) {
-      console.error('[ModelDownload] Error initiating download:', error);
-      modelDownloadToastMessage = `❌ Error: ${error}`;
-      modelDownloadToastType = 'error';
-      showModelDownloadToast = true;
-      isDownloadingModel = false;
-    }
+    isDownloadingModel = true;
+    sendCommand('download_whisper_model', { provider_alias });
   }
 
   function handleModelDownloadCancel() {
