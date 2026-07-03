@@ -445,13 +445,16 @@ def comfyui_queue_status(ctx: ToolContext, api_url: str = DEFAULT_API_URL) -> st
     return future.result(timeout=10)
 
 
-# Last progress sample per api_url: (step, max, loop_time). Lets a poll
-# estimate sec/iteration + ETA across calls when a single snapshot only
+# Last progress sample per api_url: (step, max, loop_time, prompt_id). Lets a
+# poll estimate sec/iteration + ETA across calls when a single snapshot only
 # catches one step (common on slow renders). Loop time is monotonic and
-# comparable across calls because the agent reuses one event loop.
-# Module-level and keyed only by api_url: two agents polling the same URL
-# concurrently could race here — acceptable while one agent drives renders;
-# revisit (per-agent state) if concurrent generation lands.
+# comparable across calls because the agent reuses one event loop. The
+# prompt_id is stored so the cross-call rate can be REJECTED when the stored
+# sample belongs to a different render (the queue advanced to the next clip
+# between polls) — otherwise a huge wall gap / tiny step delta yields a bogus
+# inflated s/it. Module-level and keyed only by api_url: two agents polling the
+# same URL concurrently could race here — acceptable while one agent drives
+# renders; revisit (per-agent state) if concurrent generation lands.
 _LAST_PROGRESS: dict = {}
 
 
@@ -460,12 +463,20 @@ def _fmt_dur(sec: float) -> str:
     return f"{sec}s" if sec < 90 else f"{sec // 60}m{sec % 60:02d}s"
 
 
-def _format_progress_timing(samples: list, api_url: str) -> str:
+def _format_progress_timing(samples: list, api_url: str, prompt_id: str = "") -> str:
     """Build a 'timing:' line (step, sec/it, ETA) from progress samples.
 
     ``samples`` are (step, max, loop_time) tuples collected this call.
-    Rate comes from within-call samples when >=2 are seen, else from the
-    last stored sample across calls. Returns '' when nothing is known.
+    Rate comes from within-call samples when >=2 are seen (always accurate:
+    two real sampler steps timed in one call). The cross-call fallback (using
+    the last stored sample) is trusted ONLY when that sample belongs to the
+    SAME ``prompt_id`` — otherwise the two samples straddle a clip switch (the
+    queue advanced to the next job: tail of the previous clip + VAE decode +
+    model reload + partial next clip), and dividing that large wall gap by the
+    tiny step delta produces a wildly inflated s/it (the ~250/384-per-step
+    ghost that made a healthy 28 s/step render look "stuck"). A different or
+    unknown prompt_id -> no cross-call rate (report step only, ask to re-poll).
+    Returns '' when nothing is known.
     """
     if not samples:
         return ""
@@ -477,11 +488,12 @@ def _format_progress_timing(samples: list, api_url: str) -> str:
             rate = (cur_t - t0) / (cur_step - s0)
     if rate is None:
         prev = _LAST_PROGRESS.get(api_url)
-        if prev:
-            p_step, _, p_t = prev
+        # Same render only: prev is (step, max, loop_time, prompt_id).
+        if prev and len(prev) >= 4 and prompt_id and prev[3] == prompt_id:
+            p_step, _, p_t, _ = prev
             if cur_step - p_step > 0 and cur_t - p_t > 0:
                 rate = (cur_t - p_t) / (cur_step - p_step)
-    _LAST_PROGRESS[api_url] = (cur_step, cur_max, cur_t)
+    _LAST_PROGRESS[api_url] = (cur_step, cur_max, cur_t, prompt_id)
     parts = [f"step {cur_step}/{cur_max}"]
     if rate:
         eta = max(0, (cur_max or 0) - cur_step) * rate
@@ -507,7 +519,11 @@ def comfyui_progress(ctx: ToolContext, timeout: int = 10, api_url: str = DEFAULT
     if loop is None:
         return "Error: no event loop available."
     timeout = max(3, min(timeout, 60))
-    HARD_CAP = 45.0  # must exceed one slow step (~27s) so we catch a tick
+    # Must exceed TWO slow steps (~28s each) so the accurate within-call
+    # 2-sample rate can be captured in one call when the agent asks for a long
+    # enough window (timeout ~= 60) — otherwise only 1 step fits and we fall
+    # back to the (prompt_id-guarded) cross-call estimate.
+    HARD_CAP = 65.0
 
     async def _progress():
         import websockets
@@ -515,6 +531,7 @@ def comfyui_progress(ctx: ToolContext, timeout: int = 10, api_url: str = DEFAULT
         ws_url = f"{ws_url.rstrip('/')}/ws?clientId=dpc-forge-progress"
         events = []
         prog_samples = []
+        cur_prompt_id = ""  # which render these samples belong to
         try:
             async with websockets.connect(ws_url, close_timeout=3) as ws:
                 start = asyncio.get_event_loop().time()
@@ -533,6 +550,12 @@ def comfyui_progress(ctx: ToolContext, timeout: int = 10, api_url: str = DEFAULT
                         data = json.loads(raw)
                         msg_type = data.get("type", "")
                         msg_data = data.get("data", {})
+                        # ComfyUI tags most events with the prompt_id of the
+                        # running job; capture it so the timing estimator can
+                        # tell one clip's samples from the next.
+                        pid = msg_data.get("prompt_id")
+                        if pid:
+                            cur_prompt_id = pid
                         if msg_type == "progress":
                             val = msg_data.get("value", 0)
                             mx = msg_data.get("max", 0)
@@ -562,7 +585,7 @@ def comfyui_progress(ctx: ToolContext, timeout: int = 10, api_url: str = DEFAULT
                 return f"Error: cannot connect to ComfyUI WebSocket: {e}"
             events.append(f"(connection closed: {e})")
 
-        timing = _format_progress_timing(prog_samples, api_url)
+        timing = _format_progress_timing(prog_samples, api_url, cur_prompt_id)
         if timing:
             # We have a real step/ETA: drop the heartbeat noise so the agent
             # sees the signal, not 'queue_remaining=1' lines, then append it.
@@ -786,14 +809,20 @@ def get_tools() -> List[ToolEntry]:
                     "One-shot WebSocket snapshot of ComfyUI generation progress. "
                     "Shows current step (e.g. step 5/20), which node is executing, "
                     "queue status, and errors. Use during long generations to check status. "
-                    "Non-blocking — reads available events within timeout and returns."
+                    "Reports s/it + ETA. IMPORTANT for the s/it to be accurate: the "
+                    "reported rate is a real per-step delta only when either two steps are "
+                    "seen in one call, or the previous poll was of the SAME running job. "
+                    "On slow models (>~22s/step, e.g. Bernini ~28s) pass timeout=60 so two "
+                    "real steps are captured in a single call — a short poll catches one step "
+                    "and, right after a clip finishes in a batch, cannot compute a trustworthy "
+                    "rate (it says 'poll again') rather than emitting an inflated number."
                 ),
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "timeout": {
                             "type": "integer",
-                            "description": "Seconds to listen for events (default 10, max 30). Longer = more events captured.",
+                            "description": "Seconds to listen for events (default 10, max 60). Use 60 on slow models to capture two steps and get an accurate s/it in one call.",
                         },
                         "api_url": {
                             "type": "string",
@@ -805,7 +834,7 @@ def get_tools() -> List[ToolEntry]:
             },
             handler=comfyui_progress,
             is_code_tool=False,
-            timeout_sec=35,
+            timeout_sec=80,
             is_core=False,
             default_enabled=False,
         ),

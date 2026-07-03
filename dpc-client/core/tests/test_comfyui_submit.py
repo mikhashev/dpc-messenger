@@ -10,8 +10,10 @@ import types
 
 import pytest
 
+import dpc_client_core.dpc_agent.tools.comfyui as cf
 from dpc_client_core.dpc_agent.tools.comfyui import (
     _convert_ui_to_api,
+    _format_progress_timing,
     _is_ui_format,
     _queue_item_label,
     _resolve_workflow_path,
@@ -147,3 +149,53 @@ def test_queue_item_label_malformed_item():
     assert _queue_item_label("notalist") == ("", "")
     pid, label = _queue_item_label([0, "pid-3", "promptnotadict"])
     assert pid == "pid-3" and label == ""
+
+
+# ---- _format_progress_timing: s/it estimator (prompt_id boundary guard) ----
+# Regression for the "384/250 s-per-step ghost": a healthy ~28s/step render
+# looked "stuck" because the cross-call rate divided a whole clip-switch wall
+# gap (tail + VAE + model reload + partial next clip) by a tiny step delta,
+# since _LAST_PROGRESS was keyed by api_url only and ignored which clip the
+# stored sample belonged to.
+
+
+def test_progress_timing_within_call_two_samples_accurate():
+    # Two real steps timed in one call -> exact delta, no history needed.
+    cf._LAST_PROGRESS.clear()
+    out = _format_progress_timing([(3, 20, 0.0), (5, 20, 56.0)], "http://x", "pC")
+    assert "step 5/20" in out
+    assert "~28.0s/it" in out      # 56s / 2 steps
+    assert "ETA" in out            # (20-5)*28 = 420s
+
+
+def test_progress_timing_crosscall_same_prompt_accurate():
+    # One step per call, but the previous poll was the SAME running job ->
+    # the cross-call delta is a trustworthy per-step rate.
+    cf._LAST_PROGRESS.clear()
+    first = _format_progress_timing([(5, 20, 100.0)], "http://x", "pA")
+    assert "step 5/20" in first and "poll again" in first  # nothing to compare yet
+    second = _format_progress_timing([(6, 20, 128.0)], "http://x", "pA")
+    assert "~28.0s/it" in second   # 28s / 1 step, same prompt
+
+
+def test_progress_timing_crosscall_different_prompt_rejected():
+    # The queue advanced to the next clip between polls: prev sample is pA,
+    # current is pB with a huge wall gap. Must NOT emit an inflated s/it.
+    cf._LAST_PROGRESS.clear()
+    _format_progress_timing([(11, 20, 100.0)], "http://x", "pA")
+    out = _format_progress_timing([(16, 20, 1350.0)], "http://x", "pB")
+    assert "step 16/20" in out
+    assert "~" not in out          # the bug produced a ~250s/it rate here
+    assert "poll again" in out
+    # And the new sample is stored under pB for the next same-prompt poll.
+    assert cf._LAST_PROGRESS["http://x"] == (16, 20, 1350.0, "pB")
+
+
+def test_progress_timing_unknown_prompt_id_no_crosscall():
+    # If ComfyUI never tags events with a prompt_id, the cross-call fallback is
+    # disabled (empty id never matches) — report step, ask to re-poll, never
+    # emit a possibly-wrong rate.
+    cf._LAST_PROGRESS.clear()
+    _format_progress_timing([(5, 20, 100.0)], "http://x", "")
+    out = _format_progress_timing([(6, 20, 128.0)], "http://x", "")
+    assert "step 6/20" in out and "poll again" in out
