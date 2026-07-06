@@ -1623,16 +1623,28 @@
                   Use This Value
                 </button>
               {:else}
-                <div class="info-box warning-box">
-                  <p class="info-title">⚠️ No Custom Context Window Detected</p>
-                  <p class="info-text">
-                    This model doesn't have a custom <code>num_ctx</code> parameter in its modelfile.
-                    It will use Ollama's default (typically <strong>2,048 tokens</strong>).
-                  </p>
-                  <p class="info-text">
-                    To increase it, use the dropdown in edit mode to select a larger context window.
-                  </p>
-                </div>
+                {@const providerCw = displayConfig?.providers.find(p => p.alias === queriedProviderAlias)?.context_window}
+                {#if providerCw}
+                  <div class="info-box ok-box">
+                    <p class="info-title">✓ Set by provider config</p>
+                    <p class="info-text">
+                      The modelfile has no <code>num_ctx</code>, but this provider sends
+                      <strong>{providerCw.toLocaleString()} tokens</strong> with every request
+                      (Context Window setting), which overrides Ollama's default.
+                    </p>
+                  </div>
+                {:else}
+                  <div class="info-box warning-box">
+                    <p class="info-title">⚠️ No Custom Context Window Detected</p>
+                    <p class="info-text">
+                      This model doesn't have a custom <code>num_ctx</code> parameter in its modelfile.
+                      It will use Ollama's default context size.
+                    </p>
+                    <p class="info-text">
+                      To increase it, use the dropdown in edit mode to select a larger context window.
+                    </p>
+                  </div>
+                {/if}
               {/if}
             </div>
 
@@ -2280,6 +2292,14 @@
   .warning-box {
     background: rgba(255, 193, 7, 0.1);
     border-color: #ffc107;
+  }
+
+  .ok-box {
+    background: rgba(76, 175, 80, 0.1);
+    border-color: #4caf50;
+  }
+  .ok-box .info-title {
+    color: #4caf50;
   }
 
   .info-title {
