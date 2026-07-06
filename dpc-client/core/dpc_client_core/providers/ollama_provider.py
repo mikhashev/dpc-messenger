@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 # Sampling parameters passed through from providers.json to the Ollama API.
 # Options must stay a plain dict: min_p is missing from the SDK Options model
 # (ollama 0.6.2) and survives only the dict serialization path.
-OLLAMA_SAMPLING_PARAMS = ["min_p", "presence_penalty", "repeat_penalty", "top_k", "top_p"]
+OLLAMA_SAMPLING_PARAMS = ["min_p", "presence_penalty", "repeat_penalty", "top_k", "top_p", "num_predict"]
 
 # Vision-capable Ollama models (for auto-detection)
 OLLAMA_VISION_MODELS = [

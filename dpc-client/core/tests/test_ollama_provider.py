@@ -44,6 +44,7 @@ def test_build_options_sampling_params_from_config():
         "presence_penalty": 0.0,
         "min_p": 0.05,
         "top_k": 20,
+        "num_predict": 4096,
     })
     opts = p._build_options()
     assert opts == {
@@ -52,6 +53,7 @@ def test_build_options_sampling_params_from_config():
         "presence_penalty": 0.0,
         "min_p": 0.05,
         "top_k": 20,
+        "num_predict": 4096,
     }
     assert "repeat_penalty" not in opts
     assert "top_p" not in opts
@@ -95,7 +97,7 @@ def test_sampling_params_whitelist_is_closed():
     p = _make({"presence_penality": 1.5})  # typo key
     opts = p._build_options()
     assert "presence_penality" not in opts
-    assert set(OLLAMA_SAMPLING_PARAMS) == {"min_p", "presence_penalty", "repeat_penalty", "top_k", "top_p"}
+    assert set(OLLAMA_SAMPLING_PARAMS) == {"min_p", "presence_penalty", "repeat_penalty", "top_k", "top_p", "num_predict"}
 
 
 def test_tools_anthropic_to_openai():

@@ -29,6 +29,7 @@
     presence_penalty?: number;
     repeat_penalty?: number;
     top_k?: number;
+    num_predict?: number;
     // Local Whisper specific (v0.13.1+)
     device?: string;         // 'cuda', 'cpu', or 'auto'
     compile_model?: boolean; // torch.compile optimization
@@ -115,6 +116,7 @@
     { key: 'repeat_penalty', step: 0.05, min: 0, max: 2, isInt: false, hint: '0.0–2.0' },
     { key: 'top_k', step: 1, min: 0, max: 200, isInt: true, hint: 'integer' },
     { key: 'top_p', step: 0.05, min: 0, max: 1, isInt: false, hint: '0.0–1.0' },
+    { key: 'num_predict', step: 1, min: -2, max: 1000000, isInt: true, hint: 'max tokens' },
   ];
 
   // Unset temperature means different things per provider type: ollama omits
