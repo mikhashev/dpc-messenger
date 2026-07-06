@@ -126,6 +126,16 @@
     return 'Default (0.7)';
   }
 
+  // Selecting "Custom..." must show the manual input even while temperature is
+  // still unset — tracked per provider index, reset on entering edit mode.
+  let customTempMode: Record<number, boolean> = {};
+
+  function tempSelectValue(i: number): string | number {
+    const t = editedConfig?.providers[i]?.temperature;
+    if (customTempMode[i] || (t !== undefined && !TEMPERATURE_PRESETS.some(p => p.value === t))) return 'custom';
+    return t ?? '';
+  }
+
   function getSamplingParam(i: number, key: string): number | '' {
     const v = (editedConfig?.providers[i] as any)?.[key];
     return v ?? '';
@@ -379,6 +389,7 @@
   function startEditing() {
     if (!config) return;
     editMode = true;
+    customTempMode = {};
     editedConfig = JSON.parse(JSON.stringify(config));
     if (!editedConfig) return; // Guard against null
     // Track original aliases
@@ -1199,15 +1210,20 @@
                       <label for="temperature-{i}">Temperature (optional)</label>
                       <select
                         id="temperature-select-{i}"
-                        value={editedConfig.providers[i].temperature ?? ''}
+                        value={tempSelectValue(i)}
                         on:change={(e) => {
                           if (!editedConfig) return;
                           const val = (e.target as HTMLSelectElement).value;
-                          if (val === '' || val === 'custom') {
+                          if (val === 'custom') {
+                            customTempMode[i] = true;
+                          } else if (val === '') {
                             editedConfig.providers[i].temperature = undefined;
+                            customTempMode[i] = false;
                           } else {
                             editedConfig.providers[i].temperature = parseFloat(val);
+                            customTempMode[i] = false;
                           }
+                          customTempMode = customTempMode;
                           editedConfig = editedConfig;
                         }}
                       >
@@ -1219,11 +1235,18 @@
                       </select>
                       <p class="help-text">Controls creativity: 0.2 = deterministic, 1.5 = creative</p>
 
-                      {#if editedConfig.providers[i].temperature !== undefined && !TEMPERATURE_PRESETS.some(p => p.value === editedConfig?.providers[i].temperature)}
+                      {#if tempSelectValue(i) === 'custom'}
                         <input
                           id="temperature-custom-{i}"
                           type="number"
-                          bind:value={editedConfig.providers[i].temperature}
+                          value={editedConfig.providers[i].temperature ?? ''}
+                          on:input={(e) => {
+                            if (!editedConfig) return;
+                            const raw = (e.target as HTMLInputElement).value;
+                            const n = parseFloat(raw);
+                            editedConfig.providers[i].temperature = raw === '' || isNaN(n) ? undefined : n;
+                            editedConfig = editedConfig;
+                          }}
                           placeholder="0.0 - 2.0"
                           min="0"
                           max="2"
