@@ -23,7 +23,12 @@
     context_window?: number; // Optional override
     temperature?: number;    // Model creativity (0.0-2.0, default 0.7)
     max_tokens?: number;     // Max output tokens (zai/anthropic)
-    top_p?: number;          // Nucleus sampling (zai)
+    top_p?: number;          // Nucleus sampling (zai, ollama)
+    // Ollama sampling params (unset = modelfile default)
+    min_p?: number;
+    presence_penalty?: number;
+    repeat_penalty?: number;
+    top_k?: number;
     // Local Whisper specific (v0.13.1+)
     device?: string;         // 'cuda', 'cpu', or 'auto'
     compile_model?: boolean; // torch.compile optimization
@@ -101,6 +106,33 @@
     { label: 'Creative (1.0)', value: 1.0, description: 'More varied output' },
     { label: 'Random (1.5)', value: 1.5, description: 'High variation' },
   ];
+
+  // Mirrors OLLAMA_SAMPLING_PARAMS in ollama_provider.py — unset field = key
+  // absent from providers.json = Ollama modelfile default applies.
+  const OLLAMA_SAMPLING_PARAMS = [
+    { key: 'min_p', step: 0.01, min: 0, max: 1, isInt: false, hint: '0.0–1.0' },
+    { key: 'presence_penalty', step: 0.1, min: -2, max: 2, isInt: false, hint: '-2.0–2.0' },
+    { key: 'repeat_penalty', step: 0.05, min: 0, max: 2, isInt: false, hint: '0.0–2.0' },
+    { key: 'top_k', step: 1, min: 0, max: 200, isInt: true, hint: 'integer' },
+    { key: 'top_p', step: 0.05, min: 0, max: 1, isInt: false, hint: '0.0–1.0' },
+  ];
+
+  function getSamplingParam(i: number, key: string): number | '' {
+    const v = (editedConfig?.providers[i] as any)?.[key];
+    return v ?? '';
+  }
+
+  function setSamplingParam(i: number, key: string, raw: string, isInt: boolean) {
+    if (!editedConfig) return;
+    const p = editedConfig.providers[i] as any;
+    if (raw === '') {
+      p[key] = undefined;
+    } else {
+      const n = isInt ? parseInt(raw) : parseFloat(raw);
+      p[key] = isNaN(n) ? undefined : n;
+    }
+    editedConfig = editedConfig;
+  }
 
   // New provider form
   let newProvider: Provider = {
@@ -1192,6 +1224,30 @@
                       {/if}
                     </div>
 
+                    {#if editedConfig.providers[i].type === 'ollama'}
+                      <div class="form-group">
+                        <label for="sampling-{i}">Sampling Parameters (optional)</label>
+                        <p class="help-text">Empty = model default. Check actual values via the ⓘ Query Info button.</p>
+                        <div class="sampling-grid" id="sampling-{i}">
+                          {#each OLLAMA_SAMPLING_PARAMS as param}
+                            <div class="sampling-field">
+                              <label for="sampling-{param.key}-{i}">{param.key}</label>
+                              <input
+                                id="sampling-{param.key}-{i}"
+                                type="number"
+                                step={param.step}
+                                min={param.min}
+                                max={param.max}
+                                value={getSamplingParam(i, param.key)}
+                                placeholder={param.hint}
+                                on:input={(e) => setSamplingParam(i, param.key, (e.target as HTMLInputElement).value, param.isInt)}
+                              />
+                            </div>
+                          {/each}
+                        </div>
+                      </div>
+                    {/if}
+
                     <div class="default-buttons">
                       <button
                         class="btn-set-default"
@@ -1283,6 +1339,10 @@
 
                     {#if provider.temperature !== undefined}
                       <p><strong>Temperature:</strong> {provider.temperature}</p>
+                    {/if}
+
+                    {#if OLLAMA_SAMPLING_PARAMS.some(p => (provider as any)[p.key] !== undefined)}
+                      <p><strong>Sampling:</strong> {OLLAMA_SAMPLING_PARAMS.filter(p => (provider as any)[p.key] !== undefined).map(p => `${p.key}=${(provider as any)[p.key]}`).join(', ')}</p>
                     {/if}
 
                     {#if provider.type === 'ollama'}
@@ -2034,6 +2094,28 @@
     margin-top: 8px;
     width: 100%;
     padding: 8px;
+    border: 1px solid #444;
+    background: #2a2a2a;
+    color: #fff;
+    border-radius: 4px;
+  }
+
+  .sampling-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+    gap: 8px;
+    margin-top: 6px;
+  }
+  .sampling-field label {
+    display: block;
+    font-size: 0.8rem;
+    color: #aaa;
+    margin-bottom: 3px;
+    font-family: monospace;
+  }
+  .sampling-field input {
+    width: 100%;
+    padding: 6px 8px;
     border: 1px solid #444;
     background: #2a2a2a;
     color: #fff;
