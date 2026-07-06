@@ -10,7 +10,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from dpc_client_core.providers.ollama_provider import OllamaProvider
+from dpc_client_core.providers.ollama_provider import OllamaProvider, OLLAMA_SAMPLING_PARAMS
 
 
 class _Resp(dict):
@@ -30,6 +30,72 @@ def _make(config=None):
 def test_supports_thinking_detection():
     assert _make({"model": "deepseek-r1:8b"}).supports_thinking() is True
     assert _make({"model": "lfm2.5:latest"}).supports_thinking() is False
+
+
+def test_supports_vision_detection():
+    assert _make({"model": "qwen3.6:27b"}).supports_vision() is True
+    assert _make({"model": "qwen3.5:9b"}).supports_vision() is True
+    assert _make({"model": "ornith:9b-q8_0"}).supports_vision() is False
+
+
+def test_build_options_sampling_params_from_config():
+    p = _make({
+        "context_window": 131072,
+        "presence_penalty": 0.0,
+        "min_p": 0.05,
+        "top_k": 20,
+    })
+    opts = p._build_options()
+    assert opts == {
+        "num_ctx": 131072,
+        "temperature": 0.2,
+        "presence_penalty": 0.0,
+        "min_p": 0.05,
+        "top_k": 20,
+    }
+    assert "repeat_penalty" not in opts
+    assert "top_p" not in opts
+
+
+def test_build_options_omits_unset_and_default_temperature():
+    p = OllamaProvider("ollama_test", {"model": "lfm2.5:latest"})
+    assert p._build_options() is None
+
+
+def test_build_options_kwargs_temperature_override():
+    p = _make()
+    opts = p._build_options(temperature=0.9)
+    assert opts == {"temperature": 0.9}
+
+
+def test_build_options_stays_plain_dict():
+    """min_p must reach the server: the SDK Options model drops it, only the
+    plain-dict serialization path preserves it."""
+    p = _make({"min_p": 0.1})
+    assert type(p._build_options()) is dict
+
+
+@pytest.mark.asyncio
+async def test_generate_with_tools_passes_sampling_options():
+    p = _make({"presence_penalty": 0.0, "top_p": 0.95})
+    fake_msg = SimpleNamespace(content="ok", thinking=None, tool_calls=[])
+    p.client.chat = AsyncMock(return_value=_Resp(fake_msg, prompt_eval_count=1, eval_count=1))
+
+    await p.generate_with_tools(messages=[{"role": "user", "content": "x"}], tools=[])
+
+    _, kwargs = p.client.chat.call_args
+    assert kwargs["options"]["presence_penalty"] == 0.0
+    assert kwargs["options"]["top_p"] == 0.95
+    assert kwargs["options"]["temperature"] == 0.2
+
+
+def test_sampling_params_whitelist_is_closed():
+    """The loop pulls ONLY these keys from config — a typo key in providers.json
+    can never reach the server (whitelist by construction, S96 review)."""
+    p = _make({"presence_penality": 1.5})  # typo key
+    opts = p._build_options()
+    assert "presence_penality" not in opts
+    assert set(OLLAMA_SAMPLING_PARAMS) == {"min_p", "presence_penalty", "repeat_penalty", "top_k", "top_p"}
 
 
 def test_tools_anthropic_to_openai():

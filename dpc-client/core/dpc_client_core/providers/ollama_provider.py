@@ -13,9 +13,15 @@ from .base import AIProvider
 
 logger = logging.getLogger(__name__)
 
+# Sampling parameters passed through from providers.json to the Ollama API.
+# Options must stay a plain dict: min_p is missing from the SDK Options model
+# (ollama 0.6.2) and survives only the dict serialization path.
+OLLAMA_SAMPLING_PARAMS = ["min_p", "presence_penalty", "repeat_penalty", "top_k", "top_p"]
+
 # Vision-capable Ollama models (for auto-detection)
 OLLAMA_VISION_MODELS = [
     "qwen3.5",          # Qwen3.5 family — all sizes (0.8b-122b) are natively multimodal
+    "qwen3.6",          # Qwen3.6 family — natively multimodal
     "qwen3-vl",         # Qwen3-VL dedicated vision variants
     "llava",            # LLaVA variants
     "llama3.2-vision",  # Llama 3.2 vision models
@@ -47,20 +53,26 @@ class OllamaProvider(AIProvider):
         """Check if this Ollama model is a thinking/reasoning model."""
         return any(tm in self.model.lower() for tm in OLLAMA_THINKING_MODELS)
 
+    def _build_options(self, **kwargs) -> Optional[Dict[str, Any]]:
+        options: Dict[str, Any] = {}
+        if self.config.get("context_window"):
+            options["num_ctx"] = self.config["context_window"]
+        temp = kwargs.get("temperature", self.temperature)
+        if temp != 0.7:
+            options["temperature"] = temp
+        for key in OLLAMA_SAMPLING_PARAMS:
+            if key in self.config:
+                options[key] = self.config[key]
+        if options:
+            logger.debug(f"OllamaProvider '{self.alias}': options={options}")
+        return options or None
+
     async def generate_response(self, prompt: str, **kwargs) -> str:
         self._last_thinking = None  # clear from previous call
         try:
             message = {'role': 'user', 'content': prompt}
 
-            # Build options dict for custom parameters
-            options = {}
-            if self.config.get("context_window"):
-                options["num_ctx"] = self.config["context_window"]
-
-            # Add temperature if specified (use kwargs override or config default)
-            temp = kwargs.get("temperature", self.temperature)
-            if temp != 0.7:  # Only pass if non-default to avoid unnecessary API params
-                options["temperature"] = temp
+            options = self._build_options(**kwargs)
 
             # Timeout: configurable via providers.json "timeout" field (default 300s).
             # Large models (9B+) can take >60s for initial VRAM load on first query.
@@ -70,7 +82,7 @@ class OllamaProvider(AIProvider):
                 self.client.chat(
                     model=self.model,
                     messages=[message],
-                    options=options if options else None,
+                    options=options,
                     think=True if self.supports_thinking() else None,
                 ),
                 timeout=timeout
@@ -130,10 +142,7 @@ class OllamaProvider(AIProvider):
                 'images': image_inputs
             }
 
-            # Build options dict for custom parameters
-            options = {}
-            if self.config.get("context_window"):
-                options["num_ctx"] = self.config["context_window"]
+            options = self._build_options(**kwargs)
 
             # Vision queries may take longer; respect provider config timeout first
             timeout = kwargs.get("timeout", self.config.get("timeout", 300.0))
@@ -142,7 +151,7 @@ class OllamaProvider(AIProvider):
                 self.client.chat(
                     model=self.model,
                     messages=[message],
-                    options=options if options else None,
+                    options=options,
                     think=True if self.supports_thinking() else None,
                     keep_alive=self.config.get("vision_keep_alive", 0),
                 ),
@@ -249,12 +258,7 @@ class OllamaProvider(AIProvider):
         ollama_messages = self._anthropic_to_openai_messages(system, messages)
         ollama_tools = self._anthropic_to_openai_tools(tools)
 
-        options = {}
-        if self.config.get("context_window"):
-            options["num_ctx"] = self.config["context_window"]
-        temp = kwargs.get("temperature", self.temperature)
-        if temp != 0.7:
-            options["temperature"] = temp
+        options = self._build_options(**kwargs)
         timeout = self.config.get("timeout", 300.0)
 
         try:
@@ -263,7 +267,7 @@ class OllamaProvider(AIProvider):
                     model=self.model,
                     messages=ollama_messages,
                     tools=ollama_tools,
-                    options=options if options else None,
+                    options=options,
                     think=True if self.supports_thinking() else None,
                 ),
                 timeout=timeout,
