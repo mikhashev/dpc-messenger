@@ -117,6 +117,15 @@
     { key: 'top_p', step: 0.05, min: 0, max: 1, isInt: false, hint: '0.0–1.0' },
   ];
 
+  // Unset temperature means different things per provider type: ollama omits
+  // the key (modelfile default applies), deepseek/zai_coding fall back to 1.0,
+  // the rest send self.temperature = 0.7.
+  function temperatureDefaultLabel(type: ProviderType): string {
+    if (type === 'ollama') return 'Model default (not sent)';
+    if (type === 'deepseek' || type === 'zai_coding') return 'Provider default (1.0)';
+    return 'Default (0.7)';
+  }
+
   function getSamplingParam(i: number, key: string): number | '' {
     const v = (editedConfig?.providers[i] as any)?.[key];
     return v ?? '';
@@ -1202,7 +1211,7 @@
                           editedConfig = editedConfig;
                         }}
                       >
-                        <option value="">Default (0.7)</option>
+                        <option value="">{temperatureDefaultLabel(editedConfig.providers[i].type)}</option>
                         {#each TEMPERATURE_PRESETS as preset}
                           <option value={preset.value}>{preset.label} - {preset.description}</option>
                         {/each}
