@@ -594,7 +594,17 @@ _A11Y_DOM_SNAPSHOT_JS = """
         if (sub) children.push(sub);
       }
     }
-    if (!role && !name && children.length === 0) return null;
+    if (!role && !name && children.length === 0) {
+      let directText = '';
+      for (const node of el.childNodes) {
+        if (node.nodeType === 3) {
+          const t = node.textContent.trim();
+          if (t) directText += (directText ? ' ' : '') + t;
+        }
+      }
+      if (directText) return {role: 'generic', name: directText.slice(0, 200), value: '', hidden: false, children: []};
+      return null;
+    }
     return {
       role: role || 'generic',
       name: name,
