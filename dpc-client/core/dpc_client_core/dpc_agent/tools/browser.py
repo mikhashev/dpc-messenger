@@ -586,6 +586,12 @@ _A11Y_DOM_SNAPSHOT_JS = """
       const sub = walk(child);
       if (sub) children.push(sub);
     }
+    if (el.shadowRoot) {
+      for (const child of el.shadowRoot.children) {
+        const sub = walk(child);
+        if (sub) children.push(sub);
+      }
+    }
     if (!role && !name && children.length === 0) return null;
     return {
       role: role || 'generic',
