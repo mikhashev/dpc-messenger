@@ -1252,6 +1252,44 @@ class AuthBrowser:
             f"URL {url!r} is outside auth domains {sorted(self._etld1s)!r}"
         )
 
+    def _wait_for_content_stable(self, timeout_ms: int = 10000) -> None:
+        """Wait for JS-rendered text content to stabilize after networkidle.
+
+        networkidle fires when no network requests arrive for 500ms, but
+        JS frameworks (Google AI Mode, React/Vue lazy hydration, SPA
+        routers) continue mutating the DOM via setTimeout / RAF / XHR
+        callbacks after that gate. A snapshot taken at networkidle sees
+        the element shell but empty text nodes.
+
+        Two-phase wait: (1) wait for at least one mutation of
+        document.body.innerText length past the initial reading — this
+        skips the "Loading..." stub that is stable-but-incomplete; (2)
+        then wait for the length to stop changing for 1s. Bounded by
+        timeout_ms so pages that never mutate (static content) or never
+        stabilize (infinite scroll) do not hang."""
+        try:
+            self._page.wait_for_function(
+                """() => {
+                    const cur = (document.body.innerText || '').length;
+                    if (window.__cc_initial_len === undefined) {
+                        window.__cc_initial_len = cur;
+                        window.__cc_last_len = cur;
+                        window.__cc_stable_since = Date.now();
+                        return false;
+                    }
+                    if (cur !== window.__cc_last_len) {
+                        window.__cc_last_len = cur;
+                        window.__cc_stable_since = Date.now();
+                        return false;
+                    }
+                    if (cur === window.__cc_initial_len) return false;
+                    return (Date.now() - window.__cc_stable_since) >= 1000;
+                }""",
+                timeout=timeout_ms,
+            )
+        except Exception as exc:
+            log.debug("content-stable wait timed out or failed: %s", exc)
+
     def navigate(self, url: str) -> str:
         """Navigate to URL and return the post-navigation accessibility
         snapshot inline (ADR-029 Task 006 auto-snapshot — eliminates the
@@ -1286,6 +1324,7 @@ class AuthBrowser:
                 from_url=from_url, error=type(exc).__name__,
             )
             raise
+        self._wait_for_content_stable()
         snapshot_text = ""
         snapshot_audit: dict[str, Any] = {"from_url": from_url}
         try:
