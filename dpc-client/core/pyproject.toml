@@ -48,6 +48,11 @@ mlx = [
 ]
 browser = [
     "camoufox>=0.4.11",
+    # Playwright 1.61 sends isMobile in Juggler setDefaultViewport, which the
+    # Camoufox Firefox build rejects — pin <1.61 until a Windows build with the
+    # upstream cap (daijro/camoufox#653, commit 195298d0) ships. See backlog
+    # CAMOUFOX-PLAYWRIGHT-61-FIX.
+    "playwright>=1.60,<1.61",
 ]
 graph-ner = [
     "gliner>=0.2.20",
