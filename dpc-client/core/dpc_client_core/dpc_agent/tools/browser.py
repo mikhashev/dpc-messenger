@@ -549,7 +549,9 @@ _A11Y_DOM_SNAPSHOT_JS = """
     if (tag === 'a' || tag === 'button' ||
         tag === 'h1' || tag === 'h2' || tag === 'h3' ||
         tag === 'h4' || tag === 'h5' || tag === 'h6' ||
-        tag === 'label' || tag === 'option') {
+        tag === 'label' || tag === 'option' ||
+        tag === 'span' || tag === 'strong' || tag === 'em' ||
+        tag === 'p' || tag === 'li' || tag === 'td' || tag === 'th') {
       const txt = (el.innerText || el.textContent || '').trim();
       return txt.slice(0, 200);
     }
