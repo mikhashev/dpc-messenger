@@ -819,6 +819,9 @@ class AgentService:
                 "sleep_provider_alias": config.get("sleep_provider_alias"),
                 "snapshot_summarize_provider": config.get("snapshot_summarize_provider"),
                 "snapshot_summarize_threshold": config.get("snapshot_summarize_threshold"),
+                "compaction_enabled": config.get("compaction_enabled", False),
+                "compaction_provider": config.get("compaction_provider"),
+                "compaction_threshold": config.get("compaction_threshold", 0.8),
                 "retrieval_vector": config.get("retrieval_vector", "native"),
                 "retrieval_text": config.get("retrieval_text", "native"),
                 "providers": providers_list,
@@ -848,6 +851,9 @@ class AgentService:
         sleep_provider_alias: str = None,
         snapshot_summarize_provider: str = None,
         snapshot_summarize_threshold: int = None,
+        compaction_enabled: bool = None,
+        compaction_provider: str = None,
+        compaction_threshold: float = None,
         retrieval_vector: str = None,
         retrieval_text: str = None,
         providers_getter=None,
@@ -884,6 +890,12 @@ class AgentService:
                 config["snapshot_summarize_provider"] = snapshot_summarize_provider
             if snapshot_summarize_threshold is not None:
                 config["snapshot_summarize_threshold"] = snapshot_summarize_threshold
+            if compaction_enabled is not None:
+                config["compaction_enabled"] = bool(compaction_enabled)
+            if compaction_provider is not None:
+                config["compaction_provider"] = compaction_provider
+            if compaction_threshold is not None:
+                config["compaction_threshold"] = float(compaction_threshold)
             if retrieval_vector is not None:
                 config["retrieval_vector"] = retrieval_vector
             if retrieval_text is not None:
@@ -898,6 +910,9 @@ class AgentService:
                 "sleep_provider_alias": config.get("sleep_provider_alias"),
                 "snapshot_summarize_provider": config.get("snapshot_summarize_provider"),
                 "snapshot_summarize_threshold": config.get("snapshot_summarize_threshold"),
+                "compaction_enabled": config.get("compaction_enabled", False),
+                "compaction_provider": config.get("compaction_provider"),
+                "compaction_threshold": config.get("compaction_threshold", 0.8),
                 "retrieval_vector": config.get("retrieval_vector", "native"),
                 "retrieval_text": config.get("retrieval_text", "native"),
                 "context_window": context_window,

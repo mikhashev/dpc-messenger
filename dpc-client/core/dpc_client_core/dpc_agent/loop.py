@@ -24,9 +24,10 @@ from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple
 
 from .utils import (
     utc_now_iso, append_jsonl, truncate_for_log,
-    sanitize_tool_args_for_log, sanitize_tool_result_for_log, get_agent_root
+    sanitize_tool_args_for_log, sanitize_tool_result_for_log, get_agent_root,
+    load_agent_config,
 )
-from .context import compact_tool_history
+from .context import CompactionState, apply_compaction
 from .llm_adapter import DpcLlmAdapter
 from .hooks import HookContext, HookLifecycle, HookRegistry, LoopState
 from .guards import (
@@ -510,6 +511,14 @@ async def run_llm_loop(
         state=LoopState(),
     )
 
+    # ADR-033: per-agent tool-history compaction (opt-in, default off).
+    try:
+        _compaction_cfg = load_agent_config(agent_root.name)
+    except Exception:
+        _compaction_cfg = {}
+    _compaction_state = CompactionState(_compaction_cfg)
+    _compaction_llm = getattr(llm, "_llm_manager", None)
+
     round_idx = 0
     empty_retry_count = 0
     MAX_EMPTY_RETRIES = 3
@@ -533,9 +542,17 @@ async def run_llm_loop(
                     fallback_reason=f"⚠️ Task exceeded MAX_ROUNDS ({max_rounds}).",
                 )
 
-            # Compact old tool history when needed
-            if round_idx > 8:
-                messages = compact_tool_history(messages, keep_recent=6)
+            # Compact old tool history when needed (ADR-033). last_prompt_tokens is the
+            # previous round's real input size — one request stale; the incremental pass
+            # keeps it compact and overflow-recovery covers spikes.
+            messages = await apply_compaction(
+                messages,
+                state=_compaction_state,
+                last_prompt_tokens=accumulated_usage["last_prompt_tokens"],
+                llm_manager=_compaction_llm,
+                notify=lambda m: emit_progress(m, None, round_idx),
+                round_idx=round_idx,
+            )
 
             # --- LLM call ---
             try:
