@@ -914,13 +914,13 @@
         />
         <p class="dialog-hint">Snapshots larger than this character count are summarized (LLM if configured, else line-truncated). Default 8000.</p>
 
-        <label class="dialog-label" for="compaction-enabled">
+        <label class="dialog-label checkbox-label" for="compaction-enabled">
           <input
             id="compaction-enabled"
             type="checkbox"
             bind:checked={modelConfigCompactionEnabled}
           />
-          Enable tool-history compaction (ADR-033)
+          Enable tool-history compaction
         </label>
         <p class="dialog-hint">Off by default: the agent uses the current round-based truncation. When on, old tool results are summarized by the model below as the context window fills — one point of failure, no silent model switch.</p>
 
@@ -934,7 +934,7 @@
           </select>
           <p class="dialog-hint">Model used to summarize old tool results. A fast, reasoning-disabled model is recommended (reasoning adds latency without helping this task). On failure the agent degrades to deterministic truncation and notifies you.</p>
 
-          <label for="compaction-threshold" class="dialog-label">Compaction threshold (fraction of context window):</label>
+          <label for="compaction-threshold" class="dialog-label">Compaction threshold (fraction of the agent's Main LLM model context window):</label>
           <input
             id="compaction-threshold"
             class="dialog-input"
@@ -944,7 +944,7 @@
             step="0.05"
             bind:value={modelConfigCompactionThreshold}
           />
-          <p class="dialog-hint">Compact once context usage crosses this fraction; it resumes normal size before the next compaction (0.2 hysteresis). Default 0.8.</p>
+          <p class="dialog-hint">Fraction of the agent's main model context window (not the compaction model's). Start compacting once usage crosses it, and keep compacting each round until usage falls back below (fraction − 0.2), then stop (hysteresis). Default 0.8.</p>
         {/if}
 
         <hr class="dialog-divider">
