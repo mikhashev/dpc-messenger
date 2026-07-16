@@ -160,12 +160,14 @@ Bench scripts: `docs/decisions/adr-033-benches/`.
   snapshot summarization is disabled for the agent, `browse_page` results fall through to the
   general summary template (correct, just more token-costly). Strategy fallback ladder ending in the
   existing prefix truncation.
-- `dpc_agent/loop.py` — replace the round-count trigger with a token-proportion threshold read from
-  the session token limit (`context_usage_percent`, denominator = model window per Q1), with
-  hysteresis (compact at 0.8, release ≤ 0.6). Wire **overflow-recovery**: a provider
-  "context window exceeded" error triggers a compaction and a retry of the same request (the safety
-  net for an unexpectedly large single tool result), and a **user notification** on any compaction
-  failure.
+- `dpc_agent/loop.py` — replace the round-count trigger with a token-proportion threshold: the
+  round's real prompt size (`last_prompt_tokens`, reported by the provider — it counts the **whole**
+  prompt: system, assembled context/memory, tool schemas, and the growing message tail) over the
+  agent's model window (resolved from the agent's provider when `config.json` leaves `context_window`
+  null; per Q1), with hysteresis (compact at 0.8, release ≤ 0.6) and a **user notification** on any
+  compaction failure. **Reactive overflow-recovery** — a provider "context window exceeded" error
+  triggering a compaction + retry of the same request — is **deferred to backlog**
+  (`ADR-033-REACTIVE-OVERFLOW`); today an overflow ends the task with a "start a new session" message.
 - `agent_service.py` — `set_agent_models` / `get_agent_models`: add `compaction_enabled`,
   `compaction_provider`, and `compaction_threshold` keys, mirroring the existing
   `snapshot_summarize_*` keys.
@@ -189,12 +191,16 @@ losing data — before finally falling back to lossy prefix truncation.
 
 ## Open Questions — resolved
 
-- **Q1 (resolved, @CC):** `session_state["tokens_limit"]` is the **model context window**, resolved
-  by `agent_manager._resolve_context_window()` (per-agent `config.context_window` → local provider
-  `get_context_window(model)` → peer metadata → active model; fallback 204800). The trigger uses
-  `context_usage_percent = tokens_after_last_response / tokens_limit` (full context, not just
-  history text). The original gate's worry — that a provider request-cap below the model window
-  could keep the threshold from ever firing — is covered by the reactive overflow-recovery path.
+- **Q1 (resolved, @CC):** the trigger denominator is the **agent's model context window**. In the
+  compaction loop it is resolved in `loop.py` from the agent's provider (`get_context_window(model)`)
+  when `config.json` leaves `context_window` null — local models do (fallback 204800); this mirrors
+  `agent_manager._resolve_context_window()`. The numerator is the round's real prompt size
+  (`last_prompt_tokens`), which the provider reports over the **full** prompt — system prompt,
+  assembled context/memory, tool schemas, and the growing message tail — not just history text, so
+  the threshold reflects true window pressure. The original gate's worry — that a provider
+  request-cap below the model window could keep the threshold from ever firing — is **not yet
+  covered**: the reactive overflow-recovery path that would catch it is deferred (backlog
+  `ADR-033-REACTIVE-OVERFLOW`).
 - **Q2 (resolved, @Mike):** default threshold **0.8**, exposed as a per-agent setting (not
   hardcoded), with release at 0.6.
 - **Q3 (resolved, @Ark):** on real research data the structured summary preserved every critical
