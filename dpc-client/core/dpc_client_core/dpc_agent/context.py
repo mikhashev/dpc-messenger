@@ -1057,12 +1057,21 @@ async def apply_compaction(
     if not state.compacting:
         return messages
 
+    # ADR-033 observability: one line each time compaction runs, so a live agent's
+    # compaction behaviour is visible in the log (grep "ADR-033 compaction").
+    log.debug(
+        "ADR-033 compaction: round=%d usage=%.1f%% (>= %.0f%%), window=%d, provider=%s, keep_recent=%d",
+        round_idx, ratio * 100, state.threshold * 100, state.window,
+        state.provider or "default", state.keep_recent,
+    )
+
     if state.fail_streak < state.max_fails:
         try:
             out = await compact_tool_history_llm(
                 messages, llm_manager, state.provider, keep_recent=state.keep_recent,
             )
             state.fail_streak = 0
+            log.debug("ADR-033 compaction: done (round=%d, usage was %.1f%%)", round_idx, ratio * 100)
             return out
         except Exception as e:
             # Strategy fallback ladder (not a model switch): keep MORE verbatim as a

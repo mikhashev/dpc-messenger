@@ -516,8 +516,25 @@ async def run_llm_loop(
         _compaction_cfg = load_agent_config(agent_root.name)
     except Exception:
         _compaction_cfg = {}
-    _compaction_state = CompactionState(_compaction_cfg)
     _compaction_llm = getattr(llm, "_llm_manager", None)
+    # Resolve the agent's real context window when config.json does not store one
+    # (local models leave it null). The trigger denominator must be the actual model
+    # window, not CompactionState's generic fallback — otherwise the fallback can be
+    # larger than the real window and the threshold never fires before the model
+    # overflows (observed: qwen3.6 = 131072, fallback = 204800).
+    if not _compaction_cfg.get("context_window") and _compaction_llm is not None:
+        _prov = _compaction_cfg.get("provider_alias")
+        try:
+            if _prov and _prov in _compaction_llm.providers:
+                _compaction_cfg = {
+                    **_compaction_cfg,
+                    "context_window": _compaction_llm.get_context_window(
+                        _compaction_llm.providers[_prov].model
+                    ),
+                }
+        except Exception:
+            pass
+    _compaction_state = CompactionState(_compaction_cfg)
 
     round_idx = 0
     empty_retry_count = 0
