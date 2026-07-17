@@ -183,12 +183,12 @@ def test_authbrowser_public_surface(vault_home):
     (f"https://login.{TEST_DOMAIN}/oauth", f"{TEST_DOMAIN}", True),
     (f"https://api.{TEST_DOMAIN}/v2/orders", f"{TEST_DOMAIN}", True),
     # Different TLD
-    ("https://ozon.com/path", f"{TEST_DOMAIN}", False),
+    ("https://example.org/path", f"{TEST_DOMAIN}", False),
     # Different domain
-    ("https://yandex.ru/", f"{TEST_DOMAIN}", False),
+    ("https://example.net/", f"{TEST_DOMAIN}", False),
     # Adversarial — auth domain in path/query, not host
-    (f"https://attacker.com/?ref={TEST_DOMAIN}", f"{TEST_DOMAIN}", False),
-    (f"https://attacker.com/{TEST_DOMAIN}/page", f"{TEST_DOMAIN}", False),
+    (f"https://attacker.example/?ref={TEST_DOMAIN}", f"{TEST_DOMAIN}", False),
+    (f"https://attacker.example/{TEST_DOMAIN}/page", f"{TEST_DOMAIN}", False),
     # Adversarial — auth domain as suffix-LIKE but not subdomain
     (f"https://not{TEST_DOMAIN}/", f"{TEST_DOMAIN}", False),
     (f"https://fake-{TEST_DOMAIN}/", f"{TEST_DOMAIN}", False),
@@ -216,7 +216,7 @@ def test_goto_rejects_off_domain_url(vault_home, fresh_cookies):
     # Inject a stub _page so the not-opened guard does NOT trip first
     ab._page = object()
     with pytest.raises(ValueError) as exc:
-        ab.goto("https://yandex.ru/search")
+        ab.goto("https://example.net/search")
     assert "outside auth domain" in str(exc.value)
 
 
@@ -229,9 +229,9 @@ def test_multi_domain_constructor(vault_home):
     from dpc_client_core.dpc_agent.tools.browser import AuthBrowser
 
     ab = AuthBrowser(
-        agent_id="agent_a", domains=[f"{TEST_DOMAIN}", "yandex.ru"], headed=True
+        agent_id="agent_a", domains=[f"{TEST_DOMAIN}", "example.net"], headed=True
     )
-    assert set(ab.domains) == {f"{TEST_DOMAIN}", "yandex.ru"}
+    assert set(ab.domains) == {f"{TEST_DOMAIN}", "example.net"}
     assert ab.headed is True
     assert ab.domain == f"{TEST_DOMAIN}"  # back-compat scalar = first
 
@@ -240,20 +240,20 @@ def test_constructor_rejects_both_domain_and_domains(vault_home):
     from dpc_client_core.dpc_agent.tools.browser import AuthBrowser
 
     with pytest.raises(ValueError, match="domains.*or.*domain"):
-        AuthBrowser(agent_id="agent_a", domain=f"{TEST_DOMAIN}", domains=["yandex.ru"])
+        AuthBrowser(agent_id="agent_a", domain=f"{TEST_DOMAIN}", domains=["example.net"])
 
 
 def test_multi_domain_check_allows_any_etld1(vault_home):
     from dpc_client_core.dpc_agent.tools.browser import AuthBrowser
 
-    ab = AuthBrowser(agent_id="agent_a", domains=[f"{TEST_DOMAIN}", "yandex.ru"])
+    ab = AuthBrowser(agent_id="agent_a", domains=[f"{TEST_DOMAIN}", "example.net"])
     ab._page = object()
     # Both allowed, no exception
     ab._check_domain(f"https://{TEST_DOMAIN}/orders")
-    ab._check_domain("https://www.yandex.ru/search")
+    ab._check_domain("https://www.example.net/search")
     # Off-domain still rejected
     with pytest.raises(ValueError, match="outside auth domains"):
-        ab._check_domain("https://attacker.com/")
+        ab._check_domain("https://attacker.example/")
 
 
 def test_session_registry_reuse(vault_home, fresh_cookies):
@@ -385,7 +385,7 @@ def test_route_gate_blocks_off_domain(vault_home):
 
 def test_route_gate_blocks_lookalike(vault_home):
     """Adversarial host that contains the whitelisted eTLD+1 as a
-    substring (notozon.ru, fake-ozon.ru) must be aborted — eTLD+1
+    substring (not<TEST_DOMAIN>, fake-<TEST_DOMAIN>) must be aborted — eTLD+1
     resolution, not substring match."""
     from dpc_client_core.dpc_agent.tools.browser import AuthBrowser
 
@@ -393,7 +393,7 @@ def test_route_gate_blocks_lookalike(vault_home):
     for hostile in (
         f"https://not{TEST_DOMAIN}/payload",
         f"https://fake-{TEST_DOMAIN}/payload",
-        f"https://attacker.com/?ref={TEST_DOMAIN}",
+        f"https://attacker.example/?ref={TEST_DOMAIN}",
     ):
         route = _FakeRoute(hostile)
         ab._domain_route_gate(route)
@@ -405,16 +405,16 @@ def test_route_gate_blocks_lookalike(vault_home):
 def test_route_gate_multi_domain(vault_home):
     from dpc_client_core.dpc_agent.tools.browser import AuthBrowser
 
-    ab = AuthBrowser(agent_id="agent_a", domains=[f"{TEST_DOMAIN}", "yandex.ru"])
+    ab = AuthBrowser(agent_id="agent_a", domains=[f"{TEST_DOMAIN}", "example.net"])
     for ok in (
         f"https://{TEST_DOMAIN}/orders",
-        "https://www.yandex.ru/search",
+        "https://www.example.net/search",
         f"https://api.{TEST_DOMAIN}/v2/x",
     ):
         route = _FakeRoute(ok)
         ab._domain_route_gate(route)
         assert route.continued is True, ok
-    route = _FakeRoute("https://google.com/search")
+    route = _FakeRoute("https://example.org/search")
     ab._domain_route_gate(route)
     assert route.aborted is True
     assert ab._domain_blocks == 1
@@ -526,9 +526,9 @@ def test_from_playwright_cookies_drops_session_marker(vault_home):
     from dpc_client_core.dpc_agent.tools.browser import _from_playwright_cookies
 
     src = [
-        {"name": "lang", "value": "en", "domain": ".x.com", "expires": -1},
-        {"name": "session", "value": "x", "domain": ".x.com"},
-        {"name": "valid", "value": "v", "domain": ".x.com", "expires": 1735689600},
+        {"name": "lang", "value": "en", "domain": ".example.net", "expires": -1},
+        {"name": "session", "value": "x", "domain": ".example.net"},
+        {"name": "valid", "value": "v", "domain": ".example.net", "expires": 1735689600},
     ]
     out = _from_playwright_cookies(src)
     assert "expires" not in out[0]
@@ -611,7 +611,7 @@ def test_sync_cookies_to_vault_groups_and_filters(vault_home):
         {
             # Outside whitelist — must NOT land in vault even if route
             # handler missed it.
-            "name": "leak", "value": "3", "domain": ".google.com", "path": "/",
+            "name": "leak", "value": "3", "domain": ".example.org", "path": "/",
             "secure": True, "httpOnly": True,
         },
     ]
@@ -620,8 +620,8 @@ def test_sync_cookies_to_vault_groups_and_filters(vault_home):
     assert saved is not None
     names = sorted(c["name"] for c in saved)
     assert names == ["a", "b"]
-    # google.com cookie not saved anywhere
-    assert web_auth.load_cookies("agent_a", "google.com") is None
+    # example.org cookie not saved anywhere
+    assert web_auth.load_cookies("agent_a", "example.org") is None
 
 
 def test_sync_cookies_to_vault_empty_input_no_op(vault_home):
@@ -948,7 +948,7 @@ def test_open_uses_storage_state_when_file_valid(vault_home, monkeypatch):
     )
     # Patch _inject_vault_cookies so we can detect if it was called
     original = AuthBrowser._inject_vault_cookies
-    AuthBrowser._inject_vault_cookies = lambda self: injected.append(1)
+    AuthBrowser._inject_vault_cookies = lambda self, **kw: injected.append(1)
     try:
         ab = AuthBrowser(agent_id="agent_a", domains=[f"{TEST_DOMAIN}"])
         ab._open()
@@ -960,7 +960,11 @@ def test_open_uses_storage_state_when_file_valid(vault_home, monkeypatch):
 
     assert len(new_context_kwargs) == 1
     assert new_context_kwargs[0].get("storage_state") == str(state_path)
-    assert injected == []  # vault path NOT taken when state file used
+    # Vault is canonical: even with a valid storage_state, vault cookies are
+    # always overlaid on top (browser.py — "always overlay vault cookies"),
+    # so _inject_vault_cookies still runs. storage_state is a starting point
+    # for localStorage/sessionStorage, not an either/or with the vault.
+    assert injected == [1]
 
 
 def test_open_falls_back_to_vault_when_state_missing(vault_home, monkeypatch, fresh_cookies):
@@ -991,7 +995,7 @@ def test_open_falls_back_to_vault_when_state_missing(vault_home, monkeypatch, fr
         raising=False,
     )
     original = AuthBrowser._inject_vault_cookies
-    AuthBrowser._inject_vault_cookies = lambda self: injected.append(1)
+    AuthBrowser._inject_vault_cookies = lambda self, **kw: injected.append(1)
     try:
         ab = AuthBrowser(agent_id="agent_a", domains=[f"{TEST_DOMAIN}"])
         ab._open()
@@ -1038,7 +1042,7 @@ def test_open_falls_back_to_vault_when_state_corrupt(vault_home, monkeypatch, fr
         raising=False,
     )
     original = AuthBrowser._inject_vault_cookies
-    AuthBrowser._inject_vault_cookies = lambda self: injected.append(1)
+    AuthBrowser._inject_vault_cookies = lambda self, **kw: injected.append(1)
     try:
         ab = AuthBrowser(agent_id="agent_a", domains=[f"{TEST_DOMAIN}"])
         with caplog.at_level(_logging.WARNING):
@@ -1173,15 +1177,44 @@ def _make_ctx(agent_root: Path):
     return ns
 
 
-def test_browse_page_use_auth_returns_relogin_when_vault_empty(vault_home):
-    from dpc_client_core.dpc_agent.tools.browser import browse_page
+def test_browse_page_use_auth_returns_relogin_on_auth_required(vault_home):
+    """When the auth path raises AuthRequiredError (cookies missing or
+    rejected at a protected resource), browse_page must surface it as a
+    ⚠️ re-login prompt — not a raw stack trace.
+
+    Hermetic: _auth_browse_html is stubbed to raise, so no real Camoufox /
+    network is touched. Note the empty vault alone no longer triggers this:
+    AuthBrowser.open() is tolerant of missing cookies (skip_missing=True in
+    browser.py — re-login surfaces only when a protected request is
+    rejected), so this test drives the error path directly.
+    """
+    import dpc_client_core.dpc_agent.tools.browser as mod
+    from dpc_client_core.dpc_agent.tools.browser import (
+        AuthRequiredError,
+        browse_page,
+    )
 
     agent_root = vault_home / "agents" / "agent_a"
     agent_root.mkdir(parents=True, exist_ok=True)
     ctx = _make_ctx(agent_root)
-    out = asyncio.run(
-        browse_page(ctx, url=f"https://{TEST_DOMAIN}/my/orders", use_auth=f"{TEST_DOMAIN}")
-    )
+
+    def _raise_auth_required(agent_id, domain, url, headed=True):
+        raise AuthRequiredError(
+            f"Auth required for {domain}: please re-login via the web-auth UI."
+        )
+
+    original = mod._auth_browse_html
+    mod._auth_browse_html = _raise_auth_required
+    try:
+        out = asyncio.run(
+            browse_page(
+                ctx,
+                url=f"https://{TEST_DOMAIN}/my/orders",
+                use_auth=f"{TEST_DOMAIN}",
+            )
+        )
+    finally:
+        mod._auth_browse_html = original
     assert out.startswith("⚠️")
     assert f"{TEST_DOMAIN}" in out
     assert "re-login" in out.lower()
@@ -1210,7 +1243,7 @@ def test_browse_page_use_auth_rejects_off_domain_url(vault_home, fresh_cookies):
     mod._auth_browse_html = _raise_domain_mismatch
     try:
         out = asyncio.run(
-            browse_page(ctx, url="https://yandex.ru/search", use_auth=f"{TEST_DOMAIN}")
+            browse_page(ctx, url="https://example.net/search", use_auth=f"{TEST_DOMAIN}")
         )
     finally:
         mod._auth_browse_html = original

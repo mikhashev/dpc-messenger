@@ -121,7 +121,7 @@ def test_resolve_etld1_accepts_full_urls():
     port, path and still arrive at the same vault key.
 
     Mike S141 surface: agent sees `failed to add domain` for
-    `https://www.ozon.ru/` because pre-fix the literal URL string was
+    `https://www.example.net/` because pre-fix the literal URL string was
     being stored and read-side hostname compare never matched.
     """
     from dpc_client_core import web_auth
@@ -188,10 +188,10 @@ def test_list_domains(vault_home, sample_cookies):
     from dpc_client_core import web_auth
 
     web_auth.save_cookies("agent_a", f"{TEST_DOMAIN}", sample_cookies)
-    web_auth.save_cookies("agent_a", "yarcheplus.ru", sample_cookies)
+    web_auth.save_cookies("agent_a", "example.net", sample_cookies)
     domains = web_auth.list_domains("agent_a")
     domain_names = {d["domain"] for d in domains}
-    assert domain_names == {f"{TEST_DOMAIN}", "yarcheplus.ru"}
+    assert domain_names == {f"{TEST_DOMAIN}", "example.net"}
     for entry in domains:
         assert entry["has_cookies"] is True
         assert entry["authenticated_at"] is not None
