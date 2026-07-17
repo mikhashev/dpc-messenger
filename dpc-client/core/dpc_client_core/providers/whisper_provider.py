@@ -46,6 +46,18 @@ class LocalWhisperProvider(AIProvider):
         self.task = config.get("task", "transcribe")  # 'transcribe' or 'translate'
         self.lazy_loading = config.get("lazy_loading", True)
 
+        # Whisper invents filler on non-speech audio: subtitle credits, applause,
+        # or a token looped dozens of times. These are its own guards against that
+        # — a segment that trips a threshold is re-decoded at the next temperature.
+        # Measured on a 30-min recording: repetition loops 86/36/29 -> 0, +16% time.
+        self.temperature_fallback = tuple(
+            config.get("temperature_fallback", (0.0, 0.2, 0.4, 0.6, 0.8, 1.0))
+        )
+        self.compression_ratio_threshold = config.get("compression_ratio_threshold", 1.35)
+        self.logprob_threshold = config.get("logprob_threshold", -1.0)
+        self.no_speech_threshold = config.get("no_speech_threshold", 0.6)
+        self.condition_on_prev_tokens = config.get("condition_on_prev_tokens", False)
+
         # Model state
         self.pipeline = None
         self.model_loaded = False
@@ -53,6 +65,35 @@ class LocalWhisperProvider(AIProvider):
         self._detected_device = None
 
         logger.info(f"LocalWhisperProvider '{alias}' initialized (model={self.model_name}, device={self.device})")
+
+    def _build_generate_kwargs(self) -> Dict[str, Any]:
+        """Assemble generate_kwargs: language/task plus the anti-hallucination guards.
+
+        temperature follows the provider-wide sentinel (base.py defaults it to 0.7,
+        meaning "user did not set it") — unset keeps the fallback ladder, an explicit
+        value pins a single temperature and disables the ladder.
+        """
+        kwargs: Dict[str, Any] = {
+            "language": self.language if self.language != "auto" else None,
+            "task": self.task,
+        }
+
+        if self.temperature != 0.7:
+            kwargs["temperature"] = self.temperature
+        elif self.temperature_fallback:
+            kwargs["temperature"] = self.temperature_fallback
+
+        for key in (
+            "compression_ratio_threshold",
+            "logprob_threshold",
+            "no_speech_threshold",
+            "condition_on_prev_tokens",
+        ):
+            value = getattr(self, key)
+            if value is not None:
+                kwargs[key] = value
+
+        return kwargs
 
     def _detect_device(self) -> str:
         """
@@ -202,10 +243,7 @@ class LocalWhisperProvider(AIProvider):
                 batch_size=self.batch_size,
                 dtype=torch_dtype,
                 device=device,
-                generate_kwargs={
-                    "language": self.language if self.language != "auto" else None,
-                    "task": self.task
-                },
+                generate_kwargs=self._build_generate_kwargs(),
                 ignore_warning=True
             )
 
