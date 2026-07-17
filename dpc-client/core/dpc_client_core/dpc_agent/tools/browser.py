@@ -2574,7 +2574,7 @@ def get_tools() -> List[ToolEntry]:
             name="browse_page",
             schema={
                 "name": "browse_page",
-                "description": "Fetch a web page and extract content as structured markdown. Preserves headings, lists, tables, and links. Use size presets to control output length: s=5K, m=10K (default), l=25K, f=full. Set use_auth=<domain> to fetch authenticated content using stored cookies (requires prior login via the web-auth UI). Set keep_open=true to leave the headed Camoufox window open after returning (auth path only) — useful for visual debugging and Task 002 stateful interactive flows.",
+                "description": "Fetch a web page and extract content as structured markdown. Preserves headings, lists, tables, and links. Use size presets to control output length: s=5K, m=10K (default), l=25K, f=full. Set use_auth=<domain> to fetch authenticated content using stored cookies (requires prior login via the web-auth UI). Set keep_open=true to leave the headed Camoufox window open after returning (works for both anonymous and use_auth fetches) — useful for visual debugging and Task 002 stateful interactive flows.",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -2594,7 +2594,7 @@ def get_tools() -> List[ToolEntry]:
                         },
                         "keep_open": {
                             "type": "boolean",
-                            "description": "When true, leave the headed Camoufox window open after the fetch returns (only effective on the use_auth path; ignored for anonymous fetches). The session is reused on subsequent browse_page calls for the same agent, so opening one site and then another navigates the same window. Window stays open until DPC restart or until the next browse_page call replaces it. Use for visual debugging or as the foundation for Task 002 interactive flows.",
+                            "description": "When true, leave the headed Camoufox window open after the fetch returns. Works on both the anonymous and use_auth paths: either way a headed Camoufox session is opened and reused on subsequent keep_open browse_page calls for the same agent, so opening one site and then another navigates the same window. Window stays open until DPC restart, an explicit close_browser call, or the next keep_open fetch that reuses it. Use for visual debugging or as the foundation for Task 002 interactive flows.",
                             "default": False
                         }
                     },
