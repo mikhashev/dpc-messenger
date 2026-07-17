@@ -150,6 +150,12 @@
         { key: 'search_session_archives', label: 'Search Archives', desc: 'Search across all archived sessions' },
       ]
     },
+    {
+      name: 'Audio Tools (local Whisper)',
+      tools: [
+        { key: 'transcribe_audio_file', label: 'Transcribe Audio', desc: 'Transcribe an audio file to a .txt via local Whisper (GPU, offline)' },
+      ]
+    },
   ];
 
   // Set of every tool key already rendered by the hardcoded categories.

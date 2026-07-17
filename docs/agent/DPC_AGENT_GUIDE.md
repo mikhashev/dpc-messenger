@@ -508,6 +508,34 @@ Agent-controlled image/video generation via a ComfyUI backend. Opt-in.
 | `read_session_detail` | Read a specific archived session's full detail | ✅ |
 | `search_session_archives` | Search across archived sessions | ✅ |
 
+### Audio Tools
+
+Local Whisper transcription, offline and free. Requires a provider of type
+`local_whisper` in `~/.dpc/providers.json`.
+
+| Tool | Description | Default |
+|------|-------------|---------|
+| `transcribe_audio_file` | Transcribe an audio file to a `.txt`, return its path | ⛔ opt-in |
+
+The name is `transcribe_audio_file`, not `transcribe_audio` — the latter is
+already taken by the WebSocket command for short voice clips (`local_api.py`)
+and by a legacy key in `privacy_rules.json`.
+
+The transcript is written to a file (`transcripts/<name>.txt` in the sandbox by
+default) and only its path plus a short preview come back — a 30-minute
+recording is ~18 KB of text and does not belong inline in the tool result.
+Read the returned path with `read_file`.
+
+Paths follow the file-tool rules: relative resolves inside the sandbox, absolute
+requires extended-path access in the firewall (write access too when
+`output_path` is absolute).
+
+Known upstream quirk: on non-speech stretches Whisper invents filler — subtitle
+credits (`Субтитры создавал …`) and repeated `АПЛОДИСМЕНТЫ`. Measured on a 30-min
+two-person recording: three such blocks, all **mid-file at conversational pauses**,
+with the head and tail clean. So it is not confined to a leading silence — treat
+these as artifacts anywhere they appear.
+
 ### Skills & Agent Discovery Tools
 
 | Tool | Description | Default |

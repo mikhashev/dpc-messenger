@@ -4,7 +4,7 @@
  * English only — i18n deferred until full UI localization.
  */
 
-export type ToolCategory = 'search' | 'files' | 'git' | 'browser' | 'comfyui' | 'memory' | 'tasks' | 'skills' | 'shell' | 'messaging' | 'archive' | 'auth';
+export type ToolCategory = 'search' | 'files' | 'git' | 'browser' | 'comfyui' | 'memory' | 'tasks' | 'skills' | 'shell' | 'messaging' | 'archive' | 'auth' | 'audio';
 
 interface ToolDisplayEntry {
     label: string;
@@ -36,6 +36,7 @@ const genericArg = (input: string) =>
     extractFirst(input, 'name') || extractFirst(input, 'ref') ||
     extractFirst(input, 'branch') || extractFirst(input, 'message');
 const nameArg = (input: string) => extractFirst(input, 'name');
+const audioArg = (input: string) => extractFirst(input, 'audio_path');
 const msgArg = (input: string) => {
     const t = extractFirst(input, 'text') || extractFirst(input, 'message');
     return t.length > 60 ? t.slice(0, 60) + '...' : t;
@@ -119,12 +120,15 @@ const TOOL_DISPLAY: Record<string, ToolDisplayEntry> = {
     execute_skill:          { label: 'Execute skill',     category: 'skills', argExtract: nameArg },
 
     list_auth_domains: { label: 'Auth domains', category: 'auth' },
+
+    transcribe_audio_file: { label: 'Transcribe audio', category: 'audio', argExtract: audioArg },
 };
 
 const CATEGORY_LABELS: Record<ToolCategory | 'other', string> = {
     search: 'SEARCH', files: 'FILES', git: 'GIT', browser: 'BROWSER',
     comfyui: 'COMFYUI', memory: 'MEMORY', tasks: 'TASKS', skills: 'SKILLS',
-    shell: 'SHELL', messaging: 'MESSAGES', archive: 'ARCHIVE', auth: 'AUTH', other: 'OTHER',
+    shell: 'SHELL', messaging: 'MESSAGES', archive: 'ARCHIVE', auth: 'AUTH',
+    audio: 'AUDIO', other: 'OTHER',
 };
 
 export function getToolLabel(toolName: string): string {
