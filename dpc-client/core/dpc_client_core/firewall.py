@@ -1853,6 +1853,44 @@ class ContextFirewall:
         config_text = self.access_file_path.read_text()
         return json.loads(config_text)
 
+    @staticmethod
+    def find_missing_sandbox_paths(config_dict: Dict[str, Any]) -> List[str]:
+        """Report extended sandbox paths that do not exist on disk.
+
+        Non-existent paths are legal (a path may be created later), so this
+        never blocks a save — but a typo silently produces a dead rule that
+        only surfaces when an agent is denied. Surfacing it at save time is
+        what makes the difference.
+
+        Path handling matches _normalize_path: pathlib expanduser, no manual
+        separator logic, so it behaves the same on Windows and POSIX.
+        """
+        warnings: List[str] = []
+
+        def scan(section: Dict[str, Any], label: str) -> None:
+            sandbox = section.get('sandbox_extensions')
+            if not isinstance(sandbox, dict):
+                return
+            for kind in ('read_only', 'read_write'):
+                for raw in sandbox.get(kind, []) or []:
+                    if not raw:
+                        continue
+                    try:
+                        if not Path(raw).expanduser().exists():
+                            warnings.append(f"{label}.{kind}: path does not exist — {raw}")
+                    except (OSError, ValueError):
+                        warnings.append(f"{label}.{kind}: invalid path — {raw}")
+
+        dpc_agent = config_dict.get('dpc_agent')
+        if isinstance(dpc_agent, dict):
+            scan(dpc_agent, 'dpc_agent.sandbox_extensions')
+
+        for profile_name, profile in (config_dict.get('agent_profiles') or {}).items():
+            if isinstance(profile, dict):
+                scan(profile, f"agent_profiles.{profile_name}.sandbox_extensions")
+
+        return warnings
+
     def save_rules_from_dict(self, rules_dict: Dict[str, Any]) -> Tuple[bool, str, List[str]]:
         """Validate, write, and reload rules from a dict.
 
@@ -1865,6 +1903,10 @@ class ContextFirewall:
         if not is_valid:
             return (False, "Validation failed", errors)
 
+        path_warnings = self.find_missing_sandbox_paths(rules_dict)
+        for warning in path_warnings:
+            logger.warning("Firewall save: %s", warning)
+
         backup = self.access_file_path.read_text() if self.access_file_path.exists() else None
 
         rules_text = json.dumps(rules_dict, indent=2)
@@ -1874,6 +1916,9 @@ class ContextFirewall:
         if not success and backup is not None:
             self.access_file_path.write_text(backup)
             logger.warning("Rolled back firewall rules after failed reload")
+
+        if success and path_warnings:
+            message = f"{message} — {len(path_warnings)} path(s) do not exist:\n" + "\n".join(path_warnings)
 
         return (success, message, [])
 
