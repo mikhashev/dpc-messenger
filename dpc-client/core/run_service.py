@@ -66,6 +66,7 @@ import platform  # Import the platform module to check the OS
 import subprocess
 import sys
 import re
+import traceback
 from pathlib import Path
 from dpc_client_core.service import CoreService
 from dpc_client_core.__version__ import __version__
@@ -308,9 +309,54 @@ async def main():
         except asyncio.CancelledError:
             pass # Expected
 
+def _trace_pending_overlapped():
+    """Name whatever still holds a Windows overlapped op when the loop closes.
+
+    IocpProactor.close() spins in `while self._cache` until every overlapped
+    completes, printing "is running after closing for N seconds" once a second
+    (windows_events.py:857). The log tells us one op is stuck but never which,
+    so every fix so far has been aimed at a guess. This prints the owner.
+
+    Opt-in via DPC_DEBUG_SHUTDOWN=1; costs nothing when off.
+    """
+    if platform.system() != "Windows":
+        return
+    try:
+        from asyncio.windows_events import IocpProactor
+    except ImportError:
+        return
+
+    original_close = IocpProactor.close
+
+    def close_with_trace(self):
+        cache = getattr(self, "_cache", None)
+        if cache:
+            logger.warning("Shutdown: %d overlapped op(s) still pending", len(cache))
+            for address, entry in list(cache.items()):
+                # windows_events.py:743 — _cache[ov.address] = (fut, ov, obj, callback)
+                fut, _ov, obj, callback = entry
+                logger.warning(
+                    "  pending overlapped %s: fut=%r cancelled=%s obj=%r callback=%r",
+                    address,
+                    fut,
+                    fut.cancelled(),
+                    obj,
+                    getattr(callback, "__qualname__", callback),
+                )
+                source = getattr(fut, "_source_traceback", None)
+                if source:
+                    for line in traceback.format_list(source):
+                        logger.warning("    origin: %s", line.rstrip())
+        return original_close(self)
+
+    IocpProactor.close = close_with_trace
+
+
 if __name__ == "__main__":
     try:
         single_instance.acquire()  # exits if another backend is already running
+        if os.environ.get("DPC_DEBUG_SHUTDOWN") == "1":
+            _trace_pending_overlapped()
         print(f"D-PC Messenger v{__version__} - Starting Core Service (press Ctrl+C to stop)")
         asyncio.run(main())
     except KeyboardInterrupt:
