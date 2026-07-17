@@ -1249,3 +1249,61 @@ def test_browse_page_use_auth_rejects_off_domain_url(vault_home, fresh_cookies):
         mod._auth_browse_html = original
     assert out.startswith("⚠️")
     assert "outside auth domain" in out
+
+
+# ─────────────────────────────────────────────────────────────
+# Shutdown fallback — force-kill orphaned Camoufox subprocess
+# ─────────────────────────────────────────────────────────────
+
+
+def test_capture_browser_pids_records_new_children(vault_home):
+    """_capture_browser_pids diffs the process's children so the browser
+    subprocess tree spawned during launch is tracked. Verified with a real
+    short-lived child (no Camoufox needed)."""
+    import subprocess
+    import sys
+    from dpc_client_core.dpc_agent.tools.browser import AuthBrowser
+
+    ab = AuthBrowser(agent_id="agent_a", domains=[f"{TEST_DOMAIN}"])
+    before = ab._snapshot_child_pids()
+    proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    try:
+        ab._capture_browser_pids(before)
+        assert proc.pid in ab._browser_pids
+    finally:
+        proc.kill()
+        proc.wait(timeout=5)
+
+
+def test_force_kill_process_terminates_captured_pids(vault_home):
+    """_force_kill_process kills the tree recorded in _browser_pids — the
+    shutdown fallback for a Camoufox close that hangs on a dead driver.
+    Verified with a real child so no Camoufox is launched."""
+    import subprocess
+    import sys
+    from dpc_client_core.dpc_agent.tools.browser import AuthBrowser
+
+    proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    try:
+        assert proc.poll() is None  # child is alive
+        ab = AuthBrowser(agent_id="agent_a", domains=[f"{TEST_DOMAIN}"])
+        ab._browser_pids = {proc.pid}
+        ab._force_kill_process()
+        # terminate + 2s wait + kill window; wait() raises if still alive
+        proc.wait(timeout=5)
+        assert proc.returncode is not None
+        assert ab._browser_pids == set()
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait(timeout=5)
+
+
+def test_force_kill_process_noop_when_no_pids(vault_home):
+    """No captured pids (headless / never-launched) → no-op, no raise."""
+    from dpc_client_core.dpc_agent.tools.browser import AuthBrowser
+
+    ab = AuthBrowser(agent_id="agent_a", domains=[f"{TEST_DOMAIN}"])
+    assert ab._browser_pids == set()
+    ab._force_kill_process()  # must not raise
+    assert ab._browser_pids == set()

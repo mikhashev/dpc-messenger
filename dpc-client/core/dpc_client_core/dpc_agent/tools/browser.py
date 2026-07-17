@@ -910,6 +910,12 @@ class AuthBrowser:
         self._last_refs: dict[str, dict] = {}
         self._executor: Optional[ThreadPoolExecutor] = None
         self._last_activity: float = time.monotonic()
+        # PIDs of the Camoufox/Firefox subprocess tree spawned by this
+        # browser, captured at launch. Used only as a last-resort kill when
+        # close() times out at shutdown (dead Playwright driver) — otherwise
+        # the subprocess orphans and survives Python exit. See
+        # _force_kill_process.
+        self._browser_pids: set[int] = set()
 
     def _get_executor(self) -> ThreadPoolExecutor:
         """Lazy single-worker executor pinned to this AuthBrowser.
@@ -942,6 +948,77 @@ class AuthBrowser:
             except Exception:
                 pass
             self._executor = None
+
+    @staticmethod
+    def _snapshot_child_pids() -> set[int]:
+        """PIDs of the current process's descendants, for launch diffing."""
+        try:
+            import psutil
+            return {c.pid for c in psutil.Process().children(recursive=True)}
+        except Exception:
+            return set()
+
+    def _capture_browser_pids(self, before: set[int]) -> None:
+        """Record the subprocess tree that appeared while Camoufox launched
+        (Playwright driver + Firefox), for last-resort kill on shutdown."""
+        try:
+            after = self._snapshot_child_pids()
+            self._browser_pids = after - before
+            if self._browser_pids:
+                log.debug(
+                    "tracked Camoufox pids (agent=%s): %s",
+                    self._agent_id, sorted(self._browser_pids),
+                )
+        except Exception as e:
+            log.debug("browser pid capture failed (agent=%s): %s", self._agent_id, e)
+
+    def _force_kill_process(self) -> None:
+        """Kill the Camoufox/Firefox subprocess tree captured at launch.
+
+        Last resort for shutdown only: when close() times out because the
+        Playwright driver connection is dead, the graceful __exit__ never
+        completes and the browser subprocess orphans, surviving Python exit
+        and forcing the user to kill it by hand. Killing the captured tree
+        (plus any content processes it spawned since) prevents the orphan and
+        lets the stuck executor thread unwind. Best-effort and idempotent."""
+        pids = self._browser_pids
+        if not pids:
+            return
+        try:
+            import psutil
+        except Exception:
+            return
+        victims: list = []
+        for pid in list(pids):
+            try:
+                proc = psutil.Process(pid)
+                victims.append(proc)
+                victims.extend(proc.children(recursive=True))
+            except psutil.NoSuchProcess:
+                continue
+            except Exception:
+                continue
+        for proc in victims:
+            try:
+                proc.terminate()
+            except Exception:
+                pass
+        try:
+            _gone, alive = psutil.wait_procs(victims, timeout=2)
+        except Exception:
+            alive = victims
+        for proc in alive:
+            try:
+                proc.kill()
+            except Exception:
+                pass
+        if victims:
+            log.info(
+                "Force-killed %d Camoufox subprocess(es) during shutdown "
+                "(agent=%s)",
+                len(victims), self._agent_id,
+            )
+        self._browser_pids = set()
 
     def __enter__(self):
         self._open()
@@ -1014,8 +1091,10 @@ class AuthBrowser:
     def _open(self) -> None:
         from camoufox.sync_api import Camoufox
 
+        before_pids = self._snapshot_child_pids()
         self._cm = Camoufox(headless=not self._headed, **_camoufox_launch_kwargs())
         self._browser = self._cm.__enter__()
+        self._capture_browser_pids(before_pids)
         try:
             self._browser.on("disconnected", self._on_browser_disconnected)
         except Exception as e:
