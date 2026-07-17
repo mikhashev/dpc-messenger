@@ -326,7 +326,25 @@ def _trace_pending_overlapped():
     except ImportError:
         return
 
+    # A stuck op leaves a closed socket (fd=-1), so the object itself names
+    # nothing. _OverlappedFuture._source_traceback only exists under asyncio
+    # debug mode, and a cancelled-but-stuck future would be pruned by a
+    # done-callback before close() runs. So record the stack at registration
+    # and keep it until close() reads it, keyed by ov.address like _cache.
+    origins: dict[int, list[str]] = {}
+    original_register = IocpProactor._register
     original_close = IocpProactor.close
+
+    def register_with_origin(self, ov, obj, callback):
+        fut = original_register(self, ov, obj, callback)
+        address = getattr(ov, "address", None)
+        if address is not None:
+            origins[address] = traceback.format_stack(limit=14)[:-1]
+            if len(origins) > 1000:
+                # Addresses gone from _cache have completed; their stacks are dead weight.
+                for stale in origins.keys() - self._cache.keys():
+                    del origins[stale]
+        return fut
 
     def close_with_trace(self):
         cache = getattr(self, "_cache", None)
@@ -343,12 +361,11 @@ def _trace_pending_overlapped():
                     obj,
                     getattr(callback, "__qualname__", callback),
                 )
-                source = getattr(fut, "_source_traceback", None)
-                if source:
-                    for line in traceback.format_list(source):
-                        logger.warning("    origin: %s", line.rstrip())
+                for line in origins.get(address, []):
+                    logger.warning("    origin: %s", line.rstrip())
         return original_close(self)
 
+    IocpProactor._register = register_with_origin
     IocpProactor.close = close_with_trace
 
 
