@@ -295,7 +295,7 @@ def _browse_with_camoufox(url: str) -> Optional[str]:
         with Camoufox(headless=True, **_camoufox_launch_kwargs()) as browser:
             page = browser.new_page()
             _attach_page_diagnostics(page)
-            page.goto(url, wait_until="networkidle", timeout=60000)
+            page.goto(url, wait_until="domcontentloaded", timeout=60000)
             html = page.content()
 
         import trafilatura
@@ -1408,7 +1408,7 @@ class AuthBrowser:
             )
             raise
         try:
-            self._page.goto(url, wait_until="networkidle", timeout=60000)
+            self._page.goto(url, wait_until="domcontentloaded", timeout=60000)
         except Exception as exc:
             self._audit_action(
                 "navigate", url, "failed",
@@ -2682,7 +2682,8 @@ def get_tools() -> List[ToolEntry]:
             },
             handler=browse_page,
             # 60s is too tight for the use_auth path: that goes through
-            # Camoufox launch + goto (30s wait_until=networkidle) + optional
+            # Camoufox launch + goto (wait_until=domcontentloaded, ~2s typical,
+            # 60s cap) + _wait_for_content_stable (10s, non-fatal) + optional
             # T9 popup-fallback (5min user-interaction timeout per Q4) +
             # trafilatura conversion. Worst case: ~5min popup + 30s
             # Camoufox + small overhead. 360s gives a 30s buffer over the
