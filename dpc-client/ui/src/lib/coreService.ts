@@ -1523,12 +1523,13 @@ export async function sendGroupMessage(groupId: string, text: string): Promise<a
     });
 }
 
-export async function sendGroupImage(groupId: string, imageBase64: string, filename?: string, text: string = ""): Promise<any> {
+export async function sendGroupImage(groupId: string, imageBase64: string, filename?: string, text: string = "", describeForAgents: boolean = false): Promise<any> {
     return sendCommand('send_group_image', {
         group_id: groupId,
         image_base64: imageBase64,
         filename,
-        text
+        text,
+        describe_for_agents: describeForAgents
     });
 }
 

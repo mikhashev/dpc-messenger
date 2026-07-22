@@ -10,6 +10,8 @@
     // Image preview state
     pendingImage = null,
     onClearPendingImage,
+    isGroupChat = false,
+    describeForAgents = false,
 
     // Voice preview state (v0.13.0+)
     voicePreview = null,
@@ -34,6 +36,7 @@
     filePreparationCompleted = null,
     onConfirmSendFile,
     onCancelSendFile,
+    onToggleDescribeForAgents,
 
     // Active transfers state
     activeFileTransfers = new Map(),
@@ -46,6 +49,8 @@
   }: {
     pendingImage?: { dataUrl: string; filename: string; sizeBytes: number } | null;
     onClearPendingImage: () => void;
+    isGroupChat?: boolean;
+    describeForAgents?: boolean;
     voicePreview?: { blob: Blob; duration: number } | null;
     onClearVoicePreview: () => void;
     onSendVoiceMessage: () => void;
@@ -71,6 +76,7 @@
     filePreparationCompleted?: any;
     onConfirmSendFile: () => void;
     onCancelSendFile: () => void;
+    onToggleDescribeForAgents?: (value: boolean) => void;
     activeFileTransfers?: Map<string, any>;
     onCancelTransfer: (transferId: string, filename: string) => void;
     showFileOfferToast?: boolean;
@@ -89,6 +95,12 @@
     </div>
     <button class="preview-remove" onclick={onClearPendingImage} aria-label="Remove image">✕</button>
   </div>
+  {#if isGroupChat}
+    <label style="display: flex; align-items: center; gap: 8px; margin: 6px 4px 0; font-size: 13px; cursor: pointer;">
+      <input type="checkbox" checked={describeForAgents ?? false} onchange={(e) => onToggleDescribeForAgents?.((e.currentTarget as HTMLInputElement).checked)} />
+      <span>Describe for agents (VL) — agents receive a text description of the image</span>
+    </label>
+  {/if}
 {/if}
 
 <!-- Voice Preview Chip (v0.13.0+) -->

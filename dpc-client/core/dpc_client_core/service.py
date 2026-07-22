@@ -5142,7 +5142,8 @@ class CoreService:
             return {"status": "error", "message": str(e)}
 
     async def send_group_image(
-        self, group_id: str, image_base64: str, filename: str = None, text: str = ""
+        self, group_id: str, image_base64: str, filename: str = None, text: str = "",
+        describe_for_agents: bool = False,
     ) -> Dict[str, Any]:
         """Send screenshot/image to all group members via fan-out file transfer.
 
@@ -5153,9 +5154,14 @@ class CoreService:
             image_base64: Base64 data URL (data:image/png;base64,...)
             filename: Optional filename
             text: Optional text caption
+            describe_for_agents: If True, run one vision-model pass over the image and
+                route a text description to the group agents (GROUP-CHAT-VISION-NOT-WIRED).
+                The image is shared with all members regardless; this only additionally
+                lets agents "see" it. Mentions in `text` drive which agents respond.
         """
         from datetime import datetime, timezone
         import base64 as b64
+        import hashlib
         import re
         from pathlib import Path
         from PIL import Image
@@ -5223,13 +5229,69 @@ class CoreService:
             except Exception:
                 thumbnail_base64 = ""
 
+            # Opt-in "Describe for agents (VL)": one vision pass → text description.
+            # Computed BEFORE the message is built so the description becomes part of
+            # the persisted, human-visible message text (not just ephemeral agent
+            # context). Empty string if the option is off or the VL pass fails.
+            vl_description = ""
+            if describe_for_agents:
+                try:
+                    vl_description = await self._describe_image_for_agents(encoded_data, mime_type, text)
+                except Exception as e:
+                    logger.warning("describe_for_agents (VL) failed for group image: %s", e)
+
+            # Message text = user's caption + VL description (if any). This is exactly
+            # what Mike wants persisted: file reference (attachment) + text.
+            full_text = (text or "").strip()
+            if vl_description:
+                vl_block = f"[VL] image description:\n{vl_description}"
+                full_text = f"{full_text}\n\n{vl_block}" if full_text else vl_block
+
             image_metadata = {
                 "dimensions": {"width": width, "height": height},
                 "thumbnail_base64": thumbnail_base64,
                 "source": "clipboard",
                 "captured_at": datetime.now(timezone.utc).isoformat(),
-                "text": text
+                "text": full_text,
             }
+
+            # Persist an image message to this node's history + surface it in the
+            # sender UI (mirrors send_group_voice_message). Record = attachment
+            # (file reference) + full_text (caption + VL). Closes the group-image
+            # history gap and gives agents a persistent, quotable image message.
+            attachment = {
+                "type": "image",
+                "filename": filename,
+                "file_path": str(file_path),
+                "mime_type": mime_type,
+                "size_bytes": len(image_data),
+                "thumbnail": thumbnail_base64,
+                "dimensions": {"width": width, "height": height},
+                "status": "completed",
+            }
+            image_msg_id = hashlib.sha256(
+                f"{self.p2p_manager.node_id}:group-image-send:{group_id}:{filename}".encode()
+            ).hexdigest()[:16]
+            ui_dedup_key = f"group_image_ui:{group_id}:{filename}"
+            if ui_dedup_key not in self._processed_message_ids:
+                self._processed_message_ids.add(ui_dedup_key)
+                await self.local_api.broadcast_event("group_file_received", {
+                    "sender_node_id": "user",
+                    "sender_name": "You",
+                    "text": full_text,
+                    "message_id": image_msg_id,
+                    "attachments": [attachment],
+                    "group_id": group_id,
+                })
+                if _group_monitor:
+                    _group_monitor.add_message(
+                        "user", full_text, [attachment],
+                        sender_node_id=self.p2p_manager.node_id,
+                        sender_name=(self.p2p_manager.get_display_name() or "User"),
+                        message_id=image_msg_id,
+                        sender_type="human",
+                    )
+                    _group_monitor.save_history()
 
             # Fan-out to connected members
             connected_peers = self.p2p_coordinator.get_connected_peers()
@@ -5252,6 +5314,16 @@ class CoreService:
                 except Exception as e:
                     logger.warning("Failed to send group image to %s: %s", node_id[:20], e)
 
+            # If VL was requested, route the full text (caption + VL description) into
+            # the group agents so they can reason about the image. @mentions in the
+            # caption decide which agents respond, exactly as with plain text input.
+            if vl_description:
+                try:
+                    sender_display = self.p2p_manager.get_display_name() or "User"
+                    await self._handle_group_agent_mentions(group_id, full_text, sender_display)
+                except Exception as e:
+                    logger.warning("routing VL description to group agents failed: %s", e)
+
             return {
                 "status": "success",
                 "transfer_ids": transfer_ids,
@@ -5265,6 +5337,30 @@ class CoreService:
         except Exception as e:
             logger.error("Error sending group image: %s", e, exc_info=True)
             return {"status": "error", "message": str(e)}
+
+    async def _describe_image_for_agents(self, image_b64: str, mime_type: str, caption: str = "") -> str:
+        """One vision pass over a group image → a text description for all group agents.
+
+        Uses LLMManager's auto-selected vision provider (the configured vision_provider,
+        e.g. qwen3.6:27b, or the first vision-capable one) — a single pass, not per-agent.
+        Mirrors the analysis prompt of DPCAgentLLMAdapter._pre_analyze_image_for_agent so
+        1:1 and group descriptions stay consistent.
+        """
+        analysis_prompt = (
+            f"Analyze this image in detail. Caption/context: {caption or '(none)'}\n\n"
+            "Provide a comprehensive description that includes:\n"
+            "- What objects, text, or UI elements are visible\n"
+            "- Any error messages or important text\n"
+            "- Layout and structure if it's a screenshot\n"
+            "- Any other relevant details for understanding the image"
+        )
+        meta = await self.llm_manager.query(
+            prompt=analysis_prompt,
+            provider_alias=None,  # auto-select vision provider
+            images=[{"base64": image_b64, "mime_type": mime_type}],
+            return_metadata=True,
+        )
+        return meta.get("response", "") if isinstance(meta, dict) else str(meta)
 
     async def send_group_voice_message(
         self, group_id: str, audio_base64: str, duration_seconds: float, mime_type: str = "audio/webm"

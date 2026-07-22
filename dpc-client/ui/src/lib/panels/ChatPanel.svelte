@@ -139,6 +139,7 @@
   let chatDraftInputs = $state(new Map<string, string>());
   let voicePreview = $state<{ blob: Blob; duration: number; filePath?: string } | null>(null);
   let pendingImage = $state<{ dataUrl: string; filename: string; sizeBytes: number } | null>(null);
+  let describeForAgents = $state(false); // "Describe for agents (VL)" toggle, group image sends only
 
   // Resize
   let isResizing = $state(false);
@@ -569,13 +570,18 @@
         setTimeout(() => (showFileOfferToast = false), 5000);
       }
     } else if (activeChatId.startsWith('group-')) {
-      const group = get(groupChats).get(activeChatId);
-      pendingFileSend = {
-        filePath: '', fileName: imageData.filename,
-        recipientId: activeChatId, recipientName: `group "${group?.name || 'group'}"`,
-        imageData, caption: text,
-      };
-      showSendFileDialog = true;
+      // Group image: caption + "Describe for agents (VL)" are already set on the
+      // inline preview, so send directly — no redundant confirmation dialog. The
+      // backend's group_file_received broadcast renders it in the chat.
+      const dfa = describeForAgents;
+      describeForAgents = false;
+      try {
+        await sendGroupImage(activeChatId, imageData.dataUrl, imageData.filename, text, dfa);
+      } catch (error) {
+        fileOfferToastMessage = `Failed to send image: ${error}`;
+        showFileOfferToast = true;
+        setTimeout(() => (showFileOfferToast = false), 5000);
+      }
     } else {
       // P2P screenshot
       try {
@@ -694,7 +700,7 @@
     try {
       if (pendingFileSend.imageData) {
         if (pendingFileSend.recipientId.startsWith('group-')) {
-          await sendGroupImage(pendingFileSend.recipientId, pendingFileSend.imageData.dataUrl, pendingFileSend.imageData.filename, pendingFileSend.caption || '');
+          await sendGroupImage(pendingFileSend.recipientId, pendingFileSend.imageData.dataUrl, pendingFileSend.imageData.filename, pendingFileSend.caption || '', describeForAgents);
         } else {
           await sendCommand('send_p2p_image', { node_id: pendingFileSend.recipientId, image_base64: pendingFileSend.imageData.dataUrl, filename: pendingFileSend.imageData.filename, text: pendingFileSend.caption || '' });
         }
@@ -707,6 +713,7 @@
       }
       showSendFileDialog = false;
       pendingFileSend = null;
+      describeForAgents = false;
       fileOfferToastMessage = 'Sending...';
       showFileOfferToast = true;
       setTimeout(() => (showFileOfferToast = false), 3000);
@@ -774,7 +781,7 @@
   // ---------------------------------------------------------------------------
   // Paste (images)
   // ---------------------------------------------------------------------------
-  function clearPendingImage() { pendingImage = null; }
+  function clearPendingImage() { pendingImage = null; describeForAgents = false; }
 
   async function handlePaste(e: ClipboardEvent) {
     const items = e.clipboardData?.items;
@@ -1018,6 +1025,8 @@
   <FileTransferUI
     pendingImage={pendingImage}
     onClearPendingImage={clearPendingImage}
+    isGroupChat={activeChatId?.startsWith('group-')}
+    describeForAgents={describeForAgents}
     voicePreview={voicePreview}
     onClearVoicePreview={handleCancelVoicePreview}
     onSendVoiceMessage={handleSendVoiceMessage}
@@ -1036,6 +1045,7 @@
     filePreparationCompleted={$filePreparationCompleted}
     onConfirmSendFile={handleConfirmSendFile}
     onCancelSendFile={handleCancelSendFile}
+    onToggleDescribeForAgents={(v) => describeForAgents = v}
     activeFileTransfers={$activeFileTransfers}
     onCancelTransfer={handleCancelTransfer}
     showFileOfferToast={showFileOfferToast}
