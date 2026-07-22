@@ -156,6 +156,12 @@
         { key: 'transcribe_audio_file', label: 'Transcribe Audio', desc: 'Transcribe an audio file to a .txt via local Whisper (GPU, offline)' },
       ]
     },
+    {
+      name: 'Vision Tools (local VL)',
+      tools: [
+        { key: 'describe_image', label: 'Describe Image', desc: 'Look at an image file and describe it, or answer a question about it, via the local vision model (GPU, offline)' },
+      ]
+    },
   ];
 
   // Set of every tool key already rendered by the hardcoded categories.

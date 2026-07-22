@@ -4,7 +4,7 @@
  * English only — i18n deferred until full UI localization.
  */
 
-export type ToolCategory = 'search' | 'files' | 'git' | 'browser' | 'comfyui' | 'memory' | 'tasks' | 'skills' | 'shell' | 'messaging' | 'archive' | 'auth' | 'audio';
+export type ToolCategory = 'search' | 'files' | 'git' | 'browser' | 'comfyui' | 'memory' | 'tasks' | 'skills' | 'shell' | 'messaging' | 'archive' | 'auth' | 'audio' | 'vision';
 
 interface ToolDisplayEntry {
     label: string;
@@ -37,6 +37,7 @@ const genericArg = (input: string) =>
     extractFirst(input, 'branch') || extractFirst(input, 'message');
 const nameArg = (input: string) => extractFirst(input, 'name');
 const audioArg = (input: string) => extractFirst(input, 'audio_path');
+const imageArg = (input: string) => extractFirst(input, 'image_path');
 const msgArg = (input: string) => {
     const t = extractFirst(input, 'text') || extractFirst(input, 'message');
     return t.length > 60 ? t.slice(0, 60) + '...' : t;
@@ -122,13 +123,15 @@ const TOOL_DISPLAY: Record<string, ToolDisplayEntry> = {
     list_auth_domains: { label: 'Auth domains', category: 'auth' },
 
     transcribe_audio_file: { label: 'Transcribe audio', category: 'audio', argExtract: audioArg },
+
+    describe_image:  { label: 'Describe image',    category: 'vision', argExtract: imageArg },
 };
 
 const CATEGORY_LABELS: Record<ToolCategory | 'other', string> = {
     search: 'SEARCH', files: 'FILES', git: 'GIT', browser: 'BROWSER',
     comfyui: 'COMFYUI', memory: 'MEMORY', tasks: 'TASKS', skills: 'SKILLS',
     shell: 'SHELL', messaging: 'MESSAGES', archive: 'ARCHIVE', auth: 'AUTH',
-    audio: 'AUDIO', other: 'OTHER',
+    audio: 'AUDIO', vision: 'VISION', other: 'OTHER',
 };
 
 export function getToolLabel(toolName: string): string {
