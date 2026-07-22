@@ -43,7 +43,32 @@ class OllamaProvider(AIProvider):
     def __init__(self, alias: str, config: Dict[str, Any]):
         super().__init__(alias, config)
         self.client = ollama.AsyncClient(host=config.get("host"))
+        self._client_loop: Optional[Any] = None  # event loop self.client is bound to
         self._last_thinking: Optional[str] = None
+
+    def _client_for_loop(self) -> "ollama.AsyncClient":
+        """Return an AsyncClient bound to the current running event loop.
+
+        Agent tools run each async call in a fresh event loop that is closed
+        afterward (tools/registry.py execute), so a client cached across calls
+        ends up with an httpx connection pool bound to a dead loop → the next
+        call fails with 'Event loop is closed'. Recreate the client whenever the
+        running loop changes; within one persistent loop (chat) it is built once.
+        """
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+        if self._client_loop is None:
+            # First request (or an externally-injected/mocked client): adopt the
+            # current loop without recreating, so the existing client is kept.
+            self._client_loop = loop
+        elif self._client_loop is not loop:
+            # The loop we were bound to has been replaced (agent per-call loop
+            # closed) — rebuild on the new one.
+            self.client = ollama.AsyncClient(host=self.config.get("host"))
+            self._client_loop = loop
+        return self.client
 
     def supports_vision(self) -> bool:
         """Check if this Ollama model supports vision/multimodal inputs."""
@@ -79,7 +104,7 @@ class OllamaProvider(AIProvider):
             timeout = self.config.get("timeout", 300.0)
 
             response = await asyncio.wait_for(
-                self.client.chat(
+                self._client_for_loop().chat(
                     model=self.model,
                     messages=[message],
                     options=options,
@@ -148,12 +173,15 @@ class OllamaProvider(AIProvider):
             timeout = kwargs.get("timeout", self.config.get("timeout", 300.0))
 
             response = await asyncio.wait_for(
-                self.client.chat(
+                self._client_for_loop().chat(
                     model=self.model,
                     messages=[message],
                     options=options,
                     think=True if self.supports_thinking() else None,
-                    keep_alive=self.config.get("vision_keep_alive", 0),
+                    # Keep the VL model resident for a bit so back-to-back agent QC
+                    # calls don't cold-start a reload each time (was 0 = unload
+                    # immediately). Configurable via providers.json vision_keep_alive.
+                    keep_alive=self.config.get("vision_keep_alive", "1m"),
                 ),
                 timeout=timeout
             )
@@ -263,7 +291,7 @@ class OllamaProvider(AIProvider):
 
         try:
             response = await asyncio.wait_for(
-                self.client.chat(
+                self._client_for_loop().chat(
                     model=self.model,
                     messages=ollama_messages,
                     tools=ollama_tools,
@@ -325,7 +353,7 @@ class OllamaProvider(AIProvider):
                 - details: Model details (family, parameter_size, etc.)
         """
         try:
-            response = await self.client.show(model=self.model)
+            response = await self._client_for_loop().show(model=self.model)
 
             # Parse num_ctx from modelfile
             num_ctx = None

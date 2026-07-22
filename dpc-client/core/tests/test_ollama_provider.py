@@ -190,3 +190,98 @@ async def test_generate_with_tools_no_surface_when_tool_calls_present():
     assert len(result["tool_calls_raw"]) == 1
     # missing id is backfilled so the round-trip tool_call_id is never empty
     assert result["tool_calls_raw"][0].id.startswith("call_")
+
+
+# ---------------------------------------------------------------------------
+# Loop-aware client + vision keep_alive (OLLAMA-VISION-EVENT-LOOP, 2026-07-22)
+# ---------------------------------------------------------------------------
+
+import asyncio
+
+
+class _Msg(dict):
+    """Ollama message: supports both msg['content'] and msg.thinking."""
+    def __init__(self, content, thinking=None):
+        super().__init__(content=content)
+        self.thinking = thinking
+
+
+class TestLoopAwareClient:
+    """Agent tools run each async call in a fresh event loop that is closed
+    afterward (tools/registry.py); a client cached across calls ends up bound to
+    a dead loop → 'Event loop is closed'. _client_for_loop() rebuilds on loop
+    change but keeps the client (incl. an injected mock) within one loop."""
+
+    def test_same_loop_adopts_and_reuses_client(self):
+        p = _make()
+        injected = p.client
+
+        async def call():
+            return p._client_for_loop()
+
+        loop = asyncio.new_event_loop()
+        try:
+            c1 = loop.run_until_complete(call())
+            c2 = loop.run_until_complete(call())
+        finally:
+            loop.close()
+
+        assert c1 is injected  # first use adopts the existing client
+        assert c2 is injected  # same loop → reused, not rebuilt
+
+    def test_new_loop_rebuilds_client(self):
+        p = _make()
+        injected = p.client
+
+        async def call():
+            return p._client_for_loop()
+
+        loop_a = asyncio.new_event_loop()
+        try:
+            c_a = loop_a.run_until_complete(call())
+        finally:
+            loop_a.close()  # simulate the agent per-call loop being closed
+
+        loop_b = asyncio.new_event_loop()
+        try:
+            c_b = loop_b.run_until_complete(call())
+        finally:
+            loop_b.close()
+
+        assert c_a is injected      # loop A adopted the original client
+        assert c_b is not injected  # loop changed → rebuilt (no dead-loop reuse)
+        assert c_b is p.client
+
+
+class TestVisionKeepAlive:
+    """The VL model must stay resident briefly so back-to-back agent QC calls
+    don't cold-start a reload (was keep_alive=0 = unload immediately)."""
+
+    @pytest.mark.asyncio
+    async def test_default_keep_alive_is_one_minute(self):
+        p = _make({"model": "qwen3-vl:8b"})
+        captured = {}
+
+        async def fake_chat(**kwargs):
+            captured.update(kwargs)
+            return _Resp(_Msg("a description"))
+
+        p.client = SimpleNamespace(chat=fake_chat)
+        out = await p.generate_with_vision("what is this", [{"base64": "abc", "mime_type": "image/png"}])
+
+        assert out == "a description"
+        assert captured["keep_alive"] == "1m"
+
+    @pytest.mark.asyncio
+    async def test_keep_alive_config_override(self):
+        p = _make({"model": "qwen3-vl:8b", "vision_keep_alive": 0})
+        captured = {}
+
+        async def fake_chat(**kwargs):
+            captured.update(kwargs)
+            return _Resp(_Msg("d"))
+
+        p.client = SimpleNamespace(chat=fake_chat)
+        await p.generate_with_vision("q", [{"base64": "x", "mime_type": "image/png"}])
+
+        assert captured["keep_alive"] == 0
