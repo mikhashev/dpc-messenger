@@ -431,7 +431,24 @@ def _inject_prompt(graph: dict, prompt: str) -> Optional[str]:
     return None
 
 
-def comfyui_submit(ctx: ToolContext, workflow: str = "", prompt: str = "", workflow_json: dict = None, api_url: str = DEFAULT_API_URL) -> str:
+def _set_save_prefix(graph: dict, save_prefix: str) -> Optional[str]:
+    """Set filename_prefix on every save node in the API graph (SaveImage,
+    TS_SaveSVGString, SaveVideo/SaveWEBM/SaveAnimatedWEBP, …). Lets sequential or
+    batch runs write named files (icon_brain_….svg) instead of colliding on a
+    shared default name. Returns a warning if no save node was found."""
+    n = 0
+    for node in graph.values():
+        if isinstance(node, dict):
+            inp = node.get("inputs")
+            if isinstance(inp, dict) and "filename_prefix" in inp:
+                inp["filename_prefix"] = save_prefix
+                n += 1
+    if n == 0:
+        return "save_prefix given but no save node with a filename_prefix field was found"
+    return None
+
+
+def comfyui_submit(ctx: ToolContext, workflow: str = "", prompt: str = "", workflow_json: dict = None, save_prefix: str = "", api_url: str = DEFAULT_API_URL) -> str:
     """Submit a ComfyUI workflow. Pass workflow filename + prompt, or raw workflow_json."""
     loop = ctx.agent_event_loop
     if loop is None:
@@ -479,6 +496,12 @@ def comfyui_submit(ctx: ToolContext, workflow: str = "", prompt: str = "", workf
                 inject_warn = _inject_prompt(graph, prompt)
                 if inject_warn:
                     conv_warnings.append(inject_warn)
+
+            # Override save-node filename_prefix so files are named, not colliding.
+            if save_prefix:
+                sp_warn = _set_save_prefix(graph, save_prefix)
+                if sp_warn:
+                    conv_warnings.append(sp_warn)
 
             wf_str_keys = {str(k): v for k, v in graph.items()}
             payload: Dict[str, Any] = {"prompt": wf_str_keys}
@@ -1039,6 +1062,15 @@ def get_tools() -> List[ToolEntry]:
                         "workflow_json": {
                             "type": "object",
                             "description": "Raw ComfyUI workflow JSON in API format (submitted as-is).",
+                        },
+                        "save_prefix": {
+                            "type": "string",
+                            "description": (
+                                "Optional. Overrides filename_prefix on every save node "
+                                "(SaveImage/SaveVideo/TS_SaveSVGString/…) so outputs are named "
+                                "(e.g. 'icon_brain' -> icon_brain_*.svg) instead of colliding on a "
+                                "shared default. Use a distinct value per run for batch packs."
+                            ),
                         },
                         "api_url": {
                             "type": "string",
