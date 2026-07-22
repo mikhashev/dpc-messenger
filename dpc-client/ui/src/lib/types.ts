@@ -63,6 +63,8 @@ export type Message = {
   mentions?: Mention[];        // @-mentions in group chat messages
   attachments?: MessageAttachment[];
   isError?: boolean;           // Error message styling (v0.19.2+)
+  pending?: boolean;           // Optimistic bubble awaiting server confirmation (group image send)
+  describing?: boolean;        // Optimistic "Describing… (VL)" indicator while backend runs vision
   isAgent?: boolean;           // Agent message in group chat (v0.25.0+)
   agentOwner?: string | null;
   msg_index?: number;          // Sequential message number (MSG-CHAIN, v0.25.0+)

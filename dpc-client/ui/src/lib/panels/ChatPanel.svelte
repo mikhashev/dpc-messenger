@@ -571,13 +571,35 @@
       }
     } else if (activeChatId.startsWith('group-')) {
       // Group image: caption + "Describe for agents (VL)" are already set on the
-      // inline preview, so send directly — no redundant confirmation dialog. The
-      // backend's group_file_received broadcast renders it in the chat.
+      // inline preview, so send directly — no redundant confirmation dialog.
       const dfa = describeForAgents;
       describeForAgents = false;
+      // Optimistic pending bubble: show the image immediately and, when a VL pass
+      // is requested, a "Describing… (VL)" indicator while the backend runs vision.
+      // The group_file_received broadcast replaces this bubble (matched by
+      // filename) with the real message (caption + VL description).
+      const gid = activeChatId;
+      const pendingId = crypto.randomUUID();
+      chatHistories.update(h => {
+        const m = new Map(h);
+        const hist = m.get(gid) || [];
+        m.set(gid, [...hist, {
+          id: pendingId, sender: 'user', senderName: 'You', text, timestamp: Date.now(),
+          attachments: [{ type: 'image', filename: imageData.filename, thumbnail: imageData.dataUrl, size_bytes: imageData.sizeBytes }],
+          pending: true, describing: dfa,
+        }]);
+        return m;
+      });
+      autoScroll();
       try {
-        await sendGroupImage(activeChatId, imageData.dataUrl, imageData.filename, text, dfa);
+        await sendGroupImage(gid, imageData.dataUrl, imageData.filename, text, dfa);
       } catch (error) {
+        // Drop the optimistic bubble if the send failed.
+        chatHistories.update(h => {
+          const m = new Map(h);
+          m.set(gid, (m.get(gid) || []).filter((x: any) => x.id !== pendingId));
+          return m;
+        });
         fileOfferToastMessage = `Failed to send image: ${error}`;
         showFileOfferToast = true;
         setTimeout(() => (showFileOfferToast = false), 5000);

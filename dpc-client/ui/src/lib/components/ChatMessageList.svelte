@@ -238,6 +238,15 @@
             {/each}
           </div>
         {/if}
+
+        <!-- Optimistic VL indicator: shown while the backend runs the vision pass
+             for a pasted group image opted into "Describe for agents (VL)". -->
+        {#if msg.describing}
+          <div class="vl-describing">
+            <span class="vl-spinner"></span>
+            <span>Describing… (VL)</span>
+          </div>
+        {/if}
       </div>
     {/each}
   {:else}
@@ -444,6 +453,32 @@
     border-radius: 8px;
     color: #555;
     font-size: 13px;
+  }
+
+  .vl-describing {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    margin-top: 8px;
+    padding: 4px 10px;
+    background: rgba(120, 90, 220, 0.1);
+    border: 1px solid rgba(120, 90, 220, 0.25);
+    border-radius: 8px;
+    color: #6b4fd0;
+    font-size: 12px;
+  }
+
+  .vl-spinner {
+    width: 12px;
+    height: 12px;
+    border: 2px solid rgba(120, 90, 220, 0.3);
+    border-top-color: #6b4fd0;
+    border-radius: 50%;
+    animation: vl-spin 0.7s linear infinite;
+  }
+
+  @keyframes vl-spin {
+    to { transform: rotate(360deg); }
   }
 
   /* Collapsible raw streaming output (v0.16.0+) */
