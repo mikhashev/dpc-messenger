@@ -30,6 +30,9 @@
   let modelConfigSleepProvider = $state('');
   let modelConfigSnapshotProvider = $state('');
   let modelConfigSnapshotThreshold = $state<number>(8000);
+  let modelConfigCompactionEnabled = $state<boolean>(false);
+  let modelConfigCompactionProvider = $state('');
+  let modelConfigCompactionThreshold = $state<number>(0.8);
   let modelConfigProvidersList = $state<{alias: string, model: string, type: string, is_remote?: boolean, peer_id?: string}[]>([]);
   let modelConfigSaving = $state(false);
   let modelConfigRetrievalVector = $state<'native' | 'grafeo'>('native');
@@ -189,6 +192,11 @@
       modelConfigSnapshotThreshold = Number(result.snapshot_summarize_threshold) > 0
         ? Number(result.snapshot_summarize_threshold)
         : 8000;
+      modelConfigCompactionEnabled = result.compaction_enabled === true;
+      modelConfigCompactionProvider = result.compaction_provider || '';
+      modelConfigCompactionThreshold = Number(result.compaction_threshold) > 0
+        ? Number(result.compaction_threshold)
+        : 0.8;
       modelConfigProvidersList = result.providers || [];
       modelConfigRetrievalVector = (result.retrieval_vector === 'grafeo') ? 'grafeo' : 'native';
       modelConfigRetrievalText = (result.retrieval_text === 'grafeo') ? 'grafeo' : 'native';
@@ -207,6 +215,11 @@
         snapshot_summarize_provider: modelConfigSnapshotProvider || null,
         snapshot_summarize_threshold: Number(modelConfigSnapshotThreshold) > 0
           ? Number(modelConfigSnapshotThreshold)
+          : null,
+        compaction_enabled: modelConfigCompactionEnabled,
+        compaction_provider: modelConfigCompactionProvider || null,
+        compaction_threshold: Number(modelConfigCompactionThreshold) > 0
+          ? Number(modelConfigCompactionThreshold)
           : null,
         retrieval_vector: modelConfigRetrievalVector,
         retrieval_text: modelConfigRetrievalText,
@@ -351,7 +364,7 @@
     }) => Promise<void>;
     onUnlinkAgentTelegram?: (agentId: string) => Promise<void>;
     onGetAgentModelConfig: (agentId: string) => Promise<any>;
-    onSaveAgentModelConfig: (agentId: string, config: { provider_alias: string; sleep_provider_alias: string | null; snapshot_summarize_provider?: string | null; snapshot_summarize_threshold?: number | null; retrieval_vector?: 'native' | 'grafeo'; retrieval_text?: 'native' | 'grafeo' }) => Promise<void>;
+    onSaveAgentModelConfig: (agentId: string, config: { provider_alias: string; sleep_provider_alias: string | null; snapshot_summarize_provider?: string | null; snapshot_summarize_threshold?: number | null; compaction_enabled?: boolean; compaction_provider?: string | null; compaction_threshold?: number | null; retrieval_vector?: 'native' | 'grafeo'; retrieval_text?: 'native' | 'grafeo' }) => Promise<void>;
   } = $props();
 </script>
 
@@ -900,6 +913,39 @@
           bind:value={modelConfigSnapshotThreshold}
         />
         <p class="dialog-hint">Snapshots larger than this character count are summarized (LLM if configured, else line-truncated). Default 8000.</p>
+
+        <label class="dialog-label checkbox-label" for="compaction-enabled">
+          <input
+            id="compaction-enabled"
+            type="checkbox"
+            bind:checked={modelConfigCompactionEnabled}
+          />
+          Enable tool-history compaction
+        </label>
+        <p class="dialog-hint">Off by default: the agent uses the current round-based truncation. When on, old tool results are summarized by the model below as the context window fills — one point of failure, no silent model switch.</p>
+
+        {#if modelConfigCompactionEnabled}
+          <label for="compaction-llm" class="dialog-label">Compaction LLM:</label>
+          <select id="compaction-llm" class="dialog-input" bind:value={modelConfigCompactionProvider}>
+            <option value="">Default (global)</option>
+            {#each modelConfigProvidersList as p}
+              <option value={p.alias} disabled={p.is_remote && p.peer_id !== mainConfigPeerId}>{providerOptionLabel(p)}</option>
+            {/each}
+          </select>
+          <p class="dialog-hint">Model used to summarize old tool results. A fast, reasoning-disabled model is recommended (reasoning adds latency without helping this task). On failure the agent degrades to deterministic truncation and notifies you.</p>
+
+          <label for="compaction-threshold" class="dialog-label">Compaction threshold (fraction of the agent's Main LLM model context window):</label>
+          <input
+            id="compaction-threshold"
+            class="dialog-input"
+            type="number"
+            min="0.1"
+            max="0.95"
+            step="0.05"
+            bind:value={modelConfigCompactionThreshold}
+          />
+          <p class="dialog-hint">Fraction of the agent's main model context window (not the compaction model's). Start compacting once usage crosses it, and keep compacting each round until usage falls back below (fraction − 0.2), then stop (hysteresis). Default 0.8.</p>
+        {/if}
 
         <hr class="dialog-divider">
 

@@ -18,11 +18,12 @@ Assembles LLM context from:
 
 from __future__ import annotations
 
+import asyncio
 import copy
 import json
 import logging
 import pathlib
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from typing import Any
 from .utils import (
@@ -922,3 +923,170 @@ def compact_tool_history(messages: list, keep_recent: int = 6) -> list:
         result.append(msg)
 
     return result
+
+
+# ADR-033: structured LLM compaction (opt-in per agent). This is the primary path
+# when `compaction_enabled` is set; the prefix-truncation `compact_tool_history`
+# above stays as the toggle-off default and as the last rung of the fallback ladder.
+
+# Small tool results (grep/search lists, short outputs) are kept verbatim — an LLM
+# call would cost more than it saves. Larger results are summarized.
+_KEEP_ASIS_CHARS = 2000
+
+# Per-result compaction prompt. The compaction provider is expected to run with
+# reasoning/thinking disabled (see ADR-033); we do not toggle it here.
+_COMPACT_RESULT_PROMPT = (
+    "Compact this AI agent tool result into 1-3 lines for context reuse. "
+    "Preserve EXACT file paths, identifiers, numbers, commit hashes, and error "
+    "text verbatim — never round or paraphrase a number. Drop boilerplate and "
+    "markup noise. Output only the compact note.\n\n"
+    "--- TOOL RESULT ---\n{body}\n--- END ---\nCompact note:"
+)
+
+
+async def compact_tool_history_llm(
+    messages: List[Dict[str, Any]],
+    llm_manager: Any,
+    provider_alias: Optional[str],
+    keep_recent: int = 6,
+    timeout_s: float = 180.0,
+) -> List[Dict[str, Any]]:
+    """Incremental structured compaction of old tool results via a (thinking-disabled)
+    model.
+
+    Each large tool result that has aged out of the `keep_recent` window is summarized
+    exactly once and marked ``_compacted`` so later passes skip it; small results and
+    already-compacted results are left untouched. This keeps every model call small
+    (one result), which is what makes it fast — a single batch summary of the whole old
+    history can exceed the model's own context window (see ADR-033 Validation bench-2).
+
+    Raises on model failure (error, timeout, or empty summary) so the caller can apply
+    the strategy fallback ladder. Never swallows — a silent failure would leave the
+    context uncompacted and overflow the window.
+    """
+    tool_round_starts = [
+        i for i, m in enumerate(messages)
+        if m.get("role") == "assistant" and m.get("tool_calls")
+    ]
+    if len(tool_round_starts) <= keep_recent:
+        return messages
+
+    rounds_to_compact = set(tool_round_starts[:-keep_recent])
+    result: List[Dict[str, Any]] = []
+
+    for i, msg in enumerate(messages):
+        if msg.get("role") == "tool" and not msg.get("_compacted"):
+            parent_round = None
+            for rs in reversed(tool_round_starts):
+                if rs < i:
+                    parent_round = rs
+                    break
+            if parent_round in rounds_to_compact:
+                content = str(msg.get("content") or "")
+                if len(content) > _KEEP_ASIS_CHARS:
+                    prompt = _COMPACT_RESULT_PROMPT.format(body=content)
+                    summary = await asyncio.wait_for(
+                        llm_manager.query(prompt, provider_alias=provider_alias),
+                        timeout=timeout_s,
+                    )
+                    summary = (summary or "").strip()
+                    if not summary:
+                        raise RuntimeError("compaction model returned an empty summary")
+                    result.append({**msg, "content": summary, "_compacted": True})
+                    continue
+                # Small result: keep verbatim, but mark so we don't re-check it.
+                result.append({**msg, "_compacted": True})
+                continue
+
+        result.append(msg)
+
+    return result
+
+
+class CompactionState:
+    """Per-run compaction settings + hysteresis/circuit-breaker state (ADR-033).
+
+    Built once per ``run_llm_loop`` from the agent config, then threaded through
+    ``apply_compaction`` each round so the trigger deadband and the failure streak
+    persist across rounds.
+    """
+
+    def __init__(self, cfg: Dict[str, Any]):
+        self.enabled = bool(cfg.get("compaction_enabled", False))
+        self.provider = cfg.get("compaction_provider") or None
+        try:
+            self.threshold = float(cfg.get("compaction_threshold", 0.8))
+        except (TypeError, ValueError):
+            self.threshold = 0.8
+        self.release = max(0.0, self.threshold - 0.2)  # hysteresis deadband
+        self.window = int(cfg.get("context_window") or 0) or 204800
+        self.keep_recent = 6
+        self.max_fails = 3
+        self.compacting = False   # True while usage sits above release
+        self.fail_streak = 0
+
+
+async def apply_compaction(
+    messages: List[Dict[str, Any]],
+    *,
+    state: CompactionState,
+    last_prompt_tokens: int,
+    llm_manager: Any,
+    notify: Optional[Any] = None,
+    round_idx: int = 0,
+) -> List[Dict[str, Any]]:
+    """Decide whether/how to compact this round and return the (maybe) compacted list.
+
+    Toggle off (or no llm_manager) → the pre-existing round-count prefix truncation,
+    unchanged. Toggle on → window-adaptive trigger with hysteresis; on LLM failure,
+    degrade the *strategy* (keep more verbatim: 12 → 18) and ``notify`` the user,
+    with a circuit breaker after ``max_fails`` consecutive failures. The model is
+    never swapped. Mutates ``state`` (compacting / fail_streak).
+    """
+    if not state.enabled or llm_manager is None:
+        if round_idx > 8:
+            return compact_tool_history(messages, keep_recent=6)
+        return messages
+
+    ratio = (last_prompt_tokens / state.window) if state.window else 0.0
+    if not state.compacting and ratio >= state.threshold:
+        state.compacting = True
+    elif state.compacting and ratio < state.release:
+        state.compacting = False
+
+    if not state.compacting:
+        return messages
+
+    # ADR-033 observability: one line each time compaction runs, so a live agent's
+    # compaction behaviour is visible in the log (grep "ADR-033 compaction").
+    log.debug(
+        "ADR-033 compaction: round=%d usage=%.1f%% (>= %.0f%%), window=%d, provider=%s, keep_recent=%d",
+        round_idx, ratio * 100, state.threshold * 100, state.window,
+        state.provider or "default", state.keep_recent,
+    )
+
+    if state.fail_streak < state.max_fails:
+        try:
+            out = await compact_tool_history_llm(
+                messages, llm_manager, state.provider, keep_recent=state.keep_recent,
+            )
+            state.fail_streak = 0
+            log.debug("ADR-033 compaction: done (round=%d, usage was %.1f%%)", round_idx, ratio * 100)
+            return out
+        except Exception as e:
+            # Strategy fallback ladder (not a model switch): keep MORE verbatim as a
+            # data-integrity step, and notify the user.
+            state.fail_streak += 1
+            log.warning(
+                "Compaction failed (%d/%d): %s", state.fail_streak, state.max_fails, e,
+            )
+            if notify is not None:
+                notify(
+                    f"⚠️ Compaction failed ({state.fail_streak}/{state.max_fails}): "
+                    f"{type(e).__name__}. Degrading to deterministic truncation."
+                )
+            keep = {1: 12, 2: 18}.get(state.fail_streak, state.keep_recent)
+            return compact_tool_history(messages, keep_recent=keep)
+
+    # Circuit broken: stop calling the model; keep context bounded deterministically.
+    return compact_tool_history(messages, keep_recent=state.keep_recent)

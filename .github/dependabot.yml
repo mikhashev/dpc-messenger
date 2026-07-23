@@ -1,0 +1,28 @@
+version: 2
+
+# Python deps are managed by uv; uv.lock is gitignored (platform-specific,
+# ADR-012), so Dependabot resolves the graph from each pyproject.toml.
+updates:
+  - package-ecosystem: "pip"
+    directory: "/dpc-hub"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+
+  - package-ecosystem: "pip"
+    directory: "/dpc-client/core"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+
+  - package-ecosystem: "pip"
+    directory: "/dpc-protocol"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+
+  - package-ecosystem: "npm"
+    directory: "/dpc-client/ui"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5

@@ -20,10 +20,23 @@ template drops those so you can adopt the pattern cleanly in any context.
    and paste the resulting prompt.
 4. The cron is session-only — recreate it after reopening the IDE.
 
+> **Run the bridge with `uv run python`, not plain `python`.** The
+> **send** path (`--send` / `--send-file`) imports `websockets` to reach
+> the backend WebSocket, and that dependency lives in the project venv,
+> not necessarily in your system Python — plain `python` fails with
+> `[ERROR] websockets not installed.` Invoking the bridge as
+> `uv run python …` from the `dpc-client/core` directory guarantees the
+> venv (with `websockets`) is used for every call. Reads (`--last N`)
+> use only the stdlib and work under plain `python` too, but standardize
+> on `uv run python` so one command form (and one allowlist entry)
+> covers both poll and send. Prereq: the backend service must be running
+> (WebSocket port open) and `~/.dpc/.ws_token` must exist for sends to
+> authenticate.
+
 ## Prompt template
 
 ```
-Check DPC agent chat. Run: cd <path-to-dpc-client-core> && python cc_agent_bridge.py --once --last 10 --full --conversation-id <agent>. Scan output for @CC or @СС mentions from non-CC senders. If unanswered @CC mentions with direct questions are found, read context and respond via the bridge. For plain text without backticks use: python cc_agent_bridge.py --send "response text" --conversation-id <agent>. For markdown responses with backticks, code blocks, or any shell-special characters, write the response to <path-to-temp-file> and send it via: python cc_agent_bridge.py --send-file <path-to-temp-file> --conversation-id <agent>. Keep responses in markdown formatting. Distinguish: @CC as direct question (needs response) vs @CC mentioned in passing (no response needed). If no actionable mentions, do nothing and don't report.
+Check DPC agent chat. Run: cd <path-to-dpc-client-core> && uv run python cc_agent_bridge.py --once --last 10 --full --conversation-id <agent>. Scan output for @CC or @СС mentions from non-CC senders. If unanswered @CC mentions with direct questions are found, read context and respond via the bridge. For plain text without backticks use: uv run python cc_agent_bridge.py --send "response text" --conversation-id <agent>. For markdown responses with backticks, code blocks, or any shell-special characters, write the response to <path-to-temp-file> and send it via: uv run python cc_agent_bridge.py --send-file <path-to-temp-file> --conversation-id <agent>. Keep responses in markdown formatting. Distinguish: @CC as direct question (needs response) vs @CC mentioned in passing (no response needed). If no actionable mentions, do nothing and don't report.
 ```
 
 `<path-to-dpc-client-core>` is the absolute path to the
@@ -59,8 +72,8 @@ for user-wide coverage:
 {
   "permissions": {
     "allow": [
-      "Bash(python cc_agent_bridge.py*)",
-      "Bash(cd <path-to-dpc-client-core> && python cc_agent_bridge.py*)"
+      "Bash(uv run python cc_agent_bridge.py*)",
+      "Bash(cd <path-to-dpc-client-core> && uv run python cc_agent_bridge.py*)"
     ]
   }
 }
@@ -77,15 +90,15 @@ the quoted string as command substitution), it's tempting to write a
 `python -c "import sys; sys.path.insert(...); from cc_agent_bridge import send_response_sync; ..."` wrapper that reads the message from
 a file. That wrapper command string does NOT match the allowlist
 pattern above — you'll get a fresh prompt every time. Use `--send-file
-<path>` instead: it matches `Bash(python cc_agent_bridge.py*)` and the
-bridge reads the file directly (no shell interpretation, so backticks
-and code blocks survive intact).
+<path>` instead: it matches `Bash(uv run python cc_agent_bridge.py*)`
+and the bridge reads the file directly (no shell interpretation, so
+backticks and code blocks survive intact).
 
 **Pre-check also via the bridge.** The cron prompt already uses
-`python cc_agent_bridge.py --once --last 10 --full ...` for its
+`uv run python cc_agent_bridge.py --once --last 10 --full ...` for its
 polling. If you add a pre-send check in your workflow (to catch
 messages that landed during compose), run it through the same CLI —
-`python cc_agent_bridge.py --once --last 5 --full --conversation-id <agent>` —
+`uv run python cc_agent_bridge.py --once --last 10 --full --conversation-id <agent>` —
 not through a different tool. One allowlist entry covers both.
 
 ## Customizing
@@ -124,19 +137,32 @@ For monitoring a group chat instead of an agent 1:1 chat, use
 `cc_group_chat_bridge.py` with `--group <group-id>`:
 
 ```
-Check DPC group chat. Run: cd <path-to-dpc-client-core> && python cc_group_chat_bridge.py --group <group-id> --last 10. Scan output for @CC or @СС mentions from non-CC senders. If unanswered @CC mentions with direct questions are found, read context and respond via the bridge. For plain text without backticks use: python cc_group_chat_bridge.py --group <group-id> --send "response text". For markdown responses with backticks, code blocks, or any shell-special characters, write the response to <path-to-temp-file> and send it via: python cc_group_chat_bridge.py --group <group-id> --send-file <path-to-temp-file>. Keep responses in markdown formatting. Distinguish: @CC as direct question (needs response) vs @CC mentioned in passing (no response needed). If no actionable mentions, do nothing and don't report.
+Check DPC group chat. Run: cd <path-to-dpc-client-core> && uv run python cc_group_chat_bridge.py --group <group-id> --last 10. Scan output for @CC or @СС mentions from non-CC senders. If unanswered @CC mentions with direct questions are found, read context and respond via the bridge. For plain text without backticks use: uv run python cc_group_chat_bridge.py --group <group-id> --send "response text". For markdown responses with backticks, code blocks, or any shell-special characters, write the response to <path-to-temp-file> and send it via: uv run python cc_group_chat_bridge.py --group <group-id> --send-file <path-to-temp-file>. Keep responses in markdown formatting. Distinguish: @CC as direct question (needs response) vs @CC mentioned in passing (no response needed). If no actionable mentions, do nothing and don't report.
 ```
 
 Find your `<group-id>` by running `python cc_group_chat_bridge.py --list`.
 
 Add the matching permission pattern:
 ```json
-"Bash(python cc_group_chat_bridge.py*)"
+"Bash(uv run python cc_group_chat_bridge.py*)"
 ```
 
 ## Version notes
 
-This template tracks the bridge CLI as of v5.2 of the internal prompt.
+This template tracks the bridge CLI as of v5.3 of the internal prompt.
+
+Changes from v5.2:
+
+- All bridge invocations use `uv run python` instead of plain `python`
+  (poll, send, pre-check) and the allowlist patterns match
+  `uv run python …`. Reason: the send path imports `websockets`, which
+  lives in the project venv, not system Python — plain `python` fails
+  with `[ERROR] websockets not installed.` on a fresh machine (surfaced
+  after a PC migration where system Python had no `websockets`).
+  Standardizing on `uv run python` makes the cron send-capable on first
+  fire. Also aligns the pre-check example to the canonical `--last 10`
+  (was `--last 5`).
+
 Changes from v5.1:
 
 - Outbox is now per-target: `cc-out-{target}.md` instead of a single

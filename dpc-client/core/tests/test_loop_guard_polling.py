@@ -98,10 +98,19 @@ class TestProgressTiming:
 
     def test_cross_call_rate(self):
         # First call seeds (5 @ t=100), second call (6 @ t=128) -> 28 s/it.
-        _format_progress_timing([(5, 30, 100.0)], "url")
-        out = _format_progress_timing([(6, 30, 128.0)], "url")
+        # Cross-call is trusted only for the SAME prompt_id (same render).
+        _format_progress_timing([(5, 30, 100.0)], "url", "p1")
+        out = _format_progress_timing([(6, 30, 128.0)], "url", "p1")
         assert "~28.0s/it" in out
         assert "ETA ~11m12s" in out  # (30-6)*28 = 672s
+
+    def test_cross_call_rate_rejected_across_prompts(self):
+        # Different prompt_id between polls (queue advanced to the next clip):
+        # the large wall gap / tiny step delta must NOT become an inflated rate.
+        _format_progress_timing([(11, 20, 100.0)], "url", "clipA")
+        out = _format_progress_timing([(16, 20, 1350.0)], "url", "clipB")
+        assert "~" not in out
+        assert "poll again" in out
 
     def test_two_in_call_samples_rate(self):
         out = _format_progress_timing([(1, 30, 0.0), (3, 30, 40.0)], "url")

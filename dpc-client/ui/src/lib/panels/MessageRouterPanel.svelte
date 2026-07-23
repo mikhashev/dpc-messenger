@@ -218,7 +218,19 @@
           if (msg.attachments && msg.attachments.length > 0) {
             messageData.attachments = msg.attachments;
           }
-          newMap.set(msg.group_id, [...hist, messageData]);
+          // Reconcile an optimistic pending bubble (our own image send) by
+          // filename — replace it in place instead of appending a duplicate.
+          const incomingFilename = msg.attachments?.[0]?.filename;
+          const pendingIdx = incomingFilename
+            ? hist.findIndex((x: any) => x.pending && x.attachments?.[0]?.filename === incomingFilename)
+            : -1;
+          if (pendingIdx !== -1) {
+            const next = [...hist];
+            next[pendingIdx] = messageData;
+            newMap.set(msg.group_id, next);
+          } else {
+            newMap.set(msg.group_id, [...hist, messageData]);
+          }
           return newMap;
         });
 

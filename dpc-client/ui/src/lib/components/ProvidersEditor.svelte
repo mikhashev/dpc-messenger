@@ -23,7 +23,13 @@
     context_window?: number; // Optional override
     temperature?: number;    // Model creativity (0.0-2.0, default 0.7)
     max_tokens?: number;     // Max output tokens (zai/anthropic)
-    top_p?: number;          // Nucleus sampling (zai)
+    top_p?: number;          // Nucleus sampling (zai, ollama)
+    // Ollama sampling params (unset = modelfile default)
+    min_p?: number;
+    presence_penalty?: number;
+    repeat_penalty?: number;
+    top_k?: number;
+    num_predict?: number;
     // Local Whisper specific (v0.13.1+)
     device?: string;         // 'cuda', 'cpu', or 'auto'
     compile_model?: boolean; // torch.compile optimization
@@ -101,6 +107,53 @@
     { label: 'Creative (1.0)', value: 1.0, description: 'More varied output' },
     { label: 'Random (1.5)', value: 1.5, description: 'High variation' },
   ];
+
+  // Mirrors OLLAMA_SAMPLING_PARAMS in ollama_provider.py — unset field = key
+  // absent from providers.json = Ollama modelfile default applies.
+  const OLLAMA_SAMPLING_PARAMS = [
+    { key: 'min_p', step: 0.01, min: 0, max: 1, isInt: false, hint: '0.0–1.0' },
+    { key: 'presence_penalty', step: 0.1, min: -2, max: 2, isInt: false, hint: '-2.0–2.0' },
+    { key: 'repeat_penalty', step: 0.05, min: 0, max: 2, isInt: false, hint: '0.0–2.0' },
+    { key: 'top_k', step: 1, min: 0, max: 200, isInt: true, hint: 'integer' },
+    { key: 'top_p', step: 0.05, min: 0, max: 1, isInt: false, hint: '0.0–1.0' },
+    { key: 'num_predict', step: 1, min: -2, max: 1000000, isInt: true, hint: 'max tokens' },
+  ];
+
+  // Unset temperature means different things per provider type: ollama omits
+  // the key (modelfile default applies), deepseek/zai_coding fall back to 1.0,
+  // the rest send self.temperature = 0.7.
+  function temperatureDefaultLabel(type: ProviderType): string {
+    if (type === 'ollama') return 'Model default (not sent)';
+    if (type === 'deepseek' || type === 'zai_coding') return 'Provider default (1.0)';
+    return 'Default (0.7)';
+  }
+
+  // Selecting "Custom..." must show the manual input even while temperature is
+  // still unset — tracked per provider index, reset on entering edit mode.
+  let customTempMode: Record<number, boolean> = {};
+
+  function tempSelectValue(i: number): string | number {
+    const t = editedConfig?.providers[i]?.temperature;
+    if (customTempMode[i] || (t !== undefined && !TEMPERATURE_PRESETS.some(p => p.value === t))) return 'custom';
+    return t ?? '';
+  }
+
+  function getSamplingParam(i: number, key: string): number | '' {
+    const v = (editedConfig?.providers[i] as any)?.[key];
+    return v ?? '';
+  }
+
+  function setSamplingParam(i: number, key: string, raw: string, isInt: boolean) {
+    if (!editedConfig) return;
+    const p = editedConfig.providers[i] as any;
+    if (raw === '') {
+      p[key] = undefined;
+    } else {
+      const n = isInt ? parseInt(raw) : parseFloat(raw);
+      p[key] = isNaN(n) ? undefined : n;
+    }
+    editedConfig = editedConfig;
+  }
 
   // New provider form
   let newProvider: Provider = {
@@ -338,6 +391,7 @@
   function startEditing() {
     if (!config) return;
     editMode = true;
+    customTempMode = {};
     editedConfig = JSON.parse(JSON.stringify(config));
     if (!editedConfig) return; // Guard against null
     // Track original aliases
@@ -1158,19 +1212,24 @@
                       <label for="temperature-{i}">Temperature (optional)</label>
                       <select
                         id="temperature-select-{i}"
-                        value={editedConfig.providers[i].temperature ?? ''}
+                        value={tempSelectValue(i)}
                         on:change={(e) => {
                           if (!editedConfig) return;
                           const val = (e.target as HTMLSelectElement).value;
-                          if (val === '' || val === 'custom') {
+                          if (val === 'custom') {
+                            customTempMode[i] = true;
+                          } else if (val === '') {
                             editedConfig.providers[i].temperature = undefined;
+                            customTempMode[i] = false;
                           } else {
                             editedConfig.providers[i].temperature = parseFloat(val);
+                            customTempMode[i] = false;
                           }
+                          customTempMode = customTempMode;
                           editedConfig = editedConfig;
                         }}
                       >
-                        <option value="">Default (0.7)</option>
+                        <option value="">{temperatureDefaultLabel(editedConfig.providers[i].type)}</option>
                         {#each TEMPERATURE_PRESETS as preset}
                           <option value={preset.value}>{preset.label} - {preset.description}</option>
                         {/each}
@@ -1178,11 +1237,18 @@
                       </select>
                       <p class="help-text">Controls creativity: 0.2 = deterministic, 1.5 = creative</p>
 
-                      {#if editedConfig.providers[i].temperature !== undefined && !TEMPERATURE_PRESETS.some(p => p.value === editedConfig?.providers[i].temperature)}
+                      {#if tempSelectValue(i) === 'custom'}
                         <input
                           id="temperature-custom-{i}"
                           type="number"
-                          bind:value={editedConfig.providers[i].temperature}
+                          value={editedConfig.providers[i].temperature ?? ''}
+                          on:input={(e) => {
+                            if (!editedConfig) return;
+                            const raw = (e.target as HTMLInputElement).value;
+                            const n = parseFloat(raw);
+                            editedConfig.providers[i].temperature = raw === '' || isNaN(n) ? undefined : n;
+                            editedConfig = editedConfig;
+                          }}
                           placeholder="0.0 - 2.0"
                           min="0"
                           max="2"
@@ -1191,6 +1257,30 @@
                         />
                       {/if}
                     </div>
+
+                    {#if editedConfig.providers[i].type === 'ollama'}
+                      <div class="form-group">
+                        <label for="sampling-{i}">Sampling Parameters (optional)</label>
+                        <p class="help-text">Empty = model default. Check actual values via the ⓘ Query Info button.</p>
+                        <div class="sampling-grid" id="sampling-{i}">
+                          {#each OLLAMA_SAMPLING_PARAMS as param}
+                            <div class="sampling-field">
+                              <label for="sampling-{param.key}-{i}">{param.key}</label>
+                              <input
+                                id="sampling-{param.key}-{i}"
+                                type="number"
+                                step={param.step}
+                                min={param.min}
+                                max={param.max}
+                                value={getSamplingParam(i, param.key)}
+                                placeholder={param.hint}
+                                on:input={(e) => setSamplingParam(i, param.key, (e.target as HTMLInputElement).value, param.isInt)}
+                              />
+                            </div>
+                          {/each}
+                        </div>
+                      </div>
+                    {/if}
 
                     <div class="default-buttons">
                       <button
@@ -1283,6 +1373,10 @@
 
                     {#if provider.temperature !== undefined}
                       <p><strong>Temperature:</strong> {provider.temperature}</p>
+                    {/if}
+
+                    {#if OLLAMA_SAMPLING_PARAMS.some(p => (provider as any)[p.key] !== undefined)}
+                      <p><strong>Sampling:</strong> {OLLAMA_SAMPLING_PARAMS.filter(p => (provider as any)[p.key] !== undefined).map(p => `${p.key}=${(provider as any)[p.key]}`).join(', ')}</p>
                     {/if}
 
                     {#if provider.type === 'ollama'}
@@ -1529,16 +1623,28 @@
                   Use This Value
                 </button>
               {:else}
-                <div class="info-box warning-box">
-                  <p class="info-title">⚠️ No Custom Context Window Detected</p>
-                  <p class="info-text">
-                    This model doesn't have a custom <code>num_ctx</code> parameter in its modelfile.
-                    It will use Ollama's default (typically <strong>2,048 tokens</strong>).
-                  </p>
-                  <p class="info-text">
-                    To increase it, use the dropdown in edit mode to select a larger context window.
-                  </p>
-                </div>
+                {@const providerCw = displayConfig?.providers.find(p => p.alias === queriedProviderAlias)?.context_window}
+                {#if providerCw}
+                  <div class="info-box ok-box">
+                    <p class="info-title">✓ Set by provider config</p>
+                    <p class="info-text">
+                      The modelfile has no <code>num_ctx</code>, but this provider sends
+                      <strong>{providerCw.toLocaleString()} tokens</strong> with every request
+                      (Context Window setting), which overrides Ollama's default.
+                    </p>
+                  </div>
+                {:else}
+                  <div class="info-box warning-box">
+                    <p class="info-title">⚠️ No Custom Context Window Detected</p>
+                    <p class="info-text">
+                      This model doesn't have a custom <code>num_ctx</code> parameter in its modelfile.
+                      It will use Ollama's default context size.
+                    </p>
+                    <p class="info-text">
+                      To increase it, use the dropdown in edit mode to select a larger context window.
+                    </p>
+                  </div>
+                {/if}
               {/if}
             </div>
 
@@ -2040,6 +2146,28 @@
     border-radius: 4px;
   }
 
+  .sampling-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+    gap: 8px;
+    margin-top: 6px;
+  }
+  .sampling-field label {
+    display: block;
+    font-size: 0.8rem;
+    color: #aaa;
+    margin-bottom: 3px;
+    font-family: monospace;
+  }
+  .sampling-field input {
+    width: 100%;
+    padding: 6px 8px;
+    border: 1px solid #444;
+    background: #2a2a2a;
+    color: #fff;
+    border-radius: 4px;
+  }
+
   /* Model Info Modal */
   .model-info-modal {
     max-width: 700px;
@@ -2164,6 +2292,14 @@
   .warning-box {
     background: rgba(255, 193, 7, 0.1);
     border-color: #ffc107;
+  }
+
+  .ok-box {
+    background: rgba(76, 175, 80, 0.1);
+    border-color: #4caf50;
+  }
+  .ok-box .info-title {
+    color: #4caf50;
   }
 
   .info-title {

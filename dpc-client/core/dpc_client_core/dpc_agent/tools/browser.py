@@ -295,7 +295,7 @@ def _browse_with_camoufox(url: str) -> Optional[str]:
         with Camoufox(headless=True, **_camoufox_launch_kwargs()) as browser:
             page = browser.new_page()
             _attach_page_diagnostics(page)
-            page.goto(url, wait_until="networkidle", timeout=60000)
+            page.goto(url, wait_until="domcontentloaded", timeout=60000)
             html = page.content()
 
         import trafilatura
@@ -549,7 +549,9 @@ _A11Y_DOM_SNAPSHOT_JS = """
     if (tag === 'a' || tag === 'button' ||
         tag === 'h1' || tag === 'h2' || tag === 'h3' ||
         tag === 'h4' || tag === 'h5' || tag === 'h6' ||
-        tag === 'label' || tag === 'option') {
+        tag === 'label' || tag === 'option' ||
+        tag === 'span' || tag === 'strong' || tag === 'em' ||
+        tag === 'p' || tag === 'li' || tag === 'td' || tag === 'th') {
       const txt = (el.innerText || el.textContent || '').trim();
       return txt.slice(0, 200);
     }
@@ -586,7 +588,23 @@ _A11Y_DOM_SNAPSHOT_JS = """
       const sub = walk(child);
       if (sub) children.push(sub);
     }
-    if (!role && !name && children.length === 0) return null;
+    if (el.shadowRoot) {
+      for (const child of el.shadowRoot.children) {
+        const sub = walk(child);
+        if (sub) children.push(sub);
+      }
+    }
+    if (!role && !name && children.length === 0) {
+      let directText = '';
+      for (const node of el.childNodes) {
+        if (node.nodeType === 3) {
+          const t = node.textContent.trim();
+          if (t) directText += (directText ? ' ' : '') + t;
+        }
+      }
+      if (directText) return {role: 'generic', name: directText.slice(0, 200), value: '', hidden: false, children: []};
+      return null;
+    }
     return {
       role: role || 'generic',
       name: name,
@@ -892,6 +910,12 @@ class AuthBrowser:
         self._last_refs: dict[str, dict] = {}
         self._executor: Optional[ThreadPoolExecutor] = None
         self._last_activity: float = time.monotonic()
+        # PIDs of the Camoufox/Firefox subprocess tree spawned by this
+        # browser, captured at launch. Used only as a last-resort kill when
+        # close() times out at shutdown (dead Playwright driver) — otherwise
+        # the subprocess orphans and survives Python exit. See
+        # _force_kill_process.
+        self._browser_pids: set[int] = set()
 
     def _get_executor(self) -> ThreadPoolExecutor:
         """Lazy single-worker executor pinned to this AuthBrowser.
@@ -924,6 +948,77 @@ class AuthBrowser:
             except Exception:
                 pass
             self._executor = None
+
+    @staticmethod
+    def _snapshot_child_pids() -> set[int]:
+        """PIDs of the current process's descendants, for launch diffing."""
+        try:
+            import psutil
+            return {c.pid for c in psutil.Process().children(recursive=True)}
+        except Exception:
+            return set()
+
+    def _capture_browser_pids(self, before: set[int]) -> None:
+        """Record the subprocess tree that appeared while Camoufox launched
+        (Playwright driver + Firefox), for last-resort kill on shutdown."""
+        try:
+            after = self._snapshot_child_pids()
+            self._browser_pids = after - before
+            if self._browser_pids:
+                log.debug(
+                    "tracked Camoufox pids (agent=%s): %s",
+                    self._agent_id, sorted(self._browser_pids),
+                )
+        except Exception as e:
+            log.debug("browser pid capture failed (agent=%s): %s", self._agent_id, e)
+
+    def _force_kill_process(self) -> None:
+        """Kill the Camoufox/Firefox subprocess tree captured at launch.
+
+        Last resort for shutdown only: when close() times out because the
+        Playwright driver connection is dead, the graceful __exit__ never
+        completes and the browser subprocess orphans, surviving Python exit
+        and forcing the user to kill it by hand. Killing the captured tree
+        (plus any content processes it spawned since) prevents the orphan and
+        lets the stuck executor thread unwind. Best-effort and idempotent."""
+        pids = self._browser_pids
+        if not pids:
+            return
+        try:
+            import psutil
+        except Exception:
+            return
+        victims: list = []
+        for pid in list(pids):
+            try:
+                proc = psutil.Process(pid)
+                victims.append(proc)
+                victims.extend(proc.children(recursive=True))
+            except psutil.NoSuchProcess:
+                continue
+            except Exception:
+                continue
+        for proc in victims:
+            try:
+                proc.terminate()
+            except Exception:
+                pass
+        try:
+            _gone, alive = psutil.wait_procs(victims, timeout=2)
+        except Exception:
+            alive = victims
+        for proc in alive:
+            try:
+                proc.kill()
+            except Exception:
+                pass
+        if victims:
+            log.info(
+                "Force-killed %d Camoufox subprocess(es) during shutdown "
+                "(agent=%s)",
+                len(victims), self._agent_id,
+            )
+        self._browser_pids = set()
 
     def __enter__(self):
         self._open()
@@ -996,8 +1091,10 @@ class AuthBrowser:
     def _open(self) -> None:
         from camoufox.sync_api import Camoufox
 
+        before_pids = self._snapshot_child_pids()
         self._cm = Camoufox(headless=not self._headed, **_camoufox_launch_kwargs())
         self._browser = self._cm.__enter__()
+        self._capture_browser_pids(before_pids)
         try:
             self._browser.on("disconnected", self._on_browser_disconnected)
         except Exception as e:
@@ -1093,6 +1190,15 @@ class AuthBrowser:
     def _save_storage_state(self) -> None:
         if self._context is None:
             return
+        if self._disconnected:
+            # Browser already detached (e.g. user closed the window): the
+            # context is dead, so storage_state() would only raise and the
+            # cookies are unreadable. Skip quietly instead of WARNING-spamming.
+            log.debug(
+                "storage_state save skipped for agent=%s (browser already closed)",
+                self._agent_id,
+            )
+            return
         try:
             state_path = self._state_path()
             state_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1110,10 +1216,19 @@ class AuthBrowser:
             if state is not None:
                 self._sync_cookies_to_vault(state.get("cookies", []))
         except Exception as e:
-            log.warning(
-                "storage_state save failed for agent=%s: %s",
-                self._agent_id, e,
-            )
+            if self._disconnected:
+                # Disconnect fired *during* storage_state() (manual close
+                # race): expected, not a real failure — keep it at DEBUG.
+                log.debug(
+                    "storage_state save skipped for agent=%s "
+                    "(browser closed mid-save): %s",
+                    self._agent_id, e,
+                )
+            else:
+                log.warning(
+                    "storage_state save failed for agent=%s: %s",
+                    self._agent_id, e,
+                )
 
     def _install_domain_route_handler(self) -> None:
         if self._context is None:
@@ -1228,6 +1343,44 @@ class AuthBrowser:
             f"URL {url!r} is outside auth domains {sorted(self._etld1s)!r}"
         )
 
+    def _wait_for_content_stable(self, timeout_ms: int = 10000) -> None:
+        """Wait for JS-rendered text content to stabilize after networkidle.
+
+        networkidle fires when no network requests arrive for 500ms, but
+        JS frameworks (Google AI Mode, React/Vue lazy hydration, SPA
+        routers) continue mutating the DOM via setTimeout / RAF / XHR
+        callbacks after that gate. A snapshot taken at networkidle sees
+        the element shell but empty text nodes.
+
+        Two-phase wait: (1) wait for at least one mutation of
+        document.body.innerText length past the initial reading — this
+        skips the "Loading..." stub that is stable-but-incomplete; (2)
+        then wait for the length to stop changing for 1s. Bounded by
+        timeout_ms so pages that never mutate (static content) or never
+        stabilize (infinite scroll) do not hang."""
+        try:
+            self._page.wait_for_function(
+                """() => {
+                    const cur = (document.body.innerText || '').length;
+                    if (window.__cc_initial_len === undefined) {
+                        window.__cc_initial_len = cur;
+                        window.__cc_last_len = cur;
+                        window.__cc_stable_since = Date.now();
+                        return false;
+                    }
+                    if (cur !== window.__cc_last_len) {
+                        window.__cc_last_len = cur;
+                        window.__cc_stable_since = Date.now();
+                        return false;
+                    }
+                    if (cur === window.__cc_initial_len) return false;
+                    return (Date.now() - window.__cc_stable_since) >= 1000;
+                }""",
+                timeout=timeout_ms,
+            )
+        except Exception as exc:
+            log.debug("content-stable wait timed out or failed: %s", exc)
+
     def navigate(self, url: str) -> str:
         """Navigate to URL and return the post-navigation accessibility
         snapshot inline (ADR-029 Task 006 auto-snapshot — eliminates the
@@ -1255,13 +1408,14 @@ class AuthBrowser:
             )
             raise
         try:
-            self._page.goto(url, wait_until="networkidle", timeout=60000)
+            self._page.goto(url, wait_until="domcontentloaded", timeout=60000)
         except Exception as exc:
             self._audit_action(
                 "navigate", url, "failed",
                 from_url=from_url, error=type(exc).__name__,
             )
             raise
+        self._wait_for_content_stable()
         snapshot_text = ""
         snapshot_audit: dict[str, Any] = {"from_url": from_url}
         try:
@@ -1657,12 +1811,17 @@ class AuthBrowser:
     def close(self) -> None:
         """Release browser resources. Safe to call multiple times.
 
-        Idempotent + race-tolerant: every Playwright call is guarded
-        by a fresh `_disconnected` check so a disconnect event firing
-        mid-close skips the doomed IPC (the failure mode behind the
-        S155 Ctrl+C hang). Registry / lock / executor teardown always
-        runs in the finally block so a stuck close() never leaves
-        orphan threads keeping the Python process alive."""
+        Idempotent + race-tolerant: the live-only work (audit + cookie
+        writeback) is guarded by `_disconnected` so a disconnect event
+        firing mid-close skips the doomed IPC (the failure mode behind the
+        S155 Ctrl+C hang). The Camoufox `__exit__` (driver-subprocess
+        teardown) runs unconditionally in the finally block — even after a
+        disconnect — so the subprocess and its OS pipe are always released;
+        skipping it orphaned the pipe and left a Windows IOCP overlapped
+        read pending → ProactorEventLoop spin at shutdown. It is bounded by
+        the caller's `_run_in_session` timeout + the daemon executor, so a
+        doomed IPC here can never block process exit. Registry / lock /
+        executor teardown always runs too."""
         try:
             if not self._disconnected:
                 url = ""
@@ -1672,25 +1831,27 @@ class AuthBrowser:
                     except Exception:
                         pass
                 self._audit_action("close", url, "ok")
-            if self._disconnected:
-                return
-            if self._context is not None and not self._disconnected:
-                try:
-                    self._save_storage_state()
-                except Exception as exc:
-                    log.warning(
-                        "storage_state save during close failed for agent=%s: %s",
-                        self._agent_id, exc,
-                    )
-            if self._cm is not None and not self._disconnected:
+                if self._context is not None:
+                    try:
+                        self._save_storage_state()
+                    except Exception as exc:
+                        log.warning(
+                            "storage_state save during close failed for agent=%s: %s",
+                            self._agent_id, exc,
+                        )
+        finally:
+            # Tear down the Camoufox context manager regardless of
+            # `_disconnected` — this is what kills the driver subprocess and
+            # drains its pipe. Best-effort: log at DEBUG since a disconnected
+            # browser's __exit__ commonly raises (connection already gone).
+            if self._cm is not None:
                 try:
                     self._cm.__exit__(None, None, None)
                 except Exception as exc:
-                    log.warning(
-                        "Camoufox __exit__ failed for agent=%s: %s",
+                    log.debug(
+                        "Camoufox __exit__ during close (agent=%s): %s",
                         self._agent_id, exc,
                     )
-        finally:
             self._cm = None
             self._browser = None
             self._context = None
@@ -2492,7 +2653,7 @@ def get_tools() -> List[ToolEntry]:
             name="browse_page",
             schema={
                 "name": "browse_page",
-                "description": "Fetch a web page and extract content as structured markdown. Preserves headings, lists, tables, and links. Use size presets to control output length: s=5K, m=10K (default), l=25K, f=full. Set use_auth=<domain> to fetch authenticated content using stored cookies (requires prior login via the web-auth UI). Set keep_open=true to leave the headed Camoufox window open after returning (auth path only) — useful for visual debugging and Task 002 stateful interactive flows.",
+                "description": "Fetch a web page and extract content as structured markdown. Preserves headings, lists, tables, and links. Use size presets to control output length: s=5K, m=10K (default), l=25K, f=full. Set use_auth=<domain> to fetch authenticated content using stored cookies (requires prior login via the web-auth UI). Set keep_open=true to leave the headed Camoufox window open after returning (works for both anonymous and use_auth fetches) — useful for visual debugging and Task 002 stateful interactive flows.",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -2512,7 +2673,7 @@ def get_tools() -> List[ToolEntry]:
                         },
                         "keep_open": {
                             "type": "boolean",
-                            "description": "When true, leave the headed Camoufox window open after the fetch returns (only effective on the use_auth path; ignored for anonymous fetches). The session is reused on subsequent browse_page calls for the same agent, so opening one site and then another navigates the same window. Window stays open until DPC restart or until the next browse_page call replaces it. Use for visual debugging or as the foundation for Task 002 interactive flows.",
+                            "description": "When true, leave the headed Camoufox window open after the fetch returns. Works on both the anonymous and use_auth paths: either way a headed Camoufox session is opened and reused on subsequent keep_open browse_page calls for the same agent, so opening one site and then another navigates the same window. Window stays open until DPC restart, an explicit close_browser call, or the next keep_open fetch that reuses it. Use for visual debugging or as the foundation for Task 002 interactive flows.",
                             "default": False
                         }
                     },
@@ -2521,7 +2682,8 @@ def get_tools() -> List[ToolEntry]:
             },
             handler=browse_page,
             # 60s is too tight for the use_auth path: that goes through
-            # Camoufox launch + goto (30s wait_until=networkidle) + optional
+            # Camoufox launch + goto (wait_until=domcontentloaded, ~2s typical,
+            # 60s cap) + _wait_for_content_stable (10s, non-fatal) + optional
             # T9 popup-fallback (5min user-interaction timeout per Q4) +
             # trafilatura conversion. Worst case: ~5min popup + 30s
             # Camoufox + small overhead. 360s gives a 30s buffer over the

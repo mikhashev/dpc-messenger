@@ -1199,6 +1199,9 @@ export function sendCommand(command: string, payload: any = {}, commandId?: stri
             // (up to 5min), surfacing as `Uncaught (in promise) Error:
             // Command 'execute_ai_query' timed out` in DevTools.
             'execute_ai_query',
+            // Runs in the backend thread pool; progress/completion arrive via
+            // whisper_model_download_started/completed/failed events, not the await.
+            'download_whisper_model',
         ]);
         const expectsResponse = !fireAndForgetCommands.has(command);
 
@@ -1520,12 +1523,13 @@ export async function sendGroupMessage(groupId: string, text: string): Promise<a
     });
 }
 
-export async function sendGroupImage(groupId: string, imageBase64: string, filename?: string, text: string = ""): Promise<any> {
+export async function sendGroupImage(groupId: string, imageBase64: string, filename?: string, text: string = "", describeForAgents: boolean = false): Promise<any> {
     return sendCommand('send_group_image', {
         group_id: groupId,
         image_base64: imageBase64,
         filename,
-        text
+        text,
+        describe_for_agents: describeForAgents
     });
 }
 

@@ -373,6 +373,65 @@ class TestComputeSharing:
         assert available == []
 
 
+class TestMissingSandboxPaths:
+    """Extended sandbox paths that do not exist are reported, not silently kept."""
+
+    def test_existing_paths_produce_no_warnings(self, tmp_path):
+        config = {"dpc_agent": {"sandbox_extensions": {"read_only": [str(tmp_path)]}}}
+
+        assert ContextFirewall.find_missing_sandbox_paths(config) == []
+
+    def test_missing_path_reported(self, tmp_path):
+        missing = tmp_path / "nope"
+        config = {"dpc_agent": {"sandbox_extensions": {"read_only": [str(missing)]}}}
+
+        warnings = ContextFirewall.find_missing_sandbox_paths(config)
+
+        assert len(warnings) == 1
+        assert "does not exist" in warnings[0]
+        assert str(missing) in warnings[0]
+
+    def test_typo_variant_reported_while_real_path_passes(self, tmp_path):
+        """The S42 incident: a chat-copied path lost its separator."""
+        real = tmp_path / ".dpc" / "conversations"
+        real.mkdir(parents=True)
+        typo = str(tmp_path) + ".dpc\\conversations"
+        config = {"agent_profiles": {"agent_001": {"sandbox_extensions": {
+            "read_only": [str(real), typo],
+        }}}}
+
+        warnings = ContextFirewall.find_missing_sandbox_paths(config)
+
+        assert len(warnings) == 1
+        assert typo in warnings[0]
+
+    def test_tilde_expanded_not_treated_as_missing(self):
+        config = {"dpc_agent": {"sandbox_extensions": {"read_only": ["~"]}}}
+
+        assert ContextFirewall.find_missing_sandbox_paths(config) == []
+
+    def test_read_write_and_profiles_scanned(self, tmp_path):
+        config = {
+            "dpc_agent": {"sandbox_extensions": {"read_write": [str(tmp_path / "a")]}},
+            "agent_profiles": {
+                "agent_001": {"sandbox_extensions": {"read_only": [str(tmp_path / "b")]}},
+                "default": {"tools": {}},
+            },
+        }
+
+        warnings = ContextFirewall.find_missing_sandbox_paths(config)
+
+        assert len(warnings) == 2
+        assert any("dpc_agent" in w and "read_write" in w for w in warnings)
+        assert any("agent_profiles.agent_001" in w for w in warnings)
+
+    def test_empty_and_absent_sections_are_safe(self):
+        assert ContextFirewall.find_missing_sandbox_paths({}) == []
+        assert ContextFirewall.find_missing_sandbox_paths(
+            {"dpc_agent": {"sandbox_extensions": {"read_only": []}}}
+        ) == []
+
+
 class TestFirewallValidation:
     """Test firewall configuration validation."""
 
