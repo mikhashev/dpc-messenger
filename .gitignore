@@ -90,7 +90,10 @@ uv.lock
 
 # 11. AI assistant Editor-Specific Files
 # Prevents AI personal editor settings from being committed.
+# .mcp.json registers the local orbit code-graph MCP server; it carries an
+# absolute path to this machine's orbit.exe, so it is per-machine, not shared.
 .claude/
+.mcp.json
 
 # 12. Sensitive Legal & Compliance Documents
 # Personal legal analysis and compliance docs - keep private
