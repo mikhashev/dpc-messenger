@@ -218,22 +218,40 @@ uv pip install torch torchvision --index-url https://download.pytorch.org/whl/ro
 
 ## Optional features
 
-The default `uv sync` stays lean. Enable extras as needed — they can be
-added later without reinstalling, and combined
-(`uv sync --extra graph-grafeo --extra browser`):
+The default `uv sync` stays lean. Extras add optional capabilities and can be
+enabled at any time.
+
+**`uv sync` makes the environment match exactly what you ask for.** Any extra
+you leave out of the command is *uninstalled* if it was there before. So pass
+the full set you want in **one** command:
 
 ```bash
 cd dpc-client/core
-uv sync --extra graph-grafeo   # Grafeo retrieval backend for agent memory (opt-in; default is native FAISS)
-uv sync --extra browser        # camoufox — headless browser tool for agents
-uv sync --extra graph-ner      # gliner — named-entity extraction
-uv sync --extra mlx            # macOS Apple Silicon — GPU Whisper via MLX
+
+# Pick what you need and list it all on one line:
+uv sync --extra graph-grafeo --extra browser --extra graph-ner
 ```
+
+| Extra | What it adds |
+|---|---|
+| `graph-grafeo` | Grafeo retrieval backend for agent memory (opt-in; default is native FAISS) |
+| `browser` | camoufox — headless browser tool for agents |
+| `graph-ner` | gliner — named-entity extraction |
+| `mlx` | macOS Apple Silicon only — GPU Whisper via MLX |
+
+> **Do not run them as separate lines.** `uv sync --extra browser` followed by
+> `uv sync --extra graph-ner` leaves you with *only* `graph-ner` — the second
+> command removes what the first installed.
+>
+> The same applies to a plain `uv sync` later (after a `git pull`, say): it
+> removes **every** extra. Whenever you re-sync, repeat the full `--extra`
+> list you want to keep.
 
 > If an agent is configured for the Grafeo backend but the package is
 > missing, the log shows
 > `Background memory indexing failed: Grafeo retrieval requires the grafeo package`
-> — install `--extra graph-grafeo` to enable it.
+> — re-run the sync above with `--extra graph-grafeo` in the list (keeping your
+> other extras on the same line).
 
 ---
 

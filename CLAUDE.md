@@ -32,11 +32,25 @@ dpc-messenger/
 **Backend (Python):**
 ```bash
 cd dpc-client/core
-uv sync                           # Install dependencies (default)
+uv sync                           # Install dependencies (default, no extras)
 uv run python run_service.py      # Run backend service (ports 8888, 9999)
 uv run pytest                     # Run tests
 uv run pytest --cov=dpc_client_core  # Run with coverage
 ```
+
+> ⚠️ **`uv sync` is declarative, not additive.** It makes the environment match
+> exactly what the command asks for, so a bare `uv sync` **uninstalls** every
+> optional extra installed earlier — `browser` (camoufox, playwright),
+> `graph-ner` (gliner), `graph-grafeo` (grafeo). Re-syncing an environment that
+> uses extras must repeat the full list in one command:
+>
+> ```bash
+> uv sync --extra browser --extra graph-ner --extra graph-grafeo
+> ```
+>
+> The same applies to `uv sync --extra X` on its own: it keeps `X` and drops the
+> others. Check with `uv sync --dry-run` before running it on a live environment
+> — it prints exactly what would be uninstalled.
 
 **Platform-Specific Dependencies (macOS Apple Silicon):**
 
@@ -51,6 +65,11 @@ uv sync
 # Install with MLX support (enables GPU-accelerated offline transcription)
 uv sync --extra mlx
 ```
+
+> These two are alternatives, not steps — and `--extra mlx` alone drops any
+> other extras (see the `uv sync` warning above). On a machine that also uses
+> `browser`/`graph-ner`/`graph-grafeo`, list them together:
+> `uv sync --extra mlx --extra browser --extra graph-ner --extra graph-grafeo`.
 
 **Technical Details:**
 - **Dependencies**: `mlx>=0.4.0`, `mlx-whisper>=0.2.0`
