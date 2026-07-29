@@ -248,8 +248,21 @@ class LocalWhisperProvider(AIProvider):
             )
 
             if self.compile_model and device == "cuda":
-                logger.info("Applying torch.compile optimization (4.5x speedup)...")
-                self.pipeline.model = torch.compile(self.pipeline.model)
+                # torch.compile is an optional 4.5x speedup. Wrap it in its own try:
+                # if the installed torch/dynamo is incompatible (e.g. torch 2.11 dropped
+                # functorch.compile.min_cut_rematerialization_partition, breaking
+                # torch._dynamo import chain), we must NOT take down model loading —
+                # the model is already loaded above and runs fine uncompiled. Without
+                # this guard, a compile failure aborts local transcription entirely and
+                # the user has no fallback if the OpenAI key is also unset.
+                try:
+                    logger.info("Applying torch.compile optimization (4.5x speedup)...")
+                    self.pipeline.model = torch.compile(self.pipeline.model)
+                except Exception as compile_err:
+                    logger.warning(
+                        "torch.compile failed (%s) — continuing with uncompiled model. "
+                        "Local transcription will work, just slower.", compile_err
+                    )
 
             self.model_loaded = True
             elapsed = time.time() - start_time
