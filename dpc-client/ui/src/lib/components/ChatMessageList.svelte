@@ -8,6 +8,7 @@
   import ThinkingBlock from './ThinkingBlock.svelte';
   import AgentProgressCollapsible from './AgentProgressCollapsible.svelte';
   import { agentLiveTools } from '$lib/coreService';
+  import { agentsList } from '$lib/services/agents';
   import type { Message, Mention } from '$lib/types.js';
 
   // Props (Svelte 5 runes mode)
@@ -59,6 +60,13 @@
   // dropped results, survives chat switches. The currently-executing tool shows via the
   // live spinner (currentTool); completed tools come from the snapshot with their results.
   let liveToolCalls = $derived($agentLiveTools[conversationId] ?? []);
+
+  // First registered agent — fallback agent_id for the group-chat Stop button.
+  // The 1:1 fallback below only covers conversation_id starting with 'agent_'; in a
+  // group chat that's never true, so without this an empty agent_id is sent and the
+  // backend interrupt is a no-op (no agent_id provided). See backend defense-in-depth
+  // in CoreService.interrupt_agent.
+  let defaultAgentId = $derived($agentsList[0]?.agent_id ?? '');
 
   // Filter tool_call code blocks from streaming when collapsible is active
   let filteredStreamingText = $derived.by(() => {
@@ -267,7 +275,7 @@
       currentRound={agentProgressRound}
       streamingText={filteredStreamingText}
       conversationId={conversationId}
-      agentId={agentProgressAgentId || (conversationId.startsWith('agent_') ? conversationId : '')}
+      agentId={agentProgressAgentId || (conversationId.startsWith('agent_') ? conversationId : '') || defaultAgentId}
     />
   {/if}
 </div>

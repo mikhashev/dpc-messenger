@@ -7462,6 +7462,13 @@ class CoreService:
         if not agent_id and conversation_id.startswith("agent_"):
             agent_id = conversation_id
         if not agent_id:
+            # Defense-in-depth: group-chat Stop button can arrive with empty agent_id
+            # (frontend ChatMessageList.svelte only injects conversation_id fallback for
+            # agent_* chats, not group-*). Resolve to the default agent instead of
+            # erroring out — the Stop should still reach the active loop.
+            agent_id = self._get_default_agent_id()
+            logger.info("interrupt_agent: empty agent_id resolved to default %r", agent_id)
+        if not agent_id:
             logger.warning("interrupt_agent: no agent_id provided")
             return {"status": "error", "message": "agent_id required"}
         if not conversation_id:
