@@ -151,4 +151,4 @@ def test_no_two_files_share_a_key_across_layers(tmp_path):
 
 def test_key_format_marker_is_set():
     """agent_manager compares this against the stored marker to force a rebuild."""
-    assert KEY_FORMAT == "layer_addressed_v2"
+    assert KEY_FORMAT == "layer_addressed_v3"

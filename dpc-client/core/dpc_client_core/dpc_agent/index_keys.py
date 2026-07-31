@@ -37,10 +37,16 @@ from typing import Dict, List, Sequence
 
 log = logging.getLogger(__name__)
 
-# Bumped whenever the shape below changes; agent_manager compares it against the
-# stored marker and forces a full rebuild on mismatch. Old indexes are not
-# migrated: the key is embedded in the document text, so the vectors differ too.
-KEY_FORMAT = "layer_addressed_v2"
+# What the stored index was built by. agent_manager compares it against the marker
+# in index_meta.json and rebuilds from scratch on mismatch, because these changes
+# cannot be repaired incrementally: an incremental pass only touches documents whose
+# hash moved, and the damage here is in documents whose hash did not.
+#
+# Bump it for any change to what ends up in the index, not only to how keys are
+# spelled. v3 collects each file once however many roots reach it — the duplicate
+# rows left by v2 all carry unchanged hashes, so nothing short of a rebuild removes
+# them.
+KEY_FORMAT = "layer_addressed_v3"
 
 L5_PREFIX = "knowledge"
 L6_PREFIX = "L6"

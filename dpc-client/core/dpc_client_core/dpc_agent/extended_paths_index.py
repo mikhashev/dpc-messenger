@@ -131,11 +131,22 @@ def collect_extended_files(
     already_indexed holds normalised paths another layer has claimed; a directory can
     legitimately appear both as an implicit layer source and in the extended paths, and
     indexing it twice puts the same file in the index under two keys.
+
+    A file is yielded once however many configured roots lead to it. Three arrangements
+    reach the same file twice and all of them are ordinary: a root granted both
+    read_only and read_write (the access lists are separate and a path may sit in both),
+    a root nested inside another indexed root, and the same path listed twice. The
+    second copy carries the same key, so it does not collide with anything — it
+    duplicates, quietly doubling that document's weight in the index.
     """
     exclude = frozenset(excluded_dirs) if excluded_dirs is not None else DEFAULT_EXCLUDED_DIRS
     extensions = allowed_extensions if allowed_extensions is not None else TEXT_EXTENSIONS
-    claimed = already_indexed or set()
+    # Copied, not aliased: this grows as we collect, and the caller's set means
+    # "claimed by another layer", which is not ours to add to.
+    claimed = set(already_indexed or ())
+    seen: set = set()
     skipped_dupes = 0
+    skipped_repeats = 0
     files: List[pathlib.Path] = []
 
     if indexed_paths is not None:
@@ -153,9 +164,13 @@ def collect_extended_files(
                 log.warning("indexed path does not exist, nothing will be indexed from it: %s", path_str)
                 continue
             if p.is_file() and _is_ext_match(p, extensions):
-                if _norm(str(p)) in claimed:
+                key = _norm(str(p))
+                if key in claimed:
                     skipped_dupes += 1
+                elif key in seen:
+                    skipped_repeats += 1
                 else:
+                    seen.add(key)
                     files.append(p)
             elif p.is_dir():
                 for f in p.rglob("*"):
@@ -163,13 +178,20 @@ def collect_extended_files(
                         continue
                     if any(part in exclude for part in f.relative_to(p).parts):
                         continue
-                    if _norm(str(f)) in claimed:
+                    key = _norm(str(f))
+                    if key in claimed:
                         skipped_dupes += 1
                         continue
+                    if key in seen:
+                        skipped_repeats += 1
+                        continue
+                    seen.add(key)
                     files.append(f)
 
     if skipped_dupes:
         log.info("collect_extended_files: skipped %d file(s) already indexed by another layer", skipped_dupes)
+    if skipped_repeats:
+        log.info("collect_extended_files: skipped %d file(s) reachable through more than one indexed root", skipped_repeats)
     log.info("collect_extended_files: %d files (extensions: %s, excluded: %s)",
              len(files), ", ".join(sorted(extensions)), ", ".join(sorted(exclude)[:5]) + ("..." if len(exclude) > 5 else ""))
     return files
