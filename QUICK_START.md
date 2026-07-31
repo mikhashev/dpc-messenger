@@ -255,6 +255,47 @@ uv sync --extra graph-grafeo --extra browser --extra graph-ner
 
 ---
 
+## If a command in `.venv` stops starting (Windows)
+
+```
+error: uv trampoline failed to canonicalize script path
+```
+
+Every console command in the environment — `pytest`, `coverage`, `openai`,
+`huggingface-cli` — is a small `.exe` with the **absolute path** of
+`.venv\Scripts\python.exe` baked into it at install time. Move or rename any
+folder above the checkout and those paths stop resolving. `python.exe` itself
+is a real binary and keeps working, so the environment looks healthy while
+every command in it fails.
+
+The usual cause on Windows is OneDrive: turning "Back up your Documents
+folder" on or off swaps `C:\Users\<you>\Documents` for
+`C:\Users\<you>\OneDrive\Documents` (localised — `Документы`, `Dokumente`, …)
+and back. Packages installed on one side of that switch point at a path that
+no longer exists. Only the commands installed *before* the switch break, which
+is why the failure looks arbitrary.
+
+**Immediate way through** — this never depends on a shim:
+
+```bash
+uv run python -m pytest        # instead of: uv run pytest
+```
+
+**Repair** the affected commands by reinstalling just those packages, pinned to
+the versions you already have, so nothing else in the environment moves:
+
+```bash
+cd dpc-client/core
+uv pip list                    # read the versions first
+uv pip install --force-reinstall --no-deps pytest==8.4.2 coverage==7.14.3
+```
+
+Use `uv pip install`, **not** `uv sync --reinstall`: a sync would drop every
+extra you did not name on the line (see above) and re-download PyTorch to fix
+a 45 KB launcher.
+
+---
+
 ## What's in `.dpc`?
 
 Your data is stored in `~/.dpc/` (Windows: `C:\Users\<YourName>\.dpc\`). Here's what gets created on first run:

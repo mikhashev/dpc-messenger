@@ -1071,6 +1071,15 @@ uv run pytest -v --cov=dpc_hub
 **Coverage Reports:**
 - HTML: `htmlcov/index.html` (generated after running with --cov)
 
+> If `uv run pytest` fails with `uv trampoline failed to canonicalize script
+> path`, the tests are fine — the launcher `.exe` in `.venv\Scripts` has a stale
+> absolute path baked in (typically after a Windows OneDrive Documents
+> redirection is switched on or off). `uv run python -m pytest` works regardless;
+> the repair is in
+> [QUICK_START.md](QUICK_START.md#if-a-command-in-venv-stops-starting-windows).
+> Do **not** reach for `uv sync --reinstall` — it drops every extra not named on
+> the line.
+
 ---
 
 ## Key Architectural Patterns
