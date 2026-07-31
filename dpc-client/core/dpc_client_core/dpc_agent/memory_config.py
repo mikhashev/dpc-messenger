@@ -22,6 +22,12 @@ class MemoryConfig:
     # whatever else the client has resident (a Whisper model, a local LLM), and a
     # batch large enough to spill into shared memory turns a fast pass into paging.
     batch_size: int = 16
+    # Where a document is cut before embedding. The other half of peak memory —
+    # cost is batch_size times this — and the half batch_size cannot reach, since one
+    # long file fills the window alone. Below bge-m3's own 8192 so a 400 KB file does
+    # not decide how much memory an indexing pass needs. Changing it moves the vectors
+    # of every document longer than the limit, so it wants a reindex, not a restart.
+    max_tokens: int = 4096
 
     @classmethod
     def from_dict(cls, data: dict) -> "MemoryConfig":

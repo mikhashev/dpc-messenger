@@ -303,11 +303,13 @@ class DpcAgentManager:
                             if _stored_model != _actual_model:
                                 log.info("Memory index model changed (%s -> %s), forcing rebuild", _stored_model, _actual_model)
                                 needs_full_rebuild = True
-                            # Key format migration: pre-fix metas used basenames; new
-                            # format uses per-layer relative posix keys. Force rebuild
-                            # once when an older meta lacks the version marker.
+                            # Key format migration: the key is part of the embedded
+                            # document text, so a change of shape means the stored
+                            # vectors answer to names nothing asks for any more.
+                            # Rebuild rather than migrate.
+                            from dpc_client_core.dpc_agent.index_keys import KEY_FORMAT as _KEY_FORMAT
                             _stored_key_fmt = _meta.get("header", {}).get("key_format", "")
-                            if _stored_key_fmt != "layer_relative_posix_v1":
+                            if _stored_key_fmt != _KEY_FORMAT:
                                 log.info("Memory index key format outdated (%r), forcing rebuild", _stored_key_fmt)
                                 needs_full_rebuild = True
                         except Exception:
@@ -330,7 +332,19 @@ class DpcAgentManager:
                             from dpc_client_core.dpc_agent.indexing_pipeline import (
                                 _extract_heading, _build_doc_text, _BACKFILL_SKIP, read_file_meta,
                             )
-                            provider = _provider_ref or get_embedding_provider(model_name=_actual_model)
+                            from dpc_client_core.dpc_agent.index_keys import (
+                                KEY_FORMAT, build_ext_roots, ext_key, l5_key, l6_key,
+                            )
+                            provider = get_embedding_provider(
+                                model_name=_actual_model, max_tokens=int(mem_cfg.max_tokens)
+                            ) if _provider_ref is None else _provider_ref
+                            # The agent built its provider before this config was read, so
+                            # state the window here too — otherwise the setting applies only
+                            # on the path where the agent happens not to have one yet.
+                            if int(provider.max_tokens) != int(mem_cfg.max_tokens):
+                                provider.max_tokens = int(mem_cfg.max_tokens)
+                                if provider._model is not None:
+                                    provider._apply_token_limit()
                             backend = make_backend_for_agent(
                                 agent_root,
                                 model_name=_actual_model,
@@ -360,12 +374,13 @@ class DpcAgentManager:
                                         continue
                                     heading = _extract_heading(text)
                                     file_meta = read_file_meta(knowledge_dir, f.name)
-                                    key = f.relative_to(knowledge_dir).as_posix()
+                                    key = l5_key(f, knowledge_dir)
                                     doc_text = _build_doc_text(key, heading, text)
                                     collected.append((
                                         key, doc_text,
                                         {"source_file": key, "heading": heading,
                                          "source_layer": file_meta.source_layer,
+                                         "source_path": str(f),
                                          "char_count": len(text), "text": text[:500]},
                                         "L5",
                                     ))
@@ -384,13 +399,13 @@ class DpcAgentManager:
                                         if not text:
                                             continue
                                         heading = _extract_heading(text)
-                                        key = f"L6/{f.relative_to(l6_dir).as_posix()}"
+                                        key = l6_key(f, l6_dir)
                                         doc_text = _build_doc_text(key, heading, text)
                                         collected.append((
                                             key, doc_text,
                                             {"source_file": key, "heading": heading,
                                              "source_layer": "L6", "char_count": len(text),
-                                             "text": text[:500]},
+                                             "source_path": str(f), "text": text[:500]},
                                             "L6",
                                         ))
                                         _claim(f)
@@ -410,7 +425,7 @@ class DpcAgentManager:
                                         for repair in repairs:
                                             log.warning("[%s] indexed_paths: %s", self.agent_id, repair)
                                     ext_files = collect_extended_files(ext_paths, indexed_paths=indexed_list, excluded_dirs=excluded_dirs, allowed_extensions=RECALL_EXTENSIONS, already_indexed=claimed_paths) if indexed_list else []
-                                    indexed_path_objs = [Path(ip) for ip in indexed_list]
+                                    ext_roots = build_ext_roots(indexed_list)
                                     for f in ext_files:
                                         if self._stop_event.is_set():
                                             return
@@ -418,24 +433,13 @@ class DpcAgentManager:
                                         if not text:
                                             continue
                                         heading = _extract_heading(text)
-                                        # Find longest matching indexed_path so relative_to gives the
-                                        # shortest portable suffix. Fallback to bare name if no match
-                                        # (shouldn't happen — collect_extended_files only yields files
-                                        # inside indexed_paths — but defends against config drift).
-                                        rel = None
-                                        for ip in sorted(indexed_path_objs, key=lambda p: len(p.parts), reverse=True):
-                                            try:
-                                                rel = f.relative_to(ip).as_posix()
-                                                break
-                                            except ValueError:
-                                                continue
-                                        key = f"EXT/{rel}" if rel else f"EXT/{f.name}"
+                                        key = ext_key(f, ext_roots)
                                         doc_text = _build_doc_text(key, heading, text)
                                         collected.append((
                                             key, doc_text,
                                             {"source_file": key, "heading": heading,
                                              "source_layer": "EXT", "char_count": len(text),
-                                             "text": text[:500]},
+                                             "source_path": str(f), "text": text[:500]},
                                             "EXT",
                                         ))
                                         ext_count += 1
@@ -463,6 +467,16 @@ class DpcAgentManager:
                             unchanged: list = []
                             for source_file, doc_text, meta, _layer in collected:
                                 h = hashlib.sha256(doc_text.encode()).hexdigest()[:16]
+                                # Two files under one key is not a duplicate, it is a
+                                # disappearance: the second overwrites the first here and
+                                # deletes both from the index on the next remove_by_source.
+                                # The scheme is supposed to make this impossible; say so
+                                # out loud if it ever stops being.
+                                if source_file in new_hashes:
+                                    log.warning(
+                                        "[%s] index key collision: %s is claimed by more than one file (%s)",
+                                        self.agent_id, source_file, meta.get("source_path", "?"),
+                                    )
                                 new_hashes[source_file] = h
                                 if not needs_full_rebuild and old_hashes.get(source_file) == h:
                                     unchanged.append(source_file)
@@ -519,11 +533,11 @@ class DpcAgentManager:
                                     # header.model_name is read at startup to detect
                                     # model swap → forced full rebuild. Must persist on
                                     # save or every restart trips the mismatch check.
-                                    # header.key_format pins the file_hashes key schema
-                                    # (per-layer relative posix). Bump when key shape changes.
+                                    # header.key_format pins the file_hashes key schema.
+                                    # Bump KEY_FORMAT in index_keys when the shape changes.
                                     _hdr = _md.setdefault("header", {})
                                     _hdr["model_name"] = _actual_model
-                                    _hdr["key_format"] = "layer_relative_posix_v1"
+                                    _hdr["key_format"] = KEY_FORMAT
                                     _md["file_hashes"] = new_hashes
                                     _md.pop("extra_hash", None)
                                     meta_path.write_text(

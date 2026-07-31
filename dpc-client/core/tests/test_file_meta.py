@@ -203,3 +203,53 @@ def test_embedding_provider_unload():
     p._model = MagicMock()
     p.unload()
     assert p._model is None
+
+
+# --- max_tokens: the setting that was stored and never used ---
+
+
+class _Model:
+    def __init__(self, max_seq_length=8192):
+        self.max_seq_length = max_seq_length
+
+
+def test_token_limit_reaches_the_model():
+    p = EmbeddingProvider(max_tokens=4096)
+    p._model = _Model(8192)
+    p._apply_token_limit()
+    assert p._model.max_seq_length == 4096
+
+
+def test_token_limit_is_never_raised_above_the_model():
+    """Positions the model never trained on give worse embeddings, not longer ones."""
+    p = EmbeddingProvider(max_tokens=32768)
+    p._model = _Model(8192)
+    p._apply_token_limit()
+    assert p._model.max_seq_length == 8192
+
+
+def test_model_without_the_attribute_keeps_its_own_limit():
+    p = EmbeddingProvider(max_tokens=4096)
+    p._model = object()
+    p._apply_token_limit()  # a warning, not a failed load
+
+
+def test_zero_means_leave_it_alone():
+    p = EmbeddingProvider(max_tokens=0)
+    p._model = _Model(8192)
+    p._apply_token_limit()
+    assert p._model.max_seq_length == 8192
+
+
+def test_shared_provider_honours_a_stated_window(monkeypatch):
+    """The singleton hands the same object to everyone; the window must not be
+    decided by whichever caller happened to be first."""
+    import dpc_client_core.dpc_agent.memory as memory
+
+    monkeypatch.setattr(memory, "_singleton_providers", {})
+    first = memory.get_embedding_provider(model_name="test/model")
+    first._model = _Model(8192)
+    second = memory.get_embedding_provider(model_name="test/model", max_tokens=2048)
+    assert second is first
+    assert first.max_tokens == 2048
+    assert first._model.max_seq_length == 2048

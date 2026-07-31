@@ -204,14 +204,11 @@ def write_file(ctx: ToolContext, path: str, content: str) -> str:
                         backend = make_backend_for_agent(ctx.agent_root)
                         if backend.vector.load():
                             backend.text.load()
-                            # L5 key shape must match agent_manager._sync_index
-                            # (base = agent_root/knowledge) so incremental adds line up
-                            # with full-rebuild keys.
-                            _knowledge_dir = ctx.agent_root / "knowledge"
-                            try:
-                                _l5_key = file_path.relative_to(_knowledge_dir).as_posix()
-                            except ValueError:
-                                _l5_key = file_path.name
+                            # Same key shape as the full rebuild, from the same helper —
+                            # an incremental add under a different name would sit beside
+                            # the rebuilt entry instead of replacing it.
+                            from ..index_keys import l5_key
+                            _l5_key = l5_key(file_path, ctx.agent_root / "knowledge")
                             index_single_file(file_path, provider, backend, source_layer="L5", source_file_key=_l5_key)
                             backend.save()
                             log.info("Incremental reindex: added %s to retrieval backend", file_path.name)
@@ -265,8 +262,12 @@ def repo_delete(ctx: ToolContext, path: str, recursive: bool = False) -> str:
                     from ..retrieval import make_backend_for_agent
                     index_dir = ctx.agent_root / "state" / "memory_index"
                     if index_dir.exists():
+                        from ..index_keys import l5_key
                         backend = make_backend_for_agent(ctx.agent_root)
-                        source_file = Path(path).name
+                        # Delete by the key the file was indexed under, not by its bare
+                        # name: a mismatch here leaves the deleted file in the index and
+                        # Active Recall keeps offering a path that no longer exists.
+                        source_file = l5_key(target, ctx.agent_root / "knowledge")
                         if backend.vector.load():
                             backend.vector.remove_by_source(source_file)
                             backend.vector.save()

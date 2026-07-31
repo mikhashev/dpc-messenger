@@ -24,6 +24,13 @@ def test_batch_size_survives_roundtrip():
     assert mc.batch_size == 24
 
 
+def test_max_tokens_is_configurable_and_survives_roundtrip():
+    """The other half of peak memory, and the half batch_size cannot reach."""
+    assert MemoryConfig().max_tokens == 4096
+    mc = MemoryConfig.from_dict(MemoryConfig(max_tokens=2048).to_dict())
+    assert mc.max_tokens == 2048
+
+
 def test_to_dict_roundtrip():
     mc = MemoryConfig(enabled=True, memory_provider="ollama")
     d = mc.to_dict()

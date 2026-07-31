@@ -21,10 +21,6 @@ LAYER_WEIGHTS: Dict[str, float] = {
 
 DEFAULT_RRF_K = 60
 
-# Layer prefixes stripped by _file_key so the SAME logical file indexed under more than
-# one layer (e.g. EXT/<path> and L6/<path>) fuses to one entry instead of a cross-layer dup.
-_LAYER_PREFIXES = frozenset(LAYER_WEIGHTS)
-
 
 @dataclass
 class SearchResult:
@@ -34,7 +30,7 @@ class SearchResult:
 
 
 def _accumulate(results, default_layer, scores, meta_map, layer_weights, k):
-    """Add one result list's RRF contributions, keyed by _file_key (layer-stripped path).
+    """Add one result list's RRF contributions, keyed by _file_key (the index key).
 
     A file appearing in multiple layers has its scores SUM (RRF combines evidence across
     lists); meta_map keeps the meta of the HIGHEST layer-weight occurrence, so the injected
@@ -59,9 +55,10 @@ def reciprocal_rank_fusion(
 ) -> List[SearchResult]:
     """Merge FAISS dense, sparse/BM25, and graph results using RRF with layer priority weights.
 
-    Dedup is by _file_key (layer-stripped path): a file indexed under multiple layers
-    collapses to a single fused entry instead of passing as a cross-layer duplicate
-    (RECALL-RELEVANCE dup — measured ~48.6% of injections before this fix).
+    Dedup is by _file_key, i.e. by index key: one entry per document however many
+    channels returned it. Cross-layer duplicates of the same file are prevented at
+    indexing time (they were ~48.6% of injections before that fix), so nothing here
+    needs to guess which two names mean one document.
     """
     scores: Dict[str, float] = {}
     meta_map: Dict[str, dict] = {}
@@ -78,13 +75,17 @@ def reciprocal_rank_fusion(
 
 
 def _file_key(meta: dict) -> str:
-    """Fusion/dedup key: source_file with a single leading layer prefix stripped.
+    """Fusion/dedup key: the index key itself, which is already unique per file.
 
-    `EXT/archive/protocol-13.md` and `L6/archive/protocol-13.md` -> `archive/protocol-13.md`
-    (same logical file under two layers -> collapse). NOT basename: that would wrongly merge
-    distinct files sharing a name in different dirs (e.g. `EXT/archive/protocol-13.md` vs
-    `EXT/protocol-13.md`). A source_file with no known layer prefix is returned unchanged.
+    This used to strip the layer prefix, because the same file really could be indexed
+    twice — once as L6, once as EXT — and arrive as two hints for one document. That is
+    now prevented where it belongs, at indexing time: a path claimed by one layer is not
+    collected again by another.
+
+    With that gone, stripping only causes harm. It merges *different* files that share a
+    relative path (`EXT/README.md` with `L6/README.md`), and under the root-qualified EXT
+    keys it can even strip its way onto another layer's key — an indexed root whose last
+    segment is `knowledge` would yield `knowledge/x.md`, the exact shape of an L5 key.
+    Two distinct documents collapsing into one hint is silent, so prefer the identity.
     """
-    sf = meta.get("source_file", "")
-    head, sep, rest = sf.partition("/")
-    return rest if (sep and rest and head in _LAYER_PREFIXES) else sf
+    return meta.get("source_file", "")

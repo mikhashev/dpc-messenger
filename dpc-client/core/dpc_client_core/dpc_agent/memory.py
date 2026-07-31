@@ -188,11 +188,26 @@ _singleton_lock = threading.Lock()
 
 
 def get_embedding_provider(model_name: str = "BAAI/bge-m3", **kwargs) -> "EmbeddingProvider":
-    """Return a singleton EmbeddingProvider per model_name to avoid duplicate GPU loads."""
+    """Return a singleton EmbeddingProvider per model_name to avoid duplicate GPU loads.
+
+    Because it is a singleton, whoever asks first decides the settings and everyone
+    after gets an object configured for someone else. max_tokens is the one setting
+    where that silently matters — it decides where documents are cut — so a caller
+    that states it is honoured on the shared instance rather than ignored. Queries and
+    documents then pass through the same window, which is the only way their vectors
+    are comparable.
+    """
     with _singleton_lock:
         if model_name not in _singleton_providers:
             _singleton_providers[model_name] = EmbeddingProvider(model_name=model_name, **kwargs)
-        return _singleton_providers[model_name]
+            return _singleton_providers[model_name]
+        provider = _singleton_providers[model_name]
+        requested = kwargs.get("max_tokens")
+        if requested is not None and int(requested) != provider.max_tokens:
+            provider.max_tokens = int(requested)
+            if provider._model is not None:
+                provider._apply_token_limit()
+        return provider
 
 
 class _EmbeddingDiskCache:
@@ -338,8 +353,35 @@ class EmbeddingProvider:
                     self._model = SentenceTransformer(self.model_name, **kwargs)
             else:
                 self._model = SentenceTransformer(self.model_name, **kwargs)
+            self._apply_token_limit()
             precision = "FP16" if self.device == "cuda" else "FP32"
-            log.info("Loaded embedding model %s on %s (%s)", self.model_name, self.device, precision)
+            log.info("Loaded embedding model %s on %s (%s, max %d tokens)",
+                     self.model_name, self.device, precision, self.max_tokens)
+
+    def _apply_token_limit(self) -> None:
+        """Hold the model to the configured window instead of its own.
+
+        max_tokens was accepted, stored and never used, so every document was cut at
+        bge-m3's own 8192 and the setting said one thing while the model did another.
+        It is also the half of peak memory the batch size cannot reach: cost is batch
+        times sequence length, and a single 400 KB file fills the window on its own —
+        no batch small enough to help. Lowering it truncates long documents earlier,
+        which is why changing it needs a reindex: the vectors move.
+
+        A model that does not expose the attribute keeps its own limit; that is worth
+        a warning, not a failed load.
+        """
+        limit = int(self.max_tokens)
+        if limit <= 0:
+            return
+        current = getattr(self._model, "max_seq_length", None)
+        if current is None:
+            log.warning("Embedding model %s exposes no max_seq_length; max_tokens=%d not applied",
+                        self.model_name, limit)
+            return
+        # Never raise it: above what the model was trained for, positions it has never
+        # seen produce embeddings that are worse, not longer.
+        self._model.max_seq_length = min(limit, current)
 
     def embed(self, text: str) -> List[float]:
         self._load_model()

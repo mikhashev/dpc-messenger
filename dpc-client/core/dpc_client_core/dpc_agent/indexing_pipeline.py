@@ -18,6 +18,7 @@ from typing import Dict, List, Optional
 
 import numpy as np
 
+from .index_keys import l5_key
 from .retrieval import RetrievalBackend, TextAddItem, VectorAddItem
 from .text_extract import extract_text, is_binary
 from .memory import read_all_meta, write_file_meta, read_file_meta, FileMeta, _BACKFILL_SKIP
@@ -82,6 +83,8 @@ def index_single_file(
         "source_file": _src,
         "heading": heading,
         "source_layer": source_layer,
+        # Where the document actually lives. The key names it; this reaches it.
+        "source_path": str(path),
         "char_count": len(text),
         "text": text[:500],
     }
@@ -117,7 +120,7 @@ def full_rebuild(
         if not text:
             continue
         heading = _extract_heading(text)
-        _src = f.relative_to(knowledge_dir).as_posix()
+        _src = l5_key(f, knowledge_dir)
         doc_text = _build_doc_text(_src, heading, text)
         file_meta = read_file_meta(knowledge_dir, f.name)
         all_doc_texts.append(doc_text)
@@ -125,6 +128,7 @@ def full_rebuild(
             "source_file": _src,
             "heading": heading,
             "source_layer": file_meta.source_layer,
+            "source_path": str(f),
             "char_count": len(text),
             "text": text[:500],
         })
