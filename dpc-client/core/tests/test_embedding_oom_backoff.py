@@ -4,12 +4,16 @@ Batch size times sequence length is not under our control — documents arrive w
 the machine may be sharing its VRAM with a resident speech or chat model — so any fixed
 default has to survive a device that says no.
 """
+import sys
+import types
+
 import numpy as np
 import pytest
 
 from dpc_client_core.dpc_agent.memory import (
     EmbeddingProvider,
     _is_out_of_memory,
+    _release_device_memory,
 )
 
 
@@ -77,3 +81,61 @@ def test_batch_that_fits_is_encoded_in_one_call():
     model = _FakeModel(capacity=100)
     _provider(model)._encode_within_memory(["a", "b", "c"])
     assert model.calls == [3]
+
+
+# --- releasing the allocator's cache before a retry ---
+
+
+def _fake_torch(freed, *, cuda=True, mps=True, cuda_raises=False, has_mps_module=True):
+    """A torch whose accelerators can be present, absent, or broken independently."""
+    torch = types.ModuleType("torch")
+
+    def _cuda_empty():
+        if cuda_raises:
+            raise RuntimeError("driver said no")
+        freed.append("cuda")
+
+    torch.cuda = types.SimpleNamespace(
+        is_available=lambda: cuda, empty_cache=_cuda_empty
+    )
+    torch.backends = types.SimpleNamespace(
+        mps=types.SimpleNamespace(is_available=lambda: mps)
+    )
+    if has_mps_module:
+        torch.mps = types.SimpleNamespace(empty_cache=lambda: freed.append("mps"))
+    return torch
+
+
+def test_both_accelerators_get_their_cache_back(monkeypatch):
+    """Apple Silicon shares that memory with the system, so skipping it costs more."""
+    freed = []
+    monkeypatch.setitem(sys.modules, "torch", _fake_torch(freed))
+    _release_device_memory()
+    assert freed == ["cuda", "mps"]
+
+
+def test_only_the_present_accelerator_is_asked(monkeypatch):
+    freed = []
+    monkeypatch.setitem(sys.modules, "torch", _fake_torch(freed, cuda=False))
+    _release_device_memory()
+    assert freed == ["mps"]
+
+
+def test_one_failing_accelerator_does_not_block_the_other(monkeypatch):
+    freed = []
+    monkeypatch.setitem(sys.modules, "torch", _fake_torch(freed, cuda_raises=True))
+    _release_device_memory()
+    assert freed == ["mps"]
+
+
+def test_torch_too_old_for_mps_is_not_an_error(monkeypatch):
+    freed = []
+    monkeypatch.setitem(sys.modules, "torch", _fake_torch(freed, has_mps_module=False))
+    _release_device_memory()
+    assert freed == ["cuda"]
+
+
+def test_no_torch_at_all_is_not_an_error(monkeypatch):
+    """The caller is already on its way to a retry; this is best-effort only."""
+    monkeypatch.setitem(sys.modules, "torch", None)
+    _release_device_memory()

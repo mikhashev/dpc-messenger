@@ -265,13 +265,27 @@ def _is_out_of_memory(exc: Exception) -> bool:
 
 
 def _release_device_memory() -> None:
-    """Hand freed blocks back before retrying, or the retry meets the same ceiling."""
+    """Hand freed blocks back before retrying, or the retry meets the same ceiling.
+
+    Both accelerators keep a caching allocator, so a block we stopped using is still
+    held by the process until the cache is emptied. On Apple Silicon that memory is
+    shared with the system rather than a separate pool, which makes returning it
+    matter more, not less. ROCm answers to torch.cuda, so it needs no branch of its
+    own. Every call is optional: an older torch without torch.mps, or no torch at
+    all, only costs us the retry we were going to attempt anyway.
+    """
     try:
         import torch
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
     except Exception:
-        pass
+        return
+    for release in (
+        lambda: torch.cuda.is_available() and torch.cuda.empty_cache(),
+        lambda: torch.backends.mps.is_available() and torch.mps.empty_cache(),
+    ):
+        try:
+            release()
+        except Exception:
+            pass
 
 
 class EmbeddingProvider:
