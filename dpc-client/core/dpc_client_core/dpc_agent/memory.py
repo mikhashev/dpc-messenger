@@ -38,8 +38,16 @@ log = logging.getLogger(__name__)
 
 @dataclass
 class FileMeta:
+    # Reads. Until now these were bumped by writes, because update_access had exactly
+    # one caller and it sat in write_file — so a document written once and read fifty
+    # times counted as accessed once, and consolidation offered to archive it.
     last_accessed: str = ""
     access_count: int = 0
+    # Writes, kept separately rather than folded in. Consolidation needs both: a
+    # document nobody has read yet is not stale if it was written this morning, and
+    # without a write date the only way to know it is fresh is to miscount it as read.
+    last_written: str = ""
+    write_count: int = 0
     last_verified: str = ""
     tags: List[str] = field(default_factory=list)
     summary: str = ""
@@ -76,15 +84,65 @@ def backfill_meta(knowledge_dir: pathlib.Path) -> Dict[str, dict]:
     return data
 
 
+def _parse_stamp(ts: str):
+    from datetime import datetime
+    try:
+        return datetime.fromisoformat(ts.replace("Z", "+00:00"))
+    except (ValueError, TypeError, AttributeError):
+        return None
+
+
+def last_touched(entry: dict):
+    """The most recent time anyone wanted this document, by reading or by writing.
+
+    Everything that asks how current a document is — the index sections, staleness,
+    archive proposals — has to ask this and not either half alone. Reads alone would
+    call every newly written document stale; writes alone is what the code did while
+    calling the number reads.
+    """
+    stamps = [t for t in (_parse_stamp(entry.get("last_accessed", "")),
+                          _parse_stamp(entry.get("last_written", ""))) if t]
+    return max(stamps) if stamps else None
+
+
+def _migrate_legacy_access(data: Dict[str, dict]) -> bool:
+    """Move the old access numbers to the column they always described.
+
+    Every one of them was produced by a write: update_access had a single caller and
+    it lived in write_file. So this is not a guess about which events were which — it
+    is the whole history moving to its correct name. Entries already carrying a write
+    date have been through this and are left alone.
+
+    Returns whether anything moved, so the caller knows to persist it.
+    """
+    moved = False
+    for entry in data.values():
+        if not isinstance(entry, dict) or "last_written" in entry:
+            continue
+        entry["last_written"] = entry.get("last_accessed", "")
+        entry["write_count"] = entry.get("access_count", 0)
+        entry["last_accessed"] = ""
+        entry["access_count"] = 0
+        moved = True
+    return moved
+
+
 def read_all_meta(knowledge_dir: pathlib.Path) -> Dict[str, dict]:
     meta_path = knowledge_dir / "_meta.json"
     if not meta_path.exists():
         return backfill_meta(knowledge_dir)
     try:
-        return json.loads(meta_path.read_text(encoding="utf-8"))
+        data = json.loads(meta_path.read_text(encoding="utf-8"))
     except (json.JSONDecodeError, OSError):
         log.warning("Corrupt _meta.json, returning empty")
         return {}
+    if isinstance(data, dict) and _migrate_legacy_access(data):
+        log.info("Moved legacy access counts to write counts in %s", meta_path)
+        try:
+            write_all_meta(knowledge_dir, data)
+        except OSError:
+            pass  # in-memory result is still correct; next write persists it
+    return data
 
 
 def write_all_meta(knowledge_dir: pathlib.Path, data: Dict[str, dict]) -> None:
@@ -105,9 +163,28 @@ def write_file_meta(knowledge_dir: pathlib.Path, filename: str, meta: FileMeta) 
 
 
 def update_access(knowledge_dir: pathlib.Path, filename: str) -> None:
+    """Record that this document was read. Called from read_file, and only from there."""
     meta = read_file_meta(knowledge_dir, filename)
     meta.last_accessed = utc_now_iso()
     meta.access_count += 1
+    write_file_meta(knowledge_dir, filename, meta)
+    try:
+        generate_smart_index(knowledge_dir)
+    except Exception:
+        pass
+
+
+def record_write(knowledge_dir: pathlib.Path, filename: str) -> None:
+    """Record that this document was written.
+
+    Separate from update_access because the two answer different questions.
+    Consolidation asks "has anyone wanted this lately", and a write is the author
+    saying so while a read is a reader saying so — but only the write used to be
+    counted, under the reader's name.
+    """
+    meta = read_file_meta(knowledge_dir, filename)
+    meta.last_written = utc_now_iso()
+    meta.write_count += 1
     write_file_meta(knowledge_dir, filename, meta)
     try:
         generate_smart_index(knowledge_dir)
@@ -127,18 +204,14 @@ def generate_smart_index(knowledge_dir: pathlib.Path) -> str:
     active, recent, reference, stale = [], [], [], []
 
     for fname, entry in all_meta.items():
-        ts = entry.get("last_accessed", "")
         summary = entry.get("summary", "")[:160]
         title = fname.replace(".md", "").replace("_", " ").replace("-", " ").title()
-        if not ts:
+        touched = last_touched(entry)
+        if touched is None:
             reference.append((fname, title, summary, ""))
             continue
-        try:
-            accessed = datetime.fromisoformat(ts.replace("Z", "+00:00"))
-            days = (now - accessed).days
-        except (ValueError, TypeError):
-            reference.append((fname, title, summary, ""))
-            continue
+        ts = touched.isoformat()
+        days = (now - touched).days
         line_data = (fname, title, summary, ts)
         if days == 0:
             active.append(line_data)

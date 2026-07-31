@@ -47,6 +47,6 @@ def test_tier2_never_accessed(tmp_path):
     (tmp_path / "_meta.json").write_text(json.dumps(data), encoding="utf-8")
     proposals = tier2_propose(tmp_path)
     assert len(proposals) == 1
-    assert proposals[0]["reason"] == "never accessed"
+    assert proposals[0]["reason"] == "never read and never written"
 
 

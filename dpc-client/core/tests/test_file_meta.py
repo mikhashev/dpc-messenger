@@ -112,12 +112,20 @@ def test_read_all_meta_triggers_backfill(tmp_path):
 
 
 def test_generate_smart_index_sections(tmp_path):
+    """Written with both stamps: a legacy entry carrying only `last_accessed` is
+    migrated to `last_written` on load, so writing one here would test the migration
+    rather than the sections."""
     now = datetime.now(timezone.utc)
+
+    def _seen(days_ago):
+        ts = (now - timedelta(days=days_ago)).isoformat()
+        return {"last_accessed": ts, "last_written": ts}
+
     data = {
-        "today.md": {"last_accessed": now.isoformat(), "summary": "Fresh topic"},
-        "recent.md": {"last_accessed": (now - timedelta(days=3)).isoformat(), "summary": "Recent topic"},
-        "old.md": {"last_accessed": (now - timedelta(days=15)).isoformat(), "summary": "Old topic"},
-        "stale.md": {"last_accessed": (now - timedelta(days=45)).isoformat(), "summary": "Stale topic"},
+        "today.md": {**_seen(0), "summary": "Fresh topic"},
+        "recent.md": {**_seen(3), "summary": "Recent topic"},
+        "old.md": {**_seen(15), "summary": "Old topic"},
+        "stale.md": {**_seen(45), "summary": "Stale topic"},
     }
     (tmp_path / "_meta.json").write_text(json.dumps(data), encoding="utf-8")
     content = generate_smart_index(tmp_path)

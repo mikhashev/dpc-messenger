@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from .registry import ToolEntry, ToolContext
+from ..memory import _BACKFILL_SKIP
 from ..utils import auto_commit_agent_change
 
 log = logging.getLogger(__name__)
@@ -114,6 +115,7 @@ def read_file(ctx: ToolContext, path: str, offset: int | None = None, limit: int
             return f"⚠️ Not a file: {path}"
 
         content = file_path.read_text(encoding="utf-8", errors="replace")
+        _record_knowledge_read(ctx, file_path)
         import os
         truncate_limit = 100000 if os.path.isabs(path) else 50000
         return _paginate_content(content, path, offset, limit, fallback_truncate=truncate_limit)
@@ -122,6 +124,26 @@ def read_file(ctx: ToolContext, path: str, offset: int | None = None, limit: int
         return f"⚠️ Access denied: {e}"
     except Exception as e:
         return f"⚠️ Error reading file: {e}"
+
+
+def _record_knowledge_read(ctx: ToolContext, file_path: Path) -> None:
+    """Credit a read to the document that was read.
+
+    The access registry only covers the agent's own knowledge directory — the shared
+    and external layers have no _meta.json to write to, and they are ranked by the
+    recall counter instead. Bookkeeping must never be the reason a read fails, so a
+    problem here is logged and swallowed: the content is already in hand.
+    """
+    knowledge_dir = ctx.agent_root / "knowledge"
+    try:
+        if file_path.parent.resolve() != knowledge_dir.resolve():
+            return
+        if file_path.name in _BACKFILL_SKIP:
+            return
+        from ..memory import update_access
+        update_access(knowledge_dir, file_path.name)
+    except Exception as e:
+        log.debug("Could not record read of %s: %s", file_path, e)
 
 
 # Legacy aliases for backward compatibility
@@ -210,7 +232,7 @@ def write_file(ctx: ToolContext, path: str, content: str) -> str:
 
         # Update _meta.json + regenerate smart _index.md for knowledge writes
         if not os.path.isabs(path) and path.startswith("knowledge/") and not path.endswith("_index.md"):
-            from ..memory import read_file_meta, write_file_meta, update_access
+            from ..memory import read_file_meta, write_file_meta, record_write
             knowledge_dir = ctx.agent_root / "knowledge"
             filename = Path(path).name
             meta = read_file_meta(knowledge_dir, filename)
@@ -218,7 +240,7 @@ def write_file(ctx: ToolContext, path: str, content: str) -> str:
                 meta.summary = content[:1000].strip()
                 meta.tags = [t for t in Path(path).stem.replace("_", "-").split("-") if len(t) > 2]
                 write_file_meta(knowledge_dir, filename, meta)
-            update_access(knowledge_dir, filename)
+            record_write(knowledge_dir, filename)
             # Incremental reindex for Active Recall (MEM-3.7)
             try:
                 agent = getattr(ctx, '_agent', None)

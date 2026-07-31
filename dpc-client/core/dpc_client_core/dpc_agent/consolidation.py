@@ -13,7 +13,7 @@ from typing import List
 
 from .memory import (
     read_all_meta, write_all_meta, read_file_meta, write_file_meta,
-    FileMeta, generate_smart_index,
+    FileMeta, generate_smart_index, last_touched,
 )
 
 log = logging.getLogger(__name__)
@@ -31,18 +31,14 @@ def tier1_consolidate(knowledge_dir: pathlib.Path) -> dict:
     stale_count = 0
 
     for fname, entry in all_meta.items():
-        ts = entry.get("last_accessed", "")
-        if not ts:
+        touched = last_touched(entry)
+        if touched is None:
             continue
-        try:
-            accessed = datetime.fromisoformat(ts.replace("Z", "+00:00"))
-            if (now - accessed).days > STALE_DAYS:
-                entry["stale"] = True
-                stale_count += 1
-            else:
-                entry["stale"] = False
-        except (ValueError, TypeError):
-            pass
+        if (now - touched).days > STALE_DAYS:
+            entry["stale"] = True
+            stale_count += 1
+        else:
+            entry["stale"] = False
 
     write_all_meta(knowledge_dir, all_meta)
     generate_smart_index(knowledge_dir)
@@ -59,26 +55,25 @@ def tier2_propose(knowledge_dir: pathlib.Path) -> List[dict]:
     now = datetime.now(timezone.utc)
 
     for fname, entry in all_meta.items():
-        ts = entry.get("last_accessed", "")
-        access_count = entry.get("access_count", 0)
+        touched = last_touched(entry)
+        read_count = entry.get("access_count", 0)
 
-        if not ts:
+        if touched is None:
             proposals.append({
                 "file": fname, "action": "archive",
-                "reason": "never accessed",
+                "reason": "never read and never written",
             })
             continue
 
-        try:
-            accessed = datetime.fromisoformat(ts.replace("Z", "+00:00"))
-            days = (now - accessed).days
-        except (ValueError, TypeError):
-            continue
-
-        if days > STALE_DAYS and access_count <= 1:
+        days = (now - touched).days
+        # Reads decide, and age is measured from the last sign of interest of either
+        # kind. A document read often is not a candidate however long ago it was
+        # written — which is exactly the case this code got wrong, because the number
+        # it called reads was counting writes.
+        if days > STALE_DAYS and read_count <= 1:
             proposals.append({
                 "file": fname, "action": "archive",
-                "reason": f"stale ({days} days, accessed {access_count} time(s))",
+                "reason": f"untouched for {days} days, read {read_count} time(s)",
             })
 
     return proposals
