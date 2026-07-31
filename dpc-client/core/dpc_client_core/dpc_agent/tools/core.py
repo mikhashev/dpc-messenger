@@ -48,10 +48,37 @@ def _paginate_content(content: str, path: str, offset: int | None, limit: int | 
     return content
 
 
+def _is_shared_knowledge_read(ctx: ToolContext, path: str) -> bool:
+    """Is this a read of the shared human knowledge layer the agent already indexes?
+
+    L6 lives at $DPC_HOME/knowledge, outside every agent sandbox, and is admitted to
+    an agent's index by can_agent_access_context('knowledge') — not by the extended
+    path list. So an agent can hold a document in its index, be offered it by Active
+    Recall, and then be refused the read, purely because the directory was never added
+    to a second, unrelated list. Honour the same permission that put it there.
+
+    Reads only. Write access to the shared layer stays where it was.
+    """
+    if not ctx.firewall:
+        return False
+    import os
+    dpc_home = Path(os.environ.get("DPC_HOME", Path.home() / ".dpc"))
+    knowledge_dir = (dpc_home / "knowledge").resolve()
+    try:
+        resolved = Path(path).expanduser().resolve()
+        resolved.relative_to(knowledge_dir)
+    except (ValueError, OSError):
+        return False
+    profile = getattr(getattr(ctx, "_agent", None), "_firewall_profile", None)
+    return bool(ctx.firewall.can_agent_access_context("knowledge", profile_name=profile))
+
+
 def _resolve_file_path(ctx: ToolContext, path: str, require_write: bool = False) -> Path:
     """Resolve path to a file: relative → sandbox, absolute → firewall-checked extended path."""
     import os
     if os.path.isabs(path):
+        if not require_write and _is_shared_knowledge_read(ctx, path):
+            return Path(path).expanduser().resolve()
         # Check extended path access gates (S31) — per-agent profile aware (S110 fix)
         if ctx.firewall:
             profile = getattr(getattr(ctx, "_agent", None), "_firewall_profile", None)

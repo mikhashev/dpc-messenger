@@ -244,10 +244,14 @@ class DpcAgent:
         all_tools_map = None
         sandbox_ro = None
         sandbox_rw = None
+        extended_read = True
         if self._firewall is not None:
             all_tools_map = self._firewall.get_agent_tools_map(self._firewall_profile)
             sandbox_ro = self._firewall.get_sandbox_read_only_paths(self._firewall_profile)
             sandbox_rw = self._firewall.get_sandbox_read_write_paths(self._firewall_profile)
+            # Read the same gate read_file will apply, so a recall hint for an external
+            # file either offers an address that works or admits it has none.
+            extended_read = self._firewall.get_extended_read_enabled(self._firewall_profile)
 
         messages, cap_info = build_llm_messages(
             agent_root=self.agent_root,
@@ -265,6 +269,7 @@ class DpcAgent:
             embedding_provider=self._embedding_provider,
             billing_model=self.config.billing_model,
             reader_identity=reader_identity,
+            extended_read_enabled=extended_read,
         )
 
         # Store cap_info for agent_manager to include in next request's session_state

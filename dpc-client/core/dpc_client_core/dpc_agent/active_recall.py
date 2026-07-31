@@ -16,6 +16,7 @@ from collections import Counter
 from typing import Dict, List, Optional
 
 from .hybrid_search import SearchResult
+from .index_keys import L5_PREFIX as L5_KEY_PREFIX, L6_PREFIX as L6_KEY_PREFIX
 from .utils import utc_now_iso
 
 log = logging.getLogger(__name__)
@@ -26,7 +27,42 @@ DECAY_FLOOR = 0.1
 GRACE_PERIOD_SESSIONS = 5
 
 
-def format_recall_hints(results: List[SearchResult], max_results: int = 3) -> str:
+def hint_address(meta: Dict, extended_read_enabled: bool = True) -> Optional[str]:
+    """What to pass to read_file() to actually get this document, or None if nothing works.
+
+    The index key names a document; it does not locate it. Only the agent's own
+    knowledge layer is named by a path read_file can follow, because that layer lives
+    inside the sandbox and its key is the sandbox-relative path. Everything else — the
+    shared human layer, every indexed external root — resolves through the absolute
+    path recorded at indexing time.
+
+    The two outside layers answer to different permissions, and only one of them is the
+    extended-read toggle. The shared layer is admitted to the index by the knowledge
+    gate, so a document already sitting in this index has proved that gate — read_file
+    honours the same one. External roots are the toggle's business, and when it is off
+    there is no address to give.
+
+    None means the file is genuinely out of reach right now, and the caller should say
+    so. Printing a path the agent cannot follow is how this went unnoticed for 102 days:
+    the hint looked helpful, the call failed, and nothing counted the failure.
+    """
+    key = meta.get("source_file", "")
+    if key.startswith(f"{L5_KEY_PREFIX}/"):
+        return key
+    source_path = meta.get("source_path", "")
+    if not source_path:
+        # Indexed before source_path was recorded. Nothing to resolve to.
+        return None
+    if key.startswith(f"{L6_KEY_PREFIX}/") or meta.get("source_layer") == "L6":
+        return source_path
+    return source_path if extended_read_enabled else None
+
+
+def format_recall_hints(
+    results: List[SearchResult],
+    max_results: int = 3,
+    extended_read_enabled: bool = True,
+) -> str:
     """Format search results as markdown hints for Block2 injection."""
     if not results:
         return ""
@@ -43,7 +79,17 @@ def format_recall_hints(results: List[SearchResult], max_results: int = 3) -> st
         filename = meta.get("source_file", "unknown")
         heading = meta.get("heading", "")
         label = f"{heading}" if heading else filename
-        lines.append(f"[{source}] {filename}: {label} — call read_file(\"{filename}\") for details")
+        excerpt = _excerpt(meta)
+        address = hint_address(meta, extended_read_enabled)
+        if address:
+            action = f'call read_file("{address}") for details'
+        else:
+            # An honest dead end beats a plausible one: the agent stops instead of
+            # spending a round guessing at spellings of a path it cannot reach.
+            action = "not readable from here — extended path read access is off"
+        lines.append(f"[{source}] {filename}: {label} — {action}")
+        if excerpt:
+            lines.append(f"    {excerpt}")
     lines.append("--- END RECALL ---")
     lines.append("")
     return "\n".join(lines)
@@ -76,6 +122,7 @@ def get_recall_block(
     context_usage_ratio: float = 0.0,
     max_results: int = 3,
     agent_root: Optional[pathlib.Path] = None,
+    extended_read_enabled: bool = True,
 ) -> str:
     """Get the appropriate recall block based on context budget and decay scoring."""
     mode = should_inject(context_usage_ratio)
@@ -88,7 +135,7 @@ def get_recall_block(
         _log_knowledge_access(injected, mode, agent_root)
     if mode == "hints":
         return format_hints_only(results, max_results)
-    return format_recall_hints(results, max_results)
+    return format_recall_hints(results, max_results, extended_read_enabled)
 
 
 def _build_access_counts(agent_root: pathlib.Path) -> Dict[str, int]:

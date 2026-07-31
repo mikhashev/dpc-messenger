@@ -372,6 +372,7 @@ def build_llm_messages(
     embedding_provider: Optional[Any] = None,
     billing_model: str = "subscription",
     reader_identity: Optional[Dict[str, str]] = None,
+    extended_read_enabled: bool = True,
 ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
     """
     Build the full LLM message context for a task.
@@ -394,6 +395,9 @@ def build_llm_messages(
         all_tools: Dict of all tool names → default enabled from firewall
         sandbox_read_only: Extended sandbox read-only paths from firewall
         sandbox_read_write: Extended sandbox read-write paths from firewall
+        extended_read_enabled: Whether the agent may read outside its sandbox. Decides
+                               whether an Active Recall hint for an external file can
+                               offer an address at all, or has to say it cannot.
 
     Returns:
         (messages, cap_info) tuple:
@@ -503,7 +507,10 @@ def build_llm_messages(
 
                 _results = _backend.fuser.fuse(_faiss_results, _keyword_results, graph_results=_graph_results)
                 _ctx_ratio = (session_state or {}).get("context_usage_percent", 0) / 100.0
-                _recall = get_recall_block(_results, context_usage_ratio=_ctx_ratio, agent_root=agent_root)
+                _recall = get_recall_block(
+                    _results, context_usage_ratio=_ctx_ratio, agent_root=agent_root,
+                    extended_read_enabled=extended_read_enabled,
+                )
                 if _recall:
                     _mode = "full" if _ctx_ratio < 0.5 else "hints"
                     _summary = ", ".join(
