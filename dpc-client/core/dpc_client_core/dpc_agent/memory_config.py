@@ -18,6 +18,10 @@ class MemoryConfig:
     max_recall_results: int = 3
     memory_provider: Optional[str] = None
     auto_index: bool = True
+    # Texts per embedding call. Kept modest on purpose: indexing shares the GPU with
+    # whatever else the client has resident (a Whisper model, a local LLM), and a
+    # batch large enough to spill into shared memory turns a fast pass into paging.
+    batch_size: int = 16
 
     @classmethod
     def from_dict(cls, data: dict) -> "MemoryConfig":

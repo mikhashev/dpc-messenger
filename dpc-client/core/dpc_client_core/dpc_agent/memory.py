@@ -248,6 +248,32 @@ def _get_disk_cache() -> "_EmbeddingDiskCache":
     return _disk_cache
 
 
+_OOM_MARKERS = ("out of memory", "outofmemory", "cuda error", "cublas_status_alloc_failed")
+
+
+def _is_out_of_memory(exc: Exception) -> bool:
+    """Recognise an allocation failure without importing torch just to ask.
+
+    Matched on the message rather than the type because the same condition surfaces as
+    torch.cuda.OutOfMemoryError, a bare RuntimeError, or a MemoryError depending on
+    backend and platform.
+    """
+    if isinstance(exc, MemoryError):
+        return True
+    text = f"{type(exc).__name__} {exc}".lower()
+    return any(marker in text for marker in _OOM_MARKERS)
+
+
+def _release_device_memory() -> None:
+    """Hand freed blocks back before retrying, or the retry meets the same ceiling."""
+    try:
+        import torch
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+    except Exception:
+        pass
+
+
 class EmbeddingProvider:
     """Lazy-loading embedding provider. BGE-M3 via sentence-transformers + PyTorch."""
 
@@ -312,6 +338,30 @@ class EmbeddingProvider:
         cache.put(text, result)
         return result
 
+    def _encode_within_memory(self, texts: List[str]) -> List[List[float]]:
+        """Encode, halving the batch whenever the device says it cannot hold it.
+
+        Peak memory here is batch size times sequence length, and neither is under our
+        control: documents arrive whole and the model truncates at its own ceiling, so a
+        batch that is comfortable on a 32 GB card can be impossible on a laptop sharing
+        its VRAM with a resident speech or chat model. Rather than pick a number that is
+        safe everywhere and slow everywhere, back off on the machine that says no. A
+        single text that still does not fit is re-raised: halving cannot rescue it, and
+        silently dropping a document would leave a hole in the index nobody would notice.
+        """
+        try:
+            return self._model.encode(texts, normalize_embeddings=True).tolist()
+        except Exception as e:
+            if not _is_out_of_memory(e) or len(texts) == 1:
+                raise
+            half = len(texts) // 2
+            log.warning(
+                "Embedding batch of %d did not fit in memory (%s) — retrying as two halves",
+                len(texts), type(e).__name__,
+            )
+            _release_device_memory()
+            return self._encode_within_memory(texts[:half]) + self._encode_within_memory(texts[half:])
+
     def embed_batch(self, texts: List[str]) -> List[List[float]]:
         self._load_model()
         import numpy as np
@@ -327,7 +377,7 @@ class EmbeddingProvider:
         if misses:
             miss_texts = [t for _, t in misses]
             with self._gpu_semaphore:
-                vectors = self._model.encode(miss_texts, normalize_embeddings=True).tolist()
+                vectors = self._encode_within_memory(miss_texts)
             for (idx, text), vec in zip(misses, vectors):
                 cache.put(text, vec)
                 results[idx] = vec

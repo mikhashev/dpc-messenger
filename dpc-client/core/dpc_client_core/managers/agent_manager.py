@@ -484,7 +484,7 @@ class DpcAgentManager:
                                         backend.vector.remove_by_source(sf)
                                         backend.text.remove_by_source(sf)
 
-                            BATCH_SIZE = 8
+                            BATCH_SIZE = max(1, int(mem_cfg.batch_size))
                             embedded = 0
                             if to_embed:
                                 if hasattr(backend.text, "begin_batch"):

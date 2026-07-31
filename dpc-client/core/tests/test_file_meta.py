@@ -96,9 +96,9 @@ def test_backfill_extracts_tags_from_filename(tmp_path):
 
 
 def test_backfill_summary_truncates(tmp_path):
-    (tmp_path / "long.md").write_text("A" * 500, encoding="utf-8")
+    (tmp_path / "long.md").write_text("A" * 5000, encoding="utf-8")
     data = backfill_meta(tmp_path)
-    assert len(data["long.md"]["summary"]) == 200
+    assert len(data["long.md"]["summary"]) == 1000
 
 
 def test_read_all_meta_triggers_backfill(tmp_path):
@@ -149,8 +149,8 @@ def test_update_access_triggers_index_refresh(tmp_path):
 
 def test_embedding_provider_defaults():
     p = EmbeddingProvider()
-    assert p.model_name == "intfloat/multilingual-e5-small"
-    assert p.max_tokens == 512
+    assert p.model_name == "BAAI/bge-m3"
+    assert p.max_tokens == 4096
     assert p._model is None
 
 
@@ -161,8 +161,22 @@ def test_embedding_provider_custom_config():
     assert p.max_tokens == 256
 
 
-def test_embedding_provider_embed_returns_list():
+def test_embedding_provider_embed_returns_list(monkeypatch):
+    """The cache is bypassed on purpose: without this the assertion depends on whether
+    a previous run left this text in the user's on-disk cache, so `encode` may never be
+    called and the test passes or fails by accident of machine state."""
     import numpy as np
+
+    class _NeverCached:
+        def get(self, text):
+            return None
+
+        def put(self, text, vec):
+            pass
+
+    monkeypatch.setattr(
+        "dpc_client_core.dpc_agent.memory._get_disk_cache", lambda: _NeverCached()
+    )
     mock_model = MagicMock()
     mock_model.encode.return_value = np.array([0.1, 0.2, 0.3])
     p = EmbeddingProvider()
