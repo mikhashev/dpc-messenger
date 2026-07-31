@@ -55,8 +55,8 @@ def test_namesakes_in_different_layers_count_separately(agent_root):
     _injections(agent_root, *[["EXT/brainbake/README.md"]] * 5)
 
     counts = _build_access_counts(agent_root)
-    assert counts.for_document({"source_file": "EXT/dpc-messenger/README.md"}) == 1
-    assert counts.for_document({"source_file": "EXT/brainbake/README.md"}) == 5
+    assert counts.injections_for({"source_file": "EXT/dpc-messenger/README.md"}) == 1
+    assert counts.injections_for({"source_file": "EXT/brainbake/README.md"}) == 5
 
 
 def test_a_new_file_inherits_nothing_from_its_namesakes(agent_root):
@@ -73,9 +73,7 @@ def test_a_read_by_absolute_path_credits_the_indexed_document(agent_root):
     real = str(pathlib.Path(agent_root) / "projects" / "repo" / "backlog.md")
     _reads(agent_root, real)
     counts = _build_access_counts(agent_root)
-    assert counts.for_document(
-        {"source_file": "EXT/repo/backlog.md", "source_path": real}
-    ) == 1
+    assert counts.reads_for({"source_file": "EXT/repo/backlog.md", "source_path": real}) == 1
 
 
 def test_the_same_place_spelled_differently_is_the_same_place(agent_root):
@@ -83,14 +81,23 @@ def test_the_same_place_spelled_differently_is_the_same_place(agent_root):
     awkward = str(pathlib.Path(agent_root) / "projects" / "x" / ".." / "repo" / "backlog.md")
     _reads(agent_root, awkward)
     counts = _build_access_counts(agent_root)
-    assert counts.for_document({"source_file": "EXT/repo/backlog.md", "source_path": str(real)}) == 1
+    assert counts.reads_for({"source_file": "EXT/repo/backlog.md", "source_path": str(real)}) == 1
 
 
 def test_a_sandbox_read_credits_by_key(agent_root):
     """The agent's own layer is addressed by its key, so the read arrives as one."""
     _reads(agent_root, "knowledge/protocol-13.md")
     counts = _build_access_counts(agent_root)
-    assert counts.for_document({"source_file": "knowledge/protocol-13.md"}) == 1
+    assert counts.reads_for({"source_file": "knowledge/protocol-13.md"}) == 1
+
+
+def test_a_relative_address_typed_with_the_native_separator_still_matches(agent_root):
+    """Index keys are always forward-slashed; an agent on Windows may not be."""
+    _reads(agent_root, os.path.join("knowledge", "protocol-13.md"))
+    _reads(agent_root, "./knowledge/other.md")
+    counts = _build_access_counts(agent_root)
+    assert counts.reads_for({"source_file": "knowledge/protocol-13.md"}) == 1
+    assert counts.reads_for({"source_file": "knowledge/other.md"}) == 1
 
 
 def test_reads_of_files_that_are_not_indexed_match_nothing(agent_root):
@@ -106,7 +113,41 @@ def test_skill_invocations_do_not_enter_the_counter(agent_root):
     with open(agent_root / "logs" / "tools.jsonl", "a", encoding="utf-8") as f:
         f.write(json.dumps({"tool": "execute_skill", "args": {"skill_name": "deploy"}}) + "\n")
     counts = _build_access_counts(agent_root)
-    assert counts.by_key == {} and counts.by_path == {}
+    assert not counts
+
+
+# --- showing a document is not the same evidence as reading it ---
+
+
+def test_no_number_of_injections_outranks_a_single_read(agent_root):
+    """The loop this closes: the count that decides what to show was raised by showing."""
+    _injections(agent_root, *[["knowledge/shown.md"]] * 5000)
+    _reads(agent_root, "knowledge/read-once.md")
+
+    counts = _build_access_counts(agent_root)
+    assert counts.for_document({"source_file": "knowledge/read-once.md"}) > counts.for_document(
+        {"source_file": "knowledge/shown.md"}
+    )
+    ranked = _apply_decay([_doc("knowledge/shown.md"), _doc("knowledge/read-once.md")], agent_root)
+    assert ranked[0].chunk_meta["source_file"] == "knowledge/read-once.md"
+
+
+def test_injections_still_order_documents_nobody_has_read(agent_root):
+    """The weak signal is kept, not discarded — it is the only one such files have."""
+    _injections(agent_root, *[["knowledge/often.md"]] * 15)
+    _injections(agent_root, ["knowledge/once.md"])
+    ranked = _apply_decay([_doc("knowledge/once.md"), _doc("knowledge/often.md")], agent_root)
+    assert ranked[0].chunk_meta["source_file"] == "knowledge/often.md"
+
+
+def test_repeated_injection_cannot_lift_a_file_indefinitely(agent_root):
+    """Past saturation the only way up is to be read."""
+    _injections(agent_root, *[["knowledge/a.md"]] * 20)
+    _injections(agent_root, *[["knowledge/b.md"]] * 4000)
+    counts = _build_access_counts(agent_root)
+    assert counts.for_document({"source_file": "knowledge/a.md"}) == counts.for_document(
+        {"source_file": "knowledge/b.md"}
+    )
 
 
 # --- what the normaliser is allowed to depend on ---
@@ -114,9 +155,9 @@ def test_skill_invocations_do_not_enter_the_counter(agent_root):
 
 def test_an_unrelated_popular_file_cannot_push_the_candidates_onto_the_floor(agent_root):
     """This is what a project README did to 1791 documents."""
-    _injections(agent_root, *[["EXT/somewhere/README.md"]] * 4000)
-    _injections(agent_root, *[["knowledge/used.md"]] * 8)
-    _injections(agent_root, ["knowledge/rare.md"])
+    _reads(agent_root, *["EXT/somewhere/README.md"] * 4000)
+    _reads(agent_root, *["knowledge/used.md"] * 8)
+    _reads(agent_root, "knowledge/rare.md")
 
     results = [_doc("knowledge/rare.md"), _doc("knowledge/used.md")]
     ranked = _apply_decay(results, agent_root)

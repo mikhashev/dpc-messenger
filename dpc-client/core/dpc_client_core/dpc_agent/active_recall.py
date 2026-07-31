@@ -27,6 +27,13 @@ CONTEXT_THRESHOLD_SKIP = 0.7
 DECAY_FLOOR = 0.1
 GRACE_PERIOD_SESSIONS = 5
 
+# What an injection is worth next to a read. Bounded strictly below 1.0, the value of
+# a single read, so no amount of showing a document can outrank one act of opening it.
+# Saturation is where extra showings stop adding anything: past it the only way up is
+# to be read.
+INJECTION_MAX_CREDIT = 0.9
+INJECTION_SATURATION = 20
+
 
 def hint_address(meta: Dict, extended_read_enabled: bool = True) -> Optional[str]:
     """What to pass to read_file() to actually get this document, or None if nothing works.
@@ -141,32 +148,68 @@ def get_recall_block(
 
 @dataclass
 class AccessCounts:
-    """How often each document was touched, in the two vocabularies we have.
+    """How often each document was shown and how often it was read, kept apart.
 
-    The two sources name documents differently and neither can be translated into
-    the other without guessing. The injection log records index keys, because that is
-    what the index hands it. A read records whatever string the agent passed to
-    read_file — the sandbox-relative key for its own layer, an absolute path for
-    anything outside it. So keep both and let the lookup ask in both languages: a
-    document knows its own key and its own path.
+    Two vocabularies, because the two sources name documents differently and neither
+    can be translated into the other without guessing. The injection log records index
+    keys, since that is what the index hands it. A read records whatever string the
+    agent passed to read_file — the sandbox-relative key for its own layer, an
+    absolute path for anything outside it. So keep both and let the lookup ask in both
+    languages: a document knows its own key and its own path.
+
+    And two kinds of event, because they are not the same evidence. Showing a document
+    is something we did; reading it is something the agent chose. Adding them made the
+    number that decides what to show rise by showing it — a file floated because it
+    had been offered before, not because it had ever helped.
+
+    So a read outranks any number of injections, always: injections earn a bounded
+    credit that cannot reach the value of a single read. Within that bound they still
+    order documents nobody has read yet, which is the weak signal worth keeping rather
+    than discarding. Turning "shown and never read" into an actual penalty is a
+    different claim, and it needs evidence we do not have yet — the loop has been
+    closed for hours, not weeks.
     """
 
-    by_key: Dict[str, int]
-    by_path: Dict[str, int]
+    injections_by_key: Dict[str, int]
+    reads_by_key: Dict[str, int]
+    reads_by_path: Dict[str, int]
 
-    def for_document(self, meta: Dict) -> int:
-        n = self.by_key.get(meta.get("source_file", ""), 0)
+    def reads_for(self, meta: Dict) -> int:
+        n = self.reads_by_key.get(meta.get("source_file", ""), 0)
         source_path = meta.get("source_path", "")
         if source_path:
-            n += self.by_path.get(_norm_path(source_path), 0)
+            n += self.reads_by_path.get(_norm_path(source_path), 0)
         return n
 
+    def injections_for(self, meta: Dict) -> int:
+        return self.injections_by_key.get(meta.get("source_file", ""), 0)
+
+    def for_document(self, meta: Dict) -> float:
+        """Evidence that this document is worth showing again, reads first."""
+        shown = self.injections_for(meta)
+        credit = min(1.0, shown / INJECTION_SATURATION) * INJECTION_MAX_CREDIT if shown else 0.0
+        return self.reads_for(meta) + credit
+
     def __bool__(self) -> bool:
-        return bool(self.by_key or self.by_path)
+        return bool(self.injections_by_key or self.reads_by_key or self.reads_by_path)
 
 
 def _norm_path(path: str) -> str:
     return os.path.normcase(os.path.normpath(path))
+
+
+def _norm_key(path: str) -> str:
+    """A relative address as the index would spell it.
+
+    Index keys always use forward slashes (they are built with as_posix), while an
+    agent on Windows may well type or copy a backslash. Only the native separator is
+    rewritten: on POSIX a backslash is a legal character in a filename, not a
+    separator, and rewriting it there would invent a different document.
+    """
+    key = path.replace(os.sep, "/")
+    if os.altsep:
+        key = key.replace(os.altsep, "/")
+    return key[2:] if key.startswith("./") else key
 
 
 def _build_access_counts(agent_root: pathlib.Path) -> AccessCounts:
@@ -183,8 +226,9 @@ def _build_access_counts(agent_root: pathlib.Path) -> AccessCounts:
     that no document can ever match, so their only effect was to raise the
     normaliser — the same defect in miniature.
     """
-    by_key: Dict[str, int] = Counter()
-    by_path: Dict[str, int] = Counter()
+    injections_by_key: Dict[str, int] = Counter()
+    reads_by_key: Dict[str, int] = Counter()
+    reads_by_path: Dict[str, int] = Counter()
 
     # Source 1: hints injected into context (knowledge_access.jsonl), recorded by key.
     live_path = agent_root / "state" / "knowledge_access.jsonl"
@@ -195,7 +239,7 @@ def _build_access_counts(agent_root: pathlib.Path) -> AccessCounts:
                     continue
                 entry = json.loads(line)
                 for f in entry.get("files", []):
-                    by_key[f] += 1
+                    injections_by_key[f] += 1
         except (json.JSONDecodeError, OSError):
             pass
 
@@ -216,13 +260,17 @@ def _build_access_counts(agent_root: pathlib.Path) -> AccessCounts:
                 # That stood in for "is this a knowledge file" and got it wrong both
                 # ways. A path that names no indexed document simply matches nothing.
                 if os.path.isabs(path_val):
-                    by_path[_norm_path(path_val)] += 1
+                    reads_by_path[_norm_path(path_val)] += 1
                 else:
-                    by_key[path_val] += 1
+                    reads_by_key[_norm_key(path_val)] += 1
         except (json.JSONDecodeError, OSError):
             pass
 
-    return AccessCounts(by_key=dict(by_key), by_path=dict(by_path))
+    return AccessCounts(
+        injections_by_key=dict(injections_by_key),
+        reads_by_key=dict(reads_by_key),
+        reads_by_path=dict(reads_by_path),
+    )
 
 
 def _apply_decay(
