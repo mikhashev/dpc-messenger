@@ -13,6 +13,7 @@ import logging
 import os
 import pathlib
 from collections import Counter
+from dataclasses import dataclass
 from typing import Dict, List, Optional
 
 from .hybrid_search import SearchResult
@@ -138,14 +139,54 @@ def get_recall_block(
     return format_recall_hints(results, max_results, extended_read_enabled)
 
 
-def _build_access_counts(agent_root: pathlib.Path) -> Dict[str, int]:
-    """Build access frequency map from live JSONL + retroactive tools.jsonl.
+@dataclass
+class AccessCounts:
+    """How often each document was touched, in the two vocabularies we have.
 
-    Sources: S1 live data, retroactive knowledge reads, skill usage (S8).
+    The two sources name documents differently and neither can be translated into
+    the other without guessing. The injection log records index keys, because that is
+    what the index hands it. A read records whatever string the agent passed to
+    read_file — the sandbox-relative key for its own layer, an absolute path for
+    anything outside it. So keep both and let the lookup ask in both languages: a
+    document knows its own key and its own path.
     """
-    counts: Dict[str, int] = Counter()
 
-    # Source 1: live knowledge_access.jsonl (S1 data)
+    by_key: Dict[str, int]
+    by_path: Dict[str, int]
+
+    def for_document(self, meta: Dict) -> int:
+        n = self.by_key.get(meta.get("source_file", ""), 0)
+        source_path = meta.get("source_path", "")
+        if source_path:
+            n += self.by_path.get(_norm_path(source_path), 0)
+        return n
+
+    def __bool__(self) -> bool:
+        return bool(self.by_key or self.by_path)
+
+
+def _norm_path(path: str) -> str:
+    return os.path.normcase(os.path.normpath(path))
+
+
+def _build_access_counts(agent_root: pathlib.Path) -> AccessCounts:
+    """Count accesses per document, keyed by what identifies a document.
+
+    It used to count by bare filename. Measured on the live agents before this
+    change: `README.md` was one bucket holding 49 different files with 4109 accesses
+    between them, and it set the normaliser for everything else — so 1791 of
+    agent_001's 1855 documents sat on the decay floor and decay ranked nothing, it
+    divided everything by ten. A file also inherited the standing of every namesake
+    the moment it was created, which is not bias, it is the wrong number.
+
+    Skill invocations are no longer counted here. They were, under a `skill:` key
+    that no document can ever match, so their only effect was to raise the
+    normaliser — the same defect in miniature.
+    """
+    by_key: Dict[str, int] = Counter()
+    by_path: Dict[str, int] = Counter()
+
+    # Source 1: hints injected into context (knowledge_access.jsonl), recorded by key.
     live_path = agent_root / "state" / "knowledge_access.jsonl"
     if live_path.exists():
         try:
@@ -154,35 +195,34 @@ def _build_access_counts(agent_root: pathlib.Path) -> Dict[str, int]:
                     continue
                 entry = json.loads(line)
                 for f in entry.get("files", []):
-                    counts[os.path.basename(f)] += 1
+                    by_key[f] += 1
         except (json.JSONDecodeError, OSError):
             pass
 
-    # Source 2 + S8: retroactive baseline from tools.jsonl (knowledge reads + skill usage)
+    # Source 2: reads the agent actually performed (tools.jsonl), recorded by address.
     tools_path = agent_root / "logs" / "tools.jsonl"
     if tools_path.exists():
         try:
-            for line in tools_path.read_text(encoding="utf-8").strip().split("\n"):
+            for line in tools_path.read_text(encoding="utf-8", errors="replace").strip().split("\n"):
                 if not line.strip():
                     continue
                 entry = json.loads(line)
-                tool = entry.get("tool", "")
-                args = entry.get("args", {})
-                path_val = args.get("path", "")
-                if tool == "read_file" and "knowledge" in path_val.lower():
-                    counts[os.path.basename(path_val)] += 1
-                elif tool == "execute_skill":
-                    skill_name = args.get("skill_name", args.get("name", ""))
-                    if skill_name:
-                        counts[f"skill:{skill_name}"] += 1
+                if entry.get("tool", "") != "read_file":
+                    continue
+                path_val = str((entry.get("args") or {}).get("path", ""))
+                if not path_val:
+                    continue
+                # No filtering by whether the word "knowledge" appears in the path.
+                # That stood in for "is this a knowledge file" and got it wrong both
+                # ways. A path that names no indexed document simply matches nothing.
+                if os.path.isabs(path_val):
+                    by_path[_norm_path(path_val)] += 1
+                else:
+                    by_key[path_val] += 1
         except (json.JSONDecodeError, OSError):
             pass
 
-    # S9: startup init — if no live data yet, ensure retro baseline is used
-    if not live_path.exists() and counts:
-        log.debug("S9 startup: no live knowledge_access.jsonl, using retroactive baseline only")
-
-    return dict(counts)
+    return AccessCounts(by_key=dict(by_key), by_path=dict(by_path))
 
 
 def _apply_decay(
@@ -191,23 +231,25 @@ def _apply_decay(
     """Re-rank results by access frequency. Unused files sink, used files float.
 
     ADR-013 S4: decay floor 0.1, grace period for new files.
+
+    Normalised against the candidates being ranked, not against every number in the
+    log. Decay decides an order within one result set, and only ratios inside that set
+    can affect the order — while a global maximum lets a file nobody is considering
+    push the whole set onto the floor, which is what a project README did.
     """
     counts = _build_access_counts(agent_root)
     if not counts:
         return results
 
-    max_count = max(counts.values()) if counts else 1
+    accesses = [counts.for_document(r.chunk_meta) for r in results]
+    max_count = max(accesses, default=0)
+    if max_count <= 0:
+        return results
 
-    scored = []
-    for r in results:
-        filename = os.path.basename(r.chunk_meta.get("source_file", ""))
-        access = counts.get(filename, 0)
-        if access == 0:
-            decay_multiplier = DECAY_FLOOR
-        else:
-            decay_multiplier = max(DECAY_FLOOR, access / max_count)
-        scored.append((r, r.score * decay_multiplier))
-
+    scored = [
+        (r, r.score * (max(DECAY_FLOOR, access / max_count) if access else DECAY_FLOOR))
+        for r, access in zip(results, accesses)
+    ]
     scored.sort(key=lambda x: -x[1])
     return [r for r, _ in scored]
 
