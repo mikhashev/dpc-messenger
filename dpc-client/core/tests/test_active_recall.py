@@ -41,22 +41,37 @@ def test_should_inject_modes():
 
 def test_get_recall_block_full():
     results = [_make_result()]
-    block = get_recall_block(results, context_usage_ratio=0.2)
-    assert "ACTIVE RECALL" in block
+    injection = get_recall_block(results, context_usage_ratio=0.2)
+    assert "ACTIVE RECALL" in injection.text
+    assert injection.mode == "full"
 
 
 def test_get_recall_block_hints():
     results = [_make_result()]
-    block = get_recall_block(results, context_usage_ratio=0.55)
-    assert "RECALL HINTS" in block
+    injection = get_recall_block(results, context_usage_ratio=0.55)
+    assert "RECALL HINTS" in injection.text
+    assert injection.mode == "hints"
 
 
 def test_get_recall_block_skip():
     results = [_make_result()]
-    block = get_recall_block(results, context_usage_ratio=0.8)
-    assert block == ""
+    injection = get_recall_block(results, context_usage_ratio=0.8)
+    assert not injection
+    assert injection.text == ""
+    assert injection.injected == []
 
 
 def test_empty_results():
     assert format_recall_hints([]) == ""
-    assert get_recall_block([], 0.0) == ""
+    assert not get_recall_block([], 0.0)
+
+
+def test_the_report_names_what_went_in_not_what_was_considered():
+    """The count used to be the size of the candidate pool: 26 hints for 3 slots."""
+    results = [_make_result(f"doc{i}.md") for i in range(26)]
+    injection = get_recall_block(results, context_usage_ratio=0.2, max_results=3)
+    assert len(injection.injected) == 3
+    assert [r.chunk_meta["source_file"] for r in injection.injected] == [
+        "doc0.md", "doc1.md", "doc2.md"
+    ]
+    assert injection.summary().count(",") == 2

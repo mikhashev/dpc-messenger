@@ -13,7 +13,7 @@ import logging
 import os
 import pathlib
 from collections import Counter
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Dict, List, Optional
 
 from .hybrid_search import SearchResult
@@ -125,25 +125,51 @@ def format_hints_only(results: List[SearchResult], max_results: int = 3) -> str:
     return f"Active Recall\n--- RECALL HINTS: {', '.join(names)} ---\n"
 
 
+@dataclass
+class RecallInjection:
+    """What was actually put into the context, said by the code that put it there.
+
+    The caller used to describe this from the outside: it logged the size of the
+    candidate pool as the number of hints, re-derived the mode from the ratio, and
+    printed the fusion scores from before decay re-ordered them. Three chances to
+    describe something other than what happened, and it took all three — so the log
+    we would check today's work against reported a different event.
+
+    Reporting from here costs nothing, because this is the code that made the choice.
+    """
+
+    text: str
+    mode: str
+    injected: List[SearchResult]
+
+    def summary(self) -> str:
+        return ", ".join(
+            f"{r.chunk_meta.get('source_file', '?')}({r.score:.3f})" for r in self.injected
+        )
+
+    def __bool__(self) -> bool:
+        return bool(self.text)
+
+
 def get_recall_block(
     results: List[SearchResult],
     context_usage_ratio: float = 0.0,
     max_results: int = 3,
     agent_root: Optional[pathlib.Path] = None,
     extended_read_enabled: bool = True,
-) -> str:
+) -> RecallInjection:
     """Get the appropriate recall block based on context budget and decay scoring."""
     mode = should_inject(context_usage_ratio)
     if mode == "skip":
-        return ""
+        return RecallInjection(text="", mode=mode, injected=[])
     if agent_root and results:
         results = _apply_decay(results, agent_root)
     injected = results[:max_results]
     if agent_root and injected:
         _log_knowledge_access(injected, mode, agent_root)
-    if mode == "hints":
-        return format_hints_only(results, max_results)
-    return format_recall_hints(results, max_results, extended_read_enabled)
+    text = (format_hints_only(results, max_results) if mode == "hints"
+            else format_recall_hints(results, max_results, extended_read_enabled))
+    return RecallInjection(text=text, mode=mode, injected=injected if text else [])
 
 
 @dataclass
@@ -294,12 +320,15 @@ def _apply_decay(
     if max_count <= 0:
         return results
 
+    # The decayed score is the score: it is what decided the order, so it is what a
+    # reader of the log needs to see. Keeping the pre-decay number on the result meant
+    # the printed ranking and the printed numbers disagreed with each other.
     scored = [
-        (r, r.score * (max(DECAY_FLOOR, access / max_count) if access else DECAY_FLOOR))
+        replace(r, score=r.score * (max(DECAY_FLOOR, access / max_count) if access else DECAY_FLOOR))
         for r, access in zip(results, accesses)
     ]
-    scored.sort(key=lambda x: -x[1])
-    return [r for r, _ in scored]
+    scored.sort(key=lambda r: -r.score)
+    return scored
 
 
 def _log_knowledge_access(

@@ -512,14 +512,14 @@ def build_llm_messages(
                     extended_read_enabled=extended_read_enabled,
                 )
                 if _recall:
-                    _mode = "full" if _ctx_ratio < 0.5 else "hints"
-                    _summary = ", ".join(
-                        f"{r.chunk_meta.get('source_file', '?')}({r.score:.2f})"
-                        for r in _results
-                    )
-                    log.info("Active Recall injected %d hints (mode=%s): %s",
-                             len(_results), _mode, _summary)
-                    semi_stable_parts.append(_recall)
+                    # Reported by the code that made the choice, not reconstructed
+                    # here: the count is what went in rather than what was considered,
+                    # the order and scores are post-decay, and the mode is the one that
+                    # was acted on instead of a second reading of the threshold.
+                    log.info("Active Recall injected %d of %d candidates (mode=%s): %s",
+                             len(_recall.injected), len(_results), _recall.mode,
+                             _recall.summary())
+                    semi_stable_parts.append(_recall.text)
                 else:
                     log.debug("Active Recall: no results matched query")
             except Exception:

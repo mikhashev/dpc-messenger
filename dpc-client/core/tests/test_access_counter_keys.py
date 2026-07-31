@@ -175,6 +175,21 @@ def test_a_document_nobody_touched_sinks_below_one_that_was(agent_root):
     assert ranked[0].chunk_meta["source_file"] == "knowledge/used.md"
 
 
+def test_the_reported_order_and_scores_are_the_ones_that_decided_it(agent_root):
+    """The log printed the fusion score while the order came from decay, so the two
+    contradicted each other on every line."""
+    from dpc_client_core.dpc_agent.active_recall import get_recall_block
+
+    _reads(agent_root, *["knowledge/used.md"] * 10)
+    results = [_doc("knowledge/rare.md", score=0.9), _doc("knowledge/used.md", score=0.4)]
+
+    injection = get_recall_block(results, context_usage_ratio=0.2, agent_root=agent_root)
+    reported = injection.injected
+    assert [r.chunk_meta["source_file"] for r in reported] == ["knowledge/used.md", "knowledge/rare.md"]
+    # Ranked first, so its printed number must be the larger one.
+    assert reported[0].score > reported[1].score
+
+
 def test_no_access_data_leaves_the_order_alone(agent_root):
     results = [_doc("knowledge/a.md", score=0.4), _doc("knowledge/b.md", score=0.9)]
     assert _apply_decay(results, agent_root) == results
