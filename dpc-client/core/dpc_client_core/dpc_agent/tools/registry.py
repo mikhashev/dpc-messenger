@@ -16,6 +16,7 @@ ToolRegistry collects all tools, provides schemas() and execute().
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import logging
 import pathlib
@@ -25,6 +26,42 @@ from typing import Any, Callable, Dict, List, Optional
 from ..utils import safe_relpath, is_path_in_sandbox, get_agent_root
 
 log = logging.getLogger(__name__)
+
+# Names models reach for that mean a parameter we already have. Renaming beats
+# failing the call: the intent is unambiguous and the alternative is a round spent
+# on a TypeError the model then has to guess its way out of.
+ARG_ALIASES: Dict[str, str] = {
+    "file_path": "path",
+    "filepath": "path",
+}
+
+
+def _resolve_arg_aliases(handler: Callable, args: Dict[str, Any], tool_name: str) -> Dict[str, Any]:
+    """Rename an aliased argument onto the parameter the handler actually takes.
+
+    Only when the rename is unambiguous: the handler must accept the canonical name
+    and not the alias, and the caller must not have supplied both. Anything else is
+    left alone so a genuine argument error still surfaces as one.
+    """
+    if not args or not any(alias in args for alias in ARG_ALIASES):
+        return args
+
+    try:
+        params = inspect.signature(handler).parameters
+    except (TypeError, ValueError):
+        return args
+    if any(p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values()):
+        return args
+
+    resolved = dict(args)
+    for alias, canonical in ARG_ALIASES.items():
+        if alias not in resolved:
+            continue
+        if alias in params or canonical not in params or canonical in resolved:
+            continue
+        resolved[canonical] = resolved.pop(alias)
+        log.debug("Tool %s: argument %r accepted as %r", tool_name, alias, canonical)
+    return resolved
 
 
 @dataclass
@@ -402,6 +439,8 @@ class ToolRegistry:
         # Check whitelist
         if _ctx.tool_whitelist and name not in _ctx.tool_whitelist:
             return f"⚠️ Tool '{name}' is not in the allowed tools list"
+
+        args = _resolve_arg_aliases(entry.handler, args, name)
 
         try:
             result = entry.handler(_ctx, **args)
