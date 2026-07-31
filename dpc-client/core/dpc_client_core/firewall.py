@@ -1891,6 +1891,37 @@ class ContextFirewall:
 
         return warnings
 
+    def _repair_indexed_paths(self, rules_dict: Dict[str, Any]) -> List[Tuple[str, str]]:
+        """Re-attach index flags to the access paths they belong to, in place.
+
+        The UI writes an index flag as a copy of the access-path string, so editing a
+        path strands the old spelling in `indexed_paths` where it matches nothing and
+        the root stops being indexed without a word. Repairing on save keeps the file
+        honest; `collect_extended_files` repairs the same way at read time, so an
+        unsaved config still indexes correctly.
+        """
+        from dpc_client_core.dpc_agent.extended_paths_index import reconcile_indexed_paths
+
+        scopes: List[Tuple[str, Dict[str, Any]]] = []
+        global_sandbox = (rules_dict.get('dpc_agent') or {}).get('sandbox_extensions')
+        if isinstance(global_sandbox, dict):
+            scopes.append(("dpc_agent", global_sandbox))
+        for name, profile in (rules_dict.get('agent_profiles') or {}).items():
+            sandbox = (profile or {}).get('sandbox_extensions')
+            if isinstance(sandbox, dict):
+                scopes.append((name, sandbox))
+
+        report: List[Tuple[str, str]] = []
+        for scope, sandbox in scopes:
+            indexed = sandbox.get('indexed_paths')
+            if not isinstance(indexed, list) or not indexed:
+                continue
+            repaired, changes = reconcile_indexed_paths(sandbox, indexed)
+            if changes:
+                sandbox['indexed_paths'] = repaired
+                report.extend((scope, line) for line in changes)
+        return report
+
     def save_rules_from_dict(self, rules_dict: Dict[str, Any]) -> Tuple[bool, str, List[str]]:
         """Validate, write, and reload rules from a dict.
 
@@ -1906,6 +1937,9 @@ class ContextFirewall:
         path_warnings = self.find_missing_sandbox_paths(rules_dict)
         for warning in path_warnings:
             logger.warning("Firewall save: %s", warning)
+
+        for scope, line in self._repair_indexed_paths(rules_dict):
+            logger.warning("Firewall save: %s: %s", scope, line)
 
         backup = self.access_file_path.read_text() if self.access_file_path.exists() else None
 

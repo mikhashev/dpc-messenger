@@ -341,6 +341,13 @@ class DpcAgentManager:
 
                             collected: list = []
                             l5_count = l6_count = ext_count = 0
+                            # A directory can be both an implicit layer source and an
+                            # extended path; without this the same file lands in the
+                            # index twice under two keys and splits its own ranking.
+                            claimed_paths: set = set()
+
+                            def _claim(p) -> None:
+                                claimed_paths.add(os.path.normcase(os.path.normpath(str(p))))
 
                             if knowledge_dir.is_dir():
                                 for f in sorted(knowledge_dir.iterdir()):
@@ -362,6 +369,7 @@ class DpcAgentManager:
                                          "char_count": len(text), "text": text[:500]},
                                         "L5",
                                     ))
+                                    _claim(f)
                                     l5_count += 1
 
                             if self.firewall and self.firewall.can_agent_access_context('knowledge', profile_name=self.agent_id):
@@ -385,15 +393,23 @@ class DpcAgentManager:
                                              "text": text[:500]},
                                             "L6",
                                         ))
+                                        _claim(f)
                                         l6_count += 1
 
                             if self.firewall:
                                 try:
-                                    from dpc_client_core.dpc_agent.extended_paths_index import collect_extended_files, RECALL_EXTENSIONS
+                                    from dpc_client_core.dpc_agent.extended_paths_index import collect_extended_files, reconcile_indexed_paths, RECALL_EXTENSIONS
                                     ext_paths = self.firewall.get_extended_paths(profile_name=self.agent_id) if hasattr(self.firewall, 'get_extended_paths') else {}
                                     indexed_list = self.firewall._get_profile_or_global(self.agent_id, 'sandbox_extensions', 'indexed_paths', default=[]) if self.agent_id else []
                                     excluded_dirs = self.firewall._get_profile_or_global(self.agent_id, 'sandbox_extensions', 'excluded_dirs', default=None) if self.agent_id else None
-                                    ext_files = collect_extended_files(ext_paths, indexed_paths=indexed_list, excluded_dirs=excluded_dirs, allowed_extensions=RECALL_EXTENSIONS) if indexed_list else []
+                                    # Repair before use: the key below is built relative to one of
+                                    # these roots, so a stale entry here costs the key its path and
+                                    # collapses it onto a bare filename.
+                                    if indexed_list:
+                                        indexed_list, repairs = reconcile_indexed_paths(ext_paths, indexed_list)
+                                        for repair in repairs:
+                                            log.warning("[%s] indexed_paths: %s", self.agent_id, repair)
+                                    ext_files = collect_extended_files(ext_paths, indexed_paths=indexed_list, excluded_dirs=excluded_dirs, allowed_extensions=RECALL_EXTENSIONS, already_indexed=claimed_paths) if indexed_list else []
                                     indexed_path_objs = [Path(ip) for ip in indexed_list]
                                     for f in ext_files:
                                         if self._stop_event.is_set():
