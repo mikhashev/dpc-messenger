@@ -23,6 +23,36 @@ from typing import Any, Dict, List, Optional
 from .index_keys import l5_key, l6_key
 
 
+def _snapshot_dict(store_path, backend: str, nodes_by_type: dict, edges_by_type: dict,
+                   kf_edges_by_type: dict, kf_structural: int,
+                   kf_nodes_keyed: int, kf_nodes_legacy_stem: int) -> dict:
+    """One shape for both backends, so a reader compares numbers and not formats.
+
+    `kf_edges_non_structural` is the number the whole key-as-id migration rested on:
+    structural edges are cleared and rebuilt on every indexing pass, so they survive a
+    change of node identity by being written again — anything else attached to a
+    knowledge-file node does not, and would be left pointing at a node no query
+    reaches. Note that an orphaned edge is still an edge: the total count does not move
+    when one is orphaned, which is why the count alone proves nothing and this
+    breakdown exists.
+    """
+    kf_edges_total = sum(kf_edges_by_type.values())
+    return {
+        "store_path": str(store_path),
+        "backend": backend,
+        "nodes_total": sum(nodes_by_type.values()),
+        "edges_total": sum(edges_by_type.values()),
+        "nodes_by_type": dict(sorted(nodes_by_type.items())),
+        "edges_by_type": dict(sorted(edges_by_type.items())),
+        "kf_edges_total": kf_edges_total,
+        "kf_edges_by_type": dict(sorted(kf_edges_by_type.items())),
+        "kf_edges_structural": kf_structural,
+        "kf_edges_non_structural": kf_edges_total - kf_structural,
+        "kf_nodes_keyed": kf_nodes_keyed,
+        "kf_nodes_legacy_stem": kf_nodes_legacy_stem,
+    }
+
+
 def node_id_for(index_key: str) -> str:
     """A knowledge file's node id: its index key, which is already its identity.
 
@@ -164,6 +194,22 @@ class GraphBackend(ABC):
         """Return True iff ANY edge of given type connects source_id → target_id,
         regardless of t_invalidated. Active-only filtering can be added later as
         a separate method or include_invalidated parameter."""
+        ...
+
+    @abstractmethod
+    def snapshot(self) -> dict:
+        """Counts of what is actually in this store, for someone auditing a claim.
+
+        Exists because the store cannot be read from outside: the file is held with
+        an exclusive lock, and on Windows it cannot even be copied while the backend
+        runs. Three analyses in a row therefore measured a SQLite file last written in
+        May and reported it as the live graph — not for want of care, but because it
+        was the only thing openable. The answer has to come from the process holding
+        the database, and nothing else will do.
+
+        Keys are stable and dumb on purpose: this output is meant to be handed to
+        someone who did not write the code and asked to check a number.
+        """
         ...
 
     @abstractmethod
@@ -325,6 +371,29 @@ class SQLiteGraphBackend(GraphBackend):
             (source_id, target_id, edge_type.value),
         ).fetchone()
         return row is not None
+
+    def snapshot(self) -> dict:
+        c = self._conn
+        nodes_by_type = {r[0]: r[1] for r in c.execute(
+            "SELECT node_type, count(*) FROM nodes GROUP BY node_type")}
+        edges_by_type = {r[0]: r[1] for r in c.execute(
+            "SELECT edge_type, count(*) FROM edges GROUP BY edge_type")}
+        kf = "kf:%"
+        kf_edges_by_type = {r[0]: r[1] for r in c.execute(
+            "SELECT edge_type, count(*) FROM edges "
+            "WHERE source_id LIKE ? OR target_id LIKE ? GROUP BY edge_type", (kf, kf))}
+        structural = c.execute(
+            "SELECT count(*) FROM edges WHERE (source_id LIKE ? OR target_id LIKE ?) "
+            "AND (properties LIKE '%\"source\": \"structural\"%' "
+            "OR properties LIKE '%\"source\":\"structural\"%')", (kf, kf)).fetchone()[0]
+        keyed = c.execute(
+            "SELECT count(*) FROM nodes WHERE node_id LIKE ? AND node_id LIKE '%/%'",
+            (kf,)).fetchone()[0]
+        legacy = c.execute(
+            "SELECT count(*) FROM nodes WHERE node_id LIKE ? AND node_id NOT LIKE '%/%'",
+            (kf,)).fetchone()[0]
+        return _snapshot_dict(self._db_path, "sqlite", nodes_by_type, edges_by_type,
+                              kf_edges_by_type, structural, keyed, legacy)
 
     def clear_structural_edges(self) -> int:
         # Canonical marker is source=structural. Legacy edges (pre-KG-LLM-MARKER
@@ -674,6 +743,39 @@ class GrafeoGraphBackend(GraphBackend):
     def edge_count(self) -> int:
         return self._db.edge_count
 
+    def snapshot(self) -> dict:
+        def rows(query, params=None):
+            try:
+                return list(self._db.execute_cypher(query, params or {}))
+            except Exception as e:
+                log.debug("snapshot query failed: %s", e)
+                return []
+
+        nodes_by_type = {r["t"]: r["c"] for r in rows(
+            "MATCH (n) RETURN labels(n)[0] AS t, count(n) AS c")}
+        edges_by_type = {r["t"]: r["c"] for r in rows(
+            "MATCH ()-[r]->() RETURN type(r) AS t, count(r) AS c")}
+        # A node id is the index key with a `kf:` prefix, so "touches a knowledge
+        # file" is a prefix test on either end of the edge.
+        kf_edges_by_type = {r["t"]: r["c"] for r in rows(
+            "MATCH (a)-[r]->(b) WHERE a.node_id STARTS WITH 'kf:' "
+            "OR b.node_id STARTS WITH 'kf:' RETURN type(r) AS t, count(r) AS c")}
+        structural_rows = rows(
+            "MATCH (a)-[r]->(b) WHERE (a.node_id STARTS WITH 'kf:' "
+            "OR b.node_id STARTS WITH 'kf:') AND (r.properties CONTAINS $sa "
+            "OR r.properties CONTAINS $sb) RETURN count(r) AS c",
+            {"sa": '"source": "structural"', "sb": '"source":"structural"'})
+        keyed_rows = rows(
+            "MATCH (n) WHERE n.node_id STARTS WITH 'kf:' AND n.node_id CONTAINS '/' "
+            "RETURN count(n) AS c")
+        all_kf_rows = rows(
+            "MATCH (n) WHERE n.node_id STARTS WITH 'kf:' RETURN count(n) AS c")
+        structural = structural_rows[0]["c"] if structural_rows else 0
+        keyed = keyed_rows[0]["c"] if keyed_rows else 0
+        all_kf = all_kf_rows[0]["c"] if all_kf_rows else 0
+        return _snapshot_dict(self._db_path, "grafeo", nodes_by_type, edges_by_type,
+                              kf_edges_by_type, structural, keyed, all_kf - keyed)
+
     def close(self) -> None:
         # Drop from the singleton cache so a subsequent
         # GrafeoGraphBackend(same_path) gets a fresh handle instead of
@@ -880,6 +982,10 @@ class KnowledgeGraph:
     @property
     def backend(self) -> GraphBackend:
         return self._backend
+
+    def snapshot(self) -> dict:
+        """What this graph contains right now — see GraphBackend.snapshot."""
+        return self._backend.snapshot()
 
     def bulk_import_knowledge_files(self, knowledge_dir: Path, source_layer: str = "L5") -> int:
         """Create KnowledgeFile nodes from existing .md files.

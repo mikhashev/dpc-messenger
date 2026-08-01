@@ -7358,6 +7358,34 @@ class CoreService:
         except Exception as e:
             return {"status": "error", "message": str(e)}
 
+    async def get_graph_snapshot(self, agent_id: str = None) -> Dict[str, Any]:
+        """Counts from the knowledge graph the running system has open.
+
+        The store is held with an exclusive lock — a second process cannot open it,
+        and on Windows cannot even copy it — so the only readable graph outside this
+        process is whatever stale file happens to be lying next to it. That is what
+        three analyses in a row measured while calling it the live graph. The answer
+        has to be asked of the process holding the database.
+
+        Deliberately the same instance Active Recall queries, not a fresh one: a
+        second handle would answer for a different open file and reintroduce the whole
+        problem in miniature.
+        """
+        if agent_id is None:
+            agent_id = self._get_default_agent_id()
+        try:
+            from dpc_client_core.dpc_agent.context import _get_knowledge_graph
+            agent_root = DPC_HOME_DIR / "agents" / agent_id
+            if not agent_root.is_dir():
+                return {"status": "error", "message": f"No such agent: {agent_id}"}
+            kg = _get_knowledge_graph(agent_root)
+            if kg is None:
+                return {"status": "error", "message": "Knowledge graph unavailable"}
+            return {"status": "ok", "agent_id": agent_id, **kg.snapshot()}
+        except Exception as e:
+            logger.error("get_graph_snapshot failed for %s: %s", agent_id, e, exc_info=True)
+            return {"status": "error", "message": str(e)}
+
     async def get_agent_model_config(self, agent_id: str = None) -> Dict[str, Any]:
         """Delegated to AgentService."""
         if not self.agent_service:

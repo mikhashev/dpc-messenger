@@ -139,6 +139,10 @@ ALLOWED_COMMANDS: frozenset = frozenset({
     "delete_agent",
     "list_agent_profiles",
     "get_agent_permissions",  # Agent permissions transparency (v0.22.0)
+    # Graph counts from the process that holds the store — it cannot be read from
+    # anywhere else while the backend runs, which is how three analyses came to
+    # measure a file from May and call it the live graph.
+    "get_graph_snapshot",
     "get_agent_model_config",
     "save_agent_model_config",
     # Agent Task Board (v0.20.0)
