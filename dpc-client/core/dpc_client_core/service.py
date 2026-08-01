@@ -7415,6 +7415,63 @@ class CoreService:
             logger.error("get_corpus_stats failed: %s", e, exc_info=True)
             return {"status": "error", "message": str(e)}
 
+    async def get_indexed_path_drift(self) -> Dict[str, Any]:
+        """How many index flags in privacy_rules.json point at nothing, per scope.
+
+        The flag is stored as a copy of the access-path string, so editing a path
+        strands the old spelling. Reconcile repairs it in memory on every read, which
+        is why indexing is correct while the file is not — and the file is what the
+        user reads. Reporting is separate from repairing on purpose: one branch of the
+        repair is "drop", and a root that is merely unmounted today would be dropped
+        for good. That decision belongs to a person (P13 §11).
+        """
+        if not self.firewall:
+            return {"status": "error", "message": "Firewall not initialized"}
+        try:
+            import copy
+
+            from dpc_client_core.dpc_agent.extended_paths_index import REPAIR_DROPPED
+            rules = copy.deepcopy(self.firewall.get_rules_as_dict())
+            report = self.firewall._repair_indexed_paths(rules)
+            scopes: Dict[str, Dict[str, int]] = {}
+            for scope, line in report:
+                bucket = scopes.setdefault(scope, {"re_pointed": 0, "dropped": 0})
+                key = "dropped" if line.startswith(REPAIR_DROPPED) else "re_pointed"
+                bucket[key] += 1
+            return {
+                "status": "ok",
+                "total": sum(v["re_pointed"] + v["dropped"] for v in scopes.values()),
+                "scopes": [{"scope": s, **v} for s, v in sorted(scopes.items())],
+                "details": [f"{s}: {line}" for s, line in report],
+            }
+        except Exception as e:
+            logger.error("get_indexed_path_drift failed: %s", e, exc_info=True)
+            return {"status": "error", "message": str(e)}
+
+    async def repair_indexed_paths(self) -> Dict[str, Any]:
+        """Write the repair the reader already applies, on the user's word.
+
+        Saving is what persists it — `save_rules_from_dict` reconciles on the way in —
+        so this is the same path the UI takes when a user edits rules, minus the edit.
+        """
+        if not self.firewall:
+            return {"status": "error", "message": "Firewall not initialized"}
+        try:
+            import copy
+            rules = copy.deepcopy(self.firewall.get_rules_as_dict())
+            report = self.firewall._repair_indexed_paths(rules)
+            if not report:
+                return {"status": "ok", "repaired": 0, "message": "Nothing to repair"}
+            ok, message, errors = self.firewall.save_rules_from_dict(rules)
+            if not ok:
+                return {"status": "error", "message": message, "errors": errors}
+            logger.info("Indexed paths repaired on request: %d changes", len(report))
+            return {"status": "ok", "repaired": len(report),
+                    "details": [f"{s}: {line}" for s, line in report]}
+        except Exception as e:
+            logger.error("repair_indexed_paths failed: %s", e, exc_info=True)
+            return {"status": "error", "message": str(e)}
+
     async def get_agent_model_config(self, agent_id: str = None) -> Dict[str, Any]:
         """Delegated to AgentService."""
         if not self.agent_service:

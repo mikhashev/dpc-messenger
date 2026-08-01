@@ -146,6 +146,10 @@ ALLOWED_COMMANDS: frozenset = frozenset({
     # What each indexed corpus costs and returns — the evidence the "what belongs in
     # the index" decision waits on, reported rather than argued.
     "get_corpus_stats",
+    # Path drift in privacy_rules.json: report, and repair only when asked. The repair
+    # can drop an entry, and an unmounted disk must not lose its root silently.
+    "get_indexed_path_drift",
+    "repair_indexed_paths",
     "get_agent_model_config",
     "save_agent_model_config",
     # Agent Task Board (v0.20.0)
