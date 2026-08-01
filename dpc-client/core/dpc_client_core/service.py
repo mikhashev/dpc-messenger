@@ -7386,6 +7386,35 @@ class CoreService:
             logger.error("get_graph_snapshot failed for %s: %s", agent_id, e, exc_info=True)
             return {"status": "error", "message": str(e)}
 
+    async def get_corpus_stats(self, agent_id: str = None) -> Dict[str, Any]:
+        """What each indexed corpus contributes and what the agent does with it.
+
+        For the question of what belongs in the index, which was about to be answered
+        from a scratch script and one day of data. A first-class command instead, so
+        the evidence accumulates where anyone can look at it and the decision waits for
+        a sample worth deciding on.
+
+        `agent_id=None` reports every agent that has an index, because the answer
+        differs per agent — the shared layer is read constantly by one and never by
+        four others.
+        """
+        try:
+            from dpc_client_core.dpc_agent.corpus_stats import corpus_stats
+            agents_dir = DPC_HOME_DIR / "agents"
+            if agent_id:
+                roots = [agents_dir / agent_id]
+            else:
+                roots = sorted(p for p in agents_dir.iterdir() if p.is_dir())
+            reports = [
+                corpus_stats(root, self.firewall, root.name, dpc_home=DPC_HOME_DIR)
+                for root in roots
+                if (root / "state" / "memory_index" / "index_meta.json").exists()
+            ]
+            return {"status": "ok", "agents": reports}
+        except Exception as e:
+            logger.error("get_corpus_stats failed: %s", e, exc_info=True)
+            return {"status": "error", "message": str(e)}
+
     async def get_agent_model_config(self, agent_id: str = None) -> Dict[str, Any]:
         """Delegated to AgentService."""
         if not self.agent_service:

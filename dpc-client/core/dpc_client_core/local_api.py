@@ -143,6 +143,9 @@ ALLOWED_COMMANDS: frozenset = frozenset({
     # anywhere else while the backend runs, which is how three analyses came to
     # measure a file from May and call it the live graph.
     "get_graph_snapshot",
+    # What each indexed corpus costs and returns — the evidence the "what belongs in
+    # the index" decision waits on, reported rather than argued.
+    "get_corpus_stats",
     "get_agent_model_config",
     "save_agent_model_config",
     # Agent Task Board (v0.20.0)
