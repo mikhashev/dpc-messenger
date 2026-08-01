@@ -245,13 +245,18 @@ class DpcAgent:
         sandbox_ro = None
         sandbox_rw = None
         extended_read = True
+        shared_knowledge = True
         if self._firewall is not None:
             all_tools_map = self._firewall.get_agent_tools_map(self._firewall_profile)
             sandbox_ro = self._firewall.get_sandbox_read_only_paths(self._firewall_profile)
             sandbox_rw = self._firewall.get_sandbox_read_write_paths(self._firewall_profile)
-            # Read the same gate read_file will apply, so a recall hint for an external
-            # file either offers an address that works or admits it has none.
+            # Read the same gates read_file will apply, so a recall hint either offers
+            # an address that works or admits it has none. Both layers outside the
+            # sandbox are asked, and asked now: a gate revoked since indexing does not
+            # remove the row, so nothing else would notice.
             extended_read = self._firewall.get_extended_read_enabled(self._firewall_profile)
+            shared_knowledge = self._firewall.can_agent_access_context(
+                "knowledge", profile_name=self._firewall_profile)
 
         messages, cap_info = build_llm_messages(
             agent_root=self.agent_root,
@@ -270,6 +275,7 @@ class DpcAgent:
             billing_model=self.config.billing_model,
             reader_identity=reader_identity,
             extended_read_enabled=extended_read,
+            shared_knowledge_enabled=shared_knowledge,
         )
 
         # Store cap_info for agent_manager to include in next request's session_state

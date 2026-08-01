@@ -58,7 +58,14 @@ INJECTION_MAX_CREDIT = 0.3
 INJECTION_SATURATION = 20
 
 
-def hint_address(meta: Dict, extended_read_enabled: bool = True) -> Optional[str]:
+def is_shared_layer(meta: Dict) -> bool:
+    """Does this document belong to the shared human layer, by key or by label?"""
+    return (str(meta.get("source_file", "")).startswith(f"{L6_KEY_PREFIX}/")
+            or meta.get("source_layer") == "L6")
+
+
+def hint_address(meta: Dict, extended_read_enabled: bool = True,
+                 shared_knowledge_enabled: bool = True) -> Optional[str]:
     """What to pass to read_file() to actually get this document, or None if nothing works.
 
     The index key names a document; it does not locate it. Only the agent's own
@@ -67,11 +74,12 @@ def hint_address(meta: Dict, extended_read_enabled: bool = True) -> Optional[str
     shared human layer, every indexed external root — resolves through the absolute
     path recorded at indexing time.
 
-    The two outside layers answer to different permissions, and only one of them is the
-    extended-read toggle. The shared layer is admitted to the index by the knowledge
-    gate, so a document already sitting in this index has proved that gate — read_file
-    honours the same one. External roots are the toggle's business, and when it is off
-    there is no address to give.
+    The two outside layers answer to different permissions, and each is asked here in
+    the same state read_file will ask it. The shared layer used to be treated as
+    settled by its presence in the index — the document proved the knowledge gate when
+    it was indexed. But a gate is a question about now, and revoking it does not
+    reindex anything: the row stays, so the hint went on printing an address that
+    read_file had already begun refusing.
 
     None means the file is genuinely out of reach right now, and the caller should say
     so. Printing a path the agent cannot follow is how this went unnoticed for 102 days:
@@ -84,8 +92,8 @@ def hint_address(meta: Dict, extended_read_enabled: bool = True) -> Optional[str
     if not source_path:
         # Indexed before source_path was recorded. Nothing to resolve to.
         return None
-    if key.startswith(f"{L6_KEY_PREFIX}/") or meta.get("source_layer") == "L6":
-        return source_path
+    if is_shared_layer(meta):
+        return source_path if shared_knowledge_enabled else None
     return source_path if extended_read_enabled else None
 
 
@@ -111,15 +119,18 @@ def format_recall_hints(
     results: List[SearchResult],
     max_results: int = 3,
     extended_read_enabled: bool = True,
+    shared_knowledge_enabled: bool = True,
 ) -> str:
     """Format search results as markdown hints for Block2 injection."""
-    return render_recall_hints(results, max_results, extended_read_enabled).text
+    return render_recall_hints(results, max_results, extended_read_enabled,
+                               shared_knowledge_enabled).text
 
 
 def render_recall_hints(
     results: List[SearchResult],
     max_results: int = 3,
     extended_read_enabled: bool = True,
+    shared_knowledge_enabled: bool = True,
 ) -> RenderedHints:
     """Format the hints and report which addresses went into them."""
     if not results:
@@ -139,14 +150,18 @@ def render_recall_hints(
         heading = meta.get("heading", "")
         label = f"{heading}" if heading else filename
         excerpt = _excerpt(meta)
-        address = hint_address(meta, extended_read_enabled)
+        address = hint_address(meta, extended_read_enabled, shared_knowledge_enabled)
         addresses.append(address)
         if address:
             action = f'call read_file("{address}") for details'
         else:
             # An honest dead end beats a plausible one: the agent stops instead of
-            # spending a round guessing at spellings of a path it cannot reach.
-            action = "not readable from here — extended path read access is off"
+            # spending a round guessing at spellings of a path it cannot reach. Name
+            # the gate that is actually shut — two layers reach this line, and telling
+            # an agent to check the wrong toggle is its own kind of dead end.
+            action = ("not readable from here — shared knowledge access is off"
+                      if is_shared_layer(meta)
+                      else "not readable from here — extended path read access is off")
         lines.append(f"[{source}] {filename}: {label} — {action}")
         if excerpt:
             lines.append(f"    {excerpt}")
@@ -203,7 +218,8 @@ class RecallInjection:
         return bool(self.text)
 
 
-def _has_something_to_offer(result: SearchResult, extended_read_enabled: bool) -> bool:
+def _has_something_to_offer(result: SearchResult, extended_read_enabled: bool,
+                            shared_knowledge_enabled: bool = True) -> bool:
     """A slot must carry either a way in or something to read. This carries neither.
 
     Narrow on purpose. A hint with no address but with an excerpt is still worth a
@@ -215,10 +231,19 @@ def _has_something_to_offer(result: SearchResult, extended_read_enabled: bool) -
 
     Dropping it here rather than in the channel keeps the candidate in the fused pool,
     where the question "is the graph channel worth its slot" is still being measured.
+
+    The shared layer with its gate closed is the one case where an excerpt does not
+    redeem a missing address: the index keeps 500 characters of every L6 document, and
+    quoting 200 of them is handing over the content the gate was closed to withhold.
+    Revocation blocks the read at once and cannot reach the index, so it has to be
+    honoured here — a dead end for extended paths is a courtesy, and here it is the
+    whole permission.
     """
     meta = result.chunk_meta
-    if hint_address(meta, extended_read_enabled):
+    if hint_address(meta, extended_read_enabled, shared_knowledge_enabled):
         return True
+    if is_shared_layer(meta) and not shared_knowledge_enabled:
+        return False
     return bool(meta.get("text"))
 
 
@@ -229,6 +254,7 @@ def get_recall_block(
     agent_root: Optional[pathlib.Path] = None,
     extended_read_enabled: bool = True,
     task_id: str = "",
+    shared_knowledge_enabled: bool = True,
 ) -> RecallInjection:
     """Get the appropriate recall block based on context budget and decay scoring."""
     mode = should_inject(context_usage_ratio)
@@ -236,7 +262,8 @@ def get_recall_block(
         return RecallInjection(text="", mode=mode, injected=[])
     if agent_root and results:
         results = _apply_decay(results, agent_root)
-    results = [r for r in results if _has_something_to_offer(r, extended_read_enabled)]
+    results = [r for r in results
+               if _has_something_to_offer(r, extended_read_enabled, shared_knowledge_enabled)]
     injected = results[:max_results]
     # Render before logging: the addresses recorded are the ones printed, taken from
     # the render that printed them. The `hints` mode prints no addresses at all, so
@@ -246,7 +273,8 @@ def get_recall_block(
         text = format_hints_only(results, max_results)
         addresses: List[Optional[str]] = []
     else:
-        rendered = render_recall_hints(results, max_results, extended_read_enabled)
+        rendered = render_recall_hints(results, max_results, extended_read_enabled,
+                                       shared_knowledge_enabled)
         text, addresses = rendered.text, rendered.addresses
     if agent_root and injected:
         _log_knowledge_access(injected, mode, agent_root, task_id=task_id,

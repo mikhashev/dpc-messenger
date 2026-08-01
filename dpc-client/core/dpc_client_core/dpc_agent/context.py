@@ -373,6 +373,7 @@ def build_llm_messages(
     billing_model: str = "subscription",
     reader_identity: Optional[Dict[str, str]] = None,
     extended_read_enabled: bool = True,
+    shared_knowledge_enabled: bool = True,
 ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
     """
     Build the full LLM message context for a task.
@@ -398,6 +399,11 @@ def build_llm_messages(
         extended_read_enabled: Whether the agent may read outside its sandbox. Decides
                                whether an Active Recall hint for an external file can
                                offer an address at all, or has to say it cannot.
+        shared_knowledge_enabled: Whether the agent may read the shared human layer
+                               right now. Revocation cannot reach the index, so a
+                               hint asks the gate here — and with it shut an L6
+                               document is dropped rather than quoted, because the
+                               index holds 500 characters of it.
 
     Returns:
         (messages, cap_info) tuple:
@@ -520,6 +526,7 @@ def build_llm_messages(
                 _recall = get_recall_block(
                     _results, context_usage_ratio=_ctx_ratio, agent_root=agent_root,
                     extended_read_enabled=extended_read_enabled,
+                    shared_knowledge_enabled=shared_knowledge_enabled,
                     # The identity tools.jsonl writes for the same turn — join key,
                     # not decoration.
                     task_id=str(task.get("id") or ""),
