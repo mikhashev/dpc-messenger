@@ -150,5 +150,11 @@ def test_no_two_files_share_a_key_across_layers(tmp_path):
 
 
 def test_key_format_marker_is_set():
-    """agent_manager compares this against the stored marker to force a rebuild."""
-    assert KEY_FORMAT == "layer_addressed_v3"
+    """agent_manager compares this against the stored marker to force a rebuild.
+
+    The literal is pinned on purpose: a bump costs every agent a full reindex, so it
+    has to be a decision someone makes, not a value that drifts. Changing it here is
+    the second half of that decision — v4 stores source_path on the node, and v3 rows
+    carry unchanged hashes, so only a rebuild puts the field on them.
+    """
+    assert KEY_FORMAT == "layer_addressed_v4"

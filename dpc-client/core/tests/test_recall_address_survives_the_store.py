@@ -1,0 +1,159 @@
+"""The address has to survive the store, not just the renderer.
+
+`test_recall_hint_is_followable` builds its metas by hand and hands them straight to
+the renderer. That covers indexer -> hint. It leaves out the leg in between: the meta
+goes into a backend and comes back out, and a backend is free to keep only the fields
+it knows about. Grafeo kept four and dropped `source_path`, so in production every
+external hint resolved to nothing while those tests stayed green — the original defect
+one layer down.
+
+So this test writes through a real backend, reads back through its own search, and
+follows whatever address comes out. Parametrized over both backends because parity is
+the property that broke: native passes the whole meta dict through, Grafeo enumerates
+properties, and only an enumerating backend can silently lose one.
+"""
+from __future__ import annotations
+
+import re
+
+import numpy as np
+import pytest
+
+from dpc_client_core.dpc_agent.active_recall import format_recall_hints
+from dpc_client_core.dpc_agent.hybrid_search import SearchResult
+from dpc_client_core.dpc_agent.index_keys import build_ext_roots, ext_key, l5_key
+from dpc_client_core.dpc_agent.retrieval.base import TextAddItem, VectorAddItem
+from dpc_client_core.dpc_agent.retrieval.native import NativeTextIndex, NativeVectorIndex
+from dpc_client_core.dpc_agent.tools.core import read_file
+from dpc_client_core.dpc_agent.tools.registry import ToolContext
+
+DIM = 8
+
+
+class _Firewall:
+    def __init__(self, allowed=()):
+        self._allowed = [str(p) for p in allowed]
+
+    def get_extended_read_enabled(self, profile_name=None):
+        return True
+
+    def get_extended_write_enabled(self, profile_name=None):
+        return False
+
+    def can_agent_access_context(self, context_type, profile_name=None):
+        return context_type == "knowledge"
+
+    def is_extended_path_allowed(self, path, require_write=False, profile_name=None):
+        return any(str(path).startswith(root) for root in self._allowed)
+
+
+@pytest.fixture
+def world(tmp_path):
+    agent_root = tmp_path / "agents" / "agent_x"
+    (agent_root / "knowledge").mkdir(parents=True)
+    (agent_root / "knowledge" / "own-note.md").write_text(
+        "# Own\nsandbox layer", encoding="utf-8")
+
+    ext_root = tmp_path / "projects" / "dpc-messenger"
+    ext_root.mkdir(parents=True)
+    (ext_root / "backlog.md").write_text("# Backlog\nexternal layer", encoding="utf-8")
+
+    return {"agent_root": agent_root,
+            "knowledge_dir": agent_root / "knowledge",
+            "ext_root": ext_root}
+
+
+def _metas(world):
+    """Exactly the dicts agent_manager stores, for the two layers that differ."""
+    l5 = world["knowledge_dir"] / "own-note.md"
+    ext = world["ext_root"] / "backlog.md"
+    roots = build_ext_roots([str(world["ext_root"])])
+    return [
+        {"source_file": l5_key(l5, world["knowledge_dir"]), "source_layer": "L5",
+         "source_path": str(l5), "heading": "Own",
+         "char_count": 20, "text": l5.read_text(encoding="utf-8")},
+        {"source_file": ext_key(ext, roots), "source_layer": "EXT",
+         "source_path": str(ext), "heading": "Backlog",
+         "char_count": 24, "text": ext.read_text(encoding="utf-8")},
+    ]
+
+
+def _vector_index(kind, tmp_path):
+    if kind == "native":
+        return NativeVectorIndex(tmp_path / "vectors.faiss", dimensions=DIM)
+    pytest.importorskip("grafeo")
+    from dpc_client_core.dpc_agent.retrieval.grafeo import GrafeoVectorIndex
+    return GrafeoVectorIndex(tmp_path / "store.grafeo", dimensions=DIM)
+
+
+def _text_index(kind, tmp_path):
+    if kind == "native":
+        return NativeTextIndex(tmp_path / "bm25")
+    pytest.importorskip("grafeo")
+    from dpc_client_core.dpc_agent.retrieval.grafeo import GrafeoTextIndex
+    return GrafeoTextIndex(tmp_path / "store.grafeo")
+
+
+def _unit(seed: int) -> np.ndarray:
+    v = np.zeros(DIM, dtype=np.float32)
+    v[seed % DIM] = 1.0
+    return v
+
+
+def _addresses(hint: str):
+    return re.findall(r'read_file\("([^"]+)"\)', hint)
+
+
+@pytest.mark.parametrize("kind", ["native", "grafeo"])
+def test_vector_search_returns_a_meta_that_still_addresses_the_file(kind, world, tmp_path):
+    index = _vector_index(kind, tmp_path)
+    metas = _metas(world)
+    index.add([VectorAddItem(vector=_unit(i), meta=m) for i, m in enumerate(metas)])
+
+    found = index.search(_unit(1), top_k=5)
+    assert found, "search returned nothing — the write did not land"
+
+    ctx = ToolContext(agent_root=world["agent_root"],
+                      firewall=_Firewall(allowed=[str(world["ext_root"])]))
+    for meta, _score in found:
+        hint = format_recall_hints(
+            [SearchResult(chunk_meta=meta, score=1.0, source="vector")], max_results=1)
+        addresses = _addresses(hint)
+        assert addresses, f"{kind}: no address for {meta.get('source_file')!r} — {hint}"
+        content = read_file(ctx, addresses[0])
+        assert not content.startswith("⚠️"), f"{kind}: {addresses[0]!r} -> {content}"
+
+
+@pytest.mark.parametrize("kind", ["native", "grafeo"])
+def test_text_search_returns_a_meta_that_still_addresses_the_file(kind, world, tmp_path):
+    index = _text_index(kind, tmp_path)
+    metas = _metas(world)
+    index.add([TextAddItem(text=m["text"], meta=m) for m in metas])
+
+    found = index.search("external layer backlog", top_k=5)
+    assert found, "search returned nothing — the write did not land"
+
+    ctx = ToolContext(agent_root=world["agent_root"],
+                      firewall=_Firewall(allowed=[str(world["ext_root"])]))
+    for meta, _score in found:
+        hint = format_recall_hints(
+            [SearchResult(chunk_meta=meta, score=1.0, source="text")], max_results=1)
+        addresses = _addresses(hint)
+        assert addresses, f"{kind}: no address for {meta.get('source_file')!r} — {hint}"
+        content = read_file(ctx, addresses[0])
+        assert not content.startswith("⚠️"), f"{kind}: {addresses[0]!r} -> {content}"
+
+
+@pytest.mark.parametrize("kind", ["native", "grafeo"])
+def test_the_field_the_address_is_built_from_survives_the_round_trip(kind, world, tmp_path):
+    """Stated on the field itself, so a failure names the cause instead of the symptom."""
+    index = _vector_index(kind, tmp_path)
+    metas = _metas(world)
+    index.add([VectorAddItem(vector=_unit(i), meta=m) for i, m in enumerate(metas)])
+
+    by_key = {m["source_file"]: m for m, _ in index.search(_unit(1), top_k=5)}
+    for original in metas:
+        returned = by_key.get(original["source_file"])
+        assert returned is not None, f"{kind}: {original['source_file']} not returned"
+        assert returned.get("source_path") == original["source_path"], (
+            f"{kind}: source_path lost in the store for {original['source_file']}")

@@ -123,6 +123,7 @@ def _chunk_meta_from_node(db, node_id) -> Optional[dict]:
         return None
     return {
         "source_file": _node_str(node, "source_file"),
+        "source_path": _node_str(node, "source_path"),
         "source_layer": _node_str(node, "source_layer") or "L5",
         "heading": _node_str(node, "heading"),
         "char_count": _node_int(node, "char_count"),
@@ -206,6 +207,9 @@ class GrafeoVectorIndex(VectorIndex):
                 properties={
                     VECTOR_PROPERTY: vec.astype(np.float32).tolist(),
                     "source_file": item.meta.get("source_file", ""),
+                    # The key names the document; only this locates it. A search
+                    # result without it cannot be turned into a read_file argument.
+                    "source_path": str(item.meta.get("source_path", "")),
                     "source_layer": item.meta.get("source_layer", "L5"),
                     "heading": item.meta.get("heading", ""),
                     "char_count": int(item.meta.get("char_count", 0)),
@@ -380,6 +384,7 @@ class GrafeoTextIndex(TextIndex):
                     TEXT_PROPERTY: preprocessed,
                     RAW_TEXT_PROPERTY: item.text[:500],
                     "source_file": item.meta.get("source_file", ""),
+                    "source_path": str(item.meta.get("source_path", "")),
                     "source_layer": item.meta.get("source_layer", "L5"),
                     "heading": item.meta.get("heading", ""),
                     "char_count": int(item.meta.get("char_count", 0)),

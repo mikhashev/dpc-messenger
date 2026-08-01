@@ -45,8 +45,9 @@ log = logging.getLogger(__name__)
 # Bump it for any change to what ends up in the index, not only to how keys are
 # spelled. v3 collects each file once however many roots reach it — the duplicate
 # rows left by v2 all carry unchanged hashes, so nothing short of a rebuild removes
-# them.
-KEY_FORMAT = "layer_addressed_v3"
+# them. v4 stores source_path on the stored node: v3 rows were written by a backend
+# that dropped the field, and their hashes did not move when it started keeping it.
+KEY_FORMAT = "layer_addressed_v4"
 
 L5_PREFIX = "knowledge"
 L6_PREFIX = "L6"
