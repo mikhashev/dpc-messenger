@@ -293,6 +293,14 @@ class DpcAgentManager:
                     _provider_ref = self._agent._embedding_provider if self._agent else None
                     _actual_model = _provider_ref.model_name if _provider_ref else mem_cfg.embedding_model
 
+                    # Once per start, not per message: the counter reads this log on
+                    # every user turn and it is the one log with no rotation.
+                    try:
+                        from dpc_client_core.dpc_agent.active_recall import compact_access_log
+                        compact_access_log(agent_root)
+                    except Exception:
+                        log.debug("access log compaction skipped for %s", self.agent_id, exc_info=True)
+
                     index_dir = agent_root / "state" / "memory_index"
                     # Model change and key-format change both mean the stored rows
                     # answer to names nothing asks for any more, and neither is

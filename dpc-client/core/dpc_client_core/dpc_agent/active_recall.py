@@ -324,6 +324,33 @@ def _norm_key(path: str) -> str:
     return key[2:] if key.startswith("./") else key
 
 
+def _read_log_paths(agent_root: pathlib.Path) -> List[pathlib.Path]:
+    """Every file still holding reads, oldest rotation first.
+
+    append_jsonl rotates tools.jsonl at 5 MB into `.1` and deletes whatever `.1` held
+    before, so the read history on disk is two files and no more. Reading only the live
+    one threw away the older of the two for nothing: measured on agent_001, reads
+    covered 11 days while the file next to it held 13 more.
+    """
+    logs = agent_root / "logs"
+    rotated = sorted(logs.glob("tools.jsonl.*"), reverse=True)  # .2, .1, then live
+    return [p for p in [*rotated, logs / "tools.jsonl"] if p.exists()]
+
+
+def _iter_jsonl(path: pathlib.Path):
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return
+    for line in text.splitlines():
+        if not line.strip():
+            continue
+        try:
+            yield json.loads(line)
+        except json.JSONDecodeError:
+            continue  # one torn line is not a reason to lose the file
+
+
 def _build_access_counts(agent_root: pathlib.Path) -> AccessCounts:
     """Count accesses per document, keyed by what identifies a document.
 
@@ -337,46 +364,50 @@ def _build_access_counts(agent_root: pathlib.Path) -> AccessCounts:
     Skill invocations are no longer counted here. They were, under a `skill:` key
     that no document can ever match, so their only effect was to raise the
     normaliser — the same defect in miniature.
+
+    The two sources are held to one window. Injections are appended to a file that has
+    never rotated and reads to one that rotates away, so the same number was built from
+    103 days of showing against 11 days of reading on agent_001 — a document read every
+    week in May and shown ever since arrives here looking like one that is only ever
+    shown. The window is taken from the reads because that is the side that expires:
+    injections older than the oldest surviving read are not counted, which makes the
+    comparison like-for-like by construction and needs no date written down anywhere.
+    A log with no reads at all is not a mismatch, only an absence, and is left whole.
     """
-    injections_by_key: Dict[str, int] = Counter()
+    injections: List[tuple] = []
     reads_by_key: Dict[str, int] = Counter()
     reads_by_path: Dict[str, int] = Counter()
+    oldest_read = ""
 
     # Source 1: hints injected into context (knowledge_access.jsonl), recorded by key.
-    live_path = agent_root / "state" / "knowledge_access.jsonl"
-    if live_path.exists():
-        try:
-            for line in live_path.read_text(encoding="utf-8").strip().split("\n"):
-                if not line.strip():
-                    continue
-                entry = json.loads(line)
-                for f in entry.get("files", []):
-                    injections_by_key[f] += 1
-        except (json.JSONDecodeError, OSError):
-            pass
+    for entry in _iter_jsonl(agent_root / "state" / "knowledge_access.jsonl"):
+        injections.append((str(entry.get("ts", "")), entry.get("files", [])))
 
     # Source 2: reads the agent actually performed (tools.jsonl), recorded by address.
-    tools_path = agent_root / "logs" / "tools.jsonl"
-    if tools_path.exists():
-        try:
-            for line in tools_path.read_text(encoding="utf-8", errors="replace").strip().split("\n"):
-                if not line.strip():
-                    continue
-                entry = json.loads(line)
-                if entry.get("tool", "") != "read_file":
-                    continue
-                path_val = str((entry.get("args") or {}).get("path", ""))
-                if not path_val:
-                    continue
-                # No filtering by whether the word "knowledge" appears in the path.
-                # That stood in for "is this a knowledge file" and got it wrong both
-                # ways. A path that names no indexed document simply matches nothing.
-                if os.path.isabs(path_val):
-                    reads_by_path[_norm_path(path_val)] += 1
-                else:
-                    reads_by_key[_norm_key(path_val)] += 1
-        except (json.JSONDecodeError, OSError):
-            pass
+    for path in _read_log_paths(agent_root):
+        for entry in _iter_jsonl(path):
+            if entry.get("tool", "") != "read_file":
+                continue
+            ts = str(entry.get("ts", ""))
+            if ts and (not oldest_read or ts < oldest_read):
+                oldest_read = ts
+            path_val = str((entry.get("args") or {}).get("path", ""))
+            if not path_val:
+                continue
+            # No filtering by whether the word "knowledge" appears in the path.
+            # That stood in for "is this a knowledge file" and got it wrong both
+            # ways. A path that names no indexed document simply matches nothing.
+            if os.path.isabs(path_val):
+                reads_by_path[_norm_path(path_val)] += 1
+            else:
+                reads_by_key[_norm_key(path_val)] += 1
+
+    injections_by_key: Dict[str, int] = Counter()
+    for ts, files in injections:
+        if oldest_read and ts and ts < oldest_read:
+            continue
+        for f in files:
+            injections_by_key[f] += 1
 
     return AccessCounts(
         injections_by_key=dict(injections_by_key),
@@ -475,6 +506,71 @@ def _log_knowledge_access(
             f.write(json.dumps(entry, ensure_ascii=False) + "\n")
     except OSError:
         pass
+
+
+ACCESS_LOG_ARCHIVE = "knowledge_access.archive.jsonl"
+
+
+def compact_access_log(agent_root: pathlib.Path) -> int:
+    """Move injections older than the counted window into an archive, and keep them.
+
+    The counter reads the whole injection log on every user message — 1.48 MB on
+    agent_001, next to 8.87 MB of read logs, growing with every turn and never
+    shrinking, because this is the one log in the system that has no rotation. Deleting
+    it is not an option: it is the only record of what the system offered over 103 days
+    and the denominator of every question we have asked about the repair.
+
+    So nothing is deleted. Lines the counter no longer counts — older than the oldest
+    surviving read, the window the counter itself derives — are appended to an archive
+    that is never opened at runtime. Written archive-first: a crash between the two
+    steps repeats lines in a file nobody parses, where the alternative loses them.
+
+    Returns how many lines moved.
+    """
+    live = agent_root / "state" / "knowledge_access.jsonl"
+    if not live.exists():
+        return 0
+    boundary = ""
+    for path in _read_log_paths(agent_root):
+        for entry in _iter_jsonl(path):
+            if entry.get("tool", "") != "read_file":
+                continue
+            ts = str(entry.get("ts", ""))
+            if ts and (not boundary or ts < boundary):
+                boundary = ts
+    if not boundary:
+        return 0  # no reads means no window, so nothing is out of it
+
+    try:
+        lines = live.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return 0
+
+    stale, current = [], []
+    for line in lines:
+        if not line.strip():
+            continue
+        try:
+            ts = str(json.loads(line).get("ts", ""))
+        except json.JSONDecodeError:
+            current.append(line)  # unparsable: keep it where a human will find it
+            continue
+        (stale if ts and ts < boundary else current).append(line)
+
+    if not stale:
+        return 0
+    try:
+        with open(live.parent / ACCESS_LOG_ARCHIVE, "a", encoding="utf-8") as f:
+            f.write("\n".join(stale) + "\n")
+        tmp = live.with_suffix(".jsonl.compacting")
+        tmp.write_text(("\n".join(current) + "\n") if current else "", encoding="utf-8")
+        tmp.replace(live)
+    except OSError:
+        log.debug("access log compaction failed for %s", agent_root.name, exc_info=True)
+        return 0
+    log.info("Access log compacted for %s: %d lines archived, %d kept (window opens %s)",
+             agent_root.name, len(stale), len(current), boundary[:19])
+    return len(stale)
 
 
 def _excerpt(meta: dict, max_chars: int = 200) -> str:
