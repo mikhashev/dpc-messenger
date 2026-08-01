@@ -90,6 +90,32 @@ class FaissIndex:
         log.info("Removed %d chunks for %s, %d remaining", removed, source_file, self._header.chunk_count)
         return removed
 
+    def remove_by_sources(self, source_files) -> int:
+        """One pass over the chunks, one index rebuilt, however many sources go.
+
+        Per source this reconstructed every surviving vector one at a time and built a
+        fresh IndexFlatIP from them — O(sources x index size), which for a few hundred
+        deletions over a couple of thousand chunks is hundreds of thousands of single
+        reconstructions to delete a few hundred rows.
+        """
+        drop = {s for s in source_files if s}
+        if not drop or self._index is None or not self._chunks:
+            return 0
+        keep = [(i, c) for i, c in enumerate(self._chunks) if c.get("source_file") not in drop]
+        removed = len(self._chunks) - len(keep)
+        if removed == 0:
+            return 0
+        import faiss
+        new_index = faiss.IndexFlatIP(self._header.dimensions)
+        if keep:
+            new_index.add(np.vstack([self._index.reconstruct(i).reshape(1, -1) for i, _ in keep]))
+        self._index = new_index
+        self._chunks = [c for _, c in keep]
+        self._header.chunk_count = self._index.ntotal
+        log.info("Removed %d chunks for %d sources, %d remaining",
+                 removed, len(drop), self._header.chunk_count)
+        return removed
+
     def save(self) -> None:
         self.index_dir.mkdir(parents=True, exist_ok=True)
         if self._index is not None:

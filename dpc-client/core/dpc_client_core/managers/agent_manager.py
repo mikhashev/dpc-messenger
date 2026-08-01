@@ -497,9 +497,12 @@ class DpcAgentManager:
                                 # remove_by_source kills all rows for source_file, must precede add for modified entries
                                 modified_or_removed = [f for f, _, _ in to_embed if f in old_hashes] + removed_files
                                 if modified_or_removed:
-                                    for sf in modified_or_removed:
-                                        backend.vector.remove_by_source(sf)
-                                        backend.text.remove_by_source(sf)
+                                    # One call, one rebuild per index. Per source this
+                                    # rebuilt the whole index each time, and a pass that
+                                    # dropped 298 sources spent 505.9 s doing it while
+                                    # embedding 73 documents.
+                                    backend.vector.remove_by_sources(modified_or_removed)
+                                    backend.text.remove_by_sources(modified_or_removed)
 
                             BATCH_SIZE = max(1, int(mem_cfg.batch_size))
                             embedded = 0

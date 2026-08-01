@@ -59,6 +59,9 @@ class NativeVectorIndex(VectorIndex):
     def remove_by_source(self, source_file: str) -> int:
         return self._inner.remove_by_source(source_file)
 
+    def remove_by_sources(self, source_files) -> int:
+        return self._inner.remove_by_sources(source_files)
+
     def save(self) -> None:
         self._inner.save()
 
@@ -101,6 +104,9 @@ class NativeTextIndex(TextIndex):
 
     def remove_by_source(self, source_file: str) -> int:
         return self._inner.remove_by_source(source_file)
+
+    def remove_by_sources(self, source_files) -> int:
+        return self._inner.remove_by_sources(source_files)
 
     def save(self) -> None:
         self._inner.save()

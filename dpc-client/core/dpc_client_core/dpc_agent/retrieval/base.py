@@ -25,7 +25,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import List, Optional, Tuple
+from typing import Iterable, List, Optional, Tuple
 
 import numpy as np
 
@@ -69,6 +69,20 @@ class VectorIndex(ABC):
     @abstractmethod
     def remove_by_source(self, source_file: str) -> int:
         """Remove items where meta['source_file'] == source_file. Returns removed count."""
+
+    def remove_by_sources(self, source_files: Iterable[str]) -> int:
+        """Remove several sources, rebuilding whatever needs rebuilding once.
+
+        Removal is the expensive half of an incremental pass, and it is expensive per
+        call rather than per item: every backend here has to put its structure back
+        together afterwards. Measured on a live pass, one agent removed 298 sources in
+        505.9 s while another embedded twice as many documents in 4.0 s and removed
+        none. So the count that matters is rebuilds, and there should be one.
+
+        This default is correct and is not the point — it rebuilds N times. Backends
+        override it.
+        """
+        return sum(self.remove_by_source(s) for s in dict.fromkeys(source_files))
 
     @abstractmethod
     def save(self) -> None:
@@ -114,6 +128,10 @@ class TextIndex(ABC):
     @abstractmethod
     def remove_by_source(self, source_file: str) -> int:
         """Remove docs where meta['source_file'] == source_file. Returns removed count."""
+
+    def remove_by_sources(self, source_files: Iterable[str]) -> int:
+        """Remove several sources with one corpus rebuild. See VectorIndex."""
+        return sum(self.remove_by_source(s) for s in dict.fromkeys(source_files))
 
     @abstractmethod
     def save(self) -> None:

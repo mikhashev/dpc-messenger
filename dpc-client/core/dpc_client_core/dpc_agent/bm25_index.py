@@ -179,6 +179,29 @@ class BM25Index:
         log.info("Removed %d BM25 docs for %s, %d remaining", removed, source_file, len(self._chunk_metas))
         return removed
 
+    def remove_by_sources(self, source_files) -> int:
+        """One pass over the corpus, one build. See FaissIndex.remove_by_sources."""
+        drop = {s for s in source_files if s}
+        if not drop or not self._chunk_metas:
+            return 0
+        keep_texts, keep_metas, removed = [], [], 0
+        for meta in self._chunk_metas:
+            if meta.get("source_file") in drop:
+                removed += 1
+            else:
+                keep_texts.append(meta.get("text", ""))
+                keep_metas.append(meta)
+        if removed == 0:
+            return 0
+        if keep_texts:
+            self.build(keep_texts, keep_metas)
+        else:
+            self._retriever = None
+            self._chunk_metas = []
+        log.info("Removed %d BM25 docs for %d sources, %d remaining",
+                 removed, len(drop), len(self._chunk_metas))
+        return removed
+
     def save(self) -> None:
         if self.index_dir is None or self._retriever is None:
             return
