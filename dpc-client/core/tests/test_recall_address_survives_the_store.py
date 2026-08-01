@@ -184,19 +184,25 @@ def test_the_log_records_the_addresses_that_were_printed(world, tmp_path):
 
 
 def test_an_unreachable_hint_is_recorded_as_a_null_address(world, tmp_path):
-    """A wasted slot has to be countable, not merely visible to whoever reads the block."""
+    """A slot the agent cannot follow has to be countable, not merely visible in the block.
+
+    Written first against the graph channel's meta; that case now never reaches a slot
+    (see `test_a_hint_with_neither_address_nor_text_gets_no_slot`), so the remaining —
+    and the only honest — null is the external document offered while extended read is
+    off: it says so, quotes the file, and records that no address was printed.
+    """
     from dpc_client_core.dpc_agent.active_recall import get_recall_block
 
-    graph_meta = {"source_file": "graviton-knowledge-graph-framework.md",
-                  "source_layer": "L7", "heading": "Graviton"}
-    results = [SearchResult(chunk_meta=graph_meta, score=1.0, source="graph")]
+    ext_meta = [m for m in _metas(world) if m["source_layer"] == "EXT"][0]
+    results = [SearchResult(chunk_meta=ext_meta, score=1.0, source="hybrid")]
     agent_root = world["agent_root"]
 
-    get_recall_block(results, context_usage_ratio=0.0, agent_root=agent_root, task_id="t-1")
+    get_recall_block(results, context_usage_ratio=0.0, agent_root=agent_root,
+                     extended_read_enabled=False, task_id="t-1")
     entry = _read_access_log(agent_root)[-1]
 
     assert entry["addresses"] == [None]
-    assert entry["files"] == ["graviton-knowledge-graph-framework.md"]
+    assert entry["files"] == [ext_meta["source_file"]]
 
 
 def test_the_hints_mode_records_no_addresses_because_it_prints_none(world, tmp_path):
@@ -212,3 +218,38 @@ def test_the_hints_mode_records_no_addresses_because_it_prints_none(world, tmp_p
     assert block.mode == "hints"
     assert 'read_file("' not in block.text
     assert _read_access_log(agent_root)[-1]["addresses"] == []
+
+
+def test_a_hint_with_neither_address_nor_text_gets_no_slot(world, tmp_path):
+    """The graph channel's meta: nothing to open, nothing to read. It should not cost a slot."""
+    from dpc_client_core.dpc_agent.active_recall import get_recall_block
+
+    graph_meta = {"source_file": "graviton-knowledge-graph-framework.md",
+                  "source_layer": "L7", "heading": "Graviton"}
+    usable = _metas(world)
+    results = [SearchResult(chunk_meta=graph_meta, score=9.0, source="graph")] + [
+        SearchResult(chunk_meta=m, score=1.0, source="hybrid") for m in usable]
+
+    block = get_recall_block(results, context_usage_ratio=0.0,
+                             agent_root=world["agent_root"], task_id="t-3")
+
+    assert "graviton" not in block.text, block.text
+    assert len(block.injected) == len(usable)
+    assert _read_access_log(world["agent_root"])[-1]["files"] == [m["source_file"] for m in usable]
+
+
+def test_an_honest_dead_end_with_an_excerpt_keeps_its_slot(world, tmp_path):
+    """Narrowness matters: 'no address' alone must not evict the EXT toggle-off case."""
+    from dpc_client_core.dpc_agent.active_recall import get_recall_block, hint_address
+
+    ext_meta = [m for m in _metas(world) if m["source_layer"] == "EXT"][0]
+    assert hint_address(ext_meta, extended_read_enabled=False) is None
+    assert ext_meta["text"]
+
+    block = get_recall_block([SearchResult(chunk_meta=ext_meta, score=1.0, source="hybrid")],
+                             context_usage_ratio=0.0, agent_root=world["agent_root"],
+                             extended_read_enabled=False, task_id="t-4")
+
+    assert ext_meta["source_file"] in block.text
+    assert "external layer" in block.text
+    assert len(block.injected) == 1

@@ -180,6 +180,25 @@ class RecallInjection:
         return bool(self.text)
 
 
+def _has_something_to_offer(result: SearchResult, extended_read_enabled: bool) -> bool:
+    """A slot must carry either a way in or something to read. This carries neither.
+
+    Narrow on purpose. A hint with no address but with an excerpt is still worth a
+    slot — that is the honest dead end an agent gets when extended read is off, and
+    the excerpt is the whole point of saying so. What has nothing is the graph
+    channel's meta: no `source_path` to build an address from and no `text` to quote,
+    so the line prints a filename, a "(chunk 0)" that names a chunk nobody stored,
+    and a reason that blames a toggle which is not involved.
+
+    Dropping it here rather than in the channel keeps the candidate in the fused pool,
+    where the question "is the graph channel worth its slot" is still being measured.
+    """
+    meta = result.chunk_meta
+    if hint_address(meta, extended_read_enabled):
+        return True
+    return bool(meta.get("text"))
+
+
 def get_recall_block(
     results: List[SearchResult],
     context_usage_ratio: float = 0.0,
@@ -194,6 +213,7 @@ def get_recall_block(
         return RecallInjection(text="", mode=mode, injected=[])
     if agent_root and results:
         results = _apply_decay(results, agent_root)
+    results = [r for r in results if _has_something_to_offer(r, extended_read_enabled)]
     injected = results[:max_results]
     # Render before logging: the addresses recorded are the ones printed, taken from
     # the render that printed them. The `hints` mode prints no addresses at all, so

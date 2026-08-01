@@ -916,26 +916,6 @@ class KnowledgeGraph:
                     }, 1.0))
         return results
 
-    def get_graph_results_for_query(self, seed_node_ids: List[str], hops: int = 2) -> List[dict]:
-        """Traverse graph from seed nodes, return results compatible with RRF fusion."""
-        results = []
-        seen: set = set()
-        for seed_id in seed_node_ids:
-            neighbors = self._backend.get_neighbors(seed_id, hops=hops)
-            for neighbor in neighbors:
-                if neighbor.node_id in seen:
-                    continue
-                seen.add(neighbor.node_id)
-                path_prop = neighbor.properties.get("path", "")
-                results.append({
-                    "source_file": path_prop,
-                    "source_layer": neighbor.source_layer,
-                    "heading": neighbor.label,
-                    "graph_node_id": neighbor.node_id,
-                    "graph_node_type": neighbor.node_type.value,
-                })
-        return results
-
     def extract_structural_edges(self, knowledge_dir: Path, archive_dir: Optional[Path] = None) -> int:
         """Extract deterministic edges from existing files (Task 002).
 
