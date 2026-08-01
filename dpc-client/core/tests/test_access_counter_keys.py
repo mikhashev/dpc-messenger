@@ -12,6 +12,7 @@ import pathlib
 import pytest
 
 from dpc_client_core.dpc_agent.active_recall import (
+    GRACE_PERIOD_DAYS,
     DECAY_FLOOR,
     _apply_decay,
     _build_access_counts,
@@ -120,7 +121,15 @@ def test_skill_invocations_do_not_enter_the_counter(agent_root):
 
 
 def test_no_number_of_injections_outranks_a_single_read(agent_root):
-    """The loop this closes: the count that decides what to show was raised by showing."""
+    """The loop this closes: the count that decides what to show was raised by showing.
+
+    The shown document starts ahead on search score, because that is the case the
+    counter has to survive. Ranking both from 1.0 only ever tested the counter's own
+    arithmetic — and the counter is a multiplier, so with a credit of 0.9 a search
+    advantage of 12% was enough to put a document shown 5000 times and never opened
+    above one that was read. The margin, not the ordering of two equal numbers, is
+    what this asserts.
+    """
     _injections(agent_root, *[["knowledge/shown.md"]] * 5000)
     _reads(agent_root, "knowledge/read-once.md")
 
@@ -128,8 +137,38 @@ def test_no_number_of_injections_outranks_a_single_read(agent_root):
     assert counts.for_document({"source_file": "knowledge/read-once.md"}) > counts.for_document(
         {"source_file": "knowledge/shown.md"}
     )
-    ranked = _apply_decay([_doc("knowledge/shown.md"), _doc("knowledge/read-once.md")], agent_root)
+    ranked = _apply_decay(
+        [_doc("knowledge/shown.md", score=2.0), _doc("knowledge/read-once.md", score=1.0)],
+        agent_root,
+    )
     assert ranked[0].chunk_meta["source_file"] == "knowledge/read-once.md"
+
+
+def test_the_margin_a_read_holds_is_bounded_and_the_bound_is_stated(agent_root):
+    """The promise is a margin, not an absolute — so pin the margin rather than imply infinity.
+
+    A read survives a search advantage up to 1/INJECTION_MAX_CREDIT. Beyond that the
+    other document wins, which is intended: search disagreeing that strongly is a
+    different claim from noise. The test exists so that lowering the credit without
+    thinking about the margin fails here rather than in production.
+    """
+    from dpc_client_core.dpc_agent.active_recall import INJECTION_MAX_CREDIT
+
+    _injections(agent_root, *[["knowledge/shown.md"]] * 5000)
+    _reads(agent_root, "knowledge/read-once.md")
+    margin = 1.0 / INJECTION_MAX_CREDIT
+
+    inside = _apply_decay(
+        [_doc("knowledge/shown.md", score=margin * 0.9), _doc("knowledge/read-once.md", score=1.0)],
+        agent_root,
+    )
+    assert inside[0].chunk_meta["source_file"] == "knowledge/read-once.md"
+
+    outside = _apply_decay(
+        [_doc("knowledge/shown.md", score=margin * 1.1), _doc("knowledge/read-once.md", score=1.0)],
+        agent_root,
+    )
+    assert outside[0].chunk_meta["source_file"] == "knowledge/shown.md"
 
 
 def test_injections_still_order_documents_nobody_has_read(agent_root):
@@ -200,3 +239,63 @@ def test_candidates_nobody_ever_touched_keep_their_search_order(agent_root):
     _injections(agent_root, *[["knowledge/elsewhere.md"]] * 10)
     results = [_doc("knowledge/a.md", score=0.9), _doc("knowledge/b.md", score=0.4)]
     assert _apply_decay(results, agent_root) == results
+
+
+def _aged_file(tmp_path, name, days_old):
+    """A real file with a chosen mtime — grace reads the filesystem, so the test must too."""
+    import os
+    import time
+    p = tmp_path / name
+    p.write_text("# doc\n", encoding="utf-8")
+    stamp = time.time() - days_old * 86400
+    os.utime(p, (stamp, stamp))
+    return p
+
+
+def test_a_new_document_is_not_floored_for_having_no_history(agent_root, tmp_path):
+    """Absence of a history is not evidence against a document; it is absence of a chance.
+
+    Grace is 1.0 — no decay — not a promotion: a new document ranks with the busiest
+    candidate in its result set, and above one whose history is thinner. Before it, the
+    same document sat on DECAY_FLOOR, a tenth of what a document shown once and ignored
+    scored for being that set's maximum.
+    """
+    fresh = _aged_file(tmp_path, "fresh.md", days_old=1)
+    _injections(agent_root, *[["knowledge/often.md"]] * 15)
+    _injections(agent_root, ["knowledge/thin.md"])
+
+    ranked = _apply_decay(
+        [_doc("knowledge/often.md", score=1.0),
+         _doc("knowledge/thin.md", score=1.0),
+         _doc("knowledge/fresh.md", source_path=str(fresh), score=1.0)],
+        agent_root,
+    )
+    by_key = {r.chunk_meta["source_file"]: r.score for r in ranked}
+    assert by_key["knowledge/fresh.md"] == 1.0                      # untouched, not floored
+    assert by_key["knowledge/fresh.md"] > by_key["knowledge/thin.md"]
+    assert by_key["knowledge/fresh.md"] == by_key["knowledge/often.md"]  # level, not ahead
+
+
+def test_an_old_document_with_no_history_still_sinks(agent_root, tmp_path):
+    """The window is a grace period, not an exemption — it expires on its own."""
+    stale = _aged_file(tmp_path, "stale.md", days_old=GRACE_PERIOD_DAYS + 1)
+    _injections(agent_root, *[["knowledge/shown.md"]] * 5)
+
+    ranked = _apply_decay(
+        [_doc("knowledge/shown.md", score=1.0),
+         _doc("knowledge/stale.md", source_path=str(stale), score=1.0)],
+        agent_root,
+    )
+    assert ranked[0].chunk_meta["source_file"] == "knowledge/shown.md"
+
+
+def test_a_document_whose_file_cannot_be_read_is_treated_as_old(agent_root, tmp_path):
+    """An unreadable path must not promote itself by being unreadable."""
+    _injections(agent_root, *[["knowledge/shown.md"]] * 5)
+
+    ranked = _apply_decay(
+        [_doc("knowledge/shown.md", score=1.0),
+         _doc("knowledge/gone.md", source_path=str(tmp_path / "not-here.md"), score=1.0)],
+        agent_root,
+    )
+    assert ranked[0].chunk_meta["source_file"] == "knowledge/shown.md"

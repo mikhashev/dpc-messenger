@@ -12,6 +12,7 @@ import json
 import logging
 import os
 import pathlib
+import time
 from collections import Counter
 from dataclasses import dataclass, replace
 from typing import Dict, List, Optional
@@ -25,13 +26,35 @@ log = logging.getLogger(__name__)
 CONTEXT_THRESHOLD_HINTS_ONLY = 0.5
 CONTEXT_THRESHOLD_SKIP = 0.7
 DECAY_FLOOR = 0.1
-GRACE_PERIOD_SESSIONS = 5
+# A document nobody has touched yet is not a document nobody wants — it is one that
+# has not been offered. Without this it lands on DECAY_FLOOR, 0.1, while a document
+# shown once and ignored is the busiest in its own result set and scores 1.0: a
+# tenfold penalty for being new against being uninteresting.
+#
+# Measured in days, not sessions: there is no session counter at this layer, and the
+# constant that named one sat unused for months partly because nothing could have
+# incremented it. Age comes from the file's mtime via `source_path`, which every layer
+# now carries — a stat() per candidate, and no index change to record what the
+# filesystem already knows.
+GRACE_PERIOD_DAYS = 7
 
 # What an injection is worth next to a read. Bounded strictly below 1.0, the value of
 # a single read, so no amount of showing a document can outrank one act of opening it.
 # Saturation is where extra showings stop adding anything: past it the only way up is
 # to be read.
-INJECTION_MAX_CREDIT = 0.9
+#
+# The bound is on the counter, and the counter is a multiplier on the fusion score —
+# so what it really buys is a margin. At 0.9 the margin was 11%: a document shown 5000
+# times and never opened beat one read once as soon as search liked it 12% better,
+# which is ordinary noise between two candidates. At 0.3 a read is worth more than any
+# history of showing until search prefers the other by more than 3.3×, and that is a
+# difference of kind rather than of noise.
+#
+# Both numbers are placeholders. They were chosen by argument, not from data, and the
+# data that would settle them — how often a shown-and-never-read document turns out to
+# be worth showing — starts accruing only now that the address works. Revisit with the
+# first weeks of follow-rate, not before.
+INJECTION_MAX_CREDIT = 0.3
 INJECTION_SATURATION = 20
 
 
@@ -247,12 +270,16 @@ class AccessCounts:
     number that decides what to show rise by showing it — a file floated because it
     had been offered before, not because it had ever helped.
 
-    So a read outranks any number of injections, always: injections earn a bounded
-    credit that cannot reach the value of a single read. Within that bound they still
-    order documents nobody has read yet, which is the weak signal worth keeping rather
-    than discarding. Turning "shown and never read" into an actual penalty is a
-    different claim, and it needs evidence we do not have yet — the loop has been
-    closed for hours, not weeks.
+    So a read outweighs any number of injections *in this number*: injections earn a
+    bounded credit that cannot reach the value of a single read. Stated on the final
+    order the claim is weaker and worth stating honestly — the number multiplies the
+    fusion score, so a document with enough of a search advantage still wins. The bound
+    sets how much advantage that takes; see INJECTION_MAX_CREDIT.
+
+    Within the bound injections still order documents nobody has read yet, which is the
+    weak signal worth keeping rather than discarding. Turning "shown and never read"
+    into an actual penalty is a different claim, and it needs evidence we do not have
+    yet — the loop has been closed for hours, not weeks.
     """
 
     injections_by_key: Dict[str, int]
@@ -358,6 +385,38 @@ def _build_access_counts(agent_root: pathlib.Path) -> AccessCounts:
     )
 
 
+def _is_within_grace(meta: Dict, now: Optional[float] = None) -> bool:
+    """Was this document written recently enough that having no history means nothing?
+
+    Answered from the file, not from the index: `source_path` is on every layer's meta
+    since the store started keeping it, and mtime is the one date the filesystem is
+    guaranteed to have. A path we cannot stat is treated as old — an unreadable file
+    should not be promoted by its own unreadability.
+    """
+    source_path = meta.get("source_path", "")
+    if not source_path:
+        return False
+    try:
+        age_seconds = (now if now is not None else time.time()) - os.path.getmtime(source_path)
+    except OSError:
+        return False
+    return 0 <= age_seconds < GRACE_PERIOD_DAYS * 86400
+
+
+def _decay_multiplier(result: SearchResult, access: float, max_count: float) -> float:
+    """What access history does to a candidate's score.
+
+    Inside the grace window a new document is left alone (1.0) rather than floored: the
+    absence of a history is not evidence against it, and one week is short enough that
+    a document which never earns reads returns to the ordinary rule on its own. Note
+    1.0 is level with the busiest candidate in the set, not above it — grace removes a
+    penalty, it does not hand out a promotion.
+    """
+    if access:
+        return max(DECAY_FLOOR, access / max_count)
+    return 1.0 if _is_within_grace(result.chunk_meta) else DECAY_FLOOR
+
+
 def _apply_decay(
     results: List[SearchResult], agent_root: pathlib.Path
 ) -> List[SearchResult]:
@@ -383,7 +442,7 @@ def _apply_decay(
     # reader of the log needs to see. Keeping the pre-decay number on the result meant
     # the printed ranking and the printed numbers disagreed with each other.
     scored = [
-        replace(r, score=r.score * (max(DECAY_FLOOR, access / max_count) if access else DECAY_FLOOR))
+        replace(r, score=r.score * _decay_multiplier(r, access, max_count))
         for r, access in zip(results, accesses)
     ]
     scored.sort(key=lambda r: -r.score)
