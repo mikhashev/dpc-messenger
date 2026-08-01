@@ -57,7 +57,8 @@ def test_kg_bulk_import_creates_nodes(kg, tmp_path):
     n = kg.bulk_import_knowledge_files(kdir)
     assert n == 2
     assert kg.backend.node_count() == 2
-    alpha = kg.backend.get_node("kf:alpha")
+    # Addressed by index key, the identity the index, the fuser and read_file all use.
+    alpha = kg.backend.get_node("kf:knowledge/alpha.md")
     assert alpha is not None
     assert alpha.node_type == NodeType.KNOWLEDGE_FILE
     assert alpha.label == "Alpha"
@@ -159,8 +160,14 @@ def test_kg_graph_expand_ignores_a_namesake(kg, tmp_path):
     assert kg.graph_expand(["EXT/some-project/docs/alpha.md"], max_hops=1) == []
 
 
-def test_kg_bulk_import_keeps_the_document_that_claimed_a_stem_first(kg, tmp_path):
-    """Two layers, one stem: overwriting one document's node with another's is silent loss."""
+def test_kg_two_layers_holding_one_stem_are_two_documents(kg, tmp_path):
+    """The collision the old scheme had to guard against does not exist under keys.
+
+    With `kf:<stem>` the second import silently overwrote the first document's node, so
+    the code carried a guard that refused it — and that guard, reading the layer label
+    to decide, refused the entire shared layer on its first run. The key carries the
+    layer, so the two documents simply have two ids and neither has to be sacrificed.
+    """
     l5 = tmp_path / "knowledge"
     l5.mkdir()
     _write_md(l5, "shared", "# Shared\nagent layer")
@@ -168,28 +175,30 @@ def test_kg_bulk_import_keeps_the_document_that_claimed_a_stem_first(kg, tmp_pat
     l6.mkdir()
     _write_md(l6, "shared", "# Shared\nhuman layer")
 
-    kg.bulk_import_knowledge_files(l5, source_layer="L5")
-    assert kg.bulk_import_knowledge_files(l6, source_layer="L6") == 0
+    assert kg.bulk_import_knowledge_files(l5, source_layer="L5") == 1
+    assert kg.bulk_import_knowledge_files(l6, source_layer="L6") == 1
 
-    node = kg.backend.get_node("kf:shared")
-    assert node.source_layer == "L5"
-    assert node.properties["path"] == "knowledge/shared.md"
+    own = kg.backend.get_node("kf:knowledge/shared.md")
+    shared = kg.backend.get_node("kf:L6/shared.md")
+    assert own.source_layer == "L5" and own.properties["path"] == "knowledge/shared.md"
+    assert shared.source_layer == "L6" and shared.properties["path"] == "L6/shared.md"
+    assert own.properties["source_path"] != shared.properties["source_path"]
 
 
-def test_kg_bulk_import_upgrades_a_node_written_before_layers_were_recorded(kg, tmp_path):
-    """The guard asks where a node points, not what it is labelled.
+def test_kg_a_node_written_before_keys_is_left_behind_not_mistaken_for_the_document(kg, tmp_path):
+    """Stem-addressed rows survive the scheme change; they must not be treated as current.
 
-    Every node written by the previous version says "L5" — including the shared-layer
-    documents, which is the mislabel this change exists to end. A guard that read the
-    label refused to import the shared layer at all (0 of 303, six agents, one restart)
-    and preserved precisely the rows it was meant to repair.
+    Under `kf:<stem>` a legacy row was the same id as the document, so an import either
+    upgraded it or — as happened in production — was refused by a guard reading its
+    stale label. Under keys it is a different id: the document gets its own node, and
+    the old row is inert, holding no edges after the next extraction pass.
     """
     l6 = tmp_path / "shared-knowledge"
     l6.mkdir()
     _write_md(l6, "commit-note", "# Commit\nhuman layer")
 
     kg.backend.add_node(GraphNode(
-        node_id="kf:commit-note",
+        node_id="kf:commit-note",               # the old scheme: a stem
         node_type=NodeType.KNOWLEDGE_FILE,
         label="Commit Note",
         source_layer="L5",                      # what the old code wrote for every layer
@@ -198,10 +207,14 @@ def test_kg_bulk_import_upgrades_a_node_written_before_layers_were_recorded(kg, 
 
     assert kg.bulk_import_knowledge_files(l6, source_layer="L6") == 1
 
-    node = kg.backend.get_node("kf:commit-note")
-    assert node.source_layer == "L6"
-    assert node.properties["path"] == "L6/commit-note.md"
-    assert node.properties["source_path"]
+    current = kg.backend.get_node("kf:L6/commit-note.md")
+    assert current.source_layer == "L6"
+    assert current.properties["path"] == "L6/commit-note.md"
+    assert current.properties["source_path"]
+
+    stale = kg.backend.get_node("kf:commit-note")
+    assert stale is not None and stale.properties["path"] == "commit-note.md"
+    assert kg.graph_expand(["commit-note.md"], max_hops=1) == []  # unreachable as a seed
 
 
 def test_kg_invalidate_edges_bi_temporal(kg):

@@ -23,11 +23,17 @@ from typing import Any, Dict, List, Optional
 from .index_keys import l5_key, l6_key
 
 
-def _same_file(recorded: str, candidate: Path) -> bool:
-    """Two spellings of one location, compared the way every OS here spells it."""
-    import os
-    return os.path.normcase(os.path.normpath(recorded)) == os.path.normcase(
-        os.path.normpath(str(candidate)))
+def node_id_for(index_key: str) -> str:
+    """A knowledge file's node id: its index key, which is already its identity.
+
+    The graph used to address documents by stem, which is a name rather than an
+    identity — two layers could hold one stem, a seed key had to be cut down to match,
+    and neither the fuser nor the decay counter could line a graph result up with the
+    same document from another channel. Keying on the index key makes those questions
+    disappear instead of guarding them: the key is what the index, the fuser, the
+    counter and read_file all already mean by "this document".
+    """
+    return f"kf:{index_key}"
 
 log = logging.getLogger(__name__)
 
@@ -893,24 +899,13 @@ class KnowledgeGraph:
         for md_file in sorted(knowledge_dir.glob("*.md")):
             if md_file.name.startswith("_"):
                 continue
-            node_id = f"kf:{md_file.stem}"
-            # A collision is two *documents* wanting one id, so ask where the node
-            # points, not what it is labelled. The label cannot answer: every node
-            # written before this function took a layer says "L5", including the 303
-            # shared-layer documents — keyed off the label, the guard refused to
-            # import the shared layer at all and left exactly the rows it was meant
-            # to repair. A node with no source_path predates the field and is an
-            # upgrade, not a rival.
-            existing = self._backend.get_node(node_id)
-            claimed = (existing.properties.get("source_path") or "") if existing else ""
-            if claimed and not _same_file(claimed, md_file):
-                log.warning(
-                    "Knowledge graph: %s already points at %s; skipping the %s document %s",
-                    node_id, claimed, source_layer, md_file.name,
-                )
-                continue
             key = (l5_key(md_file, knowledge_dir) if source_layer == "L5"
                    else l6_key(md_file, knowledge_dir))
+            # No collision guard: two layers holding one stem now produce two ids,
+            # because the key carries the layer. The guard this replaces was written
+            # for a danger the scheme removes — and, reading the layer label to detect
+            # it, refused to import the shared layer at all on its first run.
+            node_id = node_id_for(key)
             mtime = datetime.fromtimestamp(md_file.stat().st_mtime, tz=timezone.utc).isoformat()
             node = GraphNode(
                 node_id=node_id,
@@ -934,17 +929,11 @@ class KnowledgeGraph:
         results = []
         seen: set = set()
         for fname in filenames:
-            stem = Path(fname).stem
-            src_id = f"kf:{stem}"
-            seed = self._backend.get_node(src_id)
-            if seed is None:
-                continue
-            # The stem drops both the directory and the layer, so a match is a claim
-            # about a name, not about a document. The key settles it: three of this
-            # agent's 1874 keys share a stem with some node, and each is a second copy
-            # of a file in another root — expanding from those would start somewhere
-            # the search never went.
-            if seed.properties.get("path") != fname:
+            # The seed arrives as an index key and the node is addressed by one, so the
+            # lookup is exact. Nothing to cut down and nothing to verify afterwards: a
+            # namesake in another root is a different key, therefore a different node.
+            src_id = node_id_for(fname)
+            if self._backend.get_node(src_id) is None:
                 continue
             neighbors = self._backend.get_neighbors(src_id, hops=max_hops)
             for neighbor in neighbors:
@@ -981,25 +970,28 @@ class KnowledgeGraph:
         file_ref_re = re.compile(r'\b([\w_-]+\.md)\b')
         now = _utc_now()
 
-        known_files = {f.stem: f.name for f in knowledge_dir.glob("*.md") if not f.name.startswith("_")}
+        # Links inside a document name a file; nodes are addressed by index key. The map
+        # is the translation, and it is the only place a stem is allowed to stand for a
+        # document — inside one directory, where a stem is unambiguous by definition.
+        known_files = {f.stem: (f.name, node_id_for(l5_key(f, knowledge_dir)))
+                       for f in knowledge_dir.glob("*.md") if not f.name.startswith("_")}
 
-        for stem, fname in known_files.items():
-            src_id = f"kf:{stem}"
+        for stem, (fname, src_id) in known_files.items():
             text = (knowledge_dir / fname).read_text(encoding="utf-8", errors="replace")
 
             for match in md_link_re.finditer(text):
-                target_path = match.group(2)
-                target_stem = Path(target_path).stem
+                target_stem = Path(match.group(2)).stem
                 if target_stem in known_files and target_stem != stem:
-                    self._add_edge_safe(src_id, f"kf:{target_stem}", EdgeType.DEPENDS_ON,
+                    self._add_edge_safe(src_id, known_files[target_stem][1], EdgeType.DEPENDS_ON,
                                         f"markdown link [{match.group(1)}]", now)
                     count += 1
 
             for match in file_ref_re.finditer(text):
                 ref_stem = Path(match.group(1)).stem
                 if ref_stem in known_files and ref_stem != stem:
-                    if not self._edge_exists(src_id, f"kf:{ref_stem}", EdgeType.DEPENDS_ON):
-                        self._add_edge_safe(src_id, f"kf:{ref_stem}", EdgeType.DEPENDS_ON,
+                    ref_id = known_files[ref_stem][1]
+                    if not self._edge_exists(src_id, ref_id, EdgeType.DEPENDS_ON):
+                        self._add_edge_safe(src_id, ref_id, EdgeType.DEPENDS_ON,
                                             f"file reference {match.group(1)}", now)
                         count += 1
 
@@ -1012,8 +1004,10 @@ class KnowledgeGraph:
                 count += 1
 
         for fname, file_meta in meta.items():
-            stem = Path(fname).stem
-            src_id = f"kf:{stem}"
+            entry = known_files.get(Path(fname).stem)
+            if entry is None:
+                continue
+            src_id = entry[1]
             if self._backend.get_node(src_id) is None:
                 continue
             for tag in file_meta.get("tags", []):
@@ -1170,7 +1164,7 @@ class KnowledgeGraph:
             log.info("Invalidated %d edges for node %s", count, node_id)
         return count
 
-    def backfill_edge_timestamps(self, knowledge_dir: Path) -> int:
+    def backfill_edge_timestamps(self, knowledge_dir: Path, source_layer: str = "L5") -> int:
         """Backfill t_created on edges from source file mtime.
 
         Atomicity note: each file's UPDATE is its own backend transaction (one
@@ -1185,9 +1179,10 @@ class KnowledgeGraph:
         for md_file in sorted(knowledge_dir.glob("*.md")):
             if md_file.name.startswith("_"):
                 continue
-            node_id = f"kf:{md_file.stem}"
+            key = (l5_key(md_file, knowledge_dir) if source_layer == "L5"
+                   else l6_key(md_file, knowledge_dir))
             mtime = datetime.fromtimestamp(md_file.stat().st_mtime, tz=timezone.utc).isoformat()
-            count += self._backend.update_edge_timestamp_for_node(node_id, "t_created", mtime)
+            count += self._backend.update_edge_timestamp_for_node(node_id_for(key), "t_created", mtime)
         if count:
             log.info("Backfilled t_created on %d edges from file timestamps", count)
         return count
