@@ -20,6 +20,8 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from .index_keys import l5_key, l6_key
+
 log = logging.getLogger(__name__)
 
 
@@ -866,8 +868,18 @@ class KnowledgeGraph:
     def backend(self) -> GraphBackend:
         return self._backend
 
-    def bulk_import_knowledge_files(self, knowledge_dir: Path) -> int:
-        """Create KnowledgeFile nodes from existing .md files."""
+    def bulk_import_knowledge_files(self, knowledge_dir: Path, source_layer: str = "L5") -> int:
+        """Create KnowledgeFile nodes from existing .md files.
+
+        `path` holds the index key, not the bare filename, because the key is what the
+        rest of the system means by "this document": the fuser dedups on it, the decay
+        counter buckets on it, and an address is built from it. A node that names its
+        document differently from everyone else cannot be matched to anything.
+
+        The layer is a parameter because this is called once per layer and the two
+        cannot be told apart from the directory alone — the shared layer used to be
+        imported as L5, and a node that lies about its layer cannot say where it lives.
+        """
         count = 0
         if not knowledge_dir.exists():
             return count
@@ -875,17 +887,30 @@ class KnowledgeGraph:
             if md_file.name.startswith("_"):
                 continue
             node_id = f"kf:{md_file.stem}"
+            # Same stem in two layers would silently overwrite one document's node with
+            # another's. Nobody has hit it (0 overlaps today), which is why it is worth
+            # a warning rather than a scheme change: the day it happens, it says so.
+            existing = self._backend.get_node(node_id)
+            if existing is not None and existing.source_layer not in ("", source_layer):
+                log.warning(
+                    "Knowledge graph: %s already holds a %s document; skipping the %s one (%s)",
+                    node_id, existing.source_layer, source_layer, md_file.name,
+                )
+                continue
+            key = (l5_key(md_file, knowledge_dir) if source_layer == "L5"
+                   else l6_key(md_file, knowledge_dir))
             mtime = datetime.fromtimestamp(md_file.stat().st_mtime, tz=timezone.utc).isoformat()
             node = GraphNode(
                 node_id=node_id,
                 node_type=NodeType.KNOWLEDGE_FILE,
                 label=md_file.stem.replace("_", " ").title(),
-                source_layer="L5",
-                properties={"path": str(md_file.name), "size_bytes": md_file.stat().st_size, "file_mtime": mtime},
+                source_layer=source_layer,
+                properties={"path": key, "source_path": str(md_file),
+                            "size_bytes": md_file.stat().st_size, "file_mtime": mtime},
             )
             self._backend.add_node(node)
             count += 1
-        log.info("Bulk imported %d knowledge files as graph nodes", count)
+        log.info("Bulk imported %d %s knowledge files as graph nodes", count, source_layer)
         return count
 
     def graph_expand(self, filenames: List[str], max_hops: int = 1) -> List[tuple]:
@@ -899,7 +924,15 @@ class KnowledgeGraph:
         for fname in filenames:
             stem = Path(fname).stem
             src_id = f"kf:{stem}"
-            if self._backend.get_node(src_id) is None:
+            seed = self._backend.get_node(src_id)
+            if seed is None:
+                continue
+            # The stem drops both the directory and the layer, so a match is a claim
+            # about a name, not about a document. The key settles it: three of this
+            # agent's 1874 keys share a stem with some node, and each is a second copy
+            # of a file in another root — expanding from those would start somewhere
+            # the search never went.
+            if seed.properties.get("path") != fname:
                 continue
             neighbors = self._backend.get_neighbors(src_id, hops=max_hops)
             for neighbor in neighbors:
@@ -910,6 +943,10 @@ class KnowledgeGraph:
                 if path and path not in filenames:
                     results.append(({
                         "source_file": path,
+                        "source_path": neighbor.properties.get("source_path", ""),
+                        # The channel, not the document's layer: LAYER_WEIGHTS prices
+                        # L7 at 0.6, and re-labelling here would silently re-weight
+                        # fusion under cover of an addressing fix.
                         "source_layer": "L7",
                         "heading": neighbor.label,
                         "graph_node_id": neighbor.node_id,

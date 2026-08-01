@@ -562,10 +562,10 @@ class DpcAgentManager:
                             try:
                                 from dpc_client_core.dpc_agent.knowledge_graph import KnowledgeGraph
                                 _kg = KnowledgeGraph(agent_root)
-                                _kg.bulk_import_knowledge_files(knowledge_dir)
+                                _kg.bulk_import_knowledge_files(knowledge_dir, source_layer="L5")
                                 if self.firewall and self.firewall.can_agent_access_context('knowledge', profile_name=self.agent_id):
                                     _l6_dir = Path(os.environ.get("DPC_HOME", Path.home() / ".dpc")) / "knowledge"
-                                    _kg.bulk_import_knowledge_files(_l6_dir)
+                                    _kg.bulk_import_knowledge_files(_l6_dir, source_layer="L6")
                                 _archive_dir = Path(os.environ.get("DPC_HOME", Path.home() / ".dpc")) / "conversations" / (self.agent_id or "agent_001") / "archive"
                                 _kg.extract_structural_edges(knowledge_dir, _archive_dir if _archive_dir.exists() else None)
                                 log.info("Knowledge graph built: %d nodes, %d edges", _kg.backend.node_count(), _kg.backend.edge_count())

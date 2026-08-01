@@ -106,19 +106,74 @@ def test_kg_persist_extracted_entities_writes_mentions(kg, tmp_path):
 
 
 def test_kg_graph_expand_after_structural(kg, tmp_path):
+    """The channel speaks index keys, because that is what everything else calls identity.
+
+    It used to emit bare filenames. The fuser dedups on this string, so a graph hit for
+    a document the vector channel had already found could not merge with it — RRF split
+    the evidence instead of summing it — and no address could be built from the name.
+    """
     kdir = tmp_path / "knowledge"
     kdir.mkdir()
     _write_md(kdir, "alpha", "# Alpha\nReferences [Beta](beta.md) and [Gamma](gamma.md).")
     _write_md(kdir, "beta", "# Beta\nLinks to [Gamma](gamma.md).")
     _write_md(kdir, "gamma", "# Gamma\nLeaf.")
-    kg.bulk_import_knowledge_files(kdir)
+    kg.bulk_import_knowledge_files(kdir, source_layer="L5")
     kg.extract_structural_edges(kdir)
 
-    expanded = kg.graph_expand(["alpha.md"], max_hops=1)
+    expanded = kg.graph_expand(["knowledge/alpha.md"], max_hops=1)
     expanded_paths = {row[0]["source_file"] for row in expanded}
-    # 1-hop from alpha → both beta and gamma should appear
-    assert "beta.md" in expanded_paths
-    assert "gamma.md" in expanded_paths
+    # 1-hop from alpha → both beta and gamma should appear, spelled as keys
+    assert "knowledge/beta.md" in expanded_paths
+    assert "knowledge/gamma.md" in expanded_paths
+
+
+def test_kg_graph_expand_returns_an_addressable_meta(kg, tmp_path):
+    """Whatever the channel returns has to survive the trip to a printed address."""
+    from dpc_client_core.dpc_agent.active_recall import hint_address
+
+    kdir = tmp_path / "knowledge"
+    kdir.mkdir()
+    _write_md(kdir, "alpha", "# Alpha\nReferences [Beta](beta.md).")
+    _write_md(kdir, "beta", "# Beta\nLeaf.")
+    kg.bulk_import_knowledge_files(kdir, source_layer="L5")
+    kg.extract_structural_edges(kdir)
+
+    expanded = kg.graph_expand(["knowledge/alpha.md"], max_hops=1)
+    assert expanded, "expected at least one neighbour"
+    for meta, _score in expanded:
+        assert meta["source_file"].startswith("knowledge/"), meta
+        assert meta.get("source_path"), meta
+        assert hint_address(meta, extended_read_enabled=True) is not None, meta
+
+
+def test_kg_graph_expand_ignores_a_namesake(kg, tmp_path):
+    """A stem match is a claim about a name; the key is what settles which document."""
+    kdir = tmp_path / "knowledge"
+    kdir.mkdir()
+    _write_md(kdir, "alpha", "# Alpha\nReferences [Beta](beta.md).")
+    _write_md(kdir, "beta", "# Beta\nLeaf.")
+    kg.bulk_import_knowledge_files(kdir, source_layer="L5")
+    kg.extract_structural_edges(kdir)
+
+    # Same stem, different document: an external root holding its own alpha.md.
+    assert kg.graph_expand(["EXT/some-project/docs/alpha.md"], max_hops=1) == []
+
+
+def test_kg_bulk_import_keeps_the_layer_that_claimed_a_stem_first(kg, tmp_path):
+    """Two layers, one stem: overwriting one document's node with another's is silent loss."""
+    l5 = tmp_path / "knowledge"
+    l5.mkdir()
+    _write_md(l5, "shared", "# Shared\nagent layer")
+    l6 = tmp_path / "shared-knowledge"
+    l6.mkdir()
+    _write_md(l6, "shared", "# Shared\nhuman layer")
+
+    kg.bulk_import_knowledge_files(l5, source_layer="L5")
+    assert kg.bulk_import_knowledge_files(l6, source_layer="L6") == 0
+
+    node = kg.backend.get_node("kf:shared")
+    assert node.source_layer == "L5"
+    assert node.properties["path"] == "knowledge/shared.md"
 
 
 def test_kg_invalidate_edges_bi_temporal(kg):
