@@ -58,6 +58,14 @@ def _is_shared_knowledge_read(ctx: ToolContext, path: str) -> bool:
     Recall, and then be refused the read, purely because the directory was never added
     to a second, unrelated list. Honour the same permission that put it there.
 
+    Which is the whole justification, and it bounds the gate: the indexer takes the
+    top-level `.md` files of that directory and nothing else, so a file deeper in the
+    tree or of another type was never offered and this rule was never about it. It
+    used to admit any file at any depth — wider than its own reason, and quietly, since
+    the two sets happen to coincide today (measured 2026-08-02: 301 files, all `.md`,
+    no subdirectories). A refusal here is logged rather than silent, because the day
+    the sets stop coinciding is the day someone needs to know which rule to change.
+
     Reads only. Write access to the shared layer stays where it was.
     """
     if not ctx.firewall:
@@ -69,6 +77,10 @@ def _is_shared_knowledge_read(ctx: ToolContext, path: str) -> bool:
         resolved = Path(path).expanduser().resolve()
         resolved.relative_to(knowledge_dir)
     except (ValueError, OSError):
+        return False
+    if resolved.parent != knowledge_dir or resolved.suffix.lower() != ".md":
+        log.info("shared knowledge read refused: %s is under the shared layer but is not "
+                 "what the indexer admits (top-level .md)", resolved)
         return False
     profile = getattr(getattr(ctx, "_agent", None), "_firewall_profile", None)
     return bool(ctx.firewall.can_agent_access_context("knowledge", profile_name=profile))

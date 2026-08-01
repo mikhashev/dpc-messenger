@@ -32,7 +32,13 @@ DEFAULT_EXCLUDED_DIRS = frozenset({
 
 
 def _norm(path_str: str) -> str:
-    """Comparison key for two spellings of the same location."""
+    """Comparison key for two spellings of the same location.
+
+    Case-folding is the platform's, not ours: `normcase` lower-cases on Windows and is
+    a no-op on POSIX. So `Backlog.md` and `backlog.md` are one document on Windows and
+    two on Linux — correct in both places, because that is what the filesystem says,
+    and worth stating because a reader expects a comparison helper to be portable.
+    """
     return os.path.normcase(os.path.normpath(path_str))
 
 

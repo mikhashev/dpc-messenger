@@ -55,7 +55,13 @@ EXT_PREFIX = "EXT"
 
 
 def _norm(path) -> str:
-    """Comparison key for two spellings of the same location."""
+    """Comparison key for two spellings of the same location.
+
+    Case-folding is the platform's, not ours: `normcase` lower-cases on Windows and is
+    a no-op on POSIX. So `Backlog.md` and `backlog.md` are one document on Windows and
+    two on Linux — correct in both places, because that is what the filesystem says,
+    and worth stating because a reader expects a comparison helper to be portable.
+    """
     return os.path.normcase(os.path.normpath(str(path)))
 
 
@@ -115,6 +121,17 @@ def build_ext_roots(indexed_paths: Sequence[str]) -> List[ExtRoot]:
     seen: set = set()
     for entry in indexed_paths:
         p = pathlib.Path(entry)
+        if not p.exists():
+            # A root that is not there is not "a file", but `is_dir()` says False for
+            # both, so its parent would become the base — and the base takes part in
+            # computing everyone's tails. A path that indexes nothing could therefore
+            # lengthen a live root's tail and rename every key under it, which is a
+            # rebuild nobody asked for and a document that quietly changes identity.
+            # Nothing reaches here today (reconcile_indexed_paths drops dead entries
+            # first), and that is one caller's habit rather than a property of this
+            # function.
+            log.warning("indexed root %s does not exist; excluded from key naming", p)
+            continue
         base = p if p.is_dir() else p.parent
         if _norm(base) not in seen:
             seen.add(_norm(base))
