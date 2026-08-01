@@ -77,3 +77,16 @@ def test_no_firewall_skips_every_agent_rather_than_indexing_them_all(commit_file
     messages = _run(svc, commit_file, caplog)
 
     assert sum("no firewall to ask" in m for m in messages) == 2
+
+
+def test_an_all_digit_content_hash_is_not_a_mismatch():
+    """A 16-hex-digit hash with no letters is valid YAML for an integer, and the parser
+    obliges. Comparing the computed string against that int reported two of 265 commits
+    as corrupted while their content was untouched — a false alarm about integrity is
+    not harmless: it is the alarm nobody will believe next time.
+    """
+    computed = "4541343283619917"
+    from_frontmatter = 4541343283619917  # what yaml hands back
+
+    assert computed != from_frontmatter
+    assert computed == str(from_frontmatter)

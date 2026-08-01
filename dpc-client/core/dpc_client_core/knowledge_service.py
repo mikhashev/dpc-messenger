@@ -179,7 +179,11 @@ class KnowledgeService:
                         frontmatter, content = markdown_manager.parse_markdown_with_frontmatter(filepath)
                         if 'content_hash' in frontmatter:
                             actual_hash = hashlib.sha256(content.encode('utf-8')).hexdigest()[:16]
-                            if actual_hash != frontmatter['content_hash']:
+                            # str(): a 16-hex-digit hash that happens to contain no
+                            # letters is valid YAML for an integer, and the parser
+                            # obliges — so two of 265 commits compared str against int
+                            # and "mismatched" against their own unchanged content.
+                            if actual_hash != str(frontmatter['content_hash']):
                                 logger.warning("Content hash mismatch for %s: %s", topic_name, frontmatter['commit_id'])
                         entries = markdown_manager.markdown_to_entries(content)
                         topic.entries = entries
