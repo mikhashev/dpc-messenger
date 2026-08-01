@@ -157,3 +157,58 @@ def test_the_field_the_address_is_built_from_survives_the_round_trip(kind, world
         assert returned is not None, f"{kind}: {original['source_file']} not returned"
         assert returned.get("source_path") == original["source_path"], (
             f"{kind}: source_path lost in the store for {original['source_file']}")
+
+
+def _read_access_log(agent_root):
+    import json
+    path = agent_root / "state" / "knowledge_access.jsonl"
+    return [json.loads(l) for l in path.read_text(encoding="utf-8").splitlines() if l.strip()]
+
+
+def test_the_log_records_the_addresses_that_were_printed(world, tmp_path):
+    """Attribution is a string comparison, so the strings have to be the printed ones."""
+    from dpc_client_core.dpc_agent.active_recall import get_recall_block, render_recall_hints
+
+    metas = _metas(world)
+    results = [SearchResult(chunk_meta=m, score=1.0, source="hybrid") for m in metas]
+    agent_root = world["agent_root"]
+
+    block = get_recall_block(results, context_usage_ratio=0.0, agent_root=agent_root,
+                             task_id="group-b88b65076b85")
+    printed = _addresses(block.text)
+    entry = _read_access_log(agent_root)[-1]
+
+    assert entry["task_id"] == "group-b88b65076b85"
+    assert entry["addresses"] == printed, "logged addresses are not the ones in the block"
+    assert len(entry["addresses"]) == len(entry["files"])
+
+
+def test_an_unreachable_hint_is_recorded_as_a_null_address(world, tmp_path):
+    """A wasted slot has to be countable, not merely visible to whoever reads the block."""
+    from dpc_client_core.dpc_agent.active_recall import get_recall_block
+
+    graph_meta = {"source_file": "graviton-knowledge-graph-framework.md",
+                  "source_layer": "L7", "heading": "Graviton"}
+    results = [SearchResult(chunk_meta=graph_meta, score=1.0, source="graph")]
+    agent_root = world["agent_root"]
+
+    get_recall_block(results, context_usage_ratio=0.0, agent_root=agent_root, task_id="t-1")
+    entry = _read_access_log(agent_root)[-1]
+
+    assert entry["addresses"] == [None]
+    assert entry["files"] == ["graviton-knowledge-graph-framework.md"]
+
+
+def test_the_hints_mode_records_no_addresses_because_it_prints_none(world, tmp_path):
+    from dpc_client_core.dpc_agent.active_recall import get_recall_block
+
+    results = [SearchResult(chunk_meta=m, score=1.0, source="hybrid") for m in _metas(world)]
+    agent_root = world["agent_root"]
+
+    # Between CONTEXT_THRESHOLD_HINTS_ONLY (0.5) and CONTEXT_THRESHOLD_SKIP (0.7):
+    # above 0.7 nothing is injected at all and there would be no entry to check.
+    block = get_recall_block(results, context_usage_ratio=0.6, agent_root=agent_root,
+                             task_id="t-2")
+    assert block.mode == "hints"
+    assert 'read_file("' not in block.text
+    assert _read_access_log(agent_root)[-1]["addresses"] == []

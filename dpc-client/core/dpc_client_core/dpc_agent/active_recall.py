@@ -66,16 +66,44 @@ def hint_address(meta: Dict, extended_read_enabled: bool = True) -> Optional[str
     return source_path if extended_read_enabled else None
 
 
+@dataclass
+class RenderedHints:
+    """The block, plus the addresses it actually printed.
+
+    Attribution compares strings: an address the agent followed has to be matched
+    against the address it was given. Recomputing that address at log time would
+    compare our second guess with the agent's copy of the first, and the two drift
+    the moment the renderer changes. So the code that prints them hands them over.
+
+    `addresses` is aligned with the injected results, and carries None exactly where
+    the hint printed a dead end — which is what makes "how often is a slot wasted"
+    a count rather than an impression.
+    """
+
+    text: str
+    addresses: List[Optional[str]]
+
+
 def format_recall_hints(
     results: List[SearchResult],
     max_results: int = 3,
     extended_read_enabled: bool = True,
 ) -> str:
     """Format search results as markdown hints for Block2 injection."""
+    return render_recall_hints(results, max_results, extended_read_enabled).text
+
+
+def render_recall_hints(
+    results: List[SearchResult],
+    max_results: int = 3,
+    extended_read_enabled: bool = True,
+) -> RenderedHints:
+    """Format the hints and report which addresses went into them."""
     if not results:
-        return ""
+        return RenderedHints(text="", addresses=[])
 
     hints = results[:max_results]
+    addresses: List[Optional[str]] = []
     lines = [
         "Active Recall",
         "--- ACTIVE RECALL ---",
@@ -89,6 +117,7 @@ def format_recall_hints(
         label = f"{heading}" if heading else filename
         excerpt = _excerpt(meta)
         address = hint_address(meta, extended_read_enabled)
+        addresses.append(address)
         if address:
             action = f'call read_file("{address}") for details'
         else:
@@ -100,7 +129,7 @@ def format_recall_hints(
             lines.append(f"    {excerpt}")
     lines.append("--- END RECALL ---")
     lines.append("")
-    return "\n".join(lines)
+    return RenderedHints(text="\n".join(lines), addresses=addresses)
 
 
 def should_inject(context_usage_ratio: float) -> str:
@@ -157,6 +186,7 @@ def get_recall_block(
     max_results: int = 3,
     agent_root: Optional[pathlib.Path] = None,
     extended_read_enabled: bool = True,
+    task_id: str = "",
 ) -> RecallInjection:
     """Get the appropriate recall block based on context budget and decay scoring."""
     mode = should_inject(context_usage_ratio)
@@ -165,10 +195,19 @@ def get_recall_block(
     if agent_root and results:
         results = _apply_decay(results, agent_root)
     injected = results[:max_results]
+    # Render before logging: the addresses recorded are the ones printed, taken from
+    # the render that printed them. The `hints` mode prints no addresses at all, so
+    # it has none to record — and is excluded from the follow-rate denominator for
+    # that reason rather than by convention.
+    if mode == "hints":
+        text = format_hints_only(results, max_results)
+        addresses: List[Optional[str]] = []
+    else:
+        rendered = render_recall_hints(results, max_results, extended_read_enabled)
+        text, addresses = rendered.text, rendered.addresses
     if agent_root and injected:
-        _log_knowledge_access(injected, mode, agent_root)
-    text = (format_hints_only(results, max_results) if mode == "hints"
-            else format_recall_hints(results, max_results, extended_read_enabled))
+        _log_knowledge_access(injected, mode, agent_root, task_id=task_id,
+                              addresses=addresses)
     return RecallInjection(text=text, mode=mode, injected=injected if text else [])
 
 
@@ -332,13 +371,26 @@ def _apply_decay(
 
 
 def _log_knowledge_access(
-    results: List[SearchResult], mode: str, agent_root: pathlib.Path
+    results: List[SearchResult],
+    mode: str,
+    agent_root: pathlib.Path,
+    task_id: str = "",
+    addresses: Optional[List[Optional[str]]] = None,
 ) -> None:
-    """Log which knowledge files were injected into context (S1 feedback loop)."""
+    """Log which knowledge files were injected into context (S1 feedback loop).
+
+    Two fields carry the attribution. `task_id` is written with the same meaning
+    `tools.jsonl` gives it, so the two logs join on equal strings instead of on a
+    guess about which turn a read belongs to. `addresses` holds what the hint
+    printed, position for position with `files`, so "the agent followed the hint"
+    is a string comparison rather than an inference from timestamps — and a null
+    there is a slot that was spent on a document the agent could not open.
+    """
     access_path = agent_root / "state" / "knowledge_access.jsonl"
     access_path.parent.mkdir(parents=True, exist_ok=True)
     files = [r.chunk_meta.get("source_file", "unknown") for r in results]
-    entry = {"ts": utc_now_iso(), "mode": mode, "files": files, "useful": None}
+    entry = {"ts": utc_now_iso(), "task_id": task_id, "mode": mode, "files": files,
+             "addresses": list(addresses or []), "useful": None}
     try:
         with open(access_path, "a", encoding="utf-8") as f:
             f.write(json.dumps(entry, ensure_ascii=False) + "\n")

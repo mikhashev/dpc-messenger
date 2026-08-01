@@ -510,6 +510,9 @@ def build_llm_messages(
                 _recall = get_recall_block(
                     _results, context_usage_ratio=_ctx_ratio, agent_root=agent_root,
                     extended_read_enabled=extended_read_enabled,
+                    # The identity tools.jsonl writes for the same turn — join key,
+                    # not decoration.
+                    task_id=str(task.get("id") or ""),
                 )
                 if _recall:
                     # Reported by the code that made the choice, not reconstructed
