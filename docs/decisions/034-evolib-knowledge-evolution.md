@@ -474,12 +474,21 @@ follow-rate count reported 7 where the honest number was 3. The rule the team ad
 S59 — a report about a running system states the last process-start time next to the last
 commit time — was written because of the first and would have caught it.
 
-*Both external reviewers measured a stale store.* Every graph number in the fourth round —
-node counts, orphaned edges, stem collisions — came from a SQLite file last written on 17 May,
-while production had been on Grafeo for weeks; one review presented them as measured against
-the live agents, and the team's synthesis inherited them. Nobody was careless: there is no way
-to snapshot the live graph without stopping the backend, so the stale file is what a reviewer
-finds. That absence is now its own backlog entry.
+*Both external reviewers measured a stale store, and so did the excuse for it.* Every graph
+number in the fourth round — node counts, orphaned edges, stem collisions — came from a SQLite
+file last written on 17 May, while production had been on Grafeo for weeks; one review
+presented them as measured against the live agents, and the team's synthesis inherited them.
+The first account of this said nobody was careless, since there is no way to snapshot the live
+graph without stopping the backend. Half true: the tool is missing, and the *answer* was not —
+`KnowledgeGraph initialized at <path> [backend=<name>] (N nodes, M edges)` is printed at every
+startup, in the log all of us were reading. What was absent was the habit of asking the system
+what it had opened before opening a file and assuming.
+
+The proposal that followed — delete or rename the stale file so it stops looking live — was
+also wrong, and Mike caught it: the backend is user-selectable (`[knowledge_graph] backend`,
+default `sqlite`; retrieval backends per agent in the UI, which states that old index files are
+kept deliberately). The stale store is the rollback state. Two of us reached for deletion
+because we had each assumed the choice was permanent.
 
 **Round 3 (logs).** The team's own empirical brief overstated system health — total tool calls
 counted as `read_file`, reads pooled by basename across projects — and every error pointed the
