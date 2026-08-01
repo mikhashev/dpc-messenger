@@ -7432,7 +7432,7 @@ class CoreService:
 
             from dpc_client_core.dpc_agent.extended_paths_index import REPAIR_DROPPED
             rules = copy.deepcopy(self.firewall.get_rules_as_dict())
-            report = self.firewall._repair_indexed_paths(rules)
+            report = self.firewall._repair_indexed_paths(rules, guess_renames=True)
             scopes: Dict[str, Dict[str, int]] = {}
             for scope, line in report:
                 bucket = scopes.setdefault(scope, {"re_pointed": 0, "dropped": 0})
@@ -7459,7 +7459,7 @@ class CoreService:
         try:
             import copy
             rules = copy.deepcopy(self.firewall.get_rules_as_dict())
-            report = self.firewall._repair_indexed_paths(rules)
+            report = self.firewall._repair_indexed_paths(rules, guess_renames=True)
             if not report:
                 return {"status": "ok", "repaired": 0, "message": "Nothing to repair"}
             ok, message, errors = self.firewall.save_rules_from_dict(rules)

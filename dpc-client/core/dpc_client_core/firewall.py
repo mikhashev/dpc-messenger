@@ -1891,7 +1891,8 @@ class ContextFirewall:
 
         return warnings
 
-    def _repair_indexed_paths(self, rules_dict: Dict[str, Any]) -> List[Tuple[str, str]]:
+    def _repair_indexed_paths(self, rules_dict: Dict[str, Any],
+                              guess_renames: bool = False) -> List[Tuple[str, str]]:
         """Re-attach index flags to the access paths they belong to, in place.
 
         The UI writes an index flag as a copy of the access-path string, so editing a
@@ -1916,7 +1917,7 @@ class ContextFirewall:
             indexed = sandbox.get('indexed_paths')
             if not isinstance(indexed, list) or not indexed:
                 continue
-            repaired, changes = reconcile_indexed_paths(sandbox, indexed)
+            repaired, changes = reconcile_indexed_paths(sandbox, indexed, guess_renames)
             if changes:
                 sandbox['indexed_paths'] = repaired
                 report.extend((scope, line) for line in changes)

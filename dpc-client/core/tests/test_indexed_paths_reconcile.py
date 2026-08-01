@@ -34,7 +34,7 @@ def test_renamed_parent_is_repointed_by_tail(tmp_path):
     live_dir = tmp_path / "new_user" / "project"
     live_dir.mkdir(parents=True)
     stale = str(tmp_path / "old_user" / "project")
-    repaired, changes = reconcile_indexed_paths(_ext([str(live_dir)]), [stale])
+    repaired, changes = reconcile_indexed_paths(_ext([str(live_dir)]), [stale], guess_renames=True)
     assert repaired == [str(live_dir)]
     assert any("segment(s) match" in c for c in changes)
 
@@ -47,7 +47,7 @@ def test_moved_and_renamed_is_repointed_by_final_segment(tmp_path):
     live_dir = tmp_path / "mikha" / "Documents" / "ai-studio"
     live_dir.mkdir(parents=True)
     stale = str(tmp_path / "mike" / "ai-studio")
-    repaired, changes = reconcile_indexed_paths(_ext([str(live_dir)]), [stale])
+    repaired, changes = reconcile_indexed_paths(_ext([str(live_dir)]), [stale], guess_renames=True)
     assert repaired == [str(live_dir)]
 
 
@@ -57,7 +57,7 @@ def test_ambiguous_tail_is_dropped_rather_than_guessed(tmp_path):
     a.mkdir(parents=True)
     b.mkdir(parents=True)
     stale = str(tmp_path / "gone" / "docs")
-    repaired, changes = reconcile_indexed_paths(_ext([str(a), str(b)]), [stale])
+    repaired, changes = reconcile_indexed_paths(_ext([str(a), str(b)]), [stale], guess_renames=True)
     assert repaired == []
     assert any("dropped" in c for c in changes)
 
@@ -77,7 +77,7 @@ def test_same_path_at_two_access_levels_is_one_candidate(tmp_path):
     live_dir.mkdir(parents=True)
     stale = str(tmp_path / "mike" / "ai-studio")
     ext = _ext(read_only=[str(live_dir)], read_write=[str(live_dir)])
-    repaired, _ = reconcile_indexed_paths(ext, [stale])
+    repaired, _ = reconcile_indexed_paths(ext, [stale], guess_renames=True)
     assert repaired == [str(live_dir)]
 
 
@@ -117,6 +117,37 @@ def test_summary_counts_both_kinds(tmp_path):
     stale = str(tmp_path / "mike" / "project")
     gone = str(tmp_path / "mike" / "nothing-like-this")
 
-    repaired, changes = reconcile_indexed_paths(_ext([str(live_dir)]), [stale, gone])
+    repaired, changes = reconcile_indexed_paths(_ext([str(live_dir)]), [stale, gone], guess_renames=True)
     assert repaired == [str(live_dir)]
     assert summarise_repairs(2, changes) == "2 entries, 1 re-pointed, 1 dropped (no reachable path)"
+
+
+def test_removing_a_root_does_not_move_its_flag_to_a_namesake(tmp_path):
+    """Found by testing the claim rather than reading it.
+
+    A deliberate removal and a rename look identical from here: an index flag whose
+    path is in neither the access list nor the filesystem. Guessing rename indexes a
+    root the user did not tick — remove `…/projA/docs` while `…/projB/docs` stays and
+    the flag lands on projB. The access list is what the user said, so an automatic
+    pass may only subtract from it.
+    """
+    keep = tmp_path / "projB" / "docs"
+    keep.mkdir(parents=True)
+    removed = str(tmp_path / "projA" / "docs")
+
+    repaired, changes = reconcile_indexed_paths(_ext([str(keep)]), [removed])
+
+    assert repaired == []
+    assert any("dropped" in c for c in changes)
+
+
+def test_the_rename_guess_is_still_available_when_a_person_asks_for_it(tmp_path):
+    """The profile rename this was written for — `mike` to `mikha`, 45 entries — is a
+    real case and still repairable, through the path where the user sees the moves."""
+    live_dir = tmp_path / "mikha" / "Documents" / "zemstvo"
+    live_dir.mkdir(parents=True)
+    stale = str(tmp_path / "mike" / "Documents" / "zemstvo")
+
+    repaired, _ = reconcile_indexed_paths(_ext([str(live_dir)]), [stale], guess_renames=True)
+
+    assert repaired == [str(live_dir)]

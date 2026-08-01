@@ -63,8 +63,21 @@ def summarise_repairs(entries: int, changes: List[str]) -> str:
 def reconcile_indexed_paths(
     extended_paths: Dict[str, List],
     indexed_paths: List[str],
+    guess_renames: bool = False,
 ) -> Tuple[List[str], List[str]]:
     """Re-attach index flags to the access list they were copied from.
+
+    `guess_renames` decides what happens to a flag whose path is gone from both the
+    access list and the disk. Off — the default, and what every automatic caller
+    uses — it is dropped. On, a single reachable access path with the same tail is
+    treated as the same root under a new name.
+
+    The guess is off by default because a rename and a deliberate removal look
+    identical from here, and guessing wrong indexes a root the user did not tick:
+    removing `…\\projA\\docs` while `…\\projB\\docs` stays moves the flag to projB.
+    Verified by test. What is in the access list is what the user said, so an
+    automatic pass may only subtract from it; adding is a person's call, which is
+    what `repair_indexed_paths` is for — it shows the moves before making them.
 
     The UI stores an index flag as a *copy* of the access-list string, so editing a
     path in `read_only` leaves the old spelling stranded in `indexed_paths`, where it
@@ -110,7 +123,7 @@ def reconcile_indexed_paths(
             continue
 
         remapped = None
-        if not os.path.exists(entry):
+        if guess_renames and not os.path.exists(entry):
             entry_parts = pathlib.PurePath(entry).parts
             for depth in (2, 1):
                 if len(entry_parts) < depth:
