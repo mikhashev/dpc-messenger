@@ -1028,9 +1028,13 @@ Respond in JSON format:
             if commit.conversation_id:
                 monitor = self._get_or_create_conversation_monitor(commit.conversation_id)
                 if monitor.message_buffer:
+                    # Name the buffer. "Clearing buffer for <conversation>" reads as
+                    # "your conversation was cleared", and it is not: message_history,
+                    # which the chat shows and syncs, is untouched here.
                     logger.info(
-                        "Clearing buffer for %s after commit approval",
-                        commit.conversation_id,
+                        "Knowledge auto-detect buffer reset for %s after commit approval "
+                        "(%d messages; chat history untouched)",
+                        commit.conversation_id, len(monitor.message_buffer),
                     )
                     monitor.message_buffer = []
                     monitor.knowledge_score = 0.0
