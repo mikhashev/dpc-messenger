@@ -294,26 +294,17 @@ class DpcAgentManager:
                     _actual_model = _provider_ref.model_name if _provider_ref else mem_cfg.embedding_model
 
                     index_dir = agent_root / "state" / "memory_index"
-                    needs_full_rebuild = not (index_dir / "index_meta.json").exists()
-                    if not needs_full_rebuild:
-                        try:
-                            import json as _json
-                            _meta = _json.loads((index_dir / "index_meta.json").read_text(encoding="utf-8"))
-                            _stored_model = _meta.get("header", {}).get("model_name", "")
-                            if _stored_model != _actual_model:
-                                log.info("Memory index model changed (%s -> %s), forcing rebuild", _stored_model, _actual_model)
-                                needs_full_rebuild = True
-                            # Key format migration: the key is part of the embedded
-                            # document text, so a change of shape means the stored
-                            # vectors answer to names nothing asks for any more.
-                            # Rebuild rather than migrate.
-                            from dpc_client_core.dpc_agent.index_keys import KEY_FORMAT as _KEY_FORMAT
-                            _stored_key_fmt = _meta.get("header", {}).get("key_format", "")
-                            if _stored_key_fmt != _KEY_FORMAT:
-                                log.info("Memory index key format outdated (%r), forcing rebuild", _stored_key_fmt)
-                                needs_full_rebuild = True
-                        except Exception:
-                            needs_full_rebuild = True
+                    # Model change and key-format change both mean the stored rows
+                    # answer to names nothing asks for any more, and neither is
+                    # repairable incrementally — an incremental pass only revisits
+                    # documents whose hash moved. The decision lives in
+                    # indexing_pipeline so it can be tested against the state older
+                    # versions actually wrote.
+                    from dpc_client_core.dpc_agent.indexing_pipeline import rebuild_decision
+                    _decision = rebuild_decision(index_dir, _actual_model)
+                    needs_full_rebuild = _decision.needed
+                    if _decision.message:
+                        log.info("%s", _decision.message)
 
                     def _sync_index():
                         """Per-file hash incremental indexing in thread executor."""

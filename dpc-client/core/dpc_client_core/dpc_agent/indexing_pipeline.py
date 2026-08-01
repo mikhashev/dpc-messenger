@@ -14,11 +14,12 @@ import pathlib
 import json
 import re
 import time
+from dataclasses import dataclass
 from typing import Dict, List, Optional
 
 import numpy as np
 
-from .index_keys import l5_key
+from .index_keys import KEY_FORMAT, l5_key
 from .retrieval import RetrievalBackend, TextAddItem, VectorAddItem
 from .text_extract import extract_text, is_binary
 from .memory import read_all_meta, write_file_meta, read_file_meta, FileMeta, _BACKFILL_SKIP
@@ -94,6 +95,55 @@ def index_single_file(
     backend.text.add([TextAddItem(text=doc_text, meta=meta)])
 
     return 1
+
+
+@dataclass(frozen=True)
+class RebuildDecision:
+    """Whether the stored index can still be extended, and what to tell the log."""
+
+    needed: bool
+    message: str = ""
+
+
+def rebuild_decision(index_dir: pathlib.Path, actual_model: str) -> RebuildDecision:
+    """Can the index on disk be brought up to date incrementally, or must it be rebuilt?
+
+    An incremental pass only touches documents whose content hash moved, so it cannot
+    repair damage that lives in documents whose hash did not: a different embedding
+    model, a different key spelling, a field the store used to drop. Those are exactly
+    the changes that arrive as *old rows*, and the marker in the header is how a
+    previous version announces itself.
+
+    Lifted out of agent_manager unchanged so it can be run against the state earlier
+    versions wrote. Inline, the one path in this system whose whole job is to recognise
+    legacy state was the one path no test could reach — see tests/legacy_forms.py.
+    """
+    meta_path = index_dir / "index_meta.json"
+    if not meta_path.exists():
+        # Nothing stored yet. Not a migration, and nothing worth a line in the log.
+        return RebuildDecision(needed=True)
+    try:
+        header = json.loads(meta_path.read_text(encoding="utf-8")).get("header", {})
+    except Exception:
+        # Unreadable or malformed: the safe reading is that we do not know what is in
+        # there, and the cheap answer is to build it again.
+        return RebuildDecision(needed=True)
+
+    stored_model = header.get("model_name", "")
+    if stored_model != actual_model:
+        return RebuildDecision(
+            needed=True,
+            message=f"Memory index model changed ({stored_model} -> {actual_model}), forcing rebuild",
+        )
+
+    stored_key_format = header.get("key_format", "")
+    if stored_key_format != KEY_FORMAT:
+        return RebuildDecision(
+            needed=True,
+            message=f"Memory index key format outdated ({stored_key_format!r}), forcing rebuild",
+        )
+
+    return RebuildDecision(needed=False)
 
 
 def full_rebuild(
