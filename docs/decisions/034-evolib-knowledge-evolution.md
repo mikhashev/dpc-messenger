@@ -1,7 +1,7 @@
 ---
 adr: 034
 title: "Repair the Active Recall access layer, then adopt EvoLib's bookkeeping mechanisms"
-status: proposed
+status: accepted
 date: 2026-07-31
 deciders: [Mike]
 consulted: [CC, Ark, Warren, Fable 5, GLM 5.2]
@@ -18,6 +18,18 @@ session: S49
 > never had a working input. What follows is ordered by measured impact, not by how the
 > mechanisms read on paper. The superseded reasoning is kept in *Revision history* rather
 > than deleted, because unrecorded reversals come back.
+>
+> **T0 shipped 2026-08-01 (S59–S60); status accepted.** All eight items are in `dev`; see
+> *Implementation Status*. Two of them were solved differently from what this ADR specified
+> and the difference is recorded there rather than quietly absorbed. T1–T4 are untouched and
+> still gated on Q1–Q2.
+>
+> **D0 = 2026-08-01 17:05:25 local (10:05:25 UTC)** — the restart after `20a035bc`, the first
+> run in which the address works, the injection credit is bounded, and the grace period
+> exists. It is the epoch of every follow-rate measurement: numbers from before it describe a
+> different system, and this ADR's own "0 of 28" belongs to that one. D0 was not declared at
+> the first repair commit but at this restart, because until it the credit constant was one we
+> had already measured as wrong.
 
 ## Context and Problem Statement
 
@@ -45,6 +57,18 @@ agent-layer files live under `knowledge/`. Measured across all agents, all histo
 |---|---|
 | **successes** | **0** |
 
+> **After D0, measured 2026-08-01 18:15** — 9 injections, 27 slots, **0 slots with no
+> address**, **3 verbatim follows**. The first non-zero count in the system's history, against
+> 0 of 28 over the preceding 102 days.
+>
+> Two caveats belong next to that number and not below it. All three targets were files Mike
+> had asked for in the same minutes, so what is proven is that the address is *followable*,
+> not that the agent went *because of the hint*; separating them needs cases nobody asked for.
+> And the first count of this was wrong in our favour — the join credited one read at 10:50:16
+> to five different injections that had shown the same file, reporting 7. A rate needs distinct
+> events on both sides: each read is now attributed to the nearest preceding injection and
+> counted once, and paginated reads (`limit`, then `offset`) count as one follow.
+
 And every knowledge read that *did* succeed used an address the hint never prints:
 
 | how successful knowledge reads were addressed | count |
@@ -56,6 +80,13 @@ And every knowledge read that *did* succeed used an address the hint never print
 **2. The access counter is therefore ~entirely self-generated.** Fleet-wide: **28 873
 injections vs 166 genuine accesses (99.4% injection)**; per agent 86–99.9%. The top-ranked
 key for the largest agent is `README.md` — injected 4 102 times, read 0 times.
+
+> **The 166 is an artefact of the counter it was measuring, and the ratio was worse than
+> reality on both sides.** It was produced by the same counter this ADR was about to repair:
+> reads were pooled by basename, and only the live half of a rotating read log was ever
+> opened. Counted properly against the index — see Q4 — agent_001 alone shows **775** reads
+> landing on indexed documents in a 24-day window. The finding stands; the magnitude does not.
+> Left in place rather than corrected in-line, because it is what the decision was made on.
 
 **3. Decay has degenerated into a constant.** `decay_multiplier = max(0.1, access/max_count)`
 normalizes against a counter keyed by **basename**, which pools files from every layer —
@@ -207,54 +238,113 @@ the content is wanted, and removes the agent's choice of what to open. **Rejecte
 Verification criteria. Data-integrity items are required (this ADR changes what the knowledge
 layer records and how it is ranked).
 
-- [ ] **A hint can be followed verbatim.** For each layer (L5, L6, EXT), a test issues
+- [x] **A hint can be followed verbatim.** For each layer (L5, L6, EXT), a test issues
       `read_file("<exactly what the hint block printed>")` and receives content. Where the
       firewall legitimately denies it, the hint says so rather than printing an
       un-followable path.
-- [ ] The access counter distinguishes injection from read; N consecutive injections with no
-      read do not raise a file's decay multiplier, one real read does.
-- [ ] Counter keys are layer-relative paths: two files sharing a basename across layers have
-      independent counts (regression test with two `README.md`).
-- [ ] `read_file` on a knowledge file increments `_meta.json.access_count`; a written-once,
-      read-many file is not proposed for archive.
-- [ ] A new entry is not pinned to `DECAY_FLOOR` during its grace period (requires `created`
-      in `FileMeta`).
-- [ ] `knowledge_access.jsonl` is bounded by the same rotation policy as other agent logs.
-- [ ] No code path archives, deletes, or merges a knowledge entry without explicit human
-      approval. `useful` and decay affect **ranking only**.
+      — `tests/test_recall_hint_is_followable.py`, and `tests/test_recall_address_survives_the_store.py`
+      which writes through a real backend and opens the address that backend hands back, on
+      both retrieval backends. The second exists because the first builds its metas by hand
+      and so passed for 102 days over a store that dropped the field. Confirmed in production
+      after D0: 27 slots, 0 without an address, the shared layer among them.
+- [x] The access counter distinguishes injection from read; N consecutive injections with no
+      read do not raise a file's decay multiplier, one real read does. — `7e14b6a4`; the bound
+      that makes "does not raise" true in the ranking, not only in the counter, is `20a035bc`.
+- [x] Counter keys are layer-relative paths: two files sharing a basename across layers have
+      independent counts (regression test with two `README.md`). — `adaaaa45`.
+- [x] `read_file` on a knowledge file increments `_meta.json.access_count`; a written-once,
+      read-many file is not proposed for archive. — `5ee3625a`; the historical counts moved to
+      a write column rather than being discarded, since every one of them was a write.
+- [x] A new entry is not pinned to `DECAY_FLOOR` during its grace period. — `20a035bc`. Grace
+      returns 1.0, which is *level with* the busiest candidate in the set and not above it: it
+      removes a penalty, it does not hand out a promotion. **The parenthetical "(requires
+      `created` in `FileMeta`)" was dropped** — see T0e above.
+- [ ] ~~`knowledge_access.jsonl` is bounded by the same rotation policy as other agent logs.~~
+      **Criterion withdrawn — that policy deletes.** Replaced by: the log is bounded without
+      losing a line, and the counter compares injections and reads over one window.
+      — [x] `9fcc20c8`, with the archive and the line-count conservation test.
+- [x] No code path archives, deletes, or merges a knowledge entry without explicit human
+      approval. `useful` and decay affect **ranking only**. — still true; re-checked while
+      touching consolidation's neighbours. `tier2_propose` still has no production caller.
 - [ ] A merged entry's `contributors` is the union of its parents'; a merged entry inherits
       **post-T0** access history and is not floored in the session it is created.
 - [ ] Merge-candidate detection issues zero network calls to third-party embedding services.
 - [ ] The similarity threshold was calibrated on DPC's own base; the procedure and the
       resulting number are recorded here, not inherited from EvoLib.
-- [ ] The "Active Recall injected N hints" log line reports exactly the injected files,
-      post-decay, with post-decay scores.
+- [x] The "Active Recall injected N hints" log line reports exactly the injected files,
+      post-decay, with post-decay scores. — `8a599d93`; observed in production on the first
+      injection after the restart.
 - [ ] `useful` is documented at its write site as a correlational heuristic, with the
       counterfactual named as unavailable and why.
 
 ## Scope
 
+Planned scope, with what the implementation actually touched:
+
 - `dpc_agent/active_recall.py` — hint rendering (T0a), counter keying (T0b), injection/read
-  split (T0c), grace period (T0e), log rotation (T0f), slot dedup (T0g).
+  split (T0c), grace period (T0e), retention window and compaction (T0f), slot dedup (T0g).
 - `managers/agent_manager.py` — store a resolvable address in chunk metadata at index time
   (T0a); this is where the real `Path` exists.
 - `dpc_agent/tools/core.py` — `read_file` → `update_access` (T0d).
-- `dpc_agent/memory.py` — `created` field in `FileMeta` (T0e); merge writer (T1).
+- `dpc_agent/memory.py` — ~~`created` field in `FileMeta` (T0e)~~ **not needed**, see T0e;
+  the write column and its migration landed here instead. Merge writer (T1).
 - `dpc_agent/context.py` — telemetry line (T0h).
-- `dpc_agent/consolidation.py` — merge action, score/attribution transfer (T1).
+- `dpc_agent/consolidation.py` — merge action, score/attribution transfer (T1). **Untouched.**
+
+Three files were not in the plan and had to change, each because the defect had a second copy
+the code reading had missed:
+
+- `dpc_agent/index_keys.py` (new) — one place that decides what a document is called, after
+  the EXT scheme was found to collapse every project's `README.md` onto one key.
+- `dpc_agent/retrieval/grafeo.py` — the store dropped `source_path`, so T0a worked in tests
+  and not in production.
+- `dpc_agent/knowledge_graph.py` — the graph channel built its metadata outside the index and
+  spoke a different document identity, so its hints had no address and its results could never
+  be fused with the same document from another channel.
 
 ## Implementation Status
 
+All of T0 landed on `dev` on 2026-08-01 across two sessions. Where a commit differs from what
+this ADR specified, the difference is named in the row and expanded under the table.
+
 | Task | Status | Commit |
 |------|--------|--------|
-| T0a hint followability | Pending | — |
-| T0b counter keying | Pending | — |
-| T0c injection ≠ access | Pending | — |
-| T0d read → update_access | Pending | — |
-| T0e grace period (+ `created`) | Pending | — |
-| T0f–h retention, dedup, telemetry | Pending | — |
-| T1 merge + transfer | Pending | — |
+| T0a hint followability | **Done** | `819cb52d`, `c51cf81b` — key per document, then an address the agent can open |
+| T0a (prod) store keeps the address | **Done** | `a2ddcdae` — the Grafeo backend dropped `source_path`, so T0a was dead in production while green in tests |
+| T0b counter keying | **Done** | `adaaaa45` |
+| T0c injection ≠ access | **Done** | `7e14b6a4`, credit bound corrected in `20a035bc` |
+| T0d read → update_access | **Done** | `5ee3625a` |
+| T0e grace period | **Done, differently** | `20a035bc` — measured in days from file mtime; **no `created` field was added** |
+| T0f retention | **Done, differently** | `9fcc20c8` — not rotation: one window derived from the reads, plus an archive |
+| T0g slot dedup | **Done — no code** | closed by measurement; the duplication had already been removed |
+| T0h telemetry | **Done** | `8a599d93` |
+| Measurability (`task_id`, printed addresses) | **Done** | `514d77eb` — added so T0 could be verified from the log at all |
+| Graph channel addressing | **Done** | `3841d66d`, `a4ee1813`, `f3c5d903`, `05036984` — a second, independent copy of the same defect |
+| Shared-layer gate at hint time | **Done** | `1940b6ed` |
+| Legacy-state test fixture | **Done** | `d85c9c83` |
+| T1 merge + transfer | Pending — gated on Q1, Q2 | — |
 | T2–T4 | Pending | — |
+
+**T0e — why no `created` field.** This ADR said the grace period needs a birth date and that
+`FileMeta` has none. It still has none. Age is taken from the file's mtime via `source_path`,
+which every layer now carries, so the check is a `stat()` per candidate and no schema change,
+no backfill, and no question of what to seed the field with for documents that predate it. The
+constant is also now in days rather than sessions: there is no session counter at this layer,
+which is part of why the original one sat unused for months.
+
+**T0f — why not rotation.** The item said to put this log under the shared rotating writer.
+That writer keeps one old file and deletes the one before it, which would have destroyed the
+only record of what the system offered over 103 days — and both reviewers said as much. What
+shipped instead: the counter derives one window from the *reads*, since reads are the side that
+expires, and ignores injections older than the oldest surviving read; a compaction step moves
+what falls outside into `knowledge_access.archive.jsonl`, which nothing parses at runtime.
+Measured on agent_001: 5879 of 7171 lines archived, live log 1.48 MB → 0.28 MB, counter 92.6 →
+63.6 ms, and the counts identical before and after. The same commit also started reading the
+rotated half of `tools.jsonl`, which had been on disk and ignored — read events 768 → 1724 on
+agent_001, 251 → 1142 on warren.
+
+**T0g — closed without code.** The measurement that was supposed to justify the fix found the
+duplication already gone; the entry is closed as verified rather than implemented.
 
 ## Open Questions
 
@@ -273,6 +363,18 @@ layer records and how it is ranked).
 - **Q4: After T0c, is there enough read signal to rank on at all?** ~1 knowledge read/day
   across ~2 000 files. If not, decay should be disabled until clean signal accumulates rather
   than recalibrated. — @Mike
+
+  > **Re-measured 2026-08-01, after T0b/T0c/T0f. The premise was wrong by an order of
+  > magnitude.** Reads that land on a document actually in the index, counted with the
+  > indexer's own roots: **775 of 1728 read events on agent_001** over the 24-day window
+  > (≈32/day), **274 of 1142 on warren** over 52 days (≈5/day). The old figure predates two
+  > things: injections were being counted as accesses, and half the read log was never opened.
+  >
+  > So the quantity is there and decay does not need disabling on these grounds. What the
+  > number does **not** settle is whether it is the *right* signal: `dpc-messenger` is itself
+  > an indexed root of 519 documents, so much of this is an agent reading the code it is
+  > working on rather than consulting knowledge. That is Q5's question, and this measurement
+  > sharpens it rather than answering it.
 - **Q5: Corpus selection.** The set the agents actually read is nearly disjoint from the set
   that gets injected (org-mirror files, a session-archive JSON injected 1 161 times). No T
   item covers *what belongs in the index*. *(Fable 5 §1.7.)* — @Mike
@@ -305,6 +407,35 @@ without opening the code, and were wrong: that the human gate was "already archi
 place" (`tier2_propose` has no production caller) and that a birth date was "available in
 `_meta.json`" (`FileMeta` has no such field). Both are now Confirmation items and Open
 Questions instead.
+
+**Round 4 and implementation (S59–S60, 2026-08-01).** T0 shipped. Four things are worth
+recording because each changed what this ADR says or how it should be read.
+
+*The defect had copies.* T0a was fixed at hint time and at index time and was still dead in
+production, because the Grafeo store never persisted `source_path`; then the graph channel
+turned out to build its metadata outside the index entirely, a third instance of the same
+mistake in a place no one had looked. "Fixed at the layer where the value is produced" is not
+the same as "carried by every layer in between".
+
+*Every defect was green in the suite and red on the first restart.* Four times, ending with a
+guard that passed 1145 tests and then refused to import the shared layer on six agents. The
+common shape: the tests built clean state, production is made of rows written by code that no
+longer exists. `d85c9c83` gives the suite five measured forms of legacy state; the guard
+regression now fails in it.
+
+*Two of our own measurements were wrong in our favour, and both were caught by re-deriving
+rather than by re-reading.* A claim that the null-address rate was "now being measured" was
+made 20 minutes before the commit that measures it was restarted into. And the first
+follow-rate count reported 7 where the honest number was 3. The rule the team adopted after
+S59 — a report about a running system states the last process-start time next to the last
+commit time — was written because of the first and would have caught it.
+
+*Both external reviewers measured a stale store.* Every graph number in the fourth round —
+node counts, orphaned edges, stem collisions — came from a SQLite file last written on 17 May,
+while production had been on Grafeo for weeks; one review presented them as measured against
+the live agents, and the team's synthesis inherited them. Nobody was careless: there is no way
+to snapshot the live graph without stopping the backend, so the stale file is what a reviewer
+finds. That absence is now its own backlog entry.
 
 **Round 3 (logs).** The team's own empirical brief overstated system health — total tool calls
 counted as `read_file`, reads pooled by basename across projects — and every error pointed the
