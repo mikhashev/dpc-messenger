@@ -22,6 +22,13 @@ from typing import Any, Dict, List, Optional
 
 from .index_keys import l5_key, l6_key
 
+
+def _same_file(recorded: str, candidate: Path) -> bool:
+    """Two spellings of one location, compared the way every OS here spells it."""
+    import os
+    return os.path.normcase(os.path.normpath(recorded)) == os.path.normcase(
+        os.path.normpath(str(candidate)))
+
 log = logging.getLogger(__name__)
 
 
@@ -887,14 +894,19 @@ class KnowledgeGraph:
             if md_file.name.startswith("_"):
                 continue
             node_id = f"kf:{md_file.stem}"
-            # Same stem in two layers would silently overwrite one document's node with
-            # another's. Nobody has hit it (0 overlaps today), which is why it is worth
-            # a warning rather than a scheme change: the day it happens, it says so.
+            # A collision is two *documents* wanting one id, so ask where the node
+            # points, not what it is labelled. The label cannot answer: every node
+            # written before this function took a layer says "L5", including the 303
+            # shared-layer documents — keyed off the label, the guard refused to
+            # import the shared layer at all and left exactly the rows it was meant
+            # to repair. A node with no source_path predates the field and is an
+            # upgrade, not a rival.
             existing = self._backend.get_node(node_id)
-            if existing is not None and existing.source_layer not in ("", source_layer):
+            claimed = (existing.properties.get("source_path") or "") if existing else ""
+            if claimed and not _same_file(claimed, md_file):
                 log.warning(
-                    "Knowledge graph: %s already holds a %s document; skipping the %s one (%s)",
-                    node_id, existing.source_layer, source_layer, md_file.name,
+                    "Knowledge graph: %s already points at %s; skipping the %s document %s",
+                    node_id, claimed, source_layer, md_file.name,
                 )
                 continue
             key = (l5_key(md_file, knowledge_dir) if source_layer == "L5"

@@ -159,7 +159,7 @@ def test_kg_graph_expand_ignores_a_namesake(kg, tmp_path):
     assert kg.graph_expand(["EXT/some-project/docs/alpha.md"], max_hops=1) == []
 
 
-def test_kg_bulk_import_keeps_the_layer_that_claimed_a_stem_first(kg, tmp_path):
+def test_kg_bulk_import_keeps_the_document_that_claimed_a_stem_first(kg, tmp_path):
     """Two layers, one stem: overwriting one document's node with another's is silent loss."""
     l5 = tmp_path / "knowledge"
     l5.mkdir()
@@ -174,6 +174,34 @@ def test_kg_bulk_import_keeps_the_layer_that_claimed_a_stem_first(kg, tmp_path):
     node = kg.backend.get_node("kf:shared")
     assert node.source_layer == "L5"
     assert node.properties["path"] == "knowledge/shared.md"
+
+
+def test_kg_bulk_import_upgrades_a_node_written_before_layers_were_recorded(kg, tmp_path):
+    """The guard asks where a node points, not what it is labelled.
+
+    Every node written by the previous version says "L5" — including the shared-layer
+    documents, which is the mislabel this change exists to end. A guard that read the
+    label refused to import the shared layer at all (0 of 303, six agents, one restart)
+    and preserved precisely the rows it was meant to repair.
+    """
+    l6 = tmp_path / "shared-knowledge"
+    l6.mkdir()
+    _write_md(l6, "commit-note", "# Commit\nhuman layer")
+
+    kg.backend.add_node(GraphNode(
+        node_id="kf:commit-note",
+        node_type=NodeType.KNOWLEDGE_FILE,
+        label="Commit Note",
+        source_layer="L5",                      # what the old code wrote for every layer
+        properties={"path": "commit-note.md"},  # bare name, no source_path
+    ))
+
+    assert kg.bulk_import_knowledge_files(l6, source_layer="L6") == 1
+
+    node = kg.backend.get_node("kf:commit-note")
+    assert node.source_layer == "L6"
+    assert node.properties["path"] == "L6/commit-note.md"
+    assert node.properties["source_path"]
 
 
 def test_kg_invalidate_edges_bi_temporal(kg):
