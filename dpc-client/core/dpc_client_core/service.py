@@ -359,6 +359,7 @@ class CoreService:
                 peer_metadata=self.peer_metadata,
                 group_manager=self.group_manager,
                 instruction_set=self.instruction_set,
+                firewall=self.firewall,
                 send_ai_query=self.send_ai_query,
                 broadcast_to_peers=self._broadcast_to_peers,
                 broadcast_to_group=self._broadcast_to_group,

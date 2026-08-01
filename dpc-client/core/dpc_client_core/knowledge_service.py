@@ -66,6 +66,7 @@ class KnowledgeService:
         group_manager,
         instruction_set,
         *,
+        firewall=None,
         send_ai_query: Callable,
         broadcast_to_peers: Callable,
         broadcast_to_group: Callable,
@@ -90,6 +91,10 @@ class KnowledgeService:
         self.dpc_home_dir = dpc_home_dir
         self.group_manager = group_manager
         self.instruction_set = instruction_set
+        # Needed to honour human_knowledge_access when a commit is indexed into the
+        # agents. Nothing set it before, so the gate below read None and never fired:
+        # `L6 reindex skipped` has zero occurrences in any log against 175 reindexes.
+        self.firewall = firewall
         self._send_ai_query = send_ai_query
         self._broadcast_to_peers_func = broadcast_to_peers
         self._broadcast_to_group_func = broadcast_to_group
@@ -885,6 +890,55 @@ Respond in JSON format:
         except Exception as e:
             logger.error("Error in _on_vote_received: %s", e, exc_info=True)
 
+    def _reindex_commit_into_agents(self, markdown_file: str) -> None:
+        """Add an approved commit to the index of each agent allowed the shared layer.
+
+        Lifted out of the approval handler so the gate can be tested. Inline, it sat
+        behind everything else that handler does, and the one branch whose whole job is
+        to refuse never ran: `L6 reindex skipped` has zero occurrences across every log
+        on this machine, against 175 reindexes.
+        """
+        firewall = self.firewall
+        commit_path = self.dpc_home_dir / markdown_file
+        if not commit_path.exists():
+            return
+        dpc_agent_provider = self.llm_manager.providers.get("dpc_agent")
+        if not (dpc_agent_provider and hasattr(dpc_agent_provider, "_managers")):
+            return
+        for agent_mgr in dpc_agent_provider._managers.values():
+            # Fail closed. The previous form was `if firewall and not …`, so a missing
+            # firewall disabled the gate instead of the indexing — a permission that
+            # silently stops being asked is worse than one that refuses.
+            if firewall is None:
+                logger.warning("MEM-3.7: L6 reindex skipped for %s — no firewall to ask",
+                               agent_mgr.agent_id)
+                continue
+            if not firewall.can_agent_access_context("knowledge", profile_name=agent_mgr.agent_id):
+                logger.info("MEM-3.7: L6 reindex skipped for %s (human_knowledge_access disabled)",
+                            agent_mgr.agent_id)
+                continue
+            agent = agent_mgr._agent
+            if not (agent and getattr(agent, "_embedding_provider", None)):
+                continue
+            index_dir = agent_mgr.agent_root / "state" / "memory_index"
+            if not index_dir.exists():
+                continue
+            from .dpc_agent.index_keys import l6_key
+            from .dpc_agent.indexing_pipeline import index_single_file
+            from .dpc_agent.retrieval import make_backend_for_agent
+            backend = make_backend_for_agent(agent_mgr.agent_root)
+            if not backend.vector.load():
+                continue
+            backend.text.load()
+            # Same key shape as the full rebuild, from the same helper, so this
+            # incremental add replaces the rebuilt entry instead of sitting beside it.
+            _l6_key = l6_key(commit_path, self.dpc_home_dir / "knowledge")
+            index_single_file(commit_path, agent._embedding_provider, backend,
+                              source_layer="L6", source_file_key=_l6_key)
+            backend.save()
+            logger.info("MEM-3.7: reindexed L6 commit %s for agent %s",
+                        commit_path.name, agent_mgr.agent_id)
+
     async def _on_commit_approved(self, commit) -> None:
         """Notify the UI that consensus was reached and the commit was approved."""
         try:
@@ -920,32 +974,7 @@ Respond in JSON format:
 
         # MEM-3.7 trigger #2: incremental reindex for Active Recall (L6)
         try:
-            firewall = getattr(self, '_firewall', None) or getattr(self.p2p_manager, '_service', None) and getattr(self.p2p_manager._service, 'firewall', None)
-            commit_path = self.dpc_home_dir / markdown_file
-            if commit_path.exists():
-                dpc_agent_provider = self.llm_manager.providers.get("dpc_agent")
-                if dpc_agent_provider and hasattr(dpc_agent_provider, '_managers'):
-                    for agent_mgr in dpc_agent_provider._managers.values():
-                        if firewall and not firewall.can_agent_access_context('knowledge', profile_name=agent_mgr.agent_id):
-                            logger.info("MEM-3.7: L6 reindex skipped for %s (human_knowledge_access disabled)", agent_mgr.agent_id)
-                            continue
-                        agent = agent_mgr._agent
-                        if agent and hasattr(agent, '_embedding_provider') and agent._embedding_provider:
-                            from .dpc_agent.indexing_pipeline import index_single_file
-                            from .dpc_agent.retrieval import make_backend_for_agent
-                            index_dir = agent_mgr.agent_root / "state" / "memory_index"
-                            if index_dir.exists():
-                                backend = make_backend_for_agent(agent_mgr.agent_root)
-                                if backend.vector.load():
-                                    backend.text.load()
-                                    # Same key shape as the full rebuild, from the same
-                                    # helper, so this incremental add replaces the rebuilt
-                                    # entry instead of sitting beside it.
-                                    from .dpc_agent.index_keys import l6_key
-                                    _l6_key = l6_key(commit_path, self.dpc_home_dir / "knowledge")
-                                    index_single_file(commit_path, agent._embedding_provider, backend, source_layer="L6", source_file_key=_l6_key)
-                                    backend.save()
-                                    logger.info("MEM-3.7: reindexed L6 commit %s for agent %s", commit_path.name, agent_mgr.agent_id)
+            self._reindex_commit_into_agents(markdown_file)
         except Exception as e:
             logger.warning("MEM-3.7 L6 reindex failed for commit %s: %s", commit.commit_id, e)
 
