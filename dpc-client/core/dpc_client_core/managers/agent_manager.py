@@ -413,7 +413,7 @@ class DpcAgentManager:
 
                             if self.firewall:
                                 try:
-                                    from dpc_client_core.dpc_agent.extended_paths_index import collect_extended_files, reconcile_indexed_paths, RECALL_EXTENSIONS
+                                    from dpc_client_core.dpc_agent.extended_paths_index import collect_extended_files, reconcile_indexed_paths, summarise_repairs, RECALL_EXTENSIONS
                                     ext_paths = self.firewall.get_extended_paths(profile_name=self.agent_id) if hasattr(self.firewall, 'get_extended_paths') else {}
                                     indexed_list = self.firewall._get_profile_or_global(self.agent_id, 'sandbox_extensions', 'indexed_paths', default=[]) if self.agent_id else []
                                     excluded_dirs = self.firewall._get_profile_or_global(self.agent_id, 'sandbox_extensions', 'excluded_dirs', default=None) if self.agent_id else None
@@ -421,9 +421,13 @@ class DpcAgentManager:
                                     # these roots, so a stale entry here costs the key its path and
                                     # collapses it onto a bare filename.
                                     if indexed_list:
+                                        _before = len(indexed_list)
                                         indexed_list, repairs = reconcile_indexed_paths(ext_paths, indexed_list)
-                                        for repair in repairs:
-                                            log.warning("[%s] indexed_paths: %s", self.agent_id, repair)
+                                        if repairs:
+                                            log.info("[%s] indexed_paths: %s", self.agent_id,
+                                                     summarise_repairs(_before, repairs))
+                                            for repair in repairs:
+                                                log.debug("[%s] indexed_paths: %s", self.agent_id, repair)
                                     ext_files = collect_extended_files(ext_paths, indexed_paths=indexed_list, excluded_dirs=excluded_dirs, allowed_extensions=RECALL_EXTENSIONS, already_indexed=claimed_paths) if indexed_list else []
                                     ext_roots = build_ext_roots(indexed_list)
                                     for f in ext_files:

@@ -36,6 +36,24 @@ def _norm(path_str: str) -> str:
     return os.path.normcase(os.path.normpath(path_str))
 
 
+# The two things a repair can be. Named once so the summary counts the same wording
+# the lines are written with, instead of re-guessing it from their prose.
+REPAIR_REPOINTED = "re-pointed"
+REPAIR_DROPPED = "dropped"
+
+
+def summarise_repairs(entries: int, changes: List[str]) -> str:
+    """One line for a boot log; the individual lines belong at DEBUG.
+
+    A config that has drifted produces one repair per stale entry, and a machine that
+    was renamed drifts every entry at once — fifty warnings on every start, saying the
+    same thing fifty times. The count is the part worth reading at INFO.
+    """
+    dropped = sum(1 for c in changes if c.startswith(REPAIR_DROPPED))
+    return (f"{entries} entries, {len(changes) - dropped} re-pointed, "
+            f"{dropped} dropped (no reachable path)")
+
+
 def reconcile_indexed_paths(
     extended_paths: Dict[str, List],
     indexed_paths: List[str],
@@ -79,7 +97,10 @@ def reconcile_indexed_paths(
         live_spelling = by_norm.get(_norm(entry))
         if live_spelling:
             repaired.append(live_spelling)
-            changes.append(f"re-pointed {entry!r} -> {live_spelling!r} (same location, other spelling)")
+            changes.append(
+                f"{REPAIR_REPOINTED} {entry!r} -> {live_spelling!r} "
+                f"(same location, other spelling)"
+            )
             continue
 
         remapped = None
@@ -98,7 +119,7 @@ def reconcile_indexed_paths(
                 if len(candidates) == 1:
                     remapped = next(iter(candidates.values()))
                     changes.append(
-                        f"re-pointed stale {entry!r} -> {remapped!r} "
+                        f"{REPAIR_REPOINTED} stale {entry!r} -> {remapped!r} "
                         f"(last {depth} segment(s) match, single candidate)"
                     )
                     break
@@ -106,7 +127,7 @@ def reconcile_indexed_paths(
             repaired.append(remapped)
             continue
 
-        changes.append(f"dropped {entry!r} (matches no reachable path)")
+        changes.append(f"{REPAIR_DROPPED} {entry!r} (matches no reachable path)")
 
     deduped: List[str] = []
     for p in repaired:

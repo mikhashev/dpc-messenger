@@ -106,3 +106,17 @@ def test_input_list_is_not_mutated(tmp_path):
     snapshot = list(original)
     reconcile_indexed_paths(_ext([str(tmp_path)]), original)
     assert original == snapshot
+
+
+def test_summary_counts_both_kinds(tmp_path):
+    """A renamed machine drifts every entry at once; the boot log gets one line."""
+    from dpc_client_core.dpc_agent.extended_paths_index import summarise_repairs
+
+    live_dir = tmp_path / "mikha" / "Documents" / "project"
+    live_dir.mkdir(parents=True)
+    stale = str(tmp_path / "mike" / "project")
+    gone = str(tmp_path / "mike" / "nothing-like-this")
+
+    repaired, changes = reconcile_indexed_paths(_ext([str(live_dir)]), [stale, gone])
+    assert repaired == [str(live_dir)]
+    assert summarise_repairs(2, changes) == "2 entries, 1 re-pointed, 1 dropped (no reachable path)"
