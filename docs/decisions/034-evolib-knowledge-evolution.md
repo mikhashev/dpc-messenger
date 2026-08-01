@@ -22,7 +22,22 @@ session: S49
 > **T0 shipped 2026-08-01 (S59–S60); status accepted.** All eight items are in `dev`; see
 > *Implementation Status*. Two of them were solved differently from what this ADR specified
 > and the difference is recorded there rather than quietly absorbed. T1–T4 are untouched and
-> still gated on Q1–Q2.
+> still gated on Q1–Q2 — and now on Q5, which review promoted from a question to a
+> precondition.
+>
+> **Numbers in this document.** Mike, 2026-08-01: *«а нахуя вообще такие числа в ADR, они у
+> нас сейчас такие — данных подгрузили в граф, и поменялись»*. He is right, and the rule that
+> follows from it is:
+>
+> - **Evidence for the decision stays, frozen and dated.** It is what makes the decision
+>   auditable, and it is never edited afterwards — a correction goes beside it, not over it.
+> - **Current-state metrics do not belong here at all.** Counts of documents, reads, timings,
+>   follow rate: every one changes the next time data is loaded or the code is touched, and a
+>   figure that rots inside a decision record makes the whole record untrustworthy. They live
+>   in `backlog.md`, which is rewritten as the system changes.
+> - **Every figure carries the date it was taken and what it was taken with**, because the same
+>   quantity measured through a broken counter and a fixed one is two different numbers — which
+>   is exactly what happened to the "166" below.
 >
 > **D0 = 2026-08-01 17:05:25 local (10:05:25 UTC)** — the restart after `20a035bc`, the first
 > run in which the address works, the injection credit is bounded, and the grace period
@@ -57,17 +72,17 @@ agent-layer files live under `knowledge/`. Measured across all agents, all histo
 |---|---|
 | **successes** | **0** |
 
-> **After D0, measured 2026-08-01 18:15** — 9 injections, 27 slots, **0 slots with no
-> address**, **3 verbatim follows**. The first non-zero count in the system's history, against
-> 0 of 28 over the preceding 102 days.
+> **After D0 this stopped being zero** — the first verbatim follows in the system's history,
+> and no slot printed without an address. The running count is in `backlog.md`; it changes
+> every turn and does not belong here.
 >
-> Two caveats belong next to that number and not below it. All three targets were files Mike
-> had asked for in the same minutes, so what is proven is that the address is *followable*,
-> not that the agent went *because of the hint*; separating them needs cases nobody asked for.
-> And the first count of this was wrong in our favour — the join credited one read at 10:50:16
-> to five different injections that had shown the same file, reporting 7. A rate needs distinct
-> events on both sides: each read is now attributed to the nearest preceding injection and
-> counted once, and paginated reads (`limit`, then `offset`) count as one follow.
+> Two things about it are permanent and do belong here. **The early follows were all files
+> Mike had asked for in the same minutes**, so what a non-zero count proves is that the address
+> is *followable*, not that the agent went *because of the hint* — separating those needs cases
+> nobody asked for, and any report that skips this caveat is overclaiming. And **the first
+> count was wrong in our favour**: the join credited one read to all five injections that had
+> shown that file. A rate needs distinct events on both sides — each read is attributed to the
+> nearest preceding injection and counted once, and a paginated read is one follow.
 
 And every knowledge read that *did* succeed used an address the hint never prints:
 
@@ -81,12 +96,20 @@ And every knowledge read that *did* succeed used an address the hint never print
 injections vs 166 genuine accesses (99.4% injection)**; per agent 86–99.9%. The top-ranked
 key for the largest agent is `README.md` — injected 4 102 times, read 0 times.
 
-> **The 166 is an artefact of the counter it was measuring, and the ratio was worse than
-> reality on both sides.** It was produced by the same counter this ADR was about to repair:
-> reads were pooled by basename, and only the live half of a rotating read log was ever
-> opened. Counted properly against the index — see Q4 — agent_001 alone shows **775** reads
-> landing on indexed documents in a 24-day window. The finding stands; the magnitude does not.
-> Left in place rather than corrected in-line, because it is what the decision was made on.
+> ### ⚠️ Correction — 2026-08-01
+>
+> **The 166 is an artefact of the counter it was measuring.** It came from the same counter
+> this ADR was about to repair: reads pooled by basename, and only the live half of a rotating
+> read log ever opened. Re-counted after the repair, the real figure is more than an order of
+> magnitude higher.
+>
+> **The finding stands; the magnitude does not.** Injection did dominate, and that is what the
+> decision rests on. The ratio was wrong on both sides.
+>
+> The number above is left as written because it is the evidence the decision was made on, and
+> a decision record that edits its own evidence cannot be audited. The current figure is not
+> reproduced here — see *Numbers in this document* — it lives in `backlog.md`, which is
+> rewritten as the system changes.
 
 **3. Decay has degenerated into a constant.** `decay_multiplier = max(0.1, access/max_count)`
 normalizes against a counter keyed by **basename**, which pools files from every layer —
@@ -316,13 +339,13 @@ this ADR specified, the difference is named in the row and expanded under the ta
 | T0d read → update_access | **Done** | `5ee3625a` |
 | T0e grace period | **Done, differently** | `20a035bc` — measured in days from file mtime; **no `created` field was added** |
 | T0f retention | **Done, differently** | `9fcc20c8` — not rotation: one window derived from the reads, plus an archive |
-| T0g slot dedup | **Done — no code** | closed by measurement; the duplication had already been removed |
+| T0g slot dedup | **Verified — not present** | no code, no config, no procedure: the measurement that was to justify the fix found no duplication to fix |
 | T0h telemetry | **Done** | `8a599d93` |
 | Measurability (`task_id`, printed addresses) | **Done** | `514d77eb` — added so T0 could be verified from the log at all |
 | Graph channel addressing | **Done** | `3841d66d`, `a4ee1813`, `f3c5d903`, `05036984` — a second, independent copy of the same defect |
 | Shared-layer gate at hint time | **Done** | `1940b6ed` |
 | Legacy-state test fixture | **Done** | `d85c9c83` |
-| T1 merge + transfer | Pending — gated on Q1, Q2 | — |
+| T1 merge + transfer | Pending — gated on Q1, Q2, Q5; **API cost to be measured before implementation, not after** | — |
 | T2–T4 | Pending | — |
 
 **T0e — why no `created` field.** This ADR said the grace period needs a birth date and that
@@ -338,13 +361,21 @@ only record of what the system offered over 103 days — and both reviewers said
 shipped instead: the counter derives one window from the *reads*, since reads are the side that
 expires, and ignores injections older than the oldest surviving read; a compaction step moves
 what falls outside into `knowledge_access.archive.jsonl`, which nothing parses at runtime.
-Measured on agent_001: 5879 of 7171 lines archived, live log 1.48 MB → 0.28 MB, counter 92.6 →
-63.6 ms, and the counts identical before and after. The same commit also started reading the
-rotated half of `tools.jsonl`, which had been on disk and ignored — read events 768 → 1724 on
-agent_001, 251 → 1142 on warren.
+The property to hold on to is that compaction does not change what is counted — the archive is
+data the window already excluded. The same commit also started reading the rotated half of
+`tools.jsonl`, which had been on disk and ignored, roughly doubling the reads available to the
+counter. Sizes and timings are in `backlog.md`.
 
-**T0g — closed without code.** The measurement that was supposed to justify the fix found the
-duplication already gone; the entry is closed as verified rather than implemented.
+**T0g — verified, not implemented.** The measurement that was to justify the fix found no
+duplication. Nothing was written, nothing is configured, and there is no manual procedure —
+if the duplication returns, this item starts from zero. Recorded this way because "Done"
+against an item nobody implemented sends the next reader looking for the mechanism.
+
+**T1 — the cost is a precondition, not a postscript.** This ADR's drivers say "no GPU budget:
+CPU + local embeddings + LLM API", which prices the GPU and says nothing about the API. T1's
+merge step is an LLM call per candidate pair, and nobody has estimated how many pairs. That
+estimate is due **before** implementation starts, not as a surprise afterwards — the same rule
+this ADR already applies to its own claims: measured before ordered.
 
 ## Open Questions
 
@@ -364,20 +395,33 @@ duplication already gone; the entry is closed as verified rather than implemente
   across ~2 000 files. If not, decay should be disabled until clean signal accumulates rather
   than recalibrated. — @Mike
 
-  > **Re-measured 2026-08-01, after T0b/T0c/T0f. The premise was wrong by an order of
-  > magnitude.** Reads that land on a document actually in the index, counted with the
-  > indexer's own roots: **775 of 1728 read events on agent_001** over the 24-day window
-  > (≈32/day), **274 of 1142 on warren** over 52 days (≈5/day). The old figure predates two
-  > things: injections were being counted as accesses, and half the read log was never opened.
+  > **Answered 2026-08-01 — the premise was wrong by more than an order of magnitude, so this
+  > question is closed on its own terms.** The "~1 read/day" was measured through the counter
+  > this ADR repairs: injections were being counted as accesses, and half the read log was
+  > never opened. Re-counted after T0b/T0c/T0f, against the index, with the indexer's own
+  > roots: reads landing on indexed documents run to tens per day on the busiest agent. Decay
+  > does not need disabling for want of signal. (Figures in `backlog.md` — they move.)
   >
-  > So the quantity is there and decay does not need disabling on these grounds. What the
-  > number does **not** settle is whether it is the *right* signal: `dpc-messenger` is itself
-  > an indexed root of 519 documents, so much of this is an agent reading the code it is
-  > working on rather than consulting knowledge. That is Q5's question, and this measurement
-  > sharpens it rather than answering it.
-- **Q5: Corpus selection.** The set the agents actually read is nearly disjoint from the set
-  that gets injected (org-mirror files, a session-archive JSON injected 1 161 times). No T
-  item covers *what belongs in the index*. *(Fable 5 §1.7.)* — @Mike
+  > **What this does not settle is whether it is the right signal**, and that now blocks
+  > something. `dpc-messenger` is itself an indexed root of several hundred documents, so much
+  > of the count is an agent reading the code it is working on rather than consulting
+  > knowledge. See Q5, which this promotes from a question to a precondition.
+- **Q5: Corpus selection — promoted to a precondition of the T0 verdict, 2026-08-01.** The set
+  the agents actually read is nearly disjoint from the set that gets injected (org-mirror
+  files, a session-archive JSON injected 1 161 times). No T item covers *what belongs in the
+  index*. *(Fable 5 §1.7.)* — @Mike
+
+  > **Why this outranks waiting for follow-rate data.** The plan is to accumulate two weeks of
+  > follow rate and decide from it whether the hint modality works. That decision is not
+  > readable while Q5 is open: if the corpus is wrong, a low follow rate means "we are offering
+  > the wrong documents", and if the corpus is right it means "the modality does not work" —
+  > the same number, two opposite conclusions, and nothing in the data distinguishes them.
+  >
+  > So the corpus has to be settled *before* the window closes, not after. Q4's answer sharpens
+  > this rather than relieving it: there is plenty of read signal, and much of it is an agent
+  > reading the project it works on. Tracked as `AR-CORPUS-MISALIGNMENT` in `backlog.md`, ahead
+  > of the follow-rate item. *(Raised by Warren and Ark on review of `e9194ae1`; both were
+  > right that this was filed as a question when it is a blocker.)*
 
 ## Authors
 
