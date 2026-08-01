@@ -501,7 +501,17 @@ def build_llm_messages(
                     if _seed_files and _kg:
                         _graph_results = _kg.graph_expand(_seed_files, max_hops=GRAPH_MAX_HOPS)
                         if _graph_results:
-                            log.debug("Active Recall Graph L7: %d results from %d seeds", len(_graph_results), len(_seed_files))
+                            # Named like the other two channels. Counting them told us
+                            # the channel ran and nothing about what it produced, so
+                            # "does a graph result carry a key and an address" could
+                            # only be answered by waiting for one to win a slot —
+                            # which, at the lowest layer weight, it kept not doing.
+                            log.debug(
+                                "Active Recall Graph L7: %d results from %d seeds — %s",
+                                len(_graph_results), len(_seed_files),
+                                [(m.get("source_file", "?"), bool(m.get("source_path")))
+                                 for m, _ in _graph_results],
+                            )
                 except Exception:
                     log.debug("Active Recall Graph L7: unavailable (cold start or no graph DB)")
 
