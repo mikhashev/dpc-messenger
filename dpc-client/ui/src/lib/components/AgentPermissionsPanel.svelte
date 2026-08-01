@@ -176,6 +176,30 @@
   // Reactive — repopulates when allRegisteredTools arrives from list_all_tools.
   $: unmanagedTools = allRegisteredTools.filter(t => !hardcodedToolKeys.has(t.name));
 
+  // Which configured roots are reachable right now. The webview cannot stat the
+  // filesystem, so a folder on an external drive looks exactly like one that was
+  // deleted — and they are not the same thing. Removing stays the user's action;
+  // this only says which are unavailable at the moment.
+  let pathExists: Record<string, boolean> = {};
+
+  async function refreshPathExistence(settings: any) {
+    const paths = [
+      ...(settings?.sandbox_extensions?.read_only || []),
+      ...(settings?.sandbox_extensions?.read_write || []),
+    ].filter((p: string) => typeof p === 'string' && p.trim());
+    if (!paths.length) { pathExists = {}; return; }
+    try {
+      const result = await sendCommand('check_paths_exist', { paths });
+      pathExists = result?.exists || {};
+    } catch {
+      pathExists = {};  // unknown is not the same as missing: mark nothing
+    }
+  }
+
+  // Re-checked whenever the shown settings change; `pathExists` is written here and
+  // not read above, so this does not re-trigger itself.
+  $: refreshPathExistence(displaySettings);
+
   // Helper to get sandbox extensions safely
   function getSandboxExtensions(settings: any, type: 'read_only' | 'read_write'): string[] {
     return settings?.sandbox_extensions?.[type] || [];
@@ -1003,7 +1027,7 @@
                   <span class="path-label">📖 Read-Only Paths</span>
                   <ul class="path-list">
                     {#each displaySettings.sandbox_extensions.read_only || [] as path}
-                      <li>{path} {#if (displaySettings.sandbox_extensions.indexed_paths || []).includes(path)}<span class="indexed-badge">📇 Indexed</span>{/if}</li>
+                      <li>{path} {#if (displaySettings.sandbox_extensions.indexed_paths || []).includes(path)}<span class="indexed-badge">📇 Indexed</span>{/if}{#if pathExists[path] === false}<span class="unavailable-badge" title="Configured, but not reachable right now — an external or network drive looks like this too. Remove it here if it is gone for good.">⚠️ not available now</span>{/if}</li>
                     {/each}
                   </ul>
                 </div>
@@ -1023,7 +1047,7 @@
                   <span class="path-label">✏️ Read-Write Paths</span>
                   <ul class="path-list">
                     {#each displaySettings.sandbox_extensions.read_write || [] as path}
-                      <li>{path}</li>
+                      <li>{path}{#if pathExists[path] === false}<span class="unavailable-badge" title="Configured, but not reachable right now — an external or network drive looks like this too. Remove it here if it is gone for good.">⚠️ not available now</span>{/if}</li>
                     {/each}
                   </ul>
                 </div>
@@ -1337,6 +1361,20 @@
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
+  }
+
+  /* Configured but not reachable right now. Deliberately not styled as an error:
+     an external drive that is currently unplugged looks exactly like this, and the
+     path is still a valid setting. */
+  .unavailable-badge {
+    font-family: inherit;
+    font-size: 0.75rem;
+    margin-left: 0.5rem;
+    padding: 0 0.35rem;
+    border-radius: 3px;
+    background: var(--warning-bg, #fff4e5);
+    color: var(--warning-text, #8a5300);
+    white-space: nowrap;
   }
 
   /* Session History archive status */

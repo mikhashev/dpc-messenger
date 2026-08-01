@@ -148,6 +148,7 @@ ALLOWED_COMMANDS: frozenset = frozenset({
     "get_corpus_stats",
     # Path drift in privacy_rules.json: report, and repair only when asked. The repair
     # can drop an entry, and an unmounted disk must not lose its root silently.
+    "check_paths_exist",
     "get_indexed_path_drift",
     "repair_indexed_paths",
     "get_agent_model_config",

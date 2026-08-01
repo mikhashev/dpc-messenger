@@ -7415,6 +7415,23 @@ class CoreService:
             logger.error("get_corpus_stats failed: %s", e, exc_info=True)
             return {"status": "error", "message": str(e)}
 
+    async def check_paths_exist(self, paths: List[str] = None) -> Dict[str, Any]:
+        """Which of these paths are reachable right now.
+
+        The UI cannot stat the filesystem, so a configured root on an external drive
+        looks exactly like one that was deleted. Reporting reachability lets the panel
+        mark it "not available now" — which is what it is. Removing it stays the
+        user's action: the drive comes back.
+        """
+        import os
+        try:
+            return {
+                "status": "ok",
+                "exists": {p: os.path.exists(p) for p in (paths or []) if isinstance(p, str)},
+            }
+        except Exception as e:
+            return {"status": "error", "message": str(e)}
+
     async def get_indexed_path_drift(self) -> Dict[str, Any]:
         """How many index flags in privacy_rules.json point at nothing, per scope.
 
