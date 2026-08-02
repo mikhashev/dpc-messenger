@@ -887,10 +887,16 @@
           </div>
         {/if}
 
-        {#if !isGlobal}
-          <!-- Sandbox Path Configuration (per-agent) -->
+          <!-- Shown for the global view too. The value lives in `dpc_agent`, and every agent
+               without a profile of its own inherits it — hiding the section here made those
+               paths inheritable but neither visible nor removable except through some
+               individual agent. -->
           <h5 style="margin-top: 1rem; margin-bottom: 0.5rem; color: var(--text-secondary);">Configure Extended Paths</h5>
-          <p class="help-text-small" style="margin-bottom: 0.5rem;">Add directories outside the default sandbox that the agent can access</p>
+          <p class="help-text-small" style="margin-bottom: 0.5rem;">
+            {isGlobal
+              ? 'Directories every agent without its own profile inherits'
+              : 'Add directories outside the default sandbox that the agent can access'}
+          </p>
 
           <!-- Extended path access gates (S31) -->
           <div class="extended-access-gates" style="display: flex; gap: 1.5rem; margin-bottom: 0.75rem;">
@@ -1059,8 +1065,6 @@
           {:else}
             <p class="help-text-small" style="font-style: italic;">No extended paths configured</p>
           {/if}
-
-        {/if}
       </div>
     {/if}
   </div>
