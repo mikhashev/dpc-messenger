@@ -642,10 +642,14 @@
         : displayRules.agent_profiles?.[selectedAgentId] || displayRules.dpc_agent || null)
     : null;
 
+  // An agent with no profile of its own inherits the global one, and the panel binds
+  // to whatever this returns. Returning null for that case handed the tool checkboxes
+  // a null to write through — one thrown setter per checkbox. Copy-on-write still runs
+  // below and replaces this with the agent's own copy before anything is saved.
   $: effectiveEditProfile = editedRules
     ? (selectedAgentId === 'default'
         ? editedRules.dpc_agent || null
-        : editedRules.agent_profiles?.[selectedAgentId] || null)
+        : editedRules.agent_profiles?.[selectedAgentId] || editedRules.dpc_agent || null)
     : null;
 
   // Track whether current agent uses inherited (global) settings
@@ -658,6 +662,21 @@
   // This ensures edits never mutate the shared dpc_agent object.
   $: if (editMode && selectedAgentId && selectedAgentId !== 'default' && editedRules) {
     ensureAgentProfileExists();
+  }
+
+  // Write one rule without `bind:` to a member expression.
+  //
+  // `bind:value={obj[key]}` where `key` comes from an `{#each ... as [key, …]}`
+  // compiles to a setter carrying an invalidation list, and that list is built
+  // across all the like-shaped binds in this file: the generated code for the hub
+  // select referenced `scopeName`, `presetName`, `groupName` and `nodeId` — each-block
+  // variables from elsewhere in the template, undeclared at that point. The first
+  // reactive flush that reached it threw a ReferenceError, which aborted the flush
+  // that was creating a new agent's permission profile.
+  function setRule(target: any, key: string, value: any): void {
+    if (!target) return;
+    target[key] = value;
+    editedRules = editedRules;
   }
 
   // Create agent profile as copy of global settings (copy-on-write)
@@ -1068,7 +1087,7 @@
                     <div class="rule-item">
                       <strong>{path}:</strong>
                       {#if editMode && editedRules && editedRules.hub}
-                        <select id="hub-rule-{path}" name="hub-rule-{path}" bind:value={editedRules.hub[path]}>
+                        <select id="hub-rule-{path}" name="hub-rule-{path}" value={editedRules.hub[path]} on:change={(e) => setRule(editedRules?.hub, path, e.currentTarget.value)}>
                           <option value="allow">allow</option>
                           <option value="deny">deny</option>
                         </select>
@@ -1509,7 +1528,7 @@
                             <code class="rule-path">{path}</code>
                             {#if editMode && editedRules && editedRules.ai_scopes && editedRules.ai_scopes[scopeName]}
                               <div style="display: flex; gap: 0.5rem; align-items: center;">
-                                <select id="ai-scope-rule-{scopeName}-{path}" name="ai-scope-rule-{scopeName}-{path}" bind:value={editedRules.ai_scopes[scopeName][path]}>
+                                <select id="ai-scope-rule-{scopeName}-{path}" name="ai-scope-rule-{scopeName}-{path}" value={editedRules.ai_scopes[scopeName][path]} on:change={(e) => setRule(editedRules?.ai_scopes?.[scopeName], path, e.currentTarget.value)}>
                                   <option value="allow">allow</option>
                                   <option value="deny">deny</option>
                                 </select>
@@ -1591,7 +1610,7 @@
                             <code class="rule-path">{path}</code>
                             {#if editMode && editedRules && editedRules.device_sharing && editedRules.device_sharing[presetName]}
                               <div style="display: flex; gap: 0.5rem; align-items: center;">
-                                <select id="device-sharing-rule-{presetName}-{path}" name="device-sharing-rule-{presetName}-{path}" bind:value={editedRules.device_sharing[presetName][path]}>
+                                <select id="device-sharing-rule-{presetName}-{path}" name="device-sharing-rule-{presetName}-{path}" value={editedRules.device_sharing[presetName][path]} on:change={(e) => setRule(editedRules?.device_sharing?.[presetName], path, e.currentTarget.value)}>
                                   <option value="allow">allow</option>
                                   <option value="deny">deny</option>
                                 </select>
@@ -1672,7 +1691,7 @@
                         <div class="setting-item">
                           <span><strong>File Transfer Allowed:</strong></span>
                           {#if editMode && editedRules?.file_transfer?.groups?.[groupName]}
-                            <select bind:value={editedRules.file_transfer.groups[groupName]['file_transfer.allow']}>
+                            <select value={editedRules.file_transfer.groups[groupName]['file_transfer.allow']} on:change={(e) => setRule(editedRules?.file_transfer?.groups?.[groupName], 'file_transfer.allow', e.currentTarget.value)}>
                               <option value="allow">allow</option>
                               <option value="deny">deny</option>
                             </select>
@@ -1687,7 +1706,8 @@
                               type="number"
                               min="1"
                               max="10000"
-                              bind:value={editedRules.file_transfer.groups[groupName]['file_transfer.max_size_mb']}
+                              value={editedRules.file_transfer.groups[groupName]['file_transfer.max_size_mb']}
+                              on:input={(e) => setRule(editedRules?.file_transfer?.groups?.[groupName], 'file_transfer.max_size_mb', e.currentTarget.value === '' ? null : Number(e.currentTarget.value))}
                               placeholder="No limit"
                             />
                           {:else}
@@ -1756,7 +1776,7 @@
                         <div class="setting-item">
                           <span><strong>File Transfer Allowed:</strong></span>
                           {#if editMode && editedRules?.file_transfer?.nodes?.[nodeId]}
-                            <select bind:value={editedRules.file_transfer.nodes[nodeId]['file_transfer.allow']}>
+                            <select value={editedRules.file_transfer.nodes[nodeId]['file_transfer.allow']} on:change={(e) => setRule(editedRules?.file_transfer?.nodes?.[nodeId], 'file_transfer.allow', e.currentTarget.value)}>
                               <option value="allow">allow</option>
                               <option value="deny">deny</option>
                             </select>
@@ -1771,7 +1791,8 @@
                               type="number"
                               min="1"
                               max="10000"
-                              bind:value={editedRules.file_transfer.nodes[nodeId]['file_transfer.max_size_mb']}
+                              value={editedRules.file_transfer.nodes[nodeId]['file_transfer.max_size_mb']}
+                              on:input={(e) => setRule(editedRules?.file_transfer?.nodes?.[nodeId], 'file_transfer.max_size_mb', e.currentTarget.value === '' ? null : Number(e.currentTarget.value))}
                               placeholder="No limit"
                             />
                           {:else}
@@ -2141,7 +2162,7 @@
                             <code class="rule-path">{path}</code>
                             {#if editMode && editedRules && editedRules.nodes && editedRules.nodes[nodeId]}
                               <div style="display: flex; gap: 0.5rem; align-items: center;">
-                                <select id="node-rule-{nodeId}-{path}" name="node-rule-{nodeId}-{path}" bind:value={editedRules.nodes[nodeId][path]}>
+                                <select id="node-rule-{nodeId}-{path}" name="node-rule-{nodeId}-{path}" value={editedRules.nodes[nodeId][path]} on:change={(e) => setRule(editedRules?.nodes?.[nodeId], path, e.currentTarget.value)}>
                                   <option value="allow">allow</option>
                                   <option value="deny">deny</option>
                                 </select>
@@ -2213,7 +2234,7 @@
                             <code class="rule-path">{path}</code>
                             {#if editMode && editedRules && editedRules.groups && editedRules.groups[groupName]}
                               <div style="display: flex; gap: 0.5rem; align-items: center;">
-                                <select id="group-rule-{groupName}-{path}" name="group-rule-{groupName}-{path}" bind:value={editedRules.groups[groupName][path]}>
+                                <select id="group-rule-{groupName}-{path}" name="group-rule-{groupName}-{path}" value={editedRules.groups[groupName][path]} on:change={(e) => setRule(editedRules?.groups?.[groupName], path, e.currentTarget.value)}>
                                   <option value="allow">allow</option>
                                   <option value="deny">deny</option>
                                 </select>
