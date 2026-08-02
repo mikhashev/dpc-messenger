@@ -146,6 +146,8 @@ ALLOWED_COMMANDS: frozenset = frozenset({
     # What each indexed corpus costs and returns — the evidence the "what belongs in
     # the index" decision waits on, reported rather than argued.
     "get_corpus_stats",
+    # Undo what the broken gate wrote: the fix stopped the leak, the rows stayed.
+    "purge_denied_shared_knowledge",
     # Path drift in privacy_rules.json: report, and repair only when asked. The repair
     # can drop an entry, and an unmounted disk must not lose its root silently.
     "check_paths_exist",

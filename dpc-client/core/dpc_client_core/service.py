@@ -7416,6 +7416,55 @@ class CoreService:
             logger.error("get_corpus_stats failed: %s", e, exc_info=True)
             return {"status": "error", "message": str(e)}
 
+    async def purge_denied_shared_knowledge(self) -> Dict[str, Any]:
+        """Drop shared-layer documents from the stores of agents denied that layer.
+
+        The gate is asked when a hint is printed and when a commit is indexed, but
+        nothing ever asked it about what the broken gate had already written: the fix
+        stopped the leak and did not undo it. The sources offered for removal are the
+        shared layer itself, so the match cannot reach a document outside it, and an
+        agent whose gate cannot be asked counts as denied — the same fail-closed
+        reading the indexing path uses.
+
+        Returns what each store actually gave up, which is also the only way to count
+        it: the rows are visible to the process holding the database and to nothing
+        else.
+        """
+        try:
+            from dpc_client_core.dpc_agent.index_keys import l6_key
+            from dpc_client_core.dpc_agent.retrieval import make_backend_for_agent
+            l6_dir = DPC_HOME_DIR / "knowledge"
+            keys = [l6_key(p, l6_dir) for p in sorted(l6_dir.glob("*.md")) if p.is_file()]
+            if not keys:
+                return {"status": "error", "message": "shared layer is empty"}
+            report = []
+            for root in sorted(p for p in (DPC_HOME_DIR / "agents").iterdir() if p.is_dir()):
+                if not (root / "state" / "memory_index").is_dir():
+                    continue
+                allowed = self.firewall is not None and self.firewall.can_agent_access_context(
+                    "knowledge", profile_name=root.name)
+                if allowed:
+                    report.append({"agent_id": root.name, "gate": "open"})
+                    continue
+                backend = make_backend_for_agent(root)
+                if not backend.vector.load():
+                    report.append({"agent_id": root.name, "gate": "closed",
+                                   "skipped": "no vector index"})
+                    continue
+                backend.text.load()
+                removed_vectors = backend.vector.remove_by_sources(keys)
+                removed_text = backend.text.remove_by_sources(keys)
+                backend.save()
+                logger.info("Shared layer purged from %s: %d vectors, %d text rows",
+                            root.name, removed_vectors, removed_text)
+                report.append({"agent_id": root.name, "gate": "closed",
+                               "removed_vectors": removed_vectors,
+                               "removed_text": removed_text})
+            return {"status": "ok", "shared_documents": len(keys), "agents": report}
+        except Exception as e:
+            logger.error("purge_denied_shared_knowledge failed: %s", e, exc_info=True)
+            return {"status": "error", "message": str(e)}
+
     async def check_paths_exist(self, paths: List[str] = None) -> Dict[str, Any]:
         """Which of these paths are reachable right now.
 
