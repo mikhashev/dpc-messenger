@@ -274,7 +274,6 @@ CORE_TOOL_NAMES = {
 # Restricted tools (require explicit enable in config)
 RESTRICTED_TOOL_NAMES = {
     "run_shell",           # Shell access
-    "claude_code_edit",    # Code editing via Claude
     "git_push",            # Git push
     "request_restart",     # Control operations
     "promote_to_stable",
@@ -295,7 +294,7 @@ class ToolRegistry:
     """
 
     CODE_TOOLS = frozenset({
-        "repo_write_commit", "claude_code_edit", "run_shell"
+        "repo_write_commit", "run_shell"
     })
 
     def __init__(self, agent_root: Optional[pathlib.Path] = None):
@@ -306,6 +305,11 @@ class ToolRegistry:
             agent_root: Root directory for agent storage (defaults to ~/.dpc/agent/)
         """
         self._entries: Dict[str, ToolEntry] = {}
+        # Modules that failed to import, name -> error text. A non-empty dict
+        # means this registry is an incomplete picture of the tools that exist:
+        # callers that compare it against stored config (firewall seeding and
+        # pruning) must not treat "absent from the registry" as "does not exist".
+        self.load_failures: Dict[str, str] = {}
         self._agent_root = agent_root or get_agent_root("default")
         self._ctx = ToolContext(agent_root=self._agent_root)
         self._load_modules()
@@ -325,20 +329,32 @@ class ToolRegistry:
         tools_path = pathlib.Path(__file__).parent
 
         tools_loaded = 0
+        modules_loaded = 0
         for _importer, modname, _ispkg in pkgutil.iter_modules([str(tools_path)]):
             if modname.startswith("_") or modname == "registry":
                 continue
             try:
                 mod = importlib.import_module(f".{modname}", package="dpc_client_core.dpc_agent.tools")
                 if hasattr(mod, "get_tools"):
+                    modules_loaded += 1
                     for entry in mod.get_tools():
                         self._entries[entry.name] = entry
                         tools_loaded += 1
             except Exception as e:
-                log.warning(f"Failed to load tool module {modname}: {e}", exc_info=True)
+                # ERROR, not WARNING: a module that does not import takes its
+                # tools out of the registry, out of the permissions panel and
+                # out of every agent — silently, and the only trace is here.
+                self.load_failures[modname] = str(e)
+                log.error(f"Failed to load tool module {modname}: {e}", exc_info=True)
 
         if tools_loaded > 0:
-            log.info(f"Loaded {tools_loaded} agent tools from {len(self._entries)} modules")
+            log.info(f"Loaded {tools_loaded} agent tools from {modules_loaded} modules")
+        if self.load_failures:
+            log.error(
+                "%d tool module(s) failed to load — their tools are missing from "
+                "this registry: %s",
+                len(self.load_failures), ", ".join(sorted(self.load_failures)),
+            )
 
     def set_context(self, ctx: ToolContext) -> None:
         """Set the execution context for subsequent tool calls."""
