@@ -12,6 +12,35 @@ from dpc_protocol.pcm_core import PersonalContext  # For wildcard matching
 
 logger = logging.getLogger(__name__)
 
+# Suffixes of keys that live inside a `tools` block but are NOT tools: they are
+# per-tool settings named `<tool>_<setting>`. `_group_allowed` is a convention
+# open to every tool (agent.py builds the key from the tool name), so matching a
+# fixed pair of names would silently mis-classify `browse_page_group_allowed`
+# and friends — and the prune below would then delete them as unknown tools.
+#
+# Every place that walks a tools dict has to skip these: before this lived in
+# one place the validator skipped two of them by name while the tools map
+# coerced them to booleans, so the same key was metadata in one reader and a
+# pseudo-tool in another.
+TOOL_SETTING_SUFFIXES = ('_group_allowed', '_tier1_whitelist')
+
+# Where those settings live once migrated out of `tools`:
+# tool_settings: {"run_shell": {"group_allowed": bool, "tier1_whitelist": [...]}}
+TOOL_SETTINGS_KEY = 'tool_settings'
+
+
+def _is_tool_key(name: str) -> bool:
+    """True for keys in a `tools` block that name an actual tool."""
+    return not name.startswith('_') and not name.endswith(TOOL_SETTING_SUFFIXES)
+
+
+def _split_tool_setting(name: str) -> Optional[Tuple[str, str]]:
+    """`run_shell_group_allowed` -> ('run_shell', 'group_allowed')."""
+    for suffix in TOOL_SETTING_SUFFIXES:
+        if name.endswith(suffix) and len(name) > len(suffix):
+            return name[: -len(suffix)], suffix.lstrip('_')
+    return None
+
 
 class ContextFirewall:
     """
@@ -104,19 +133,157 @@ class ContextFirewall:
         old hardcoded `all_tools_defaults` dict that used to drift from
         the actual registered tools (e.g. popup_* tools added without
         firewall defaults — see AGENT-TOOL-FIREWALL-DEFAULT-DRIFT).
+
+        Sets `self._registry_load_failures` as a side effect: the number
+        of tool modules that did not import. Adding keys is safe while
+        that number is unknown-but-nonzero; *removing* them is not, so
+        the prune below reads it.
         """
+        self._registry_load_failures: int = 0
         try:
             from .dpc_agent.tools.registry import ToolRegistry
             registry = ToolRegistry()
+            self._registry_load_failures = len(registry.load_failures)
             return {
                 entry.name: entry.default_enabled
                 for entry in registry._entries.values()
             }
         except Exception as e:
             logger.error("Failed to load ToolRegistry defaults: %s", e, exc_info=True)
+            # Registry unreadable: pretend one failure so nothing gets pruned.
+            self._registry_load_failures = 1
             return {}
 
-    def _seed_missing_tools_into_rules(self) -> bool:
+    def _migrate_tool_settings_out_of_tools(self) -> bool:
+        """Move `<tool>_<setting>` keys from `tools` into `tool_settings`.
+
+        `tools` is a map of tool name -> allowed. Settings of a tool were
+        stored in the same dict under a compound name, so every reader had
+        to know which names were not tools — and they disagreed. After this
+        migration a `tools` block contains tool names and nothing else.
+
+        Existing values are moved, never rewritten; a value already present
+        at the destination wins and the stale copy is dropped. Returns True
+        iff self.rules was modified.
+        """
+        modified = False
+
+        def migrate_block(container: Dict[str, Any], where: str) -> None:
+            nonlocal modified
+            tools = container.get('tools')
+            if not isinstance(tools, dict):
+                return
+            for name in [k for k in tools if not k.startswith('_') and not _is_tool_key(k)]:
+                split = _split_tool_setting(name)
+                if split is None:
+                    continue
+                tool, setting = split
+                value = tools.pop(name)
+                settings = container.setdefault(TOOL_SETTINGS_KEY, {}).setdefault(tool, {})
+                if setting not in settings:
+                    settings[setting] = value
+                modified = True
+                logger.info("Moved %s.%s -> %s.%s.%s.%s",
+                            where, name, where, TOOL_SETTINGS_KEY, tool, setting)
+
+        dpc_agent = self.rules.get('dpc_agent')
+        if isinstance(dpc_agent, dict):
+            migrate_block(dpc_agent, 'dpc_agent')
+
+        for profile_name, profile in self.rules.get('agent_profiles', {}).items():
+            if isinstance(profile, dict):
+                migrate_block(profile, f'agent_profiles.{profile_name}')
+
+        return modified
+
+    def get_tool_setting(self, tool_name: str, setting: str,
+                         profile_name: Optional[str] = None, default=None,
+                         inherit_global: bool = False):
+        """Read a per-tool setting (`group_allowed`, `tier1_whitelist`).
+
+        `inherit_global` is **off** by default, and deliberately so: both
+        current readers (the group-chat gate on run_shell and the Tier 1
+        shell whitelist) have always looked at the agent's own profile and
+        nowhere else. Turning inheritance on here would hand every agent
+        without a profile the global `run_shell_group_allowed: true` — a
+        loosening of the shell gate, not a refactor. Whether these settings
+        *should* inherit is a decision, and it is not this migration's.
+
+        Falls back to the pre-migration location (`tools.<tool>_<setting>`)
+        so a hand-edited or externally restored file still answers correctly.
+        """
+        compound = f"{tool_name}_{setting}"
+
+        def read(container: Optional[Dict[str, Any]]):
+            if not isinstance(container, dict):
+                return None
+            settings = container.get(TOOL_SETTINGS_KEY, {})
+            if isinstance(settings, dict):
+                per_tool = settings.get(tool_name, {})
+                if isinstance(per_tool, dict) and setting in per_tool:
+                    return per_tool[setting]
+            tools = container.get('tools', {})
+            if isinstance(tools, dict) and compound in tools:
+                return tools[compound]
+            return None
+
+        if profile_name:
+            value = read(self.rules.get('agent_profiles', {}).get(profile_name))
+            if value is not None:
+                return value
+        if not inherit_global:
+            return default
+        value = read(self.rules.get('dpc_agent'))
+        return default if value is None else value
+
+    def _prune_dead_tool_keys(self, registry_defaults: Dict[str, bool]) -> bool:
+        """Drop keys from every `tools` block that name no registered tool.
+
+        Counterpart to seeding: that one only ever adds, so names that
+        left the code stayed in privacy_rules.json forever
+        (`claude_code_edit`, `repo_commit_push`, `extract_links`,
+        `transcribe_audio` — the last one a WebSocket command that was
+        never an agent tool at all).
+
+        Refuses to run when any tool module failed to import: in that
+        state "absent from the registry" means "we could not see it",
+        and pruning would silently delete the user's settings for real
+        tools. Comments (`_`-prefixed) and TOOL_METADATA_KEYS are kept.
+
+        Returns True iff self.rules was modified.
+        """
+        if not registry_defaults:
+            return False
+        if getattr(self, '_registry_load_failures', 0):
+            logger.warning(
+                "Skipping dead tool key prune: %d tool module(s) failed to load, "
+                "so the registry is not a complete list of existing tools",
+                self._registry_load_failures,
+            )
+            return False
+
+        modified = False
+
+        def prune_block(tools: Dict[str, Any], where: str) -> None:
+            nonlocal modified
+            for name in [k for k in tools if _is_tool_key(k) and k not in registry_defaults]:
+                del tools[name]
+                modified = True
+                logger.info("Removed dead tool key from %s: %s", where, name)
+
+        dpc_agent = self.rules.get('dpc_agent', {})
+        if isinstance(dpc_agent.get('tools'), dict):
+            prune_block(dpc_agent['tools'], 'dpc_agent.tools')
+
+        for profile_name, profile in self.rules.get('agent_profiles', {}).items():
+            if isinstance(profile, dict) and isinstance(profile.get('tools'), dict):
+                prune_block(profile['tools'], f'agent_profiles.{profile_name}.tools')
+
+        return modified
+
+    def _seed_missing_tools_into_rules(
+        self, registry_defaults: Optional[Dict[str, bool]] = None
+    ) -> bool:
         """Auto-add tools from ToolRegistry that are absent from privacy_rules.
 
         Walks the global `dpc_agent.tools` block and every
@@ -134,7 +301,8 @@ class ContextFirewall:
         drift (old code maintained two dicts in this file that fell out
         of sync; now only the registry decides which keys exist).
         """
-        registry_defaults = self._get_registered_tool_defaults()
+        if registry_defaults is None:
+            registry_defaults = self._get_registered_tool_defaults()
         if not registry_defaults:
             return False
         modified = False
@@ -169,15 +337,22 @@ class ContextFirewall:
 
     def _parse_dpc_agent_settings(self):
         """Parse DPC agent settings from the config."""
-        # First, auto-seed any tools that landed in ToolRegistry after this
-        # privacy_rules.json was created. Persists to disk on first run if
-        # anything was added. Single source of truth: ToolEntry.default_enabled.
-        if self._seed_missing_tools_into_rules():
+        # First, reconcile the stored tools blocks with the registry in both
+        # directions: seed tools that landed in ToolRegistry after this
+        # privacy_rules.json was created, and drop keys naming tools that no
+        # longer exist. Single source of truth: ToolEntry.default_enabled.
+        # One registry load feeds both, so the prune sees the same picture —
+        # including whether any module failed to import.
+        registry_defaults = self._get_registered_tool_defaults()
+        changed = self._migrate_tool_settings_out_of_tools()
+        changed = self._seed_missing_tools_into_rules(registry_defaults) or changed
+        changed = self._prune_dead_tool_keys(registry_defaults) or changed
+        if changed:
             try:
                 self.access_file_path.write_text(json.dumps(self.rules, indent=2))
-                logger.info("Persisted seeded tool defaults to %s", self.access_file_path)
+                logger.info("Persisted reconciled tool keys to %s", self.access_file_path)
             except Exception as e:
-                logger.error("Failed to persist seeded defaults: %s", e, exc_info=True)
+                logger.error("Failed to persist reconciled tool keys: %s", e, exc_info=True)
 
         dpc_agent = self.rules.get('dpc_agent', {})
         self.dpc_agent_enabled = dpc_agent.get('enabled', True)
@@ -358,7 +533,7 @@ class ContextFirewall:
             return merged
         profile_tools = profile.get('tools', {})
         for tool_name, enabled in profile_tools.items():
-            if not tool_name.startswith('_'):
+            if _is_tool_key(tool_name):
                 merged[tool_name] = bool(enabled)
         return merged
 
@@ -628,7 +803,7 @@ class ContextFirewall:
             if bool(profile_tools.get(tool_name, global_enabled)):
                 allowed.add(tool_name)
         for tool_name, enabled in profile_tools.items():
-            if not tool_name.startswith('_') and bool(enabled):
+            if _is_tool_key(tool_name) and bool(enabled):
                 allowed.add(tool_name)
 
         # Per-profile overrides mirroring get_allowed_agent_tools()
@@ -1681,12 +1856,9 @@ class ContextFirewall:
                                 'extended_path_read', 'extended_path_write',
                                 'repo_list', 'drive_list', 'extended_path_list',
                             }
-                            tool_metadata_keys = {'run_shell_tier1_whitelist', 'run_shell_group_allowed'}
                             for tool_name, tool_enabled in tools.items():
-                                if tool_name.startswith('_'):
-                                    continue  # Skip comments
-                                if tool_name in tool_metadata_keys:
-                                    continue  # Non-boolean tool settings
+                                if not _is_tool_key(tool_name):
+                                    continue  # Comments and run_shell metadata
                                 if tool_name not in valid_tools:
                                     logger.warning("Unknown tool in dpc_agent.tools: '%s' (ignored — may be from older config)", tool_name)
                                 if not isinstance(tool_enabled, bool):
@@ -1762,12 +1934,9 @@ class ContextFirewall:
                                         'extended_path_read', 'extended_path_write',
                                         'repo_list', 'drive_list', 'extended_path_list',
                                     }
-                                    tool_metadata_keys = {'run_shell_tier1_whitelist', 'run_shell_group_allowed'}
                                     for tool_name, tool_enabled in tools.items():
-                                        if tool_name.startswith('_'):
-                                            continue  # Skip comments
-                                        if tool_name in tool_metadata_keys:
-                                            continue  # Non-boolean tool settings
+                                        if not _is_tool_key(tool_name):
+                                            continue  # Comments and run_shell metadata
                                         if tool_name not in valid_tools:
                                             logger.warning("Unknown tool in agent_profiles.%s.tools: '%s' (ignored)", profile_name, tool_name)
                                         if not isinstance(tool_enabled, bool):

@@ -121,11 +121,9 @@ def _get_tier1_whitelist(ctx: Optional["ToolContext"] = None) -> list[str]:
     try:
         _profile = getattr(getattr(ctx, "_agent", None), "_firewall_profile", None)
         profile_name = _profile or "default"
-        rules = ctx.firewall.rules
-        profiles = rules.get("agent_profiles", {})
-        profile = profiles.get(profile_name, {})
-        tools_block = profile.get("tools", {})
-        wl = tools_block.get("run_shell_tier1_whitelist", [])
+        wl = ctx.firewall.get_tool_setting(
+            "run_shell", "tier1_whitelist", profile_name=profile_name, default=[]
+        )
         if isinstance(wl, list):
             log.debug("tier1_whitelist[%s]: %s", profile_name, wl)
             return wl

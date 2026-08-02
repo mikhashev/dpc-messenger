@@ -518,17 +518,16 @@ class DpcAgent:
 
         is_group = conversation_id and conversation_id.startswith("group-")
         if is_group:
-            profile_tools = {}
-            if self._firewall_profile:
-                profile = self._firewall.get_agent_profile_settings(self._firewall_profile)
-                if profile:
-                    profile_tools = profile.get("tools", {})
             group_restricted = set()
             for tool_name in allowed:
-                key = f"{tool_name}_group_allowed"
-                if key in profile_tools and not profile_tools[key]:
-                    group_restricted.add(tool_name)
-                elif key not in profile_tools and tool_name == "run_shell":
+                # Unset means "not allowed in groups" for run_shell only; every
+                # other tool keeps its permission until the setting says no.
+                group_allowed = self._firewall.get_tool_setting(
+                    tool_name, "group_allowed",
+                    profile_name=self._firewall_profile,
+                    default=(tool_name != "run_shell"),
+                )
+                if not group_allowed:
                     group_restricted.add(tool_name)
             if group_restricted:
                 allowed = allowed - group_restricted

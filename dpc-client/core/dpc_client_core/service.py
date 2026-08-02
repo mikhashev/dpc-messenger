@@ -3682,7 +3682,14 @@ class CoreService:
                     "default_enabled": entry.default_enabled,
                 })
             tools.sort(key=lambda t: t["name"])
-            return {"status": "success", "tools": tools}
+            # A tool module that fails to import removes its tools from this
+            # list without anything visible happening. Hand the failure to the
+            # panel so the gap is shown where the tools would have been.
+            failures = [
+                {"module": name, "error": err}
+                for name, err in sorted(registry.load_failures.items())
+            ]
+            return {"status": "success", "tools": tools, "load_failures": failures}
         except Exception as e:
             logger.error("Error listing all tools: %s", e, exc_info=True)
             return {"status": "error", "message": str(e)}
@@ -3890,14 +3897,18 @@ class CoreService:
     async def shell_add_to_whitelist(self, agent_id: str, command_prefix: str) -> Dict[str, Any]:
         """Add a command prefix to an agent's Tier 1 whitelist."""
         try:
+            from .firewall import TOOL_SETTINGS_KEY
+
             rules = self.firewall.rules
             profiles = rules.setdefault("agent_profiles", {})
             profile = profiles.setdefault(agent_id, {})
-            tools = profile.setdefault("tools", {})
-            whitelist = tools.setdefault("run_shell_tier1_whitelist", [])
+            # Tool settings live beside `tools`, not inside it (see the
+            # migration in firewall.py) — `tools` holds tool names only.
+            shell_settings = profile.setdefault(TOOL_SETTINGS_KEY, {}).setdefault("run_shell", {})
+            whitelist = shell_settings.setdefault("tier1_whitelist", [])
             if not isinstance(whitelist, list):
                 whitelist = []
-                tools["run_shell_tier1_whitelist"] = whitelist
+                shell_settings["tier1_whitelist"] = whitelist
             if command_prefix not in whitelist:
                 whitelist.append(command_prefix)
             ok, msg, errs = self.firewall.save_rules_from_dict(rules)
