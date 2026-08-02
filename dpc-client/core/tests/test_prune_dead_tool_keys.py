@@ -41,6 +41,11 @@ def firewall(tmp_path):
 
 
 def test_dead_keys_go_and_everything_else_stays(firewall):
+    # State the precondition instead of inheriting it from the machine: the
+    # fixture built a real registry, and on an install missing an optional
+    # extra that registry carries load failures and the prune stands down —
+    # correctly, but this test is about what the prune deletes when it runs.
+    firewall._registry_load_failures = 0
     firewall.rules = _rules(
         {
             "_comment": "keep me",
@@ -95,12 +100,31 @@ def test_empty_registry_prunes_nothing(firewall):
 
 
 def test_reconciliation_seeds_and_prunes_in_one_pass_and_persists(tmp_path):
-    """The startup path does both directions and writes the result once."""
+    """The startup path does both directions and writes the result once.
+
+    This one builds a real registry, so it is the only test here whose
+    expectation depends on the environment: where a tool module cannot be
+    imported (an install without some optional extra, a broken dependency)
+    the prune is *supposed* to stand down. Asserting "the dead key is gone"
+    unconditionally would fail there — and fail for the one reason that
+    means the code did the right thing. So assert the branch that applies.
+    """
+    from dpc_client_core.dpc_agent.tools.registry import ToolRegistry
+
+    registry_is_complete = not ToolRegistry().load_failures
+
     path = tmp_path / "privacy_rules.json"
     path.write_text(json.dumps(_rules({"claude_code_edit": False})), encoding="utf-8")
     firewall = ContextFirewall(path)
 
     on_disk = json.loads(path.read_text(encoding="utf-8"))["dpc_agent"]["tools"]
-    assert "claude_code_edit" not in on_disk, "dead key survived startup reconciliation"
+    # Seeding runs either way: adding a key is safe with an incomplete registry.
     assert "list_dir" in on_disk, "seeding did not run alongside the prune"
     assert firewall.dpc_agent_tools.get("list_dir") is not None
+
+    if registry_is_complete:
+        assert "claude_code_edit" not in on_disk, "dead key survived startup reconciliation"
+    else:
+        assert "claude_code_edit" in on_disk, (
+            "prune ran while tool modules were missing — it must stand down instead"
+        )
