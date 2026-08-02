@@ -255,7 +255,7 @@ CORE_TOOL_NAMES = {
     "update_scratchpad", "update_identity",
     "chat_history",
     # Knowledge
-    "knowledge_read", "knowledge_write", "knowledge_list",
+    "knowledge_list",
     "memory_search",
     # DPC integration
     "get_dpc_context",
@@ -275,8 +275,6 @@ CORE_TOOL_NAMES = {
 RESTRICTED_TOOL_NAMES = {
     "run_shell",           # Shell access
     "git_push",            # Git push
-    "request_restart",     # Control operations
-    "promote_to_stable",
     # Git tools (can modify files / history)
     "git_add", "git_commit", "git_init",
     "git_checkout", "git_merge", "git_tag", "git_reset", "git_snapshot",
@@ -395,8 +393,11 @@ class ToolRegistry:
             # Filter restricted tools
             if not include_restricted and e.name in RESTRICTED_TOOL_NAMES:
                 continue
-            # Check whitelist
-            if self._ctx.tool_whitelist and e.name not in self._ctx.tool_whitelist:
+            # Check whitelist. `None` means no firewall answered, so no gate;
+            # an EMPTY set means the firewall allowed nothing, which has to deny
+            # everything — under truthiness those two read the same, and the
+            # empty one silently offered the model every tool it had.
+            if self._ctx.tool_whitelist is not None and e.name not in self._ctx.tool_whitelist:
                 continue
 
             result.append({"type": "function", "function": e.schema})
@@ -452,8 +453,8 @@ class ToolRegistry:
         elif ctx is None:
             log.warning("Tool %s: using shared ctx %x (no isolation — potential race)", name, _ctx_id)
 
-        # Check whitelist
-        if _ctx.tool_whitelist and name not in _ctx.tool_whitelist:
+        # Check whitelist — `None` is "no gate", empty is "nothing allowed".
+        if _ctx.tool_whitelist is not None and name not in _ctx.tool_whitelist:
             return f"⚠️ Tool '{name}' is not in the allowed tools list"
 
         args = _resolve_arg_aliases(entry.handler, args, name)

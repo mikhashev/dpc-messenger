@@ -34,6 +34,46 @@ def _is_tool_key(name: str) -> bool:
     return not name.startswith('_') and not name.endswith(TOOL_SETTING_SUFFIXES)
 
 
+# Tool names that are no longer registered but are still accepted in config:
+# older keys that the loader maps onto the tools that replaced them.
+LEGACY_TOOL_ALIASES = frozenset({
+    'repo_read', 'repo_write_commit', 'drive_read', 'drive_write',
+    'extended_path_read', 'extended_path_write',
+    'repo_list', 'drive_list', 'extended_path_list',
+})
+
+_known_tool_names_cache: Optional[Set[str]] = None
+
+
+def _known_tool_names() -> Optional[Set[str]]:
+    """Tool names the validator will recognise, straight from the registry.
+
+    This used to be a hand-maintained set in the validator — a third copy
+    of "which tools exist", after ToolEntry and the config itself. It fell
+    behind: on the live config it called 24 registered tools "unknown …
+    may be from older config" (every browser_*, every comfyui_*, the
+    session-archive readers), 244 warnings in one startup, advising the
+    reader to treat live permissions as leftovers.
+
+    Returns None when the registry cannot be trusted — unreadable, or a
+    module failed to import — because then "not in the registry" says
+    nothing about the name and the warning would be noise again.
+    """
+    global _known_tool_names_cache
+    if _known_tool_names_cache is not None:
+        return _known_tool_names_cache
+    try:
+        from .dpc_agent.tools.registry import ToolRegistry
+        registry = ToolRegistry()
+        if registry.load_failures:
+            return None
+        _known_tool_names_cache = set(registry._entries) | set(LEGACY_TOOL_ALIASES)
+        return _known_tool_names_cache
+    except Exception as e:
+        logger.error("Cannot read tool registry for validation: %s", e, exc_info=True)
+        return None
+
+
 def _split_tool_setting(name: str) -> Optional[Tuple[str, str]]:
     """`run_shell_group_allowed` -> ('run_shell', 'group_allowed')."""
     for suffix in TOOL_SETTING_SUFFIXES:
@@ -1816,54 +1856,14 @@ class ContextFirewall:
                         if not isinstance(tools, dict):
                             errors.append("'dpc_agent.tools' must be a dictionary")
                         else:
-                            # All valid tool names
-                            valid_tools = {
-                                # File operations (unified S31 + S149)
-                                'read_file', 'write_file', 'list_dir', 'repo_delete',
-                                'list_extended_sandbox_paths',
-                                # Memory/identity
-                                'update_scratchpad', 'update_identity', 'chat_history',
-                                # Knowledge
-                                'knowledge_list',
-                                'get_task_board',
-                                # DPC integration
-                                'get_dpc_context',
-                                # Web tools
-                                'browse_page', 'fetch_json', 'check_url', 'search_web',
-                                # Git tools
-                                'git_status', 'git_diff', 'git_log', 'git_add', 'git_commit', 'git_branch', 'git_init',
-                                'git_checkout', 'git_merge', 'git_tag', 'git_reset', 'git_snapshot',
-                                'git_push',
-                                # Restricted tools
-                                'run_shell',
-                                # Task queue tools (v0.16.0+)
-                                'schedule_task', 'get_task_status',
-                                # Search tools (v0.16.0+)
-                                'search_files', 'search_in_file',
-                                # Messaging tools (v0.18.0+)
-                                'send_user_message',
-                                # Knowledge tools (v0.18.0+)
-                                'deduplicate_identity',
-                                # Task type management tools (v0.18.0+)
-                                'register_task_type', 'list_task_types', 'unregister_task_type',
-                                # Memento-Skills tools (v0.20.0+)
-                                'execute_skill',
-                                # Inter-agent skill sharing tools (v0.21.0+)
-                                'list_local_agents', 'list_agent_skills', 'import_skill_from_agent',
-                                # Self-introspection tools
-                                'list_my_tools', 'list_my_skills',
-                                # Memory search (ADR-010)
-                                'memory_search',
-                                # Legacy aliases (S31 → read_file/write_file; S149 → list_dir)
-                                'repo_read', 'repo_write_commit', 'drive_read', 'drive_write',
-                                'extended_path_read', 'extended_path_write',
-                                'repo_list', 'drive_list', 'extended_path_list',
-                            }
+                            # Which names exist is the registry's business, not a
+                            # list maintained here (see _known_tool_names).
+                            valid_tools = _known_tool_names()
                             for tool_name, tool_enabled in tools.items():
                                 if not _is_tool_key(tool_name):
                                     continue  # Comments and run_shell metadata
-                                if tool_name not in valid_tools:
-                                    logger.warning("Unknown tool in dpc_agent.tools: '%s' (ignored — may be from older config)", tool_name)
+                                if valid_tools is not None and tool_name not in valid_tools:
+                                    logger.warning("No registered tool named '%s' — key in dpc_agent.tools is ignored", tool_name)
                                 if not isinstance(tool_enabled, bool):
                                     errors.append(f"'dpc_agent.tools.{tool_name}' must be a boolean")
 
@@ -1906,42 +1906,13 @@ class ContextFirewall:
                                 if not isinstance(tools, dict):
                                     errors.append(f"'agent_profiles.{profile_name}.tools' must be a dictionary")
                                 else:
-                                    # Use the same valid tools as dpc_agent
-                                    valid_tools = {
-                                        'read_file', 'write_file', 'list_dir', 'repo_delete',
-                                        'list_extended_sandbox_paths',
-                                        'update_scratchpad', 'update_identity', 'chat_history',
-                                        'knowledge_list',
-                                        'get_task_board',
-                                        'get_dpc_context',
-                                        'browse_page', 'fetch_json', 'check_url', 'search_web',
-                                        'git_status', 'git_diff', 'git_log', 'git_add', 'git_commit', 'git_branch', 'git_init',
-                                        'git_checkout', 'git_merge', 'git_tag', 'git_reset', 'git_snapshot',
-                                        'git_push',
-                                        'run_shell',
-                                        'schedule_task', 'get_task_status',
-                                        'search_files', 'search_in_file',
-                                        'send_user_message',
-                                        'deduplicate_identity',
-                                        'register_task_type', 'list_task_types', 'unregister_task_type',
-                                        # Memento-Skills tools (v0.20.0+)
-                                        'execute_skill',
-                                        # Inter-agent skill sharing tools (v0.21.0+)
-                                        'list_local_agents', 'list_agent_skills', 'import_skill_from_agent',
-                                        # Self-introspection tools
-                                        'list_my_tools', 'list_my_skills',
-                                        # Memory search (ADR-010)
-                                        'memory_search',
-                                        # Legacy aliases (S31 → read_file/write_file; S149 → list_dir)
-                                        'repo_read', 'repo_write_commit', 'drive_read', 'drive_write',
-                                        'extended_path_read', 'extended_path_write',
-                                        'repo_list', 'drive_list', 'extended_path_list',
-                                    }
+                                    # Same source as dpc_agent above: the registry.
+                                    valid_tools = _known_tool_names()
                                     for tool_name, tool_enabled in tools.items():
                                         if not _is_tool_key(tool_name):
                                             continue  # Comments and run_shell metadata
-                                        if tool_name not in valid_tools:
-                                            logger.warning("Unknown tool in agent_profiles.%s.tools: '%s' (ignored)", profile_name, tool_name)
+                                        if valid_tools is not None and tool_name not in valid_tools:
+                                            logger.warning("No registered tool named '%s' — key in agent_profiles.%s.tools is ignored", tool_name, profile_name)
                                         if not isinstance(tool_enabled, bool):
                                             errors.append(f"'agent_profiles.{profile_name}.tools.{tool_name}' must be a boolean")
 
