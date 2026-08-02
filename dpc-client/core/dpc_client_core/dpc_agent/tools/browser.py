@@ -752,6 +752,15 @@ def _build_a11y_tree(root: dict) -> tuple[str, dict]:
 
 SNAPSHOT_SUMMARIZE_THRESHOLD = 8000
 
+# The auxiliary summarizer must finish well inside the calling tool's own
+# budget (browser_snapshot gets 60s). An unbounded call once ran for 10
+# minutes on a video page: the tool timed out at 60s, the agent got
+# nothing, retried until the loop guard killed the run — and the
+# abandoned request went on billing tokens after the turn had ended.
+SNAPSHOT_SUMMARIZE_TIMEOUT_SEC = 25
+
+HTTP_ERROR_PREFIX = "⚠️ HTTP "
+
 
 def _truncate_snapshot(
     snapshot_text: str, max_chars: int = SNAPSHOT_SUMMARIZE_THRESHOLD,
@@ -819,7 +828,8 @@ async def _llm_summarize_snapshot(
     current task through the LLM Manager (same path Sleep Consolidation
     uses) so an auxiliary model can extract just the task-relevant
     elements. Falls back to `_truncate_snapshot` when llm_manager is
-    None, when the auxiliary call raises, or when the model returns an
+    None, when the auxiliary call raises or outruns
+    `SNAPSHOT_SUMMARIZE_TIMEOUT_SEC`, or when the model returns an
     empty string. No-op when `snapshot_text` already fits under
     `max_chars`."""
     if len(snapshot_text) <= max_chars:
@@ -833,11 +843,18 @@ async def _llm_summarize_snapshot(
     else:
         prompt = _LLM_EXTRACT_NO_TASK.format(snapshot=snapshot_text)
     try:
-        response = await llm_manager.query(
-            prompt, provider_alias=provider_alias,
+        response = await asyncio.wait_for(
+            llm_manager.query(prompt, provider_alias=provider_alias),
+            timeout=SNAPSHOT_SUMMARIZE_TIMEOUT_SEC,
         )
         extracted = (response or "").strip()
         return extracted or _truncate_snapshot(snapshot_text, max_chars)
+    except asyncio.TimeoutError:
+        log.warning(
+            "snapshot summarization exceeded %ss, falling back to truncation",
+            SNAPSHOT_SUMMARIZE_TIMEOUT_SEC,
+        )
+        return _truncate_snapshot(snapshot_text, max_chars)
     except Exception:
         return _truncate_snapshot(snapshot_text, max_chars)
 
@@ -1408,16 +1425,21 @@ class AuthBrowser:
             )
             raise
         try:
-            self._page.goto(url, wait_until="domcontentloaded", timeout=60000)
+            response = self._page.goto(
+                url, wait_until="domcontentloaded", timeout=60000,
+            )
         except Exception as exc:
             self._audit_action(
                 "navigate", url, "failed",
                 from_url=from_url, error=type(exc).__name__,
             )
             raise
+        status = response.status if response is not None else None
         self._wait_for_content_stable()
         snapshot_text = ""
         snapshot_audit: dict[str, Any] = {"from_url": from_url}
+        if status is not None:
+            snapshot_audit["status"] = status
         try:
             snapshot_text, refs = self.a11y_snapshot()
             snapshot_audit["snapshot_node_count"] = len(refs)
@@ -1425,6 +1447,8 @@ class AuthBrowser:
         except Exception as exc:
             snapshot_audit["snapshot_error"] = type(exc).__name__
         self._audit_action("navigate", url, "ok", **snapshot_audit)
+        if status is not None and status >= 400:
+            snapshot_text = f"{HTTP_ERROR_PREFIX}{status}\n\n{snapshot_text}"
         try:
             self._save_storage_state()
         except Exception as exc:
@@ -1791,6 +1815,13 @@ class AuthBrowser:
         """Map a `@eN` ref against the last snapshot to a Playwright
         locator; fall back to treating the string as a CSS selector.
 
+        A role+name pair is not unique on real pages — a card usually
+        exposes the same accessible name on its thumbnail link and its
+        title link — and Playwright's strict mode rejects a locator that
+        resolves to several elements. The ref is disambiguated by its
+        position among snapshot entries sharing that role and name;
+        `_last_refs` and `get_by_role` are both in DOM order.
+
         Raises ValueError for `@eN` refs missing from `_last_refs` so
         the caller can prompt the agent to take a new snapshot."""
         self._require_open()
@@ -1803,9 +1834,15 @@ class AuthBrowser:
                 )
             role = node.get("role", "")
             name = node.get("name", "")
-            if name:
-                return self._page.get_by_role(role, name=name)
-            return self._page.get_by_role(role)
+            if not name:
+                return self._page.get_by_role(role)
+            ordinal = 0
+            for ref, other in self._last_refs.items():
+                if ref == ref_or_selector:
+                    break
+                if (other.get("role", ""), other.get("name", "")) == (role, name):
+                    ordinal += 1
+            return self._page.get_by_role(role, name=name).nth(ordinal)
         return self._page.locator(ref_or_selector)
 
     def close(self) -> None:
@@ -2355,7 +2392,15 @@ async def _maybe_summarize_snapshot(
     """Apply Phase 2 LLM summarization or Phase 1 line truncation when
     `snapshot_text` exceeds the per-agent threshold; pass through
     otherwise. Reads provider + threshold from agent config and pulls
-    llm_manager from `ctx.dpc_service`."""
+    llm_manager from `ctx.dpc_service`.
+
+    No task is passed to the summarizer. The only candidate on the
+    context is `current_task_type`, which is the literal "chat" for
+    every agent turn; handing that over as the user's task made the
+    auxiliary model answer "is there a chat widget on this page?" and
+    drop the elements the agent had navigated there to use. Without a
+    task it keeps interactive elements and their refs, which is what
+    the caller needs."""
     if not snapshot_text:
         return snapshot_text
     provider, threshold = _load_agent_summarize_config(agent_id)
@@ -2365,9 +2410,8 @@ async def _maybe_summarize_snapshot(
     dpc_service = getattr(ctx, "dpc_service", None)
     if dpc_service is not None:
         llm_manager = getattr(dpc_service, "llm_manager", None)
-    user_task = getattr(ctx, "current_task_type", None) or None
     return await _llm_summarize_snapshot(
-        snapshot_text, user_task, llm_manager,
+        snapshot_text, None, llm_manager,
         provider_alias=provider, max_chars=threshold,
     )
 
@@ -2430,7 +2474,11 @@ async def browser_snapshot(ctx: ToolContext, raw: bool = False) -> str:
 
 async def browser_navigate(ctx: ToolContext, url: str) -> str:
     """Navigate the active browser session to URL within the auth
-    domains. Returns the post-navigation accessibility snapshot."""
+    domains. Returns the post-navigation accessibility snapshot,
+    prefixed with the HTTP status when the server answered 4xx/5xx —
+    a 404 renders as an ordinary page, so without this the agent
+    cannot tell a missing page from a real one and waits out full
+    click timeouts on elements that were never there."""
     agent_id = ctx.agent_root.name
     session = _get_session_or_error(agent_id)
     if session is None:
@@ -2443,9 +2491,15 @@ async def browser_navigate(ctx: ToolContext, url: str) -> str:
             return f"⚠️ Domain blocked: {e}"
         except Exception as e:
             return f"⚠️ Navigate failed: {type(e).__name__}: {e}"
+    status_note = ""
+    if snapshot.startswith(HTTP_ERROR_PREFIX):
+        head, _, snapshot = snapshot.partition("\n\n")
+        status_note = f"{head}\n\n"
     summarized = await _maybe_summarize_snapshot(snapshot, ctx, agent_id)
     if summarized:
-        return f"Navigated to {url}\n\n{summarized}"
+        return f"Navigated to {url}\n\n{status_note}{summarized}"
+    if status_note:
+        return f"Navigated to {url}\n\n{status_note.strip()}"
     return f"Navigated to {url}"
 
 

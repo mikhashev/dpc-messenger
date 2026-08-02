@@ -1307,3 +1307,146 @@ def test_force_kill_process_noop_when_no_pids(vault_home):
     assert ab._browser_pids == set()
     ab._force_kill_process()  # must not raise
     assert ab._browser_pids == set()
+
+
+# ─────────────────────────────────────────────────────────────
+# Ref resolution — role+name is not unique on real pages
+# ─────────────────────────────────────────────────────────────
+
+
+class _FakeLocator:
+    """Records nth() so a test can assert which of several equally-named
+    matches the ref resolved to."""
+
+    def __init__(self, calls: list, role: str, name):
+        self._calls = calls
+        self.role = role
+        self.name = name
+        self.nth_index = None
+
+    def nth(self, index: int):
+        self.nth_index = index
+        return self
+
+
+class _FakeRolePage:
+    def __init__(self):
+        self.calls: list = []
+
+    def get_by_role(self, role, name=None):
+        loc = _FakeLocator(self.calls, role, name)
+        self.calls.append(loc)
+        return loc
+
+
+def _browser_with_refs(refs: dict):
+    from dpc_client_core.dpc_agent.tools.browser import AuthBrowser
+
+    ab = AuthBrowser(agent_id="agent_a", domain=f"{TEST_DOMAIN}")
+    ab._page = _FakeRolePage()
+    ab._last_refs = refs
+    return ab
+
+
+def test_resolve_ref_picks_first_of_duplicate_names():
+    """A card exposes the same accessible name on its thumbnail link and
+    its title link. The earlier ref must resolve to index 0 rather than
+    to a locator that matches both (Playwright strict mode rejects it)."""
+    ab = _browser_with_refs({
+        "@e1": {"role": "link", "name": "Deceased Flesh"},
+        "@e2": {"role": "link", "name": "Deceased Flesh"},
+    })
+    loc = ab._resolve_ref("@e1")
+    assert (loc.role, loc.name) == ("link", "Deceased Flesh")
+    assert loc.nth_index == 0
+
+
+def test_resolve_ref_picks_the_duplicate_the_ref_stands_for():
+    """The second ref with that role+name is the second match, not the
+    first — otherwise every duplicate would click the same element."""
+    ab = _browser_with_refs({
+        "@e1": {"role": "link", "name": "Deceased Flesh"},
+        "@e2": {"role": "link", "name": "Deceased Flesh"},
+    })
+    assert ab._resolve_ref("@e2").nth_index == 1
+
+
+def test_resolve_ref_counts_only_matching_role_and_name():
+    """Unrelated refs in between must not shift the ordinal."""
+    ab = _browser_with_refs({
+        "@e1": {"role": "link", "name": "Deceased Flesh"},
+        "@e2": {"role": "button", "name": "Subscribe"},
+        "@e3": {"role": "link", "name": "Night Mind"},
+        "@e4": {"role": "link", "name": "Deceased Flesh"},
+    })
+    assert ab._resolve_ref("@e4").nth_index == 1
+    assert ab._resolve_ref("@e2").nth_index == 0
+
+
+def test_resolve_ref_without_name_keeps_role_only_locator():
+    ab = _browser_with_refs({"@e1": {"role": "button", "name": ""}})
+    loc = ab._resolve_ref("@e1")
+    assert loc.name is None
+    assert loc.nth_index is None
+
+
+def test_resolve_ref_unknown_ref_raises():
+    import pytest as _pytest
+
+    ab = _browser_with_refs({})
+    with _pytest.raises(ValueError):
+        ab._resolve_ref("@e9")
+
+
+# ─────────────────────────────────────────────────────────────
+# navigate() must surface the HTTP status of an error page
+# ─────────────────────────────────────────────────────────────
+
+
+class _FakeResponsePage:
+    def __init__(self, status: int, url: str):
+        self.url = url
+        self._status = status
+
+    def goto(self, url, **kwargs):
+        self.url = url
+        return types.SimpleNamespace(status=self._status)
+
+
+def _browser_for_navigate(status: int, monkeypatch):
+    from dpc_client_core.dpc_agent.tools.browser import AuthBrowser
+
+    ab = AuthBrowser(agent_id="agent_a", domain=f"{TEST_DOMAIN}")
+    ab._page = _FakeResponsePage(status, TEST_DOMAIN_URL)
+    ab.audit: list = []
+    monkeypatch.setattr(ab, "_check_domain", lambda url: None)
+    monkeypatch.setattr(ab, "_wait_for_content_stable", lambda: None)
+    monkeypatch.setattr(ab, "a11y_snapshot", lambda: ("button 'Subscribe'", {"@e1": {}}))
+    monkeypatch.setattr(ab, "_save_storage_state", lambda: None)
+    monkeypatch.setattr(
+        ab, "_audit_action",
+        lambda action, url, result, **kw: ab.audit.append((action, result, kw)),
+    )
+    return ab
+
+
+def test_navigate_flags_http_error_page(vault_home, monkeypatch):
+    """A 404 renders as an ordinary page and used to be indistinguishable
+    from a real one, so the agent waited out full click timeouts on a
+    page that never existed."""
+    from dpc_client_core.dpc_agent.tools.browser import HTTP_ERROR_PREFIX
+
+    ab = _browser_for_navigate(404, monkeypatch)
+    out = ab.navigate(f"{TEST_DOMAIN_URL}/@nosuchchannel")
+    assert out.startswith(f"{HTTP_ERROR_PREFIX}404")
+    assert "Subscribe" in out
+    assert ab.audit[0][2]["status"] == 404
+
+
+def test_navigate_leaves_ok_page_unprefixed(vault_home, monkeypatch):
+    from dpc_client_core.dpc_agent.tools.browser import HTTP_ERROR_PREFIX
+
+    ab = _browser_for_navigate(200, monkeypatch)
+    out = ab.navigate(f"{TEST_DOMAIN_URL}/@real")
+    assert not out.startswith(HTTP_ERROR_PREFIX)
+    assert ab.audit[0][2]["status"] == 200
