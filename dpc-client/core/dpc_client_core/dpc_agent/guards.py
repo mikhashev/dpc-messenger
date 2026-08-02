@@ -115,10 +115,15 @@ class ResearchLimitGuard(GuardMiddleware):
         )
 
 
-# Tools whose whole job is to poll a long-running external task. Calling
-# them with identical args is legitimate while a generation runs — what
-# matters is whether the OUTPUT keeps advancing, not the call signature.
-_POLLING_TOOLS = frozenset({"comfyui_progress", "comfyui_wait", "comfyui_check"})
+# Tools whose call signature does not identify the call, so repeats have to
+# be judged by whether the OUTPUT advanced. Two shapes qualify: polling a
+# long-running external task (the comfyui family, identical args for the
+# whole render), and reading live external state (browser_snapshot takes no
+# args at all, so five snapshots of five different pages are indistinguishable
+# from one call repeated five times).
+_OUTPUT_KEYED_TOOLS = frozenset({
+    "comfyui_progress", "comfyui_wait", "comfyui_check", "browser_snapshot",
+})
 
 
 class LoopGuard(GuardMiddleware):
@@ -130,10 +135,11 @@ class LoopGuard(GuardMiddleware):
     ``args`` may arrive as a JSON string from some providers and is
     normalised before fingerprinting.
 
-    Exception for :data:`_POLLING_TOOLS`: when a poll's output advances vs
-    the previous poll (new progress = new information), the repeat counter
-    for that tool is reset, so monitoring a slow generation is not killed.
-    A poll whose output stops changing (done/stuck) still trips the cap.
+    Exception for :data:`_OUTPUT_KEYED_TOOLS`: when such a call's output
+    advances vs the previous one (new output = new information), the repeat
+    counter for that tool is reset, so monitoring a slow generation — or
+    walking a browser session page by page — is not killed. Output that
+    stops changing (done/stuck/same page) still trips the cap.
     """
 
     def __init__(self, max_duplicate_calls: int = 5) -> None:
@@ -161,14 +167,15 @@ class LoopGuard(GuardMiddleware):
         return f"{name}::{args_key}"
 
     async def after_llm_call(self, ctx: HookContext) -> Optional[HookAction]:
-        # A polling tool whose output advanced since the last poll produced
-        # NEW information — reset its repeat counter so live monitoring of a
-        # long task is not mistaken for a stuck loop.
+        # An output-keyed tool whose output advanced since the last call
+        # produced NEW information — reset its repeat counter so live
+        # monitoring of a long task, or a walk across pages, is not mistaken
+        # for a stuck loop.
         for res in (ctx.state.recent_tool_results or []):
             if not isinstance(res, dict):
                 continue
             name = res.get("name", "")
-            if name not in _POLLING_TOOLS:
+            if name not in _OUTPUT_KEYED_TOOLS:
                 continue
             out = res.get("output", "")
             if self._last_poll_output.get(name) not in (None, out):
