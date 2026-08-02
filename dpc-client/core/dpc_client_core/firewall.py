@@ -125,7 +125,7 @@ class ContextFirewall:
         logger.debug("Notification settings updated: enabled=%s, events=%s",
                      self.notifications_enabled, self.notification_events)
 
-    def _get_registered_tool_defaults(self) -> Dict[str, bool]:
+    def _get_registered_tool_defaults(self) -> Tuple[Dict[str, bool], int]:
         """Read canonical tool defaults from the ToolEntry registry.
 
         Single source of truth for `default_enabled` per tool: each
@@ -134,25 +134,24 @@ class ContextFirewall:
         the actual registered tools (e.g. popup_* tools added without
         firewall defaults — see AGENT-TOOL-FIREWALL-DEFAULT-DRIFT).
 
-        Sets `self._registry_load_failures` as a side effect: the number
-        of tool modules that did not import. Adding keys is safe while
-        that number is unknown-but-nonzero; *removing* them is not, so
-        the prune below reads it.
+        Returns (defaults, load_failures) — the second value is the
+        number of tool modules that did not import. It travels with the
+        defaults rather than on `self` so the prune below cannot be
+        called without it: adding keys is safe while that number is
+        unknown-but-nonzero, removing them is not.
         """
-        self._registry_load_failures: int = 0
         try:
             from .dpc_agent.tools.registry import ToolRegistry
             registry = ToolRegistry()
-            self._registry_load_failures = len(registry.load_failures)
-            return {
+            defaults = {
                 entry.name: entry.default_enabled
                 for entry in registry._entries.values()
             }
+            return defaults, len(registry.load_failures)
         except Exception as e:
             logger.error("Failed to load ToolRegistry defaults: %s", e, exc_info=True)
-            # Registry unreadable: pretend one failure so nothing gets pruned.
-            self._registry_load_failures = 1
-            return {}
+            # Registry unreadable: report a failure so nothing gets pruned.
+            return {}, 1
 
     def _migrate_tool_settings_out_of_tools(self) -> bool:
         """Move `<tool>_<setting>` keys from `tools` into `tool_settings`.
@@ -236,7 +235,8 @@ class ContextFirewall:
         value = read(self.rules.get('dpc_agent'))
         return default if value is None else value
 
-    def _prune_dead_tool_keys(self, registry_defaults: Dict[str, bool]) -> bool:
+    def _prune_dead_tool_keys(self, registry_defaults: Dict[str, bool],
+                              load_failures: int) -> bool:
         """Drop keys from every `tools` block that name no registered tool.
 
         Counterpart to seeding: that one only ever adds, so names that
@@ -248,17 +248,20 @@ class ContextFirewall:
         Refuses to run when any tool module failed to import: in that
         state "absent from the registry" means "we could not see it",
         and pruning would silently delete the user's settings for real
-        tools. Comments (`_`-prefixed) and TOOL_METADATA_KEYS are kept.
+        tools. `load_failures` is a required argument rather than state
+        on `self` on purpose — a caller cannot reach the deleting branch
+        without saying how complete its picture is. Comments
+        (`_`-prefixed) and per-tool settings are kept.
 
         Returns True iff self.rules was modified.
         """
         if not registry_defaults:
             return False
-        if getattr(self, '_registry_load_failures', 0):
+        if load_failures:
             logger.warning(
                 "Skipping dead tool key prune: %d tool module(s) failed to load, "
                 "so the registry is not a complete list of existing tools",
-                self._registry_load_failures,
+                load_failures,
             )
             return False
 
@@ -302,7 +305,7 @@ class ContextFirewall:
         of sync; now only the registry decides which keys exist).
         """
         if registry_defaults is None:
-            registry_defaults = self._get_registered_tool_defaults()
+            registry_defaults, _ = self._get_registered_tool_defaults()
         if not registry_defaults:
             return False
         modified = False
@@ -343,10 +346,10 @@ class ContextFirewall:
         # longer exist. Single source of truth: ToolEntry.default_enabled.
         # One registry load feeds both, so the prune sees the same picture —
         # including whether any module failed to import.
-        registry_defaults = self._get_registered_tool_defaults()
+        registry_defaults, load_failures = self._get_registered_tool_defaults()
         changed = self._migrate_tool_settings_out_of_tools()
         changed = self._seed_missing_tools_into_rules(registry_defaults) or changed
-        changed = self._prune_dead_tool_keys(registry_defaults) or changed
+        changed = self._prune_dead_tool_keys(registry_defaults, load_failures) or changed
         if changed:
             try:
                 self.access_file_path.write_text(json.dumps(self.rules, indent=2))
@@ -368,7 +371,7 @@ class ContextFirewall:
             'write_file': ['repo_write_commit', 'extended_path_write', 'drive_write'],
             'list_dir': ['repo_list', 'extended_path_list', 'drive_list'],
         }
-        registry_defaults = self._get_registered_tool_defaults()
+        registry_defaults, _ = self._get_registered_tool_defaults()
         tools = dpc_agent.get('tools', {})
         self.dpc_agent_tools: Dict[str, bool] = {}
         for tool_name, default_enabled in registry_defaults.items():

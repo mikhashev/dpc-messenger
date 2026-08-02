@@ -41,11 +41,10 @@ def firewall(tmp_path):
 
 
 def test_dead_keys_go_and_everything_else_stays(firewall):
-    # State the precondition instead of inheriting it from the machine: the
-    # fixture built a real registry, and on an install missing an optional
-    # extra that registry carries load failures and the prune stands down —
-    # correctly, but this test is about what the prune deletes when it runs.
-    firewall._registry_load_failures = 0
+    # The precondition is an argument, so this test states it rather than
+    # inheriting it from the machine: on an install missing an optional extra
+    # the registry carries load failures and the prune stands down — correctly,
+    # but this test is about what the prune deletes when it does run.
     firewall.rules = _rules(
         {
             "_comment": "keep me",
@@ -66,7 +65,8 @@ def test_dead_keys_go_and_everything_else_stays(firewall):
         },
     )
 
-    assert firewall._prune_dead_tool_keys({"list_dir": True, "run_shell": False}) is True
+    assert firewall._prune_dead_tool_keys(
+        {"list_dir": True, "run_shell": False}, load_failures=0) is True
 
     global_tools = firewall.rules["dpc_agent"]["tools"]
     assert "claude_code_edit" not in global_tools
@@ -85,17 +85,26 @@ def test_dead_keys_go_and_everything_else_stays(firewall):
 
 def test_nothing_is_pruned_when_a_tool_module_failed_to_load(firewall):
     firewall.rules = _rules({"list_dir": True, "browser_click": True})
-    firewall._registry_load_failures = 1
 
     # `browser_click` is missing from the defaults only because its module did not
     # import. Deleting it here would silently revoke a permission the user granted.
-    assert firewall._prune_dead_tool_keys({"list_dir": True}) is False
+    assert firewall._prune_dead_tool_keys({"list_dir": True}, load_failures=1) is False
+    assert firewall.rules["dpc_agent"]["tools"]["browser_click"] is True
+
+
+def test_the_guard_cannot_be_skipped_by_calling_it_wrong(firewall):
+    """The completeness of the picture is an argument, not ambient state."""
+    firewall.rules = _rules({"list_dir": True, "browser_click": True})
+
+    with pytest.raises(TypeError):
+        firewall._prune_dead_tool_keys({"list_dir": True})
+
     assert firewall.rules["dpc_agent"]["tools"]["browser_click"] is True
 
 
 def test_empty_registry_prunes_nothing(firewall):
     firewall.rules = _rules({"list_dir": True})
-    assert firewall._prune_dead_tool_keys({}) is False
+    assert firewall._prune_dead_tool_keys({}, load_failures=0) is False
     assert firewall.rules["dpc_agent"]["tools"] == {"list_dir": True}
 
 

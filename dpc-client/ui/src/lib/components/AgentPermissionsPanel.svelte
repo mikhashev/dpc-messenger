@@ -363,22 +363,28 @@
   // `tools` is a map of tool name -> allowed and nothing else. The backend
   // migrates the old compound keys (`tools.run_shell_group_allowed`) on load;
   // reading falls back to them so an un-migrated file still displays right.
-  function shellSetting(settings: any, key: string, fallback: any): any {
-    const moved = settings?.tool_settings?.run_shell?.[key];
+  function toolSetting(settings: any, tool: string, key: string, fallback: any): any {
+    const moved = settings?.tool_settings?.[tool]?.[key];
     if (moved !== undefined) return moved;
-    const legacy = settings?.tools?.[`run_shell_${key}`];
+    const legacy = settings?.tools?.[`${tool}_${key}`];
     return legacy !== undefined ? legacy : fallback;
   }
 
-  function setShellSetting(settings: any, key: string, value: any): void {
+  function setToolSetting(settings: any, tool: string, key: string, value: any): void {
     if (!settings) return;
     if (!settings.tool_settings) settings.tool_settings = {};
-    if (!settings.tool_settings.run_shell) settings.tool_settings.run_shell = {};
-    settings.tool_settings.run_shell[key] = value;
+    if (!settings.tool_settings[tool]) settings.tool_settings[tool] = {};
+    settings.tool_settings[tool][key] = value;
     // Drop the pre-migration copy so the two cannot disagree after a save.
-    if (settings.tools) delete settings.tools[`run_shell_${key}`];
-    editSettings = editSettings;
+    if (settings.tools) delete settings.tools[`${tool}_${key}`];
+    editSettings = editSettings;  // trigger Svelte reactivity after nested mutation
   }
+
+  // run_shell is the only tool with settings today; these keep the call sites short.
+  const shellSetting = (settings: any, key: string, fallback: any) =>
+    toolSetting(settings, 'run_shell', key, fallback);
+  const setShellSetting = (settings: any, key: string, value: any) =>
+    setToolSetting(settings, 'run_shell', key, value);
 
   onMount(() => {
     (async () => {
