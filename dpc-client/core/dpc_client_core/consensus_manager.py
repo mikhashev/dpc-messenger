@@ -676,7 +676,9 @@ class ConsensusManager:
             frontmatter, content = markdown_manager.parse_markdown_with_frontmatter(markdown_path)
 
             # Confirm commit_hash matches what's in the file
-            stored_hash = frontmatter.get('commit_hash', '')
+            # str(): yaml turns an all-digit hash into an integer, and comparing
+            # that against the received string always mismatches (see S61).
+            stored_hash = str(frontmatter.get('commit_hash', ''))
             if stored_hash and stored_hash != commit_hash:
                 logger.warning(
                     "record_commit_signature: commit_hash mismatch for %s (stored=%s, received=%s)",

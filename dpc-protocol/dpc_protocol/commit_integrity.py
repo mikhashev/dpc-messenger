@@ -457,7 +457,10 @@ def verify_markdown_integrity(
         # CHECK 1: Content hash
         if 'content_hash' in frontmatter:
             actual_content_hash = compute_content_hash(content)
-            expected_content_hash = frontmatter['content_hash']
+            # str(): a hash of digits only is valid YAML for an integer, and the
+            # parser obliges — so the comparison ran str against int and reported
+            # two untouched commits as manually edited, every startup.
+            expected_content_hash = str(frontmatter['content_hash'])
 
             if actual_content_hash != expected_content_hash:
                 result['valid'] = False
@@ -491,7 +494,11 @@ def verify_markdown_integrity(
         # canonical_json (base64) was written at apply time — it is the exact bytes
         # that were SHA256-hashed to produce commit_hash.  This check is independent of
         # signatures: it works even when no peer certificates are available.
+        # Same coercion as CHECK 1: a hash the parser turned into an integer
+        # would both mismatch and blow up on the slice below.
         commit_hash = frontmatter.get('commit_hash')
+        if commit_hash is not None:
+            commit_hash = str(commit_hash)
         canonical_json_b64 = frontmatter.get('canonical_json', '')
 
         if canonical_json_b64 and commit_hash:
