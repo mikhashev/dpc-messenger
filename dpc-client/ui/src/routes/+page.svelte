@@ -24,6 +24,7 @@
   import NewGroupDialog from "$lib/components/NewGroupDialog.svelte";
   import GroupSettingsDialog from "$lib/components/GroupSettingsDialog.svelte";
   import ShellApprovalDialog from "$lib/components/ShellApprovalDialog.svelte";
+  import WebAuthApprovalDialog from "$lib/components/WebAuthApprovalDialog.svelte";
   import ChatPanel from "$lib/panels/ChatPanel.svelte";
   import AgentPanel from "$lib/panels/AgentPanel.svelte";
   import VoicePanel from "$lib/panels/VoicePanel.svelte";
@@ -1228,6 +1229,12 @@
      shell commands. Subscribes to pendingShellApprovals store fed by
      coreService.ts shell_approval_request WS handler. -->
 <ShellApprovalDialog />
+
+<!-- WebAuthApprovalDialog: ADR-029 Task 008 — the same shape for an agent
+     asking to use saved cookies in a browser the human cannot see. The
+     backend has broadcast this request since June with nothing mounted to
+     answer it. -->
+<WebAuthApprovalDialog />
 
 <!-- ChatHistorySyncPanel: loads history from backend when switching to peer/agent/group chat (Step 8) -->
 <ChatHistorySyncPanel
