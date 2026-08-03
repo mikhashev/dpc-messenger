@@ -300,6 +300,8 @@ async def main():
     except asyncio.CancelledError:
         pass # This is expected on shutdown
     finally:
+        global _shutting_down
+        _shutting_down = True
         logger.info("Shutdown initiated")
         await service.stop()
         # Ensure the main service task is also cancelled
@@ -308,16 +310,62 @@ async def main():
             await service_task
         except asyncio.CancelledError:
             pass # Expected
+        # Named before the loop closes: after this point a stuck overlapped
+        # op parks the process inside IocpProactor.close and nothing else
+        # reaches the log.
+        log_live_non_daemon_threads()
 
-def _trace_pending_overlapped():
-    """Name whatever still holds a Windows overlapped op when the loop closes.
+# Set by the shutdown path so the proactor hook below can tell the final
+# loop close from the short-lived per-call loops agent tools open and close
+# constantly. Same facts either way — only the log level differs.
+_shutting_down = False
+
+
+def log_live_non_daemon_threads():
+    """Name the non-daemon threads that will hold the interpreter open.
+
+    The other half of a hung exit: even with every overlapped op settled,
+    Python waits at exit for each non-daemon thread to return. Daemon
+    threads are excluded because they are not what keeps it alive.
+    """
+    import threading
+
+    main = threading.main_thread()
+    alive = [
+        t for t in threading.enumerate()
+        if t.is_alive() and not t.daemon and t is not main
+    ]
+    if not alive:
+        return
+    logger.warning(
+        "Shutdown: %d non-daemon thread(s) still alive — the interpreter "
+        "waits for each before exiting", len(alive),
+    )
+    for t in alive:
+        logger.warning("  thread %r (ident=%s)", t.name, t.ident)
+
+
+def _install_shutdown_diagnostics():
+    """Name whatever still holds a Windows overlapped op when a loop closes.
 
     IocpProactor.close() spins in `while self._cache` until every overlapped
-    completes, printing "is running after closing for N seconds" once a second
-    (windows_events.py:857). The log tells us one op is stuck but never which,
-    so every fix so far has been aimed at a guess. This prints the owner.
+    completes, printing "is running after closing for N seconds" once a
+    second. That message says one op is stuck and never which, so every fix
+    so far has been aimed at a guess.
 
-    Opt-in via DPC_DEBUG_SHUTDOWN=1; costs nothing when off.
+    Two halves with very different costs, so they are gated separately:
+
+    * listing what is pending runs once per loop close and costs nothing —
+      always on;
+    * recording where each op was registered means a formatted stack per
+      overlapped registration, i.e. per socket read and write in the
+      process — opt-in via DPC_DEBUG_SHUTDOWN=1.
+
+    Without the second half the object alone rarely identifies the op: a
+    stuck one leaves a closed socket (fd=-1) behind. The stack has to be
+    taken at registration — _OverlappedFuture._source_traceback exists only
+    under asyncio debug mode, and a cancelled-but-stuck future is pruned by
+    a done-callback before close() ever sees it.
     """
     if platform.system() != "Windows":
         return
@@ -326,34 +374,40 @@ def _trace_pending_overlapped():
     except ImportError:
         return
 
-    # A stuck op leaves a closed socket (fd=-1), so the object itself names
-    # nothing. _OverlappedFuture._source_traceback only exists under asyncio
-    # debug mode, and a cancelled-but-stuck future would be pruned by a
-    # done-callback before close() runs. So record the stack at registration
-    # and keep it until close() reads it, keyed by ov.address like _cache.
+    capture_origins = os.environ.get("DPC_DEBUG_SHUTDOWN") == "1"
     origins: dict[int, list[str]] = {}
-    original_register = IocpProactor._register
     original_close = IocpProactor.close
 
-    def register_with_origin(self, ov, obj, callback):
-        fut = original_register(self, ov, obj, callback)
-        address = getattr(ov, "address", None)
-        if address is not None:
-            origins[address] = traceback.format_stack(limit=14)[:-1]
-            if len(origins) > 1000:
-                # Addresses gone from _cache have completed; their stacks are dead weight.
-                for stale in origins.keys() - self._cache.keys():
-                    del origins[stale]
-        return fut
+    if capture_origins:
+        original_register = IocpProactor._register
+
+        def register_with_origin(self, ov, obj, callback):
+            fut = original_register(self, ov, obj, callback)
+            address = getattr(ov, "address", None)
+            if address is not None:
+                origins[address] = traceback.format_stack(limit=14)[:-1]
+                if len(origins) > 1000:
+                    # Addresses gone from _cache have completed; their
+                    # stacks are dead weight.
+                    for stale in origins.keys() - self._cache.keys():
+                        del origins[stale]
+            return fut
+
+        IocpProactor._register = register_with_origin
 
     def close_with_trace(self):
         cache = getattr(self, "_cache", None)
         if cache:
-            logger.warning("Shutdown: %d overlapped op(s) still pending", len(cache))
+            # Agent tools run each async call on a fresh loop and close it,
+            # so a leaked op here is worth recording but not worth shouting
+            # about until it is the exit that hangs.
+            level = logging.WARNING if _shutting_down else logging.DEBUG
+            logger.log(level, "%d overlapped op(s) still pending at loop close", len(cache))
             for address, entry in list(cache.items()):
-                # windows_events.py:743 — _cache[ov.address] = (fut, ov, obj, callback)
+                # windows_events.py — _cache[ov.address] = (fut, ov, obj, callback)
                 fut, _ov, obj, callback = entry
-                logger.warning(
+                logger.log(
+                    level,
                     "  pending overlapped %s: fut=%r cancelled=%s obj=%r callback=%r",
                     address,
                     fut,
@@ -362,18 +416,21 @@ def _trace_pending_overlapped():
                     getattr(callback, "__qualname__", callback),
                 )
                 for line in origins.get(address, []):
-                    logger.warning("    origin: %s", line.rstrip())
+                    logger.log(level, "    origin: %s", line.rstrip())
+            if not capture_origins and _shutting_down:
+                logger.warning(
+                    "  (start with DPC_DEBUG_SHUTDOWN=1 to also record where "
+                    "each op was registered)"
+                )
         return original_close(self)
 
-    IocpProactor._register = register_with_origin
     IocpProactor.close = close_with_trace
 
 
 if __name__ == "__main__":
     try:
         single_instance.acquire()  # exits if another backend is already running
-        if os.environ.get("DPC_DEBUG_SHUTDOWN") == "1":
-            _trace_pending_overlapped()
+        _install_shutdown_diagnostics()
         print(f"D-PC Messenger v{__version__} - Starting Core Service (press Ctrl+C to stop)")
         asyncio.run(main())
     except KeyboardInterrupt:
