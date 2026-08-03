@@ -1906,3 +1906,40 @@ def test_headless_gate_still_waits_when_a_ui_is_connected(vault_home):
 
     assert broadcasts == ["web_auth_headless_approval_request"]
     assert "not approved" not in out
+
+
+def test_fetch_browser_carries_no_login(vault_home):
+    """The regression this closes: the browse_page JS fallback opened with
+    the agent's whole saved login and ran as a second, concurrent browser
+    against the same account — two sessions, two fingerprints, one set of
+    Google/TikTok cookies. browse_page without use_auth is the
+    unauthenticated path; it must carry no identity at all."""
+    from dpc_client_core.dpc_agent.tools.browser import AuthBrowser
+
+    fetch = AuthBrowser(agent_id="agent_a", domains=[], anonymous=True)
+    assert fetch._anonymous is True
+
+    interactive = AuthBrowser(agent_id="agent_a", domains=[])
+    assert interactive._anonymous is False
+
+
+def test_anonymous_browser_never_writes_the_shared_state(vault_home):
+    """Second half of the same defect: both browsers resolve the same
+    ~/.dpc/agents/{id}/browser_state.json, so an anonymous one closing last
+    would overwrite the interactive session's login with a blank one."""
+    from dpc_client_core.dpc_agent.tools.browser import AuthBrowser
+
+    state = vault_home / "agents" / "agent_a" / "browser_state.json"
+    state.parent.mkdir(parents=True, exist_ok=True)
+    state.write_text('{"cookies": [{"name": "SID"}], "origins": []}', encoding="utf-8")
+
+    fetch = AuthBrowser(agent_id="agent_a", domains=[], anonymous=True)
+
+    class _Ctx:
+        def storage_state(self, **_kw):
+            raise AssertionError("anonymous browser must not read state out")
+
+    fetch._context = _Ctx()
+    fetch._save_storage_state()  # must be a no-op, not an exception
+
+    assert json.loads(state.read_text(encoding="utf-8"))["cookies"] == [{"name": "SID"}]

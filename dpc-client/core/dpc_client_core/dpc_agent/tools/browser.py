@@ -1012,11 +1012,18 @@ class AuthBrowser:
         *,
         headed: bool = False,
         domain: str | None = None,
+        anonymous: bool = False,
     ):
         from dpc_client_core import web_auth
 
         self._agent_id = agent_id
         self._headed = headed
+        # Carries no identity: opens without the agent's saved cookies and
+        # writes none back. For the browse_page JS fallback, which is the
+        # *unauthenticated* path — authenticated fetches go through use_auth.
+        # Without this the fallback inherited the agent's whole login and ran
+        # it as a second, concurrent browser against the same account.
+        self._anonymous = anonymous
         # Normalize: accept either `domains=[...]` (new multi-domain) or
         # `domain="..."` (legacy single-domain). Both produce a list.
         if domain is not None and domains is None:
@@ -1237,7 +1244,12 @@ class AuthBrowser:
 
         state_path = self._state_path()
         context_kwargs: dict = {}
-        if state_path.exists():
+        if self._anonymous:
+            log.debug(
+                "anonymous browser for agent=%s — no saved login loaded",
+                self._agent_id,
+            )
+        elif state_path.exists():
             try:
                 state_data = json.loads(state_path.read_text(encoding="utf-8"))
                 # Strip origins (localStorage/sessionStorage) — they cause
@@ -1321,6 +1333,11 @@ class AuthBrowser:
 
     def _save_storage_state(self) -> None:
         if self._context is None:
+            return
+        if self._anonymous:
+            # It never held the agent's login, so it has nothing to
+            # contribute — and writing here would overwrite the file the
+            # interactive session owns with a session that knows nothing.
             return
         if self._disconnected:
             # Browser already detached (e.g. user closed the window): the
@@ -2231,7 +2248,9 @@ async def _get_or_create_fetch_session(agent_id: str) -> "AuthBrowser":
             except Exception:
                 pass
             _fetch_sessions.pop(agent_id, None)
-        session = AuthBrowser(agent_id=agent_id, domains=[], headed=False)
+        session = AuthBrowser(
+            agent_id=agent_id, domains=[], headed=False, anonymous=True,
+        )
         await _run_in_session(session, "start")
         _fetch_sessions[agent_id] = session
         return session
