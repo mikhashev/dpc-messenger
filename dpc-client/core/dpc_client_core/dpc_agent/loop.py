@@ -61,6 +61,29 @@ def _get_shared_executor() -> ThreadPoolExecutor:
     return _SHARED_EXECUTOR
 
 
+def shutdown_shared_executor() -> None:
+    """Stop the tool pool, so that a stuck tool cannot hold the exit silently.
+
+    Nothing ever stopped this pool. Its workers are non-daemon, so the one
+    that stops it is the interpreter's own atexit hook, which joins every
+    worker with no timeout — and it runs after the last line of the log.
+    A tool still executing there parks the process where no diagnostic can
+    reach it, which is what every unexplained hang looked like from outside.
+
+    `wait_for` in `execute_tool_with_timeout` cancels the *await*, never the
+    thread: a tool that outlives its timeout keeps running. So the wait here
+    has to be bounded by the caller (see run_service), and whatever is still
+    running when it expires is left for the thread dump to name.
+    """
+    global _SHARED_EXECUTOR
+    executor, _SHARED_EXECUTOR = _SHARED_EXECUTOR, None
+    if executor is None:
+        return
+    # Queued calls are dropped rather than run during shutdown; only the ones
+    # already inside a worker can still delay us.
+    executor.shutdown(wait=True, cancel_futures=True)
+
+
 def _truncate_tool_result(result: Any) -> str:
     """Hard-cap tool result string to 15000 characters with scope metadata.
 

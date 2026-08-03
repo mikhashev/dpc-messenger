@@ -219,6 +219,7 @@ import re
 import traceback
 from pathlib import Path
 from dpc_client_core.service import CoreService
+from dpc_client_core.dpc_agent.loop import shutdown_shared_executor
 from dpc_client_core.__version__ import __version__
 from dpc_client_core import single_instance
 
@@ -466,6 +467,24 @@ async def main():
             await service_task
         except asyncio.CancelledError:
             pass # Expected
+        # Same disease as the default pool below, different pool: every agent
+        # tool call runs on the shared tool executor, which nobody stopped
+        # either. Bounded here rather than in the helper, so a tool that
+        # outran its own timeout cannot decide when the process exits — the
+        # thread dump names it instead.
+        try:
+            await asyncio.wait_for(
+                asyncio.to_thread(shutdown_shared_executor),
+                timeout=_TOOL_EXECUTOR_SHUTDOWN_SEC,
+            )
+        except asyncio.TimeoutError:
+            logger.warning(
+                "Agent tool executor still had a tool running after %.0fs — "
+                "see the thread dump below for which one",
+                _TOOL_EXECUTOR_SHUTDOWN_SEC,
+            )
+        except Exception as e:
+            logger.warning("Agent tool executor did not shut down cleanly: %s", e)
         # run_in_executor(None, ...) parks work on asyncio's default pool,
         # whose workers are non-daemon: nobody ever asked them to stop, so
         # nine of them once held the interpreter open after every component
@@ -495,6 +514,11 @@ _STACK_FRAMES_PER_THREAD = 4
 # Long enough for a hash or an index write to land, short enough that a
 # thread parked on a two-minute wait does not decide when we exit.
 _DEFAULT_EXECUTOR_SHUTDOWN_SEC = 5.0
+
+# Same for the agent tool pool. Kept short deliberately: anything still
+# running here has already blown through its own tool timeout, so waiting
+# on it longer buys nothing that the thread dump does not report better.
+_TOOL_EXECUTOR_SHUTDOWN_SEC = 5.0
 
 
 def log_live_non_daemon_threads():
