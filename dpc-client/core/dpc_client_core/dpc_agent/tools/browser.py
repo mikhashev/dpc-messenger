@@ -503,23 +503,39 @@ def get_pending_auth_approvals() -> dict[str, dict]:
     return _pending_auth_approvals
 
 
-class _DaemonThreadPoolExecutor(ThreadPoolExecutor):
-    """ThreadPoolExecutor whose worker threads are daemon.
+# How long a headless auth request waits for a human before it is refused.
+_HEADLESS_APPROVAL_TIMEOUT_SEC = 120
 
-    Stdlib ThreadPoolExecutor creates non-daemon workers, so a worker
-    stuck in a blocking call (e.g. Playwright IPC after the Camoufox
-    subprocess has crashed) keeps the Python interpreter alive even
-    after `sys.exit` / Ctrl+C, forcing the user to kill the process
-    via the OS. Marking the worker daemon lets Python exit cleanly
-    while leaving the stuck IPC for the OS to reap."""
 
-    def _adjust_thread_count(self) -> None:
-        super()._adjust_thread_count()
-        for thread in list(self._threads):
-            try:
-                thread.daemon = True
-            except RuntimeError:
-                pass
+class _CrossLoopSignal:
+    """One-shot signal set from any loop, awaited on the loop that made it.
+
+    The waiter is a tool handler, which the registry runs on a loop of its
+    own; the setter is a WebSocket command handler on the main loop. A
+    `threading.Event` bridges them, but only by parking a pool worker for
+    the whole wait — and pool workers are joined at interpreter exit, so a
+    shutdown during an approval waited out the full timeout before the
+    process could leave.
+    """
+
+    def __init__(self) -> None:
+        self._loop = asyncio.get_running_loop()
+        self._event = asyncio.Event()
+
+    def set(self) -> None:
+        try:
+            self._loop.call_soon_threadsafe(self._event.set)
+        except RuntimeError:
+            # Waiter's loop is already gone: the tool call it belonged to
+            # has returned, so there is nobody left to signal. Say so —
+            # swallowing this is how a dead mechanism looks healthy.
+            log.warning(
+                "Approval signalled after its waiter's loop closed — "
+                "the call it belonged to has already returned"
+            )
+
+    async def wait(self) -> None:
+        await self._event.wait()
 
 
 def _get_session_lock(agent_id: str) -> asyncio.Lock:
@@ -1069,12 +1085,13 @@ class AuthBrowser:
         session, eliminating the `cannot switch to a different thread`
         error surfaced in S155.
 
-        The executor is built with `_DaemonThreadPoolExecutor` so the
-        worker thread is daemon — if a Playwright IPC call hangs after
-        Camoufox crashed, Python can still exit cleanly instead of
-        waiting indefinitely for a thread that will never complete."""
+        A worker parked on a dead Playwright IPC still holds the
+        interpreter at exit: `_python_exit` joins pool workers whatever
+        their daemon flag says. Nothing here can change that, so it is
+        not attempted — the shutdown thread dump names the stuck call
+        instead."""
         if self._executor is None:
-            self._executor = _DaemonThreadPoolExecutor(
+            self._executor = ThreadPoolExecutor(
                 max_workers=1,
                 thread_name_prefix=f"camoufox-{self._agent_id}",
             )
@@ -2397,10 +2414,9 @@ async def browse_page(
                     f"for a headed browser."
                 )
             if local_api is not None:
-                import threading
                 import uuid as _uuid
                 approval_id = _uuid.uuid4().hex[:12]
-                approval_event = threading.Event()
+                approval_event = _CrossLoopSignal()
                 _pending_auth_approvals[approval_id] = {
                     "event": approval_event,
                     "agent_id": agent_id,
@@ -2417,14 +2433,13 @@ async def browse_page(
                         "url": url,
                     },
                 )
-                loop = asyncio.get_running_loop()
                 try:
-                    approved = await asyncio.wait_for(
-                        loop.run_in_executor(None, approval_event.wait, 120),
-                        timeout=120,
+                    await asyncio.wait_for(
+                        approval_event.wait(),
+                        timeout=_HEADLESS_APPROVAL_TIMEOUT_SEC,
                     )
                 except asyncio.TimeoutError:
-                    approved = False
+                    pass
                 entry = _pending_auth_approvals.pop(approval_id, {})
                 if not entry.get("approved", False):
                     _web_auth_mod.audit_append(
