@@ -208,49 +208,113 @@ class _Msg(dict):
 
 class TestLoopAwareClient:
     """Agent tools run each async call in a fresh event loop that is closed
-    afterward (tools/registry.py); a client cached across calls ends up bound to
-    a dead loop → 'Event loop is closed'. _client_for_loop() rebuilds on loop
-    change but keeps the client (incl. an injected mock) within one loop."""
+    afterward (tools/registry.py), and an httpx pool belongs to the loop that
+    opened it.
 
-    def test_same_loop_adopts_and_reuses_client(self):
-        p = _make()
-        injected = p.client
+    The earlier answer — replace the cached client whenever the loop changed —
+    left the old one unclosed, because its loop was already dead. Each such
+    call leaked a client holding an open socket to Ollama with a read
+    outstanding, and one of those sockets parked the process inside
+    IocpProactor.close() at shutdown, where the wait is unbounded.
 
+    So: the shared client is used only on its own loop; any other loop gets
+    one of its own and closes it before returning."""
+
+    def _use(self, provider, loop):
         async def call():
-            return p._client_for_loop()
+            async with provider._client() as client:
+                return client
+
+        return loop.run_until_complete(call())
+
+    def test_same_loop_reuses_the_shared_client(self):
+        p = _make()
+        shared = p.client
 
         loop = asyncio.new_event_loop()
         try:
-            c1 = loop.run_until_complete(call())
-            c2 = loop.run_until_complete(call())
+            c1 = self._use(p, loop)
+            c2 = self._use(p, loop)
         finally:
             loop.close()
 
-        assert c1 is injected  # first use adopts the existing client
-        assert c2 is injected  # same loop → reused, not rebuilt
+        assert c1 is shared
+        assert c2 is shared
 
-    def test_new_loop_rebuilds_client(self):
+    def test_foreign_loop_gets_its_own_client(self):
         p = _make()
-        injected = p.client
-
-        async def call():
-            return p._client_for_loop()
+        shared = p.client
 
         loop_a = asyncio.new_event_loop()
         try:
-            c_a = loop_a.run_until_complete(call())
+            c_a = self._use(p, loop_a)  # first use adopts this loop
         finally:
-            loop_a.close()  # simulate the agent per-call loop being closed
+            loop_a.close()
 
         loop_b = asyncio.new_event_loop()
         try:
-            c_b = loop_b.run_until_complete(call())
+            c_b = self._use(p, loop_b)
         finally:
             loop_b.close()
 
-        assert c_a is injected      # loop A adopted the original client
-        assert c_b is not injected  # loop changed → rebuilt (no dead-loop reuse)
-        assert c_b is p.client
+        assert c_a is shared
+        assert c_b is not shared
+
+    def test_foreign_loop_client_is_closed_before_returning(self):
+        """The leak itself: what a per-call loop opens, it must also close —
+        afterwards nobody can, since the pool's loop is gone."""
+        p = _make()
+        closed = []
+        made = []
+
+        class _FakeClient:
+            def __init__(self, host=None):
+                made.append(self)
+
+            async def close(self):
+                closed.append(self)
+
+        loop_a = asyncio.new_event_loop()
+        try:
+            self._use(p, loop_a)  # adopt loop A
+        finally:
+            loop_a.close()
+
+        import dpc_client_core.providers.ollama_provider as mod
+
+        original = mod.ollama.AsyncClient
+        mod.ollama.AsyncClient = _FakeClient
+        try:
+            loop_b = asyncio.new_event_loop()
+            try:
+                c_b = self._use(p, loop_b)
+            finally:
+                loop_b.close()
+        finally:
+            mod.ollama.AsyncClient = original
+
+        assert made == [c_b]
+        assert closed == [c_b], "a per-call client left open is the leak"
+
+    def test_shared_client_is_never_replaced(self):
+        """Replacing it was how the old client became unreachable — and
+        unclosable, its loop already dead."""
+        p = _make()
+        shared = p.client
+
+        loop_a = asyncio.new_event_loop()
+        try:
+            self._use(p, loop_a)
+        finally:
+            loop_a.close()
+
+        loop_b = asyncio.new_event_loop()
+        try:
+            self._use(p, loop_b)
+        finally:
+            loop_b.close()
+
+        assert p.client is shared
 
 
 class TestVisionKeepAlive:

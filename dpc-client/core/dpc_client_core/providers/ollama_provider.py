@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 import uuid
+from contextlib import asynccontextmanager
 from types import SimpleNamespace
 from typing import Dict, Any, Optional, List
 
@@ -43,32 +44,58 @@ class OllamaProvider(AIProvider):
     def __init__(self, alias: str, config: Dict[str, Any]):
         super().__init__(alias, config)
         self.client = ollama.AsyncClient(host=config.get("host"))
-        self._client_loop: Optional[Any] = None  # event loop self.client is bound to
+        # The loop `self.client` belongs to. Captured here when there is one,
+        # so the long-lived service loop keeps a reusable client; None means
+        # the first request adopts whatever loop it runs on.
+        try:
+            self._own_loop: Optional[Any] = asyncio.get_running_loop()
+        except RuntimeError:
+            self._own_loop = None
         self._last_thinking: Optional[str] = None
 
-    def _client_for_loop(self) -> "ollama.AsyncClient":
-        """Return an AsyncClient bound to the current running event loop.
+    @asynccontextmanager
+    async def _client(self):
+        """Yield a client usable on the running loop, closing it if it is ours.
 
-        Agent tools run each async call in a fresh event loop that is closed
-        afterward (tools/registry.py execute), so a client cached across calls
-        ends up with an httpx connection pool bound to a dead loop → the next
-        call fails with 'Event loop is closed'. Recreate the client whenever the
-        running loop changes; within one persistent loop (chat) it is built once.
+        An httpx pool belongs to the loop that opened it, and agent tools run
+        each async call in a fresh loop that is closed afterwards
+        (tools/registry.py execute). The previous version handled that by
+        replacing `self.client` whenever the running loop changed — and
+        dropping the old one **without closing it**, because its loop was
+        already dead. Every such call leaked a client holding an open socket
+        to Ollama with a read still outstanding. One of those sockets is what
+        parked the process inside `IocpProactor.close()` at shutdown, where
+        the wait is unbounded: the exit never completed and the process had
+        to be killed.
+
+        Now the shared client is only ever used on the loop it belongs to.
+        Any other loop gets its own client and closes it before returning, on
+        that same loop — so nothing outlives its pool and shutdown has no
+        orphans to find. The cost is one connection per request from those
+        loops, which against a local Ollama is nothing; the old cache bought
+        no reuse there anyway, since each per-call loop rebuilt the client
+        regardless.
         """
         try:
             loop = asyncio.get_running_loop()
         except RuntimeError:
             loop = None
-        if self._client_loop is None:
-            # First request (or an externally-injected/mocked client): adopt the
-            # current loop without recreating, so the existing client is kept.
-            self._client_loop = loop
-        elif self._client_loop is not loop:
-            # The loop we were bound to has been replaced (agent per-call loop
-            # closed) — rebuild on the new one.
-            self.client = ollama.AsyncClient(host=self.config.get("host"))
-            self._client_loop = loop
-        return self.client
+        if self._own_loop is None:
+            self._own_loop = loop
+        if loop is self._own_loop:
+            yield self.client
+            return
+        client = ollama.AsyncClient(host=self.config.get("host"))
+        try:
+            yield client
+        finally:
+            try:
+                await client.close()
+            except Exception as exc:
+                logger.debug(
+                    "OllamaProvider '%s': closing per-call client failed: %s",
+                    self.alias, exc,
+                )
 
     def supports_vision(self) -> bool:
         """Check if this Ollama model supports vision/multimodal inputs."""
@@ -103,15 +130,16 @@ class OllamaProvider(AIProvider):
             # Large models (9B+) can take >60s for initial VRAM load on first query.
             timeout = self.config.get("timeout", 300.0)
 
-            response = await asyncio.wait_for(
-                self._client_for_loop().chat(
-                    model=self.model,
-                    messages=[message],
-                    options=options,
-                    think=True if self.supports_thinking() else None,
-                ),
-                timeout=timeout
-            )
+            async with self._client() as client:
+                response = await asyncio.wait_for(
+                    client.chat(
+                        model=self.model,
+                        messages=[message],
+                        options=options,
+                        think=True if self.supports_thinking() else None,
+                    ),
+                    timeout=timeout
+                )
             self._last_thinking = response['message'].thinking
             content = response['message']['content']
             if not content and self._last_thinking:
@@ -172,19 +200,22 @@ class OllamaProvider(AIProvider):
             # Vision queries may take longer; respect provider config timeout first
             timeout = kwargs.get("timeout", self.config.get("timeout", 300.0))
 
-            response = await asyncio.wait_for(
-                self._client_for_loop().chat(
-                    model=self.model,
-                    messages=[message],
-                    options=options,
-                    think=True if self.supports_thinking() else None,
-                    # Keep the VL model resident for a bit so back-to-back agent QC
-                    # calls don't cold-start a reload each time (was 0 = unload
-                    # immediately). Configurable via providers.json vision_keep_alive.
-                    keep_alive=self.config.get("vision_keep_alive", "1m"),
-                ),
-                timeout=timeout
-            )
+            async with self._client() as client:
+                response = await asyncio.wait_for(
+                    client.chat(
+                        model=self.model,
+                        messages=[message],
+                        options=options,
+                        think=True if self.supports_thinking() else None,
+                        # Keep the VL model resident for a bit so back-to-back agent
+                        # QC calls don't cold-start a reload each time (was 0 =
+                        # unload immediately). Configurable via providers.json
+                        # vision_keep_alive. Unaffected by the per-call client: this
+                        # is the model's residency in Ollama, not our connection.
+                        keep_alive=self.config.get("vision_keep_alive", "1m"),
+                    ),
+                    timeout=timeout
+                )
             self._last_thinking = response['message'].thinking
             content = response['message']['content']
             if not content and self._last_thinking:
@@ -290,16 +321,17 @@ class OllamaProvider(AIProvider):
         timeout = self.config.get("timeout", 300.0)
 
         try:
-            response = await asyncio.wait_for(
-                self._client_for_loop().chat(
-                    model=self.model,
-                    messages=ollama_messages,
-                    tools=ollama_tools,
-                    options=options,
-                    think=True if self.supports_thinking() else None,
-                ),
-                timeout=timeout,
-            )
+            async with self._client() as client:
+                response = await asyncio.wait_for(
+                    client.chat(
+                        model=self.model,
+                        messages=ollama_messages,
+                        tools=ollama_tools,
+                        options=options,
+                        think=True if self.supports_thinking() else None,
+                    ),
+                    timeout=timeout,
+                )
         except asyncio.TimeoutError:
             raise RuntimeError(f"Ollama provider '{self.alias}' timed out after {timeout}s.")
         except Exception as e:
@@ -353,7 +385,8 @@ class OllamaProvider(AIProvider):
                 - details: Model details (family, parameter_size, etc.)
         """
         try:
-            response = await self._client_for_loop().show(model=self.model)
+            async with self._client() as client:
+                response = await client.show(model=self.model)
 
             # Parse num_ctx from modelfile
             num_ctx = None
@@ -408,7 +441,23 @@ class OllamaProvider(AIProvider):
 
     async def close(self) -> None:
         """Close the Ollama async client. Model stays loaded — Ollama manages
-        VRAM via its own keep_alive TTL (default 5 min idle → auto-unload)."""
+        VRAM via its own keep_alive TTL (default 5 min idle → auto-unload).
+
+        Per-request clients are already closed by `_client()`, on the loop
+        that opened them; this only releases the one built in __init__ (or
+        one a caller swapped in). It must not raise: shutdown used to log
+        `Error closing provider 'ollama_vision': Event loop is closed` here
+        and move on, which was the visible half of the leak — the invisible
+        half was every client replaced before it, never closed at all.
+        """
         if hasattr(self.client, 'close'):
-            await self.client.close()
+            try:
+                await self.client.close()
+            except Exception as exc:
+                logger.debug(
+                    "OllamaProvider '%s': close failed (%s) — the per-call "
+                    "clients were already closed by their own loop",
+                    self.alias, exc,
+                )
+                return
         logger.debug(f"OllamaProvider '{self.alias}': Client closed")
