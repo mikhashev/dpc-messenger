@@ -2351,6 +2351,19 @@ async def browse_page(
         # Headless (keep_open=False) broadcasts approval request to UI.
         if not keep_open:
             local_api = getattr(dpc_service, "local_api", None) if dpc_service else None
+            if local_api is not None and not getattr(local_api, "has_clients", True):
+                # broadcast_event drops the request when nobody is connected,
+                # so the wait below could only ever time out. Two minutes of
+                # silence per call, and the agent is told "not approved" as
+                # though a human had refused. Say what actually happened.
+                _web_auth_mod.audit_append(
+                    agent_id, use_auth, url, status="headless_no_ui",
+                )
+                return (
+                    f"⚠️ Headless access to '{use_auth}' needs approval, but no "
+                    f"UI client is connected to approve it. Use keep_open=true "
+                    f"for a headed browser."
+                )
             if local_api is not None:
                 import threading
                 import uuid as _uuid

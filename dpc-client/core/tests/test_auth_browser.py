@@ -1832,3 +1832,77 @@ def test_audit_error_records_the_message():
     assert "\n" not in fields["error_message"], "call log must not be inlined"
     assert len(fields["error_message"]) <= 300
 
+
+def test_headless_gate_fails_fast_without_a_ui(vault_home):
+    """The gate broadcasts a request and waits 120s for an answer. When no UI
+    client is connected the broadcast is dropped, so the wait could only end
+    in a timeout — and the agent was told "not approved", as though a human
+    had refused. 19 requests across three agents expired that way before the
+    dialog existed."""
+    import time
+    import dpc_client_core.dpc_agent.tools.browser as mod
+    from dpc_client_core.dpc_agent.tools.browser import browse_page
+
+    agent_root = vault_home / "agents" / "agent_a"
+    agent_root.mkdir(parents=True, exist_ok=True)
+    ctx = _make_ctx(agent_root)
+
+    broadcasts = []
+
+    class _NoUiApi:
+        has_clients = False
+
+        async def broadcast_event(self, name, payload):
+            broadcasts.append(name)
+
+    ctx.dpc_service = types.SimpleNamespace(local_api=_NoUiApi())
+
+    started = time.monotonic()
+    out = asyncio.run(
+        browse_page(ctx, url=f"https://{TEST_DOMAIN}/x", use_auth=f"{TEST_DOMAIN}")
+    )
+    elapsed = time.monotonic() - started
+
+    assert "no UI client is connected" in out
+    assert elapsed < 5, "must not wait out the 120s approval window"
+    assert broadcasts == [], "no point broadcasting to nobody"
+
+
+def test_headless_gate_still_waits_when_a_ui_is_connected(vault_home):
+    """With a UI attached the request is real: broadcast, then wait for the
+    answer the dialog sends back."""
+    import dpc_client_core.dpc_agent.tools.browser as mod
+    from dpc_client_core.dpc_agent.tools.browser import browse_page
+
+    agent_root = vault_home / "agents" / "agent_a"
+    agent_root.mkdir(parents=True, exist_ok=True)
+    ctx = _make_ctx(agent_root)
+
+    broadcasts = []
+
+    class _LiveApi:
+        has_clients = True
+
+        async def broadcast_event(self, name, payload):
+            broadcasts.append(name)
+            # Answer immediately, the way the dialog does.
+            entry = mod.get_pending_auth_approvals()[payload["request_id"]]
+            entry["approved"] = True
+            entry["event"].set()
+
+    ctx.dpc_service = types.SimpleNamespace(local_api=_LiveApi())
+
+    def _html(agent_id, domain, url, headed=True):
+        return "<html><body><p>ok</p></body></html>"
+
+    original = mod._auth_browse_html
+    mod._auth_browse_html = _html
+    try:
+        out = asyncio.run(
+            browse_page(ctx, url=f"https://{TEST_DOMAIN}/x", use_auth=f"{TEST_DOMAIN}")
+        )
+    finally:
+        mod._auth_browse_html = original
+
+    assert broadcasts == ["web_auth_headless_approval_request"]
+    assert "not approved" not in out

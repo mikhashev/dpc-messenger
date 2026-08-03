@@ -440,6 +440,15 @@ class LocalApiServer:
             await self.server.wait_closed()
             logger.info("Local API Server stopped")
 
+    @property
+    def has_clients(self) -> bool:
+        """Whether any UI client is connected right now.
+
+        Callers that broadcast a request and then *wait* for an answer need
+        this: broadcast_event drops the message when nobody is listening, so
+        without the check the wait can only end in a timeout."""
+        return bool(self._clients)
+
     async def broadcast_event(self, event_name: str, payload: dict):
         if not self._clients:
             return
