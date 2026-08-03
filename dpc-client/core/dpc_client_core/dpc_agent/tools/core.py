@@ -43,9 +43,27 @@ def _paginate_content(content: str, path: str, offset: int | None, limit: int | 
         shown_end = min(end, total)
         return f"[Lines {shown_start}-{shown_end} of {total} total | {path}]\n{result}"
 
-    # No pagination — apply legacy truncation
+    # No pagination — truncate, and say so where it will be read. The old
+    # notice sat after the content, counted characters while the reader
+    # counts lines, and named no way to continue: a reader who took the
+    # first page for the whole file got its size right and its extent
+    # wrong, then reasoned on a quarter of the document.
     if len(content) > fallback_truncate:
-        content = content[:fallback_truncate] + f"\n\n... (truncated, {len(content)} total chars)"
+        # Cut on a line boundary, so the offset offered below resumes exactly
+        # where this page stops. A character cut lands mid-line and the
+        # advertised offset would skip its remainder.
+        shown = 0
+        size = 0
+        for line in lines:
+            if size + len(line) > fallback_truncate:
+                break
+            size += len(line)
+            shown += 1
+        head = "".join(lines[:shown])
+        return (
+            f"[Lines 1-{shown} of {total} | truncated at {size} "
+            f"of {len(content)} chars | continue: offset={shown}]\n{head}"
+        )
     return content
 
 
