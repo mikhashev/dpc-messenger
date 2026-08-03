@@ -70,6 +70,10 @@ function intercept(level: LogLevel, args: unknown[]) {
         .map(a => {
             if (a === null) return 'null';
             if (a === undefined) return 'undefined';
+            // An Error has no enumerable own properties, so JSON.stringify
+            // renders it as "{}" — the one thing a caught error is logged for
+            // is exactly what got destroyed on the way to ui.log.
+            if (a instanceof Error) return a.stack || `${a.name}: ${a.message}`;
             if (typeof a === 'object') { try { return JSON.stringify(a); } catch { return String(a); } }
             return String(a);
         })
