@@ -548,7 +548,7 @@ def _get_session_lock(agent_id: str) -> asyncio.Lock:
 
 
 _A11Y_DOM_SNAPSHOT_JS = """
-() => {
+(serial) => {
   const TAG_TO_ROLE = {
     'a': 'link', 'button': 'button',
     'input': 'textbox', 'textarea': 'textbox',
@@ -620,10 +620,18 @@ _A11Y_DOM_SNAPSHOT_JS = """
   }
   let nodeCount = 0;
   const MAX_NODES = 3000;
+  // Stamp every visited element with an identity the Python side can turn
+  // back into an exact locator. Without it a ref is only (role, name), and
+  // that pair addresses nothing on a real page: an icon button has no name
+  // at all, and a name that does exist is rarely unique.
+  // Scoped by `serial` so marks left by earlier snapshots — on elements this
+  // walk no longer reaches — cannot be mistaken for current ones.
   function walk(el) {
     if (!el || el.nodeType !== 1) return null;
     if (nodeCount >= MAX_NODES) return null;
     if (isHidden(el)) return null;
+    const elId = serial + ':' + nodeCount;
+    try { el.setAttribute('data-dpc-el', elId); } catch (e) { /* read-only DOM */ }
     nodeCount += 1;
     const role = getRole(el);
     const name = getName(el);
@@ -647,7 +655,7 @@ _A11Y_DOM_SNAPSHOT_JS = """
           if (t) directText += (directText ? ' ' : '') + t;
         }
       }
-      if (directText) return {role: 'generic', name: directText.slice(0, 200), value: '', hidden: false, children: []};
+      if (directText) return {role: 'generic', name: directText.slice(0, 200), value: '', hidden: false, children: [], el: elId};
       return null;
     }
     return {
@@ -656,9 +664,10 @@ _A11Y_DOM_SNAPSHOT_JS = """
       value: value,
       hidden: false,
       children: children,
+      el: elId,
     };
   }
-  return walk(document.body) || {role: 'generic', name: '', children: []};
+  return walk(document.body) || {role: 'generic', name: '', children: [], el: ''};
 }
 """
 
@@ -777,7 +786,7 @@ def _build_a11y_tree(root: dict) -> tuple[str, dict]:
         if role in _A11Y_INTERACTIVE_ROLES:
             counter[0] += 1
             ref = f"@e{counter[0]}"
-            refs[ref] = {"role": role, "name": name}
+            refs[ref] = {"role": role, "name": name, "el": node.get("el", "")}
             ref_tag = f" [{ref}]"
         indent = "  " * depth
         line = f"{indent}- {role}"
@@ -834,31 +843,82 @@ def _truncate_snapshot(
     return "\n".join(result)
 
 
+def _audit_error(exc: BaseException) -> dict:
+    """Audit fields for a failed browser action.
+
+    The type alone does not identify the failure: `Error` covered both a
+    strict-mode violation naming 24 matching buttons and unrelated
+    Playwright refusals, and the record kept neither message. Reading the
+    audit afterwards could establish that something failed and nothing
+    about why. First line only — Playwright appends a call log that runs
+    to dozens of lines.
+    """
+    message = str(exc).strip().split("\n", 1)[0]
+    return {"error": type(exc).__name__, "error_message": message[:300]}
+
+
+_REF_LINE_RE = re.compile(r"\[@e\d+\]")
+
+
+def _split_actionable_lines(snapshot_text: str) -> tuple[list[str], str]:
+    """Separate the lines that carry a `@eN` ref from everything else.
+
+    A ref is the only thing on the page the agent can actually address.
+    Handing the whole tree to a summarizing model and asking it to be
+    concise loses them wholesale: a calendar of 31 day cells came back as
+    the single line "Calendar showing August 2026 (day grid 1-31)", after
+    which the agent had nothing to click and spent minutes guessing CSS
+    selectors that timed out one by one.
+
+    So the refs never reach the model. Only the prose around them does.
+    """
+    actionable: list[str] = []
+    prose: list[str] = []
+    for line in snapshot_text.split("\n"):
+        (actionable if _REF_LINE_RE.search(line) else prose).append(line)
+    return actionable, "\n".join(prose)
+
+
+def _rejoin_with_actionable(summary: str, actionable: list[str]) -> str:
+    """Put the untouched ref lines back after the summarized prose.
+
+    The result can exceed the threshold the summarization was asked to
+    meet. That is deliberate: a snapshot under budget that the agent
+    cannot act on is worse than one over it.
+    """
+    if not actionable:
+        return summary
+    block = "\n".join(actionable)
+    if not summary:
+        return block
+    return f"{summary}\n\nInteractive elements (verbatim, refs intact):\n{block}"
+
+
 _LLM_EXTRACT_WITH_TASK = (
     "You are a content extractor for a browser automation agent.\n\n"
     "The user's task is: {user_task}\n\n"
     "Given the following page snapshot (accessibility tree representation), "
     "extract and summarize the most relevant information for completing "
     "this task. Focus on:\n"
-    "1. Interactive elements (buttons, links, inputs) that might be needed\n"
-    "2. Text content relevant to the task "
+    "1. Text content relevant to the task "
     "(prices, descriptions, headings, important info)\n"
-    "3. Navigation structure if relevant\n\n"
-    "Keep ref IDs (like @e5) for interactive elements so the agent "
-    "can use them.\n\n"
-    "Page Snapshot:\n{snapshot}\n\n"
-    "Provide a concise summary that preserves actionable information "
-    "and relevant content."
+    "2. Navigation structure if relevant\n\n"
+    "The interactive elements have already been separated out and will be "
+    "appended to your answer verbatim. They are not in the text below — do "
+    "not try to reproduce or refer to them.\n\n"
+    "Page Snapshot (surrounding content only):\n{snapshot}\n\n"
+    "Provide a concise summary of this content."
 )
 
 _LLM_EXTRACT_NO_TASK = (
     "Summarize this page snapshot, preserving:\n"
-    "1. All interactive elements with their ref IDs (like @e5)\n"
-    "2. Key text content and headings\n"
-    "3. Important information visible on the page\n\n"
-    "Page Snapshot:\n{snapshot}\n\n"
-    "Provide a concise summary focused on interactive elements and "
-    "key content."
+    "1. Key text content and headings\n"
+    "2. Important information visible on the page\n\n"
+    "The interactive elements have already been separated out and will be "
+    "appended to your answer verbatim. They are not in the text below — do "
+    "not try to reproduce or refer to them.\n\n"
+    "Page Snapshot (surrounding content only):\n{snapshot}\n\n"
+    "Provide a concise summary of this content."
 )
 
 
@@ -879,27 +939,34 @@ async def _llm_summarize_snapshot(
     `max_chars`."""
     if len(snapshot_text) <= max_chars:
         return snapshot_text
+    actionable, prose = _split_actionable_lines(snapshot_text)
     if llm_manager is None:
-        return _truncate_snapshot(snapshot_text, max_chars)
+        return _rejoin_with_actionable(
+            _truncate_snapshot(prose, max_chars), actionable,
+        )
     if user_task:
         prompt = _LLM_EXTRACT_WITH_TASK.format(
-            user_task=user_task, snapshot=snapshot_text,
+            user_task=user_task, snapshot=prose,
         )
     else:
-        prompt = _LLM_EXTRACT_NO_TASK.format(snapshot=snapshot_text)
+        prompt = _LLM_EXTRACT_NO_TASK.format(snapshot=prose)
     try:
         response = await asyncio.wait_for(
             llm_manager.query(prompt, provider_alias=provider_alias),
             timeout=SNAPSHOT_SUMMARIZE_TIMEOUT_SEC,
         )
         extracted = (response or "").strip()
-        return extracted or _truncate_snapshot(snapshot_text, max_chars)
+        return _rejoin_with_actionable(
+            extracted or _truncate_snapshot(prose, max_chars), actionable,
+        )
     except asyncio.TimeoutError:
         log.warning(
             "snapshot summarization exceeded %ss, falling back to truncation",
             SNAPSHOT_SUMMARIZE_TIMEOUT_SEC,
         )
-        return _truncate_snapshot(snapshot_text, max_chars)
+        return _rejoin_with_actionable(
+            _truncate_snapshot(prose, max_chars), actionable,
+        )
     except Exception:
         return _truncate_snapshot(snapshot_text, max_chars)
 
@@ -970,6 +1037,9 @@ class AuthBrowser:
         self._domain_blocks = 0
         self._disconnected = False
         self._last_refs: dict[str, dict] = {}
+        # Scopes the `data-dpc-el` marks to one snapshot, so a mark left on an
+        # element this walk no longer reaches cannot answer a current ref.
+        self._snapshot_serial: int = 0
         self._executor: Optional[ThreadPoolExecutor] = None
         self._last_activity: float = time.monotonic()
         # PIDs of the Camoufox/Firefox subprocess tree spawned by this
@@ -1476,7 +1546,7 @@ class AuthBrowser:
         except Exception as exc:
             self._audit_action(
                 "navigate", url, "failed",
-                from_url=from_url, error=type(exc).__name__,
+                from_url=from_url, **_audit_error(exc),
             )
             raise
         status = response.status if response is not None else None
@@ -1555,7 +1625,7 @@ class AuthBrowser:
             self._audit_action(
                 "scroll", url, "failed",
                 direction=direction, amount=amount,
-                error=type(exc).__name__,
+                **_audit_error(exc),
             )
             raise
         scrolled = (result or {}).get("scrolled", 0)
@@ -1588,7 +1658,7 @@ class AuthBrowser:
             self._audit_action(
                 "click", url, "failed",
                 selector=ref_or_selector, mode=mode,
-                error=type(exc).__name__,
+                **_audit_error(exc),
             )
             raise
         self._audit_action(
@@ -1608,7 +1678,7 @@ class AuthBrowser:
             self._audit_action(
                 "fill", url, "failed",
                 selector=ref_or_selector, mode=mode,
-                text_length=text_length, error=type(exc).__name__,
+                text_length=text_length, **_audit_error(exc),
             )
             raise
         self._audit_action(
@@ -1654,7 +1724,7 @@ class AuthBrowser:
         except Exception as exc:
             self._audit_action(
                 "screenshot", url, "failed",
-                full_page=full_page, error=type(exc).__name__,
+                full_page=full_page, **_audit_error(exc),
             )
             raise
 
@@ -1690,7 +1760,7 @@ class AuthBrowser:
             html = self.get_page_html()
         except Exception as exc:
             self._audit_action(
-                "extract", url, "failed", error=type(exc).__name__,
+                "extract", url, "failed", **_audit_error(exc),
             )
             raise
         self._audit_action("extract", url, "ok", html_size=len(html))
@@ -1715,7 +1785,7 @@ class AuthBrowser:
             self._audit_action(
                 "switch_tab", from_url, "failed",
                 from_index=from_index, to_index=index,
-                error=type(exc).__name__,
+                **_audit_error(exc),
             )
             raise
         self._audit_action(
@@ -1745,12 +1815,15 @@ class AuthBrowser:
         self._require_open()
         url = self._page.url
         try:
-            raw = self._page.evaluate(_A11Y_DOM_SNAPSHOT_JS)
+            self._snapshot_serial += 1
+            raw = self._page.evaluate(
+                _A11Y_DOM_SNAPSHOT_JS, self._snapshot_serial,
+            )
             tree_text, refs = _build_a11y_tree(raw) if raw else ("", {})
             self._last_refs = refs
         except Exception as exc:
             self._audit_action(
-                "snapshot", url, "failed", error=type(exc).__name__,
+                "snapshot", url, "failed", **_audit_error(exc),
             )
             raise
         self._audit_action(
@@ -1876,15 +1949,23 @@ class AuthBrowser:
         """Map a `@eN` ref against the last snapshot to a Playwright
         locator; fall back to treating the string as a CSS selector.
 
-        A role+name pair is not unique on real pages — a card usually
-        exposes the same accessible name on its thumbnail link and its
-        title link — and Playwright's strict mode rejects a locator that
-        resolves to several elements. The ref is disambiguated by its
-        position among snapshot entries sharing that role and name;
-        `_last_refs` and `get_by_role` are both in DOM order.
+        The ref addresses the exact element the snapshot walked, via the
+        `data-dpc-el` mark stamped during that walk. Addressing it by
+        (role, name) instead — what this did before — fails on real
+        pages in two ways, both seen in one session against YouTube
+        Studio and TikTok:
 
-        Raises ValueError for `@eN` refs missing from `_last_refs` so
-        the caller can prompt the agent to take a new snapshot."""
+        * an element with no accessible name (every icon button) produced
+          `get_by_role("button")`, which matched all 24 buttons on the
+          page and died instantly on strict mode;
+        * a name that does exist is rarely unique, and the ordinal used to
+          disambiguate it assumed the page had not re-rendered between
+          the snapshot and the click — on a Polymer app it usually has.
+
+        Raises ValueError for a ref missing from `_last_refs`, and for one
+        whose element is no longer in the page, so the caller can tell the
+        agent to take a fresh snapshot instead of waiting out a timeout on
+        a locator that can never match."""
         self._require_open()
         if ref_or_selector.startswith("@e"):
             node = self._last_refs.get(ref_or_selector)
@@ -1893,17 +1974,27 @@ class AuthBrowser:
                     f"unknown ref {ref_or_selector!r} — "
                     "call a11y_snapshot() to refresh"
                 )
-            role = node.get("role", "")
-            name = node.get("name", "")
-            if not name:
-                return self._page.get_by_role(role)
-            ordinal = 0
-            for ref, other in self._last_refs.items():
-                if ref == ref_or_selector:
-                    break
-                if (other.get("role", ""), other.get("name", "")) == (role, name):
-                    ordinal += 1
-            return self._page.get_by_role(role, name=name).nth(ordinal)
+            el_id = node.get("el", "")
+            if not el_id:
+                raise ValueError(
+                    f"ref {ref_or_selector!r} carries no element mark — "
+                    "call a11y_snapshot() to refresh"
+                )
+            locator = self._page.locator(f'[data-dpc-el="{el_id}"]')
+            # count() answers now; letting a vanished element go to click()
+            # costs the full timeout and then reports it as if the element
+            # were merely slow. A count() that itself fails decides nothing —
+            # fall through and let the action speak.
+            try:
+                present = locator.count()
+            except Exception:
+                present = -1
+            if present == 0:
+                raise ValueError(
+                    f"ref {ref_or_selector!r} is stale — the page changed "
+                    "since the snapshot; call a11y_snapshot() to refresh"
+                )
+            return locator
         return self._page.locator(ref_or_selector)
 
     def close(self) -> None:
@@ -2611,6 +2702,10 @@ async def browser_snapshot(ctx: ToolContext, raw: bool = False) -> str:
         try:
             tree, _refs = await _run_in_session(session, "a11y_snapshot")
         except Exception as e:
+            log.warning(
+                "snapshot failed (agent=%s): %s: %s",
+                agent_id, type(e).__name__, str(e).split(chr(10))[0],
+            )
             return f"⚠️ Snapshot failed: {type(e).__name__}: {e}"
         try:
             containers = await _run_in_session(
@@ -2643,6 +2738,10 @@ async def browser_navigate(ctx: ToolContext, url: str) -> str:
         except ValueError as e:
             return f"⚠️ Domain blocked: {e}"
         except Exception as e:
+            log.warning(
+                "navigate failed (agent=%s): %s: %s",
+                agent_id, type(e).__name__, str(e).split(chr(10))[0],
+            )
             return f"⚠️ Navigate failed: {type(e).__name__}: {e}"
     status_note = ""
     if snapshot.startswith(HTTP_ERROR_PREFIX):
@@ -2669,6 +2768,10 @@ async def browser_scroll(
         try:
             await _run_in_session(session, "scroll", direction, amount)
         except Exception as e:
+            log.warning(
+                "scroll failed (agent=%s): %s: %s",
+                agent_id, type(e).__name__, str(e).split(chr(10))[0],
+            )
             return f"⚠️ Scroll failed: {type(e).__name__}: {e}"
     return f"Scrolled {direction} by {amount}px"
 
@@ -2688,6 +2791,10 @@ async def browser_click(
         except ValueError as e:
             return f"⚠️ {e}"
         except Exception as e:
+            log.warning(
+                "click failed (agent=%s): %s: %s",
+                agent_id, type(e).__name__, str(e).split(chr(10))[0],
+            )
             return f"⚠️ Click failed: {type(e).__name__}: {e}"
     return f"Clicked {ref_or_selector}"
 
@@ -2707,6 +2814,10 @@ async def browser_fill(
         except ValueError as e:
             return f"⚠️ {e}"
         except Exception as e:
+            log.warning(
+                "fill failed (agent=%s): %s: %s",
+                agent_id, type(e).__name__, str(e).split(chr(10))[0],
+            )
             return f"⚠️ Fill failed: {type(e).__name__}: {e}"
     return f"Filled {ref_or_selector} ({len(text)} chars)"
 
@@ -2728,6 +2839,10 @@ async def browser_wait_for(
         except ValueError as e:
             return f"⚠️ {e}"
         except Exception as e:
+            log.warning(
+                "wait failed (agent=%s): %s: %s",
+                agent_id, type(e).__name__, str(e).split(chr(10))[0],
+            )
             return f"⚠️ Wait failed: {type(e).__name__}: {e}"
     return f"Element {ref_or_selector} is visible"
 
@@ -2744,6 +2859,10 @@ async def browser_extract(ctx: ToolContext) -> str:
         try:
             html = await _run_in_session(session, "extract")
         except Exception as e:
+            log.warning(
+                "extract failed (agent=%s): %s: %s",
+                agent_id, type(e).__name__, str(e).split(chr(10))[0],
+            )
             return f"⚠️ Extract failed: {type(e).__name__}: {e}"
     return html
 
@@ -2768,6 +2887,10 @@ async def browser_screenshot(
                 session, "screenshot", full_page, str(path),
             )
         except Exception as e:
+            log.warning(
+                "screenshot failed (agent=%s): %s: %s",
+                agent_id, type(e).__name__, str(e).split(chr(10))[0],
+            )
             return f"⚠️ Screenshot failed: {type(e).__name__}: {e}"
     try:
         _cleanup_screenshots_lru(screenshots_dir, max_keep=50)
@@ -2792,6 +2915,10 @@ async def browser_switch_tab(ctx: ToolContext, index: int) -> str:
         try:
             new_page = await _run_in_session(session, "switch_tab", index)
         except Exception as e:
+            log.warning(
+                "switch tab failed (agent=%s): %s: %s",
+                agent_id, type(e).__name__, str(e).split(chr(10))[0],
+            )
             return f"⚠️ Switch tab failed: {type(e).__name__}: {e}"
     try:
         url = new_page.url
@@ -2824,6 +2951,10 @@ async def browser_collect(
                 max_scrolls, scroll_pause_ms, dedup_by,
             )
         except Exception as e:
+            log.warning(
+                "collect failed (agent=%s): %s: %s",
+                agent_id, type(e).__name__, str(e).split(chr(10))[0],
+            )
             return f"⚠️ Collect failed: {type(e).__name__}: {e}"
     import json as _json
     if isinstance(result, dict) and result.get("error"):
@@ -2848,6 +2979,10 @@ async def browser_close(ctx: ToolContext) -> str:
         try:
             await _run_in_session(session, "close")
         except Exception as e:
+            log.warning(
+                "close failed (agent=%s): %s: %s",
+                agent_id, type(e).__name__, str(e).split(chr(10))[0],
+            )
             return f"⚠️ Close failed: {type(e).__name__}: {e}"
     _session_locks.pop(agent_id, None)
     return "Browser session closed"

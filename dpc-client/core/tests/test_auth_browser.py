@@ -1309,94 +1309,6 @@ def test_force_kill_process_noop_when_no_pids(vault_home):
     assert ab._browser_pids == set()
 
 
-# ─────────────────────────────────────────────────────────────
-# Ref resolution — role+name is not unique on real pages
-# ─────────────────────────────────────────────────────────────
-
-
-class _FakeLocator:
-    """Records nth() so a test can assert which of several equally-named
-    matches the ref resolved to."""
-
-    def __init__(self, calls: list, role: str, name):
-        self._calls = calls
-        self.role = role
-        self.name = name
-        self.nth_index = None
-
-    def nth(self, index: int):
-        self.nth_index = index
-        return self
-
-
-class _FakeRolePage:
-    def __init__(self):
-        self.calls: list = []
-
-    def get_by_role(self, role, name=None):
-        loc = _FakeLocator(self.calls, role, name)
-        self.calls.append(loc)
-        return loc
-
-
-def _browser_with_refs(refs: dict):
-    from dpc_client_core.dpc_agent.tools.browser import AuthBrowser
-
-    ab = AuthBrowser(agent_id="agent_a", domain=f"{TEST_DOMAIN}")
-    ab._page = _FakeRolePage()
-    ab._last_refs = refs
-    return ab
-
-
-def test_resolve_ref_picks_first_of_duplicate_names():
-    """A card exposes the same accessible name on its thumbnail link and
-    its title link. The earlier ref must resolve to index 0 rather than
-    to a locator that matches both (Playwright strict mode rejects it)."""
-    ab = _browser_with_refs({
-        "@e1": {"role": "link", "name": "Deceased Flesh"},
-        "@e2": {"role": "link", "name": "Deceased Flesh"},
-    })
-    loc = ab._resolve_ref("@e1")
-    assert (loc.role, loc.name) == ("link", "Deceased Flesh")
-    assert loc.nth_index == 0
-
-
-def test_resolve_ref_picks_the_duplicate_the_ref_stands_for():
-    """The second ref with that role+name is the second match, not the
-    first — otherwise every duplicate would click the same element."""
-    ab = _browser_with_refs({
-        "@e1": {"role": "link", "name": "Deceased Flesh"},
-        "@e2": {"role": "link", "name": "Deceased Flesh"},
-    })
-    assert ab._resolve_ref("@e2").nth_index == 1
-
-
-def test_resolve_ref_counts_only_matching_role_and_name():
-    """Unrelated refs in between must not shift the ordinal."""
-    ab = _browser_with_refs({
-        "@e1": {"role": "link", "name": "Deceased Flesh"},
-        "@e2": {"role": "button", "name": "Subscribe"},
-        "@e3": {"role": "link", "name": "Night Mind"},
-        "@e4": {"role": "link", "name": "Deceased Flesh"},
-    })
-    assert ab._resolve_ref("@e4").nth_index == 1
-    assert ab._resolve_ref("@e2").nth_index == 0
-
-
-def test_resolve_ref_without_name_keeps_role_only_locator():
-    ab = _browser_with_refs({"@e1": {"role": "button", "name": ""}})
-    loc = ab._resolve_ref("@e1")
-    assert loc.name is None
-    assert loc.nth_index is None
-
-
-def test_resolve_ref_unknown_ref_raises():
-    import pytest as _pytest
-
-    ab = _browser_with_refs({})
-    with _pytest.raises(ValueError):
-        ab._resolve_ref("@e9")
-
 
 # ─────────────────────────────────────────────────────────────
 # navigate() must surface the HTTP status of an error page
@@ -1713,4 +1625,210 @@ def test_idle_cleanup_sweeps_fetch_browsers():
         assert "agent_a" not in _fetch_sessions
     finally:
         _fetch_sessions.pop("agent_a", None)
+
+
+
+# ─────────────────────────────────────────────────────────────
+# S17: refs address the element the snapshot walked, and the
+# summarizer may not eat the only things the agent can act on.
+# ─────────────────────────────────────────────────────────────
+
+
+class _RecordingPage:
+    """Captures what locator/get_by_role the resolver reaches for."""
+
+    def __init__(self, count=1):
+        self.locators: list = []
+        self.roles: list = []
+        self._count = count
+
+    def locator(self, selector):
+        self.locators.append(selector)
+        page = self
+
+        class _Loc:
+            def count(self_inner):
+                return page._count
+
+        return _Loc()
+
+    def get_by_role(self, role, name=None):
+        self.roles.append((role, name))
+        raise AssertionError("refs must not go through get_by_role any more")
+
+
+def _browser_with_refs(refs, count=1):
+    from dpc_client_core.dpc_agent.tools.browser import AuthBrowser
+
+    ab = AuthBrowser(agent_id="agent_a", domains=[])
+    ab._page = _RecordingPage(count=count)
+    ab._last_refs = refs
+    return ab
+
+
+def test_ref_resolves_to_the_marked_element(vault_home):
+    """The failure this replaces: a nameless icon button became
+    get_by_role("button") with no disambiguation, matched all 24 buttons
+    on the page and died instantly on strict mode."""
+    ab = _browser_with_refs({"@e7": {"role": "button", "name": "", "el": "3:41"}})
+    ab._resolve_ref("@e7")
+    assert ab._page.locators == ['[data-dpc-el="3:41"]']
+    assert ab._page.roles == []
+
+
+def test_named_ref_also_resolves_by_mark(vault_home):
+    """Names are not unique either, and the ordinal that disambiguated them
+    assumed the page had not re-rendered since the snapshot."""
+    ab = _browser_with_refs(
+        {"@e2": {"role": "link", "name": "Integrity and Authenticity", "el": "5:9"}}
+    )
+    ab._resolve_ref("@e2")
+    assert ab._page.locators == ['[data-dpc-el="5:9"]']
+
+
+def test_stale_ref_fails_immediately_with_a_useful_message(vault_home):
+    """A vanished element used to cost the full 30 s timeout and then be
+    reported as if it were merely slow."""
+    ab = _browser_with_refs(
+        {"@e2": {"role": "link", "name": "x", "el": "5:9"}}, count=0,
+    )
+    with pytest.raises(ValueError) as exc:
+        ab._resolve_ref("@e2")
+    assert "stale" in str(exc.value)
+    assert "a11y_snapshot" in str(exc.value)
+
+
+def test_unknown_ref_still_raises(vault_home):
+    ab = _browser_with_refs({})
+    with pytest.raises(ValueError) as exc:
+        ab._resolve_ref("@e1")
+    assert "unknown ref" in str(exc.value)
+
+
+def test_css_selector_passes_through(vault_home):
+    ab = _browser_with_refs({})
+    ab._resolve_ref("button.primary")
+    assert ab._page.locators == ["button.primary"]
+
+
+def test_snapshot_marks_are_scoped_per_snapshot(vault_home):
+    """Marks left on elements a later walk no longer reaches must not be
+    able to answer a current ref."""
+    from dpc_client_core.dpc_agent.tools.browser import _A11Y_DOM_SNAPSHOT_JS
+
+    assert _A11Y_DOM_SNAPSHOT_JS.lstrip().startswith("(serial)")
+    assert "data-dpc-el" in _A11Y_DOM_SNAPSHOT_JS
+    assert "serial + ':' + nodeCount" in _A11Y_DOM_SNAPSHOT_JS
+
+
+# ─────────────────────────────────────────────────────────────
+# Summarization keeps every ref
+# ─────────────────────────────────────────────────────────────
+
+
+_CALENDAR_SNAPSHOT = "\n".join(
+    ["- dialog \"Schedule\"", "  - text \"Select a date\""]
+    + [f'  - button "{d}" [@e{d}]' for d in range(1, 32)]
+    + ["  - text \"Time zone\""]
+)
+
+
+def test_ref_lines_are_split_out_of_the_prose():
+    from dpc_client_core.dpc_agent.tools.browser import _split_actionable_lines
+
+    actionable, prose = _split_actionable_lines(_CALENDAR_SNAPSHOT)
+    assert len(actionable) == 31
+    assert "@e" not in prose
+    assert "Select a date" in prose
+
+
+def test_summary_keeps_every_ref_verbatim():
+    """The observed loss: 31 day cells came back as one line of prose and the
+    agent had nothing to click."""
+    from dpc_client_core.dpc_agent.tools.browser import (
+        _rejoin_with_actionable,
+        _split_actionable_lines,
+    )
+
+    actionable, _prose = _split_actionable_lines(_CALENDAR_SNAPSHOT)
+    out = _rejoin_with_actionable("Calendar showing August 2026 (day grid 1-31)", actionable)
+    for d in range(1, 32):
+        assert f"[@e{d}]" in out
+
+
+def test_summarizer_is_only_shown_the_prose(monkeypatch):
+    """What the auxiliary model never sees, it cannot drop."""
+    import dpc_client_core.dpc_agent.tools.browser as mod
+
+    seen = {}
+
+    class _LLM:
+        async def query(self, prompt, provider_alias=None):
+            seen["prompt"] = prompt
+            return "short summary"
+
+    out = asyncio.run(
+        mod._llm_summarize_snapshot(_CALENDAR_SNAPSHOT, None, _LLM(), max_chars=10)
+    )
+    # The template names @e5 as an illustration, so assert on the snapshot's
+    # own refs rather than on the substring.
+    assert "[@e" not in seen["prompt"], "ref lines must not reach the summarizer"
+    assert out.count("[@e") == 31
+
+
+def test_duplicate_names_address_different_elements(vault_home):
+    """Kept from the earlier ordinal scheme, which existed because a card
+    exposes the same accessible name on its thumbnail and its title link.
+    Distinct marks answer it directly instead of by counting."""
+    ab = _browser_with_refs({
+        "@e1": {"role": "link", "name": "Deceased Flesh", "el": "2:10"},
+        "@e2": {"role": "link", "name": "Deceased Flesh", "el": "2:14"},
+    })
+    ab._resolve_ref("@e1")
+    ab._resolve_ref("@e2")
+    assert ab._page.locators == ['[data-dpc-el="2:10"]', '[data-dpc-el="2:14"]']
+
+
+def test_refs_survive_a_summarizer_timeout():
+    import dpc_client_core.dpc_agent.tools.browser as mod
+
+    class _HangingLLM:
+        async def query(self, prompt, provider_alias=None):
+            await asyncio.sleep(mod.SNAPSHOT_SUMMARIZE_TIMEOUT_SEC + 5)
+
+    out = asyncio.run(
+        mod._llm_summarize_snapshot(_CALENDAR_SNAPSHOT, None, _HangingLLM(), max_chars=10)
+    )
+    assert out.count("[@e") == 31
+
+
+def test_refs_survive_without_an_llm_at_all():
+    import dpc_client_core.dpc_agent.tools.browser as mod
+
+    out = asyncio.run(
+        mod._llm_summarize_snapshot(_CALENDAR_SNAPSHOT, None, None, max_chars=10)
+    )
+    assert out.count("[@e") == 31
+
+
+# ─────────────────────────────────────────────────────────────
+# The audit says why, not just that
+# ─────────────────────────────────────────────────────────────
+
+
+def test_audit_error_records_the_message():
+    """`Error` alone covered a strict-mode violation naming 24 buttons and
+    unrelated refusals; the record kept neither message."""
+    from dpc_client_core.dpc_agent.tools.browser import _audit_error
+
+    exc = RuntimeError(
+        "Locator.click: Error: strict mode violation: "
+        'get_by_role("button") resolved to 24 elements:\n'
+        "  1) <button ...>\n  2) <button ...>"
+    )
+    fields = _audit_error(exc)
+    assert fields["error"] == "RuntimeError"
+    assert "strict mode violation" in fields["error_message"]
+    assert "\n" not in fields["error_message"], "call log must not be inlined"
+    assert len(fields["error_message"]) <= 300
 

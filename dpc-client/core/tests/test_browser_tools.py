@@ -316,7 +316,11 @@ class _HangingManager:
 async def test_summarize_without_task_keeps_refs_prompt():
     """The context carries no real task — only the literal task *type*
     "chat". Passing that on made the model answer "is there a chat
-    widget here?" and drop the elements the agent needed."""
+    widget here?" and drop the elements the agent needed.
+
+    Asking it to preserve the refs did not save them either: they are now
+    withheld from the model entirely and re-attached afterwards, so the
+    prompt says so rather than asking for something it cannot see."""
     from dpc_client_core.dpc_agent.tools import browser
 
     manager = _RecordingManager()
@@ -324,7 +328,7 @@ async def test_summarize_without_task_keeps_refs_prompt():
     out = await browser._llm_summarize_snapshot(oversized, None, manager)
     assert out == "SUMMARY"
     assert "The user's task is" not in manager.prompts[0]
-    assert "@e5" in manager.prompts[0]
+    assert "appended to your answer verbatim" in manager.prompts[0]
 
 
 @pytest.mark.asyncio
