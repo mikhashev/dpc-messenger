@@ -48,10 +48,113 @@ if _hf_cfg_path.exists():
         _hf_cfg.read(_hf_cfg_path, encoding="utf-8")
     except _hf_configparser.Error:
         pass  # malformed config — proceed without the offline opt-in
+
+def _hf_required_models() -> set:
+    """Model ids this install loads through the HF cache.
+
+    Read from where each one is actually defined, never copied here. The
+    ordering constraint above bans importing huggingface_hub before the env
+    var is set — it does not ban importing our own modules, and none of
+    these pulls it in (asserted by test_hf_offline_autodetect, so the day
+    one of them grows a top-level `import huggingface_hub` the ban is not
+    quietly broken).
+
+    A source that cannot be read contributes nothing rather than raising:
+    a model that goes unlisted only keeps the process online, which is the
+    safe direction.
+    """
+    import json as _hf_json
+
+    wanted = set()
+
+    try:
+        from dpc_client_core.dpc_agent.memory_config import MemoryConfig
+        wanted.add(MemoryConfig.embedding_model)
+    except Exception:
+        pass
+
+    try:
+        from dpc_client_core.dpc_agent.knowledge_graph import GLINER_MODEL_NAME
+        wanted.add(GLINER_MODEL_NAME)
+    except Exception:
+        pass
+
+    # Agents may point memory at a different embedding model than the default.
+    agents_dir = _HFPath.home() / ".dpc" / "agents"
+    if agents_dir.is_dir():
+        for cfg in agents_dir.glob("*/config.json"):
+            try:
+                data = _hf_json.loads(cfg.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                continue
+            model = (data.get("memory") or {}).get("embedding_model")
+            if isinstance(model, str) and model:
+                wanted.add(model)
+
+    # Whisper has no module constant — the id lives in providers.json, which
+    # is also the only place that knows whether this install has one at all.
+    try:
+        from dpc_client_core.dpc_agent.tools.transcribe import _WHISPER_PROVIDER_TYPE
+
+        providers_path = _HFPath.home() / ".dpc" / "providers.json"
+        providers = _hf_json.loads(providers_path.read_text(encoding="utf-8"))
+
+        def _walk(node):
+            if isinstance(node, dict):
+                if node.get("type") == _WHISPER_PROVIDER_TYPE:
+                    model = node.get("model")
+                    if isinstance(model, str) and model:
+                        yield model
+                for value in node.values():
+                    yield from _walk(value)
+            elif isinstance(node, list):
+                for item in node:
+                    yield from _walk(item)
+
+        wanted.update(_walk(providers))
+    except Exception:
+        pass
+
+    return wanted
+
+
+def _hf_cache_root() -> "_HFPath":
+    """Where huggingface_hub keeps model snapshots, honouring its own env vars."""
+    explicit = os.environ.get("HF_HUB_CACHE")
+    if explicit:
+        return _HFPath(explicit)
+    home = os.environ.get("HF_HOME")
+    if home:
+        return _HFPath(home) / "hub"
+    return _HFPath.home() / ".cache" / "huggingface" / "hub"
+
+
+def _hf_model_fully_cached(model_id: str, root: "_HFPath") -> bool:
+    """True when this model can be loaded with no network at all.
+
+    Presence of the directory is not the question — an interrupted download
+    leaves one behind that looks complete from the outside. What decides it
+    is a snapshot with files in it and no *.incomplete blob still parked in
+    the cache.
+    """
+    model_dir = root / ("models--" + model_id.replace("/", "--"))
+    snapshots = model_dir / "snapshots"
+    if not snapshots.is_dir():
+        return False
+    if not any(any(rev.iterdir()) for rev in snapshots.iterdir() if rev.is_dir()):
+        return False
+    blobs = model_dir / "blobs"
+    if blobs.is_dir() and any(blobs.glob("*.incomplete")):
+        return False
+    return True
+
+
 try:
+    _hf_offline_set = _hf_cfg.has_option("hf", "offline_mode")
     _hf_offline = _hf_cfg.getboolean("hf", "offline_mode", fallback=False)
 except (ValueError, _hf_configparser.Error):
-    _hf_offline = False
+    _hf_offline_set, _hf_offline = False, False
+
 if _hf_offline:
     # setdefault so an explicit HF_HUB_OFFLINE env var still wins.
     os.environ.setdefault("HF_HUB_OFFLINE", "1")
@@ -60,6 +163,44 @@ if _hf_offline:
         "transformers/sentence-transformers/gliner will skip HF Hub HEAD "
         "requests and read directly from ~/.cache/huggingface/"
     )
+elif not _hf_offline_set:
+    # No explicit answer in the config, so ask the disk instead of asking the
+    # user to remember. Everything needed already cached means a HEAD request
+    # to huggingface.co can only confirm what we have, so skip the network for
+    # this run. Anything missing and we stay online and it downloads normally
+    # — which is also what makes this safe to leave on: adding a model does not
+    # need anyone to go flip a flag back.
+    #
+    # Not covered: a model nothing declares — a provider added to a fallback
+    # chain but absent from providers.json, say. If one is ever needed and is
+    # not cached, offline turns a download into an error. The startup line
+    # below names exactly what was checked so that decision is never silent.
+    try:
+        _hf_root = _hf_cache_root()
+        _hf_wanted = sorted(_hf_required_models())
+        _hf_missing = [m for m in _hf_wanted if not _hf_model_fully_cached(m, _hf_root)]
+        if not _hf_wanted:
+            # Nothing could be sourced, so nothing was verified. An empty set
+            # trivially satisfies "all present" — going offline on it would be
+            # a decision made on no evidence.
+            print(
+                "[startup] HF Hub stays online — could not determine which "
+                "models this install needs"
+            )
+        elif _hf_missing:
+            print(
+                "[startup] HF Hub stays online — not fully cached: "
+                + ", ".join(_hf_missing)
+            )
+        else:
+            os.environ.setdefault("HF_HUB_OFFLINE", "1")
+            print(
+                "[startup] HF_HUB_OFFLINE=1 (auto) — all startup models cached "
+                "locally, skipping HF Hub HEAD requests: " + ", ".join(_hf_wanted)
+            )
+    except OSError as _hf_exc:
+        # An unreadable cache is not grounds to cut the network.
+        print(f"[startup] HF cache check skipped ({_hf_exc}) — staying online")
 
 import argparse
 import platform  # Import the platform module to check the OS
