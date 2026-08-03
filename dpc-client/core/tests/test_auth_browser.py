@@ -490,13 +490,15 @@ class _FakeStateContext:
     us enough surface to drive AuthBrowser through _open/close without
     a real Camoufox binary."""
 
-    def __init__(self, on_storage_state=None):
+    def __init__(self, on_storage_state=None, cookies_payload=None):
         self.added: list[list[dict]] = []
         self.routes: list[tuple[str, object]] = []
         self.pages: list[object] = []
         self._on_storage_state = on_storage_state
+        self.cookies_payload: list[dict] = list(cookies_payload or [])
         self.closed = False
         self.storage_state_calls: list[str] = []
+        self.cookies_calls = 0
 
     def add_cookies(self, cookies: list[dict]) -> None:
         self.added.append(list(cookies))
@@ -510,13 +512,22 @@ class _FakeStateContext:
         return page
 
     def storage_state(self, path: str | None = None) -> dict | None:
+        """Kept so a test can assert it is NOT called.
+
+        Saving via storage_state() collects localStorage, and Firefox reads
+        that by opening a window on each origin — measured at one extra
+        visible window per origin, appearing and vanishing within a second,
+        after every navigate and at close. The save path uses cookies()
+        instead; the origins it stopped collecting were discarded on load
+        anyway."""
         self.storage_state_calls.append(path or "<no-path>")
         if self._on_storage_state is not None:
-            # Real Playwright returns the state dict; allow the test
-            # callback to return one too so we can exercise the
-            # return-value path that skips the read-back.
             return self._on_storage_state(path)
         return None
+
+    def cookies(self) -> list[dict]:
+        self.cookies_calls = getattr(self, "cookies_calls", 0) + 1
+        return list(self.cookies_payload)
 
     def close(self) -> None:
         self.closed = True
@@ -656,7 +667,10 @@ def test_save_storage_state_writes_atomically_and_syncs_vault(vault_home):
         Path(path).write_text(json.dumps(state_dict), encoding="utf-8")
         return state_dict
 
-    ab._context = _FakeStateContext(on_storage_state=_write_state)
+    ab._context = _FakeStateContext(
+        on_storage_state=_write_state,
+        cookies_payload=state_dict["cookies"],
+    )
     ab._save_storage_state()
 
     state_path = ab._state_path()
@@ -703,7 +717,10 @@ def test_save_storage_state_uses_return_value_not_disk_read(vault_home, monkeypa
 
     monkeypatch.setattr(Path, "read_text", _no_read)
     try:
-        ab._context = _FakeStateContext(on_storage_state=_write_state)
+        ab._context = _FakeStateContext(
+        on_storage_state=_write_state,
+        cookies_payload=state_dict["cookies"],
+    )
         ab._save_storage_state()
     finally:
         monkeypatch.setattr(Path, "read_text", original_read)
@@ -751,7 +768,10 @@ def test_save_storage_state_chmod_on_posix(vault_home, monkeypatch):
 
     _patch_browser_os(monkeypatch, "posix", _capture_chmod)
 
-    ab._context = _FakeStateContext(on_storage_state=_write_state)
+    ab._context = _FakeStateContext(
+        on_storage_state=_write_state,
+        cookies_payload=state_dict["cookies"],
+    )
     ab._save_storage_state()
 
     state_path = ab._state_path()
@@ -776,7 +796,10 @@ def test_save_storage_state_no_chmod_on_non_posix(vault_home, monkeypatch):
 
     _patch_browser_os(monkeypatch, "nt", _record_chmod)
 
-    ab._context = _FakeStateContext(on_storage_state=_write_state)
+    ab._context = _FakeStateContext(
+        on_storage_state=_write_state,
+        cookies_payload=[],
+    )
     ab._save_storage_state()
 
     assert chmod_called == []
@@ -808,7 +831,10 @@ def test_save_storage_state_swallows_chmod_oserror(vault_home, monkeypatch, capl
 
     _patch_browser_os(monkeypatch, "posix", _raise_chmod)
 
-    ab._context = _FakeStateContext(on_storage_state=_write_state)
+    ab._context = _FakeStateContext(
+        on_storage_state=_write_state,
+        cookies_payload=state_dict["cookies"],
+    )
     with caplog.at_level(_logging.WARNING):
         ab._save_storage_state()
 
@@ -1943,3 +1969,33 @@ def test_anonymous_browser_never_writes_the_shared_state(vault_home):
     fetch._save_storage_state()  # must be a no-op, not an exception
 
     assert json.loads(state.read_text(encoding="utf-8"))["cookies"] == [{"name": "SID"}]
+
+
+def test_save_does_not_collect_origins(vault_home):
+    """Measured cause of the windows that opened and vanished: saving via
+    storage_state() collects localStorage, and Firefox reads it by opening a
+    window on each origin — a save with two origins peaked at two extra
+    visible windows. This runs after every navigate and at close.
+
+    Nothing is lost by skipping it: the load path strips origins before
+    handing state to new_context, for the same reason in reverse."""
+    from dpc_client_core.dpc_agent.tools.browser import AuthBrowser
+
+    ab = AuthBrowser(agent_id="agent_a", domains=[f"{TEST_DOMAIN}"])
+    cookies = [{
+        "name": "SID", "value": "v", "domain": f".{TEST_DOMAIN}",
+        "path": "/", "secure": True, "httpOnly": True,
+        "sameSite": "Lax", "expires": 1735689600,
+    }]
+    ctx = _FakeStateContext(cookies_payload=cookies)
+    ab._context = ctx
+    ab._save_storage_state()
+
+    assert ctx.storage_state_calls == [], (
+        "storage_state() opens a window per origin — the save must not call it"
+    )
+    assert ctx.cookies_calls == 1
+
+    saved = json.loads(ab._state_path().read_text(encoding="utf-8"))
+    assert saved["origins"] == []
+    assert [c["name"] for c in saved["cookies"]] == ["SID"], "the login must survive"

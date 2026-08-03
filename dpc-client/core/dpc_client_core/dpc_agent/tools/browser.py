@@ -1352,7 +1352,20 @@ class AuthBrowser:
             state_path = self._state_path()
             state_path.parent.mkdir(parents=True, exist_ok=True)
             tmp_path = state_path.with_suffix(".json.tmp")
-            state = self._context.storage_state(path=str(tmp_path))
+            # Cookies only, deliberately. `storage_state()` also collects
+            # localStorage, and Firefox reads it by *opening a window on each
+            # origin* — measured: a save with two origins peaked at two extra
+            # visible windows, appearing and vanishing within a second. This
+            # runs after every navigate and at close, which is the flicker of
+            # windows opening and closing that the user kept seeing.
+            #
+            # Nothing is lost: the load path strips origins before handing the
+            # state to new_context, for the same reason in reverse ("they
+            # cause Firefox to briefly visit each origin on context creation").
+            # So the localStorage we paid those windows to collect was written
+            # to disk and then discarded on the next open.
+            state = {"cookies": self._context.cookies(), "origins": []}
+            tmp_path.write_text(json.dumps(state), encoding="utf-8")
             os.replace(tmp_path, state_path)
             if os.name == "posix":
                 try:
