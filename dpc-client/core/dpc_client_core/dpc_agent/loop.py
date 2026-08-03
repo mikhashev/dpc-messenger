@@ -368,11 +368,19 @@ async def _execute_with_timeout(
             "tool": fn_name,
             "timeout_sec": timeout_sec,
         })
+        # The arguments are the whole point of a timeout record: without them
+        # the log says a call hung but not what it was called on.
+        try:
+            timed_out_args = json.loads(tc["function"]["arguments"] or "{}")
+        except (json.JSONDecodeError, ValueError):
+            timed_out_args = {}
         timeout_log = {
             "ts": utc_now_iso(),
             "tool": fn_name,
             "task_id": task_id,
-            "args": sanitize_tool_args_for_log(fn_name, {}),
+            "args": sanitize_tool_args_for_log(
+                fn_name, timed_out_args if isinstance(timed_out_args, dict) else {}
+            ),
             "result_preview": result,
             "is_error": True,
             "error_category": "timeout",
@@ -387,7 +395,7 @@ async def _execute_with_timeout(
             "fn_name": fn_name,
             "result": result,
             "is_error": True,
-            "args_for_log": {},
+            "args_for_log": timeout_log["args"],
         }
     finally:
         # Don't shutdown the shared executor - it will be reused
