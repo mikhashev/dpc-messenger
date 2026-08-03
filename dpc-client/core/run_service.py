@@ -466,6 +466,16 @@ async def main():
             await service_task
         except asyncio.CancelledError:
             pass # Expected
+        # run_in_executor(None, ...) parks work on asyncio's default pool,
+        # whose workers are non-daemon: nobody ever asked them to stop, so
+        # nine of them once held the interpreter open after every component
+        # had reported clean. Bounded, because the point is to exit.
+        try:
+            await loop.shutdown_default_executor(
+                timeout=_DEFAULT_EXECUTOR_SHUTDOWN_SEC,
+            )
+        except Exception as e:
+            logger.warning("Default executor did not shut down cleanly: %s", e)
         # Named before the loop closes: after this point a stuck overlapped
         # op parks the process inside IocpProactor.close and nothing else
         # reaches the log.
@@ -475,6 +485,16 @@ async def main():
 # loop close from the short-lived per-call loops agent tools open and close
 # constantly. Same facts either way — only the log level differs.
 _shutting_down = False
+
+
+# Enough of each stuck thread's stack to name the blocking call and who
+# asked for it, without turning a shutdown into a core dump.
+_STACK_FRAMES_PER_THREAD = 4
+
+# How long the default executor gets to drain before we stop waiting on it.
+# Long enough for a hash or an index write to land, short enough that a
+# thread parked on a two-minute wait does not decide when we exit.
+_DEFAULT_EXECUTOR_SHUTDOWN_SEC = 5.0
 
 
 def log_live_non_daemon_threads():
@@ -497,8 +517,16 @@ def log_live_non_daemon_threads():
         "Shutdown: %d non-daemon thread(s) still alive — the interpreter "
         "waits for each before exiting", len(alive),
     )
+    # Names alone say which pool is holding the process, never where it is
+    # stuck, so every such exit ended in a guess. The innermost frames say it.
+    frames = sys._current_frames()
     for t in alive:
         logger.warning("  thread %r (ident=%s)", t.name, t.ident)
+        frame = frames.get(t.ident)
+        if frame is None:
+            continue
+        for line in traceback.format_stack(frame)[-_STACK_FRAMES_PER_THREAD:]:
+            logger.warning("    %s", line.rstrip())
 
 
 def _should_report_pending(pending: int, shutting_down: bool) -> bool:
