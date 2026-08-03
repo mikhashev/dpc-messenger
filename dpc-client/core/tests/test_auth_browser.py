@@ -1450,3 +1450,267 @@ def test_navigate_leaves_ok_page_unprefixed(vault_home, monkeypatch):
     out = ab.navigate(f"{TEST_DOMAIN_URL}/@real")
     assert not out.startswith(HTTP_ERROR_PREFIX)
     assert ab.audit[0][2]["status"] == 200
+
+
+# ─────────────────────────────────────────────────────────────
+# S17 browser-lifecycle fixes: a transient navigation failure must not
+# cost the browser; browse_page must stop launching one per call; the
+# auth path must honour the headless it asked approval for.
+# ─────────────────────────────────────────────────────────────
+
+
+class _FakeSession:
+    """Stands in for AuthBrowser on the `_run_in_session` contract:
+    a `_get_executor()` plus plain sync methods."""
+
+    def __init__(self, fail_with=None, fail_times=0):
+        self._last_activity = 0.0
+        self._page = object()
+        self._agent_id = "agent_a"
+        self.calls: list = []
+        self.closed = False
+        self._fail_with = fail_with
+        self._fail_times = fail_times
+
+    def _get_executor(self):
+        return None  # default loop executor is fine for a sync stub
+
+    def navigate(self, url):
+        self.calls.append(("navigate", url))
+        if self._fail_times > 0:
+            self._fail_times -= 1
+            raise self._fail_with
+        return "snapshot"
+
+    def fetch_html(self, url):
+        self.calls.append(("fetch_html", url))
+        return "<html><body><p>pooled</p></body></html>"
+
+    def close(self):
+        self.closed = True
+        self.calls.append(("close", None))
+
+
+_TRANSIENT = Exception(
+    "Page.goto: Navigation to https://a/x is interrupted by "
+    "another navigation to https://a/y"
+)
+_DEAD = Exception("Target page, context or browser has been closed")
+
+
+@pytest.mark.parametrize(
+    "exc,expected",
+    [
+        (_TRANSIENT, False),
+        (Exception("Timeout 60000ms exceeded"), False),
+        (Exception("net::ERR_ABORTED"), False),
+        (_DEAD, True),
+        (Exception("Browser closed"), True),
+        (Exception("Connection closed while reading from the driver"), True),
+    ],
+)
+def test_is_session_dead_classification(exc, expected):
+    from dpc_client_core.dpc_agent.tools.browser import _is_session_dead
+
+    assert _is_session_dead(exc) is expected
+
+
+def test_navigate_retries_in_place_on_transient_failure():
+    """A navigation that loses a race leaves a working browser. Recovery
+    must retry on the same page, not tear the session down."""
+    from dpc_client_core.dpc_agent.tools.browser import _navigate_with_recovery
+
+    session = _FakeSession(fail_with=_TRANSIENT, fail_times=1)
+    out = asyncio.run(
+        _navigate_with_recovery(session, "agent_a", "https://a/x", [])
+    )
+
+    assert out is session, "same session must keep serving"
+    assert session.closed is False, "a live browser must not be closed"
+    assert [c[0] for c in session.calls] == ["navigate", "navigate"]
+
+
+def test_navigate_recycles_when_session_is_dead(monkeypatch):
+    """The one case that does justify a relaunch: the browser is gone."""
+    import dpc_client_core.dpc_agent.tools.browser as mod
+
+    dead = _FakeSession(fail_with=_DEAD, fail_times=1)
+    fresh = _FakeSession()
+
+    async def _fake_create(agent_id, domains, headed):
+        return fresh
+
+    monkeypatch.setattr(mod, "_get_or_create_session_async", _fake_create)
+    out = asyncio.run(
+        mod._navigate_with_recovery(dead, "agent_a", "https://a/x", [])
+    )
+
+    assert out is fresh
+    assert dead.closed is True
+    assert [c[0] for c in fresh.calls] == ["navigate"]
+
+
+def test_fetch_session_is_invisible_to_interactive_tools(vault_home):
+    """The pooled fetch browser must never be handed to browser_* tools:
+    they resolve `_active_browser_sessions`, and a fetch navigating the
+    page an agent holds refs into would silently invalidate them."""
+    from dpc_client_core.dpc_agent.tools.browser import (
+        AuthBrowser,
+        _active_browser_sessions,
+        _fetch_sessions,
+        _get_session_or_error,
+    )
+
+    interactive = AuthBrowser(agent_id="agent_a", domains=[])
+    interactive._page = object()
+    fetch = AuthBrowser(agent_id="agent_a", domains=[])
+    fetch._page = object()
+    _active_browser_sessions["agent_a"] = interactive
+    _fetch_sessions["agent_a"] = fetch
+    try:
+        assert _get_session_or_error("agent_a") is interactive
+    finally:
+        _active_browser_sessions.pop("agent_a", None)
+        _fetch_sessions.pop("agent_a", None)
+
+
+def test_close_deregisters_only_its_own_entry(vault_home):
+    """Two browsers can share one agent_id. Closing one must not evict
+    the other's registration while that browser is still running."""
+    from dpc_client_core.dpc_agent.tools.browser import (
+        AuthBrowser,
+        _active_browser_sessions,
+        _fetch_sessions,
+    )
+
+    interactive = AuthBrowser(agent_id="agent_a", domains=[])
+    fetch = AuthBrowser(agent_id="agent_a", domains=[])
+    _active_browser_sessions["agent_a"] = interactive
+    _fetch_sessions["agent_a"] = fetch
+    try:
+        fetch.close()
+        assert _active_browser_sessions.get("agent_a") is interactive
+        assert "agent_a" not in _fetch_sessions
+        interactive.close()
+        assert "agent_a" not in _active_browser_sessions
+    finally:
+        _active_browser_sessions.pop("agent_a", None)
+        _fetch_sessions.pop("agent_a", None)
+
+
+def test_fetch_js_text_reuses_pooled_browser(monkeypatch):
+    """The JS fallback goes through the pooled browser, not a launch."""
+    import dpc_client_core.dpc_agent.tools.browser as mod
+
+    session = _FakeSession()
+    launched: list = []
+
+    async def _fake_pool(agent_id):
+        return session
+
+    monkeypatch.setattr(mod, "_get_or_create_fetch_session", _fake_pool)
+    monkeypatch.setattr(
+        mod, "_browse_with_camoufox",
+        lambda url, agent_id="<anonymous>": launched.append((url, agent_id)),
+    )
+    monkeypatch.setattr(mod, "_html_to_markdown", lambda html: "pooled")
+
+    out = asyncio.run(mod._fetch_js_text("https://a/x", "agent_a"))
+
+    assert out == "pooled"
+    assert session.calls == [("fetch_html", "https://a/x")]
+    assert launched == [], "no one-shot browser may be launched"
+
+
+def test_fetch_js_text_falls_back_to_one_shot(monkeypatch):
+    """If the pool fails the tool must not get worse than it was — and
+    the one-shot must carry the agent id, so its page console lines are
+    attributable instead of landing as <anonymous>."""
+    import dpc_client_core.dpc_agent.tools.browser as mod
+
+    launched: list = []
+
+    async def _boom(agent_id):
+        raise RuntimeError("Camoufox launch failed")
+
+    def _oneshot(url, agent_id="<anonymous>"):
+        launched.append((url, agent_id))
+        return "oneshot"
+
+    monkeypatch.setattr(mod, "_get_or_create_fetch_session", _boom)
+    monkeypatch.setattr(mod, "_browse_with_camoufox", _oneshot)
+
+    out = asyncio.run(mod._fetch_js_text("https://a/x", "agent_a"))
+
+    assert out == "oneshot"
+    assert launched == [("https://a/x", "agent_a")]
+
+
+def test_fetch_js_text_without_agent_uses_one_shot(monkeypatch):
+    import dpc_client_core.dpc_agent.tools.browser as mod
+
+    launched: list = []
+
+    def _oneshot(url, agent_id="<anonymous>"):
+        launched.append((url, agent_id))
+        return "oneshot"
+
+    monkeypatch.setattr(mod, "_browse_with_camoufox", _oneshot)
+
+    out = asyncio.run(mod._fetch_js_text("https://a/x", None))
+
+    assert out == "oneshot"
+    assert launched == [("https://a/x", "<anonymous>")]
+
+
+def test_browse_page_auth_without_keep_open_is_headless(vault_home):
+    """The gate above this call asks the user to approve *headless*
+    access and audits it as such; the browse must not be headed."""
+    import dpc_client_core.dpc_agent.tools.browser as mod
+    from dpc_client_core.dpc_agent.tools.browser import browse_page
+
+    agent_root = vault_home / "agents" / "agent_a"
+    agent_root.mkdir(parents=True, exist_ok=True)
+    ctx = _make_ctx(agent_root)
+
+    seen: dict = {}
+
+    def _capture(agent_id, domain, url, headed=True):
+        seen["headed"] = headed
+        return "<html><body><p>ok</p></body></html>"
+
+    original = mod._auth_browse_html
+    mod._auth_browse_html = _capture
+    try:
+        asyncio.run(
+            browse_page(
+                ctx,
+                url=f"https://{TEST_DOMAIN}/my/orders",
+                use_auth=f"{TEST_DOMAIN}",
+            )
+        )
+    finally:
+        mod._auth_browse_html = original
+
+    assert seen["headed"] is False
+
+
+def test_idle_cleanup_sweeps_fetch_browsers():
+    """Fetch browsers are reaped by the same idle sweep as sessions —
+    otherwise a headless browser would outlive every agent round."""
+    from dpc_client_core.dpc_agent.tools.browser import (
+        _fetch_sessions,
+        cleanup_idle_browser_sessions,
+    )
+
+    stale = _FakeSession()
+    stale._last_activity = time.monotonic() - 10_000
+    _fetch_sessions["agent_a"] = stale
+    try:
+        closed = asyncio.run(cleanup_idle_browser_sessions())
+        assert closed >= 1
+        assert stale.closed is True
+        assert "agent_a" not in _fetch_sessions
+    finally:
+        _fetch_sessions.pop("agent_a", None)
+

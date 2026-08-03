@@ -285,7 +285,33 @@ def _attach_page_diagnostics(page, agent_id: str = "<anonymous>") -> None:
         log.debug("attach diagnostics failed: %s", e)
 
 
-def _browse_with_camoufox(url: str) -> Optional[str]:
+_SESSION_DEAD_MARKERS = (
+    "target page, context or browser has been closed",
+    "browser has been closed",
+    "browser closed",
+    "connection closed",
+    "target closed",
+    "page closed",
+    "browser is not connected",
+    "session is closed",
+)
+
+
+def _is_session_dead(exc: BaseException) -> bool:
+    """True when the exception says the browser/page is gone, as opposed
+    to the navigation itself having failed.
+
+    Everything that is not on this list — a timeout, an aborted load, a
+    navigation superseded by another navigation — leaves a perfectly
+    usable browser behind, and answering it by tearing the browser down
+    costs a relaunch, the page state, and (headed) a window that vanishes
+    and reappears in front of the user.
+    """
+    text = f"{type(exc).__name__}: {exc}".lower()
+    return any(marker in text for marker in _SESSION_DEAD_MARKERS)
+
+
+def _browse_with_camoufox(url: str, agent_id: str = "<anonymous>") -> Optional[str]:
     try:
         from camoufox.sync_api import Camoufox
     except ImportError:
@@ -294,7 +320,7 @@ def _browse_with_camoufox(url: str) -> Optional[str]:
     try:
         with Camoufox(headless=True, **_camoufox_launch_kwargs()) as browser:
             page = browser.new_page()
-            _attach_page_diagnostics(page)
+            _attach_page_diagnostics(page, agent_id=agent_id)
             page.goto(url, wait_until="domcontentloaded", timeout=60000)
             html = page.content()
 
@@ -428,6 +454,19 @@ def get_active_browser_sessions() -> dict[str, "AuthBrowser"]:
     return _active_browser_sessions
 
 
+# Headless browsers kept for the `browse_page` JS fallback, one per agent.
+# Deliberately separate from `_active_browser_sessions`: that registry is
+# what the interactive `browser_*` tools resolve, and a fetch must never
+# navigate the page an agent is holding refs into. Same idle sweep, same
+# shutdown set — only the lookup is distinct.
+_fetch_sessions: dict[str, "AuthBrowser"] = {}
+
+
+def get_fetch_sessions() -> dict[str, "AuthBrowser"]:
+    """Accessor for tests and shutdown — returns the live dict."""
+    return _fetch_sessions
+
+
 async def cleanup_idle_browser_sessions() -> int:
     """Close browser sessions idle longer than IDLE_TIMEOUT_SECONDS.
 
@@ -436,16 +475,22 @@ async def cleanup_idle_browser_sessions() -> int:
     """
     now = time.monotonic()
     closed = 0
-    for agent_id, session in list(_active_browser_sessions.items()):
-        idle = now - session._last_activity
-        if idle > IDLE_TIMEOUT_SECONDS:
-            log.info("Closing idle browser session for %s (idle %.0fs)", agent_id, idle)
-            try:
-                await _run_in_session(session, "close")
-            except Exception as e:
-                log.warning("Error closing idle session %s: %s", agent_id, e)
-            _active_browser_sessions.pop(agent_id, None)
-            closed += 1
+    for registry, label in (
+        (_active_browser_sessions, "browser session"),
+        (_fetch_sessions, "fetch browser"),
+    ):
+        for agent_id, session in list(registry.items()):
+            idle = now - session._last_activity
+            if idle > IDLE_TIMEOUT_SECONDS:
+                log.info(
+                    "Closing idle %s for %s (idle %.0fs)", label, agent_id, idle
+                )
+                try:
+                    await _run_in_session(session, "close")
+                except Exception as e:
+                    log.warning("Error closing idle %s %s: %s", label, agent_id, e)
+                registry.pop(agent_id, None)
+                closed += 1
     return closed
 
 
@@ -1462,6 +1507,22 @@ class AuthBrowser:
         assignment) so subclass overrides of navigate() are honored."""
         return self.navigate(url)
 
+    def fetch_html(self, url: str) -> str:
+        """Navigate and return raw HTML, skipping the accessibility
+        snapshot that `navigate()` builds inline.
+
+        The snapshot exists for interactive callers that need `@eN` refs
+        next; the browse_page fallback reads the DOM and throws the refs
+        away, and the summarizer behind it is the single most expensive
+        step in the call (it has its own 25 s budget)."""
+        self._require_open()
+        self._check_domain(url)
+        self._page.goto(url, wait_until="domcontentloaded", timeout=60000)
+        self._wait_for_content_stable()
+        html = self._page.content()
+        self._audit_action("fetch_html", url, "ok", html_size=len(html))
+        return html
+
     def get_page_html(self) -> str:
         """Return raw HTML of the current page. Used by T9 challenge
         detection before trafilatura conversion."""
@@ -1894,9 +1955,21 @@ class AuthBrowser:
             self._context = None
             self._page = None
             _active_camoufox_browsers.discard(self)
+            self._deregister()
+            self._shutdown_executor()
+
+    def _deregister(self) -> None:
+        """Drop this instance from the per-agent registries — but only the
+        entries that point at *this* object. An agent can hold more than one
+        AuthBrowser at a time (interactive session + the browse_page fetch
+        browser), and both carry the same `agent_id`; popping by id alone
+        made whichever closed first evict the other's registration while
+        that browser was still running."""
+        if _active_browser_sessions.get(self._agent_id) is self:
             _active_browser_sessions.pop(self._agent_id, None)
             _session_locks.pop(self._agent_id, None)
-            self._shutdown_executor()
+        if _fetch_sessions.get(self._agent_id) is self:
+            _fetch_sessions.pop(self._agent_id, None)
 
     def _on_browser_disconnected(self, *args: Any) -> None:
         """Fired by Playwright when the browser process detaches."""
@@ -1908,8 +1981,7 @@ class AuthBrowser:
             self._agent_id,
         )
         _active_camoufox_browsers.discard(self)
-        _active_browser_sessions.pop(self._agent_id, None)
-        _session_locks.pop(self._agent_id, None)
+        self._deregister()
         self._shutdown_executor()
 
 
@@ -1999,6 +2071,107 @@ async def _get_or_create_session_async(
         await _run_in_session(session, "start")
         _active_browser_sessions[agent_id] = session
         return session
+
+
+async def _navigate_with_recovery(
+    session: "AuthBrowser", agent_id: str, url: str, domains: list[str],
+) -> "AuthBrowser":
+    """Navigate, absorbing a transient failure without losing the browser.
+
+    Order matters. A navigation can fail for two unrelated reasons, and
+    they call for opposite responses:
+
+    * the browser is gone (crashed, closed underneath us) — the session
+      is unusable and must be replaced;
+    * the navigation itself lost — a timeout, an aborted load, or a
+      `goto` superseded by another navigation still in flight. The
+      browser is fine; retrying on the same page is enough.
+
+    Recycling on *any* exception treated the second case as the first:
+    it tore down a working browser, dropped the page state, and in a
+    headed session made the window vanish and a new one appear.
+
+    Returns the session that ended up serving the navigation — the same
+    one on the retry path, a fresh one after a genuine recycle.
+    """
+    try:
+        await _run_in_session(session, "navigate", url)
+        return session
+    except Exception as nav_err:
+        if not _is_session_dead(nav_err):
+            log.info(
+                "navigate failed (agent=%s, url=%s): %s — retrying on the "
+                "same page (browser is alive)",
+                agent_id, url, nav_err,
+            )
+            await _run_in_session(session, "navigate", url)
+            return session
+        log.warning(
+            "navigate failed (agent=%s, url=%s): %s — session is dead, "
+            "recreating",
+            agent_id, url, nav_err,
+        )
+    try:
+        await _run_in_session(session, "close")
+    except Exception:
+        pass
+    _active_browser_sessions.pop(agent_id, None)
+    session = await _get_or_create_session_async(agent_id, domains, True)
+    await _run_in_session(session, "navigate", url)
+    return session
+
+
+_fetch_create_locks: dict[str, asyncio.Lock] = {}
+
+
+async def _get_or_create_fetch_session(agent_id: str) -> "AuthBrowser":
+    """Return this agent's headless fetch browser, opening one if needed.
+
+    No auth domains, so `_check_domain` is a no-op and no vault entry is
+    read — this browser exists only to run JS for `browse_page`."""
+    if agent_id not in _fetch_create_locks:
+        _fetch_create_locks[agent_id] = asyncio.Lock()
+    async with _fetch_create_locks[agent_id]:
+        existing = _fetch_sessions.get(agent_id)
+        if existing is not None and existing._page is not None:
+            try:
+                if not existing._page.is_closed():
+                    return existing
+            except Exception:
+                pass
+            _fetch_sessions.pop(agent_id, None)
+        session = AuthBrowser(agent_id=agent_id, domains=[], headed=False)
+        await _run_in_session(session, "start")
+        _fetch_sessions[agent_id] = session
+        return session
+
+
+async def _fetch_js_text(url: str, agent_id: Optional[str]) -> Optional[str]:
+    """Render `url` in a real browser and return it as markdown.
+
+    Reuses the agent's fetch browser across calls. Before this, every
+    JS-needing page cost a full Camoufox launch and teardown — measured
+    at 7 processes and ~7-10 s per call, repeated for each page in a
+    research run. Falls back to the one-shot browser when no agent is
+    known or the pooled one fails, so the tool never gets worse than it
+    was.
+    """
+    if agent_id:
+        try:
+            session = await _get_or_create_fetch_session(agent_id)
+            html = await _run_in_session(session, "fetch_html", url)
+            return _html_to_markdown(html)
+        except Exception as exc:
+            log.warning(
+                "pooled fetch browser failed (agent=%s, url=%s): %s — "
+                "falling back to one-shot",
+                agent_id, url, exc,
+            )
+            if _is_session_dead(exc):
+                _fetch_sessions.pop(agent_id, None)
+    return await asyncio.to_thread(
+        _browse_with_camoufox, url, agent_id or "<anonymous>",
+    )
 
 
 def _html_to_markdown(html: str) -> str:
@@ -2134,27 +2307,18 @@ async def browse_page(
                 session = await _get_or_create_session_async(
                     agent_id, [use_auth], True,
                 )
-                try:
-                    await _run_in_session(session, "navigate", url)
-                except Exception as nav_err:
-                    log.warning(
-                        "navigate failed (agent=%s, url=%s): %s — "
-                        "closing session and retrying with fresh context",
-                        agent_id, url, nav_err,
-                    )
-                    try:
-                        await _run_in_session(session, "close")
-                    except Exception:
-                        pass
-                    _active_browser_sessions.pop(agent_id, None)
-                    session = await _get_or_create_session_async(
-                        agent_id, [use_auth], True,
-                    )
-                    await _run_in_session(session, "navigate", url)
+                session = await _navigate_with_recovery(
+                    session, agent_id, url, [use_auth],
+                )
                 html = await _run_in_session(session, "get_page_html")
             else:
+                # headed=False: the gate above asked the user to approve
+                # *headless* access and the audit records it as such
+                # (`headless_approved` / `headless_rejected`). Passing a
+                # headed browser here opened a visible window per call
+                # while telling the user it would not.
                 html = await asyncio.to_thread(
-                    _auth_browse_html, agent_id, use_auth, url, True
+                    _auth_browse_html, agent_id, use_auth, url, False
                 )
         except AuthRequiredError as e:
             _web_auth_mod.audit_append(
@@ -2202,20 +2366,7 @@ async def browse_page(
         agent_id = ctx.agent_root.name if hasattr(ctx, 'agent_root') else "anonymous"
         try:
             session = await _get_or_create_session_async(agent_id, [], True)
-            try:
-                await _run_in_session(session, "navigate", url)
-            except Exception as nav_err:
-                log.warning(
-                    "navigate failed (agent=%s, url=%s): %s — retrying fresh",
-                    agent_id, url, nav_err,
-                )
-                try:
-                    await _run_in_session(session, "close")
-                except Exception:
-                    pass
-                _active_browser_sessions.pop(agent_id, None)
-                session = await _get_or_create_session_async(agent_id, [], True)
-                await _run_in_session(session, "navigate", url)
+            session = await _navigate_with_recovery(session, agent_id, url, [])
             html = await _run_in_session(session, "get_page_html")
         except Exception as e:
             return f"⚠️ Camoufox browser failed: {e}"
@@ -2234,7 +2385,9 @@ async def browse_page(
     text = result.get("text", "")
 
     if result.get("needs_js"):
-        js_text = await asyncio.to_thread(_browse_with_camoufox, url)
+        js_text = await _fetch_js_text(
+            url, getattr(getattr(ctx, "agent_root", None), "name", None),
+        )
         if js_text and len(js_text) > len(text or ""):
             text = js_text
     max_chars = _SIZE_PRESETS.get(size, _SIZE_PRESETS["m"])
