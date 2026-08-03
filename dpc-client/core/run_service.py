@@ -149,6 +149,16 @@ def _hf_model_fully_cached(model_id: str, root: "_HFPath") -> bool:
     return True
 
 
+# Held for setup_logging() to repeat into the log — nothing here can log yet.
+_HF_STARTUP_NOTE = ""
+
+
+def _hf_announce(note: str) -> None:
+    global _HF_STARTUP_NOTE
+    _HF_STARTUP_NOTE = note
+    print("[startup] " + note)
+
+
 try:
     _hf_offline_set = _hf_cfg.has_option("hf", "offline_mode")
     _hf_offline = _hf_cfg.getboolean("hf", "offline_mode", fallback=False)
@@ -158,8 +168,8 @@ except (ValueError, _hf_configparser.Error):
 if _hf_offline:
     # setdefault so an explicit HF_HUB_OFFLINE env var still wins.
     os.environ.setdefault("HF_HUB_OFFLINE", "1")
-    print(
-        "[startup] HF_HUB_OFFLINE=1 (from [hf] offline_mode=true) — "
+    _hf_announce(
+        "HF_HUB_OFFLINE=1 (from [hf] offline_mode=true) — "
         "transformers/sentence-transformers/gliner will skip HF Hub HEAD "
         "requests and read directly from ~/.cache/huggingface/"
     )
@@ -183,24 +193,23 @@ elif not _hf_offline_set:
             # Nothing could be sourced, so nothing was verified. An empty set
             # trivially satisfies "all present" — going offline on it would be
             # a decision made on no evidence.
-            print(
-                "[startup] HF Hub stays online — could not determine which "
-                "models this install needs"
+            _hf_announce(
+                "HF Hub stays online — could not determine which models this "
+                "install needs"
             )
         elif _hf_missing:
-            print(
-                "[startup] HF Hub stays online — not fully cached: "
-                + ", ".join(_hf_missing)
+            _hf_announce(
+                "HF Hub stays online — not fully cached: " + ", ".join(_hf_missing)
             )
         else:
             os.environ.setdefault("HF_HUB_OFFLINE", "1")
-            print(
-                "[startup] HF_HUB_OFFLINE=1 (auto) — all startup models cached "
-                "locally, skipping HF Hub HEAD requests: " + ", ".join(_hf_wanted)
+            _hf_announce(
+                "HF_HUB_OFFLINE=1 (auto) — all startup models cached locally, "
+                "skipping HF Hub HEAD requests: " + ", ".join(_hf_wanted)
             )
     except OSError as _hf_exc:
         # An unreadable cache is not grounds to cut the network.
-        print(f"[startup] HF cache check skipped ({_hf_exc}) — staying online")
+        _hf_announce(f"HF cache check skipped ({_hf_exc}) — staying online")
 
 import argparse
 import platform  # Import the platform module to check the OS
@@ -335,6 +344,12 @@ def setup_logging(settings):
     # These come from the websockets library's internal logging when DEBUG is enabled
     for ws_logger in ['websockets.server', 'websockets.protocol', 'websockets']:
         logging.getLogger(ws_logger).setLevel(logging.WARNING)
+
+    # The HF decision is taken at import time, before any of the above exists,
+    # so it could only be printed. Repeat it here: which mode a run started in
+    # is exactly the thing you want when reading the log days later.
+    if _HF_STARTUP_NOTE:
+        logger.info(_HF_STARTUP_NOTE)
 
 
 def dependency_setup():
@@ -486,6 +501,21 @@ def log_live_non_daemon_threads():
         logger.warning("  thread %r (ident=%s)", t.name, t.ident)
 
 
+def _should_report_pending(pending: int, shutting_down: bool) -> bool:
+    """Whether a loop closing with `pending` overlapped ops is worth a line.
+
+    Every proactor loop closes with exactly one outstanding: its own
+    self-pipe read, cancelled by close() a moment earlier and not yet
+    reaped. Agent tools open and close a loop per call, so reporting that
+    one is a line per tool call saying the same nothing.
+
+    Anything past it is the self-pipe plus something real. At shutdown
+    everything is named regardless — that is the close that can hang, and
+    there the self-pipe is a suspect like any other.
+    """
+    return pending > 0 and (shutting_down or pending > 1)
+
+
 def _install_shutdown_diagnostics():
     """Name whatever still holds a Windows overlapped op when a loop closes.
 
@@ -538,10 +568,7 @@ def _install_shutdown_diagnostics():
 
     def close_with_trace(self):
         cache = getattr(self, "_cache", None)
-        if cache:
-            # Agent tools run each async call on a fresh loop and close it,
-            # so a leaked op here is worth recording but not worth shouting
-            # about until it is the exit that hangs.
+        if cache and _should_report_pending(len(cache), _shutting_down):
             level = logging.WARNING if _shutting_down else logging.DEBUG
             logger.log(level, "%d overlapped op(s) still pending at loop close", len(cache))
             for address, entry in list(cache.items()):

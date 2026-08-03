@@ -199,3 +199,52 @@ def test_offline_decision_follows_the_cache(tmp_path, missing_one):
     assert bool(missing) is missing_one
     if missing_one:
         assert missing == [models[0]]
+
+
+# ─────────────────────────────────────────────────────────────
+# The startup decision reaches the log, not just the console
+# ─────────────────────────────────────────────────────────────
+
+
+def test_startup_note_is_recorded_for_the_log():
+    """The HF block runs before logging exists, so it can only print. The
+    note it keeps is what setup_logging() replays into dpc-client.log —
+    without it, a log read days later cannot tell which mode a run used."""
+    saved = run_service._HF_STARTUP_NOTE
+    try:
+        run_service._hf_announce("test note")
+        assert run_service._HF_STARTUP_NOTE == "test note"
+    finally:
+        run_service._HF_STARTUP_NOTE = saved
+
+
+def test_real_startup_recorded_a_note():
+    assert run_service._HF_STARTUP_NOTE, (
+        "importing run_service must leave a note describing the HF decision"
+    )
+
+
+# ─────────────────────────────────────────────────────────────
+# Which loop closes are worth reporting
+# ─────────────────────────────────────────────────────────────
+
+
+def test_lone_self_pipe_op_is_not_reported_during_normal_operation():
+    """Observed after the fix landed: every per-call loop closed with exactly
+    one op — a cancelled self-pipe read. Reporting it once per tool call is
+    noise that buries the case worth seeing."""
+    assert run_service._should_report_pending(1, shutting_down=False) is False
+
+
+def test_more_than_the_self_pipe_is_reported():
+    assert run_service._should_report_pending(2, shutting_down=False) is True
+
+
+def test_shutdown_reports_even_a_single_op():
+    """At the close that can hang, the self-pipe is a suspect like any other."""
+    assert run_service._should_report_pending(1, shutting_down=True) is True
+
+
+def test_nothing_pending_is_never_reported():
+    assert run_service._should_report_pending(0, shutting_down=True) is False
+    assert run_service._should_report_pending(0, shutting_down=False) is False
