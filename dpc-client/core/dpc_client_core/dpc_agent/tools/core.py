@@ -1038,7 +1038,16 @@ def _schedule_needs_approval(ctx) -> bool:
     try:
         agent_obj = getattr(ctx, "_agent", None)
         profile = getattr(agent_obj, "_firewall_profile", None)
-        value = getter(profile, "schedule_task", "approval_required")
+        # Keyword arguments on purpose: the positional order here is
+        # (tool_name, setting, profile_name), and getting it wrong reads a
+        # setting that does not exist — which fails closed and so looks like
+        # it works, while the exemption silently never applies.
+        value = getter(
+            tool_name="schedule_task",
+            setting="approval_required",
+            profile_name=profile,
+            default=None,
+        )
     except Exception:
         return True
     return True if value is None else bool(value)

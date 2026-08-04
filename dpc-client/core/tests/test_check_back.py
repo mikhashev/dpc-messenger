@@ -13,13 +13,25 @@ import pytest
 from dpc_client_core.dpc_agent.tools.core import _CHECK_BACK_MAX_DEPTH, schedule_task
 
 CONV = "group-work"
+PROFILE = "agent_forge_7244b181"
 
 
 class _NoApproval:
-    """Firewall stub for an agent exempted from the queue gate."""
+    """A real ContextFirewall, configured to exempt this agent.
 
-    def get_tool_setting(self, _profile, _tool, _key):
-        return False
+    A hand-written stub was what hid the first version of this: it mirrored the
+    caller's argument order instead of the real one, so a wrong call validated
+    itself and the exemption never applied in production.
+    """
+
+    def __new__(cls):
+        from dpc_client_core.firewall import ContextFirewall
+
+        fw = ContextFirewall.__new__(ContextFirewall)
+        fw.rules = {"agent_profiles": {PROFILE: {"tool_settings": {
+            "schedule_task": {"approval_required": False}}}}}
+        fw.dpc_agent_tools = {}
+        return fw
 
 
 def _ctx(depth=0, queued=(), firewall=None):
@@ -35,7 +47,8 @@ def _ctx(depth=0, queued=(), firewall=None):
         queue._queue.append(task)
         return task
 
-    agent = SimpleNamespace(queue=queue, schedule_task=_schedule, _task_handlers={})
+    agent = SimpleNamespace(queue=queue, schedule_task=_schedule, _task_handlers={},
+                            _firewall_profile=PROFILE, display_name="Forge")
     return SimpleNamespace(
         _agent=agent, current_task_id=CONV, check_back_depth=depth,
         reply_telegram_chat_id=None, _scheduled=scheduled,
