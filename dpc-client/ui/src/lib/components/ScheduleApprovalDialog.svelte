@@ -37,16 +37,23 @@
 <style>
   .schedule-approval {
     position: fixed;
-    right: 1rem;
+    /* Bottom-right is where Windows paints its "Activate Windows" watermark,
+       and that is drawn by the OS above every window — no z-index reaches it.
+       The card sat under it and the text was unreadable, so it moves aside
+       rather than fighting for the same corner. */
+    left: 1rem;
     bottom: 1rem;
     z-index: 1000;
     width: min(380px, calc(100vw - 2rem));
     padding: 0.9rem 1rem;
     border-radius: 10px;
-    background: var(--panel-bg, #1e1e24);
-    border: 1px solid rgba(255, 193, 7, 0.5);
-    box-shadow: 0 8px 28px rgba(0, 0, 0, 0.35);
-    color: var(--text, #e8e8ea);
+    /* --panel-bg is defined nowhere; the literal was the only thing painting
+       this. Use the variable the other dialogs use, and keep an opaque
+       fallback so the card never goes translucent. */
+    background: var(--bg-secondary, #1e1e2e);
+    border: 1px solid rgba(255, 193, 7, 0.65);
+    box-shadow: 0 8px 28px rgba(0, 0, 0, 0.55);
+    color: var(--text-primary, #f2f2f5);
     font-size: 0.9rem;
   }
   .head { margin-bottom: 0.6rem; }
@@ -61,7 +68,7 @@
     grid-template-columns: auto 1fr;
     gap: 0.25rem 0.6rem;
   }
-  dt { opacity: 0.65; font-size: 0.8rem; }
+  dt { opacity: 0.8; font-size: 0.8rem; }
   dd { margin: 0; }
   .about {
     max-height: 5.5rem;
