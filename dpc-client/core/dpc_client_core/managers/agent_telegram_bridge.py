@@ -746,6 +746,21 @@ Send a voice message and it will be transcribed and processed\\.
         except Exception as e:
             log.error(f"notify_knowledge_result error: {e}", exc_info=True)
 
+    async def _show_chat_action(self, context, chat_id: str, action: str) -> None:
+        """Show a Telegram activity indicator, and never let it cost the message.
+
+        These calls are decoration — "typing…", "uploading voice". Three of the
+        four sites had one sitting outside any try, so an httpx timeout on the
+        indicator aborted the handler and the user's message was dropped with
+        nothing in the log to say so; the fourth threw away a transcription
+        that had already been computed. Best-effort by construction, so a new
+        call site cannot reintroduce it.
+        """
+        try:
+            await context.bot.send_chat_action(chat_id=chat_id, action=action)
+        except Exception as e:
+            log.debug(f"send_chat_action({action}) failed, continuing: {e}")
+
     async def _handle_message(self, update, context):
         """Handle incoming text message."""
         chat_id = str(update.effective_chat.id)
@@ -761,11 +776,7 @@ Send a voice message and it will be transcribed and processed\\.
             await update.message.reply_text("⚠️ Message handler not configured. Cannot process message.")
             return
 
-        # Send "processing" indicator (best-effort — a failed typing action must not drop the message)
-        try:
-            await context.bot.send_chat_action(chat_id=chat_id, action="typing")
-        except Exception as e:
-            log.debug(f"send_chat_action(typing) failed, continuing: {e}")
+        await self._show_chat_action(context, chat_id, "typing")
 
         # Build sender attribution for history (shown in DPC chat UI)
         tg_user = update.effective_user
@@ -903,8 +914,7 @@ Send a voice message and it will be transcribed and processed\\.
 
         log.info(f"Processing voice message from chat {chat_id} (duration: {duration}s, size: {file_size} bytes)")
 
-        # Send "recording audio" action
-        await context.bot.send_chat_action(chat_id=chat_id, action="upload_voice")
+        await self._show_chat_action(context, chat_id, "upload_voice")
 
         import tempfile
 
@@ -950,7 +960,7 @@ Send a voice message and it will be transcribed and processed\\.
             )
 
             # Process transcription through agent
-            await context.bot.send_chat_action(chat_id=chat_id, action="typing")
+            await self._show_chat_action(context, chat_id, "typing")
 
             tg_user = update.effective_user
             tg_display_name = (tg_user.first_name or tg_user.username or "Telegram User") if tg_user else "Telegram User"
@@ -1016,7 +1026,7 @@ Send a voice message and it will be transcribed and processed\\.
         caption = update.message.caption or ""
 
         log.info(f"Processing photo from chat {chat_id} (file_id={photo.file_id}, caption={caption[:50]!r})")
-        await context.bot.send_chat_action(chat_id=chat_id, action="typing")
+        await self._show_chat_action(context, chat_id, "typing")
 
         try:
             # Download photo from Telegram
