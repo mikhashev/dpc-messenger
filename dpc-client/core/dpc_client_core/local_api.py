@@ -8,7 +8,7 @@ import secrets
 import stat
 import weakref
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Optional
 import websockets
 from websockets.server import WebSocketServerProtocol
 
@@ -227,6 +227,10 @@ class LocalApiServer:
         # doesn't run) don't leak Lock objects — entries vanish as soon as
         # the WebSocketServerProtocol is garbage-collected.
         self._client_locks: "weakref.WeakKeyDictionary" = weakref.WeakKeyDictionary()
+        # The loop the locks belong to. A send arriving from another loop
+        # cannot take them, and until now that meant sending unlocked — see
+        # _send_locked.
+        self._owner_loop: Optional[asyncio.AbstractEventLoop] = None
         self._auth_token: str = ""
 
     def _generate_and_persist_auth_token(self) -> None:
@@ -320,14 +324,62 @@ class LocalApiServer:
         if lock is None:
             await client.send(message)
             return
+
+        # An asyncio.Lock does not police which loop takes it: a free one is
+        # acquired from any loop silently, and a held one blocks the foreign
+        # waiter instead of raising. So cross-loop use neither serializes
+        # reliably nor announces itself — it has to be caught by comparing
+        # loops, not by waiting for an error that only some paths produce.
+        owner = self._owner_loop
+        if owner is not None and owner.is_running():
+            try:
+                here = asyncio.get_running_loop()
+            except RuntimeError:
+                here = None
+            if here is not owner:
+                future = asyncio.run_coroutine_threadsafe(
+                    self._send_on_owner_loop(client, message), owner
+                )
+                await asyncio.wrap_future(future)
+                return
+
         try:
             async with lock:
                 await client.send(message)
         except RuntimeError as e:
-            if "bound to a different event loop" in str(e):
-                await client.send(message)
-            else:
+            if "bound to a different event loop" not in str(e):
                 raise
+            # Sending unlocked here reopened the very hole the lock closed:
+            # S145 measured 558 corrupted frames in 50ms during browse_page
+            # start, and the corruption ate web_auth_popup_request so the
+            # modal never appeared. Agent tools run on a per-call loop, so
+            # this branch is reachable from every tool that broadcasts —
+            # and it was silent, which is why the flood looked causeless.
+            owner = self._owner_loop
+            if owner is not None and owner.is_running():
+                logger.warning(
+                    "Send arrived from a foreign event loop; routing it back to "
+                    "the server loop instead of sending unlocked"
+                )
+                future = asyncio.run_coroutine_threadsafe(
+                    self._send_on_owner_loop(client, message), owner
+                )
+                await asyncio.wrap_future(future)
+                return
+            logger.warning(
+                "Send arrived from a foreign event loop and the server loop is "
+                "gone — sending unlocked, frames may interleave"
+            )
+            await client.send(message)
+
+    async def _send_on_owner_loop(self, client: WebSocketServerProtocol, message: str) -> None:
+        """Take the lock on the loop that owns it, then send."""
+        lock = self._client_locks.get(client)
+        if lock is None:
+            await client.send(message)
+            return
+        async with lock:
+            await client.send(message)
 
     async def _handler(self, websocket: WebSocketServerProtocol):
         if not await self._authenticate(websocket):
@@ -420,6 +472,9 @@ class LocalApiServer:
             await self._unregister(websocket)
 
     async def start(self):
+        # Remembered here rather than at __init__: the locks are created on
+        # whichever loop serves the connections, and that is this one.
+        self._owner_loop = asyncio.get_running_loop()
         self._generate_and_persist_auth_token()
         logger.info("Starting Local API Server on ws://%s:%d", self.host, self.port)
 
