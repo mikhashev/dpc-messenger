@@ -298,6 +298,48 @@ class KnowledgeService:
     # Conversation monitor management
     # ─────────────────────────────────────────────────────────────
 
+    def _build_participants(self, conversation_id: str) -> List[Dict[str, Any]]:
+        """Who is in this conversation, as of now.
+
+        Consensus counts votes against this list, so it has to describe the
+        conversation at the moment it is asked — not at the moment the monitor
+        happened to be constructed.
+        """
+        if conversation_id == "local_ai" or conversation_id.startswith("ai_"):
+            return [
+                {"node_id": self.p2p_manager.node_id, "name": "User", "context": "local"},
+                {"node_id": conversation_id, "name": "DPC Agent", "context": "ai_agent"},
+            ]
+
+        if conversation_id.startswith("group-"):
+            group = self.group_manager.get_group(conversation_id)
+            if not group:
+                return [
+                    {"node_id": self.p2p_manager.node_id, "name": "User", "context": "local"}
+                ]
+            participants = []
+            for member_id in group.members:
+                if member_id == self.p2p_manager.node_id:
+                    participants.append(
+                        {"node_id": member_id, "name": "User", "context": "local"}
+                    )
+                else:
+                    participants.append({
+                        "node_id": member_id,
+                        "name": self.peer_metadata.get(member_id, {}).get("name", member_id),
+                        "context": "peer",
+                    })
+            return participants
+
+        return [
+            {"node_id": self.p2p_manager.node_id, "name": "User", "context": "local"},
+            {
+                "node_id": conversation_id,
+                "name": self.peer_metadata.get(conversation_id, {}).get("name", conversation_id),
+                "context": "peer",
+            },
+        ]
+
     def _get_or_create_conversation_monitor(
         self,
         conversation_id: str,
@@ -312,102 +354,85 @@ class KnowledgeService:
         Returns:
             ConversationMonitor instance
         """
-        if conversation_id not in self.conversation_monitors:
-            participants = []
-
-            if conversation_id == "local_ai" or conversation_id.startswith("ai_"):
-                participants = [
-                    {"node_id": self.p2p_manager.node_id, "name": "User", "context": "local"},
-                    {"node_id": conversation_id, "name": "DPC Agent", "context": "ai_agent"},
-                ]
-            elif conversation_id.startswith("group-"):
-                group = self.group_manager.get_group(conversation_id)
-                if group:
-                    for member_id in group.members:
-                        if member_id == self.p2p_manager.node_id:
-                            participants.append(
-                                {"node_id": member_id, "name": "User", "context": "local"}
-                            )
-                        else:
-                            participants.append({
-                                "node_id": member_id,
-                                "name": self.peer_metadata.get(member_id, {}).get("name", member_id),
-                                "context": "peer",
-                            })
-                else:
-                    participants = [
-                        {"node_id": self.p2p_manager.node_id, "name": "User", "context": "local"}
-                    ]
-            else:
-                participants = [
-                    {"node_id": self.p2p_manager.node_id, "name": "User", "context": "local"},
-                    {
-                        "node_id": conversation_id,
-                        "name": self.peer_metadata.get(conversation_id, {}).get("name", conversation_id),
-                        "context": "peer",
-                    },
-                ]
-
-            # Determine display_name for readable folder suffix
+        if conversation_id in self.conversation_monitors:
+            monitor = self.conversation_monitors[conversation_id]
+            # A group roster changes after the monitor exists — someone is
+            # invited, someone leaves — but the list built at construction is
+            # what consensus counts votes against. A monitor born before the
+            # second node joined made every proposal claim one participant, so
+            # the proposer's own vote was unanimity and the other person's
+            # arrived too late to count. Re-read it; it is a dict lookup.
             if conversation_id.startswith("group-"):
-                display_name = group.name if group else None
-            elif not conversation_id.startswith(("local_ai", "ai_", "agent-")):
-                display_name = self.peer_metadata.get(conversation_id, {}).get("name") or None
-            else:
-                display_name = None
+                monitor.participants = self._build_participants(conversation_id)
+            return monitor
 
-            self.conversation_monitors[conversation_id] = ConversationMonitor(
-                conversation_id=conversation_id,
-                participants=participants,
-                llm_manager=self.llm_manager,
-                knowledge_threshold=0.7,
-                settings=self.settings,
-                ai_query_func=self._send_ai_query,
-                auto_detect=False,
-                instruction_set_name=instruction_set_name or self.instruction_set.default,
-                display_name=display_name,
-            )
+        participants = self._build_participants(conversation_id)
+        group = (
+            self.group_manager.get_group(conversation_id)
+            if conversation_id.startswith("group-")
+            else None
+        )
 
-            # Load persisted history from disk — only for group chats
-            if conversation_id.startswith("group-"):
-                if self.conversation_monitors[conversation_id].load_history():
-                    self.conversation_monitors[conversation_id].rebuild_extraction_buffers_from_history()
-                    logger.info(
-                        "Loaded persisted history for group %s (%d messages, extraction buffers rebuilt)",
-                        conversation_id,
-                        len(self.conversation_monitors[conversation_id].message_history),
-                    )
-                # Set token_limit to max context window among agents in the group
-                if group and self.llm_manager:
-                    max_ctx = 0
-                    node_id = getattr(self.p2p_manager, "node_id", None)
-                    for aid in group.agents.get(node_id, []):
-                        try:
-                            from .dpc_agent.utils import load_agent_config
-                            cfg = load_agent_config(aid) or {}
-                            ctx = cfg.get("context_window", 0)
-                            if not ctx:
-                                pa = cfg.get("provider_alias")
-                                if pa and pa in self.llm_manager.providers:
-                                    model = self.llm_manager.providers[pa].model
-                                    ctx = self.llm_manager.get_context_window(model) or 0
-                            max_ctx = max(max_ctx, ctx)
-                        except Exception:
-                            pass
-                    if not max_ctx:
-                        model = self.llm_manager.get_active_model_name()
-                        max_ctx = self.llm_manager.get_context_window(model) or 0
-                    if max_ctx > 0:
-                        self.conversation_monitors[conversation_id].set_token_limit(max_ctx)
-                        logger.info("Group %s token_limit set to %d (max agent context)", conversation_id, max_ctx)
+        # Determine display_name for readable folder suffix
+        if conversation_id.startswith("group-"):
+            display_name = group.name if group else None
+        elif not conversation_id.startswith(("local_ai", "ai_", "agent-")):
+            display_name = self.peer_metadata.get(conversation_id, {}).get("name") or None
+        else:
+            display_name = None
 
-            logger.info(
-                "Created conversation monitor for %s with %d participant(s) "
-                "(instruction_set=%s)",
-                conversation_id,
-                len(participants),
-                instruction_set_name or self.instruction_set.default,
-            )
+        self.conversation_monitors[conversation_id] = ConversationMonitor(
+            conversation_id=conversation_id,
+            participants=participants,
+            llm_manager=self.llm_manager,
+            knowledge_threshold=0.7,
+            settings=self.settings,
+            ai_query_func=self._send_ai_query,
+            auto_detect=False,
+            instruction_set_name=instruction_set_name or self.instruction_set.default,
+            display_name=display_name,
+        )
+
+        # Load persisted history from disk — only for group chats
+        if conversation_id.startswith("group-"):
+            if self.conversation_monitors[conversation_id].load_history():
+                self.conversation_monitors[conversation_id].rebuild_extraction_buffers_from_history()
+                logger.info(
+                    "Loaded persisted history for group %s (%d messages, extraction buffers rebuilt)",
+                    conversation_id,
+                    len(self.conversation_monitors[conversation_id].message_history),
+                )
+            # Set token_limit to max context window among agents in the group
+            if group and self.llm_manager:
+                max_ctx = 0
+                node_id = getattr(self.p2p_manager, "node_id", None)
+                for aid in group.agents.get(node_id, []):
+                    try:
+                        from .dpc_agent.utils import load_agent_config
+                        cfg = load_agent_config(aid) or {}
+                        ctx = cfg.get("context_window", 0)
+                        if not ctx:
+                            pa = cfg.get("provider_alias")
+                            if pa and pa in self.llm_manager.providers:
+                                model = self.llm_manager.providers[pa].model
+                                ctx = self.llm_manager.get_context_window(model) or 0
+                        max_ctx = max(max_ctx, ctx)
+                    except Exception:
+                        pass
+                if not max_ctx:
+                    model = self.llm_manager.get_active_model_name()
+                    max_ctx = self.llm_manager.get_context_window(model) or 0
+                if max_ctx > 0:
+                    self.conversation_monitors[conversation_id].set_token_limit(max_ctx)
+                    logger.info("Group %s token_limit set to %d (max agent context)", conversation_id, max_ctx)
+
+        logger.info(
+            "Created conversation monitor for %s with %d participant(s) "
+            "(instruction_set=%s)",
+            conversation_id,
+            len(participants),
+            instruction_set_name or self.instruction_set.default,
+        )
 
         return self.conversation_monitors[conversation_id]
 
