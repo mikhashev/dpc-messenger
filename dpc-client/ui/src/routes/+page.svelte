@@ -156,6 +156,7 @@
   let showProvidersEditor = $state(false);
   let showAgentBoard = $state(false);
   let showCommitDialog = $state(false);
+  let commitVoteError = $state("");
   let isExtractingKnowledge = $state(false);
   let showNewSessionDialog = $state(false);  // v0.11.3: mutual session approval
   let showNewGroupDialog = $state(false);  // v0.19.0: group chat creation
@@ -789,15 +790,23 @@
     showProvidersEditor = true;
   }
 
-  function handleCommitVote(event: CustomEvent) {
+  async function handleCommitVote(event: CustomEvent) {
     const { proposal_id, vote, comment, entries, summary } = event.detail;
-    sendCommand("vote_knowledge_commit", {
+    // The dialog used to close on click, before the backend answered. When a
+    // vote is refused — another node's vote closed the session first — the
+    // refusal went nowhere and the click looked accepted.
+    const result = await sendCommand("vote_knowledge_commit", {
       proposal_id,
       vote,
       comment,
       entries,
       summary
     });
+    if (result && result.status === "error") {
+      commitVoteError = result.message || "Vote could not be cast";
+      return;
+    }
+    commitVoteError = "";
     showCommitDialog = false;
   }
 
@@ -1272,6 +1281,7 @@
 <KnowledgeCommitDialog
   bind:open={showCommitDialog}
   proposal={$knowledgeCommitProposal}
+  voteError={commitVoteError}
   on:vote={handleCommitVote}
   on:close={closeCommitDialog}
 />

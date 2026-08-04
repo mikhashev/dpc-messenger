@@ -527,11 +527,26 @@ class KnowledgeService:
 
             if success:
                 return {"status": "success", "message": f"Vote cast: {vote}"}
-            else:
+
+            # "Not found or expired" was the answer to three different
+            # situations, and the common one — the session closed seconds ago
+            # because another node's vote already decided it — is the one a
+            # person needs named. Reading "expired" about a proposal that is
+            # still on screen explains nothing.
+            session = self.consensus_manager.sessions.get(proposal_id)
+            if session is None:
+                return {"status": "error", "message": "Proposal not found"}
+            if session.status != "voting":
                 return {
                     "status": "error",
-                    "message": "Proposal not found or voting session expired",
+                    "reason": "already_decided",
+                    "decided_as": session.status,
+                    "message": (
+                        f"Voting already closed ({session.status}) — your vote "
+                        f"was not counted"
+                    ),
                 }
+            return {"status": "error", "message": "Vote could not be cast"}
         except Exception as e:
             logger.error("Error voting on knowledge commit: %s", e, exc_info=True)
             return {"status": "error", "message": str(e)}

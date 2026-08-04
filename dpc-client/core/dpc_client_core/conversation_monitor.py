@@ -1940,6 +1940,14 @@ PARTICIPANTS' CULTURAL CONTEXTS:
             self.message_buffer.append(message_obj)
             self.full_conversation.append(message_obj)
 
+        # A peer that predates the export fix sends no msg_index, and the UI
+        # renders a number only when there is one. The loader backfills on the
+        # next read from disk, which is too late: the history broadcast that
+        # follows this import is what the user is looking at.
+        for i, m in enumerate(self.message_history):
+            if "msg_index" not in m:
+                m["msg_index"] = i + 1
+
         logger.info(f"Imported {len(messages)} messages into all conversation buffers")
 
     # Phase 7: Peer context cache management methods

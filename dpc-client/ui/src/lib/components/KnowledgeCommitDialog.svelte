@@ -8,6 +8,9 @@
   // Props
   export let proposal: KnowledgeCommitProposal | null = null;
   export let open: boolean = false;
+  // A refused vote — the session closed before this click reached it — used to
+  // vanish: the dialog closed on click and the backend's refusal went nowhere.
+  export let voteError: string = '';
 
   const dispatch = createEventDispatcher();
 
@@ -260,6 +263,10 @@
         </div>
       </div>
 
+      {#if voteError}
+        <div class="vote-error" role="alert">{voteError}</div>
+      {/if}
+
       <div class="modal-footer">
         <button class="btn btn-approve" on:click={() => handleVote('approve')}>
           Approve
@@ -276,6 +283,16 @@
 {/if}
 
 <style>
+  .vote-error {
+    margin: 0 1.5rem 0.75rem;
+    padding: 0.6rem 0.8rem;
+    border-radius: 6px;
+    background: rgba(220, 53, 69, 0.12);
+    border: 1px solid rgba(220, 53, 69, 0.45);
+    color: #dc3545;
+    font-size: 0.9rem;
+  }
+
   .modal-overlay {
     position: fixed;
     top: 0;
