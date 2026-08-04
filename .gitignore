@@ -136,6 +136,7 @@ dpc-client/core/ar_disc_test_iris.py
 # and WIP architecture decisions. See conversations/ for decision history.
 backlog.md
 backlog_closed.md
+backlog_reconciliation.md
 
 # 19. Internal process protocol (CC + Ark + Mike operating agreement)
 # Triple-agent collaboration rules, workflow patterns, internal references.
