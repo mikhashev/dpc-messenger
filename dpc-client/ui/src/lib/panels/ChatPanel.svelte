@@ -10,6 +10,7 @@
   import TokenWarningBanner from '$lib/components/TokenWarningBanner.svelte';
   import IntegrityWarningBanner from '$lib/components/IntegrityWarningBanner.svelte';
   import AgentTaskBoard from '$lib/components/AgentTaskBoard.svelte';
+  import { votingConversationId } from '$lib/services/knowledge';
   import {
     connectionStatus,
     nodeStatus,
@@ -1093,6 +1094,13 @@
       />
     {/if}
 
+    {#if $votingConversationId && $votingConversationId === activeChatId}
+      <div class="voting-notice" role="status">
+        Идёт голосование по knowledge commit. Сообщения, написанные сейчас,
+        в него не войдут — они попадут в следующий.
+      </div>
+    {/if}
+
     <textarea
       id="message-input"
       name="message-input"
@@ -1170,5 +1178,16 @@
 />
 
 <style>
+  .voting-notice {
+    margin: 0 0 0.5rem;
+    padding: 0.5rem 0.75rem;
+    border-radius: 6px;
+    background: rgba(255, 193, 7, 0.12);
+    border: 1px solid rgba(255, 193, 7, 0.4);
+    color: #b8860b;
+    font-size: 0.85rem;
+    line-height: 1.35;
+  }
+
   @import "./panels.css";
 </style>

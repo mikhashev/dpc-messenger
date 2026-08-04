@@ -1015,6 +1015,12 @@ DO NOT include any text before or after the JSON. DO NOT use markdown code block
         Returns:
             KnowledgeCommitProposal object
         """
+        # Read the anchor before the model runs, not after: extraction takes
+        # seconds to minutes and the conversation keeps moving underneath it.
+        # Both the proposal and the error proposal below must name the same
+        # position, or two voters could verify against different ones.
+        _anchor_index, _anchor_hash = self.history_anchor()
+
         # Detect conversation type (v0.9.3)
         self.conversation_type = self._detect_conversation_type()
         logger.info("Monitor %s: Detected conversation type: %s",
@@ -1273,6 +1279,8 @@ PARTICIPANTS' CULTURAL CONTEXTS:
                 summary=result.get('summary', 'Knowledge from group discussion'),
                 entries=entries,
                 participants=[p['node_id'] for p in self.participants],
+                based_on_msg_index=_anchor_index,
+                based_on_chain_hash=_anchor_hash,
                 proposed_by=proposed_by,
                 initiated_by=initiated_by,
                 cultural_perspectives=result.get('cultural_perspectives', []),
@@ -1315,7 +1323,9 @@ PARTICIPANTS' CULTURAL CONTEXTS:
                 conversation_id=self.conversation_id,
                 topic='error',
                 summary=error_msg,
-                participants=[p['node_id'] for p in self.participants]
+                participants=[p['node_id'] for p in self.participants],
+                based_on_msg_index=_anchor_index,
+                based_on_chain_hash=_anchor_hash,
             )
 
     def _format_messages_for_analysis(self, messages: List[Message]) -> str:
@@ -1572,6 +1582,18 @@ PARTICIPANTS' CULTURAL CONTEXTS:
             List of message dicts with 'role' and 'content' keys
         """
         return self.message_history.copy()
+
+    def history_anchor(self) -> tuple:
+        """Where in the conversation a proposal was read from, and its proof.
+
+        Voting runs for minutes while the chat keeps moving. Without this the
+        proposal describes a history that no longer exists, and each voter
+        judges its own — a divergence that looks exactly like agreement.
+        """
+        if not self.message_history:
+            return None, None
+        last = self.message_history[-1]
+        return last.get("msg_index"), last.get("chain_hash")
 
     def get_last_msg_index(self) -> int:
         if self.message_history:

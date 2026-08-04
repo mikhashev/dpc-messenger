@@ -58,6 +58,15 @@ class KnowledgeCommitProposal:
     # anchor the same parent (prevents divergent chains from concurrent proposals)
     parent_commit_id: Optional[str] = None
 
+    # The history this proposal was read from. Voting takes up to ten minutes,
+    # during which the conversation keeps moving, so without an anchor each
+    # voter judges whatever its own history happens to say — and a divergence
+    # is indistinguishable from agreement. The index names the position, the
+    # hash proves the text at it; a voter that cannot reproduce the hash knows
+    # it is reading a different conversation and says so.
+    based_on_msg_index: Optional[int] = None
+    based_on_chain_hash: Optional[str] = None
+
     # Extraction metadata (tracking which model extracted this knowledge)
     extraction_model: Optional[str] = None  # Model used for extraction (e.g., "claude-haiku-4-5", "llama3.1:8b")
     extraction_host: Optional[str] = None  # Compute host ("local" or node_id for remote)
@@ -114,6 +123,12 @@ class KnowledgeCommitProposal:
             dissenting_opinions=data.get('dissenting_opinions', []),
             avg_confidence=data.get('avg_confidence', 1.0),
             extraction_model=data.get('extraction_model'),
+            based_on_msg_index=data.get('based_on_msg_index'),
+            based_on_chain_hash=data.get('based_on_chain_hash'),
+            # parent_commit_id was set by the proposer and then dropped here, so
+            # every receiver anchored the commit to its own local HEAD instead —
+            # the exact divergence the field was added to prevent.
+            parent_commit_id=data.get('parent_commit_id'),
             extraction_host=data.get('extraction_host'),
             status=data.get('status', 'proposed'),
             votes=data.get('votes', {}),

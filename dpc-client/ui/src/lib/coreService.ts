@@ -128,7 +128,7 @@ import { voiceOfferReceived, voiceTranscriptionReceived, voiceTranscriptionCompl
 import { groupChats, groupTextReceived, groupFileReceived, groupInviteReceived, groupUpdated, groupMemberLeft, groupDeleted, groupHistorySynced, groupMessageDeleted, tokenUsageUpdated } from './services/groups';
 import { agentsList, agentCreated, agentUpdated, agentDeleted, agentProfiles, agentProgress, agentProgressClear, agentLiveTools, agentTextChunk, agentChatMessage, userMessageConfirmed, sleepStateChanged, sleepProgress, sleepAgentStates } from './services/agents';
 import { telegramEnabled, telegramConnected, telegramStatus, telegramError, telegramLinkedChats, telegramMessages, telegramMessageReceived, telegramVoiceReceived, telegramImageReceived, telegramFileReceived, agentTelegramLinked, agentTelegramUnlinked, agentHistoryUpdated } from './services/telegram';
-import { personalContext, contextUpdated, peerContextUpdated, knowledgeCommitProposal, knowledgeCommitResult, extractionFailure, tokenWarning, integrityWarnings } from './services/knowledge';
+import { personalContext, contextUpdated, peerContextUpdated, knowledgeCommitProposal, knowledgeCommitResult, extractionFailure, tokenWarning, integrityWarnings, votingConversationId } from './services/knowledge';
 import { historyRestored, newSessionProposal, newSessionResult, conversationReset, conversationSettings, conversationSettingsChanged, conversationDeleted } from './services/session';
 
 // Re-export all service stores for backward compatibility.
@@ -142,7 +142,7 @@ export { voiceOfferReceived, voiceTranscriptionReceived, voiceTranscriptionCompl
 export { groupChats, groupTextReceived, groupFileReceived, groupInviteReceived, groupUpdated, groupMemberLeft, groupDeleted, groupHistorySynced, groupMessageDeleted, tokenUsageUpdated };
 export { agentsList, agentCreated, agentUpdated, agentDeleted, agentProfiles, agentProgress, agentProgressClear, agentLiveTools, agentTextChunk, agentChatMessage, userMessageConfirmed, sleepStateChanged, sleepProgress, sleepAgentStates };
 export { telegramEnabled, telegramConnected, telegramStatus, telegramError, telegramLinkedChats, telegramMessages, telegramMessageReceived, telegramVoiceReceived, telegramImageReceived, telegramFileReceived, agentTelegramLinked, agentTelegramUnlinked, agentHistoryUpdated };
-export { personalContext, contextUpdated, peerContextUpdated, knowledgeCommitProposal, knowledgeCommitResult, extractionFailure, tokenWarning, integrityWarnings };
+export { personalContext, contextUpdated, peerContextUpdated, knowledgeCommitProposal, knowledgeCommitResult, extractionFailure, tokenWarning, integrityWarnings, votingConversationId };
 export { historyRestored, newSessionProposal, newSessionResult, conversationReset, conversationSettings, conversationSettingsChanged, conversationDeleted };
 
 // Track currently active chat to prevent unread badges on open chats
@@ -355,6 +355,7 @@ export async function connectToCoreService() {
                 else if (message.event === "knowledge_commit_proposed") {
                     console.log("Knowledge commit proposal received:", message.payload);
                     knowledgeCommitProposal.set(message.payload);
+                    votingConversationId.set(message.payload?.conversation_id ?? null);
                 } else if (message.event === "knowledge_commit_approved") {
                     console.log("Knowledge commit approved:", message.payload);
                     // Refresh personal context after approval
@@ -362,6 +363,7 @@ export async function connectToCoreService() {
                 } else if (message.event === "knowledge_commit_result") {
                     console.log("Knowledge commit result received:", message.payload);
                     knowledgeCommitResult.set(message.payload);
+                    votingConversationId.set(null);
                 }
                 // New session proposal handlers (v0.11.3)
                 else if (message.event === "new_session_proposed") {

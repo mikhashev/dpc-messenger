@@ -440,6 +440,53 @@ class KnowledgeService:
     # Knowledge commit voting flow
     # ─────────────────────────────────────────────────────────────
 
+    def _history_drift(self, proposal_id: str) -> Optional[Dict[str, Any]]:
+        """Refuse a vote cast on a different conversation than the proposal read.
+
+        The anchor is the whole point of carrying it: a proposal names the
+        position it was extracted from and the chain hash at that position, so
+        a voter can prove it is judging the same text rather than assume it.
+        Silence here would be the failure mode we keep meeting — a check that
+        exists, travels, and is never asked.
+
+        Returns an error payload when the histories disagree, None otherwise
+        (including when there is nothing to compare, which is not a mismatch).
+        """
+        session = self.consensus_manager.sessions.get(proposal_id)
+        if session is None:
+            return None
+        index = getattr(session.proposal, "based_on_msg_index", None)
+        expected = getattr(session.proposal, "based_on_chain_hash", None)
+        if not index or not expected:
+            return None  # proposer predates the anchor — nothing to verify
+
+        monitor = self.conversation_monitors.get(session.proposal.conversation_id)
+        if monitor is None:
+            return None
+
+        local = next(
+            (m for m in monitor.message_history if m.get("msg_index") == index), None
+        )
+        if local is None or local.get("chain_hash") is None:
+            return None  # we simply do not hold that position; not a mismatch
+        if local.get("chain_hash") == expected:
+            return None
+
+        logger.warning(
+            "Refusing vote on %s: history at index %s differs from the proposal's",
+            proposal_id, index,
+        )
+        return {
+            "status": "error",
+            "reason": "history_drift",
+            "based_on_msg_index": index,
+            "message": (
+                f"This proposal was extracted from a different version of the "
+                f"conversation (message #{index} does not match). Voting on it "
+                f"would approve text you are not looking at."
+            ),
+        }
+
     async def vote_knowledge_commit(
         self,
         proposal_id: str,
@@ -506,6 +553,11 @@ class KnowledgeService:
                     session.proposal.entries = rebuilt
                 if summary is not None:
                     session.proposal.summary = summary
+
+
+            drift = self._history_drift(proposal_id)
+            if drift:
+                return drift
 
             success = await self.consensus_manager.cast_vote(
                 proposal_id=proposal_id,
@@ -769,6 +821,34 @@ Respond in JSON format:
                         logger.warning("Could not get agent manager for %s: %s", conversation_id, _e)
             if monitor is None:
                 monitor = self._get_or_create_conversation_monitor(conversation_id)
+
+            # `_extracting` on the monitor clears when the proposal is built,
+            # which is minutes before the vote on it closes. A second extraction
+            # started in that window produces two proposals over overlapping
+            # history, each anchored to a different position — not a stale
+            # proposal but two commits arguing over the same conversation.
+            open_session = next(
+                (
+                    s for s in self.consensus_manager.sessions.values()
+                    if s.proposal.conversation_id == conversation_id
+                    and s.status == "voting"
+                ),
+                None,
+            )
+            if open_session is not None:
+                logger.info(
+                    "Refusing extraction for %s — proposal %s is still being voted on",
+                    conversation_id, open_session.proposal.proposal_id,
+                )
+                return {
+                    "status": "error",
+                    "reason": "vote_in_progress",
+                    "proposal_id": open_session.proposal.proposal_id,
+                    "message": (
+                        "A knowledge commit for this conversation is still being "
+                        "voted on. Finish that vote before extracting again."
+                    ),
+                }
 
             logger.info("End Session - attempting manual extraction for %s", conversation_id)
             logger.info(
