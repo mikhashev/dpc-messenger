@@ -36,25 +36,23 @@
 
 <style>
   .schedule-approval {
+    /* Same corner and offset as ShellApprovalDialog: bottom-right, lifted 80px.
+       That lift is what clears the composer and the Windows watermark, which
+       the OS paints above every window — no z-index reaches it. One approval
+       card should not sit somewhere different from the other. */
     position: fixed;
-    /* Bottom-right is where Windows paints its "Activate Windows" watermark,
-       and that is drawn by the OS above every window — no z-index reaches it.
-       The card sat under it and the text was unreadable, so it moves aside
-       rather than fighting for the same corner. */
-    left: 1rem;
-    bottom: 1rem;
+    bottom: 80px;
+    right: 20px;
     z-index: 1000;
-    width: min(380px, calc(100vw - 2rem));
-    padding: 0.9rem 1rem;
-    border-radius: 10px;
-    /* --panel-bg is defined nowhere; the literal was the only thing painting
-       this. Use the variable the other dialogs use, and keep an opaque
-       fallback so the card never goes translucent. */
+    max-width: 420px;
+    width: min(420px, calc(100vw - 40px));
+    padding: 10px 12px;
+    border-radius: 8px;
     background: var(--bg-secondary, #1e1e2e);
-    border: 1px solid rgba(255, 193, 7, 0.65);
-    box-shadow: 0 8px 28px rgba(0, 0, 0, 0.55);
-    color: var(--text-primary, #f2f2f5);
-    font-size: 0.9rem;
+    border: 1px solid var(--border-warning, #ffc107);
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+    color: var(--text-primary, #cdd6f4);
+    font-size: 0.9em;
   }
   .head { margin-bottom: 0.6rem; }
   .more {
