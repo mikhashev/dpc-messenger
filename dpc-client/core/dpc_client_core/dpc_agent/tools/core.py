@@ -1886,7 +1886,7 @@ def get_tools() -> List[ToolEntry]:
                 }
             },
             handler=update_scratchpad,
-            timeout_sec=_SCHEDULE_APPROVAL_TTL_SECONDS + 30,
+            timeout_sec=10,
             default_enabled=True,
         ),
 
@@ -2087,7 +2087,7 @@ def get_tools() -> List[ToolEntry]:
             # still on screen, and the task landed in the queue anyway because
             # a timed-out tool keeps running in its thread. Derived, not typed,
             # so the two cannot drift apart again.
-            timeout_sec=10,
+            timeout_sec=_SCHEDULE_APPROVAL_TTL_SECONDS + 30,
             default_enabled=False,
         ),
 
