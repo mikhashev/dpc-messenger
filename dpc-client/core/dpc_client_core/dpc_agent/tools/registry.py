@@ -91,6 +91,12 @@ class ToolContext:
     # executor threads can schedule async calls back via asyncio.run_coroutine_threadsafe.
     agent_event_loop: Optional[Any] = None
 
+    # How many check_back wake-ups deep this turn already is. Set by the task
+    # executor from the task record, never from a tool argument — a depth the
+    # model could pass is a depth the model can reset, and then the cap guards
+    # nothing.
+    check_back_depth: int = 0
+
     # ConversationMonitor for knowledge extraction (set by agent_manager)
     conversation_monitor: Optional[Any] = None
 

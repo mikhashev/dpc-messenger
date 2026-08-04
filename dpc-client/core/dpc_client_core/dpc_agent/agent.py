@@ -182,6 +182,9 @@ class DpcAgent:
         on_stream_chunk: Optional[Callable[[str, str], None]] = None,
         session_state: Optional[Dict[str, Any]] = None,
         conversation_monitor: Optional[Any] = None,
+        # How many check_back wake-ups deep this run already is. Only the task
+        # executor sets it; a default of 0 makes an ordinary turn the first.
+        check_back_depth: int = 0,
         # Image parameters for vision queries
         image_base64: Optional[str] = None,
         image_mime: str = "image/png",
@@ -327,6 +330,7 @@ class DpcAgent:
             agent_root=self.agent_root,
             current_task_id=conversation_id,
             current_task_type="chat",
+            check_back_depth=check_back_depth,
             tool_whitelist=allowed_tools,
             emit_progress_fn=emit_progress or (lambda msg, tool=None, rnd=None, tool_calls=None: None),
             firewall=self._firewall,  # For extended sandbox paths
@@ -963,6 +967,32 @@ class DpcAgent:
                     except Exception as e:
                         log.warning("Failed to deliver task result to Telegram: %s", e)
 
+            return result
+        elif task.task_type == "check_back":
+            # A deferred wake-up: unlike `reminder` this runs the model, so the
+            # agent can actually look at what it came back for. The depth rides
+            # on the task record — the tool reads it off the context and refuses
+            # past the cap, which is why the model is never asked for it.
+            text = task.data.get("text") or self._convert_task_data_to_prompt(task.data)
+            reply_conversation_id = task.data.get("_reply_conversation_id") or task.id
+            depth = int(task.data.get("_check_back_depth") or 0)
+
+            result = await self.process(
+                text,
+                conversation_id=reply_conversation_id,
+                dpc_context=task.data.get("dpc_context"),
+                reply_telegram_chat_id=task.data.get("_reply_telegram_chat_id"),
+                check_back_depth=depth,
+            )
+
+            reply_telegram_chat_id = task.data.get("_reply_telegram_chat_id")
+            if reply_telegram_chat_id:
+                send_fn = getattr(self, "_telegram_send_fn", None)
+                if send_fn:
+                    try:
+                        await send_fn(reply_telegram_chat_id, result)
+                    except Exception as e:
+                        log.warning("Failed to deliver check_back result to Telegram: %s", e)
             return result
         elif task.task_type == "reminder":
             # Deliver reminder message directly — no LLM call to prevent scheduling loops

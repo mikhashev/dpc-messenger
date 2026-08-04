@@ -83,6 +83,43 @@ def _build_user_content(task: Dict[str, Any]) -> Any:
     return parts
 
 
+def _deferred_tasks_digest(agent_root: pathlib.Path, *, limit: int = 5) -> Optional[List[Dict[str, Any]]]:
+    """Pending wake-ups this agent has queued for itself, newest deadline first.
+
+    Reads the same file the task queue persists to, so a restart does not make
+    the agent forget what it is waiting on.
+    """
+    try:
+        path = agent_root / "state" / "task_queue.json"
+        if not path.exists():
+            return None
+        data = json.loads(read_text(path)) or {}
+    except Exception:
+        log.debug("Failed to read task queue for context digest", exc_info=True)
+        return None
+
+    pending = [
+        t for t in (data.get("tasks") or [])
+        if isinstance(t, dict) and t.get("status") == "pending"
+    ]
+    if not pending:
+        return None
+    pending.sort(key=lambda t: t.get("scheduled_at") or "")
+    digest = [
+        {
+            "id": t.get("id", ""),
+            "type": t.get("task_type", ""),
+            "due": t.get("scheduled_at") or "as soon as possible",
+            "about": ((t.get("data") or {}).get("text")
+                      or (t.get("data") or {}).get("message") or "")[:120],
+        }
+        for t in pending[:limit]
+    ]
+    if len(pending) > limit:
+        digest.append({"omitted_count": len(pending) - limit})
+    return digest
+
+
 def _build_runtime_section(
     agent_root: pathlib.Path,
     task: Dict[str, Any],
@@ -109,6 +146,14 @@ def _build_runtime_section(
         "agent_root": str(agent_root),
         "task": task_info,
     }
+
+    # What this agent has already asked to be woken up for. Without it the
+    # agent cannot tell that deferring is possible at all — schedule_task was
+    # enabled for a month and used once — and cannot see that the check it is
+    # about to schedule is already queued.
+    deferred = _deferred_tasks_digest(agent_root)
+    if deferred:
+        runtime_data["deferred_tasks"] = deferred
 
     # Budget info from agent state. Shape depends on billing model:
     #   subscription → {"billing": "subscription", "tokens_used_total": N}

@@ -1008,6 +1008,11 @@ def get_dpc_context(ctx: ToolContext, context_type: str = "personal") -> str:
 # Task Queue Tools
 # ---------------------------------------------------------------------------
 
+# How many times an agent may hand itself the next wake-up before it has to
+# report back to the person instead. Three is enough for "still rendering,
+# check again" and short enough that an agent that will never finish says so.
+_CHECK_BACK_MAX_DEPTH = 3
+
 def schedule_task(
     ctx: ToolContext,
     task_type: str,
@@ -1034,7 +1039,7 @@ def schedule_task(
             return "⚠️ Task queue not available"
 
         # Check if task type can be handled
-        builtin_types = {"chat", "improvement", "review", "reminder"}
+        builtin_types = {"chat", "improvement", "review", "reminder", "check_back"}
         custom_handlers = getattr(ctx._agent, '_task_handlers', {})
         if task_type not in builtin_types and task_type not in custom_handlers:
             available = list(builtin_types) + list(custom_handlers.keys())
@@ -1055,6 +1060,39 @@ def schedule_task(
             "low": TaskPriority.LOW,
         }
         task_priority = priority_map.get(priority.lower(), TaskPriority.NORMAL)
+
+        if task_type == "check_back":
+            conv = getattr(ctx, "current_task_id", None)
+            depth = int(getattr(ctx, "check_back_depth", 0) or 0)
+
+            # The cap is on the chain, not on the clock: a person asking again
+            # starts a fresh chain, an agent postponing itself continues one.
+            if depth >= _CHECK_BACK_MAX_DEPTH:
+                return (
+                    f"⚠️ Already came back {depth} time(s) on this chain — the limit is "
+                    f"{_CHECK_BACK_MAX_DEPTH}. Say what is still unfinished and ask the "
+                    f"user to trigger the next check."
+                )
+
+            # One pending wake-up per conversation. Ten queued "check the render"
+            # is the failure this prevents, and it is a different failure from an
+            # endless chain — hence a separate guard, not a bigger counter.
+            queue = getattr(ctx._agent, "queue", None)
+            existing = None
+            for task in getattr(queue, "_queue", []) or []:
+                if task.task_type != "check_back" or task.status != "pending":
+                    continue
+                if (task.data or {}).get("_reply_conversation_id") == conv:
+                    existing = task
+                    break
+            if existing is not None:
+                return (
+                    f"⚠️ A check_back is already queued for this conversation "
+                    f"({existing.id}, due {existing.scheduled_at or 'immediately'}). "
+                    f"Cancel it first if this one should replace it."
+                )
+
+            data["_check_back_depth"] = depth + 1
 
         # Inject reply routing so the executor knows where to send the result.
         # _reply_conversation_id: the conversation that triggered this schedule call,
@@ -1892,17 +1930,17 @@ def get_tools() -> List[ToolEntry]:
             name="schedule_task",
             schema={
                 "name": "schedule_task",
-                "description": "Schedule a task for future or background execution. For custom tasks: 1) First call register_task_type to define execution instructions, 2) Then call schedule_task. For 'chat' tasks: task_data must include 'text' field with the message to process. For reminders: use task_type='reminder' with task_data={\"message\": \"...\"} — this sends the message directly WITHOUT going through the LLM, preventing accidental re-scheduling loops.",
+                "description": "Schedule a task for future or background execution. To come back to your own work later — a render, a build, a long job — use task_type='check_back' with task_data={\"text\": \"what to check and how\"} and delay_seconds: it wakes you up so you can actually look, and answers in this same conversation. You may chain at most 3 of them; after that report what is unfinished and ask the user. Note that 'reminder' does NOT wake you — it only re-sends text, with no LLM, to avoid re-scheduling loops. For custom tasks: 1) First call register_task_type to define execution instructions, 2) Then call schedule_task. For 'chat' tasks: task_data must include 'text' field with the message to process.",
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "task_type": {
                             "type": "string",
-                            "description": "Type of task. Built-in: 'chat' (LLM conversation), 'reminder' (direct message delivery, no LLM — use for notifications/alerts), 'improvement' (self-improvement), 'review' (code review). Custom: any type registered via register_task_type."
+                            "description": "Type of task. Built-in: 'check_back' (wake yourself up later to check on something and answer here — this is the one for 'I'll look again in 20 minutes'), 'chat' (LLM conversation), 'reminder' (direct message delivery, NO LLM — a notification, it cannot check anything), 'improvement' (self-improvement), 'review' (code review). Custom: any type registered via register_task_type."
                         },
                         "task_data": {
                             "type": "string",
-                            "description": "JSON string with task payload. For 'chat' tasks: {\"text\": \"your message here\"}. For 'reminder' tasks: {\"message\": \"reminder text\"}. For custom types: match the input_schema defined in register_task_type."
+                            "description": "JSON string with task payload. For 'check_back' and 'chat' tasks: {\"text\": \"what to do when you wake up\"}. For 'reminder' tasks: {\"message\": \"reminder text\"}. For custom types: match the input_schema defined in register_task_type."
                         },
                         "delay_seconds": {
                             "type": "integer",
