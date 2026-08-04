@@ -243,3 +243,21 @@ def test_the_gate_reads_has_clients_as_a_property():
     src = inspect.getsource(tools_core._await_schedule_approval)
     assert "has_clients()" not in src, "has_clients is a property, not a method"
     assert "has_clients" in src
+
+
+def test_the_tool_outlives_the_wait_it_performs():
+    """A human-in-the-loop gate inside a 10s tool cannot ever be answered.
+
+    Live run: the card was on screen, Mike clicked, the task reached the queue
+    — and the agent had already been told TOOL_TIMEOUT ten seconds in, because
+    a timed-out tool keeps running in its thread while the loop gives up on it.
+    """
+    from dpc_client_core.dpc_agent.tools.core import (
+        _SCHEDULE_APPROVAL_TTL_SECONDS, get_tools,
+    )
+
+    entry = next(e for e in get_tools() if e.name == "schedule_task")
+    assert entry.timeout_sec > _SCHEDULE_APPROVAL_TTL_SECONDS, (
+        f"schedule_task times out after {entry.timeout_sec}s but waits up to "
+        f"{_SCHEDULE_APPROVAL_TTL_SECONDS}s for a person"
+    )
