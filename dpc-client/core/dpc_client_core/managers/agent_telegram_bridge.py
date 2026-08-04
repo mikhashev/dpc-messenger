@@ -1188,6 +1188,18 @@ Send a voice message and it will be transcribed and processed\\.
             log.warning(f"Rate limited event: {event.type.value}")
             return False
 
+        # Second line of defence, and the one that holds for events this bridge
+        # does not own: forward only what came from a conversation Telegram is
+        # actually bound to. A group has no binding, so its content has no
+        # business in a private chat.
+        origin = str((event.data or {}).get("conversation_id") or "")
+        if origin.startswith("group-"):
+            log.debug(
+                "Not forwarding %s from group %s — group chats have no Telegram binding",
+                event.type.value, origin,
+            )
+            return False
+
         log.debug(f"Sending Telegram notification for event: {event.type.value}")
 
         # Format message

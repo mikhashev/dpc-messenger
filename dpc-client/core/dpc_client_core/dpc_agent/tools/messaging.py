@@ -110,6 +110,18 @@ async def send_user_message(ctx: ToolContext, message: str, priority: str = "nor
     if not message or not message.strip():
         return "Error: Message cannot be empty"
 
+    # A group chat has no Telegram binding — that mechanism does not exist yet —
+    # so an agent speaking in one must not reach a Telegram DM. The event used
+    # to carry only agent_id, and the bridge forwards by agent, so a group turn
+    # leaked into a private chat with nothing authorising it. Refuse here and
+    # say why, rather than let the agent believe it messaged anyone.
+    conversation_id = getattr(ctx, "current_task_id", None) or ""
+    if conversation_id.startswith("group-"):
+        return (
+            "Not sent: this is a group chat, and group chats have no Telegram "
+            "binding. Post your message in the conversation instead."
+        )
+
     # Split long messages instead of truncating
     parts = split_message(message)
     num_parts = len(parts)
@@ -127,6 +139,7 @@ async def send_user_message(ctx: ToolContext, message: str, priority: str = "nor
                 message=part_with_indicator,
                 priority=priority,
                 agent_id=ctx.agent_root.name,
+                conversation_id=conversation_id,
             )
 
         result = f"Message sent to user via Telegram (priority: {priority})"
