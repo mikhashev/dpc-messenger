@@ -18,6 +18,13 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 ui_logger = logging.getLogger("dpc_ui")
 
+# Off by default: this logs a line per outbound frame, and the paths it watches
+# are the busy ones (agent progress is fire-and-forget, hundreds per second at
+# browse_page start). Turn on with DPC_DEBUG_WS=1 when chasing corrupted frames
+# — S145 measured 558 of them in 50ms, and the only reason it stayed a guess
+# for a day is that broadcast_event said nothing about itself.
+_DEBUG_WS = os.environ.get("DPC_DEBUG_WS") == "1"
+
 # Local API authentication: a fresh random token is generated on every backend
 # startup and written to ~/.dpc/.ws_token. The frontend reads this file via a
 # Tauri command and presents the token as the first message on each WebSocket
@@ -337,6 +344,7 @@ class LocalApiServer:
             except RuntimeError:
                 here = None
             if here is not owner:
+                self._debug_ws("rerouted from a foreign loop", message)
                 future = asyncio.run_coroutine_threadsafe(
                     self._send_on_owner_loop(client, message), owner
                 )
@@ -371,6 +379,26 @@ class LocalApiServer:
                 "gone — sending unlocked, frames may interleave"
             )
             await client.send(message)
+
+    def _debug_ws(self, what: str, message: str) -> None:
+        """Name an outbound frame: how long it is and which loop wrote it.
+
+        Corruption shows up as two frames overlapping, so the useful facts are
+        size and origin loop — a frame written from a per-call tool loop is the
+        one worth suspecting.
+        """
+        if not _DEBUG_WS:
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+        logger.debug(
+            "WS %s: %d bytes, loop=%s%s, clients=%d, head=%s",
+            what, len(message), id(loop) if loop else None,
+            "" if loop is self._owner_loop else " (FOREIGN)",
+            len(self._clients), message[:60],
+        )
 
     async def _send_on_owner_loop(self, client: WebSocketServerProtocol, message: str) -> None:
         """Take the lock on the loop that owns it, then send."""
@@ -509,6 +537,7 @@ class LocalApiServer:
         if not self._clients:
             return
         message = json.dumps({"event": event_name, "payload": payload})
+        self._debug_ws(f"broadcast {event_name}", message)
         # Send to all clients under per-client locks, but don't fail if one
         # client is disconnected. Locking is required because fire-and-forget
         # broadcast callers (e.g. agent_manager._emit_progress) create

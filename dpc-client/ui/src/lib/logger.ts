@@ -20,8 +20,53 @@ let _sendFn: SendFn | null = null;
 const MAX_BUFFER = 500;
 const _buffer: Array<{ level: LogLevel; context: string; message: string }> = [];
 
+// Relaying a log is itself a WebSocket send, and the backend answers every
+// ui_log with an OK that comes straight back into JSON.parse. So a message
+// that fails to parse produces a send, which produces a reply, which can fail
+// to parse again — a closed loop on the one socket already in trouble. On
+// 2026-08-05 it turned one bad frame into 166,000 errors in twelve seconds and
+// killed the connection, taking the pending approval card with it.
+//
+// Two brakes, because they answer different failures:
+//   * the loop above — never relay a report about the socket being unreadable;
+//   * everything else — a per-second cap, so no future feedback path can
+//     saturate the link before anyone notices.
+const RELAY_MAX_PER_SECOND = 50;
+
+// Substrings of messages that are, by construction, about the relay's own
+// transport. Sending these is what closes the loop.
+const NEVER_RELAY = ['Error parsing message'];
+
+let _windowStartedAt = 0;
+let _windowCount = 0;
+let _suppressedSinceWindow = 0;
+
 function relay(level: LogLevel, context: string, message: string) {
+    if (NEVER_RELAY.some((needle) => message.includes(needle))) return;
+
     if (_sendFn) {
+        const now = Date.now();
+        if (now - _windowStartedAt >= 1000) {
+            // Report what the previous window swallowed, so a throttled flood
+            // leaves a trace instead of looking like silence.
+            const dropped = _suppressedSinceWindow;
+            _windowStartedAt = now;
+            _windowCount = 0;
+            _suppressedSinceWindow = 0;
+            if (dropped > 0) {
+                try {
+                    _sendFn('warn', 'logger',
+                        `suppressed ${dropped} log line(s) in the previous second ` +
+                        `(cap ${RELAY_MAX_PER_SECOND}/s)`);
+                    _windowCount++;
+                } catch { /* ignore */ }
+            }
+        }
+        if (_windowCount >= RELAY_MAX_PER_SECOND) {
+            _suppressedSinceWindow++;
+            return;
+        }
+        _windowCount++;
         try { _sendFn(level, context, message); } catch { /* ignore */ }
     } else {
         if (_buffer.length < MAX_BUFFER) {
