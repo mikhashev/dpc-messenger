@@ -1864,7 +1864,15 @@ PARTICIPANTS' CULTURAL CONTEXTS:
             }
             if "attachments" in msg:
                 exported_msg["attachments"] = msg["attachments"]
-            for field in ("sender_node_id", "sender_name", "sender_type", "agent_owner", "isAgent"):
+            # msg_index and chain_hash are the integrity pair. Dropping them
+            # did more than hide the numbering: the receiver's loader mints a
+            # hash for any message that arrives without one and then reports
+            # "chain integrity verified", so a chain built to detect tampering
+            # in transit was re-blessing whatever came off the wire. The index
+            # travels with it because the hash is computed over it — recomputed
+            # against a positional backfill, it would never match.
+            for field in ("sender_node_id", "sender_name", "sender_type", "agent_owner",
+                          "isAgent", "msg_index", "chain_hash"):
                 if field in msg:
                     exported_msg[field] = msg[field]
             exported.append(exported_msg)
@@ -1899,7 +1907,7 @@ PARTICIPANTS' CULTURAL CONTEXTS:
                 "content": msg.get("content", "")
             }
             for field in ("sender_name", "sender_node_id", "sender_type", "agent_owner",
-                          "timestamp", "id", "isAgent"):
+                          "timestamp", "id", "isAgent", "msg_index", "chain_hash"):
                 if field in msg:
                     imported_msg[field] = msg[field]
             if "attachments" in msg:
@@ -2281,6 +2289,7 @@ PARTICIPANTS' CULTURAL CONTEXTS:
 
             # Backfill msg_index + verify chain_hash (MSG-CHAIN, S105)
             chain_ok = True
+            minted = 0
             prev_hash = "genesis"
             for i, m in enumerate(messages):
                 if "msg_index" not in m:
@@ -2296,10 +2305,24 @@ PARTICIPANTS' CULTURAL CONTEXTS:
                     logger.warning("Chain broken at message #%d (conversation %s)", m["msg_index"], self.conversation_id)
                     chain_ok = False
                 if not stored_hash:
+                    # Writing our own hash here is how a message with none
+                    # becomes indistinguishable from a verified one. Legitimate
+                    # for files written before the chain existed; never a
+                    # verification, so it is counted and said out loud rather
+                    # than folded into the success line below.
                     m["chain_hash"] = expected_hash
+                    minted += 1
                 prev_hash = m.get("chain_hash", "genesis")
-            if chain_ok and any(m.get("chain_hash") for m in messages):
-                logger.info("Chain integrity verified: %d messages OK", len(messages))
+            if minted:
+                logger.warning(
+                    "Chain: minted a hash for %d of %d message(s) that arrived "
+                    "without one (conversation %s) — those are unverified, not verified",
+                    minted, len(messages), self.conversation_id,
+                )
+            verified = len(messages) - minted
+            if chain_ok and verified and any(m.get("chain_hash") for m in messages):
+                logger.info("Chain integrity verified: %d of %d messages OK",
+                            verified, len(messages))
 
             # Check chain anchor for deletion detection (MSG-CHAIN-2, S105)
             meta_path = path.parent / ".chain_meta.json"
