@@ -1070,7 +1070,11 @@ def _await_schedule_approval(ctx, *, task_type: str, when: str, about: str) -> t
     # Learned from the headless web-auth gate: broadcast_event drops the
     # message when nobody is listening, so waiting on an absent UI can only
     # end in a timeout that reads like a human refusal.
-    if not local_api.has_clients():
+    # has_clients is a property, not a method — calling it raised
+    # "'bool' object is not callable" and killed every check_back before it
+    # reached the gate. My own test stubbed it as a lambda, mirroring the
+    # wrong call, so the mistake validated itself.
+    if not local_api.has_clients:
         return False, "no UI client is connected, so nobody could see the request"
 
     request_id = str(uuid.uuid4())[:8]

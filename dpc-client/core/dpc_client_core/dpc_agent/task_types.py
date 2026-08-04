@@ -106,6 +106,23 @@ BUILTIN_TASK_TYPES = {
             "required": ["text"],
         },
     ),
+    "check_back": TaskTypeDefinition(
+        task_type="check_back",
+        description=(
+            "Wake yourself up later to check on something and answer in this "
+            "same conversation — the one for 'I'll look again in 20 minutes'. "
+            "Unlike 'reminder' it runs the model, so you can actually inspect "
+            "the thing. At most 3 in a chain, then report what is unfinished."
+        ),
+        execution_prompt="{text}",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "text": {"type": "string", "description": "What to do when you wake up"},
+            },
+            "required": ["text"],
+        },
+    ),
     "improvement": TaskTypeDefinition(
         task_type="improvement",
         description="Run an improvement cycle on the agent",

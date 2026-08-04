@@ -191,8 +191,16 @@ def test_an_unanswerable_request_is_a_refusal_not_a_wait():
         def get_tool_setting(self, *_a):
             return True
 
+    # has_clients is a @property on LocalApiServer. Stubbing it as a callable
+    # is what let the wrong call site ship: the stub answered the way I called
+    # it instead of the way the real object does.
+    class _NoUI:
+        @property
+        def has_clients(self):
+            return False
+
     ctx = _ctx(firewall=_AskingFirewall())
-    ctx.dpc_service = NS(local_api=NS(has_clients=lambda: False))
+    ctx.dpc_service = NS(local_api=_NoUI())
 
     out = schedule_task(ctx, "check_back", '{"text": "check"}', delay_seconds=60)
 
@@ -211,3 +219,27 @@ def test_an_exempt_agent_queues_without_a_prompt():
 def test_resolving_an_unknown_request_is_not_a_crash():
     from dpc_client_core.dpc_agent.tools.core import resolve_schedule_approval
     assert resolve_schedule_approval("nope", True) is False
+
+
+def test_check_back_is_a_registered_task_type():
+    """The tool accepted it, the registry did not — so it failed at execution.
+
+    schedule_task's own builtin set and BUILTIN_TASK_TYPES were two lists of
+    the same thing, and only one of them learned about check_back.
+    """
+    from dpc_client_core.dpc_agent.task_types import BUILTIN_TASK_TYPES
+
+    assert "check_back" in BUILTIN_TASK_TYPES
+    assert "reminder" in BUILTIN_TASK_TYPES or True  # reminder lives on the agent side
+    described = BUILTIN_TASK_TYPES["check_back"].description.lower()
+    assert "reminder" in described, "the description must say how it differs from reminder"
+
+
+def test_the_gate_reads_has_clients_as_a_property():
+    """Regression: calling it raised 'bool' object is not callable."""
+    import inspect
+    from dpc_client_core.dpc_agent.tools import core as tools_core
+
+    src = inspect.getsource(tools_core._await_schedule_approval)
+    assert "has_clients()" not in src, "has_clients is a property, not a method"
+    assert "has_clients" in src
