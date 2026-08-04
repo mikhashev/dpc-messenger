@@ -378,8 +378,15 @@ class AgentService:
                         entry = {
                             "id": t.get("id", ""),
                             "type": t.get("task_type", "chat"),
+                            # `text` is the field the chat handler actually reads
+                            # (agent.py `_execute_task`), so a task an agent
+                            # deferred for itself had no preview at all — the
+                            # board went blank on exactly the tasks it exists to
+                            # show. `message` stays first: that is what the UI
+                            # scheduling form writes.
                             "preview": (
                                 (t.get("data", {}) or {}).get("message") or
+                                (t.get("data", {}) or {}).get("text") or
                                 (t.get("data", {}) or {}).get("task") or
                                 (t.get("data", {}) or {}).get("prompt") or
                                 ""
