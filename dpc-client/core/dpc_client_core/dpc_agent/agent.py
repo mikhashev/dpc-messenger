@@ -985,6 +985,31 @@ class DpcAgent:
                 check_back_depth=depth,
             )
 
+            # Waking up is only half of coming back: the answer has to land in
+            # the conversation that scheduled it. process() returns the text, it
+            # does not publish it, and in a group there is no other path — the
+            # first live run woke correctly, produced its line, and the agent's
+            # own send_user_message delivered it to Telegram instead, so the
+            # group saw nothing.
+            if reply_conversation_id.startswith("group-") and result:
+                service = getattr(self, "_service", None)
+                sender = getattr(self, "display_name", None) or self.agent_root.name
+                if service is not None:
+                    try:
+                        await service.send_group_agent_message(
+                            group_id=reply_conversation_id,
+                            agent_name=sender,
+                            text=result,
+                        )
+                    except Exception as e:
+                        log.warning("Failed to publish check_back result to %s: %s",
+                                    reply_conversation_id, e)
+                else:
+                    log.warning(
+                        "check_back finished for %s with no service to publish through",
+                        reply_conversation_id,
+                    )
+
             reply_telegram_chat_id = task.data.get("_reply_telegram_chat_id")
             if reply_telegram_chat_id:
                 send_fn = getattr(self, "_telegram_send_fn", None)

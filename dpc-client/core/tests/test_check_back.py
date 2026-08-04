@@ -261,3 +261,78 @@ def test_the_tool_outlives_the_wait_it_performs():
         f"schedule_task times out after {entry.timeout_sec}s but waits up to "
         f"{_SCHEDULE_APPROVAL_TTL_SECONDS}s for a person"
     )
+
+
+@pytest.mark.asyncio
+async def test_a_group_wake_up_publishes_into_that_group():
+    """Waking is half the job — the answer must land where it was scheduled.
+
+    The first live run woke on time and produced its line, and the group saw
+    nothing: process() returns text without publishing it, so the agent's own
+    send_user_message delivered to Telegram instead.
+    """
+    from types import SimpleNamespace as NS
+    from dpc_client_core.dpc_agent.agent import DpcAgent
+
+    published = {}
+
+    class _Service:
+        async def send_group_agent_message(self, group_id, agent_name, text, tool_calls=None):
+            published.update(group_id=group_id, agent_name=agent_name, text=text)
+            return "msg-1"
+
+    agent = DpcAgent.__new__(DpcAgent)
+    agent._service = _Service()
+    agent.display_name = "Ark"
+    agent.agent_root = NS(name="agent_001")
+    agent._task_handlers = {}
+    agent._telegram_send_fn = None
+
+    async def _process(text, conversation_id=None, **_kw):
+        return "check_back сработал, я проснулся сам"
+
+    agent.process = _process
+    agent._convert_task_data_to_prompt = lambda d: ""
+
+    task = NS(
+        id="task-1", task_type="check_back",
+        data={"text": "напиши в чат", "_reply_conversation_id": "group-b88b65076b85",
+              "_check_back_depth": 1},
+    )
+
+    result = await DpcAgent._execute_task(agent, task)
+
+    assert published.get("group_id") == "group-b88b65076b85", "the group was never told"
+    assert published.get("text") == result
+    assert published.get("agent_name") == "Ark"
+
+
+@pytest.mark.asyncio
+async def test_a_one_to_one_wake_up_does_not_go_looking_for_a_group():
+    from types import SimpleNamespace as NS
+    from dpc_client_core.dpc_agent.agent import DpcAgent
+
+    calls = []
+
+    class _Service:
+        async def send_group_agent_message(self, **kw):
+            calls.append(kw)
+
+    agent = DpcAgent.__new__(DpcAgent)
+    agent._service = _Service()
+    agent.display_name = "Ark"
+    agent.agent_root = NS(name="agent_001")
+    agent._task_handlers = {}
+    agent._telegram_send_fn = None
+    agent.process = lambda text, conversation_id=None, **_kw: _answer()
+    agent._convert_task_data_to_prompt = lambda d: ""
+
+    async def _answer():
+        return "done"
+
+    task = NS(id="task-2", task_type="check_back",
+              data={"text": "x", "_reply_conversation_id": "agent_001"})
+
+    await DpcAgent._execute_task(agent, task)
+
+    assert calls == [], "a 1:1 wake-up tried to publish into a group"
