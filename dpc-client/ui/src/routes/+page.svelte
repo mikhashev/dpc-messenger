@@ -811,6 +811,7 @@
   }
 
   function closeCommitDialog() {
+    commitVoteError = "";
     showCommitDialog = false;
     knowledgeCommitProposal.set(null);
   }
