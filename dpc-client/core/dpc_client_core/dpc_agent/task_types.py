@@ -45,6 +45,19 @@ class TaskTypeDefinition:
     created_at: datetime = field(default_factory=datetime.utcnow)
     examples: List[Dict[str, Any]] = field(default_factory=list)
 
+    # May a task of this type be re-run after a restart caught it mid-flight?
+    # False by default and deliberately: a task that reached a side effect
+    # before the crash — a message posted, a command run — repeats it on
+    # replay. The answer belongs next to the type's own definition, so a new
+    # type has to answer it at birth rather than at its first crash. A list
+    # kept somewhere else is the shape that already failed us once, when
+    # schedule_task accepted a type the registry had never heard of.
+    restart_safe: bool = False
+
+    # Ceiling for one execution. A task that stops returning hangs the whole
+    # processor, and every other wake-up behind it, silently.
+    timeout_sec: int = 900
+
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for JSON serialization."""
         return {
@@ -54,6 +67,8 @@ class TaskTypeDefinition:
             "input_schema": self.input_schema,
             "created_at": self.created_at.isoformat() if self.created_at else None,
             "examples": self.examples,
+            "restart_safe": self.restart_safe,
+            "timeout_sec": self.timeout_sec,
         }
 
     @classmethod
@@ -107,6 +122,9 @@ BUILTIN_TASK_TYPES = {
         },
     ),
     "check_back": TaskTypeDefinition(
+        # A duplicated "I came back to look" line is a smaller harm than a
+        # wake-up the person approved and never got.
+        restart_safe=True,
         task_type="check_back",
         description=(
             "Wake yourself up later to check on something and answer in this "

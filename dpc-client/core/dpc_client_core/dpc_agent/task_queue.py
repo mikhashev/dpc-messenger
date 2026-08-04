@@ -34,6 +34,30 @@ log = logging.getLogger(__name__)
 RETRY_BACKOFF_BASE_SEC = 30
 
 
+def _task_type_def(task_type: str):
+    """The registered definition for a type, or None if it is custom/unknown."""
+    try:
+        from .task_types import BUILTIN_TASK_TYPES
+        return BUILTIN_TASK_TYPES.get(task_type)
+    except Exception:  # pragma: no cover — import cycle guard
+        return None
+
+
+def _restart_safe(task_type: str) -> bool:
+    """Whether a type may be repeated after a restart. Unknown types: no."""
+    definition = _task_type_def(task_type)
+    return bool(getattr(definition, "restart_safe", False))
+
+
+def _task_timeout(task_type: str) -> int:
+    definition = _task_type_def(task_type)
+    return int(getattr(definition, "timeout_sec", 0) or DEFAULT_TASK_TIMEOUT_SEC)
+
+
+# Ceiling for a task whose type declares none.
+DEFAULT_TASK_TIMEOUT_SEC = 900
+
+
 class TaskPriority(Enum):
     """Task priority levels."""
     CRITICAL = 0   # User-initiated, immediate
@@ -126,6 +150,7 @@ class TaskQueue:
         try:
             data = json.loads(self.queue_file.read_text(encoding="utf-8"))
             recovered = 0
+            abandoned = 0
             for item in data.get("tasks", []):
                 try:
                     task = Task(**item)
@@ -136,15 +161,37 @@ class TaskQueue:
                     # between the person's approval and the wake-up silently
                     # eats a commitment they agreed to.
                     if task.status == "running":
-                        task.status = "pending"
-                        task.retry_count += 1
-                        task.started_at = None
-                        recovered += 1
+                        # Only a type that declared itself safe to repeat comes
+                        # back. Everything else reached an unknown point before
+                        # the crash — a message may already be posted, a command
+                        # already run — so replaying it silently would trade a
+                        # lost task for a duplicated side effect. Fail it loudly
+                        # instead; that is a worse outcome to nobody and a
+                        # visible one to everybody.
+                        if _restart_safe(task.task_type):
+                            task.status = "pending"
+                            task.retry_count += 1
+                            task.started_at = None
+                            recovered += 1
+                        else:
+                            task.status = "failed"
+                            task.error = (
+                                "interrupted by a restart; this task type is not "
+                                "declared restart_safe, so it was not repeated"
+                            )
+                            task.completed_at = utc_now_iso()
+                            abandoned += 1
                     if task.status == "pending":
                         self._queue.append(task)
                 except Exception as e:
                     log.warning(f"Failed to load task: {e}")
 
+            if abandoned:
+                log.warning(
+                    "%d task(s) were running when the process last stopped and "
+                    "are not restart_safe — marked failed rather than repeated",
+                    abandoned,
+                )
             if recovered:
                 log.warning(
                     "Re-queued %d task(s) that were running when the process last "
@@ -375,8 +422,16 @@ class TaskQueue:
                         self.mark_running(task)
 
                         try:
-                            result = await executor(task)
+                            # Without a ceiling one stuck task holds the whole
+                            # processor forever, and every wake-up behind it
+                            # never fires — with nothing in the log to say so.
+                            limit = _task_timeout(task.task_type)
+                            result = await asyncio.wait_for(executor(task), timeout=limit)
                             self.mark_complete(task, str(result) if result else "")
+                        except asyncio.TimeoutError:
+                            log.error("Task %s exceeded %ds and was abandoned",
+                                      task.id, limit)
+                            self.mark_failed(task, f"timed out after {limit}s")
                         except asyncio.CancelledError:
                             log.info(f"Task {task.id} cancelled during execution")
                             self.mark_failed(task, "Cancelled")
