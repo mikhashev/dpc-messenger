@@ -1178,6 +1178,8 @@
 />
 
 <style>
+  @import "./panels.css";
+
   .voting-notice {
     margin: 0 0 0.5rem;
     padding: 0.5rem 0.75rem;
@@ -1188,6 +1190,4 @@
     font-size: 0.85rem;
     line-height: 1.35;
   }
-
-  @import "./panels.css";
 </style>
