@@ -16,7 +16,7 @@ import json
 import logging
 import uuid
 from dataclasses import dataclass, field, asdict
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from enum import Enum
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional
@@ -27,6 +27,11 @@ if TYPE_CHECKING:
     pass
 
 log = logging.getLogger(__name__)
+
+# First retry waits this long, each further one doubles it. Long enough for a
+# rate limit or a flapping provider to clear, short enough that a transient
+# failure does not park a task for the evening.
+RETRY_BACKOFF_BASE_SEC = 30
 
 
 class TaskPriority(Enum):
@@ -120,15 +125,31 @@ class TaskQueue:
 
         try:
             data = json.loads(self.queue_file.read_text(encoding="utf-8"))
+            recovered = 0
             for item in data.get("tasks", []):
                 try:
                     task = Task(**item)
-                    # Only load pending tasks
+                    # A task caught mid-execution by a restart used to vanish:
+                    # mark_running persists status="running", and only "pending"
+                    # was re-admitted here — no retry, no failure record, no
+                    # trace on the board. With check_back that means a restart
+                    # between the person's approval and the wake-up silently
+                    # eats a commitment they agreed to.
+                    if task.status == "running":
+                        task.status = "pending"
+                        task.retry_count += 1
+                        task.started_at = None
+                        recovered += 1
                     if task.status == "pending":
                         self._queue.append(task)
                 except Exception as e:
                     log.warning(f"Failed to load task: {e}")
 
+            if recovered:
+                log.warning(
+                    "Re-queued %d task(s) that were running when the process last "
+                    "stopped — they are retried, not lost", recovered,
+                )
             log.info(f"Loaded {len(self._queue)} pending tasks from disk")
         except Exception as e:
             log.error(f"Failed to load task queue: {e}")
@@ -295,7 +316,18 @@ class TaskQueue:
 
         if task.retry_count < task.max_retries:
             task.status = "pending"
-            log.warning(f"Task {task.id} failed, will retry ({task.retry_count}/{task.max_retries}): {error[:200]}")
+            # The module docstring promised exponential backoff and there was
+            # none: the one-second poll picked the task straight back up, three
+            # times, then dropped it. A failure that needs a moment to clear
+            # never got one.
+            delay = RETRY_BACKOFF_BASE_SEC * (2 ** (task.retry_count - 1))
+            task.scheduled_at = (
+                datetime.now(timezone.utc) + timedelta(seconds=delay)
+            ).isoformat()
+            log.warning(
+                f"Task {task.id} failed, retry {task.retry_count}/{task.max_retries} "
+                f"in {delay}s: {error[:200]}"
+            )
         else:
             task.status = "failed"
             task.completed_at = utc_now_iso()
