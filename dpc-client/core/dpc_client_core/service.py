@@ -3848,6 +3848,18 @@ class CoreService:
 
     # --- Shell approval (ADR-030 v2) ---
 
+    async def resolve_schedule_approval(self, request_id: str, approved: bool) -> Dict[str, Any]:
+        """Answer an agent's request to queue a deferred wake-up.
+
+        The decision is taken before anything enters the queue, so the person
+        sees what was planned and for when rather than discovering it later.
+        """
+        from .dpc_agent.tools.core import resolve_schedule_approval as _resolve
+
+        if _resolve(request_id, approved):
+            return {"status": "success", "request_id": request_id, "approved": bool(approved)}
+        return {"status": "error", "message": f"Unknown or expired request_id: {request_id}"}
+
     async def shell_approve_command(self, request_id: str, add_to_whitelist: bool = False) -> Dict[str, Any]:
         """Approve a Tier 1 shell command.
 

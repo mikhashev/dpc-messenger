@@ -15,7 +15,14 @@ from dpc_client_core.dpc_agent.tools.core import _CHECK_BACK_MAX_DEPTH, schedule
 CONV = "group-work"
 
 
-def _ctx(depth=0, queued=()):
+class _NoApproval:
+    """Firewall stub for an agent exempted from the queue gate."""
+
+    def get_tool_setting(self, _profile, _tool, _key):
+        return False
+
+
+def _ctx(depth=0, queued=(), firewall=None):
     queue = SimpleNamespace(_queue=list(queued))
     scheduled = []
 
@@ -32,6 +39,7 @@ def _ctx(depth=0, queued=()):
     return SimpleNamespace(
         _agent=agent, current_task_id=CONV, check_back_depth=depth,
         reply_telegram_chat_id=None, _scheduled=scheduled,
+        firewall=firewall if firewall is not None else _NoApproval(),
     )
 
 
@@ -143,3 +151,50 @@ def test_the_executor_passes_the_depth_through():
 
     proc = inspect.getsource(DpcAgent.process)
     assert "check_back_depth=check_back_depth" in proc, "depth never reaches ToolContext"
+
+
+# ── the approval gate ───────────────────────────────────────────────────
+# Mike: approval happens before anything enters the queue, so a person sees
+# what was planned and for when. Fail-closed by construction.
+
+
+def test_by_default_an_agent_must_ask_before_queueing():
+    """No firewall opinion means ask — a new agent is not silently autonomous."""
+    ctx = _ctx(firewall=None)
+    ctx.firewall = None  # nothing configured at all
+    ctx.dpc_service = None
+
+    out = schedule_task(ctx, "check_back", '{"text": "check"}', delay_seconds=60)
+
+    assert out.startswith("⚠️")
+    assert not ctx._scheduled, "queued without anyone approving"
+
+
+def test_an_unanswerable_request_is_a_refusal_not_a_wait():
+    """The headless web-auth lesson: broadcasting to nobody can only time out."""
+    from types import SimpleNamespace as NS
+
+    class _AskingFirewall:
+        def get_tool_setting(self, *_a):
+            return True
+
+    ctx = _ctx(firewall=_AskingFirewall())
+    ctx.dpc_service = NS(local_api=NS(has_clients=lambda: False))
+
+    out = schedule_task(ctx, "check_back", '{"text": "check"}', delay_seconds=60)
+
+    assert "no UI client is connected" in out
+    assert not ctx._scheduled
+
+
+def test_an_exempt_agent_queues_without_a_prompt():
+    ctx = _ctx()  # _NoApproval stub
+
+    out = schedule_task(ctx, "check_back", '{"text": "check"}', delay_seconds=60)
+
+    assert out.startswith("✓")
+
+
+def test_resolving_an_unknown_request_is_not_a_crash():
+    from dpc_client_core.dpc_agent.tools.core import resolve_schedule_approval
+    assert resolve_schedule_approval("nope", True) is False

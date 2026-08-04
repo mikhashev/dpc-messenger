@@ -1013,6 +1013,102 @@ def get_dpc_context(ctx: ToolContext, context_type: str = "personal") -> str:
 # check again" and short enough that an agent that will never finish says so.
 _CHECK_BACK_MAX_DEPTH = 3
 
+# How long a queue request waits for a person. Shorter than the shell gate:
+# nothing is blocked meanwhile, and an unanswered "wake me in 20 minutes" is
+# better refused than left hanging.
+_SCHEDULE_APPROVAL_TTL_SECONDS = 60
+
+# request_id -> {"event": threading.Event, "approved": bool}
+_pending_schedule_approvals: dict = {}
+
+
+def _schedule_needs_approval(ctx) -> bool:
+    """Whether this agent must ask before queueing a wake-up.
+
+    Default is to ask. A fully trusted agent can be exempted by setting
+    `schedule_approval: false` in its firewall profile — the same shape as the
+    shell gate, so there is one idea to learn rather than two.
+    """
+    firewall = getattr(ctx, "firewall", None)
+    if firewall is None:
+        return True
+    getter = getattr(firewall, "get_tool_setting", None)
+    if getter is None:
+        return True
+    try:
+        agent_obj = getattr(ctx, "_agent", None)
+        profile = getattr(agent_obj, "_firewall_profile", None)
+        value = getter(profile, "schedule_task", "approval_required")
+    except Exception:
+        return True
+    return True if value is None else bool(value)
+
+
+def _await_schedule_approval(ctx, *, task_type: str, when: str, about: str) -> tuple:
+    """Ask the person before anything enters the queue.
+
+    The point is not to guard execution — check_back runs the agent's own
+    words — but to make sure a human sees what was planned and for when,
+    before it is planned. Returns (approved, reason).
+    """
+    import threading
+    import uuid
+
+    dpc_service = getattr(ctx, "dpc_service", None)
+    local_api = getattr(dpc_service, "local_api", None) if dpc_service else None
+    if local_api is None:
+        return False, "no UI channel is available to ask for approval"
+    # Learned from the headless web-auth gate: broadcast_event drops the
+    # message when nobody is listening, so waiting on an absent UI can only
+    # end in a timeout that reads like a human refusal.
+    if not local_api.has_clients():
+        return False, "no UI client is connected, so nobody could see the request"
+
+    request_id = str(uuid.uuid4())[:8]
+    event = threading.Event()
+    _pending_schedule_approvals[request_id] = {"event": event, "approved": False}
+
+    agent_obj = getattr(ctx, "_agent", None)
+    payload = {
+        "request_id": request_id,
+        "task_type": task_type,
+        "when": when,
+        "about": about,
+        "conversation_id": getattr(ctx, "current_task_id", None),
+        "agent_name": getattr(agent_obj, "display_name", "Agent"),
+    }
+    try:
+        import asyncio
+        coro = local_api.broadcast_event("schedule_approval_request", payload)
+        main_loop = getattr(ctx, "_event_loop", None)
+        if main_loop and main_loop.is_running():
+            asyncio.run_coroutine_threadsafe(coro, main_loop)
+        else:
+            _pending_schedule_approvals.pop(request_id, None)
+            return False, "no running event loop to deliver the approval request"
+    except Exception as e:
+        _pending_schedule_approvals.pop(request_id, None)
+        return False, f"could not deliver the approval request: {e}"
+
+    signaled = event.wait(timeout=_SCHEDULE_APPROVAL_TTL_SECONDS)
+    entry = _pending_schedule_approvals.pop(request_id, None)
+    if not signaled or entry is None:
+        return False, f"nobody answered within {_SCHEDULE_APPROVAL_TTL_SECONDS}s"
+    if not entry.get("approved"):
+        return False, "the user declined"
+    return True, ""
+
+
+def resolve_schedule_approval(request_id: str, approved: bool) -> bool:
+    """Answer a pending queue request. Called from the WebSocket API."""
+    entry = _pending_schedule_approvals.get(request_id)
+    if entry is None:
+        return False
+    entry["approved"] = bool(approved)
+    entry["event"].set()
+    return True
+
+
 def schedule_task(
     ctx: ToolContext,
     task_type: str,
@@ -1093,6 +1189,19 @@ def schedule_task(
                 )
 
             data["_check_back_depth"] = depth + 1
+
+            # Mike, 2026-08-04: the person approves before anything enters the
+            # queue — "чтобы человек явно видел что там запланировано и на
+            # когда". Fail-closed: an unanswered or undeliverable request is a
+            # refusal, never a silent schedule.
+            if _schedule_needs_approval(ctx):
+                when = f"in {delay_seconds}s" if delay_seconds else "immediately"
+                about = str(data.get("text") or data.get("message") or "")[:200]
+                approved, reason = _await_schedule_approval(
+                    ctx, task_type=task_type, when=when, about=about,
+                )
+                if not approved:
+                    return f"⚠️ check_back was not scheduled — {reason}."
 
         # Inject reply routing so the executor knows where to send the result.
         # _reply_conversation_id: the conversation that triggered this schedule call,

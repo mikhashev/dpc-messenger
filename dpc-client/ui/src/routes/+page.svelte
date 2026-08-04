@@ -15,6 +15,7 @@
   import InstructionsEditor from "$lib/components/InstructionsEditor.svelte";
   import FirewallEditor from "$lib/components/FirewallEditor.svelte";
   import ProvidersEditor from "$lib/components/ProvidersEditor.svelte";
+  import ScheduleApprovalDialog from "$lib/components/ScheduleApprovalDialog.svelte";
   import ProviderSelector from "$lib/components/ProviderSelector.svelte";
   import Toast from "$lib/components/Toast.svelte";
   import ChatMessageList from "$lib/components/ChatMessageList.svelte";
@@ -1279,6 +1280,8 @@
 />
 
 <!-- Knowledge Architecture UI Components -->
+<ScheduleApprovalDialog />
+
 <KnowledgeCommitDialog
   bind:open={showCommitDialog}
   proposal={$knowledgeCommitProposal}

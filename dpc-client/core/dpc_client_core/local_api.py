@@ -175,6 +175,7 @@ ALLOWED_COMMANDS: frozenset = frozenset({
     "web_auth_approve_headless",
     "web_auth_reject_headless",
     # Shell approval (ADR-030 v2)
+    "resolve_schedule_approval",
     "shell_approve_command",
     "shell_reject_command",
     "shell_add_to_whitelist",

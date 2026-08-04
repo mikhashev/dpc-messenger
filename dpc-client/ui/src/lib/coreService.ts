@@ -783,6 +783,11 @@ export async function connectToCoreService() {
                     console.error(`[ERROR TOAST] ${title}: ${toastMessage}`);
                 }
 
+                else if (message.event === "schedule_approval_request") {
+                    console.log("Schedule approval request:", message.payload);
+                    const { pendingScheduleApprovals } = await import("$lib/services/scheduleApproval");
+                    pendingScheduleApprovals.update((list: any[]) => [...list, message.payload]);
+                }
                 // Shell approval events (ADR-030 v2)
                 else if (message.event === "shell_approval_request") {
                     console.log("Shell approval request:", message.payload);
