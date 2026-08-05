@@ -2,27 +2,36 @@ version: 2
 
 # Python deps are managed by uv; uv.lock is gitignored (platform-specific,
 # ADR-012), so Dependabot resolves the graph from each pyproject.toml.
+#
+# target-branch is dev because that is where the work is. Without it these
+# pull requests land on main, which trails dev by a hundred commits — the
+# dependency change and the code it has to build against end up on different
+# branches, and reconciling that costs more than the update is worth.
 updates:
   - package-ecosystem: "pip"
     directory: "/dpc-hub"
+    target-branch: "dev"
     schedule:
       interval: "weekly"
     open-pull-requests-limit: 5
 
   - package-ecosystem: "pip"
     directory: "/dpc-client/core"
+    target-branch: "dev"
     schedule:
       interval: "weekly"
     open-pull-requests-limit: 5
 
   - package-ecosystem: "pip"
     directory: "/dpc-protocol"
+    target-branch: "dev"
     schedule:
       interval: "weekly"
     open-pull-requests-limit: 5
 
   - package-ecosystem: "npm"
     directory: "/dpc-client/ui"
+    target-branch: "dev"
     schedule:
       interval: "weekly"
     open-pull-requests-limit: 5
