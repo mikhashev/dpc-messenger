@@ -1918,8 +1918,12 @@ PARTICIPANTS' CULTURAL CONTEXTS:
                 "id": msg.get("id"),  # Preserve ID so merge_history can deduplicate
                 "role": msg["role"],
                 "content": msg["content"],
-                "timestamp": msg.get("timestamp", datetime.now(timezone.utc).isoformat()),
             }
+            # Absent stays absent. Substituting "now" here invented a value for
+            # a field the signature covers, so the receiver recomputed a
+            # different hash and rejected an untouched message as tampered.
+            if msg.get("timestamp"):
+                exported_msg["timestamp"] = msg["timestamp"]
             if "attachments" in msg:
                 exported_msg["attachments"] = msg["attachments"]
             # msg_index and chain_hash are the integrity pair. Dropping them
@@ -1933,8 +1937,13 @@ PARTICIPANTS' CULTURAL CONTEXTS:
             # them merge_history's verification branch was unreachable: the
             # export stripped exactly the fields the check reads, so no message
             # arriving this way was ever verified.
+            # msg_index and chain_hash are deliberately absent: both describe
+            # this node's copy, not the message, and the receiver recomputes
+            # them for its own. Sending them made the receiver's chain break on
+            # every load, and they never verified anything on the far side
+            # because the hash covers `role`, which differs by reader.
             for field in ("sender_node_id", "sender_name", "sender_type", "agent_owner",
-                          "isAgent", "msg_index", "chain_hash"):
+                          "isAgent"):
                 if field in msg:
                     exported_msg[field] = msg[field]
             # Signature fields travel only when they were made over the current
@@ -1978,9 +1987,13 @@ PARTICIPANTS' CULTURAL CONTEXTS:
                 "content": msg.get("content", "")
             }
             for field in ("sender_name", "sender_node_id", "sender_type", "agent_owner",
-                          "timestamp", "id", "isAgent", "msg_index", "chain_hash"):
+                          "timestamp", "id", "isAgent",
+                          "content_hash", "signature", "signer_node_id",
+                          "preimage_version", "verification"):
                 if field in msg:
                     imported_msg[field] = msg[field]
+            # msg_index and chain_hash are this node's, not the sender's.
+            imported_msg = self._chain_locally(imported_msg)
             if "attachments" in msg:
                 imported_msg["attachments"] = self._remap_attachment_paths(msg["attachments"])
             self.message_history.append(imported_msg)
@@ -2010,14 +2023,6 @@ PARTICIPANTS' CULTURAL CONTEXTS:
             # Add to both extraction buffers
             self.message_buffer.append(message_obj)
             self.full_conversation.append(message_obj)
-
-        # A peer that predates the export fix sends no msg_index, and the UI
-        # renders a number only when there is one. The loader backfills on the
-        # next read from disk, which is too late: the history broadcast that
-        # follows this import is what the user is looking at.
-        for i, m in enumerate(self.message_history):
-            if "msg_index" not in m:
-                m["msg_index"] = i + 1
 
         logger.info(f"Imported {len(messages)} messages into all conversation buffers")
 
@@ -2546,6 +2551,35 @@ PARTICIPANTS' CULTURAL CONTEXTS:
             logger.debug(f"Rebuilt extraction buffers: added {added} historical messages for {self.conversation_id}")
         return added
 
+    def _chain_locally(self, message: Dict[str, Any]) -> Dict[str, Any]:
+        """Give an arriving message this node's index and chain hash.
+
+        `chain_hash` covers `msg_index`, `prev_hash` and `role` — a position in
+        this node's sequence, the hash before it, and a rendering that differs
+        by reader. None of the three is a property of the message, so a chain
+        cannot be shared between nodes: measured across three holding an
+        identical nine messages, all three tips differed.
+
+        It was carried across the wire (d40eea6d) to catch tampering in
+        transit. The author's signature does that now, keyed to the author and
+        computed over fields every reader agrees on — so the chain goes back to
+        the one job it can do: detecting a local file edited underneath us.
+        """
+        chained = {k: v for k, v in message.items()
+                   if k not in ("msg_index", "chain_hash")}
+
+        prev_index = max((m.get("msg_index", 0) for m in self.message_history), default=0)
+        chained["msg_index"] = prev_index + 1 if self.message_history else 1
+
+        prev_hash = self.message_history[-1].get("chain_hash", "genesis") if self.message_history else "genesis"
+        chain_input = (
+            f"{chained['msg_index']}|{chained.get('id', '')}|{chained.get('role', '')}"
+            f"|{chained.get('sender_name', '')}|{chained.get('content', '')}"
+            f"|{chained.get('timestamp', '')}|{prev_hash}"
+        )
+        chained["chain_hash"] = hashlib.sha256(chain_input.encode("utf-8")).hexdigest()
+        return chained
+
     def add_message_with_id(self, message: Dict[str, Any]) -> bool:
         """Add a message to history with duplicate detection
 
@@ -2571,8 +2605,11 @@ PARTICIPANTS' CULTURAL CONTEXTS:
         if msg_id:
             self.message_ids.add(msg_id)
 
-        # Add to history
-        self.message_history.append(message)
+        # Add to history, re-chained for this node. A foreign index and hash
+        # appended verbatim broke the local chain permanently: the loader
+        # recomputes what it expects from the local sequence, finds the
+        # imported values, and logs "Chain broken" on every load ever after.
+        self.message_history.append(self._chain_locally(message))
         self._history_dirty = True
 
         return True
