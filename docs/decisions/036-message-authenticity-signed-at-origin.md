@@ -40,12 +40,12 @@ Three further holes sit in `merge_history()`:
    logs at DEBUG and accepts.
 
 Two external reviewers then found, independently, that all of that is moot on
-the real path: `export_history()` ships a whitelist of seven fields and
-`content_hash` / `signature` / `signer_node_id` are not among them, so the
-verification branch has never executed for a message arriving through
-`GROUP_HISTORY_RESPONSE`. And `~/.dpc/peers/` was never written by any code
-path — the directory did not exist — so `verify_signature` could only ever
-answer `None`.
+the real path: `export_history()` ships a whitelist of twelve fields — five
+unconditional and seven conditional — and `content_hash` / `signature` /
+`signer_node_id` are not among them, so the verification branch has never
+executed for a message arriving through `GROUP_HISTORY_RESPONSE`. And
+`~/.dpc/peers/` was never written by any code path — the directory did not
+exist — so `verify_signature` could only ever answer `None`.
 
 Two properties that do hold, and that bound the severity:
 
@@ -61,6 +61,26 @@ But in a star topology `group_handler` relays a payload verbatim, and the
 receiving node takes the author from the transport — so a message authored by
 B and relayed by A is recorded on C as A's. Attribution is already wrong there,
 before any of this is fixed.
+
+## Threat Model
+
+Named because the value of this fix is a function of it, and without it the
+fix reads as more than it is.
+
+**In scope.** An active participant of the group holding a valid key, and a
+relaying or compromised node. Concretely: A hands D a history in which what B
+said has been rewritten, and D catches it by checking B's certificate; or C
+receives B's message through A and attributes it to B rather than to A.
+
+**Out of scope — and this is the honest boundary.** The operator of a node
+against their own node. `~/.dpc/node.key` is an unencrypted PEM
+(`load_pem_private_key(..., password=None)`), so an operator re-signs anything
+of their own trivially. Nothing here changes that, and nothing here should be
+read as claiming it does. Protecting a key from its owner's machine is a
+different problem.
+
+So the whole value is **cross-node attribution**: what a second node can prove
+about what a first one says a third one said.
 
 ## Decision Drivers
 
@@ -98,10 +118,37 @@ Concretely:
    immediately undone by storage.
 5. **Relaying stays; attribution moves to the signature.** The author is taken
    from the signed payload, not from the socket. `signer_node_id` must equal
-   `sender_node_id`.
+   `sender_node_id` — an invariant of v1 only: ADR-037 P3 introduces delegated
+   agent keys, and at that point the check becomes validation of a delegation
+   chain rather than equality. An unsigned message on a relay path is never
+   attributed to the `sender_node_id` it claims; it is either attributed to the
+   transport peer or shown as "claimed X, unverified".
 6. **Unverifiable is not the same as invalid.** `None` and absent fields mark a
    message `unverified` / `legacy`; only a *wrong* signature is rejected.
    Enforcement turns on per group once every member advertises support.
+
+### Gates on enforcement
+
+Enforcement is the irreversible half, and three things must be settled before
+it is switched on for any group. They are gates, not wishes.
+
+- **The roster must be trustworthy, or enforcement is defeated by it.** With an
+  ungated roster, any connected peer adds a phantom member; the phantom never
+  advertises support; the group is pinned in the soft phase indefinitely, and
+  the soft phase is where unsigned injection lives. Closed by `4d3b7442`
+  (GROUP_SYNC accepted only from a current member) — recorded here because
+  enforcement depends on it, not because it belongs to this ADR.
+- **Q1 must be measured, not reasoned.** This ADR decides relay attribution
+  from reading code, and says so. Enforcement waits until a three-node star has
+  actually run.
+- **Q5 must be decided.** `verify_signature` ignores the certificate validity
+  window. Enforcement plus a later expiry check retroactively rejects the whole
+  corpus — a deterministic consequence of two decisions, not a someday risk.
+
+Where the advertised capability lives is itself undecided (Q6). It is not a
+wire field this project already has: DPTP has no capability negotiation at all.
+Calling this "a wire format change" understates it — it is a negotiation
+mechanism that does not exist yet.
 
 ### Rationale
 
@@ -203,7 +250,13 @@ handshake. Both reviewers converged on flag-not-reject independently.
   those cannot be repaired (no way to recover an author's signature after the
   fact) and stay `legacy` forever.
 - **Neutral:** stored `content_hash` values change format; nothing reads them
-  today, which is what makes the change cheap now and expensive later.
+  on any reachable path today — `merge_history` does read the field, but that
+  branch is dead because the export strips it — which is what makes the change
+  cheap now and expensive later.
+- **Neutral:** `role` is deliberately outside the preimage although the old
+  `chain_hash` covered it: per ADR-031 `role` is a per-reader rendering, not a
+  property of the message, so signing it would bind a message to one reader's
+  view of it.
 - **Neutral:** verification states must reach the UI, or the cryptography
   changes nobody's decisions.
 
@@ -223,10 +276,34 @@ handshake. Both reviewers converged on flag-not-reject independently.
       preimage; verified on all three platforms, not only Windows.
 - [ ] A peer certificate whose public key does not hash to the claimed
       `node_id` is refused by the store.
+- [ ] A signed message from room X, placed inside a `GROUP_HISTORY_RESPONSE`
+      for room Y, is rejected — the verifier recomputes the preimage with the
+      `conversation_id` of the **destination monitor**, never the one carried in
+      the message.
+- [ ] The same instant at different clock precisions (milliseconds,
+      microseconds, nanoseconds) canonicalises to one preimage.
+- [ ] In a strict group, a message with no signature fields from a member that
+      **did** advertise support is `unverified`; from a member that did not, it
+      is `legacy`. The two are distinguishable — otherwise imitating an old
+      node is the cheapest attack of the rollout.
+- [ ] A member without the capability joining a strict group downgrades the
+      group predictably or is refused entry — never silently both modes at once.
 - [ ] Two nodes running the new code exchange a group message and both show it
       `verified` — observed in production, not only in tests.
 
 ## Scope
+
+**Ordered, because two of these must land before the first signature exists.**
+
+1. `dpc-client/core/dpc_client_core/service.py` — normalise `sender_name`
+   (derive from the group / HELLO instead of the literal `"User"` at `:4516`)
+   and `agent_owner` (node_id everywhere; today the monitor stores a node_id at
+   `:4806` and the wire carries a display name at `:4824`). **Before signing
+   starts.** Both fields are inside the preimage: sign first and the author's
+   node signs one value while storing another, so its own `export_history`
+   ships a history that fails to verify against its own signature — honest
+   messages rejected on the first sync.
+2. Everything below, in any order.
 
 - `dpc-protocol/dpc_protocol/message_signing.py` — canonical preimage (new)
 - `dpc-protocol/dpc_protocol/commit_integrity.py` — re-derive identity when
@@ -239,16 +316,30 @@ handshake. Both reviewers converged on flag-not-reject independently.
 - `dpc-client/core/dpc_client_core/conversation_monitor.py` — accept supplied
   signature fields in `add_message`; export them in `export_history`; four
   checks in `merge_history`
+- `dpc-client/core/dpc_client_core/p2p_manager.py` — emit an event when a peer
+  certificate is first cached, so messages parked as `unverified` are
+  re-verified rather than staying that way forever
 - `dpc-client/ui/src/lib/panels/ChatPanel.svelte` — verified / legacy /
   unverified
 - `specs/dptp_v1.md` §4.1 — the format
+- Tests: cross-platform preimage determinism
+  (`dpc-protocol/tests/test_message_preimage.py`, exists); a star-topology
+  integration test for relay attribution (does not exist — Q1 cannot be closed
+  without it)
 
 ## Implementation Status
+
+**Nothing is signed on the wire yet.** The two Done rows are plumbing that
+changes no behaviour on its own: a certificate store that can now answer, and a
+preimage nobody computes at send time. Read the table as "the parts exist", not
+as "signatures are travelling".
 
 | Task | Status | Commit |
 |------|--------|--------|
 | Persist the peer certificate the handshake proved | Done | `73a48a20` |
 | Canonical preimage + spec §4.1 | Done | `634e13e1` |
+| Roster gate — precondition for enforcement | Done | `4d3b7442` |
+| Normalise `sender_name` / `agent_owner` (before signing) | Pending | — |
 | Sign at send; fields into `GROUP_TEXT` | Pending | — |
 | Verify on receive; stop re-signing on store | Pending | — |
 | Author from the signed payload (relay) | Pending | — |
@@ -263,9 +354,16 @@ handshake. Both reviewers converged on flag-not-reject independently.
   third node has been stood up. — @Mike / @CC
 - **Q2:** ~~Per-author feeds (Option D) — own ADR, or folded in later?~~ Answered:
   [ADR-037](037-author-attribution-chains.md), phased, and not called feeds.
-- **Q3:** `import_history` on the private-chat path (`chat_history_handlers.py`)
-  replaces local history wholesale with no verification. Delete the path or
-  bring it under the same rules? — @CC
+- **Q3:** `import_history` still replaces a conversation wholesale, though a
+  reply is now only accepted against a request we made (`4d3b7442`). Delete the
+  path or bring it under the same verification rules? Owned by ADR-037 phase β,
+  where the rest of history sync lives. — @CC
+- **Q6:** Where does an advertised capability live, and what carries it? DPTP
+  has no negotiation mechanism at all. Enforcement is blocked on this having an
+  answer — including what happens to a strict group when a member without the
+  capability joins, and where the observed capability persists (peer cache?
+  group metadata?) given that HELLO is per-connection and members go offline.
+  — @Ark
 - **Q4:** What clears a divergence flag after a merge that legitimately added
   nothing? — @Ark
 - **Q5:** Certificate expiry: `verify_signature` loads a certificate without
@@ -282,7 +380,9 @@ handshake. Both reviewers converged on flag-not-reject independently.
 ## References
 
 - `specs/dptp_v1.md` §4.1 — canonical preimage
-- `ideas/dpc-research/group-auth-review-prompt.md` — the review prompt (v3)
+- `ideas/dpc-research/group-auth-review-prompt.md` — the review prompt (v4)
+- `ideas/dpc-research/adr-036-signed-at-origin-review-glm52.md`,
+  `ideas/dpc-research/adr-036-037-review-fable5.md` — reviews of this ADR
 - `ideas/dpc-research/group-auth-review-response-fable5.md` — Fable 5 review
 - `REVIEW-GLM-5.2-group-authenticity.md` — GLM 5.2 review
 - `73a48a20`, `634e13e1` — implemented steps

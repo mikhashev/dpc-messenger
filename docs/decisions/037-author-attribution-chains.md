@@ -100,6 +100,17 @@ counter is exactly the quantity whose absence the argument is built on. So α/β
 do not separate as cleanly as claimed: in the one property where γ is not
 replaceable, the proposed substitute is γ under another name.
 
+And it is weaker than that, on a second axis Fable 5 supplied: **the substitute
+catches only those who agree to be caught.** Deriving an id from a counter is a
+sender-side convention, and an equivocator simply issues two unrelated random
+ids for the two versions — no collision, no detection. To make the convention
+binding, the receiver must verify `id = H(author, room, seq)`, which requires
+`seq` to be on the wire and checkable. At that point the substitute is not γ
+renamed, it *is* γ. In γ proper the counter is mandatory and contiguous, so
+equivocation is forced to collide. Worse still today: even an honest collision
+would be dropped in silence — `add_message_with_id` sees a duplicate `id`,
+logs at DEBUG, and never compares content.
+
 What survives from GLM's argument, and it is the important part: γ buys
 provable equivocation **where a witness exists**, and nothing where none does.
 That is not an argument against γ; it is the argument for pairing it with
@@ -175,34 +186,80 @@ within a room.
 
 ## Confirmation
 
-- [ ] Two nodes holding identical messages in different arrival order report
-      **no** divergence — measured on the live pair, not only in tests.
-- [ ] A merge that legitimately adds nothing clears the divergence flag.
-- [ ] "Chain broken" disappears from a normal session log after β.
-- [ ] `history_hash` no longer depends on arrival order — the same message set
-      in two orders produces the same digest.
-- [ ] A node holding only heads (no bodies) detects a fork presented to it.
-- [ ] A layer without witnesses is labelled *unwitnessed* in the UI rather than
-      showing the same badge as a witnessed one.
-- [ ] No document or identifier in the codebase calls this a "feed".
+Each criterion carries the phase it belongs to. Without the tags the list is
+unpassable by any accepted phase — β could be delivered in full and the sheet
+would stay red on γ items, which turns a compliance test into a wish list.
 
-## Scope
+- [ ] **[β]** Two nodes holding identical messages in different arrival order
+      report **no** divergence — measured on the live pair, not only in tests.
+- [ ] **[β]** A merge that legitimately adds nothing clears the divergence flag.
+- [ ] **[β]** "Chain broken" disappears from a normal session log.
+- [ ] **[β]** `history_hash` no longer depends on arrival order — the same
+      message set in two orders produces the same digest.
+- [ ] **[β]** A message that arrives without a chain hash stays marked as
+      lacking one after a save/load cycle — the file remembers what the log
+      says once (Q4).
+- [ ] **[β]** Group history sync no longer travels the private
+      `CHAT_HISTORY` path, or that path is under the same rules.
+- [ ] **[now]** No identifier in code, no line in the spec, and no ADR calls
+      this a "feed".
+- [ ] **[γ]** A node holding only heads (no bodies) detects a fork presented
+      to it.
+- [ ] **[γ]** A layer without witnesses is labelled *unwitnessed* in the UI
+      rather than showing the same badge as a witnessed one.
+- [ ] **[γ]** In a star, C learns B's head without trusting the relay A.
 
-- `dpc-client/core/dpc_client_core/conversation_monitor.py` — order-independent
-  digest; stop deriving `history_hash` from the chain tip
+## Scope (phase β)
+
+- `dpc-client/core/dpc_client_core/conversation_monitor.py` — the
+  order-independent digest (form per Q2); stop deriving `history_hash` from the
+  chain tip. **And name which of the two ends "Chain broken":** removing the
+  STATUS derivation kills the false alarm but not the warning, which is born in
+  `load_history` recomputing the expected chain against verbatim-inserted
+  foreign hashes. Either merge re-chains what it accepts, or `chain_hash` is
+  declared a purely local artefact and foreign values are dropped on the way
+  in. Pick one here, or β ships with the warning still in the log.
+- `dpc-client/core/dpc_client_core/conversation_monitor.py` — stop minting a
+  hash for a message that arrives without one; mark it instead. Today the
+  minting is announced honestly, and then persisted, so the next load sees a
+  message that has a hash and says nothing. The log tells the truth once and
+  the disk forgets it.
 - `dpc-client/core/dpc_client_core/message_handlers/group_handler.py` —
-  `GROUP_HISTORY_STATUS` v2 carrying author heads
+  `GROUP_HISTORY_STATUS` v2 carrying the β digest (per Q2)
+- **The other door into history.** `GROUP_CREATE` and `GROUP_SYNC` seed a
+  group's history through the private `REQUEST_CHAT_HISTORY` → `import_history`
+  path — a wholesale replace. `4d3b7442` closed the unsolicited half (a reply
+  is accepted only against a request we made), but the newcomer — the one
+  holding no evidence at all — still receives history by the weakest route.
+  Either move the group calls onto `GROUP_HISTORY_*` or bring `CHAT_HISTORY`
+  under the same merge rules. β's own criterion ("two honest nodes do not
+  diverge") can be green while this is open.
 - `specs/dptp_v1.md` — specify `GROUP_TEXT` and `GROUP_HISTORY_*`, which are
   not specified today, before adding to them
 - `dpc-client/ui/src/lib/panels/ChatPanel.svelte` — provenance levels
+- **Naming sweep perimeter:** code, spec, ADRs and living documents. Not the
+  research archive — the prompts and reviews say "feeds" because that is what
+  was said, and editing them afterwards falsifies the record of the discussion.
+  The same principle by which ADR-036 refuses to re-sign old history.
+
+## Scope (phase γ, when unblocked)
+
+- STATUS relay in a star: `GroupHistoryStatusHandler` answers only its sender,
+  so in B↔A↔C node C never sees B's status directly. Harmless for β — the
+  pairs converge transitively through A — but once A's honesty is the question,
+  it is not.
 
 ## Implementation Status
 
 | Task | Status | Commit |
 |------|--------|--------|
-| α — ADR-036 (author signature on the wire) | Pending | — |
+| α — see [ADR-036](036-message-authenticity-signed-at-origin.md) | — | — |
+| β — digest form decided (Q2) | Pending | — |
 | β — order-independent digest, STATUS v2 | Pending | — |
-| Naming swept out of docs and code | Pending | — |
+| β — "Chain broken" cause removed | Pending | — |
+| β — stop minting hashes on load | Pending | — |
+| β — group history off the private path | Pending | — |
+| Naming swept out of code, spec, ADRs | Pending | — |
 | γ — preconditions below | Blocked | — |
 
 ## Preconditions for γ
@@ -222,22 +279,43 @@ Each is a decision in its own right; γ is not scheduled until they are made.
 - **P4 — agent chain lifecycle.** An append-only chain that never ends is
   unbounded growth against §3.7. Checkpoints plus epochs, or γ reproduces the
   pathology it was meant to fix.
+- **P5 — recover-before-write.** A node restored from a stale backup reuses a
+  `seq` and forks its own chain, and the result is indistinguishable from
+  deliberate equivocation. Promoted from an open question to a precondition on
+  Fable 5's argument, which is the one that settles it: once backup restores
+  happen at any noticeable rate, **"it was my backup" becomes the standard
+  alibi of a real equivocator**. Fork evidence is the single mechanism that
+  turns "we disagree" into "here is your signature", and it loses exactly as
+  much accusatory force as the innocent explanation is plausible. So this is
+  not ergonomics — it is the condition under which the evidence stays evidence.
+  Mechanically: on joining or reconnecting, ask peers for **your own** head
+  first; if theirs is ahead, adopt it and re-attach your tail before writing.
 
 ## Open Questions
 
-- **Q1:** Recover-before-write — a node restored from a stale backup reuses a
-  `seq` and self-forks, indistinguishable from an attack. Fable 5 reports this
-  as the most common real cause of dead chains in SSB's decade of operation.
-  Protocol requirement from day one of γ, or is it acceptable later? — @Mike
-- **Q2:** Does β use author heads or a digest over `content_hash`? Heads carry
-  metadata (who spoke, how much, when) and therefore belong under the firewall;
-  a content digest does not, but says less. — @CC
+- **Q1:** ~~Recover-before-write — requirement or later?~~ Resolved:
+  precondition P5.
+- **Q2:** Which form does β's digest take? The choice is three-way, not two,
+  and it decides which Confirmation items are even meaningful and what falls
+  under the firewall.
+  - **V1 — one flat set digest** over the room's sorted `content_hash` values.
+    32 bytes on STATUS; on mismatch, exchange id lists (the protocol already
+    does this in `GOSSIP_SYNC`) and fetch what is missing. Leaks no metadata,
+    firewall-neutral. Cannot say *whose* messages are missing.
+  - **V2 — per-author digests** `{author: (count, digest)}`. Addressable
+    refetch without any chronology; medium metadata exposure, so Q2's firewall
+    question applies. **Recommended.**
+  - **V3 — heads with a local `seq`.** Nearly γ's mechanics with maximum
+    metadata, and a false promise: without v2 the `seq` is unsigned, so heads
+    carry no adversarial weight at all — an author writes whatever it likes in
+    them. Useful only as a hint for honest reconciliation. β must not appear to
+    offer more than it does. **Do not choose.**
+  — @CC
 - **Q3:** `GROUP_TEXT` and `GROUP_HISTORY_*` are not in the spec at all.
   Specify the existing protocol before extending it? — @Ark
-- **Q4:** The minted-hash laundering: `load_history` counts a minted hash and
-  says so, but persists it, so the next load sees a message that already has a
-  hash and stays silent. The log tells the truth once and the disk forgets it.
-  Mark minted hashes in the file, or stop minting? — @CC
+- **Q4:** ~~Mark minted hashes, or stop minting?~~ Resolved in β's scope: mark,
+  do not mint — a computed hash that outlives its own warning is
+  indistinguishable from a verified one.
 
 ## Authors
 
