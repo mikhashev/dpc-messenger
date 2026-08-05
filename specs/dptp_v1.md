@@ -1754,6 +1754,71 @@ Per-node identity files stored in `~/.dpc/`:
 - `node.key` - RSA private key (2048-bit, PEM format)
 - `node.crt` - X.509 self-signed certificate (PEM format)
 - `node.id` - Node identifier (text file)
+- `peers/<node_id>.crt` - certificates of peers this node has completed a handshake with (PEM format)
+
+A peer certificate is written only after its public key has been re-hashed and
+found to equal the claimed `node_id`. Because `node_id` **is** that hash, a
+certificate that passes is that peer's by construction, and a re-issued
+certificate for the same key may replace a stored one safely. No certificate
+authority participates.
+
+**Implementation:** `P2PManager._persist_peer_certificate`
+
+### 4.1 Message Signing
+
+A message signature covers a **canonical preimage**, never the message dict
+and never a locally rebuilt string.
+
+**Version tag:** `dptp-msg-v1` (constant `PREIMAGE_VERSION`)
+
+**Covered fields, in this order — the order is part of the format:**
+
+| # | Field | Empty when |
+|---|---|---|
+| 1 | `PREIMAGE_VERSION` | never |
+| 2 | `conversation_id` (group id or peer conversation) | never |
+| 3 | `message_id` | never |
+| 4 | `sender_node_id` | never |
+| 5 | `sender_name` | no display name known |
+| 6 | `sender_type` (`human` / `agent`) | unset |
+| 7 | `agent_owner` | not an agent message |
+| 8 | `timestamp`, canonicalised | absent |
+| 9 | `content` | empty message |
+| 10 | `tool_calls`, canonical JSON | not an agent message |
+
+**Encoding.** Each field is UTF-8 encoded and emitted as
+`<byte-length>":"<bytes>`, concatenated in the order above:
+
+```
+11:dptp-msg-v1 21:group-b88b65076b85 36:c0ffee00-… …
+```
+(spaces shown for readability only; the wire form has none)
+
+Length prefixes rather than a separator character: a separator is unambiguous
+only while the field count is fixed, so the first optional field would silently
+end that property. Length prefixes hold on their own terms, which is what makes
+extending the field set safe.
+
+**Canonical timestamp.** Parsed as ISO-8601, converted to UTC and re-emitted as
+`%Y-%m-%dT%H:%M:%S.%fZ`. `2026-08-05T10:00:00Z`, `…+00:00` and
+`2026-08-05T13:00:00+03:00` are therefore the same instant and the same
+preimage — platforms disagree about how to spell UTC, and an honest message
+must not reject because it crossed an operating system. An unparseable value is
+covered verbatim rather than dropped.
+
+**Canonical JSON.** `sort_keys=True`, separators `(",", ":")`,
+`ensure_ascii=False`.
+
+**Signature.** `content_hash = SHA256(preimage)` as lowercase hex;
+`signature = RSA-PSS(SHA256, MAX_LENGTH salt)` over that hex string, by the
+**author's** key. `signer_node_id` is the author, so `signer_node_id` must
+equal `sender_node_id`.
+
+**Extending.** Append only, and a new field set requires a new
+`PREIMAGE_VERSION`. The version tag opens the preimage so a signature can never
+be read against a field set other than the one it was made over.
+
+**Implementation:** `dpc-protocol/dpc_protocol/message_signing.py`
 
 ## 5. Connection Flow
 
