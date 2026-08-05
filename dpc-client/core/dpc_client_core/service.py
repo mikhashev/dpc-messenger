@@ -1375,14 +1375,21 @@ class CoreService:
                 else:
                     local_count, local_hash = ConversationMonitor.peek_group_history_stats(group.group_id)
 
+                status_payload = {
+                    "group_id": group.group_id,
+                    "history_hash": local_hash,
+                    "message_count": local_count,
+                }
+                # The order-independent comparison. history_hash stays for
+                # peers that predate it, and is the reason two honest nodes
+                # reported divergence on every connection.
+                if monitor and hasattr(monitor, "history_digest"):
+                    status_payload["history_digest"] = monitor.history_digest()
+
                 try:
                     await self.p2p_manager.send_message_to_peer(peer_id, {
                         "command": "GROUP_HISTORY_STATUS",
-                        "payload": {
-                            "group_id": group.group_id,
-                            "history_hash": local_hash,
-                            "message_count": local_count
-                        }
+                        "payload": status_payload,
                     })
                     logger.debug("Sent GROUP_HISTORY_STATUS for %s to %s (hash=%s, count=%d)",
                                group.group_id, peer_id[:20], local_hash[:16], local_count)

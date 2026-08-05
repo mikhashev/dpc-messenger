@@ -2240,6 +2240,65 @@ PARTICIPANTS' CULTURAL CONTEXTS:
         )
         return "sha256:" + hashlib.sha256(data.encode()).hexdigest()[:16]
 
+    def history_digest(self) -> Dict[str, Any]:
+        """What this node holds, in a form two nodes can compare.
+
+        Per author, a count and a digest over the sorted `content_hash` values
+        of that author's messages. Two properties matter and neither is
+        incidental:
+
+        **Order does not enter it.** The previous comparison hashed the last
+        `chain_hash`, which covers `msg_index` and `prev_hash` — both functions
+        of the order this node received things in.
+
+        **Nothing per-reader enters it.** `chain_hash` also covers `role`, and
+        `role` is a rendering: each node calls its own messages `user` and
+        everyone else's `peer`. Measured across three nodes holding an
+        identical nine messages, that alone produced three different tips. A
+        digest over `content_hash` inherits the signing preimage's field set,
+        which excludes `role` deliberately (ADR-031).
+
+        Per author rather than one number for the room, so a mismatch says
+        *whose* messages are missing and only those need fetching.
+
+        Records written before `content_hash` existed fall back to their id, so
+        a legacy history is compared as best it can be rather than dropped.
+        """
+        by_author: Dict[str, List[str]] = {}
+        for msg in self.message_history:
+            author = msg.get("sender_node_id") or ""
+            key = msg.get("content_hash") or f"id:{msg.get('id', '')}"
+            by_author.setdefault(author, []).append(key)
+
+        authors = {}
+        for author, keys in by_author.items():
+            joined = "|".join(sorted(keys))
+            authors[author] = {
+                "count": len(keys),
+                "digest": "sha256:" + hashlib.sha256(joined.encode("utf-8")).hexdigest()[:16],
+            }
+
+        if not authors:
+            return {"authors": {}, "digest": "sha256:empty"}
+
+        overall = "|".join(
+            f"{author}:{authors[author]['count']}:{authors[author]['digest']}"
+            for author in sorted(authors)
+        )
+        return {
+            "authors": authors,
+            "digest": "sha256:" + hashlib.sha256(overall.encode("utf-8")).hexdigest()[:16],
+        }
+
+    def authors_that_differ(self, remote_digest: Dict[str, Any]) -> List[str]:
+        """Which authors the two sides disagree about; empty means agreement."""
+        mine = self.history_digest().get("authors", {})
+        theirs = (remote_digest or {}).get("authors", {})
+        return sorted(
+            author for author in set(mine) | set(theirs)
+            if mine.get(author) != theirs.get(author)
+        )
+
     def compute_history_hash(self) -> str:
         """Compute SHA256 hash of current message history.
 

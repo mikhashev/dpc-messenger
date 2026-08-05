@@ -673,20 +673,46 @@ class GroupHistoryStatusHandler(MessageHandler):
         else:
             local_count, local_hash = ConversationMonitor.peek_group_history_stats(group_id)
 
+        local_digest = monitor.history_digest() if monitor and hasattr(monitor, "history_digest") else None
+
         # Reply only to the initiating STATUS (not to replies), to prevent infinite ping-pong.
         # A sends STATUS → B replies once with is_reply=True → A does NOT reply again.
         if not is_reply:
+            reply = {
+                "group_id": group_id,
+                "history_hash": local_hash,
+                "message_count": local_count,
+                "is_reply": True,
+            }
+            if local_digest:
+                reply["history_digest"] = local_digest
             await self.service.p2p_manager.send_message_to_peer(sender_node_id, {
                 "command": "GROUP_HISTORY_STATUS",
-                "payload": {
-                    "group_id": group_id,
-                    "history_hash": local_hash,
-                    "message_count": local_count,
-                    "is_reply": True,
-                }
+                "payload": reply,
             })
 
-        # Hash mismatch → request sync (bidirectional; covers equal-count divergence)
+        remote_digest = payload.get("history_digest")
+        if remote_digest and local_digest:
+            # The order-independent comparison. `history_hash` below is the tip
+            # of a chain covering msg_index, prev_hash and role — the first two
+            # follow arrival order and the third is per reader, so between two
+            # honest nodes it never matched and the alarm never stopped.
+            differing = monitor.authors_that_differ(remote_digest)
+            if not differing:
+                self.logger.debug("Group %s: histories agree (%d messages)", group_id, local_count)
+                return None
+            self.logger.info(
+                "Requesting history sync for group %s: differs for %d author(s)",
+                group_id, len(differing)
+            )
+            await self.service.p2p_manager.send_message_to_peer(sender_node_id, {
+                "command": "GROUP_HISTORY_REQUEST",
+                "payload": {"group_id": group_id, "authors": differing},
+            })
+            return None
+
+        # Peer predates the digest: fall back to the old tip comparison, which
+        # over-reports but is all a legacy node can answer.
         if remote_hash != local_hash:
             self.logger.info(
                 "Requesting history sync for group %s (local: %d, remote: %d)",
