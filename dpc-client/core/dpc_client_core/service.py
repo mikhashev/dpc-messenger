@@ -4508,6 +4508,32 @@ class CoreService:
 
         return mentions
 
+    @staticmethod
+    def _signature_fields_for(monitor, message_id: str) -> Dict[str, Any]:
+        """The signature the monitor just made, for the wire.
+
+        Nothing is signed here: the author's own monitor already signed the
+        record on the way in, and for our own message the local key is the
+        author's key. What was missing was carrying it out — so a peer had
+        nothing to check and minted its own, and the signature ended up
+        attesting storage rather than authorship.
+        """
+        try:
+            history = monitor.get_message_history()
+        except Exception:
+            return {}
+        if not history or history[-1].get("id") != message_id:
+            return {}
+        record = history[-1]
+        fields = {
+            key: record[key]
+            for key in ("content_hash", "signature", "signer_node_id", "preimage_version")
+            if record.get(key)
+        }
+        # All four or none: a partial set proves nothing and invites a receiver
+        # to improvise the rest.
+        return fields if len(fields) == 4 else {}
+
     async def send_group_message(self, group_id: str, text: str) -> Dict[str, Any]:
         """Send a text message to all group members.
 
@@ -4561,6 +4587,7 @@ class CoreService:
                 "sender_type": "human",
                 "sender_node_id": node_id,
                 "agent_owner": None,
+                **self._signature_fields_for(monitor, message_id),
                 "mentions": mentions,
                 "message_id": message_id,
                 "timestamp": timestamp,
@@ -4844,6 +4871,7 @@ class CoreService:
             "mentions": [],
             "is_agent": True,
             "msg_index": msg_index,
+            **self._signature_fields_for(monitor, message_id),
             # tool_calls in the live broadcast so the collapsible renders immediately
             # on the finalized message, not only after a history reload.
             "tool_calls": tool_calls or [],

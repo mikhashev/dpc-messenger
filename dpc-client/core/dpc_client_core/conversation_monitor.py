@@ -17,6 +17,7 @@ from datetime import datetime, timezone
 
 from dpc_protocol.pcm_core import PersonalContext, KnowledgeEntry, KnowledgeSource
 from dpc_protocol.knowledge_commit import KnowledgeCommitProposal
+from dpc_protocol.message_signing import PREIMAGE_VERSION, message_content_hash
 
 logger = logging.getLogger(__name__)
 
@@ -33,6 +34,11 @@ class Message:
     attachment_transfer_id: Optional[str] = None  # Link to attachment transfer (v0.14.0)
     sender_type: Optional[str] = None  # "human" or "agent"
     agent_owner: Optional[str] = None  # node_id of agent's owner
+    # {content_hash, signature, signer_node_id} as made by the author. Carried
+    # so a verified signature survives being stored: without it the monitor
+    # signs everything with the local key on the way to disk, and a checked
+    # signature is replaced by the checker's own.
+    signature_fields: Optional[Dict[str, Any]] = None
 
 
 class ConversationMonitor:
@@ -200,7 +206,8 @@ class ConversationMonitor:
         self.add_message(role, message.text, attachments=attachments,
                         timestamp=timestamp, sender_node_id=sender_node_id,
                         sender_name=sender_name, message_id=message.message_id,
-                        sender_type=sender_type, agent_owner=agent_owner)
+                        sender_type=sender_type, agent_owner=agent_owner,
+                        signature_fields=getattr(message, "signature_fields", None))
         logger.debug(f"Added message to history: role={role}, text_len={len(message.text)}")
 
         # Only run automatic detection if enabled
@@ -1481,7 +1488,8 @@ PARTICIPANTS' CULTURAL CONTEXTS:
                     thinking: Optional[str] = None, streaming_raw: Optional[str] = None,
                     source: Optional[str] = None, sender_type: Optional[str] = None,
                     agent_owner: Optional[str] = None,
-                    tool_calls: Optional[List[Dict[str, Any]]] = None):
+                    tool_calls: Optional[List[Dict[str, Any]]] = None,
+                    signature_fields: Optional[Dict[str, Any]] = None):
         """Add a message to the conversation history
 
         Args:
@@ -1541,12 +1549,40 @@ PARTICIPANTS' CULTURAL CONTEXTS:
         chain_input = f"{msg_index}|{message_id}|{role}|{sender_name or ''}|{content}|{timestamp or ''}|{prev_hash}"
         message_dict["chain_hash"] = hashlib.sha256(chain_input.encode("utf-8")).hexdigest()
 
-        content_hash_input = f"{message_id}|{sender_node_id or ''}|{content}|{timestamp or ''}"
-        message_dict["content_hash"] = hashlib.sha256(content_hash_input.encode("utf-8")).hexdigest()
-        signer = self._get_signer()
-        if signer:
-            message_dict["signature"] = signer.sign_commit(message_dict["content_hash"])
-            message_dict["signer_node_id"] = signer.node_id
+        if signature_fields:
+            # The author already signed this; keep what was verified. Minting
+            # here is how a checked signature became the checker's own, which
+            # is why signer_node_id used to name whoever stored the message
+            # rather than whoever wrote it.
+            for field in ("content_hash", "signature", "signer_node_id", "preimage_version"):
+                if signature_fields.get(field):
+                    message_dict[field] = signature_fields[field]
+        else:
+            # The canonical preimage of specs/dptp_v1.md §4.1 — the same bytes
+            # a verifier recomputes. The old four-field string left group_id,
+            # sender_name, sender_type, agent_owner and tool_calls outside the
+            # signature, and signing one form while checking another rejects
+            # honest messages.
+            message_dict["content_hash"] = message_content_hash(
+                conversation_id=self.conversation_id,
+                message_id=message_id,
+                sender_node_id=sender_node_id,
+                sender_name=sender_name,
+                sender_type=sender_type,
+                agent_owner=agent_owner,
+                timestamp=timestamp,
+                content=content,
+                tool_calls=tool_calls,
+            )
+            signer = self._get_signer()
+            if signer:
+                message_dict["signature"] = signer.sign_commit(message_dict["content_hash"])
+                message_dict["signer_node_id"] = signer.node_id
+                # Stamped so a record can be told from one written before this
+                # preimage existed. Without it, every message already on disk —
+                # hashed the old four-field way — would be re-exported, fail a
+                # verifier's recomputation, and be rejected as tampered.
+                message_dict["preimage_version"] = PREIMAGE_VERSION
 
         self.message_history.append(message_dict)
 
@@ -1893,10 +1929,23 @@ PARTICIPANTS' CULTURAL CONTEXTS:
             # in transit was re-blessing whatever came off the wire. The index
             # travels with it because the hash is computed over it — recomputed
             # against a positional backfill, it would never match.
+            # content_hash/signature/signer_node_id are here because without
+            # them merge_history's verification branch was unreachable: the
+            # export stripped exactly the fields the check reads, so no message
+            # arriving this way was ever verified.
             for field in ("sender_node_id", "sender_name", "sender_type", "agent_owner",
                           "isAgent", "msg_index", "chain_hash"):
                 if field in msg:
                     exported_msg[field] = msg[field]
+            # Signature fields travel only when they were made over the current
+            # preimage. A record predating it carries a hash of a different
+            # shape, and shipping it would have the receiver recompute, find a
+            # mismatch, and reject a legitimate message as tampered.
+            if msg.get("preimage_version") == PREIMAGE_VERSION:
+                for field in ("content_hash", "signature", "signer_node_id",
+                              "preimage_version"):
+                    if field in msg:
+                        exported_msg[field] = msg[field]
             exported.append(exported_msg)
 
         logger.info(f"Exported {len(exported)} messages from conversation history")
@@ -2490,16 +2539,55 @@ PARTICIPANTS' CULTURAL CONTEXTS:
             content_hash = msg.get("content_hash")
             signer = msg.get("signer_node_id")
             if sig and content_hash and signer:
+                # The hash is recomputed rather than read: a hash taken from
+                # the message it describes attests nothing, and the signature
+                # over it inherits that. conversation_id comes from *this*
+                # monitor, never from the message — otherwise a signed message
+                # from another room verifies happily inside this one.
+                expected = message_content_hash(
+                    conversation_id=self.conversation_id,
+                    message_id=msg.get("id"),
+                    sender_node_id=msg.get("sender_node_id"),
+                    sender_name=msg.get("sender_name"),
+                    sender_type=msg.get("sender_type"),
+                    agent_owner=msg.get("agent_owner"),
+                    timestamp=msg.get("timestamp"),
+                    content=msg.get("content") or "",
+                    tool_calls=msg.get("tool_calls"),
+                )
+                if expected != content_hash:
+                    logger.warning("Rejected message %s: content does not match its hash",
+                                   msg.get("id", "?"))
+                    rejected += 1
+                    continue
+                if signer != msg.get("sender_node_id"):
+                    logger.warning("Rejected message %s: signed by %s but attributed to %s",
+                                   msg.get("id", "?"), signer, msg.get("sender_node_id"))
+                    rejected += 1
+                    continue
                 try:
                     from dpc_protocol.commit_integrity import CommitSigner
                     result = CommitSigner.verify_signature(signer, content_hash, sig)
-                    if result is False:
-                        logger.warning("Rejected message %s: invalid signature from %s",
-                                       msg.get("id", "?"), signer)
-                        rejected += 1
-                        continue
                 except Exception as e:
-                    logger.debug("Signature verification skipped: %s", e)
+                    # Was DEBUG-and-accept, which turned a failed check into a
+                    # silent pass — the opposite of what verify_signature
+                    # itself does with the same exceptions.
+                    logger.warning("Rejected message %s: signature check failed: %s",
+                                   msg.get("id", "?"), e)
+                    rejected += 1
+                    continue
+                if result is False:
+                    logger.warning("Rejected message %s: invalid signature from %s",
+                                   msg.get("id", "?"), signer)
+                    rejected += 1
+                    continue
+                if result is None:
+                    # Cannot check yet — the peer's certificate is not cached.
+                    # Kept and flagged rather than rejected: on first contact
+                    # rejecting would be a denial of service against ourselves.
+                    logger.info("Storing message %s unverified: no cached certificate for %s",
+                                msg.get("id", "?"), signer)
+                    msg = dict(msg, verification="unverified")
             if self.add_message_with_id(msg):
                 added += 1
 

@@ -106,6 +106,9 @@ class _Service:
     def _group_agent_context_list(self, group_id):
         return []
 
+    # The real one — a stub here would only assert the stub agrees with itself.
+    _signature_fields_for = staticmethod(CoreService._signature_fields_for)
+
 
 class _GroupManager:
     def get_group(self, group_id):

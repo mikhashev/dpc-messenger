@@ -5,6 +5,7 @@ import time
 from typing import Dict, Any, Optional
 from datetime import datetime, timezone
 from . import MessageHandler
+from dpc_protocol.message_signing import PREIMAGE_VERSION, message_content_hash
 from ..conversation_monitor import Message as ConvMessage, ConversationMonitor
 
 
@@ -72,6 +73,93 @@ class GroupTextHandler(MessageHandler):
     def command_name(self) -> str:
         return "GROUP_TEXT"
 
+    def _authenticate_author(self, transport_node_id, payload):
+        """Decide who authored this, and how sure we are.
+
+        Returns (author_node_id, verification, signature_fields), where
+        verification is one of:
+          verified   — the signature checks out against the claimed author
+          unverified — cannot check yet (peer certificate not cached); kept,
+                       flagged, and re-checkable later. Rejecting here would be
+                       a denial of service against ourselves on first contact.
+          legacy     — no signature fields at all; a node that predates this.
+                       Author falls back to the transport, because a claimed
+                       sender_node_id with nothing behind it is worth less than
+                       the socket it came from.
+          rejected   — a signature that is present and wrong.
+        """
+        claimed = payload.get("sender_node_id")
+        content_hash = payload.get("content_hash")
+        signature = payload.get("signature")
+        signer = payload.get("signer_node_id")
+
+        if not (content_hash and signature and signer):
+            return transport_node_id, "legacy", None
+
+        if payload.get("preimage_version") != PREIMAGE_VERSION:
+            # Signed over a preimage we do not know how to recompute. Treated
+            # as legacy rather than rejected: this is what a node one version
+            # ahead or behind looks like, and cutting it off is not a security
+            # decision, it is an outage.
+            return transport_node_id, "legacy", None
+
+        if signer != claimed:
+            self.logger.warning(
+                "Rejecting group message %s: signed by %s but claims %s",
+                str(payload.get("message_id"))[:8], str(signer)[:20], str(claimed)[:20]
+            )
+            return transport_node_id, "rejected", None
+
+        expected = message_content_hash(
+            conversation_id=payload.get("group_id"),
+            message_id=payload.get("message_id"),
+            sender_node_id=claimed,
+            sender_name=payload.get("sender_name"),
+            sender_type=payload.get("sender_type"),
+            agent_owner=payload.get("agent_owner"),
+            timestamp=payload.get("timestamp"),
+            content=payload.get("text") or "",
+            tool_calls=payload.get("tool_calls"),
+        )
+        if expected != content_hash:
+            self.logger.warning(
+                "Rejecting group message %s from %s: content does not match its hash",
+                str(payload.get("message_id"))[:8], str(claimed)[:20]
+            )
+            return transport_node_id, "rejected", None
+
+        try:
+            from dpc_protocol.commit_integrity import CommitSigner
+            result = CommitSigner.verify_signature(signer, content_hash, signature)
+        except Exception as e:
+            self.logger.warning(
+                "Rejecting group message %s: signature check failed: %s",
+                str(payload.get("message_id"))[:8], e
+            )
+            return transport_node_id, "rejected", None
+
+        if result is False:
+            self.logger.warning(
+                "Rejecting group message %s: invalid signature from %s",
+                str(payload.get("message_id"))[:8], str(signer)[:20]
+            )
+            return transport_node_id, "rejected", None
+
+        fields = {
+            "content_hash": content_hash,
+            "signature": signature,
+            "signer_node_id": signer,
+            "preimage_version": PREIMAGE_VERSION,
+        }
+        if result is None:
+            self.logger.info(
+                "Storing group message %s from %s unverified: no cached certificate",
+                str(payload.get("message_id"))[:8], str(signer)[:20]
+            )
+            return claimed, "unverified", fields
+
+        return claimed, "verified", fields
+
     async def handle(self, sender_node_id: str, payload: Dict[str, Any]) -> Optional[Any]:
         """
         Handle GROUP_TEXT message.
@@ -86,6 +174,18 @@ class GroupTextHandler(MessageHandler):
         group_id = payload.get("group_id")
         text = payload.get("text")
         sender_name = payload.get("sender_name", sender_node_id)
+
+        # Who wrote this, as opposed to who handed it over. In a star the two
+        # differ: a relayed message arrives on the relay's socket, and taking
+        # the author from the transport recorded seven of nine messages under
+        # the wrong node on the edges (measured 2026-08-06). A signature the
+        # relay cannot forge is what tells them apart.
+        author_node_id, verification, signature_fields = self._authenticate_author(
+            sender_node_id, payload
+        )
+        if verification == "rejected":
+            return None
+        sender_node_id = author_node_id
 
         # v0.20.0: Use sender-provided message_id if available, else generate for backwards compat
         message_id = payload.get("message_id")
@@ -154,6 +254,7 @@ class GroupTextHandler(MessageHandler):
             "message_id": message_id,
             "timestamp": timestamp,
             "mentions": payload.get("mentions", []),
+            "verification": verification,
         })
 
         # Feed to conversation monitor for knowledge extraction
@@ -169,6 +270,7 @@ class GroupTextHandler(MessageHandler):
                 timestamp=timestamp,  # v0.20.0: Use sender-provided timestamp
                 sender_type=payload.get("sender_type"),
                 agent_owner=payload.get("agent_owner"),
+                signature_fields=signature_fields,
             )
 
             # Buffer message for manual extraction
