@@ -288,8 +288,14 @@ handshake. Both reviewers converged on flag-not-reject independently.
       node is the cheapest attack of the rollout.
 - [ ] A member without the capability joining a strict group downgrades the
       group predictably or is refused entry — never silently both modes at once.
+- [x] **Observed in production 2026-08-06.** On the same three-node star, a
+      message sent from Linux is shown on macOS as `Mike (linux)
+      (dpc-node-6d218e95…)`, and one sent from macOS is shown on Linux as
+      `Mike (MacOS) (dpc-node-f9e0ec2d…)`. Before the change both read
+      `Mike Windows PC` — the relay. Attribution is correct on both edges.
 - [ ] Two nodes running the new code exchange a group message and both show it
-      `verified` — observed in production, not only in tests.
+      `verified` — the *status field*, not just the name, still to be read off
+      a record.
 
 ## Scope
 
