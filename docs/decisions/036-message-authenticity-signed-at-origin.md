@@ -349,9 +349,14 @@ as "signatures are travelling".
 
 ## Open Questions
 
-- **Q1:** Does the relay decision (author from the signed payload) hold once a
-  three-node star is actually running? Reasoned from code, never measured — no
-  third node has been stood up. — @Mike / @CC
+- **Q1:** ~~Does the relay decision hold once a three-node star is actually
+  running? Reasoned from code, never measured.~~ **Measured 2026-08-06** on a
+  live star — Windows in the middle, Linux and macOS on the edges with no link
+  between them. Every message from either edge is recorded on the other under
+  the relay's identity, and the UI shows the stored id: `dpc-node-86cdcd26…`,
+  which is the relay's, not the author's. Symmetric in both directions, so on
+  the edges the whole conversation reads as if the middle node said all of it.
+  The reasoning from code was right; this is no longer inference.
 - **Q2:** ~~Per-author feeds (Option D) — own ADR, or folded in later?~~ Answered:
   [ADR-037](037-author-attribution-chains.md), phased, and not called feeds.
 - **Q3:** `import_history` still replaces a conversation wholesale, though a
