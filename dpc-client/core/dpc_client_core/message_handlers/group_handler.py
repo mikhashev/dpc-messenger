@@ -51,11 +51,13 @@ class GroupCreateHandler(MessageHandler):
 
             # Request conversation history from the sender (group creator/admin)
             import uuid
+            request_id = str(uuid.uuid4())[:8]
+            self.service.history_requests.note(sender_node_id, group.group_id, request_id)
             await self.service.p2p_manager.send_message_to_peer(sender_node_id, {
                 "command": "REQUEST_CHAT_HISTORY",
                 "payload": {
                     "conversation_id": group.group_id,
-                    "request_id": str(uuid.uuid4())[:8],
+                    "request_id": request_id,
                 }
             })
             self.logger.info("Requested history for group %s from %s", group.group_id, sender_node_id[:16])
@@ -365,6 +367,24 @@ class GroupSyncHandler(MessageHandler):
             sender_node_id[:20], group_id, remote_version
         )
 
+        # apply_sync decides by "highest version wins" and never learns who
+        # sent it, so without this the roster belongs to whoever bids highest —
+        # any connected peer, member or not. An invitation is GROUP_CREATE;
+        # a sync is not a way into a group we have never heard of.
+        local = self.service.group_manager.get_group(group_id) if group_id else None
+        if not local:
+            self.logger.warning(
+                "Ignoring GROUP_SYNC from %s for unknown group %s",
+                sender_node_id[:20], group_id
+            )
+            return None
+        if sender_node_id not in local.members:
+            self.logger.warning(
+                "Ignoring GROUP_SYNC for %s: %s is not a member",
+                group_id, sender_node_id[:20]
+            )
+            return None
+
         result = self.service.group_manager.apply_sync(payload)
         if result:
             # Notify UI of updated group
@@ -394,11 +414,13 @@ class GroupSyncHandler(MessageHandler):
 
             if needs_history:
                 import uuid
+                request_id = str(uuid.uuid4())[:8]
+                self.service.history_requests.note(sender_node_id, group_id, request_id)
                 await self.service.p2p_manager.send_message_to_peer(sender_node_id, {
                     "command": "REQUEST_CHAT_HISTORY",
                     "payload": {
                         "conversation_id": group_id,
-                        "request_id": str(uuid.uuid4())[:8],
+                        "request_id": request_id,
                     }
                 })
                 self.logger.info("Requested history for group %s from %s (local history empty)", group_id, sender_node_id[:16])

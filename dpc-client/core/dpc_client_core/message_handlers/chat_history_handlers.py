@@ -1,7 +1,37 @@
 """Handlers for chat history synchronization commands."""
 
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, Set, Tuple
 from . import MessageHandler
+
+
+class HistoryRequestRegistry:
+    """The questions we asked, so an answer can be told from an assertion.
+
+    A CHAT_HISTORY_RESPONSE replaces the entire local history of a
+    conversation. Without a record of what was asked, of whom, that authority
+    belongs to every connected peer at any moment — including for a
+    conversation it has no part in.
+
+    A claim consumes: one question earns one answer, so a peer cannot keep
+    rewriting a history by replaying the request id we handed it.
+    """
+
+    def __init__(self):
+        self._outstanding: Set[Tuple[str, str, str]] = set()
+
+    def note(self, peer_node_id: str, conversation_id: str, request_id: str) -> None:
+        self._outstanding.add((peer_node_id, conversation_id, request_id))
+
+    def claim(self, peer_node_id: str, conversation_id: str, request_id: str) -> bool:
+        key = (peer_node_id, conversation_id, request_id)
+        if key not in self._outstanding:
+            return False
+        self._outstanding.discard(key)
+        return True
+
+    def forget_peer(self, peer_node_id: str) -> None:
+        """Drop a disconnected peer's outstanding questions."""
+        self._outstanding = {k for k in self._outstanding if k[0] != peer_node_id}
 
 
 class RequestChatHistoryHandler(MessageHandler):
@@ -97,6 +127,16 @@ class ChatHistoryResponseHandler(MessageHandler):
         total_count = payload.get("total_count", 0)
 
         self.logger.info(f"Received {total_count} messages from {sender_node_id} for {conversation_id} (request_id: {request_id})")
+
+        # This handler replaces the whole local history, so an answer is only
+        # worth that much if we asked the question. Unclaimed, it lets any
+        # connected peer overwrite a conversation it was never part of.
+        if not self.service.history_requests.claim(sender_node_id, conversation_id, request_id):
+            self.logger.warning(
+                "Discarding unsolicited chat history from %s for %s (request_id %s)",
+                sender_node_id[:20], conversation_id, request_id
+            )
+            return None
 
         # For group chats, use conversation_id from payload; for 1:1, use sender_node_id
         monitor_key = conversation_id if conversation_id and conversation_id.startswith("group-") else sender_node_id

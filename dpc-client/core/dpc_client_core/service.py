@@ -402,6 +402,10 @@ class CoreService:
         self._processed_message_ids = set()  # Track processed messages
         self._max_processed_ids = 1000  # Limit set size
         self._history_requested_peers = set()  # Track peers we've requested history from (prevents infinite loops)
+        # Which history we actually asked for, and of whom. A response replaces
+        # a whole conversation, so an unclaimed one is an assertion, not a reply.
+        from .message_handlers.chat_history_handlers import HistoryRequestRegistry
+        self.history_requests = HistoryRequestRegistry()
         # Note: _group_history_requested removed in v0.20.0 - now using hash-based sync
 
         # Initialize message router and register handlers
@@ -1337,6 +1341,7 @@ class CoreService:
                     import uuid
                     request_id = str(uuid.uuid4())
                     try:
+                        self.history_requests.note(peer_id, peer_id, request_id)
                         await self.p2p_manager.send_message_to_peer(peer_id, {
                             "command": "REQUEST_CHAT_HISTORY",
                             "payload": {
@@ -1448,6 +1453,8 @@ class CoreService:
         # Clear history request tracking for this peer
         # This allows us to request history again when they reconnect
         self._history_requested_peers.discard(peer_id)
+        # A question asked of a peer that has gone does not stay answerable.
+        self.history_requests.forget_peer(peer_id)
 
         # Schedule auto-reconnect if peer is in a node group (known peer)
         if hasattr(self, 'connection_orchestrator') and self.connection_orchestrator:
