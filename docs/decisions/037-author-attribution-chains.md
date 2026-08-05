@@ -24,11 +24,25 @@ Both `msg_index` and `prev_hash` are functions of the order in which messages
 *arrived at this node*. A room has N writers and no shared write head, so the
 chain records a delivery order, not a history. From that single fact:
 
-1. **A permanent false alarm.** Two honest nodes holding identical messages in
-   different arrival order compute different chains, so `history_hash` differs,
-   so `GROUP_HISTORY_STATUS` reports divergence; the sync that follows adds
-   nothing (dedup by `id`) and the hashes still differ. Every connection,
-   forever.
+1. **A permanent false alarm — and worse than "order-dependent" implies.**
+   Measured 2026-08-06 across three nodes holding the same nine messages: the
+   ids, the order, the indices 1…9, the content, the timestamps and even
+   `sender_name` are **identical everywhere**, and all three chain tips differ
+   anyway (`b9382ddb` / `92fe4de6` / `56ece077`).
+
+   The cause is `role`, which `chain_input` covers and which is **per reader by
+   construction**: each node marks its own messages `user` and everyone else's
+   `peer`. It differed on all nine messages. So the room chain cannot converge
+   between honest nodes even when nothing about delivery differs — divergence
+   is not a race, it is guaranteed.
+
+   This is the same principle ADR-031 states and ADR-036 §4.1 already honours
+   by keeping `role` out of the signing preimage: a per-reader rendering is not
+   a property of the message. The chain never got the memo.
+
+   A note against an earlier claim of ours: `sender_name` was blamed for
+   contributing to this. Measured — it is identical on all three nodes. It
+   does not contribute.
 2. **A permanently broken chain.** `merge_history` appends a peer's
    `msg_index`/`chain_hash` verbatim, so the next load recomputes a different
    expected hash and logs "Chain broken" — and a mismatched hash is never
@@ -304,7 +318,10 @@ Each is a decision in its own right; γ is not scheduled until they are made.
     firewall-neutral. Cannot say *whose* messages are missing.
   - **V2 — per-author digests** `{author: (count, digest)}`. Addressable
     refetch without any chronology; medium metadata exposure, so Q2's firewall
-    question applies. **Recommended.**
+    question applies. **Recommended** — and the 2026-08-06 measurement supports
+    it beyond convenience: a digest over `content_hash` inherits the v1
+    preimage's field set, which excludes `role`, so it is immune by
+    construction to the defect that keeps the current chain from converging.
   - **V3 — heads with a local `seq`.** Nearly γ's mechanics with maximum
     metadata, and a false promise: without v2 the `seq` is unsigned, so heads
     carry no adversarial weight at all — an author writes whatever it likes in
