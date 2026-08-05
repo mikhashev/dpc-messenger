@@ -951,10 +951,20 @@ class P2PManager:
 
             # Verify CN matches expected node_id
             if cn != expected_node_id:
-                logger.error(
-                    "Certificate validation failed: CN='%s' but expected node_id='%s'",
-                    cn, expected_node_id
-                )
+                if cn.strip() == expected_node_id.strip():
+                    # Naming the cause, because the generic message below ends
+                    # with "MITM attack detected" and a stray space is not one.
+                    logger.error(
+                        "Certificate validation failed on whitespace alone: "
+                        "CN=%r vs expected %r — the identity matches, the URI "
+                        "picked up whitespace in transit",
+                        cn, expected_node_id
+                    )
+                else:
+                    logger.error(
+                        "Certificate validation failed: CN=%r but expected node_id=%r",
+                        cn, expected_node_id
+                    )
                 return False
 
             logger.info("Certificate validated: node_id=%s", cn)
