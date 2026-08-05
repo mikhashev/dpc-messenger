@@ -118,6 +118,7 @@ class ConversationMonitor:
         self.message_ids: Set[str] = set()  # Track unique message IDs for deduplication
         self._history_dirty: bool = False  # Track unsaved changes
         self._signer = None  # Lazy-loaded CommitSigner for message signing
+        self._chain_rebuilt = False  # One-time local repair of a pre-local chain
         self.peer_context_hashes: Dict[str, str] = {}  # {node_id: context_hash} for peer cache invalidation
 
         # Phase 7: Peer context caching (to avoid re-fetching unchanged contexts)
@@ -2462,6 +2463,38 @@ PARTICIPANTS' CULTURAL CONTEXTS:
                     "without one (conversation %s) — those are unverified, not verified",
                     minted, len(messages), self.conversation_id,
                 )
+
+            if not chain_ok and not self._chain_rebuilt:
+                # A file written before the chain became local carries foreign
+                # indices and hashes, appended verbatim by the old merge. Those
+                # breaks are ours, they are permanent, and they fire on every
+                # load — which is how an alarm stops being read. Rebuilt once,
+                # locally, because the chain describes this node's copy.
+                #
+                # Said out loud rather than quietly: a rebuild also erases the
+                # evidence of a genuine local edit, if there was one. It runs
+                # once per conversation, and a break reported after it means
+                # something.
+                logger.warning(
+                    "Chain: rebuilding locally for %d message(s) (conversation %s) — "
+                    "one-time repair of chains merged before they became local; "
+                    "this also clears any earlier local tampering from view",
+                    len(messages), self.conversation_id,
+                )
+                prev_hash = "genesis"
+                for i, m in enumerate(messages):
+                    m["msg_index"] = i + 1
+                    chain_input = (
+                        f"{m['msg_index']}|{m.get('id', '')}|{m.get('role', '')}"
+                        f"|{m.get('sender_name', '')}|{m.get('content', '')}"
+                        f"|{m.get('timestamp', '')}|{prev_hash}"
+                    )
+                    m["chain_hash"] = hashlib.sha256(chain_input.encode("utf-8")).hexdigest()
+                    prev_hash = m["chain_hash"]
+                self._chain_rebuilt = True
+                chain_ok = True
+                self._history_dirty = True
+
             verified = len(messages) - minted
             if chain_ok and verified and any(m.get("chain_hash") for m in messages):
                 logger.info("Chain integrity verified: %d of %d messages OK",
@@ -2505,8 +2538,13 @@ PARTICIPANTS' CULTURAL CONTEXTS:
             # Idempotent — repeats are safe (rebuild dedupes by message_id).
             self.rebuild_extraction_buffers_from_history()
 
+            was_rebuilt = self._chain_rebuilt and self._history_dirty
             self._history_dirty = False
             logger.info(f"Loaded {len(messages)} messages from {path}")
+            if was_rebuilt:
+                # Persisted immediately, or the repair happens again on every
+                # start and the warning it prints never stops either.
+                self.save_history()
             return True
 
         except Exception as e:

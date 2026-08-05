@@ -166,3 +166,34 @@ def test_a_history_from_another_room_does_not_merge(tmp_path):
     added = receiver.merge_history(exported)
 
     assert added == 0
+
+
+def test_a_history_broken_by_the_old_merge_is_repaired_once(tmp_path, caplog):
+    """Files already on disk carry foreign chains; the fix alone leaves them.
+
+    Without this, "Chain broken" fires on every start for every group synced
+    before the chain became local — the alarm stays on and stops being read.
+    """
+    receiver = _monitor(tmp_path, "group-was-broken")
+    receiver.add_message(role="user", content="mine", sender_node_id="n1", sender_name="Mike")
+    # What the old merge produced: a foreign index and hash appended verbatim.
+    receiver.message_history.append({
+        "id": "from-peer", "role": "peer", "content": "theirs",
+        "msg_index": 99, "chain_hash": "a" * 64,
+    })
+    receiver.save_history()
+
+    with caplog.at_level(logging.INFO):
+        reloaded = _monitor(tmp_path, "group-was-broken")
+        reloaded.load_history()
+
+    assert "rebuilding locally" in caplog.text
+    assert [m["msg_index"] for m in reloaded.message_history] == [1, 2]
+
+    caplog.clear()
+    with caplog.at_level(logging.INFO):
+        again = _monitor(tmp_path, "group-was-broken")
+        again.load_history()
+
+    assert "Chain broken" not in caplog.text, "the repair must be persisted, not repeated"
+    assert "rebuilding locally" not in caplog.text
