@@ -243,21 +243,12 @@ class GroupTextHandler(MessageHandler):
         # Use sender-provided timestamp if available (v0.20.0)
         timestamp = payload.get("timestamp", datetime.now(timezone.utc).isoformat())
 
-        # Broadcast to UI
-        await self.service.local_api.broadcast_event("group_text_received", {
-            "group_id": group_id,
-            "sender_node_id": sender_node_id,
-            "sender_name": sender_name,
-            "sender_type": payload.get("sender_type", "human"),
-            "agent_owner": payload.get("agent_owner"),
-            "text": text,
-            "message_id": message_id,
-            "timestamp": timestamp,
-            "mentions": payload.get("mentions", []),
-            "verification": verification,
-        })
-
-        # Feed to conversation monitor for knowledge extraction
+        # Store first, then tell the UI. The order is the whole fix for the
+        # missing numbers: msg_index is assigned when the monitor writes the
+        # record, so a broadcast sent beforehand had nothing to carry and every
+        # message from a peer arrived unnumbered. Both send paths in service.py
+        # already feed the monitor first for exactly this reason.
+        msg_index = None
         try:
             monitor = self.service._get_or_create_conversation_monitor(group_id)
 
@@ -276,8 +267,27 @@ class GroupTextHandler(MessageHandler):
             # Buffer message for manual extraction
             await monitor.on_message(conv_message)
             monitor.save_history()
+
+            history = monitor.get_message_history()
+            if history and history[-1].get("id") == message_id:
+                msg_index = history[-1].get("msg_index")
         except Exception as e:
             self.logger.error("Error in group conversation monitoring: %s", e, exc_info=True)
+
+        # Broadcast to UI
+        await self.service.local_api.broadcast_event("group_text_received", {
+            "group_id": group_id,
+            "sender_node_id": sender_node_id,
+            "sender_name": sender_name,
+            "sender_type": payload.get("sender_type", "human"),
+            "agent_owner": payload.get("agent_owner"),
+            "text": text,
+            "message_id": message_id,
+            "timestamp": timestamp,
+            "mentions": payload.get("mentions", []),
+            "verification": verification,
+            "msg_index": msg_index,
+        })
 
         # Detect @Ark / @CC mentions and route to agents
         await self._handle_agent_mentions(group_id, payload, text, sender_name, sender_node_id)
