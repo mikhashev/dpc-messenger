@@ -6,7 +6,7 @@ date: 2026-08-05
 deciders: [Mike]
 consulted: [Ark, CC, Fable 5, GLM 5.2]
 informed: []
-related: [ADR-006]
+related: [ADR-006, ADR-037]
 session: S64
 ---
 
@@ -261,7 +261,8 @@ handshake. Both reviewers converged on flag-not-reject independently.
 - **Q1:** Does the relay decision (author from the signed payload) hold once a
   three-node star is actually running? Reasoned from code, never measured — no
   third node has been stood up. — @Mike / @CC
-- **Q2:** Per-author feeds (Option D) — own ADR, or folded in later? — @Mike
+- **Q2:** ~~Per-author feeds (Option D) — own ADR, or folded in later?~~ Answered:
+  [ADR-037](037-author-attribution-chains.md), phased, and not called feeds.
 - **Q3:** `import_history` on the private-chat path (`chat_history_handlers.py`)
   replaces local history wholesale with no verification. Delete the path or
   bring it under the same rules? — @CC
