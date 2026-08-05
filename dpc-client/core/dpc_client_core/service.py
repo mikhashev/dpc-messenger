@@ -4520,7 +4520,12 @@ class CoreService:
             if not group:
                 return {"status": "error", "message": f"Group {group_id} not found"}
 
-            sender_name = "User"
+            # A literal here meant a human's name never left the machine: every
+            # peer rendered "User" because that is what arrived. Fourteen other
+            # call sites in this file already resolve it this way. And the field
+            # is inside the signing preimage, so the literal would shortly have
+            # become a cryptographically attested wrong name.
+            sender_name = self.p2p_manager.get_display_name() or "User"
 
             # Parse @mentions in the message text
             mentions = self.parse_mentions(text, group.members)
@@ -4828,7 +4833,12 @@ class CoreService:
             "sender_node_id": node_id,
             "sender_name": agent_name,
             "sender_type": "agent",
-            "agent_owner": self.p2p_manager.get_display_name() or node_id,
+            # node_id, matching what the monitor stored above. A display name
+            # here and a node_id there is two values for one field, and the
+            # field is inside the signing preimage: the author would sign one
+            # and store the other, then export a history that fails against its
+            # own signature. The UI already renders a node_id here.
+            "agent_owner": node_id,
             "message_id": message_id,
             "timestamp": timestamp,
             "mentions": [],
