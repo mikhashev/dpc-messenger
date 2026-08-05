@@ -1,7 +1,7 @@
 ---
 adr: 036
 title: "Sign a message at its author, not at whoever stored it"
-status: proposed
+status: accepted
 date: 2026-08-05
 deciders: [Mike]
 consulted: [Ark, CC, Fable 5, GLM 5.2]
@@ -138,17 +138,15 @@ it is switched on for any group. They are gates, not wishes.
   the soft phase is where unsigned injection lives. Closed by `4d3b7442`
   (GROUP_SYNC accepted only from a current member) — recorded here because
   enforcement depends on it, not because it belongs to this ADR.
-- **Q1 must be measured, not reasoned.** This ADR decides relay attribution
-  from reading code, and says so. Enforcement waits until a three-node star has
-  actually run.
-- **Q5 must be decided.** `verify_signature` ignores the certificate validity
-  window. Enforcement plus a later expiry check retroactively rejects the whole
-  corpus — a deterministic consequence of two decisions, not a someday risk.
+- ~~**Q1 must be measured, not reasoned.**~~ Measured 2026-08-06 on a live
+  three-node star, both before and after: see Q1 and Confirmation.
+- ~~**Q5 must be decided.**~~ Decided 2026-08-06: the validity window is never
+  checked. See Q5.
 
-Where the advertised capability lives is itself undecided (Q6). It is not a
-wire field this project already has: DPTP has no capability negotiation at all.
-Calling this "a wire format change" understates it — it is a negotiation
-mechanism that does not exist yet.
+Where the advertised capability lives was undecided when this was written; it
+is a `capabilities` field in HELLO (Q6). DPTP had no negotiation mechanism at
+all, so "a wire format change" understated it — this is a mechanism that did
+not exist.
 
 ### Rationale
 
@@ -369,17 +367,21 @@ as "signatures are travelling".
   reply is now only accepted against a request we made (`4d3b7442`). Delete the
   path or bring it under the same verification rules? Owned by ADR-037 phase β,
   where the rest of history sync lives. — @CC
-- **Q6:** Where does an advertised capability live, and what carries it? DPTP
-  has no negotiation mechanism at all. Enforcement is blocked on this having an
-  answer — including what happens to a strict group when a member without the
-  capability joins, and where the observed capability persists (peer cache?
-  group metadata?) given that HELLO is per-connection and members go offline.
-  — @Ark
+- **Q6:** ~~Where does an advertised capability live?~~ **Decided 2026-08-06
+  (Mike): a `capabilities` field in HELLO.** Implementation with @Ark. Two
+  details still belong to whoever builds it: the observed capability has to
+  persist somewhere (HELLO is per connection and members go offline), and a
+  strict group must behave predictably when a member without it joins —
+  downgrade or refuse, never both modes at once.
 - **Q4:** What clears a divergence flag after a merge that legitimately added
   nothing? — @Ark
-- **Q5:** Certificate expiry: `verify_signature` loads a certificate without
-  checking its validity window. Harmless now; the day anyone enforces it, every
-  old message flips to reject. — @CC
+- **Q5:** ~~Certificate expiry.~~ **Decided 2026-08-06 (Mike): the validity
+  window is never checked.** A node certificate here is a proof of possession
+  of a key, not a statement about a period of time — `node_id` *is* the key's
+  fingerprint, and the key does not expire on a date. Enforcing a window would
+  reject a correctly signed message for a reason unrelated to whether it was
+  signed correctly, and would do it retroactively to the whole corpus on the
+  day it was switched on.
 
 ## Authors
 

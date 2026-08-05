@@ -1,7 +1,7 @@
 ---
 adr: 037
 title: "Make the author's chain the unit of history, in phases, and not all of it now"
-status: proposed
+status: accepted
 date: 2026-08-05
 deciders: [Mike]
 consulted: [Ark, CC, Fable 5, GLM 5.2]
@@ -270,8 +270,8 @@ would stay red on γ items, which turns a compliance test into a wish list.
 | α — see [ADR-036](036-message-authenticity-signed-at-origin.md) | Done | `1f2c10cd` |
 | β — digest form decided (Q2) | Done — V2, per author | `5b160a93` |
 | β — order-independent digest, STATUS v2 | Done | `5b160a93` |
-| β — "Chain broken" cause removed | Pending | — |
-| β — stop minting hashes on load | Pending | — |
+| β — "Chain broken" cause removed | Done — chain is local | `a4a200a1` |
+| β — stop minting hashes on load | Not needed after `a4a200a1` — every stored message is chained locally on insert, so the loader has nothing to mint except in files written by older builds, where the existing warning already says so | — |
 | β — group history off the private path | Pending | — |
 | Naming swept out of code, spec, ADRs | Pending | — |
 | γ — preconditions below | Blocked | — |
