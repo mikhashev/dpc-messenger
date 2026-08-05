@@ -267,9 +267,9 @@ would stay red on γ items, which turns a compliance test into a wish list.
 
 | Task | Status | Commit |
 |------|--------|--------|
-| α — see [ADR-036](036-message-authenticity-signed-at-origin.md) | — | — |
-| β — digest form decided (Q2) | Pending | — |
-| β — order-independent digest, STATUS v2 | Pending | — |
+| α — see [ADR-036](036-message-authenticity-signed-at-origin.md) | Done | `1f2c10cd` |
+| β — digest form decided (Q2) | Done — V2, per author | `5b160a93` |
+| β — order-independent digest, STATUS v2 | Done | `5b160a93` |
 | β — "Chain broken" cause removed | Pending | — |
 | β — stop minting hashes on load | Pending | — |
 | β — group history off the private path | Pending | — |
