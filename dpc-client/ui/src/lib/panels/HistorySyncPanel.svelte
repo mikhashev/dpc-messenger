@@ -75,56 +75,60 @@
       const messageCount = $groupHistorySynced.message_count || 0;
       console.log(`[GroupHistorySync] Group ${syncedGroupId} synced with ${messageCount} messages`);
 
-      // Only reload if this is the active chat AND backend has more messages than we do
-      const existingCount = get(chatHistories).get(syncedGroupId)?.length || 0;
+      // The event says this group's stored history changed; the backend holds the
+      // truth, so reload it whether or not the group is on screen. Gating on the
+      // active chat left a merged message invisible until a restart, and
+      // message_count is the *peer's* count, so comparing it with ours skipped
+      // reloads whenever the peer held fewer messages than we did.
+      const isActive = activeChatId === syncedGroupId;
 
-      if (activeChatId === syncedGroupId && messageCount > existingCount) {
-        console.log(`[GroupHistorySync] Reloading history for active group ${syncedGroupId}`);
+      console.log(`[GroupHistorySync] Reloading history for group ${syncedGroupId}`);
 
-        (async () => {
-          try {
-            const response = await sendCommand('get_conversation_history', { conversation_id: syncedGroupId });
-            if (response.status === 'success' && response.messages?.length > 0) {
-              console.log(`[GroupHistorySync] Loaded ${response.messages.length} messages from backend`);
+      (async () => {
+        try {
+          const response = await sendCommand('get_conversation_history', { conversation_id: syncedGroupId });
+          if (response.status === 'success' && response.messages?.length > 0) {
+            console.log(`[GroupHistorySync] Loaded ${response.messages.length} messages from backend`);
 
-              chatHistories.update(map => {
-                const newMap = new Map(map);
-                const syncedMessages = response.messages.map((msg: any, index: number) => {
-                  const isAgent = msg.sender_type === 'agent' || msg.is_agent || false;
-                  const isLocalHuman = !isAgent && (!msg.sender_node_id || msg.sender_node_id === selfNodeId);
-                  const mapped = mapBackendMessage(msg, {
-                    fallbackSender: isLocalHuman ? 'user' : (msg.sender_node_id || msg.node_id || syncedGroupId),
-                    fallbackSenderName: isLocalHuman ? 'You' : (msg.sender_name || getPeerDisplayName(msg.sender_node_id || syncedGroupId)),
-                    index,
-                    totalCount: response.messages.length,
-                  });
-                  mapped.id = msg.message_id || msg.id || `synced-${index}-${Date.now()}`;
-                  return mapped;
+            chatHistories.update(map => {
+              const newMap = new Map(map);
+              const syncedMessages = response.messages.map((msg: any, index: number) => {
+                const isAgent = msg.sender_type === 'agent' || msg.is_agent || false;
+                const isLocalHuman = !isAgent && (!msg.sender_node_id || msg.sender_node_id === selfNodeId);
+                const mapped = mapBackendMessage(msg, {
+                  fallbackSender: isLocalHuman ? 'user' : (msg.sender_node_id || msg.node_id || syncedGroupId),
+                  fallbackSenderName: isLocalHuman ? 'You' : (msg.sender_name || getPeerDisplayName(msg.sender_node_id || syncedGroupId)),
+                  index,
+                  totalCount: response.messages.length,
                 });
-
-                syncedMessages.forEach((m: any) => {
-                  if (m.id && !m.id.startsWith('synced-')) processedMessageIds.add(m.id);
-                });
-
-                const backendIds = new Set(syncedMessages.map((m: any) => m.id).filter(Boolean));
-                const existingMsgs = map.get(syncedGroupId) || [];
-                const frontendOnly = existingMsgs.filter((m: any) => m.id && !backendIds.has(m.id));
-                const merged = [...syncedMessages, ...frontendOnly].sort((a: any, b: any) => a.timestamp - b.timestamp);
-                newMap.set(syncedGroupId, merged);
-                return newMap;
+                mapped.id = msg.message_id || msg.id || `synced-${index}-${Date.now()}`;
+                return mapped;
               });
 
+              syncedMessages.forEach((m: any) => {
+                if (m.id && !m.id.startsWith('synced-')) processedMessageIds.add(m.id);
+              });
+
+              const backendIds = new Set(syncedMessages.map((m: any) => m.id).filter(Boolean));
+              const existingMsgs = map.get(syncedGroupId) || [];
+              const frontendOnly = existingMsgs.filter((m: any) => m.id && !backendIds.has(m.id));
+              const merged = [...syncedMessages, ...frontendOnly].sort((a: any, b: any) => a.timestamp - b.timestamp);
+              newMap.set(syncedGroupId, merged);
+              return newMap;
+            });
+
+            if (isActive) {
               onAgentToast(`✓ Group history synced: ${response.messages.length} messages`, 'info');
 
               setTimeout(() => {
                 if (chatWindow) chatWindow.scrollTop = chatWindow.scrollHeight;
               }, 100);
             }
-          } catch (err: any) {
-            console.error('[GroupHistorySync] Error loading synced history:', err);
           }
-        })();
-      }
+        } catch (err: any) {
+          console.error('[GroupHistorySync] Error loading synced history:', err);
+        }
+      })();
     }
   });
 </script>
