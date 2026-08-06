@@ -126,7 +126,15 @@ class NewSessionResultHandler(MessageHandler):
         if result == "approved" and clear_history:
             self.logger.info("Clearing local conversation history for %s", conversation_id[:20])
             monitor = self.service._get_or_create_conversation_monitor(conversation_id)
-            monitor.reset_conversation()
+            # This node's own archive settings, the same ones the initiator
+            # applies to itself. Called bare, it used the defaults instead, so a
+            # node configured not to archive archived anyway and a node with a
+            # retention limit ignored it.
+            firewall = getattr(self.service, "firewall", None)
+            preserve, max_sessions = (
+                firewall.get_history_settings(conversation_id) if firewall else (True, 0)
+            )
+            monitor.reset_conversation(preserve=preserve, max_sessions=max_sessions)
             self.service._group_agent_context.pop(conversation_id, None)
 
         # Update session manager (if session exists)

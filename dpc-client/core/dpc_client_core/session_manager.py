@@ -44,7 +44,14 @@ class VotingSession:
         Check if proposal is approved based on voting rules.
 
         P2P (2 participants): Unanimous approval required
-        Multi-party (3+): Majority approval (>50%)
+        Multi-party (3+): Majority of *participants*, not of votes cast.
+
+        The distinction is the whole rule. Dividing by votes cast made the
+        initiator a majority of one: its own vote is recorded as approve when it
+        proposes, the timeout finalises with whatever arrived, and one of one
+        cleared the history of everyone who later received the result. Counting
+        over participants also gives the timeout its ending for free — an
+        unanswered proposal cannot reach a majority, so silence is not consent.
         """
         if not self.proposal.votes:
             return False
@@ -56,8 +63,9 @@ class VotingSession:
             # P2P: require unanimous approval
             return approve_votes == 2 and total_votes == 2
         else:
-            # Multi-party: require majority
-            return approve_votes > (total_votes / 2)
+            # Multi-party: strict majority of everyone in the conversation, so a
+            # tie leaves the history alone.
+            return approve_votes > (len(self.proposal.participants) / 2)
 
 
 class NewSessionProposalManager:
