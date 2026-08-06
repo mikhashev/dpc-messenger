@@ -197,6 +197,35 @@ class FileTransferManager:
         path.mkdir(parents=True, exist_ok=True)
         return path
 
+    # Windows resolves these to devices no matter the directory, so a file
+    # named CON or NUL is written to the device and silently disappears.
+    _RESERVED_NAMES = frozenset(
+        ["CON", "PRN", "AUX", "NUL"]
+        + [f"COM{i}" for i in range(1, 10)]
+        + [f"LPT{i}" for i in range(1, 10)]
+    )
+
+    @staticmethod
+    def _safe_incoming_name(filename: str) -> str:
+        """A peer sends a name. Everything that makes it a path is removed here.
+
+        The old code replaced `/` and nothing else, which left three ways out of
+        the peer's directory on Windows: a backslash still separates
+        (`..\\..\\node.key`), an absolute path replaces the base outright
+        (`Path(base) / "C:/x"` is `C:\\x`), and a drive-relative prefix (`C:x`)
+        resolves against that drive's working directory. A colon also opens an
+        NTFS alternate stream. Both separators are cut before taking the last
+        segment, so neither platform's convention survives the trip.
+        """
+        name = str(filename or "").replace("\\", "/").rsplit("/", 1)[-1]
+        name = name.replace(":", "_").strip()
+        if not name.strip(". "):
+            # "", ".", "..", "..." — a name that would address a directory.
+            return "received_file"
+        if name.split(".")[0].upper() in FileTransferManager._RESERVED_NAMES:
+            name = "_" + name
+        return name
+
     def _compute_file_hash(self, file_path: Path) -> str:
         """Compute SHA256 hash of file."""
         sha256 = hashlib.sha256()
@@ -654,6 +683,11 @@ class FileTransferManager:
 
         is_image = (transfer.mime_type and transfer.mime_type.startswith("image/")
                    and transfer.image_metadata is not None)
+        # Assigned here rather than inside the `if self.local_api:` block below,
+        # where it used to live: the transcription branch at the end of this
+        # method reads it unconditionally, so a manager without a local API
+        # raised UnboundLocalError after the file was already on disk.
+        is_voice = transfer.voice_metadata is not None
 
         subdir = "files/screenshots" if is_image else "files"
 
@@ -667,7 +701,7 @@ class FileTransferManager:
         else:
             storage_path = self._get_peer_storage_path(node_id, subdir)
 
-        safe_filename = f"{transfer.filename.replace('/', '_')}"
+        safe_filename = self._safe_incoming_name(transfer.filename)
         file_path = storage_path / safe_filename
 
         save_to_disk = True
@@ -734,11 +768,6 @@ class FileTransferManager:
                 sender_name = self.service.peer_metadata.get(node_id, {}).get("name") or node_id
 
             size_mb = round(transfer.size_bytes / (1024 * 1024), 2)
-
-            # Detect if this is an image or voice transfer
-            is_image = (transfer.mime_type and transfer.mime_type.startswith("image/")
-                       and transfer.image_metadata is not None)
-            is_voice = transfer.voice_metadata is not None
 
             # Build attachment
             attachment = {
