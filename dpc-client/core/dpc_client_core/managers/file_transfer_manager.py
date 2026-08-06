@@ -198,8 +198,13 @@ class FileTransferManager:
         path.mkdir(parents=True, exist_ok=True)
         return path
 
-    # Windows resolves these to devices no matter the directory, so a file
-    # named CON or NUL is written to the device and silently disappears.
+    # Kept as insurance for older Windows, not because the hazard was observed.
+    # The claim first written here — that Windows resolves these to devices
+    # whatever the directory, so a file named CON vanishes into one — does not
+    # hold on Windows 11 26200: `CON`, `CON.txt`, `NUL.txt` and `aux .log` were
+    # each created as ordinary files and listed by `dir` (checked 2026-08-07,
+    # three ways). The guard costs one underscore on a name nobody sends by
+    # accident, so it stays; the reasoning is corrected rather than the code.
     _RESERVED_NAMES = frozenset(
         ["CON", "PRN", "AUX", "NUL"]
         + [f"COM{i}" for i in range(1, 10)]
