@@ -37,6 +37,7 @@ import hashlib
 import base64
 import uuid
 import zlib  # For CRC32 checksums
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional, Dict, Callable, List, Any, TYPE_CHECKING
 from dataclasses import dataclass, field
@@ -849,8 +850,17 @@ class FileTransferManager:
                 else:
                     message_content = f"Received file: {transfer.filename} ({size_mb} MB)"
 
-                # Add as "assistant" role (peer's message from receiver's perspective)
-                conversation_monitor.add_message("assistant", message_content, [attachment])
+                # Add as "assistant" role (peer's message from receiver's perspective).
+                # The node that sent the file is the author of this note: without
+                # it the row rendered as "You" on the receiving node, and the
+                # record joined the per-author digest under an empty author whose
+                # contents differ on every node, so that author never agreed.
+                conversation_monitor.add_message(
+                    "assistant", message_content, [attachment],
+                    timestamp=datetime.now(timezone.utc).isoformat(),
+                    sender_node_id=node_id,
+                    sender_name=sender_name,
+                )
                 logger.debug(f"Added received {attachment['type']} to conversation history: {transfer.filename}")
 
         # Auto-transcribe voice messages if enabled (v0.13.2+ recipient-side)

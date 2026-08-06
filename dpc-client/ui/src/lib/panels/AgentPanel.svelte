@@ -164,6 +164,9 @@
                 const localHistory: any[] = newMap.get(conv_id) || [];
                 const localById = new Map(localHistory.map((m: any) => [m.id, m]));
 
+                // See messageMapper: an undated record takes the time of the
+                // one before it rather than the clock at load.
+                let previousTimestamp: number | undefined;
                 const msgs = histResult.messages.map((msg: any, index: number) => {
                   const { sender, senderName } = mapMessageSender(msg, conv_id, agent.name || conv_id);
                   const stableId = msg.id || `${conv_id}-${msg.timestamp ? new Date(msg.timestamp).getTime() : index}`;
@@ -173,7 +176,9 @@
                     fallbackSenderName: senderName,
                     index,
                     totalCount: histResult.messages.length,
+                    previousTimestamp,
                   });
+                  previousTimestamp = mapped.timestamp;
                   mapped.id = stableId;
                   mapped.text = msg.content;
                   mapped.thinking = msg.thinking || local?.thinking;

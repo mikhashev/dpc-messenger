@@ -1514,12 +1514,22 @@ PARTICIPANTS' CULTURAL CONTEXTS:
         if not message_id:
             message_id = str(uuid.uuid4())
 
+        # A record with no timestamp cannot be ordered by anything, and the UI
+        # then invents one from the clock at load time — so it sorts below every
+        # real message, at a place that moves on every reload. Two file notes
+        # written that way (2026-08-07) read as "sent just now" days later. The
+        # default is here rather than at each caller because the next caller to
+        # forget should not be able to produce such a record at all; a timestamp
+        # the caller supplies is never touched, since a peer's is covered by
+        # their signature.
+        if not timestamp:
+            timestamp = datetime.now(timezone.utc).isoformat()
+
         # Add to message_history (for chat history sync)
         message_dict = {"id": message_id, "role": role, "content": content}
         if attachments:
             message_dict["attachments"] = attachments
-        if timestamp:
-            message_dict["timestamp"] = timestamp
+        message_dict["timestamp"] = timestamp
         if sender_node_id:
             message_dict["sender_node_id"] = sender_node_id
         if sender_name:

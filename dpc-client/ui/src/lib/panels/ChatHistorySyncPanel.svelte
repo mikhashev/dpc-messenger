@@ -84,6 +84,9 @@
               // Convert backend format to frontend format (v0.15.3: use backend metadata)
               chatHistories.update(map => {
                 const newMap = new Map(map);
+                // See HistorySyncPanel: an undated record borrows the time of
+                // the one before it rather than the clock.
+                let previousTimestamp: number | undefined;
                 const loadedMessages = result.messages.map((msg: any, index: number) => {
                   if (index === 0) console.log(`[ChatHistory] DIAG first msg keys:`, Object.keys(msg), `tool_calls:`, msg.tool_calls?.length, `sender_type:`, msg.sender_type, `msg_index:`, msg.msg_index);
                   const fallbackSender = msg.sender_node_id || (msg.role === 'user' ? 'user' : reqChatId);
@@ -93,7 +96,9 @@
                     fallbackSenderName: fallbackName,
                     index,
                     totalCount: result.messages.length,
+                    previousTimestamp,
                   });
+                  previousTimestamp = mapped.timestamp;
                   mapped.id = msg.message_id || `backend-${index}-${Date.now()}`;
                   const isLocalHuman = msg.sender_type === 'human' && (!msg.sender_node_id || msg.sender_node_id === selfNodeId);
                   if (isLocalHuman) {

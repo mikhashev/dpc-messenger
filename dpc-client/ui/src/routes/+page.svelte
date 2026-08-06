@@ -274,12 +274,17 @@
             chatHistories.update(map => {
               const newMap = new Map(map);
               const agentName = $agentsList?.find((a: any) => a.agent_id === state.agent_id)?.name || state.agent_id;
-              const msgs = result.messages.map((msg: any, index: number) =>
-                mapBackendMessage(msg, {
+              let previousTimestamp: number | undefined;
+              const msgs = result.messages.map((msg: any, index: number) => {
+                const mapped = mapBackendMessage(msg, {
                   index,
                   totalCount: result.messages.length,
                   identity: { agentSelfId: state.agent_id, agentSelfName: agentName, selfNodeId: $nodeStatus?.node_id || '' },
-                }));
+                  previousTimestamp,
+                });
+                previousTimestamp = mapped.timestamp;
+                return mapped;
+              });
               newMap.set(state.agent_id, msgs);
               return newMap;
             });
@@ -502,14 +507,18 @@
             const newMap = new Map(map);
             const localHistory: any[] = newMap.get(activeChatId) || [];
             const localById = new Map(localHistory.map((m: any) => [m.id, m]));
+            let previousTimestamp: number | undefined;
             const msgs = result.messages.map((msg: any, index: number) => {
               const local = localById.get(msg.id);
-              return mapBackendMessage(msg, {
+              const mapped = mapBackendMessage(msg, {
                 index,
                 totalCount: result.messages.length,
                 identity: { agentSelfId: activeChatId, agentSelfName: agentName, selfNodeId: $nodeStatus?.node_id || '' },
                 local: local ? { thinking: local.thinking, streamingRaw: local.streamingRaw, tool_calls: local.tool_calls } : undefined,
+                previousTimestamp,
               });
+              previousTimestamp = mapped.timestamp;
+              return mapped;
             });
             newMap.set(activeChatId, msgs);
             return newMap;

@@ -92,6 +92,10 @@
 
             chatHistories.update(map => {
               const newMap = new Map(map);
+              // Carried forward so a record stored without a timestamp keeps
+              // its place instead of being dated from the clock and sorting to
+              // the end — which it did again on every reload.
+              let previousTimestamp: number | undefined;
               const syncedMessages = response.messages.map((msg: any, index: number) => {
                 const isAgent = msg.sender_type === 'agent' || msg.is_agent || false;
                 const isLocalHuman = !isAgent && (!msg.sender_node_id || msg.sender_node_id === selfNodeId);
@@ -100,7 +104,9 @@
                   fallbackSenderName: isLocalHuman ? 'You' : (msg.sender_name || getPeerDisplayName(msg.sender_node_id || syncedGroupId)),
                   index,
                   totalCount: response.messages.length,
+                  previousTimestamp,
                 });
+                previousTimestamp = mapped.timestamp;
                 mapped.id = msg.message_id || msg.id || `synced-${index}-${Date.now()}`;
                 return mapped;
               });

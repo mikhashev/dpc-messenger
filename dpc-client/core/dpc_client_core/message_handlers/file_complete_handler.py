@@ -1,5 +1,6 @@
 """Handler for FILE_COMPLETE command - file transfer completed successfully."""
 
+from datetime import datetime, timezone
 from typing import Dict, Any, Optional
 from . import MessageHandler
 
@@ -132,7 +133,14 @@ class FileCompleteHandler(MessageHandler):
                     if conversation_monitor:
                         file_type = 'screenshot' if is_image else ('voice message' if is_voice else 'file')
                         message_content = f"Sent {file_type}: {transfer.filename} ({size_mb} MB)"
-                        conversation_monitor.add_message("user", message_content, [attachment])
+                        # We sent it, so we are the author of this note. Stamped
+                        # here rather than left to the default so the record
+                        # reads the same as any other message we wrote.
+                        conversation_monitor.add_message(
+                            "user", message_content, [attachment],
+                            timestamp=datetime.now(timezone.utc).isoformat(),
+                            sender_node_id=self.service.p2p_manager.node_id,
+                        )
                         self.logger.debug(f"Added sent {file_type} to conversation history: {transfer.filename}")
                 else:
                     self.logger.debug(f"Group file UI already shown for {transfer.filename}, skipping duplicate")
