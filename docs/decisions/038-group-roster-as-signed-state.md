@@ -89,9 +89,15 @@ version bump.
 | field | who may change it |
 |---|---|
 | `members` | the creator |
-| `name`, `topic` | the creator |
+| `topic` | the creator |
+| `name` | **nobody, after creation** |
 | `agents[X]`, `agent_names[X]` | node X, for its own entry — **or** the creator, to remove |
 | `created_by` | nobody, after creation |
+
+`name` is immutable by intent rather than by caution (Mike, 2026-08-06): one
+group is one project, and a renameable group is the first step toward the
+sprawl of near-duplicate channels that the design is meant to avoid. A project
+that has become a different project is a different group.
 
 `apply_sync` stops being a wholesale replace. It diffs the incoming record
 against the local one and applies each changed field only if the signer of the
@@ -183,6 +189,14 @@ asking anyone, and the creator retains a veto by being entitled to remove.
   today is that a group can be recreated.
 - **Neutral:** per-field diffing makes `apply_sync` longer and more explicit;
   the version and tie-break rules are untouched.
+- **Negative, and it is a change of failure mode (@Ark):** wholesale replace
+  fails loudly — the group looks wrong. Per-field apply can fail quietly — the
+  group looks right and one field silently did not move. Every refused field
+  needs a log line, and the tests need a case for partial refusal, not only for
+  correct application.
+- **Neutral:** the transition has to be coordinated by whoever runs the nodes,
+  not by the protocol. Every node must be updated before unsigned changes stop
+  being accepted; with three nodes that is an hour, with ten it is planning.
 
 ## Confirmation
 
@@ -196,6 +210,12 @@ asking anyone, and the creator retains a veto by being entitled to remove.
       the creator's, proving the rule survives the star.
 - [ ] A roster change whose signature does not verify leaves the local copy
       unchanged.
+- [ ] A **signed but stale** change does not roll the roster back: the version
+      rule still applies after signatures are added, and the refusal is logged.
+- [ ] A field that fails its authority check leaves a log line. Per-field apply
+      replaces "replaced the wrong thing", which is visible, with "quietly did
+      not apply", which is not — so silence is the failure mode to design
+      against (@Ark).
 - [ ] The member list is derivable and attested — P1 of ADR-037 marked satisfied
       there, not only here.
 
@@ -209,7 +229,10 @@ asking anyone, and the creator retains a veto by being entitled to remove.
   `remove_group_member` refuse when this node is not the creator.
 - `dpc-protocol/dpc_protocol/message_signing.py` — preimage for a roster change.
 - `specs/dptp_v1.md` — document `GROUP_CREATE`, `GROUP_SYNC`, `GROUP_DELETE`,
-  their payloads and acceptance rules. They are absent today.
+  their payloads and acceptance rules. They are absent today. The acceptance
+  rules move **out of the code and into the spec** (version precedence,
+  content-hash tie-break, per-field authority) rather than being described
+  loosely — otherwise the two drift apart again within a month (@Ark).
 - `dpc-client/ui` — the creator-only affordances become the truth rather than a
   hint; a refused change needs a message.
 
@@ -225,20 +248,44 @@ asking anyone, and the creator retains a veto by being entitled to remove.
 
 ## Open Questions
 
-- **Q1:** What happens to an unsigned change from a node that predates this —
-  accepted as legacy, or refused? Refusing splits the network at upgrade time;
-  accepting leaves the hole open for as long as one old node exists. — @Mike
-- **Q2:** Is ownership transfer in scope at all, or does a lost creator mean the
-  group is recreated? Deliberately excluded above, and it is the one case Mike
-  named as unresolved ("если пропал сам создатель то хз"). — @Mike
-- **Q3:** Does this ADR carry the `session_started_at` marker as well? It is the
-  same field of the same record, arriving by the same sync, and it would let a
-  node that missed a New Session catch up instead of restoring the history it
-  should have cleared. Folding it in is cheap; keeping it separate keeps this
-  ADR about authority. — @Mike
-- **Q4:** Are `name` and `topic` really creator-only, or may any member rename a
-  group? Listed as creator-only above by analogy with membership, which is an
-  assumption rather than a stated requirement. — @Mike
+- **Q1 — open.** What happens to an unsigned change from a node that predates
+  this — accepted as legacy, or refused? — @Mike
+
+  **CC recommends refusing, against Ark's legacy-accept-with-deadline**, on a
+  precedent from this codebase rather than on principle. ADR-036 fixed exactly
+  this shape: `if sig and content_hash and signer:` meant a message with those
+  fields *absent* skipped verification entirely, so rejection required a wrong
+  signature rather than a missing one. "Accept unsigned as legacy" is that line
+  again — the check becomes optional, and anyone wanting to bypass it omits the
+  signature and is treated as an old node. A transition window is a window for
+  the attacker too, and it cannot be told from a genuine old node.
+
+  What makes refusing affordable here and not for messages: roster changes are
+  rare and deliberate, so a hard cutover costs one coordinated update rather
+  than a stream of dropped traffic. The cost is real and should be stated: until
+  every node is updated, a roster change made on an old node does not reach the
+  new ones.
+
+- **Q2 — closed (Mike, 2026-08-06): out of scope.** A pinned `created_by` means
+  a lost creator freezes the roster, and the way out is to recreate the group.
+  Accepted deliberately: under the Dunbar-scale model of `VISION.md` and
+  `dpc-full-picture-s32.md` a creator is a person you know, not an anonymous
+  account that silently disappears.
+
+- **Q3 — open.** Does this ADR carry the `session_started_at` marker as well? —
+  @Mike
+
+  Concretely, what it buys: three nodes agree a New Session, all vote yes, all
+  clear. One node's process dies a second after voting and before
+  `NEW_SESSION_RESULT` reaches it. It returns holding the whole history while
+  the others hold none — and the next sync hands its copy back to them, undoing
+  the reset with nobody noticing. The marker turns the reset from a message into
+  a fact about the group: the returning node sees a `session_started_at` newer
+  than its own history and clears itself. It is the same field of the same
+  record, riding the same sync.
+
+- **Q4 — closed (Mike, 2026-08-06):** `topic` creator-only, `name` immutable
+  after creation. See the authority table.
 
 ## Authors
 
@@ -254,8 +301,15 @@ asking anyone, and the creator retains a veto by being entitled to remove.
 - [ADR-037](037-author-attribution-chains.md) — precondition **P1, membership as
   signed state**, which this ADR is the answer to
 - [ADR-023](023-group-chat-participant-model.md) — introduced
-  `agents: {node_id: [agent_ids]}`; explicitly single-node in scope, "Phase 3
-  will likely require richer format"
+  `agents: {node_id: [agent_ids]}` and **explicitly deferred to "Phase 3" the
+  richer multi-node format that this ADR now defines**. Not merely related: 038
+  is the deferred half of 023.
+- `ideas/dpc-full-picture/dpc-full-picture-s32.md` §13 — the threat model this
+  ADR serves, in the project's own words: *"a zero-trust/hostile-federation
+  threat model in place of OHS's cooperative-Alliance assumption"*, with
+  *"cryptographic identity derived from a keypair (trust without prior
+  introduction)"*. Dunbar-scale trust is the social layer; the wire is not
+  assumed friendly.
 - [ADR-022](022-multi-agent-safety-governance.md) — Layer 2, "governance in the
   wire, not in the model"; a roster change fits as another signed action
 - `4d3b7442` — the existing gate: `GROUP_SYNC` only from an existing member
