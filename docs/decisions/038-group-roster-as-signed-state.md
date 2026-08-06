@@ -1,7 +1,7 @@
 ---
 adr: 038
 title: "Make the group roster signed state, and give it an owner"
-status: proposed
+status: accepted
 date: 2026-08-06
 deciders: [Mike]
 consulted: [Ark, CC]
@@ -92,6 +92,7 @@ version bump.
 | `topic` | the creator |
 | `name` | **nobody, after creation** |
 | `agents[X]`, `agent_names[X]` | node X, for its own entry — **or** the creator, to remove |
+| `session_started_at` | any participant, as the outcome of an approved New Session |
 | `created_by` | nobody, after creation |
 
 `name` is immutable by intent rather than by caution (Mike, 2026-08-06): one
@@ -240,18 +241,24 @@ asking anyone, and the creator retains a veto by being entitled to remove.
 
 | Task | Status | Commit |
 |------|--------|--------|
-| ADR drafted | Done | — |
+| ADR drafted | Done | `b166634b` |
+| Q1–Q4 answered, status accepted | Done | — |
 | `created_by` pinned | Pending | — |
 | Per-field authority in `apply_sync` | Pending | — |
 | Signed roster changes | Pending | — |
+| `session_started_at` marker | Pending | — |
+| Unsigned changes refused, legibly | Pending | — |
 | `GROUP_SYNC` in the spec | Pending | — |
 
 ## Open Questions
 
-- **Q1 — open.** What happens to an unsigned change from a node that predates
-  this — accepted as legacy, or refused? — @Mike
+- **Q1 — closed (Mike, 2026-08-06): refuse.** *"Отвергать. Пусть все, кто кроме
+  нас пользуется, переезжает на новый код. А я таких не знаю."* Refusal must be
+  legible rather than silent (@Ark): the sending node is told its change was not
+  applied and why, otherwise its owner sees local success while the rest of the
+  group never moved, and the divergence surfaces only at the next comparison.
 
-  **CC recommends refusing, against Ark's legacy-accept-with-deadline**, on a
+  The reasoning that settled it, kept because it is the reusable part:
   precedent from this codebase rather than on principle. ADR-036 fixed exactly
   this shape: `if sig and content_hash and signer:` meant a message with those
   fields *absent* skipped verification entirely, so rejection required a wrong
@@ -272,17 +279,25 @@ asking anyone, and the creator retains a veto by being entitled to remove.
   `dpc-full-picture-s32.md` a creator is a person you know, not an anonymous
   account that silently disappears.
 
-- **Q3 — open.** Does this ADR carry the `session_started_at` marker as well? —
-  @Mike
+- **Q3 — closed (Mike, 2026-08-06): include it.**
 
-  Concretely, what it buys: three nodes agree a New Session, all vote yes, all
-  clear. One node's process dies a second after voting and before
-  `NEW_SESSION_RESULT` reaches it. It returns holding the whole history while
-  the others hold none — and the next sync hands its copy back to them, undoing
-  the reset with nobody noticing. The marker turns the reset from a message into
-  a fact about the group: the returning node sees a `session_started_at` newer
-  than its own history and clears itself. It is the same field of the same
-  record, riding the same sync.
+  What it buys: three nodes agree a New Session, all vote yes, all clear. One
+  node's process dies a second after voting and before `NEW_SESSION_RESULT`
+  reaches it. It returns holding the whole history while the others hold none —
+  and the next sync hands its copy back to them, undoing the reset with nobody
+  noticing. The marker turns the reset from a message into a fact about the
+  group: the returning node sees a `session_started_at` newer than its own
+  history and clears what predates it. Same record, same sync.
+
+  **It has to be its own field, and not — as proposed in review — a bump of the
+  existing `version`.** `version` increments on *every* metadata change, so a
+  node reading "version higher than mine" as "a reset happened" would wipe its
+  history whenever somebody edited the topic or added a member. The version says
+  *something* changed; only the marker says *what the new session boundary is*,
+  and the boundary is needed for the second half of the job: a returning node
+  must clear what predates the marker and keep what came after, which a counter
+  cannot express. The saving offered was one field; the cost was every history
+  in the group.
 
 - **Q4 — closed (Mike, 2026-08-06):** `topic` creator-only, `name` immutable
   after creation. See the authority table.
