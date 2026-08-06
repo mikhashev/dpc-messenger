@@ -1238,17 +1238,25 @@ class CoreService:
             except Exception as e:
                 logger.error("Error in hub connection monitor: %s", e, exc_info=True)
 
-    async def _auto_connect_node_groups(self):
-        """Auto-connect to all node IDs listed in firewall node groups on startup."""
-        delay = self.settings.get_p2p_auto_connect_delay()
-        await asyncio.sleep(delay)
-
+    def _peers_to_auto_connect(self) -> set:
+        """Peer IDs eligible for auto-connect and reconnect: firewall node groups plus group-chat rosters."""
         node_ids = {
             nid
             for group_ids in self.firewall.node_groups.values()
             for nid in group_ids
-            if nid != self.p2p_manager.node_id
         }
+        if self.group_manager:
+            for group in self.group_manager.get_all_groups():
+                node_ids.update(group.members)
+        node_ids.discard(self.p2p_manager.node_id)
+        return node_ids
+
+    async def _auto_connect_node_groups(self):
+        """Auto-connect on startup to every peer we keep a connection to."""
+        delay = self.settings.get_p2p_auto_connect_delay()
+        await asyncio.sleep(delay)
+
+        node_ids = self._peers_to_auto_connect()
 
         if not node_ids:
             logger.debug("No node group peers to auto-connect")
@@ -1463,11 +1471,9 @@ class CoreService:
         # A question asked of a peer that has gone does not stay answerable.
         self.history_requests.forget_peer(peer_id)
 
-        # Schedule auto-reconnect if peer is in a node group (known peer)
+        # Schedule auto-reconnect if this is a peer we keep a connection to
         if hasattr(self, 'connection_orchestrator') and self.connection_orchestrator:
-            node_groups = getattr(self.firewall, 'node_groups', {})
-            is_known = any(peer_id in ids for ids in node_groups.values())
-            if is_known:
+            if peer_id in self._peers_to_auto_connect():
                 task = asyncio.create_task(self._auto_reconnect_peer(peer_id))
                 task.set_name(f"reconnect_{peer_id[:16]}")
                 self._background_tasks.add(task)
