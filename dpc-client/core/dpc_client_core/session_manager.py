@@ -40,32 +40,25 @@ class VotingSession:
         return len(self.proposal.votes) == len(self.proposal.participants)
 
     def is_approved(self) -> bool:
-        """
-        Check if proposal is approved based on voting rules.
+        """Every participant has to say yes. One rule, whatever the size.
 
-        P2P (2 participants): Unanimous approval required
-        Multi-party (3+): Majority of *participants*, not of votes cast.
+        Majority was tried and is wrong here for a reason that is not about
+        fairness: the reset is undone by whoever did not take part. A member
+        outvoted or merely absent keeps its history, and hands it straight back
+        at the next sync — so a two-of-three reset is not a reset, it is a pause.
+        Unanimity is what makes the outcome stick.
 
-        The distinction is the whole rule. Dividing by votes cast made the
-        initiator a majority of one: its own vote is recorded as approve when it
-        proposes, the timeout finalises with whatever arrived, and one of one
-        cleared the history of everyone who later received the result. Counting
-        over participants also gives the timeout its ending for free — an
-        unanswered proposal cannot reach a majority, so silence is not consent.
+        The price is stated rather than hidden: a member that is gone for good
+        makes a reset impossible, and there is no override. That is deliberate
+        (Mike, 2026-08-06) — the alternative is a reset that silently comes back.
+
+        Counting over participants also gives the timeout its ending for free:
+        an unanswered proposal never reaches everyone, so silence is not consent.
         """
-        if not self.proposal.votes:
+        participants = self.proposal.participants
+        if not participants:
             return False
-
-        total_votes = len(self.proposal.votes)
-        approve_votes = sum(1 for v in self.proposal.votes.values() if v)
-
-        if len(self.proposal.participants) == 2:
-            # P2P: require unanimous approval
-            return approve_votes == 2 and total_votes == 2
-        else:
-            # Multi-party: strict majority of everyone in the conversation, so a
-            # tie leaves the history alone.
-            return approve_votes > (len(self.proposal.participants) / 2)
+        return all(self.proposal.votes.get(node_id) is True for node_id in participants)
 
 
 class NewSessionProposalManager:

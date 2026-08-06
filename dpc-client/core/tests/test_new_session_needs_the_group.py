@@ -1,22 +1,29 @@
-"""A group reset is a group decision, and the majority was counted over the wrong set.
+"""A group reset takes everyone's yes, and it used to take one.
 
-`is_approved` divided by the number of votes *cast* rather than the number of
-participants. The initiator's own vote is recorded as approve the moment it
+`is_approved` divided by the number of votes *cast* rather than by the people in
+the conversation. The initiator's own vote is recorded as approve the moment it
 proposes, and the 60-second timeout finalises with whatever arrived instead of
 cancelling. One approve out of one cast is a majority of one, so a proposal
 nobody answered was approved, and every node that later received the result
 archived its history and deleted the file.
 
-The two-participant rule was written correctly (`approve == 2 and total == 2`),
-which is why this never showed: it was exercised on the case it got right.
+The first fix counted over participants — a real majority, two of three. Mike
+rejected that on 2026-08-06 and the rule is now unanimity, for a reason that is
+about the mechanism rather than about fairness: **the reset is undone by whoever
+did not take part.** An outvoted or absent member keeps its history and hands it
+back at the next sync, so a two-of-three reset is a pause, not a reset. Nothing
+short of everyone makes it stick.
 
-Counting over participants also gives the timeout the right ending without a
-second rule — an unanswered proposal simply fails to reach a majority.
+The price is deliberate and stated: a member gone for good makes a reset
+impossible, with no override. The alternative was a reset that silently returns.
 
-What this does NOT fix, stated so nobody reads more into it: a member who was
-offline for the vote never learns of the reset, and hands its history back at
-the next sync. That needs a decision about what a reset means for an absent
-member, not a counting change.
+Proposing is refused up front when any member is unreachable, so the answer
+arrives immediately and names who is missing, rather than after a minute of
+silence with no reason given.
+
+These expectations changed with the rule. The earlier majority cases are not
+"fixed" here, they are reversed on purpose, and they are kept as tests so the
+reversal is visible rather than deleted.
 """
 
 import asyncio
@@ -57,25 +64,35 @@ def test_the_initiator_alone_does_not_carry_a_group_of_three():
     assert not _session([ME, BOB, CAROL], {ME: True}).is_approved()
 
 
-def test_two_of_three_is_a_majority():
-    assert _session([ME, BOB, CAROL], {ME: True, BOB: True}).is_approved()
+def test_everyone_saying_yes_is_the_only_way_through():
+    assert _session([ME, BOB, CAROL], {ME: True, BOB: True, CAROL: True}).is_approved()
 
 
-def test_a_dissenter_does_not_block_a_real_majority():
-    assert _session([ME, BOB, CAROL], {ME: True, BOB: True, CAROL: False}).is_approved()
+def test_two_of_three_is_no_longer_enough():
+    """Reversed on purpose: this was approved under the majority rule.
+
+    The third node keeps its history and returns it, so approving here bought
+    nothing and hid that fact behind a success message.
+    """
+    assert not _session([ME, BOB, CAROL], {ME: True, BOB: True}).is_approved()
+
+
+def test_one_dissenter_stops_it():
+    assert not _session([ME, BOB, CAROL], {ME: True, BOB: True, CAROL: False}).is_approved()
 
 
 def test_one_approve_against_two_rejects_fails():
     assert not _session([ME, BOB, CAROL], {ME: True, BOB: False, CAROL: False}).is_approved()
 
 
-def test_half_of_four_is_not_a_majority():
-    """`>` and not `>=`: a tie leaves the history alone."""
-    assert not _session([ME, BOB, CAROL, DAVE], {ME: True, BOB: True, CAROL: False, DAVE: False}).is_approved()
+def test_three_of_four_is_no_longer_enough():
+    assert not _session([ME, BOB, CAROL, DAVE], {ME: True, BOB: True, CAROL: True}).is_approved()
 
 
-def test_three_of_four_is_a_majority():
-    assert _session([ME, BOB, CAROL, DAVE], {ME: True, BOB: True, CAROL: True}).is_approved()
+def test_four_of_four_passes():
+    assert _session(
+        [ME, BOB, CAROL, DAVE], {ME: True, BOB: True, CAROL: True, DAVE: True}
+    ).is_approved()
 
 
 def test_silence_from_the_others_is_not_consent_at_any_size():
@@ -83,7 +100,12 @@ def test_silence_from_the_others_is_not_consent_at_any_size():
         assert not _session([ME] + others, {ME: True}).is_approved()
 
 
-# --- the pair rule, which was already right and must stay right -------------
+def test_a_vote_from_someone_outside_the_conversation_does_not_count():
+    """Otherwise a stray VOTE_NEW_SESSION could stand in for a missing member."""
+    assert not _session([ME, BOB, CAROL], {ME: True, BOB: True, DAVE: True}).is_approved()
+
+
+# --- the pair, which needed both before and still does ----------------------
 
 
 def test_two_participants_still_need_both():
@@ -116,16 +138,81 @@ async def test_an_unanswered_proposal_times_out_without_clearing_anything():
 
 
 @pytest.mark.asyncio
-async def test_an_answered_proposal_still_clears():
+async def test_a_proposal_everyone_approved_still_clears():
     """The regression half: refusing everything would also satisfy the test above."""
+    cleared = []
+    manager, results = _manager(cleared)
+    manager.active_sessions["p1"] = _session(
+        [ME, BOB, CAROL], {ME: True, BOB: True, CAROL: True}
+    )
+
+    await manager._finalize_proposal("p1")
+
+    assert cleared == [GROUP]
+    assert [r["result"] for r in results] == ["approved"]
+
+
+@pytest.mark.asyncio
+async def test_a_partly_answered_proposal_clears_nothing():
+    """Two of three used to clear everyone. Now it leaves every history alone."""
     cleared = []
     manager, results = _manager(cleared)
     manager.active_sessions["p1"] = _session([ME, BOB, CAROL], {ME: True, BOB: True})
 
     await manager._finalize_proposal("p1")
 
-    assert cleared == [GROUP]
-    assert [r["result"] for r in results] == ["approved"]
+    assert cleared == []
+    assert [r["result"] for r in results] == ["rejected"]
+
+
+# --- refusing before the vote, so the answer is immediate and says who -------
+
+
+@pytest.mark.asyncio
+async def test_proposing_is_refused_while_a_member_is_unreachable():
+    """A member who cannot answer cannot approve, so do not start the minute.
+
+    The old check asked only whether *somebody* was online, which let the vote
+    run to its timeout and come back "rejected" with no reason on screen.
+    """
+    from dpc_client_core.service import CoreService
+
+    service = _proposing_service(connected=[BOB])
+    result = await CoreService.propose_new_session(service, GROUP)
+
+    assert result["status"] == "error"
+    assert CAROL[:20] in result["message"]
+    assert service.session_manager.calls == []
+
+
+@pytest.mark.asyncio
+async def test_proposing_goes_ahead_when_everyone_is_reachable():
+    from dpc_client_core.service import CoreService
+
+    service = _proposing_service(connected=[BOB, CAROL])
+    result = await CoreService.propose_new_session(service, GROUP)
+
+    assert result["status"] == "success"
+    assert service.session_manager.calls == [{ME, BOB, CAROL}]
+
+
+def _proposing_service(connected):
+    async def _propose(conversation_id, participants):
+        calls.append(set(participants))
+        return {"status": "success", "proposal_id": "p1"}
+
+    calls = []
+    manager = SimpleNamespace(propose_new_session=_propose, calls=calls)
+    return SimpleNamespace(
+        group_manager=SimpleNamespace(
+            get_group=lambda gid: SimpleNamespace(
+                members=[ME, BOB, CAROL], is_discord_bridge=False
+            )
+        ),
+        p2p_manager=SimpleNamespace(node_id=ME),
+        p2p_coordinator=SimpleNamespace(get_connected_peers=lambda: list(connected)),
+        session_manager=manager,
+    )
 
 
 # --- the node that only receives the result ---------------------------------

@@ -4371,11 +4371,23 @@ class CoreService:
                     return result
 
                 participants = set(group.members)
-                # Check at least one other member is online
+                # Everyone has to be reachable, not just somebody. A reset needs
+                # every member's yes, and a member who cannot answer cannot give
+                # one — so refuse here with the names rather than let the vote
+                # run its full minute and come back "rejected" for no stated
+                # reason. An absent member is also the one that hands its
+                # history back at the next sync and undoes the reset.
                 connected = self.p2p_coordinator.get_connected_peers()
-                online_members = [m for m in other_members if m in connected]
-                if not online_members:
-                    return {"status": "error", "message": "No group members are online"}
+                offline_members = [m for m in other_members if m not in connected]
+                if offline_members:
+                    names = ", ".join(m[:20] for m in offline_members)
+                    return {
+                        "status": "error",
+                        "message": (
+                            f"All members must be online to start a new session. "
+                            f"Offline: {names}"
+                        ),
+                    }
             else:
                 # P2P chats: use proposal flow
                 # For now, conversation_id is the peer_id in P2P mode
