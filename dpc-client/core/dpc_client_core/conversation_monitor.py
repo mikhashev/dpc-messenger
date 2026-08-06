@@ -1904,17 +1904,31 @@ PARTICIPANTS' CULTURAL CONTEXTS:
 
         return remapped
 
-    def export_history(self) -> List[Dict[str, Any]]:
+    def export_history(self, authors: Optional[List[str]] = None) -> List[Dict[str, Any]]:
         """Export conversation history for syncing with peer
 
         Returns history in serializable format with timestamps added.
-        No message limit - returns full history.
+
+        Args:
+            authors: node ids to restrict the export to. `None` means the whole
+                history, which is what a peer predating the field asks for. An
+                empty list means "nothing differs" and exports nothing — it is
+                explicitly not the same as `None`, and reading it as falsy would
+                turn the cheapest request into the most expensive one.
+
+                β already names the authors it needs (`group_handler.py`), but
+                the answering side used to ignore them and send everything, so
+                the property "sync asks only for what is missing" held in the
+                request and never in the transfer.
 
         Returns:
             List of message dicts with 'role', 'content', 'timestamp', 'attachments'
         """
+        wanted = set(authors) if authors is not None else None
         exported = []
         for msg in self.message_history:
+            if wanted is not None and (msg.get("sender_node_id") or "") not in wanted:
+                continue
             exported_msg = {
                 "id": msg.get("id"),  # Preserve ID so merge_history can deduplicate
                 "role": msg["role"],
@@ -1958,7 +1972,13 @@ PARTICIPANTS' CULTURAL CONTEXTS:
                         exported_msg[field] = msg[field]
             exported.append(exported_msg)
 
-        logger.info(f"Exported {len(exported)} messages from conversation history")
+        if wanted is None:
+            logger.info(f"Exported {len(exported)} messages from conversation history")
+        else:
+            logger.info(
+                "Exported %d of %d messages, limited to %d author(s)",
+                len(exported), len(self.message_history), len(wanted),
+            )
         return exported
 
     def import_history(self, messages: List[Dict[str, Any]]):

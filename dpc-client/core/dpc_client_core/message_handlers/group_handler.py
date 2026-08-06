@@ -555,13 +555,20 @@ class GroupHistoryRequestHandler(MessageHandler):
 
         Args:
             sender_node_id: Node ID of requester
-            payload: Contains group_id
+            payload: Contains group_id, and optionally `authors` — the node ids
+                the requester found divergent. β has been sending that list
+                since `5b160a93`; this handler used to ignore it and answer with
+                the whole history, so every sync cost the full file no matter
+                how little differed. A peer that predates the field sends none,
+                and still gets everything.
         """
         group_id = payload.get("group_id")
+        authors = payload.get("authors")
 
         self.logger.info(
-            "Received GROUP_HISTORY_REQUEST from %s for group %s",
-            sender_node_id[:20], group_id
+            "Received GROUP_HISTORY_REQUEST from %s for group %s (%s)",
+            sender_node_id[:20], group_id,
+            "whole history" if authors is None else f"{len(authors)} author(s)",
         )
 
         # Get conversation monitor for this group; load from disk if not in memory
@@ -573,13 +580,18 @@ class GroupHistoryRequestHandler(MessageHandler):
             return None
 
         # Export history and send back
-        history = monitor.export_history() if hasattr(monitor, "export_history") else []
+        history = monitor.export_history(authors=authors) if hasattr(monitor, "export_history") else []
+        response = {
+            "group_id": group_id,
+            "history": history,
+        }
+        # Say what the answer covers. Without it a filtered reply is
+        # indistinguishable from a complete one that happens to be short.
+        if authors is not None:
+            response["authors"] = authors
         await self.service.p2p_manager.send_message_to_peer(sender_node_id, {
             "command": "GROUP_HISTORY_RESPONSE",
-            "payload": {
-                "group_id": group_id,
-                "history": history,
-            }
+            "payload": response,
         })
 
         return None
@@ -604,10 +616,14 @@ class GroupHistoryResponseHandler(MessageHandler):
         """
         group_id = payload.get("group_id")
         history = payload.get("history", [])
+        # Present when the answer was limited to the authors we asked about, so
+        # a short reply can be told apart from a short history.
+        authors = payload.get("authors")
 
         self.logger.info(
-            "Received GROUP_HISTORY_RESPONSE from %s for group %s (%d messages)",
-            sender_node_id[:20], group_id, len(history)
+            "Received GROUP_HISTORY_RESPONSE from %s for group %s (%d messages, %s)",
+            sender_node_id[:20], group_id, len(history),
+            "whole history" if authors is None else f"limited to {len(authors)} author(s)",
         )
 
         if not history:
