@@ -7894,6 +7894,24 @@ class CoreService:
                 return d
         return None
 
+    @staticmethod
+    def _local_group_agents(metadata: Dict[str, Any], local_node_id: str) -> list:
+        """The agents this node is responsible for, and only those.
+
+        Sleep runs a pipeline and then posts a morning brief into the group
+        under the agent's display name. Doing that for an agent belonging to
+        another node spends our compute on their work and signs their words
+        with our key, so the roster is read strictly per node.
+
+        There used to be a fallback — no agents for me, take everyone's — behind
+        a guard that never held: it asked `hasattr(self, "node_id")`, and the id
+        lives on `p2p_manager`, so the local list was always empty and the
+        fallback always ran. Both logs show it: `Group sleep: found N agents …
+        (node=None)`, and on 2026-05-11 the Linux node twice ran `agent_001`,
+        which is ours.
+        """
+        return list((metadata.get("agents") or {}).get(local_node_id) or [])
+
     async def trigger_group_sleep(self, group_id: str) -> Dict[str, Any]:
         """Trigger sleep pipeline for all agents in a group, using group archives only."""
         conversations_dir = Path.home() / ".dpc" / "conversations"
@@ -7906,11 +7924,8 @@ class CoreService:
             return {"status": "error", "message": "Group metadata not found"}
 
         metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
-        local_node_id = self.node_id if hasattr(self, "node_id") else None
-        local_agents = metadata.get("agents", {}).get(local_node_id, []) if local_node_id else []
-        if not local_agents:
-            for node_agents in metadata.get("agents", {}).values():
-                local_agents.extend(node_agents)
+        local_node_id = self.p2p_manager.node_id
+        local_agents = self._local_group_agents(metadata, local_node_id)
 
         if not local_agents:
             return {"status": "error", "message": "No agents in group"}
