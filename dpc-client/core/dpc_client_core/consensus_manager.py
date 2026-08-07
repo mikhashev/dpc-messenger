@@ -182,11 +182,29 @@ class ConsensusManager:
         # Record vote
         session.votes[self.node_id] = vote_obj
 
-        # Broadcast vote if function provided
+        # Broadcast vote if function provided. Signed and carrying its own
+        # conversation, for the reasons VOTE_NEW_SESSION is: the vote is relayed
+        # through whoever is connected, and a receiver reading identity off the
+        # socket credits the carrier. Here that would also put the wrong node
+        # inside the commit, because a vote on a commit becomes a signature on it.
+        from dpc_client_core.signing import sign_vote
+
+        vote_payload = asdict(vote_obj)
+        conversation_id = getattr(session.proposal, "conversation_id", None)
+        vote_payload["conversation_id"] = conversation_id
+        vote_payload.update(
+            sign_vote(
+                proposal_id=proposal_id,
+                conversation_id=conversation_id,
+                voter_node_id=self.node_id,
+                vote=vote,
+                timestamp=vote_obj.timestamp,
+            )
+        )
         if broadcast_func:
             await broadcast_func({
                 'command': 'VOTE_KNOWLEDGE_COMMIT',
-                'payload': asdict(vote_obj)
+                'payload': vote_payload
             })
 
         # Check if voting is complete
@@ -833,18 +851,27 @@ class ConsensusManager:
         except Exception as e:
             logger.error("Error handling proposal message from %s: %s", sender_node_id, e, exc_info=True)
 
-    async def handle_vote_message(self, sender_node_id: str, payload: Dict[str, Any]) -> None:
+    async def handle_vote_message(
+        self,
+        sender_node_id: str,
+        payload: Dict[str, Any],
+        voter_node_id: Optional[str] = None,
+    ) -> None:
         """Handle VOTE_KNOWLEDGE_COMMIT message from peer
 
         Args:
-            sender_node_id: Node ID of the voter
+            sender_node_id: the peer that handed us the message — the transport
+                hop, which in a star is usually not the voter
             payload: Vote payload (dict format)
+            voter_node_id: who actually cast it, as established by the handler's
+                signature check. Falls back to the transport peer only when the
+                caller could not establish it.
         """
         try:
             # Reconstruct vote from dict
             vote = CommitVote(
                 proposal_id=payload.get('proposal_id'),
-                voter_node_id=sender_node_id,
+                voter_node_id=voter_node_id or sender_node_id,
                 vote=payload.get('vote'),
                 comment=payload.get('comment'),
                 timestamp=payload.get('timestamp', datetime.now(timezone.utc).isoformat()),

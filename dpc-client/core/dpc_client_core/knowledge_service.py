@@ -443,46 +443,52 @@ class KnowledgeService:
     def _history_drift(self, proposal_id: str) -> Optional[Dict[str, Any]]:
         """Refuse a vote cast on a different conversation than the proposal read.
 
-        The anchor is the whole point of carrying it: a proposal names the
-        position it was extracted from and the chain hash at that position, so
-        a voter can prove it is judging the same text rather than assume it.
-        Silence here would be the failure mode we keep meeting — a check that
-        exists, travels, and is never asked.
+        The proposal names every message the extraction read, by `content_hash`.
+        A voter that holds all of them is judging the same text; one that is
+        missing any of them would be approving knowledge drawn from something
+        it has never seen.
 
-        Returns an error payload when the histories disagree, None otherwise
+        The check used to compare `(msg_index, chain_hash)` and refused every
+        remote vote, because `chain_hash` is local by construction (ADR-037):
+        it covers `role`, which differs per reader. Measured across the three
+        nodes on 2026-08-07 — same messages, three chains, and both peers were
+        refused at index 3. A check that exists and always says no is worse
+        than none, because it looks like agreement.
+
+        Returns an error payload when messages are missing, None otherwise
         (including when there is nothing to compare, which is not a mismatch).
         """
         session = self.consensus_manager.sessions.get(proposal_id)
         if session is None:
             return None
-        index = getattr(session.proposal, "based_on_msg_index", None)
-        expected = getattr(session.proposal, "based_on_chain_hash", None)
-        if not index or not expected:
-            return None  # proposer predates the anchor — nothing to verify
+        window = getattr(session.proposal, "based_on_content_hashes", None)
+        if not window:
+            return None  # proposer predates the window anchor — nothing to verify
 
         monitor = self.conversation_monitors.get(session.proposal.conversation_id)
         if monitor is None:
             return None
 
-        local = next(
-            (m for m in monitor.message_history if m.get("msg_index") == index), None
-        )
-        if local is None or local.get("chain_hash") is None:
-            return None  # we simply do not hold that position; not a mismatch
-        if local.get("chain_hash") == expected:
+        held = {
+            m.get("content_hash") for m in monitor.message_history if m.get("content_hash")
+        }
+        missing = [h for h in window if h not in held]
+        if not missing:
             return None
 
         logger.warning(
-            "Refusing vote on %s: history at index %s differs from the proposal's",
-            proposal_id, index,
+            "Refusing vote on %s: %d of %d messages in the extraction window are "
+            "missing from this history",
+            proposal_id, len(missing), len(window),
         )
         return {
             "status": "error",
             "reason": "history_drift",
-            "based_on_msg_index": index,
+            "missing_messages": len(missing),
+            "window_size": len(window),
             "message": (
-                f"This proposal was extracted from a different version of the "
-                f"conversation (message #{index} does not match). Voting on it "
+                f"This proposal was extracted from messages you do not have "
+                f"({len(missing)} of {len(window)} are missing here). Voting on it "
                 f"would approve text you are not looking at."
             ),
         }

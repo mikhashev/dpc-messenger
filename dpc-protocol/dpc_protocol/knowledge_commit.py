@@ -61,9 +61,20 @@ class KnowledgeCommitProposal:
     # The history this proposal was read from. Voting takes up to ten minutes,
     # during which the conversation keeps moving, so without an anchor each
     # voter judges whatever its own history happens to say — and a divergence
-    # is indistinguishable from agreement. The index names the position, the
-    # hash proves the text at it; a voter that cannot reproduce the hash knows
-    # it is reading a different conversation and says so.
+    # is indistinguishable from agreement.
+    #
+    # The window, named by the `content_hash` of every message the extraction
+    # actually read. A voter checks that it holds all of them: that is the
+    # question worth asking, because knowledge extracted from text a voter has
+    # never seen is what the anchor exists to refuse.
+    based_on_content_hashes: Optional[List[str]] = None
+
+    # The first form of the anchor, kept only so old proposals still parse.
+    # `chain_hash` is a local artefact by ADR-037 — it covers `role`, which is
+    # a rendering ("mine" vs "theirs"), so three honest nodes holding identical
+    # messages produce three different values. Measured 2026-08-07 on the same
+    # five messages: 855c…, 1a05…, 903d…. Anchoring a cross-node proposal on it
+    # meant every remote vote was refused; these fields are no longer read.
     based_on_msg_index: Optional[int] = None
     based_on_chain_hash: Optional[str] = None
 
@@ -123,6 +134,7 @@ class KnowledgeCommitProposal:
             dissenting_opinions=data.get('dissenting_opinions', []),
             avg_confidence=data.get('avg_confidence', 1.0),
             extraction_model=data.get('extraction_model'),
+            based_on_content_hashes=data.get('based_on_content_hashes'),
             based_on_msg_index=data.get('based_on_msg_index'),
             based_on_chain_hash=data.get('based_on_chain_hash'),
             # parent_commit_id was set by the proposer and then dropped here, so

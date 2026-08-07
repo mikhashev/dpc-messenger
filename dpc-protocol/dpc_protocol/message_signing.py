@@ -126,6 +126,21 @@ def message_content_hash(**fields: Any) -> str:
 VOTE_PREIMAGE_VERSION = "dptp-vote-v1"
 
 
+def _canonical_vote(vote: Any) -> str:
+    """One spelling per decision, and no two decisions sharing one.
+
+    True/"approve"/"yes" are the same yes and must not sign differently.
+    False/"reject"/"no" are the same no. Everything else — "request_changes"
+    today — keeps its own word, because collapsing a third answer into "no"
+    would let it be rewritten in flight without breaking the signature.
+    """
+    if vote in (True, "approve", "yes"):
+        return "yes"
+    if vote in (False, "reject", "no", None):
+        return "no"
+    return str(vote)
+
+
 def vote_preimage(
     *,
     proposal_id: Optional[str],
@@ -143,8 +158,13 @@ def vote_preimage(
 
     `conversation_id` is covered deliberately: without it a vote captured in one
     group could be replayed into another where the same proposal id was reused.
-    `vote` is normalised to "yes"/"no" so that True and "approve" cannot produce
-    two different signatures for the same decision.
+
+    `vote` is normalised only where two spellings mean one decision — a session
+    vote is a bool, a knowledge vote is a word, and True and "approve" must not
+    sign differently. Anything else is carried as written: knowledge voting has
+    a third answer, "request_changes", and folding it into "no" would let a
+    relay turn a request for changes into a rejection with the signature still
+    checking out.
 
     Own version tag, separate from the message preimage: the two field sets must
     never be confusable, or a signature over one could be presented as the other.
@@ -154,7 +174,7 @@ def vote_preimage(
         proposal_id or "",
         conversation_id or "",
         voter_node_id or "",
-        "yes" if vote in (True, "approve", "yes") else "no",
+        _canonical_vote(vote),
         _canonical_timestamp(timestamp),
     ]
 

@@ -1015,11 +1015,10 @@ DO NOT include any text before or after the JSON. DO NOT use markdown code block
         Returns:
             KnowledgeCommitProposal object
         """
-        # Read the anchor before the model runs, not after: extraction takes
+        # The anchor is read before the model runs, not after: extraction takes
         # seconds to minutes and the conversation keeps moving underneath it.
         # Both the proposal and the error proposal below must name the same
-        # position, or two voters could verify against different ones.
-        _anchor_index, _anchor_hash = self.history_anchor()
+        # window, or two voters could verify against different ones.
 
         # Detect conversation type (v0.9.3)
         self.conversation_type = self._detect_conversation_type()
@@ -1045,6 +1044,7 @@ DO NOT include any text before or after the JSON. DO NOT use markdown code block
         # Use full_conversation for manual extraction (includes all messages)
         # Use message_buffer only for automatic incremental extraction
         messages_to_analyze = self.full_conversation if self.full_conversation else self.message_buffer
+        _anchor_hashes = self.window_content_hashes(messages_to_analyze)
         messages_text = self._format_messages_for_analysis(messages_to_analyze)
 
         # Extract voice transcriptions from message_history (v0.13.2+)
@@ -1279,8 +1279,7 @@ PARTICIPANTS' CULTURAL CONTEXTS:
                 summary=result.get('summary', 'Knowledge from group discussion'),
                 entries=entries,
                 participants=[p['node_id'] for p in self.participants],
-                based_on_msg_index=_anchor_index,
-                based_on_chain_hash=_anchor_hash,
+                based_on_content_hashes=_anchor_hashes,
                 proposed_by=proposed_by,
                 initiated_by=initiated_by,
                 cultural_perspectives=result.get('cultural_perspectives', []),
@@ -1324,8 +1323,7 @@ PARTICIPANTS' CULTURAL CONTEXTS:
                 topic='error',
                 summary=error_msg,
                 participants=[p['node_id'] for p in self.participants],
-                based_on_msg_index=_anchor_index,
-                based_on_chain_hash=_anchor_hash,
+                based_on_content_hashes=_anchor_hashes,
             )
 
     def _format_messages_for_analysis(self, messages: List[Message]) -> str:
@@ -1622,17 +1620,46 @@ PARTICIPANTS' CULTURAL CONTEXTS:
         """
         return self.message_history.copy()
 
-    def history_anchor(self) -> tuple:
-        """Where in the conversation a proposal was read from, and its proof.
+    def window_content_hashes(self, messages: List[Any]) -> List[str]:
+        """The `content_hash` of every message an extraction read.
 
-        Voting runs for minutes while the chat keeps moving. Without this the
-        proposal describes a history that no longer exists, and each voter
-        judges its own — a divergence that looks exactly like agreement.
+        This replaces an anchor of `(msg_index, chain_hash)`, which could not
+        work between nodes and quietly refused every remote vote: `chain_hash`
+        covers `role`, and `role` is a rendering — each node calls its own
+        messages "user" and everyone else's "peer" — so three honest copies of
+        the same five messages produced three different chains. `content_hash`
+        is the signing preimage's own value (ADR-036 §4.1) and is identical on
+        every node holding the message.
+
+        A set rather than a position, and the difference is not cosmetic. A
+        single hash of the last message proves "I have that message"; it does
+        not prove the voter has the text the knowledge was drawn from. Somebody
+        missing a message in the middle of the window would pass and vote on an
+        extraction from a conversation they never saw. Naming the whole window
+        asks the question that matters.
+
+        Order is kept and duplicates dropped, so the value reads the way the
+        extraction did. Messages with no `content_hash` — written before
+        signing existed — are left out rather than faked: they cannot be
+        proven, and claiming them would refuse honest voters forever.
         """
-        if not self.message_history:
-            return None, None
-        last = self.message_history[-1]
-        return last.get("msg_index"), last.get("chain_hash")
+        by_id = {}
+        for stored in self.message_history:
+            content_hash = stored.get("content_hash")
+            if content_hash:
+                by_id[stored.get("id")] = content_hash
+
+        seen = set()
+        window = []
+        for message in messages or []:
+            message_id = getattr(message, "message_id", None) or (
+                message.get("id") if isinstance(message, dict) else None
+            )
+            content_hash = by_id.get(message_id)
+            if content_hash and content_hash not in seen:
+                seen.add(content_hash)
+                window.append(content_hash)
+        return window
 
     def get_last_msg_index(self) -> int:
         if self.message_history:
