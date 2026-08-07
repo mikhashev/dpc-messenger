@@ -1620,6 +1620,42 @@ PARTICIPANTS' CULTURAL CONTEXTS:
         """
         return self.message_history.copy()
 
+    def clear_before(self, boundary: str) -> int:
+        """Drop messages older than a session boundary, keep the rest.
+
+        A reset agreed while this node was away arrives as a fact rather than a
+        command (`session_started_at`, ADR-038 Q3), and the node applies it to
+        itself. Wholesale `reset_conversation` would be wrong here: messages
+        written *after* the boundary are part of the new session and throwing
+        them away would turn a late arrival into a second reset.
+
+        Returns how many were dropped, so the caller can stay quiet when the
+        answer is none.
+        """
+        if not boundary:
+            return 0
+
+        kept = [m for m in self.message_history if (m.get("timestamp") or "") >= boundary]
+        dropped = len(self.message_history) - len(kept)
+        if not dropped:
+            return 0
+
+        self.message_history = kept
+        kept_ids = {m.get("id") for m in kept}
+        self.full_conversation = [
+            m for m in self.full_conversation if m.message_id in kept_ids
+        ]
+        self.message_buffer = [
+            m for m in self.message_buffer if m.message_id in kept_ids
+        ]
+        self._history_dirty = True
+        self.save_history()
+        logger.info(
+            "Monitor %s: dropped %d message(s) predating %s",
+            self.conversation_id, dropped, boundary,
+        )
+        return dropped
+
     def window_content_hashes(self, messages: List[Any]) -> List[str]:
         """The `content_hash` of every message an extraction read.
 

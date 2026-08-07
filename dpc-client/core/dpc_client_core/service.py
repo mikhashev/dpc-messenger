@@ -5725,9 +5725,6 @@ class CoreService:
 
             proposal = session.proposal
 
-            # Record local vote
-            await self.session_manager.record_vote(proposal_id, self.p2p_manager.node_id, vote)
-
             # Send VOTE_NEW_SESSION to all other participants.
             # Signed, because a vote is relayed through whoever is connected and
             # the receiver has no other way to tell whose it is — the identity
@@ -5754,6 +5751,13 @@ class CoreService:
                 )
             )
             message = {"command": "VOTE_NEW_SESSION", "payload": vote_payload}
+
+            # Record our own vote from the same signed payload the peers get,
+            # so the evidence a session marker carries is one set of bytes and
+            # not a local paraphrase of it.
+            await self.session_manager.record_vote(
+                proposal_id, self.p2p_manager.node_id, vote, signed_payload=vote_payload
+            )
 
             for node_id in proposal.participants:
                 if node_id == self.p2p_manager.node_id:

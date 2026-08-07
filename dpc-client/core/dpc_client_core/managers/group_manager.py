@@ -34,6 +34,18 @@ class GroupMetadata:
     is_discord_bridge: bool = False
     reasoning_effort: Optional[str] = None
 
+    # When the group last agreed to start over, and the votes that agreed it.
+    # ADR-038 Q3: a reset used to be a message, and a node that missed the
+    # message kept its history and handed it back at the next sync, undoing the
+    # reset with nobody noticing. As a field it is a fact about the group — a
+    # returning node reads the boundary and clears what predates it.
+    #
+    # The evidence travels inside the marker rather than beside it, because the
+    # votes that authorised the reset live in the history the reset destroys.
+    # Anyone can therefore check the marker while holding nothing older than it.
+    session_started_at: Optional[str] = None
+    session_reset_evidence: Optional[Dict[str, Any]] = None
+
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
 
@@ -51,6 +63,8 @@ class GroupMetadata:
             version=data.get("version", 1),
             is_discord_bridge=data.get("is_discord_bridge", False),
             reasoning_effort=data.get("reasoning_effort"),
+            session_started_at=data.get("session_started_at"),
+            session_reset_evidence=data.get("session_reset_evidence"),
         )
 
 
@@ -504,6 +518,51 @@ class GroupManager:
         ))
         return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
 
+    def set_session_marker(
+        self, group_id: str, started_at: str, evidence: Optional[Dict[str, Any]] = None
+    ) -> Optional[GroupMetadata]:
+        """Record that the group agreed to start over at `started_at`.
+
+        Any participant may set it — ADR-038 authority table — because the fact
+        is the quorum, not the announcement. That is what closes the liveness
+        hole the ADR describes: the initiator can die between the last vote and
+        `NEW_SESSION_RESULT`, and any node that saw the quorum still writes the
+        same boundary.
+
+        Idempotent, and that is the property doing the work: two nodes writing
+        the same reset produce the same marker, so there is nothing to reconcile.
+        An older marker never displaces a newer one.
+        """
+        group = self._groups.get(group_id)
+        if not group:
+            return None
+        if group.session_started_at and group.session_started_at >= started_at:
+            return None
+
+        group.session_started_at = started_at
+        group.session_reset_evidence = evidence
+        group.version += 1
+        self._save_group(group_id)
+        logger.info(
+            "Session marker for %s set to %s (v%d)", group_id, started_at, group.version
+        )
+        return group
+
+    def _marker_survives_sync(self, local: Optional[GroupMetadata], remote: GroupMetadata) -> None:
+        """Keep whichever session boundary is later, whatever the version says.
+
+        Version ordering answers "who wrote last", which is not the same
+        question. A peer that has not heard about the reset syncs a record with
+        no marker at all and, on a higher version, would erase ours — and with
+        it the only thing telling a returning node what to clear.
+        """
+        if not local or not local.session_started_at:
+            return
+        if remote.session_started_at and remote.session_started_at >= local.session_started_at:
+            return
+        remote.session_started_at = local.session_started_at
+        remote.session_reset_evidence = local.session_reset_evidence
+
     def apply_sync(self, remote_group: Dict[str, Any]) -> Optional[GroupMetadata]:
         """
         Apply a GROUP_SYNC from a remote peer. Highest version wins; equal
@@ -521,6 +580,7 @@ class GroupManager:
 
         local = self._groups.get(remote.group_id)
         remote.reasoning_effort = local.reasoning_effort if local else None
+        self._marker_survives_sync(local, remote)
         if local and local.version > remote.version:
             logger.debug(
                 "Ignoring GROUP_SYNC for %s: local v%d > remote v%d",

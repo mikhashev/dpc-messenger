@@ -26,6 +26,10 @@ class NewSessionProposal:
     participants: Set[str]     # All node_ids in conversation
     votes: Dict[str, bool] = field(default_factory=dict)  # node_id → approve(True)/reject(False)
     deadline: float = 0.0      # time.time() + 60 seconds
+    # The signed payloads behind `votes`, kept so an approved reset can carry
+    # its own proof (ADR-038 Q3). Without them the marker would be a claim, and
+    # the votes that justify it live in the history the reset destroys.
+    signed_votes: Dict[str, Dict[str, Any]] = field(default_factory=dict)
 
 
 @dataclass
@@ -125,8 +129,29 @@ class NewSessionProposalManager:
             deadline=deadline
         )
 
-        # Auto-vote approve for initiator
-        proposal.votes[self.core_service.p2p_manager.node_id] = True
+        # Auto-vote approve for initiator — signed like any other, so the
+        # evidence a marker carries is complete rather than "everyone but me".
+        me = self.core_service.p2p_manager.node_id
+        proposal.votes[me] = True
+        try:
+            from dpc_client_core.signing import sign_vote
+            own = {
+                "proposal_id": proposal_id,
+                "vote": True,
+                "voter_node_id": me,
+                "conversation_id": conversation_id,
+            }
+            own.update(sign_vote(
+                proposal_id=proposal_id,
+                conversation_id=conversation_id,
+                voter_node_id=me,
+                vote=True,
+                timestamp=timestamp,
+            ))
+            if own.get("signature"):
+                proposal.signed_votes[me] = own
+        except Exception as e:  # noqa: BLE001 — unsigned is survivable, crashing is not
+            self.logger.warning("Could not sign own proposal vote: %s", e)
 
         # Create voting session
         session = VotingSession(
@@ -163,7 +188,8 @@ class NewSessionProposalManager:
         self,
         proposal_id: str,
         voter_node_id: str,
-        approve: bool
+        approve: bool,
+        signed_payload: Optional[Dict[str, Any]] = None,
     ) -> None:
         """
         Record a vote for a proposal and check if voting is complete.
@@ -172,6 +198,9 @@ class NewSessionProposalManager:
             proposal_id: UUID of the proposal
             voter_node_id: Node ID of the voter
             approve: True for approve, False for reject
+            signed_payload: the vote as it arrived, when it carried a signature.
+                Kept so an approved reset can prove itself later without the
+                history that is about to be cleared.
         """
         session = self.active_sessions.get(proposal_id)
         if not session:
@@ -180,6 +209,8 @@ class NewSessionProposalManager:
 
         # Record vote
         session.proposal.votes[voter_node_id] = approve
+        if signed_payload and signed_payload.get("signature"):
+            session.proposal.signed_votes[voter_node_id] = dict(signed_payload)
 
         vote_str = "approve" if approve else "reject"
         self.logger.info(
@@ -266,6 +297,29 @@ class NewSessionProposalManager:
                 local_conversation_id = conversation_id
             else:
                 local_conversation_id = proposal.initiator_node_id
+
+        # A reset is a fact about the group, not a message about it (ADR-038
+        # Q3). Written by whoever can show the quorum — here, by everyone who
+        # reached this point — and idempotent, so the copies agree. A node that
+        # rejoins later reads the boundary and clears what predates it instead
+        # of handing its old history back and quietly undoing the reset.
+        if is_approved and is_group:
+            try:
+                group_manager = getattr(self.core_service, "group_manager", None)
+                if group_manager:
+                    group_manager.set_session_marker(
+                        local_conversation_id,
+                        datetime.now(timezone.utc).isoformat(),
+                        evidence={
+                            "proposal_id": proposal_id,
+                            "conversation_id": proposal.conversation_id,
+                            "participants": sorted(proposal.participants),
+                            "votes": dict(proposal.signed_votes),
+                        },
+                    )
+            except Exception as e:  # noqa: BLE001 — a missing marker must not block the reset
+                self.logger.error("Could not set session marker for %s: %s",
+                                  local_conversation_id, e)
 
         # If approved: clear local history
         if is_approved:
@@ -443,7 +497,7 @@ class NewSessionProposalManager:
         )
 
         # Record vote
-        await self.record_vote(proposal_id, voter, vote)
+        await self.record_vote(proposal_id, voter, vote, signed_payload=payload)
 
     def get_pending_proposal(self, conversation_id: str) -> Optional[NewSessionProposal]:
         """

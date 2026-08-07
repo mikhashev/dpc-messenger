@@ -45,6 +45,61 @@ def node_signer():
         return None
 
 
+def quorum_is_proven(
+    *,
+    proposal_id: str,
+    conversation_id: Optional[str],
+    participants,
+    votes: dict,
+) -> bool:
+    """Do these signed votes show every participant approving that proposal?
+
+    This is what makes a `session_started_at` marker checkable by a node that
+    kept nothing older than it: the votes travel with the marker, so the check
+    needs no history at all.
+
+    Unanimity, matching the rule a reset already runs under — a member that did
+    not agree keeps its history and hands it back, so anything less is a pause
+    rather than a reset. A signature that cannot be checked for want of a
+    certificate counts as not proven: the marker will be adopted later, when the
+    certificate arrives, rather than on trust now.
+    """
+    from dpc_protocol.commit_integrity import CommitSigner
+    from dpc_protocol.message_signing import VOTE_PREIMAGE_VERSION, vote_content_hash
+
+    wanted = set(participants or ())
+    if not wanted:
+        return False
+
+    for node_id in wanted:
+        vote = (votes or {}).get(node_id)
+        if not isinstance(vote, dict):
+            return False
+        if vote.get("vote") not in (True, "approve", "yes"):
+            return False
+        if vote.get("vote_preimage_version") != VOTE_PREIMAGE_VERSION:
+            return False
+        if vote.get("signer_node_id") != node_id:
+            return False
+        expected = vote_content_hash(
+            proposal_id=proposal_id,
+            conversation_id=conversation_id,
+            voter_node_id=node_id,
+            vote=vote.get("vote"),
+            timestamp=vote.get("timestamp"),
+        )
+        if expected != vote.get("vote_hash"):
+            return False
+        try:
+            if CommitSigner.verify_signature(
+                node_id, vote["vote_hash"], vote.get("signature")
+            ) is not True:
+                return False
+        except Exception:  # noqa: BLE001
+            return False
+    return True
+
+
 def sign_vote(
     *,
     proposal_id: str,

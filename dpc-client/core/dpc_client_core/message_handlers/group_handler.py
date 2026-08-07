@@ -461,6 +461,58 @@ class GroupSyncHandler(MessageHandler):
     def command_name(self) -> str:
         return "GROUP_SYNC"
 
+    async def _honour_session_marker(self, local, marker_before, applied) -> None:
+        """Clear what predates a newly learned session boundary.
+
+        This is the half of ADR-038 Q3 that pays for the field. A node that was
+        away when the group agreed to start over comes back holding the whole
+        history, and the next sync hands its copy to everyone else — the reset
+        undone with nobody noticing. Reading the boundary and dropping what is
+        older than it ends that, and it ends it symmetrically: whoever was away
+        does the clearing, not whoever was present.
+
+        The marker is only obeyed when its own evidence proves the quorum, so a
+        peer cannot erase a history by announcing a reset that never happened.
+        Unprovable evidence is left alone rather than trusted — the certificate
+        may simply not have arrived yet, and the marker will be honoured when it
+        does.
+        """
+        if applied is None:
+            return
+        marker = getattr(applied, "session_started_at", None)
+        if not marker or marker == marker_before:
+            return
+        if marker_before and marker <= marker_before:
+            return
+
+        evidence = getattr(applied, "session_reset_evidence", None) or {}
+        from dpc_client_core.signing import quorum_is_proven
+
+        if not quorum_is_proven(
+            proposal_id=evidence.get("proposal_id"),
+            conversation_id=evidence.get("conversation_id"),
+            participants=evidence.get("participants"),
+            votes=evidence.get("votes"),
+        ):
+            self.logger.warning(
+                "Session marker on %s is not backed by a provable quorum — history untouched",
+                applied.group_id,
+            )
+            return
+
+        monitor = self.service.conversation_monitors.get(applied.group_id)
+        if monitor is None:
+            return
+        dropped = monitor.clear_before(marker)
+        if dropped:
+            self.logger.info(
+                "Session marker on %s: dropped %d message(s) older than %s",
+                applied.group_id, dropped, marker,
+            )
+            await self.service.local_api.broadcast_event(
+                "conversation_reset", {"conversation_id": applied.group_id}
+            )
+
     async def handle(self, sender_node_id: str, payload: Dict[str, Any]) -> Optional[Any]:
         """
         Handle GROUP_SYNC message.
@@ -497,7 +549,10 @@ class GroupSyncHandler(MessageHandler):
             )
             return None
 
+        marker_before = local.session_started_at
+
         result = self.service.group_manager.apply_sync(payload)
+        await self._honour_session_marker(local, marker_before, result)
         if result:
             # Notify UI of updated group
             await self.service.local_api.broadcast_event("group_updated", {
