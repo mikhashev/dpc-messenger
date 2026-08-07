@@ -5728,15 +5728,32 @@ class CoreService:
             # Record local vote
             await self.session_manager.record_vote(proposal_id, self.p2p_manager.node_id, vote)
 
-            # Send VOTE_NEW_SESSION to all other participants
-            message = {
-                "command": "VOTE_NEW_SESSION",
-                "payload": {
-                    "proposal_id": proposal_id,
-                    "vote": vote,
-                    "voter_node_id": self.p2p_manager.node_id
-                }
+            # Send VOTE_NEW_SESSION to all other participants.
+            # Signed, because a vote is relayed through whoever is connected and
+            # the receiver has no other way to tell whose it is — the identity
+            # used to be read off the socket, so a reject relayed by the middle
+            # node was recorded as the middle node's. `conversation_id` travels
+            # too, so relaying does not depend on the receiver already holding
+            # the proposal.
+            from dpc_client_core.signing import sign_vote
+
+            cast_at = datetime.now(timezone.utc).isoformat()
+            vote_payload = {
+                "proposal_id": proposal_id,
+                "vote": vote,
+                "voter_node_id": self.p2p_manager.node_id,
+                "conversation_id": proposal.conversation_id,
             }
+            vote_payload.update(
+                sign_vote(
+                    proposal_id=proposal_id,
+                    conversation_id=proposal.conversation_id,
+                    voter_node_id=self.p2p_manager.node_id,
+                    vote=vote,
+                    timestamp=cast_at,
+                )
+            )
+            message = {"command": "VOTE_NEW_SESSION", "payload": vote_payload}
 
             for node_id in proposal.participants:
                 if node_id == self.p2p_manager.node_id:

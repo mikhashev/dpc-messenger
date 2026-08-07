@@ -33,7 +33,14 @@ from typing import Any, Optional
 
 PREIMAGE_VERSION = "dptp-msg-v1"
 
-__all__ = ["PREIMAGE_VERSION", "message_preimage", "message_content_hash"]
+__all__ = [
+    "PREIMAGE_VERSION",
+    "message_preimage",
+    "message_content_hash",
+    "VOTE_PREIMAGE_VERSION",
+    "vote_preimage",
+    "vote_content_hash",
+]
 
 
 def _canonical_timestamp(timestamp: Optional[str]) -> str:
@@ -114,3 +121,51 @@ def message_preimage(
 def message_content_hash(**fields: Any) -> str:
     """SHA256 of the canonical preimage, hex — the value that gets signed."""
     return hashlib.sha256(message_preimage(**fields)).hexdigest()
+
+
+VOTE_PREIMAGE_VERSION = "dptp-vote-v1"
+
+
+def vote_preimage(
+    *,
+    proposal_id: Optional[str],
+    conversation_id: Optional[str],
+    voter_node_id: Optional[str],
+    vote: Any,
+    timestamp: Optional[str] = None,
+) -> bytes:
+    """The exact bytes a vote signature covers.
+
+    A vote travels relayed — through whoever happens to be connected — and the
+    receiver used to credit it to the node that handed it over. Attribution can
+    only come from something the voter produced, so the identity is inside the
+    signed bytes rather than read off the socket.
+
+    `conversation_id` is covered deliberately: without it a vote captured in one
+    group could be replayed into another where the same proposal id was reused.
+    `vote` is normalised to "yes"/"no" so that True and "approve" cannot produce
+    two different signatures for the same decision.
+
+    Own version tag, separate from the message preimage: the two field sets must
+    never be confusable, or a signature over one could be presented as the other.
+    """
+    fields = [
+        VOTE_PREIMAGE_VERSION,
+        proposal_id or "",
+        conversation_id or "",
+        voter_node_id or "",
+        "yes" if vote in (True, "approve", "yes") else "no",
+        _canonical_timestamp(timestamp),
+    ]
+
+    out = bytearray()
+    for field in fields:
+        encoded = field.encode("utf-8")
+        out += f"{len(encoded)}:".encode("utf-8")
+        out += encoded
+    return bytes(out)
+
+
+def vote_content_hash(**fields: Any) -> str:
+    """SHA256 of the canonical vote preimage, hex — the value that gets signed."""
+    return hashlib.sha256(vote_preimage(**fields)).hexdigest()

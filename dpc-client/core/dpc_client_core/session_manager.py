@@ -370,6 +370,18 @@ class NewSessionProposalManager:
         proposal_id = payload.get("proposal_id")
         conversation_id = payload.get("conversation_id")
 
+        # The same proposal can arrive twice — relayed by two neighbours, or
+        # resent — and rebuilding the session would drop every vote recorded so
+        # far, including this node's own, silently. The first arrival wins; a
+        # later copy is acknowledged and ignored.
+        existing = self.active_sessions.get(proposal_id)
+        if existing is not None:
+            self.logger.debug(
+                "Ignoring duplicate proposal %s from %s: %d vote(s) already recorded",
+                proposal_id[:8], sender_node_id[:20], len(existing.proposal.votes)
+            )
+            return
+
         self.logger.info(
             "Received new session proposal %s from %s for conversation %s",
             proposal_id[:8],
@@ -401,25 +413,37 @@ class NewSessionProposalManager:
         if self.on_proposal_received:
             await self.on_proposal_received(payload)
 
-    async def handle_vote_message(self, sender_node_id: str, payload: Dict[str, Any]) -> None:
+    async def handle_vote_message(
+        self,
+        sender_node_id: str,
+        payload: Dict[str, Any],
+        voter_node_id: Optional[str] = None,
+    ) -> None:
         """
         Handle incoming VOTE_NEW_SESSION message from peer.
 
         Args:
-            sender_node_id: Node ID of the voter
+            sender_node_id: the peer that handed us the message — the transport
+                hop, which in a star is usually not the voter
             payload: Vote payload
+            voter_node_id: who actually cast it, as established by the handler's
+                signature check. Falls back to the transport peer only when the
+                caller could not establish it, which is the old behaviour and
+                the reason a relayed reject was once recorded as the relayer's.
         """
         proposal_id = payload.get("proposal_id")
         vote = payload.get("vote")  # True = approve, False = reject
+        voter = voter_node_id or sender_node_id
 
         self.logger.info(
-            "Received vote from %s: %s",
-            sender_node_id[:20],
-            "approve" if vote else "reject"
+            "Received vote from %s: %s%s",
+            voter[:20],
+            "approve" if vote else "reject",
+            f" (relayed by {sender_node_id[:20]})" if voter != sender_node_id else "",
         )
 
         # Record vote
-        await self.record_vote(proposal_id, sender_node_id, vote)
+        await self.record_vote(proposal_id, voter, vote)
 
     def get_pending_proposal(self, conversation_id: str) -> Optional[NewSessionProposal]:
         """

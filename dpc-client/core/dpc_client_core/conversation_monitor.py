@@ -153,24 +153,16 @@ class ConversationMonitor:
         )
 
     def _get_signer(self):
-        """Lazy-load CommitSigner for RSA message signing."""
+        """Lazy-load CommitSigner for RSA message signing.
+
+        The loading itself lives in `signing.node_signer` so there is one copy
+        of it; this keeps the per-monitor cache the call sites already expect.
+        """
         if self._signer is not None:
             return self._signer
-        try:
-            from cryptography.hazmat.primitives import serialization
-            from dpc_protocol.commit_integrity import CommitSigner
-            key_path = Path.home() / ".dpc" / "node.key"
-            if not key_path.exists():
-                return None
-            with open(key_path, "rb") as f:
-                private_key = serialization.load_pem_private_key(f.read(), password=None)
-            node_id_path = Path.home() / ".dpc" / "node.id"
-            node_id = node_id_path.read_text().strip() if node_id_path.exists() else ""
-            self._signer = CommitSigner(node_id, private_key)
-            return self._signer
-        except Exception as e:
-            logger.debug("CommitSigner init failed: %s", e)
-            return None
+        from dpc_client_core.signing import node_signer
+        self._signer = node_signer()
+        return self._signer
 
     async def on_message(self, message: Message) -> Optional[KnowledgeCommitProposal]:
         """Process new message in conversation
