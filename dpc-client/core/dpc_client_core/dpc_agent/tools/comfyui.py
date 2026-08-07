@@ -448,6 +448,36 @@ def _set_save_prefix(graph: dict, save_prefix: str) -> Optional[str]:
     return None
 
 
+def _effective_params(graph: dict) -> str:
+    """Scan the final submitted graph for the LoadImage.image filename and the
+    first frame-count field, duck-typed by input name (video node class_types
+    differ across LTX/Wan/Bernini workflows, but all use a 'length' input) —
+    same style as the filename_prefix scan in _set_save_prefix. Returns a
+    ' | image=... | length=... frames' suffix, omitting a part not found.
+    Makes a silently-stale image/length visible in the first Queued message
+    instead of only after the render completes."""
+    image_val = None
+    length_val = None
+    for node in graph.values():
+        if not isinstance(node, dict):
+            continue
+        inputs = node.get("inputs")
+        if not isinstance(inputs, dict):
+            continue
+        if image_val is None and node.get("class_type") == "LoadImage":
+            img = inputs.get("image")
+            if isinstance(img, str) and img:
+                image_val = img
+        if length_val is None and "length" in inputs:
+            length_val = inputs.get("length")
+    parts = []
+    if image_val is not None:
+        parts.append(f"image={image_val}")
+    if length_val is not None:
+        parts.append(f"length={length_val} frames")
+    return " | " + " | ".join(parts) if parts else ""
+
+
 def comfyui_submit(ctx: ToolContext, workflow: str = "", prompt: str = "", workflow_json: dict = None, save_prefix: str = "", api_url: str = DEFAULT_API_URL) -> str:
     """Submit a ComfyUI workflow. Pass workflow filename + prompt, or raw workflow_json."""
     loop = ctx.agent_event_loop
@@ -524,7 +554,7 @@ def comfyui_submit(ctx: ToolContext, workflow: str = "", prompt: str = "", workf
             if not prompt_id:
                 return f"Error: ComfyUI response missing prompt_id: {data}"
 
-            result = f"Queued. prompt_id={prompt_id}"
+            result = f"Queued. prompt_id={prompt_id}" + _effective_params(wf_str_keys)
             if node_errs:
                 result += f"\nWarnings:\n{_format_node_errors(node_errs)}"
             if conv_warnings:
