@@ -98,6 +98,26 @@ class NewSessionResultHandler(MessageHandler):
     def command_name(self) -> str:
         return "NEW_SESSION_RESULT"
 
+    @staticmethod
+    def _refuse_reason(session, sender_node_id: str, conversation_id: str) -> Optional[str]:
+        """Why this result may not be acted on, or None if it may.
+
+        Membership rather than "must be the initiator": in a star the far edge
+        hears the result **relayed** by the middle node, so demanding the
+        initiator would refuse the legitimate relay and break New Session
+        exactly where it works today.
+        """
+        if session is None:
+            return "no local voting session for that proposal"
+        proposal = getattr(session, "proposal", None)
+        if proposal is None:
+            return "session carries no proposal"
+        if conversation_id != getattr(proposal, "conversation_id", None):
+            return "names a different conversation than the vote it claims"
+        if sender_node_id not in (getattr(proposal, "participants", None) or set()):
+            return "sender did not take part in that vote"
+        return None
+
     async def handle(self, sender_node_id: str, payload: Dict[str, Any]) -> Optional[Any]:
         """
         Handle voting result notification from peer.
@@ -122,6 +142,22 @@ class NewSessionResultHandler(MessageHandler):
             clear_history
         )
 
+        # A result is an instruction to destroy history, so it has to be one we
+        # can place. This used to clear first and look for the session after,
+        # which meant any peer that could reach us erased any conversation it
+        # cared to name. The gate is made of what this node already knows, so it
+        # needs neither signatures nor the ADR-038 marker to stand up today.
+        session = self.service.session_manager.get_session(proposal_id)
+        refusal = self._refuse_reason(session, sender_node_id, conversation_id)
+        if refusal:
+            self.logger.warning(
+                "Refusing NEW_SESSION_RESULT from %s for %s: %s",
+                sender_node_id[:20], str(conversation_id)[:20], refusal
+            )
+            # Not passed to the UI and not relayed: a result we will not act on
+            # is not one we should repeat to anyone else.
+            return None
+
         # If approved and clear_history flag set: clear local conversation
         if result == "approved" and clear_history:
             self.logger.info("Clearing local conversation history for %s", conversation_id[:20])
@@ -138,7 +174,6 @@ class NewSessionResultHandler(MessageHandler):
             self.service._group_agent_context.pop(conversation_id, None)
 
         # Update session manager (if session exists)
-        session = self.service.session_manager.get_session(proposal_id)
         if session:
             # Remove from active sessions (finalized)
             if proposal_id in self.service.session_manager.active_sessions:

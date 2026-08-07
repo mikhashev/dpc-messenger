@@ -228,6 +228,18 @@ async def test_a_receiving_node_applies_its_own_archive_settings():
     from dpc_client_core.message_handlers.session_handler import NewSessionResultHandler
 
     applied = []
+    # A local session for this vote is now required before anything is cleared
+    # — see `test_result_must_come_from_a_vote_we_know.py`. This stub used to
+    # hand back None, which passed only because the old handler cleared first
+    # and looked for the session afterwards.
+    session = SimpleNamespace(
+        proposal=SimpleNamespace(
+            proposal_id="p1",
+            initiator_node_id=BOB,
+            conversation_id=GROUP,
+            participants={ME, BOB, CAROL},
+        )
+    )
     service = SimpleNamespace(
         _get_or_create_conversation_monitor=lambda cid: SimpleNamespace(
             reset_conversation=lambda preserve=True, max_sessions=0: applied.append(
@@ -236,7 +248,9 @@ async def test_a_receiving_node_applies_its_own_archive_settings():
         ),
         firewall=SimpleNamespace(get_history_settings=lambda cid: (False, 7)),
         _group_agent_context={},
-        session_manager=SimpleNamespace(get_session=lambda pid: None, active_sessions={}),
+        session_manager=SimpleNamespace(
+            get_session=lambda pid: session, active_sessions={}
+        ),
         local_api=SimpleNamespace(broadcast_event=_noop),
         _processed_message_ids=set(),
         # The handler relays the result on to members that cannot reach the
