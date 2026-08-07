@@ -185,6 +185,11 @@ class GroupTextHandler(MessageHandler):
         )
         if verification == "rejected":
             return None
+        if verification == "unverified" and author_node_id != sender_node_id:
+            # Stored anyway — refusing on first contact would be a denial of
+            # service against ourselves — but ask, so "unverified" is a state
+            # this record passes through rather than one it retires in.
+            await self._ask_for_certificate(author_node_id, sender_node_id)
         sender_node_id = author_node_id
 
         # v0.20.0: Use sender-provided message_id if available, else generate for backwards compat

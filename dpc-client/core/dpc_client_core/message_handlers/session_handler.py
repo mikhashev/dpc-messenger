@@ -99,6 +99,10 @@ class VoteNewSessionHandler(MessageHandler):
                 "Not counting %s vote from %s on %s — relaying it on",
                 verdict, str(voter_node_id)[:20], str(proposal_id)[:8]
             )
+            if verdict == "unverified":
+                # The only thing between this vote and being counted is a
+                # certificate, and the peer that relayed it has one.
+                await self._ask_for_certificate(voter_node_id, sender_node_id)
 
         # Relay to group members that can't reach the voter directly (star
         # topology). The conversation comes from the payload so this no longer

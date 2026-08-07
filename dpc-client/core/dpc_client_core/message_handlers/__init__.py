@@ -114,6 +114,42 @@ class MessageHandler(ABC):
             return claimed, "unverified"
         return claimed, "verified"
 
+    async def _ask_for_certificate(self, node_id: str, ask_node_id: str) -> None:
+        """Ask the peer that handed us something for the signer's certificate.
+
+        The one place where a missing certificate is noticed is the one place
+        that knows who to ask: whoever relayed the message almost certainly has
+        it, because they could check the signature we could not. Nothing here
+        needs to trust them — an answer whose key does not hash to `node_id` is
+        refused on arrival.
+
+        Asked once per node until it arrives, so a chatty group does not turn a
+        missing certificate into a flood.
+        """
+        if not node_id or not ask_node_id or node_id == ask_node_id:
+            return
+        if node_id == self.service.p2p_manager.node_id:
+            return
+        pending = getattr(self.service, "pending_certificate_requests", None)
+        if pending is None:
+            return
+        if node_id in pending:
+            return
+        if ask_node_id not in self.service.p2p_manager.peers:
+            return
+
+        pending.add(node_id)
+        try:
+            await self.service.p2p_manager.send_message_to_peer(
+                ask_node_id, {"command": "CERT_REQUEST", "payload": {"node_id": node_id}}
+            )
+            self.logger.info(
+                "Asked %s for the certificate of %s", ask_node_id[:20], str(node_id)[:20]
+            )
+        except Exception as e:  # noqa: BLE001
+            pending.discard(node_id)
+            self.logger.debug("Could not ask %s for a certificate: %s", ask_node_id[:20], e)
+
     async def _relay_to_group(
         self, command: str, payload: Dict[str, Any],
         sender_node_id: str, group_id: str

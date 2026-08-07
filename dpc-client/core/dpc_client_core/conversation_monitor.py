@@ -1620,6 +1620,53 @@ PARTICIPANTS' CULTURAL CONTEXTS:
         """
         return self.message_history.copy()
 
+    def reverify_author(self, node_id: str) -> int:
+        """Re-check this author's signatures now that a certificate exists.
+
+        `unverified` used to be permanent. The flag was written once, on the way
+        in, and nothing ever revisited it — so a message that arrived before the
+        certificate stayed unproven for good, even after the two nodes finally
+        connected. ADR-036 listed the re-check in scope and it was never built.
+
+        The verdict is recomputed rather than trusted from storage, so this also
+        repairs records written by the live path, which stored the signature but
+        no verdict at all.
+
+        Returns how many records changed.
+        """
+        if not node_id:
+            return 0
+
+        from dpc_protocol.commit_integrity import CommitSigner
+
+        changed = 0
+        for msg in self.message_history:
+            if msg.get("signer_node_id") != node_id:
+                continue
+            content_hash = msg.get("content_hash")
+            signature = msg.get("signature")
+            if not (content_hash and signature):
+                continue
+            try:
+                result = CommitSigner.verify_signature(node_id, content_hash, signature)
+            except Exception:  # noqa: BLE001
+                continue
+            if result is None:
+                continue  # still no certificate; leave it parked
+            verdict = "verified" if result else "rejected"
+            if msg.get("verification") != verdict:
+                msg["verification"] = verdict
+                changed += 1
+
+        if changed:
+            self._history_dirty = True
+            self.save_history()
+            logger.info(
+                "Monitor %s: re-verified %d message(s) from %s",
+                self.conversation_id, changed, str(node_id)[:20],
+            )
+        return changed
+
     def clear_before(self, boundary: str) -> int:
         """Drop messages older than a session boundary, keep the rest.
 

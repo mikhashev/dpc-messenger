@@ -89,6 +89,10 @@ from .message_handlers.session_handler import (
     ProposeNewSessionHandler, VoteNewSessionHandler, NewSessionResultHandler
 )
 from .message_handlers.telegram_handler import TelegramIncomingHandler  # v0.14.0+ Telegram integration
+from .message_handlers.certificate_handler import (  # ADR-036: certs reach the far edge
+    CertificateRequestHandler,
+    CertificateResponseHandler,
+)
 from .message_handlers.group_handler import (  # v0.19.0+ Group chat
     GroupCreateHandler, GroupTextHandler, GroupLeaveHandler, GroupDeleteHandler,
     GroupSyncHandler, GroupHistoryRequestHandler, GroupHistoryResponseHandler,
@@ -400,6 +404,10 @@ class CoreService:
         self.p2p_manager.set_on_message_received(self.on_p2p_message_received)
         self.p2p_manager.set_on_peer_disconnected(self._handle_peer_disconnected)
         self._processed_message_ids = set()  # Track processed messages
+        # Certificates we have asked a neighbour for and not yet received.
+        # Without it a busy group turns one missing certificate into a
+        # request per message.
+        self.pending_certificate_requests = set()
         self._max_processed_ids = 1000  # Limit set size
         self._history_requested_peers = set()  # Track peers we've requested history from (prevents infinite loops)
         # Which history we actually asked for, and of whom. A response replaces
@@ -510,6 +518,8 @@ class CoreService:
         self.message_router.register_handler(GroupLeaveHandler(self))
         self.message_router.register_handler(GroupDeleteHandler(self))
         self.message_router.register_handler(GroupSyncHandler(self))
+        self.message_router.register_handler(CertificateRequestHandler(self))
+        self.message_router.register_handler(CertificateResponseHandler(self))
         self.message_router.register_handler(GroupHistoryRequestHandler(self))
         self.message_router.register_handler(GroupHistoryResponseHandler(self))
         self.message_router.register_handler(GroupHistoryStatusHandler(self))  # v0.20.0 hash-based sync
