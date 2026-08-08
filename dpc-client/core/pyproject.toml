@@ -52,7 +52,7 @@ browser = [
     # Camoufox Firefox build rejects — pin <1.61 until a Windows build with the
     # upstream cap (daijro/camoufox#653, commit 195298d0) ships. See backlog
     # CAMOUFOX-PLAYWRIGHT-61-FIX.
-    "playwright>=1.60,<1.61",
+    "playwright>=1.60,<1.63",
 ]
 graph-ner = [
     "gliner>=0.2.20",
