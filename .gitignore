@@ -161,3 +161,6 @@ security/
 # multiple in-flight responses without overwriting each other.
 cc_cron_prompt.md
 cc-out*.md
+
+# Generated board; its source (backlog.md) is itself ignored
+tools/backlog/backlog.html
