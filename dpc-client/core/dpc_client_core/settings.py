@@ -73,15 +73,26 @@ class Settings:
             'host': '127.0.0.1'
         }
 
+        # A fresh config ships with no TURN relay at all: empty here means the same
+        # thing the getters already return for a missing key, so "the default" has one
+        # answer instead of two. Relaying is opt-in by name — nobody's traffic should
+        # traverse a third party's server because a default was left populated.
+        # To use a relay, fill username/credential and servers with your provider's
+        # values; the public examples that used to be the default are below.
+        #   servers:           stun:stun.relay.metered.ca:80,turn:global.relay.metered.ca:80,
+        #                      turn:global.relay.metered.ca:80?transport=tcp,
+        #                      turn:global.relay.metered.ca:443,
+        #                      turns:global.relay.metered.ca:443?transport=tcp
+        #   fallback_servers:  turn:openrelay.metered.ca:80,turn:openrelay.metered.ca:443,
+        #                      turn:openrelay.metered.ca:443?transport=tcp
+        #   fallback_username / fallback_credential: openrelayproject / openrelayproject
         self._config['turn'] = {
             'username': '',  # Leave empty or set via environment variable DPC_TURN_USERNAME
             'credential': '',  # Leave empty or set via environment variable DPC_TURN_CREDENTIAL
-            # TURN server URLs (used only when username/credential are set)
-            'servers': 'stun:stun.relay.metered.ca:80,turn:global.relay.metered.ca:80,turn:global.relay.metered.ca:80?transport=tcp,turn:global.relay.metered.ca:443,turns:global.relay.metered.ca:443?transport=tcp',
-            # Fallback TURN servers (public, may be unreliable)
-            'fallback_servers': 'turn:openrelay.metered.ca:80,turn:openrelay.metered.ca:443,turn:openrelay.metered.ca:443?transport=tcp',
-            'fallback_username': 'openrelayproject',
-            'fallback_credential': 'openrelayproject'
+            'servers': '',  # Your provider's TURN/STUN URLs; used only when username/credential are set
+            'fallback_servers': '',  # A public relay, if you accept that your traffic passes through it
+            'fallback_username': '',
+            'fallback_credential': ''
         }
 
         self._config['webrtc'] = {
@@ -367,11 +378,13 @@ class Settings:
 
     def get_p2p_listen_host(self) -> str:
         """Get the P2P server listen host."""
-        return self.get('p2p', 'listen_host', '0.0.0.0')
+        # Fallback must equal what _create_default_config writes, or "the default"
+        # is two different values depending on whether the key is in config.ini.
+        return self.get('p2p', 'listen_host', 'dual')
 
     def get_p2p_connection_timeout(self) -> float:
         """Get the P2P connection establishment timeout in seconds."""
-        return float(self.get('p2p', 'connection_timeout', '60'))
+        return float(self.get('p2p', 'connection_timeout', '30'))
 
     def get_p2p_auto_connect_node_groups(self) -> bool:
         """Auto-connect to all node IDs in firewall node groups on startup."""
@@ -651,8 +664,13 @@ class Settings:
         Args:
             strategy: One of: ipv6, ipv4, webrtc, hole_punch, relay, gossip
         """
+        # Per-strategy, matching _create_default_config. A single flat fallback made
+        # a config without a [connection] section wait 30s for gossip (written: 5)
+        # and 30s for hole punching (written: 15).
+        written = {'ipv6': '60', 'ipv4': '60', 'webrtc': '30',
+                   'hole_punch': '15', 'relay': '20', 'gossip': '5'}
         key = f'{strategy}_timeout'
-        return float(self.get('connection', key, '30'))
+        return float(self.get('connection', key, written.get(strategy, '30')))
 
     def get_hole_punch_port(self) -> int:
         """Get UDP port for hole punching."""
@@ -791,8 +809,11 @@ class Settings:
 
     def get_voice_transcription_provider_priority(self) -> list[str]:
         """Get ordered list of transcription provider aliases."""
-        # Fallback matches default config (aliases match HuggingFace model names)
-        priority_str = self.get('voice_transcription', 'provider_priority', 'whisper-large-v3,whisper-large-v3-turbo,whisper-medium,whisper-small,openai')
+        # Fallback matches default config (aliases match HuggingFace model names).
+        # It did not until 2026-08-10: the fallback led with whisper-large-v3, which
+        # _create_default_config never writes, so a config missing the key tried a
+        # different first provider than a fresh install.
+        priority_str = self.get('voice_transcription', 'provider_priority', 'whisper-large-v3-turbo,whisper-medium,whisper-small,openai')
         return [p.strip() for p in priority_str.split(',') if p.strip()]
 
     def get_voice_transcription_show_transcriber_name(self) -> bool:
