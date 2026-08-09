@@ -110,8 +110,11 @@ The AGPL's network clause prevents cloud providers from creating proprietary "D-
 
 ### Components
 - `dpc-client/` - Desktop messenger application
-- `dpc-mobile/` - Mobile applications (Android, iOS*)
-- `dpc-cli/` - Command-line interface
+- `dpc-mobile/` - Mobile applications (Android, iOS*) — **planned, not present in this repository**
+- `dpc-cli/` - Command-line interface — **planned, not present in this repository**
+
+The two components marked planned are licensed in advance so the terms are settled
+before the code exists; today the repository ships only `dpc-client/`.
 
 *iOS distribution subject to special handling (see App Store section below)
 
