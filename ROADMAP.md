@@ -1,6 +1,6 @@
 # D-PC Messenger Development Roadmap
 
-> **Status:** Alpha | **Last Updated:** June 2026 | **Current Version:** 0.28.0 | **Current Phase:** Phase 2 - Agent Maturity (Track 1 mostly complete, Track 2 in progress, Discord community live)
+> **Status:** Alpha | **Last Updated:** 2026-08-09 | **Current Version:** 0.28.0 | **Current Phase:** Phase 2 (Track 1 Agent Maturity mostly complete; Track 2 Team Collaboration in progress — three nodes, star topology)
 
 ---
 
@@ -10,7 +10,7 @@ D-PC Messenger development:
 
 1. **Phase 1: Federated MVP - COMPLETE (v0.8.0)** - Proven P2P messaging with AI collaboration
 2. **Phase 1.5: Extended Features - COMPLETE (v0.9.0 - v0.18.0)** - File transfer, voice, agent, resilient infrastructure
-3. **Phase 2: Team Collaboration + Agent Evolution** - Track 1 (Agent Maturity) mostly complete, Track 2 (Team Collaboration) in progress (multi-node P2P live)
+3. **Phase 2: Team Collaboration + Agent Maturity** - Track 1 (Agent Maturity) mostly complete, Track 2 (Team Collaboration) in progress (multi-node P2P live)
 4. **Where This Leads** - Autonomous agents, network effects, local-first sovereignty
 
 ---
@@ -43,6 +43,10 @@ These features were developed organically as the product matured, significantly 
 | **Volunteer Relay Nodes** | v0.10.0 | Complete | DHT quality scoring, privacy-preserving |
 | **Gossip Store-and-Forward** | v0.10.2 | Complete | Hybrid AES-GCM + RSA-OAEP encryption, eventual delivery |
 
+> **"Complete" here means the code shipped, not that the tier carries traffic today** (measured 2026-08-07, three nodes). In the default configuration `seed_nodes` is empty, so the DHT routing table never fills; hole punching is off by default (`enable_hole_punching = false`); relay discovery runs through that same empty DHT; and gossip could not encrypt without a peer certificate until certificate transport landed (`a75da2ad`, not yet observed in production). What actually carries traffic is IPv4 direct plus the peer-address cache (`~/.dpc/peer_cache.json`), and the live topology is a star forced by host firewalls, not a mesh. Two consequences are open work: there is no path between two nodes that both block inbound, and gossip reports a success it cannot deliver.
+
+> **"Carries traffic" has to mean delivery, not a log line.** The log does contain `Connected to … via gossip_store_forward`. Gossip is the tier that reports a success it cannot deliver, so a criterion of "a connection through this tier appears in the log" would count a dead tier as live on its first entry. The criterion is *confirmed delivery to the recipient*; by that reading, one tier of six.
+
 ### File & Media Features (v0.11.0 - v0.15.0)
 
 | Feature | Version | Status | Description |
@@ -73,9 +77,9 @@ These features were developed organically as the product matured, significantly 
 
 ---
 
-## Phase 2: Team Collaboration + Agent Evolution
+## Phase 2: Team Collaboration + Agent Maturity
 
-**Status:** Track 1 (Agent Maturity) mostly complete, Track 2 (Team Collaboration) in progress (multi-node P2P live, S206)
+**Status:** Track 1 (Agent Maturity) mostly complete, Track 2 (Team Collaboration) in progress — three nodes live (Windows, Linux, macOS), star topology
 **Timeline:** Q1-Q3 2026
 **Scope:** Small teams (2-20 members + AIs), embedded agent system
 
@@ -108,13 +112,13 @@ North Star: Sleep consolidates session learnings → Memory system enables recal
 - **Retrieval Upgrade (ADR-018)** — BGE-M3 embeddings, whole-document indexing, sparse+dense RRF fusion (S76)
 - **PyTorch Unified ML (ADR-021)** — ONNX fully removed, PyTorch as single ML framework (S83)
 - **Multi-Agent Safety (ADR-022)** — Three-layer defense framework, 10 risks (C1-C10). ADR accepted (S87). Phase 1 done (S91): token-based budgets, real provider limits, per-agent daily quotas. Layer 2 partial (S108): RSA message signing + chain-aware P2P sync + signature verification at merge. Phase 2 remaining items need design
-- **Knowledge Graph (ADR-024)** — SQLite graph layer, 5 node types, 9 edge types. **Phase 1+2 COMPLETE** (S96): GraphBackend ABC + SQLite, structural edges, L7 RRF channel, GLiNER NER, guided LLM relations, bi-temporal metadata. Phase 3-4 deferred (federation, GRAVITON). Tasks: `tasks/adr-024-knowledge-graph/`
+- **Knowledge Graph (ADR-024)** — SQLite graph layer, 5 node types, 9 edge types. **Phase 1+2 implemented** (S96, Grafeo migration S123–S125): GraphBackend ABC + SQLite, structural edges, L7 RRF channel, GLiNER NER, bi-temporal metadata. Guided LLM relation extraction is built but its end-to-end verification is still open. Phase 3-4 deferred (federation, GRAVITON). Tasks: `tasks/adr-024-knowledge-graph/`
 - **Phase C Decomposition** — service.py 7799→6484 lines (-1315, -16.9%). Pragmatic ceiling reached (S85-S86)
 - **Rate Limiting + Security (ARCH-26)** — security/ folder, THREAT-MODEL.md (S58)
 - **Protocol 13** (v1.13) — Human-AI team coordination (Mike=approve, CC=execute, Ark=review)
 - **External Agent Bridge** — CC ↔ DPC via cc_agent_bridge.py + cc_group_chat_bridge.py, cron monitoring, P13 coordination
 - **Group Chat** (v0.19.0 → v0.26.0) — Multi-participant with files, voice, knowledge commits. Phase 1 dogfooding complete (S88-S92). Phase 2 multi-node (S97-S206, **live-verified on two nodes S206**): cross-node history sync (hash-based bidirectional gate, disk-SSoT, `message_id` dedup), **ADR-031 per-reader role derivation** + single-writer history, `@all`/`@CC` mention routing, GROUP_SYNC content-hash tie-break + topic sync, delete-folder cleanup, per-group serialization lock, group Sleep button + morning briefs, token-counter agent attribution, peer-model selectable, default-deny agent context. See `docs/GROUP_CHAT.md`
-- **Discord Integration (ADR-025)** — Phase 1.5 done (S97-S107): discord_service.py, @mention routing, Iris agent (agent_007) created, system prompt, identity, Discord channel live
+- **Discord Integration (ADR-025)** — Phase 1.5 built (S97-S107): discord_service.py, @mention routing, Iris agent (agent_007), system prompt, identity. **Currently switched off** — `[discord] enabled = false` in the local config as of 2026-08-09; the code is there, the bridge is not running
 - **Public Agent Guardrails (ADR-026)** — 7/7 tasks done (S106-S107): source-based tool filtering, rate limiting, output sanitization, URL whitelist, graceful fallback, TTL + context management, mention sanitization
 - **MSG-CHAIN Integrity** — Per-message hash chain (S105) + RSA content signing + chain-aware P2P sync (S108). Content hash + signature + signer_node_id on every message. Verification at merge
 - **Content-Aware Index Staleness** — Full content fingerprint in staleness hash (S108). Changed files trigger re-indexing even without rename
@@ -134,6 +138,14 @@ North Star: Sleep consolidates session learnings → Memory system enables recal
 ### Track 2: Team Collaboration
 
 **Status:** Phase 1 dogfooding COMPLETE (S92). Group chat "DPC Project" (Mike + Ark + CC) functional — agent participation, @mention routing, persistence, history sync all working. **Phase 2 (multi-node P2P) IN PROGRESS** — second node (Linux) live, cross-node group chat live-verified S206 (v0.26.0): history sync, GROUP_SYNC tie-break, remote agent @mention all confirmed across nodes.
+
+**Message authenticity and group consensus (ADR-036 / 037 / 038, accepted 2026-08-05…06, code S70 2026-08-07 → 08 — two commits on the 7th, four on the 8th).** The largest block of Track 2 work since this file was last touched, and the reason multi-node group chat can be trusted at all:
+
+- **ADR-036 — a signature is minted by the author at send time.** Until then the *receiver* signed on save, so the signature certified storage, not authorship: measured on a three-node star, seven of nine records on the edges named the relay as the author. Peer certificates are now cached (TOFU), the preimage is canonical, and the receiver no longer re-signs.
+- **ADR-037 — per-author attribution chains.** The room-level chain covers `role`, which differs per reader, so it can never agree between nodes — measured: identical messages, three different tails. Order-independent per-author digests replace it; the full `seq`/`prev`-on-the-wire step (γ) stays deferred behind named preconditions.
+- **ADR-038 — group roster as signed state.** `created_by` is pinned at first sight, authority is per-field (members/name/topic = creator; `agents[X]` = node X or the creator), and a roster change is signed by whoever made it, not by whoever relayed it. `session_started_at` makes a New Session a signed fact about the group rather than an announcement, so a node that was offline learns the reset happened.
+- **Six commits closing the consensus defects** (S70): a result may only erase history for a vote we joined; Sleep runs a node's own agents; a vote is signed and attributed to its signer; the knowledge-commit anchor is the set of content hashes the extraction read; the reset boundary is a signed marker; a certificate travels to whoever must check the signature. ~75 tests, suite 1509 → 1575. **None of the six has been observed in production yet** — the next step for this track is a three-node bench, not more code.
+- **Also accepted in this window:** ADR-034 (knowledge evolution) and ADR-035 (frontend theming tokens — a token layer under the UI before a dark theme; not started in code).
 
 **Design decisions (S88):**
 - Trust boundary = node level (node = human + agents). No separate agent crypto identity needed.
@@ -170,12 +182,16 @@ External Agent Bridge (CC) validates that non-embedded AI can participate as a f
 
 ### Success Metrics
 
-**Operational Metrics:**
-- All 6 connection tiers tested and operational
-- Sleep consolidation coverage (sessions analyzed, brief quality)
-- Knowledge commits per session (manual extraction + voting pipeline, ADR-009)
-- P2P mesh stability over 24h (2+ nodes)
-- DHT lookup success rate >95% (peer discovery without Hub)
+**Operational Metrics** (revised 2026-08-09 — the previous list measured systems that do not run in the default configuration: six tiers "operational", DHT lookup >95%, mesh stability over 24h. See the note under *Decentralized Infrastructure*. A metric attached to a dead system reports success by never being taken.)
+
+Each line below names a signal someone can actually go and look at:
+
+- **Connectivity, per tier that carries traffic.** Today that is IPv4 direct plus the peer-address cache. A tier joins this list when a connection through it appears in the log, not when its code merges.
+- **`histories agree` printed for a group that had actually diverged.** The digest exchange does print this line — but so far only for groups whose copies never drifted apart, where there was nothing to reconcile. For the group whose divergence motivated the per-author work it has never appeared. The signal worth waiting for is the line showing up for a group previously reported as differing; the line on its own proves the easy case.
+- **A signed vote counted on a node that is not the initiator** — *not measurable yet, and the reason matters.* The success paths of the consensus fixes write nothing to the log; only their failure branches do. A metric naming a line the code never emits reports success by never being takeable. One log line on the counted-vote path makes it real; until then this row honestly reads "no way to take it".
+- **How far the code runs ahead of observation:** the count of records shipped but not yet seen working in production. Tracked per session in the internal backlog rather than here, so the number does not rot between roadmap revisions.
+- **Sleep consolidation coverage** — sessions analyzed, brief actually delivered.
+- **Knowledge commits per session** — manual extraction + voting pipeline (ADR-009); zero until the commit anchor fix is observed between nodes.
 
 ---
 
@@ -208,6 +224,6 @@ See `git log` for complete version history.
 
 ---
 
-**Last Updated:** June 2026
+**Last Updated:** 2026-08-09
 **Maintained By:** D-PC Messenger Core Team
 **License:** See [LICENSE.md](./LICENSE.md)

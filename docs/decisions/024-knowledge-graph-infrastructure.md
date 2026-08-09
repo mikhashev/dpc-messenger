@@ -1,6 +1,6 @@
 # ADR-024: Knowledge Graph as Unified Infrastructure
 
-**Status:** Accepted (Phase 1 implemented, Phase 2 partial, Grafeo migration Phase 2 started S123)
+**Status:** Accepted — Phase 1 and Phase 2 implemented (Grafeo migration through Phase 2.5 Group C, S123–S125, 72/72 parity tests); Phase 3–4 deferred (federation, GRAVITON). Four items remain open below and none of them block the phases above: a live benchmark on DPC-scale data, the `node_id` property index, the `_add_edge_safe` race in the high-level wrapper, and end-to-end verification of guided LLM relation extraction. *(Header corrected 2026-08-09: it still read "Phase 2 partial" while its own checklist had marked every Phase 2 and 2.5 item done.)*
 **Date:** 2026-05-05
 **Session:** S93
 **Authors:** CC (draft, code analysis, web research), Ark (prior art research, GRAVITON mapping, dotmd analysis), Mike (direction, scale framing, decision)

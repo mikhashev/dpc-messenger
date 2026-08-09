@@ -118,6 +118,7 @@ On connect, nodes reconcile group history so all members converge.
 
 ### Session Reset
 - "New Session" voting broadcasts to all members via `propose_new_session()`.
+- **Every member must vote yes, and every member must be online to be asked.** A majority is not enough and there is no override: whoever did not take part keeps their history and hands it straight back at the next sync, so a two-of-three reset is a pause, not a reset. `propose_new_session()` therefore refuses up front when anyone is disconnected, naming who — and an unanswered proposal times out as rejected, so silence is not consent. The cost is deliberate: a member gone for good makes a reset impossible until they are removed from the group.
 
 ## Group Management
 
