@@ -65,7 +65,7 @@ uv run pytest --cov=dpc_client_core
 
 | File | Purpose |
 |------|---------|
-| [`dpc_client_core/llm_manager.py`](dpc_client_core/llm_manager.py) | Provider registry (Ollama, OpenAI, Anthropic, Z.AI, Gemini, GigaChat, GitHub Models, local Whisper) |
+| [`dpc_client_core/llm_manager.py`](dpc_client_core/llm_manager.py) | Provider registry — routes to the implementations in `providers/`; tested against Ollama, Anthropic and DeepSeek |
 | [`dpc_client_core/providers/`](dpc_client_core/providers/) | Per-provider implementations |
 | [`dpc_client_core/firewall.py`](dpc_client_core/firewall.py) | Context access control (the single gate between agent/peer requests and personal data) |
 | [`dpc_client_core/conversation_monitor.py`](dpc_client_core/conversation_monitor.py) | Knowledge-commit proposal pipeline |

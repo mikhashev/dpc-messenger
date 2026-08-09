@@ -16,9 +16,10 @@ end-user setup lives in [`../QUICK_START.md`](../QUICK_START.md).
 
 AI provider is configured at runtime in `~/.dpc/providers.json`, not at
 install time — see [`../docs/CONFIGURATION.md`](../docs/CONFIGURATION.md).
-Options include remote providers (Anthropic, OpenAI, Z.AI, Gemini,
-GigaChat, GitHub Models) and [Ollama](https://ollama.ai/) for local
-models.
+Tested remote providers are Anthropic, OpenAI and DeepSeek;
+[Ollama](https://ollama.ai/) runs models locally. Further providers are
+implemented but are not part of the tested set — see
+`dpc_client_core/providers/`.
 
 ---
 

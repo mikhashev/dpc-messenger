@@ -327,7 +327,7 @@ the next step will be empty.
      [Ollama](https://ollama.com) first, then pull a model
      (e.g. `ollama pull llama3`).
    - **Anthropic** — Claude models. Needs an Anthropic API key.
-   - **Z.AI** — GLM models. Needs a Z.AI API key.
+   - **DeepSeek** — pay-per-token V4 models. Needs a DeepSeek API key.
    - other cloud providers, each needs its own key.
 3. Fill the fields that appear (model name, API key, base URL as
    applicable) and save.
@@ -353,9 +353,11 @@ create it once and it stays in the sidebar.
    - **AI Model (LLM):** pick one of the providers you configured
      in the previous step.
    - **Permission Profile:** *default* is fine for a first run. The
-     agent can read files, search the web, and update its own
-     memory, but cannot write to your files or take destructive
-     actions. See [Agent reference](./docs/agent/DPC_AGENT_GUIDE.md)
+     agent can read files and update its own memory, but cannot write
+     to your files or take destructive actions. Web search and the
+     browser tools ship **off** — switch them on per agent in
+     Firewall Rules → Agent Permissions → tools.
+     See [Agent reference](./docs/agent/DPC_AGENT_GUIDE.md)
      for per-tool control.
 3. Click **Create Chat**.
 4. The new agent appears in the sidebar. Click it to open the chat

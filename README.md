@@ -26,7 +26,7 @@ Your team connects directly — no servers, no cloud, peer-to-peer. Humans and A
 - **Your data stays yours** — P2P, no servers, end-to-end encryption
 - **AI grows with you** — long-term memory, skills, sleep consolidation between sessions
 - **Knowledge you own** — git-like commits, signed, versioned, yours forever
-- **Works with any AI** — Ollama, Claude, Z.AI, and more — local or remote
+- **Works with any AI** — Ollama, Claude, DeepSeek, and more — local or remote
 - **Privacy on your terms** — granular firewall, field-level control
 - **Direct by default** — IPv6/IPv4 peer-to-peer, LAN or open internet; relay and gossip fallbacks are experimental
 

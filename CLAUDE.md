@@ -249,7 +249,7 @@ D-PC Messenger uses an intelligent 6-tier connection fallback hierarchy for near
    - Timeout: 15s
    - **Status**: Experimental (PoC) with DTLS encryption; **disabled by default** (`enable_hole_punching = false` in `settings.py`) — opt-in
    - Location: `connection_strategies/udp_hole_punch.py`, `managers/hole_punch_manager.py`
-   - Testing: See `docs/MANUAL_TESTING_GUIDE.md`
+   - Testing: See `archive/docs/MANUAL_TESTING_GUIDE.md` (archived)
 
 **Priority 5: Volunteer Relay** (100% NAT coverage, Hub-independent)
    - Relay discovery via DHT quality scoring (uptime 50%, capacity 30%, latency 20%)
@@ -449,7 +449,7 @@ Rollback: remove the keys + restart; FAISS state at
 - `webrtc_peer.py` - WebRTC peer wrapper (aiortc)
 - `hub_client.py` - Federation Hub communication (OAuth, WebSocket signaling)
 - `llm_manager.py` - AI provider registry and routing (implementations in `providers/`)
-  - `providers/base.py` - AbstractLLMProvider ABC
+  - `providers/base.py` - `AIProvider`, the base class every provider extends (a conventional base class, not an `abc.ABC`)
   - `providers/ollama_provider.py`, `openai_provider.py`, `anthropic_provider.py`, `zai_provider.py`
   - `providers/gemini_provider.py`, `gigachat_provider.py`, `github_models_provider.py`
   - `providers/whisper_provider.py` - local Whisper transcription
@@ -487,7 +487,7 @@ Rollback: remove the keys + restart; FAISS state at
   - CHAT_HISTORY_RESPONSE - Send conversation history to peer
   - Automatic sync on reconnect
   - Backend→frontend sync for page refresh scenarios
-  - See [CHAT_HISTORY_SYNC_DESIGN.md](docs/CHAT_HISTORY_SYNC_DESIGN.md) for full specification
+  - See [CHAT_HISTORY_SYNC_DESIGN.md](archive/docs/CHAT_HISTORY_SYNC_DESIGN.md) for full specification (archived)
 
 **Frontend Components:**
 - `NewSessionDialog.svelte` - UI for session reset voting
@@ -501,7 +501,7 @@ Rollback: remove the keys + restart; FAISS state at
 - Backend communication: `src/lib/coreService.ts` (WebSocket client, thin bootstrapper)
 - SSG mode with adapter-static (SPA fallback)
 - **Domain panels** (`src/lib/panels/`, 15 files): ChatPanel, AgentPanel, VoicePanel, GroupPanel, TelegramPanel, KnowledgeEventsPanel, ModelDownloadPanel, HistorySyncPanel, ChatHistorySyncPanel, SessionEventsPanel, MessageRouterPanel, PersistencePanel, AgentManagementPanel, GroupManagementPanel, AddAIChatPanel
-- **Domain services** (`src/lib/services/`, 10 files): messaging.ts, agents.ts, connection.ts, voice.ts, knowledge.ts, telegram.ts, groups.ts, fileTransfer.ts, session.ts, providers.ts
+- **Domain services** (`src/lib/services/`, 13 files): messaging.ts, agents.ts, connection.ts, voice.ts, knowledge.ts, telegram.ts, groups.ts, fileTransfer.ts, session.ts, providers.ts
 
 **Notification System (v0.11.3+):**
 - `notificationService.ts` - Native desktop notifications
@@ -562,11 +562,11 @@ Voice messages use the existing file transfer infrastructure (FILE_OFFER/FILE_CH
 - **Cross-platform**:
   - Windows: Native via Edge WebView2
   - Linux: Rust cpal library with ALSA/PipeWire support (v0.15.0+)
-  - macOS: Requires Info.plist permissions (see `docs/VOICE_MESSAGES_KNOWN_ISSUES.md`)
+  - macOS: Requires Info.plist permissions
 - **Storage**: `~/.dpc/conversations/{peer_id}/files/`
 
 **Transcription:**
-- **Local Whisper**: `LocalWhisperProvider` in `llm_manager.py`
+- **Local Whisper**: `LocalWhisperProvider` in `providers/whisper_provider.py`
 - **GPU Acceleration**:
   - MLX (Apple Silicon M1/M2/M3/M4) - Optional via `uv sync --extra mlx`
   - CUDA (NVIDIA GPUs) - Auto-detected
@@ -1136,7 +1136,9 @@ UI connects via WebSocket (localhost:9999) for:
 ### WebRTC NAT Traversal
 
 - STUN servers for public IP discovery (Google STUN)
-- TURN server fallback for symmetric NAT (OpenRelay)
+- TURN relay for symmetric NAT — **opt-in, nothing configured by default.** Fill
+  `[turn]` username/credential/servers in `config.ini` (or `DPC_TURN_*` env vars);
+  a fresh config ships empty so no traffic reaches a third party unasked
 - ICE candidate gathering and connectivity checks
 - Connection state monitoring in `webrtc_peer.py`
 
@@ -1288,7 +1290,7 @@ uv run pytest tests/test_turn_connectivity.py
 
 ### Important Documentation
 - `README.md` - Project overview
-- `docs/QUICK_START.md` - 5-minute setup guide
+- `QUICK_START.md` - 5-minute setup guide (repo root, not `docs/`)
 - `docs/WEBRTC_SETUP_GUIDE.md` - Production deployment
 - `docs/CONFIGURATION.md` - Complete configuration reference
 - `docs/LOGGING.md` - Logging system configuration and troubleshooting
@@ -1304,7 +1306,6 @@ uv run pytest tests/test_turn_connectivity.py
   - `001-service-split.md` - Why and how service.py was split into domain services (refactor/grand)
   - `002-provider-abc.md` - LLM provider abstract base class design
   - `003-frontend-stores.md` - Frontend hybrid local/global store strategy
-- `docs/REFACTORING_GUIDELINES_FOR_CLAUDE_CODE.md` - AI-assisted refactoring principles
 
 ---
 
@@ -1326,6 +1327,13 @@ D-PC Messenger supports multiple AI providers for local and cloud-based inferenc
 - **Whisper**: Local transcription-only provider via `whisper_provider.py`
 
 ### Z.AI Setup
+
+> ⚠️ **Not a recommended provider right now, and not named in the public docs.** The
+> account was banned for a month for reaching Z.AI through the Coding Plan subscription
+> rather than the official paid API. Rewriting the two Z.AI providers onto the paid API is
+> tracked as `ZAI-SUBSCRIPTION-AUTH-INSTEAD-OF-PAID-API`; until that lands, do not point a
+> user or an agent at this section as a way to get started. Tested providers are Ollama,
+> Anthropic and DeepSeek. The rest of this section describes how the code works today.
 
 Z.AI provides access to the GLM series of language models, including both text and vision capabilities.
 
