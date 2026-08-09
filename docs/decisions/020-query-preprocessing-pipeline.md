@@ -1,6 +1,6 @@
 # ADR-020: Query Preprocessing Pipeline
 
-**Status:** Proposed
+**Status:** Partially implemented — Layer 1 (stopwordsiso) and Layer 2 (corpus-adaptive stops) are built; language detection and Layer 3 are not
 **Date:** 2026-04-28
 **Session:** S78
 **Authors:** Ark (architecture, three-layer design), CC (code analysis, BM25 bug discovery, stop words implementation), Mike (direction, query quality insight, domain-specific stop words idea)

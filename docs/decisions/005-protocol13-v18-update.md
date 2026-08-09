@@ -1,7 +1,7 @@
 # ADR 005: Protocol 13 v1.8 Update — Session Closing + Scope-Only Estimation
 
 ## Status
-Proposed (2026-04-08, S14)
+Accepted and in force — both decisions are Protocol 13 rules today: scope-only estimation (rule 3) and the session-close sequence (rule 5). Proposed 2026-04-08 (S14); the header was never flipped.
 
 ## Context
 Session S14 revealed three process gaps in Protocol 13 v1.7:

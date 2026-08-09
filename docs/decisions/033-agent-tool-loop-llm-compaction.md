@@ -1,7 +1,7 @@
 ---
 adr: 033
 title: "Replace agent tool-history truncation with structured LLM compaction"
-status: proposed
+status: implemented (opt-in per agent via `compaction_enabled`, default off)
 date: 2026-07-16
 deciders: [Mike]
 consulted: [CC, Ark, Warren]
