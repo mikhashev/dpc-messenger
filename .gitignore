@@ -162,5 +162,8 @@ security/
 cc_cron_prompt.md
 cc-out*.md
 
-# Generated board; its source (backlog.md) is itself ignored
-tools/backlog/backlog.html
+# Generated views of the backlog — board, link graph, anything build.py grows next.
+# Their source (backlog.md) is itself ignored, so the whole shape is ignored, not a list
+# of filenames that has to be maintained every time a view is added.
+tools/backlog/*.html
+tools/backlog/*.json

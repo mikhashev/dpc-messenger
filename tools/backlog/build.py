@@ -1,12 +1,17 @@
-"""Render backlog.md into a scannable board: tools/backlog/backlog.html
+"""Render backlog.md into a scannable board and a link graph.
 
 Re-run after any backlog edit:  uv run python tools/backlog/build.py
+Writes tools/backlog/backlog.html and tools/backlog/graph.html in one pass, so the
+two artefacts can never disagree about how fresh they are.
 Reads only; never writes to backlog.md.
 """
 import html
+import json
+import math
 import re
 import sys
-from collections import Counter
+import time
+from collections import Counter, defaultdict
 from datetime import date
 from pathlib import Path
 
@@ -19,8 +24,81 @@ ROOT = Path(__file__).resolve().parents[2]   # tools/backlog/build.py -> repo ro
 _paths = [a for a in sys.argv[1:] if not a.startswith("-")]
 SRC = Path(_paths[0]).resolve() if _paths else ROOT / "backlog.md"
 DST = Path(__file__).resolve().parent / "backlog.html"
+GRAPH_DST = Path(__file__).resolve().parent / "graph.html"
+JSON_DST = Path(__file__).resolve().parent / "graph.json"
+# Entries retire to a second file. An open entry that leans on a closed one is worth
+# seeing, so the archive is read for names only — never rendered as a board.
+ARCHIVE = SRC.parent / "backlog_closed.md"
+# Read for its decisions only. The roadmap is where a decision's phase is written down,
+# and the backlog is where the same decisions are cited — so it is the far bank of the
+# bridge between the two documents, not a second backlog.
+ROADMAP = SRC.parent / "ROADMAP.md"
 
 PRIORITIES = ["CRITICAL", "HIGH", "MEDIUM", "LOW", "RESEARCH", "—"]
+
+# An entry name is a SCREAMING-KEBAB sentence (§1). The same shape appearing in a body is
+# a reference to another entry — that is the whole edge model, and it needs no new field.
+NAME_RE = re.compile(r"^[A-Z][A-Z0-9]*(?:-[A-Z0-9]+)+")   # leading run, not whole string:
+# a heading may carry an aside — "SHUTDOWN-PIPE-DRAIN (original triage, S143)" — and that
+# entry is still linkable by its name. Requiring the whole segment to match lost it, and
+# with it every edge pointing at it.
+TOKEN_RE = re.compile(r"\b[A-Z][A-Z0-9]*(?:-[A-Z0-9]+)+\b")
+ADR_RE = re.compile(r"\bADR-\d{2,3}\b")
+# A bare mention and a stated relation are different claims. Only the second is refusable
+# evidence that a link rotted; the first is reported separately and quietly.
+#
+# `blocks ` used to sit in this list, meaning "A blocks B". Measured 2026-08-10: it fired
+# 21 times across the backlog — the second most frequent marker here — and essentially
+# never as a relation. It was reading "image content blocks", "the guard blocks". It now
+# has to be followed by something name-shaped to count. `blocked by` needs no such guard.
+#
+# The phrase is kept, not just the fact that there was one. Measured 2026-08-10: of 223
+# links in the graph, exactly three carried dependency semantics and the rest meant "see
+# also" — so "what do I fix first" could not be asked of this data at all. Keeping the
+# phrase costs nothing (it was already being matched and thrown away) and makes the
+# question answerable the day somebody writes `blocked by [[NAME]]`.
+REL_TYPES = [
+    (r"blocked by",                        "blocked_by"),
+    (r"blocks (?=[A-Z][A-Z0-9]*-)",        "blocks"),
+    (r"depends on|builds on|needs (?=[A-Z][A-Z0-9]*-)", "depends_on"),
+    (r"superseded by",                     "superseded_by"),
+    (r"supersedes|subsumed by",            "supersedes"),
+    (r"duplicate of",                      "duplicate"),
+    (r"parent task",                       "parent"),
+    (r"child task",                        "child"),
+    (r"sibling of|same class as|same defect", "sibling"),
+    (r"follow-?up to",                     "followup"),
+    (r"cross-ref|related to|see also", "related"),
+]
+# `[[` is deliberately NOT in this list. It marks a reference, not a kind of one, and it
+# always sits flush against the name — so as a competing phrase it won every time and
+# "parent task: [[NAME]]" was recorded as a plain "related". Brackets are read separately.
+REL_RX = [(re.compile(p, re.I), rel) for p, rel in REL_TYPES]
+# Which relations answer "what do I fix first". The rest are "see also" — useful to read,
+# useless to walk.
+DEPENDENCY_RELS = {"blocked_by", "blocks", "depends_on", "parent", "child"}
+# How far after a relation phrase a token still counts as covered by it. Bound the claim
+# to the phrase's own neighbourhood: applying it to the whole line let a marker at
+# character 257 vouch for a token at character 68, which is not corroboration by any
+# reading. Found by Fable 5.
+STATED_WINDOW = 80
+# A bracketed name is a reference by construction, so it skips every heuristic below it —
+# no stoplist, no shape guard, no relation-phrase test. Both external reviews (Fable 5,
+# GLM 5.2, 2026-08-10) recommended this as the one convention worth adopting from the
+# note-graph tools. Encouraged, never required: a scan that only saw brackets would trade
+# visible false positives for invisible missing edges.
+WIKILINK_RE = re.compile(r"\[\[\s*([^\]]+?)\s*\]\]")
+# Vocabulary that merely looks like a name. Kept small on purpose: everything here is a
+# word the standard itself defines, not a guess about what a token might have meant.
+VOCAB = {"CRITICAL", "CRIT", "HIGH", "MEDIUM", "LOW", "RESEARCH", "NORMAL",
+         "OPEN", "CLOSED", "DONE", "AWAITING", "OBSERVATION", "IN", "PROGRESS",
+         "BLOCKED", "BACKLOG", "IDEAS", "FIXED", "DISPROVED", "MOOT", "SUPERSEDED",
+         "DUPLICATE", "WONTFIX", "TODO", "WIP", "NOT", "AND", "OR", "THE"}
+# Standards bodies and wire formats share our shape and are not entries.
+FOREIGN_RE = re.compile(r"^(?:CVE|RFC|ISO|IEEE|UTF|SHA|AES|RSA|TLS|DTLS|HTTP|IPV|X)-")
+# Line spans (L451-L462) and session spans (S111-S113) are how this backlog cites itself
+# and its own history. They are never entry names.
+RANGE_RE = re.compile(r"^[A-Z]{1,4}\d+-[A-Z]{0,4}\d+$")
 PRI_CLASS = {"CRITICAL": "crit", "HIGH": "high", "MEDIUM": "med",
              "LOW": "low", "RESEARCH": "res", "—": "none"}
 
@@ -112,13 +190,224 @@ for i, line in enumerate(lines):
             first = re.sub(r"\s+", " ", s[2:]).strip()
             break
 
+    # The body runs to the next heading, not to a fixed window. A 40-line window silently
+    # truncated long entries, so a closure line — or a reference — living past line 40 was
+    # invisible to every rule below.
+    end = i + 1
+    while end < len(lines) and not re.match(r"^#{2,3} ", lines[end]):
+        end += 1
+
+    _nm = NAME_RE.match(name)
+
     entries.append({
+        "ref": _nm.group(0) if _nm else "",
         "section": section, "name": name, "desc": desc, "pri": pri, "pri_typo": pri_typo,
         "when": when, "first": first, "line": i + 1,
         "status": status, "origin": origin, "head": head, "env": env,
-        "body": "\n".join(lines[i + 1:i + 40]).split("\n### ")[0],
+        "body": "\n".join(lines[i + 1:end]),
+        "is_name": bool(_nm),
         "done": "✅" in head, "part": "🟡" in head,
     })
+
+# ----------------------------------------------------------------------- roadmap
+# "Where are the links between ROADMAP, ADR and backlog?" — Mike, 2026-08-10. Half of that
+# chain already existed: an entry naming ADR-024 is joined to the decision. The other half
+# was sitting unread in ROADMAP.md, which says which phase each decision belongs to and,
+# on its Dependencies lines, which decision builds on which. Both halves are prose nobody
+# has to start writing; the parser just had to be pointed at the second file.
+def read_roadmap(path):
+    """(phase -> ADR) coverage and (ADR -> ADR) dependencies, both as written."""
+    covers, deps, phases = [], [], {}
+    if not path.exists():
+        return covers, deps, phases
+    section = None
+    for i, ln in enumerate(path.read_text(encoding="utf-8-sig").split("\n"), 1):
+        h = re.match(r"^(#{2,4}) (.+)", ln)
+        if h:
+            section = re.sub(r"\s*[—-]\s*(COMPLETE|DONE).*$", "", h.group(2)).strip()
+            phases.setdefault(section, i)
+            continue
+        if not section:
+            continue
+        found = list(ADR_RE.finditer(ln))
+        for m in found:
+            covers.append((section, m.group(0), "covers"))
+        # "ADR-024 builds on ADR-010, ADR-018, ADR-019" — subject is the last decision
+        # named before the phrase, targets are the ones named after it.
+        for rx, rel in REL_RX:
+            if rel == "related":
+                continue
+            for pm in rx.finditer(ln):
+                # Both ends have to be near the phrase. Without a limit on the subject the
+                # rule read "**Memory Upgrade (ADR-010)** — … model_swap superseded by
+                # ADR-018" as a claim about ADR-010, when the sentence is about model_swap.
+                before = [m for m in found
+                          if m.end() <= pm.start() and pm.start() - m.end() <= 40]
+                after = [m for m in found if m.start() >= pm.end()
+                         and m.start() - pm.end() <= 120]
+                if before and after:
+                    for t in after:
+                        deps.append((before[-1].group(0), t.group(0), rel))
+    return covers, deps, phases
+
+
+road_covers, road_deps, road_phases = read_roadmap(ROADMAP)
+
+
+# --------------------------------------------------------------------- freshness
+# Both artefacts are gitignored, so nothing in git status ever says they went stale.
+# The one signal that exists is their age against the source; it is printed, and that is
+# all — §8 of the standard says this script never rewrites a file, and a checker that
+# quietly rebuilt the board to hide its own warning would be exactly that.
+def _ago(sec: float) -> str:
+    sec = int(abs(sec))
+    if sec < 90:
+        return f"{sec}s"
+    if sec < 5400:
+        return f"{sec // 60} min"
+    if sec < 172800:
+        return f"{sec // 3600} h"
+    return f"{sec // 86400} d"
+
+
+def freshness():
+    if SRC != ROOT / "backlog.md":
+        return [f"freshness: not checked — reading {SRC}, not this project's backlog.md"]
+    out, src_m = [], SRC.stat().st_mtime
+    for p in (DST, GRAPH_DST, JSON_DST):
+        if not p.exists():
+            out.append(f"STALE   {p.name} has never been built")
+        elif src_m - p.stat().st_mtime > 60:
+            out.append(f"STALE   {p.name} is {_ago(src_m - p.stat().st_mtime)} older than "
+                       f"{SRC.name} — rebuild: uv run python tools/backlog/build.py")
+        else:
+            out.append(f"fresh   {p.name} (built {_ago(time.time() - p.stat().st_mtime)} ago)")
+    return out
+
+
+# --------------------------------------------------------------------- references
+# One pass, two consumers: the stale-reference report in --check and the graph at the end.
+# No new field is asked of anyone — every edge here is already written in the prose, which
+# is why 78 of 217 entries have one on the day this shipped and none had to be edited.
+archive_names = set()
+archive_heads, archive_unparsed = 0, []
+if ARCHIVE.exists():
+    for h in re.findall(r"^### (.+)$", ARCHIVE.read_text(encoding="utf-8-sig"), re.M):
+        archive_heads += 1
+        # The archive strikes entries through — `### ~~NAME~~ — CLOSED S191`. Matching the
+        # raw heading lost every one of those names, so an open entry citing a struck-out
+        # one was reported as a broken reference instead of drawn as an archive link. This
+        # is the drift the counter below was added to catch, found by the counter on its
+        # first run.
+        m = NAME_RE.match(re.split(r"[:—]", h.replace("~~", "").replace("**", ""))[0]
+                          .strip().strip("`"))
+        if m:
+            archive_names.add(m.group(0))
+        else:
+            # The archive is parsed by a second, simpler path than the live file, and it is
+            # edited under different circumstances. If its headings drift, entry→archive
+            # links evaporate with nothing to show for it — so the misses are counted.
+            archive_unparsed.append(h[:70])
+
+live = {e["ref"]: e for e in entries if e["is_name"]}
+known = set(live) | archive_names
+
+edges = []        # (src, dst, rel)          — both entries live in this file
+arc_edges = []    # (src, archived, rel)     — leans on something already closed
+adr_edges = []    # (src, ADR-0xx, rel)      — the bridge to ROADMAP, already in the prose
+road_edges = []   # (phase, ADR-0xx, rel)    — the other half of that bridge
+short_refs = []   # (src, token, full, line) — a prefix of exactly one real name
+dangling = []     # (src, token, line, strong) — resolves to nothing at all
+
+
+def _vocabulary(tok: str) -> bool:
+    return all(part in VOCAB for part in tok.split("-"))
+
+
+def _ambiguous(tok: str) -> bool:
+    """True for shapes a model name wears as readily as an entry name.
+
+    GLM-5, BGE-M3, D-PC and MEM-3 are indistinguishable by shape from the legacy
+    identifiers this report is meant to find (MENTION-1, DEDUP-1). Rather than guess,
+    such a token is only counted when the line states a relation — corroboration
+    supplied by the author, not by this script.
+    """
+    return any(len(p) <= 2 or p[0].isdigit() for p in tok.split("-"))
+
+
+for e in entries:
+    if not e["is_name"]:
+        continue
+    src = e["ref"]
+    hits = {}                        # token -> [stated relation?, line, bracketed?]
+    for off, ln in enumerate(e["body"].split("\n")):
+        # An entry that writes *about* broken references quotes the broken names, and the
+        # report then flags the entry that exists to fix them — permanently, since the
+        # examples never go away. One escape hatch, invisible in rendered markdown, and
+        # deliberately per-line so it cannot silence a whole entry by accident.
+        # Backticks were tried as the signal first and rejected by measurement: 53 of the
+        # 123 mentions of live entry names are inside code spans, so that rule would have
+        # thrown away nearly half the real graph.
+        if "<!-- no-refs -->" in ln:
+            continue
+        marks = [(m.end(), rel) for rx, rel in REL_RX for m in rx.finditer(ln)]
+        exact = {t for w in WIKILINK_RE.findall(ln) for t in TOKEN_RE.findall(w)}
+        for m in TOKEN_RE.finditer(ln):
+            tok = m.group(0)
+            if tok == src:
+                continue
+            # Corroboration has to sit in front of the token it vouches for, not merely
+            # somewhere on the same line. The nearest preceding phrase wins, so on
+            # "blocked by X, related to Y" each name keeps its own relation.
+            near = [(m.start() - end, rel) for end, rel in marks
+                    if 0 <= m.start() - end <= STATED_WINDOW]
+            rel = min(near)[1] if near else ""
+            hit = hits.setdefault(tok, ["", e["line"] + 1 + off, False])
+            hit[0] = hit[0] or rel
+            hit[2] = hit[2] or tok in exact
+    for tok, (rel, ln_no, bracketed) in sorted(hits.items()):
+        stated = bool(rel) or bracketed
+        # A bracketed name with no phrase in front of it is still an assertion — the author
+        # marked it up as a link — so it records as "related" rather than as a bare mention.
+        kind = rel or ("related" if bracketed else "mention")
+        # Entry first, ADR second: ADR-022 and ADR-024 are themselves entries here, and
+        # counting them as decision nodes would split one node into two.
+        if tok in live:
+            edges.append((src, tok, kind))
+        elif ADR_RE.fullmatch(tok):
+            adr_edges.append((src, tok, kind))
+        elif tok in archive_names:
+            arc_edges.append((src, tok, kind))
+        elif bracketed:
+            # Written as [[NAME]] and resolving to nothing: the author asserted a link and
+            # the target is gone. No heuristic gets to soften that.
+            dangling.append((src, tok, ln_no, True))
+        elif (_vocabulary(tok) or FOREIGN_RE.match(tok) or RANGE_RE.match(tok)
+                or tok.startswith("ADR-")):
+            pass                                  # ADR-NNN is a placeholder, not a link
+        elif _ambiguous(tok) and not stated:
+            pass
+        else:
+            # A token that is the head of exactly one real name is a shortened reference,
+            # not a broken one. Naming both as "dangling" would bury the real breakage.
+            full = [k for k in known if k.startswith(tok + "-") and k != src]
+            if len(full) == 1:
+                short_refs.append((src, tok, full[0], ln_no))
+            else:
+                dangling.append((src, tok, ln_no, stated))
+
+# Only decisions the backlog actually cites get a phase drawn behind them: a roadmap
+# section listing twenty ADRs nobody has an entry for would bury the graph in scaffolding.
+# Computed here rather than with the rest of the graph so --check can report both the raw
+# extraction and what survives the filter — reporting only the raw count let a reader
+# expect 46 new links where 22 are drawn (Warren, 2026-08-10).
+cited_adr = {b for _, b, _ in adr_edges}
+road_edges = [(p, a, r) for p, a, r in road_covers if a in cited_adr]
+adr_dep_edges = [(a, b, r) for a, b, r in road_deps if a in cited_adr or b in cited_adr]
+# One list, two consumers, one number: the summary line and graph.json must not be able to
+# disagree about how many dependencies exist.
+dependencies = sorted({(a, b, r) for a, b, r in edges + arc_edges + adr_edges + adr_dep_edges
+                       if r in DEPENDENCY_RELS})
 
 if "--check" in sys.argv:
     # Validate the file against docs/BACKLOG_FORMAT.md. Reports, never rewrites:
@@ -236,8 +525,64 @@ if "--check" in sys.argv:
         print(f"REFUSE  {line}")
     for line in warnings:
         print(f"warn    {line}")
-    print(f"\n{len(entries)} entries · {len(refusals)} refusals · {len(warnings)} warnings")
+
+    # A reference that resolves to nothing is the same defect the standard exists to
+    # prevent, one level up: the document points at something that is not there. It is
+    # reported, never refused — the entries predate the rule, and the classifier's own
+    # false-positive shape (shortened names) is printed next to it rather than hidden.
+    if dangling or short_refs:
+        print("\n-- references that resolve to nothing --")
+        for src, tok, ln, stated in sorted(dangling, key=lambda d: (not d[3], d[0])):
+            kind = "stated relation" if stated else "mention"
+            print(f"stale   {SRC.name}:{ln}  {src}\n"
+                  f"    {kind} to «{tok}», which is not an entry in {SRC.name} "
+                  f"or {ARCHIVE.name}")
+        for src, tok, full, ln in sorted(short_refs):
+            print(f"short   {SRC.name}:{ln}  {src}\n"
+                  f"    «{tok}» is the head of exactly one real name — write «{full}»")
+
+    if archive_unparsed:
+        print(f"\narchive  {ARCHIVE.name}: {len(archive_unparsed)} of {archive_heads} "
+              f"headings carry no parseable entry name, so nothing can link to them:")
+        for h in archive_unparsed[:10]:
+            print(f"    «{h}»")
+        if len(archive_unparsed) > 10:
+            print(f"    … and {len(archive_unparsed) - 10} more")
+
+    stated_n = sum(1 for d in dangling if d[3])
+    # The dependency count rides in the headline next to the warning count, and for the
+    # same reason: it is a debt meter. Warnings measure how much of the format has not
+    # been migrated; this measures how much of "what blocks what" has never been written
+    # down at all. Nobody was going to open graph.json to find out.
+    dep_all = len(dependencies)
+    print(f"\n{len(entries)} entries · {len(refusals)} refusals · {len(warnings)} warnings"
+          f" · {len(dangling)} stale references · {len(short_refs)} shortened"
+          f" · {dep_all} dependencies")
+    print(f"Of the {len(dangling)} stale, {stated_n} sit next to a stated relation and "
+          f"{len(dangling) - stated_n} are bare mentions. The first number is the one to "
+          f"drive to zero; the total is an upper bound on real breakage, not a count of it.")
+    dep_n = sum(1 for _, _, r in edges + arc_edges + adr_edges if r in DEPENDENCY_RELS)
+    print(f"Links found in prose: {len(edges)} entry→entry, {len(arc_edges)} entry→archive, "
+          f"{len(adr_edges)} entry→ADR"
+          + (". Drawn by the same script into graph.html." if SRC == ROOT / "backlog.md"
+             else " (no graph is drawn for a file other than this project's backlog)."))
+    rels = Counter(r for _, _, r in edges + arc_edges + adr_edges)
+    print("Relations as written: "
+          + " · ".join(f"{k} {v}" for k, v in rels.most_common()))
+    print(f"Of those, {dep_n} carry dependency semantics "
+          f"({'/'.join(sorted(DEPENDENCY_RELS))}) — the only ones worth walking to answer "
+          f"«what do I fix first». Everything else says «see also».")
+    if ROADMAP.exists():
+        print(f"{ROADMAP.name}: {len(road_covers)} phase→ADR and {len(road_deps)} ADR→ADR "
+              f"links across {len(road_phases)} sections, of which {len(set(road_edges))} "
+              f"and {len(set(adr_dep_edges))} are drawn — a phase reaches the graph only "
+              f"if the "
+              f"backlog actually cites one of its decisions.")
     print(f"Rules: docs/BACKLOG_FORMAT.md §8. Cutoff for the required envelope: {CUTOFF}.")
+    print("Stale and shortened references do not set the exit code: they are content, not "
+          "structure, and this checker points rather than edits.")
+    for line in freshness():
+        print(line)
     sys.exit(1 if refusals else 0)
 
 order = ["OPEN", "IN PROGRESS", "DONE", "BACKLOG", "IDEAS"]
@@ -483,6 +828,482 @@ doc = f"""<!doctype html>
 """
 
 DST.write_text(doc, encoding="utf-8")
+
+# ===================================================================== graph.html
+# The board answers "what is open". This answers "what leans on what" — the one thing a
+# flat list cannot show. Only nodes with at least one link are drawn: on the day this
+# shipped, 116 of 217 entries referenced nothing and nothing referenced them, and a
+# force layout with half its points floating in space hides the structure it exists to
+# reveal. Those entries are listed underneath instead, by priority, because "18 HIGH
+# entries no one has connected to anything" is a finding in its own right.
+g_deg = Counter()
+node_kind = {}
+for a, b, _ in edges:
+    node_kind[a] = node_kind[b] = "task"
+for a, b, _ in adr_edges:
+    node_kind[a] = "task"
+    node_kind.setdefault(b, "adr")
+for a, b, _ in arc_edges:
+    node_kind[a] = "task"
+    node_kind.setdefault(b, "arc")
+for a, b, _ in road_edges:
+    node_kind.setdefault(a, "phase")
+    node_kind.setdefault(b, "adr")
+for a, b, _ in adr_dep_edges:
+    node_kind.setdefault(a, "adr")
+    node_kind.setdefault(b, "adr")
+for a, b, _ in edges + adr_edges + arc_edges + road_edges + adr_dep_edges:
+    g_deg[a] += 1
+    g_deg[b] += 1
+
+ids = sorted(node_kind)
+idx = {n: k for k, n in enumerate(ids)}
+g_nodes = []
+for n in ids:
+    e = live.get(n)
+    g_nodes.append({
+        "id": n,
+        "k": node_kind[n],
+        "p": e["pri"] if e else "—",
+        "sec": e["section"].split(" ")[0] if e else
+               {"adr": "decision", "phase": "roadmap"}.get(node_kind[n], "closed"),
+        "d": (e["desc"] or e["first"])[:220] if e else
+             (f"ROADMAP.md:{road_phases.get(n, 0)}" if node_kind[n] == "phase" else ""),
+        "ln": e["line"] if e else 0,
+        "deg": g_deg[n],
+    })
+
+# A link keeps the words that made it: `rel` is the phrase the author used, so the picture
+# can draw "blocks" differently from "see also" and a reader can walk only the first kind.
+def _links(pairs, kind):
+    seen, out = set(), []
+    for a, b, rel in pairs:
+        key = (a, b, rel)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append({"s": idx[a], "t": idx[b], "k": kind, "rel": rel})
+    return out
+
+
+g_links = (_links(edges, 0) + _links(adr_edges, 1) + _links(arc_edges, 2)
+           + _links(road_edges, 3) + _links(adr_dep_edges, 4))
+
+# ------------------------------------------------------------------------- layout
+# The layout is computed here, not in the browser, for two reasons. It makes the picture an
+# artifact of the build rather than of whoever opened it — the coordinates land in
+# graph.json and can be checked. And it makes the previous run's positions available as a
+# starting point, which is the only thing that actually delivers spatial stability.
+#
+# The obvious fix — seed each node from a hash of its name instead of its list position —
+# was implemented and then MEASURED, because Fable 5 offered it as a one-liner and I
+# believed it. Adding a single entry still moved the median node 303 px. A force
+# simulation has many near-equivalent minima and one extra body re-routes the whole
+# descent; deterministic and stable are different properties, and only the second is the
+# one a human's spatial memory needs. Warm-starting from the last layout delivers it.
+def layout(nodes, links, prev):
+    n = len(nodes)
+    warm = sum(1 for d in nodes if d["id"] in prev)
+    steps = 90 if warm > n * 0.8 else 420          # refine an old picture, or draw a new one
+    xs, ys = [0.0] * n, [0.0] * n
+    for i, d in enumerate(nodes):
+        if d["id"] in prev:
+            xs[i], ys[i] = prev[d["id"]]
+        else:
+            # A new node starts where its name says, not where its index says: the same
+            # entry lands in the same place whatever else was added alongside it.
+            h = 2166136261
+            for ch in d["id"]:
+                h = ((h ^ ord(ch)) * 16777619) & 0xFFFFFFFF
+            ang = (h / 0x100000000) * 6.283185
+            rad = 30 + ((h >> 8) % 1000) / 1000 * 430
+            xs[i], ys[i] = 600 + rad * math.cos(ang), 410 + rad * math.sin(ang)
+    vx, vy = [0.0] * n, [0.0] * n
+    ln = [(l["s"], l["t"]) for l in links]
+    for s in range(steps):
+        cool = 1 - s / steps
+        for i in range(n):
+            for j in range(i + 1, n):
+                dx, dy = xs[j] - xs[i], ys[j] - ys[i]
+                d2 = dx * dx + dy * dy or 1.0
+                if d2 > 90000:
+                    continue
+                d = math.sqrt(d2)
+                f = 2600 / d2
+                fx, fy = f * dx / d, f * dy / d
+                vx[i] -= fx
+                vy[i] -= fy
+                vx[j] += fx
+                vy[j] += fy
+        for a, b in ln:
+            dx, dy = xs[b] - xs[a], ys[b] - ys[a]
+            d = math.hypot(dx, dy) or 1.0
+            f = (d - 95) * 0.045
+            fx, fy = f * dx / d, f * dy / d
+            vx[a] += fx
+            vy[a] += fy
+            vx[b] -= fx
+            vy[b] -= fy
+        for i in range(n):
+            vx[i] += (600 - xs[i]) * 0.004
+            vy[i] += (410 - ys[i]) * 0.004
+            xs[i] += vx[i] * cool
+            ys[i] += vy[i] * cool
+            vx[i] *= 0.82
+            vy[i] *= 0.82
+    for i, d in enumerate(nodes):
+        d["x"], d["y"] = round(xs[i], 1), round(ys[i], 1)
+    return steps
+
+
+previous = {}
+if JSON_DST.exists():
+    try:
+        for d in json.loads(JSON_DST.read_text(encoding="utf-8")).get("nodes", []):
+            if "x" in d and "y" in d:
+                previous[d["id"]] = (d["x"], d["y"])
+    except (ValueError, OSError):
+        previous = {}                    # a corrupt or hand-edited file just means cold start
+
+layout_steps = layout(g_nodes, g_links, previous)
+
+orphans = [e for e in entries if e["is_name"] and e["ref"] not in idx]
+orph_by_pri = Counter(e["pri"] for e in orphans)
+_orph_rows = []
+for e in sorted(orphans, key=lambda x: (PRIORITIES.index(x["pri"])
+                                        if x["pri"] in PRIORITIES else 9, x["ref"])):
+    _d = f'<p class="d">{md(e["desc"])}</p>' if e["desc"] else ""
+    _orph_rows.append(
+        f'<li class="item" data-pri="{esc(e["pri"])}">'
+        f'<div class="hd">{chip(e["pri"])}<code>{esc(e["ref"])}</code>'
+        f'<time>{esc(e["section"].split(" ")[0])}</time></div>{_d}</li>')
+orph_html = "".join(_orph_rows)
+
+GRAPH_CSS = """
+/* The board's 1080px column is sized for prose. A graph is not prose — on a wide screen
+   that column was most of why the canvas felt cramped. */
+.wrap{max-width:min(1680px,96vw)}
+.gwrap{display:grid;grid-template-columns:minmax(0,1fr) 340px;gap:1rem;margin-top:1rem;
+align-items:start}
+@media (max-width:900px){.gwrap{grid-template-columns:1fr}}
+/* Native resize handle, bottom-right. `overflow` must not be visible for it to appear;
+   max-width keeps a stretched box from pushing the page into a sideways scroll. */
+.stagebox{background:var(--surface);border:1px solid var(--line);border-radius:6px;
+height:min(80vh,900px);min-height:300px;min-width:320px;max-width:100%;
+resize:both;overflow:hidden;padding:0 14px 14px 0}
+#stage{touch-action:none;cursor:grab;display:block;width:100%;height:100%}
+#stage.drag{cursor:grabbing}
+.side{background:var(--surface);border:1px solid var(--line);border-radius:6px;
+padding:.9rem 1rem;font-size:.9rem;position:sticky;top:1rem}
+.side h3{margin:0 0 .4rem;font-size:.95rem;color:var(--ink-str)}
+.side code{font-family:var(--mono);font-size:.8rem;word-break:break-word;color:var(--ink-str)}
+.side p{margin:.5rem 0 0}
+.side .k{font-family:var(--mono);font-size:.72rem;color:var(--ink-faint);
+text-transform:uppercase;letter-spacing:.06em}
+.side ul{margin:.5rem 0 0;padding-left:1.1rem}
+.side li{margin:.15rem 0}
+.side li em{font-family:var(--mono);font-size:.68rem;font-style:normal;color:var(--crit);
+text-transform:uppercase;letter-spacing:.04em}
+.side a{color:var(--accent);cursor:pointer;text-decoration:none;border-bottom:1px dotted}
+.gkey{display:flex;flex-wrap:wrap;gap:.4rem 1rem;margin:.6rem 0 0;font-family:var(--mono);
+font-size:.72rem;color:var(--ink-mut)}
+.gkey span{display:inline-flex;align-items:center;gap:.35rem}
+.sw{width:12px;height:12px;border-radius:50%;display:inline-block}
+.sw.adr{border-radius:2px}
+.sw.arc{background:none;border:1.5px dashed var(--ink-faint)}
+.node{cursor:pointer}
+.node text{font-family:var(--mono);font-size:9.5px;fill:var(--ink-mut);pointer-events:none;
+paint-order:stroke;stroke:var(--surface);stroke-width:3.5px;stroke-linejoin:round}
+.node text.q{display:none}
+.node:hover text.q,.node.sel text.q,.node.nbr text.q{display:block}
+.node.sel text{fill:var(--ink-str);font-weight:700}
+.node.sel circle,.node.sel rect{stroke:var(--ink-str);stroke-width:2.5}
+.node.dim{opacity:.13}
+.link{stroke:var(--line);stroke-width:1.1;fill:none}
+.link.k1{stroke:var(--accent);stroke-opacity:.55}
+.link.k2{stroke:var(--ink-faint);stroke-dasharray:3 3;stroke-opacity:.6}
+.link.k3{stroke:var(--ok);stroke-opacity:.5;stroke-width:1.4}
+.link.k4{stroke:var(--res);stroke-opacity:.7;stroke-width:1.6}
+/* A relation somebody actually stated as a dependency. Two of them today — which is the
+   finding, not a rendering detail. */
+.link.dep{stroke:var(--crit);stroke-opacity:1;stroke-width:2.2;stroke-dasharray:none}
+.link.hot{stroke:var(--ink-str);stroke-width:2;stroke-opacity:1}
+.link.dim{opacity:.07}
+"""
+
+GRAPH_JS = """
+const NODES=DATA.nodes,LINKS=DATA.links;
+const PC={CRITICAL:'crit',HIGH:'high',MEDIUM:'med',LOW:'low',RESEARCH:'res','—':'none'};
+const svg=document.getElementById('stage');
+const W=1200,H=820;
+// Coordinates arrive already computed — the layout is part of the build (see layout() in
+// build.py), warm-started from the previous run so the picture does not reshuffle when an
+// entry is added. This page only draws, drags and queries.
+const adj=NODES.map(()=>[]);
+LINKS.forEach(l=>{adj[l.s].push(l.t);adj[l.t].push(l.s);});
+// The drawing sits wherever the simulation left it. Rather than squeeze it into a fixed
+// viewBox (which left a third of the canvas empty, because the content's aspect is not the
+// element's), frame the content: the starting view IS the bounding box. Extra room on the
+// right is label space.
+const BB=(function(){const xs=NODES.map(n=>n.x),ys=NODES.map(n=>n.y);
+  const x0=Math.min(...xs)-40,x1=Math.max(...xs)+150,y0=Math.min(...ys)-30,y1=Math.max(...ys)+30;
+  return{x:x0,y:y0,w:x1-x0,h:y1-y0};})();
+const R=n=>4+Math.sqrt(n.deg)*2.6;
+const lg=document.getElementById('links'),ng=document.getElementById('nodes');
+// Arrowheads: the semantics were always directed — src wrote dst's name, not the reverse —
+// and the picture used to draw a plain line, so "A cites B" and "B cites A" looked alike
+// (GLM 5.2). The head stops short of the target node's radius so it points at the circle
+// rather than sitting under it.
+const DEP=new Set(['blocked_by','blocks','depends_on','parent','child']);
+lg.innerHTML=LINKS.map((l,i)=>{const dep=DEP.has(l.rel);
+  return `<line class="link k${l.k}${dep?' dep':''}" data-i="${i}" data-rel="${l.rel||''}"`
+    +` marker-end="url(#ah${dep?'D':l.k})"><title>${l.rel||'mention'}</title></line>`;}).join('');
+// Every node carries its name, but only hubs and decisions show it standing still: at 190
+// nodes the labels collided into a grey mat and hid the very structure they annotate.
+// The rest appear on hover and on selection — the information is not removed, it is asked
+// for. Names are drawn with a halo so they stay readable where they cross a link.
+ng.innerHTML=NODES.map((n,i)=>{
+  const r=R(n),full=n.id.length>24?n.id.slice(0,23)+'…':n.id;
+  const quiet=(n.deg>=5||n.k==='adr'||n.k==='phase')?'':' class="q"';
+  const lab=`<text${quiet} x="${r+4}" y="3.5">${full}</text>`;
+  const shape=n.k==='phase'
+    ? `<rect x="${-r*1.7}" y="${-r*0.9}" width="${3.4*r}" height="${1.8*r}" rx="3" fill="var(--ok)" stroke="var(--ok)"></rect>`
+    : n.k==='adr'
+    ? `<rect x="${-r}" y="${-r}" width="${2*r}" height="${2*r}" rx="2" fill="var(--accent)" stroke="var(--accent)"></rect>`
+    : n.k==='arc'
+    ? `<circle r="${r}" fill="none" stroke="var(--ink-faint)" stroke-dasharray="2 2"></circle>`
+    : `<circle r="${r}" fill="var(--${PC[n.p]||'none'})" stroke="var(--surface)" stroke-width="1"></circle>`;
+  return `<g class="node" data-i="${i}" transform="translate(${n.x},${n.y})">${shape}${lab}</g>`;
+}).join('');
+const lines=[...lg.children],gs=[...ng.children];
+function draw(){
+  LINKS.forEach((l,i)=>{const a=NODES[l.s],b=NODES[l.t],e=lines[i];
+    const dx=b.x-a.x,dy=b.y-a.y,d=Math.hypot(dx,dy)||1,off=R(b)+6;
+    e.setAttribute('x1',a.x);e.setAttribute('y1',a.y);
+    e.setAttribute('x2',b.x-dx/d*off);e.setAttribute('y2',b.y-dy/d*off);});
+  NODES.forEach((n,i)=>gs[i].setAttribute('transform',`translate(${n.x},${n.y})`));
+}
+draw();
+// pan and zoom
+let vb={...BB};
+const setvb=()=>svg.setAttribute('viewBox',`${vb.x} ${vb.y} ${vb.w} ${vb.h}`);
+setvb();
+svg.addEventListener('wheel',ev=>{ev.preventDefault();
+  const f=ev.deltaY>0?1.12:0.89,pt=xy(ev);
+  vb.x=pt.x-(pt.x-vb.x)*f;vb.y=pt.y-(pt.y-vb.y)*f;vb.w*=f;vb.h*=f;setvb();},{passive:false});
+// Screen -> user space through the SVG's own matrix. Doing the arithmetic by hand from
+// getBoundingClientRect is off by the letterboxing that preserveAspectRatio adds whenever
+// the element's aspect differs from the viewBox — which is always, at any window width.
+function xy(ev){const p=svg.createSVGPoint();p.x=ev.clientX;p.y=ev.clientY;
+  const q=p.matrixTransform(svg.getScreenCTM().inverse());return{x:q.x,y:q.y};}
+// One press does one thing: a press that moves the pointer drags, a press that does not
+// selects — Mike, 2026-08-10. When the same press both moved a node and re-drew the panel,
+// every attempt to untangle the picture threw away what you were reading.
+//
+// Selection deliberately does NOT read ev.target: setPointerCapture retargets the events
+// that follow to the capturing element, so `ev.target.closest('.node')` on the dblclick
+// resolves to the <svg> and finds nothing — which is exactly why nothing selected in the
+// first version of this. The node under the press is remembered instead.
+let drag=null,pan=null;
+svg.addEventListener('pointerdown',ev=>{
+  const g=ev.target.closest('.node'),p=xy(ev);
+  if(g)drag={i:+g.dataset.i,x:p.x,y:p.y,sx:ev.clientX,sy:ev.clientY,moved:false};
+  else{pan={x:p.x,y:p.y,vx:vb.x,vy:vb.y};svg.classList.add('drag');}
+  svg.setPointerCapture(ev.pointerId);});
+svg.addEventListener('dblclick',ev=>{
+  const g=ev.target.closest('.node');
+  if(g)select(+g.dataset.i);else if(drag)select(drag.i);});
+svg.addEventListener('pointermove',ev=>{
+  if(drag){if(Math.hypot(ev.clientX-drag.sx,ev.clientY-drag.sy)>4)drag.moved=true;
+    const p=xy(ev);NODES[drag.i].x=p.x;NODES[drag.i].y=p.y;draw();}
+  else if(pan){const p=xy(ev);vb.x=pan.vx+(pan.x-p.x);vb.y=pan.vy+(pan.y-p.y);setvb();}});
+// Threshold in screen pixels, not user units: at 4x zoom a 3px twitch is a large number of
+// viewBox units, and every click would have counted as a drag.
+addEventListener('pointerup',()=>{
+  if(drag&&!drag.moved)select(drag.i);
+  drag=null;pan=null;svg.classList.remove('drag');});
+// selection
+const info=document.getElementById('info');
+function select(i){
+  const near=new Set([i,...adj[i]]);
+  gs.forEach((g,j)=>{g.classList.toggle('sel',j===i);
+    g.classList.toggle('nbr',near.has(j));
+    g.classList.toggle('dim',!near.has(j));});
+  lines.forEach((e,j)=>{const on=LINKS[j].s===i||LINKS[j].t===i;
+    e.classList.toggle('hot',on);e.classList.toggle('dim',!on);});
+  const n=NODES[i];
+  const out=LINKS.filter(l=>l.s===i).map(l=>[NODES[l.t].id,l.rel]);
+  const inn=LINKS.filter(l=>l.t===i).map(l=>[NODES[l.s].id,l.rel]);
+  const list=(t,a)=>a.length?`<p class="k">${t}</p><ul>${a.map(([x,r])=>
+    `<li><a data-jump="${x}">${x}</a>${r&&r!=='mention'?` <em>${r}</em>`:''}</li>`).join('')}</ul>`:'';
+  info.innerHTML=`<h3><code>${n.id}</code></h3>
+    <p class="k">${n.k==='adr'?'decision record':n.k==='arc'?'closed — in the archive':n.sec+' · '+n.p}${n.ln?' · backlog.md:'+n.ln:''}</p>
+    ${n.d?`<p>${n.d}</p>`:''}${list('references',out)}${list('referenced by',inn)}`;
+  info.querySelectorAll('[data-jump]').forEach(a=>a.addEventListener('click',()=>{
+    const j=NODES.findIndex(x=>x.id===a.dataset.jump);if(j>=0)select(j);}));
+}
+document.getElementById('gq').addEventListener('input',ev=>{
+  const t=ev.target.value.trim().toLowerCase();
+  const hit=j=>NODES[j].id.toLowerCase().includes(t);
+  gs.forEach((g,j)=>g.classList.toggle('dim',!!t&&!hit(j)));
+  lines.forEach((e,j)=>e.classList.toggle('dim',!!t&&!hit(LINKS[j].s)&&!hit(LINKS[j].t)));
+});
+document.getElementById('reset').addEventListener('click',()=>{
+  vb={...BB};setvb();
+  gs.forEach(g=>g.classList.remove('dim','sel','nbr'));
+  lines.forEach(e=>e.classList.remove('dim','hot'));
+  info.innerHTML=START;});
+const START=info.innerHTML;
+"""
+
+gdoc = f"""<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>D-PC Messenger — Backlog graph</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 viewBox=%270 0 16 16%27%3E%3Ctext y=%2714%27 font-size=%2714%27%3E%F0%9F%95%B8%3C/text%3E%3C/svg%3E">
+<style>{CSS}{GRAPH_CSS}</style>
+</head>
+<body>
+<div class="wrap">
+<header class="mast">
+  <h1>Backlog graph</h1>
+  <div class="meta">
+    <span>built <b>{today}</b> from <b>backlog.md</b></span>
+    <span><b>{len(g_nodes)}</b> linked nodes</span>
+    <span><b>{len(g_links)}</b> links</span>
+    <span><b>{len(orphans)}</b> entries link to nothing</span>
+  </div>
+</header>
+
+<div class="note">
+  <p><strong>Every link here was already written in the prose.</strong> An entry name is a
+  SCREAMING-KEBAB sentence, so a name appearing in another entry's body is a reference —
+  no <code>depends_on</code> field was added and no entry was edited to produce this
+  picture. That also bounds what it can claim: it shows that two entries mention each
+  other, not that one blocks the other.</p>
+  <p>ADR nodes are drawn because the backlog and the roadmap already speak the same
+  language — decisions. They are the join between the two documents, and they cost nobody
+  a new habit.</p>
+</div>
+
+<div class="controls">
+  <input id="gq" type="search" placeholder="highlight by name" aria-label="Highlight nodes by name">
+  <button class="fbtn" type="button" id="reset">reset view</button>
+</div>
+
+<div class="gkey">
+  <span><i class="sw" style="background:var(--crit)"></i>CRITICAL</span>
+  <span><i class="sw" style="background:var(--high)"></i>HIGH</span>
+  <span><i class="sw" style="background:var(--med)"></i>MEDIUM</span>
+  <span><i class="sw" style="background:var(--low)"></i>LOW</span>
+  <span><i class="sw" style="background:var(--res)"></i>RESEARCH</span>
+  <span><i class="sw adr" style="background:var(--accent)"></i>ADR</span>
+  <span><i class="sw adr" style="background:var(--ok)"></i>ROADMAP phase</span>
+  <span><i class="sw arc"></i>closed, in the archive</span>
+  <span><i class="sw" style="background:var(--crit);border-radius:1px;height:3px"></i>stated dependency</span>
+  <span>size = number of links</span>
+  <span>drag the bottom-right corner of the canvas to resize it</span>
+</div>
+
+<div class="gwrap">
+  <div class="stagebox">
+    <svg id="stage" viewBox="0 0 1200 820" role="img"
+         aria-label="Force-directed graph of backlog entries and the decisions they cite">
+      <defs>
+        <marker id="ah0" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="6"
+                markerHeight="6" orient="auto-start-reverse">
+          <path d="M0,0 L8,4 L0,8 z" fill="var(--line)"></path></marker>
+        <marker id="ah1" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="6"
+                markerHeight="6" orient="auto-start-reverse">
+          <path d="M0,0 L8,4 L0,8 z" fill="var(--accent)" fill-opacity=".6"></path></marker>
+        <marker id="ah2" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="6"
+                markerHeight="6" orient="auto-start-reverse">
+          <path d="M0,0 L8,4 L0,8 z" fill="var(--ink-faint)" fill-opacity=".6"></path></marker>
+        <marker id="ah3" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="6"
+                markerHeight="6" orient="auto-start-reverse">
+          <path d="M0,0 L8,4 L0,8 z" fill="var(--ok)" fill-opacity=".6"></path></marker>
+        <marker id="ah4" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="6"
+                markerHeight="6" orient="auto-start-reverse">
+          <path d="M0,0 L8,4 L0,8 z" fill="var(--res)" fill-opacity=".8"></path></marker>
+        <marker id="ahD" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7"
+                markerHeight="7" orient="auto-start-reverse">
+          <path d="M0,0 L8,4 L0,8 z" fill="var(--crit)"></path></marker>
+      </defs>
+      <g id="links"></g><g id="nodes"></g>
+    </svg>
+  </div>
+  <aside class="side" id="info">
+    <h3>Nothing selected</h3>
+    <p class="k">click a node</p>
+    <p><strong>Click</strong> a node to select it — or double-click, both work: everything
+    it is not connected to dims, its neighbours show their names, and both directions are
+    listed here, what it cites and what cites it. <strong>Drag</strong> a node to pull it
+    out of the crowd; a press that moves never selects, so untangling the picture never
+    throws away what you are reading. Drag the background to pan, wheel to zoom, hover any
+    node to read its name without changing anything.</p>
+  </aside>
+</div>
+
+<section class="sec">
+  <h2>Linked to nothing <span class="cnt">{len(orphans)}</span></h2>
+  <p class="legend">{" · ".join(f"{p} {orph_by_pri[p]}" for p in PRIORITIES if orph_by_pri.get(p))}</p>
+  <p class="legend">No other entry mentions these by name, and they mention none. That is
+  either genuine independence or a missing Cross-ref — the graph cannot tell which, so it
+  lists them rather than drawing them as dust.</p>
+  <ul class="list">{orph_html}</ul>
+</section>
+
+<footer>
+  <p>Built by <code>tools/backlog/build.py</code> in the same pass as
+  <code>backlog.html</code>, so the board and the graph are always the same age.
+  Rebuild both: <code>uv run python tools/backlog/build.py</code>.
+  <code>build.py --check</code> prints how old each artefact is and lists references that
+  resolve to nothing.</p>
+  <p>{len([l for l in g_links if l["k"] == 0])} entry→entry ·
+  {len([l for l in g_links if l["k"] == 1])} entry→ADR ·
+  {len([l for l in g_links if l["k"] == 2])} entry→archive.
+  Layout is deterministic: the same backlog produces the same picture.</p>
+</footer>
+</div>
+<script>const DATA={json.dumps({"nodes": g_nodes, "links": g_links}, ensure_ascii=False)};</script>
+<script>{GRAPH_JS}</script>
+</body>
+</html>
+"""
+
+GRAPH_DST.write_text(gdoc, encoding="utf-8")
+
+# The same graph, for readers who cannot click. Agents receive backlog entries as retrieval
+# chunks; an entry's own outgoing references are in the prose it was handed, but "what
+# references this" exists nowhere it can see — and the pipeline already computes it and was
+# throwing it away. Both external reviews ranked emitting it above every rendering change.
+backlinks = defaultdict(list)
+for a, b, _ in edges + arc_edges + adr_edges:
+    backlinks[b].append(a)
+
+JSON_DST.write_text(json.dumps({
+    "built": today,
+    "source": SRC.name,
+    "entries": len(entries),
+    "nodes": g_nodes,
+    "links": g_links,
+    # Name-keyed, not index-keyed: an index is only meaningful next to this exact node list,
+    # and the whole point is that something else reads this.
+    "backlinks": {k: sorted(set(v)) for k, v in sorted(backlinks.items())},
+    # The walkable subgraph, split out because it is the only part that answers "what do I
+    # fix first" — and because how small it is, is itself the finding.
+    "dependencies": [{"from": a, "to": b, "rel": r} for a, b, r in dependencies],
+    "unlinked": sorted(e["ref"] for e in orphans),
+    "stale_references": [{"from": s, "token": t, "line": ln, "stated": bool(st)}
+                         for s, t, ln, st in dangling],
+}, ensure_ascii=False, indent=1), encoding="utf-8")
+
 print(f"entries: {len(entries)}  ->  {DST}  ({len(doc)} chars)")
 print("sections:", {s: sum(1 for e in entries if e['section'] == s) for s in sections})
 print("priorities:", dict(by_pri))
+print(f"graph:   {len(g_nodes)} nodes, {len(g_links)} links, {len(orphans)} unlinked "
+      f"->  {GRAPH_DST}  ({len(gdoc)} chars)")
+print(f"references: {len(dangling)} resolve to nothing, {len(short_refs)} shortened "
+      f"(listed by: build.py --check)")

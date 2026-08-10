@@ -40,6 +40,13 @@ The heading carries five things and nothing else:
 once turned a MEDIUM entry into a CRITICAL one because its prose contained "P0 needs Mike's
 verb". The renderer already carries that fix and its comment; the validator inherits both.
 
+**Keep counts out of the name.** A name is a permanent handle and a count is a measurement;
+put a measurement in the handle and the handle starts lying, while renaming it to tell the
+truth breaks every reference pointing at it. `FORTY-BACKLOG-REFERENCES-POINT-AT-ENTRIES-THAT-DO-NOT-EXIST`
+was filed at 07:05 and the number was 28 by 07:46 — not because anything had been repaired,
+but because the classifier that produced the forty got better. Counts belong in the body,
+next to the date they were taken. (Warren, 2026-08-10.) <!-- no-refs -->
+
 ## 2. Status lives in two places, on purpose
 
 The `## H2` section an entry sits under **is** its status — moving the entry is the status
@@ -185,6 +192,107 @@ meter — it goes down by touching entries, not by a sprint.
 **Warns** — content quality, because a backlog is allowed to be untidy:
 
 - any of the above in a pre-cutoff entry.
+
+**Reports, without touching the exit code** — these are content, and the classifier behind
+them has a known false-positive shape, so they point rather than gate:
+
+- `stale` — a name-shaped token in an entry's body that resolves to no entry in
+  `backlog.md` or `backlog_closed.md`. An entry name is a SCREAMING-KEBAB sentence (§1), so
+  a name written in another entry's body **is** a reference, and one that resolves to
+  nothing is the same defect this standard exists to prevent, one level up: the document
+  points at something that is not there. Tokens shaped like model names or version numbers
+  (`GLM-5`, `BGE-M3`, `D-PC`) are indistinguishable by shape from the legacy identifiers
+  this finds (`MENTION-1`, `DEDUP-1`), so they are only reported when the line states a
+  relation — *Cross-ref*, *sibling of*, *parent task*, `[[…]]`. Line and session spans
+  (`L451-L462`, `S111-S113`) are never reported.
+  The total is an **upper bound on real breakage, not a count of it**, and the summary line
+  says so: the number that matters is how many sit next to a stated relation, because those
+  are the ones an author asserted. A phrase only vouches for tokens within 80 characters
+  *after* it — applying it to the whole line let a marker at character 257 corroborate a
+  token at character 68, which is not corroboration by any reading.
+- `short` — a token that is the head of exactly one real name; a shortened reference, not a
+  broken one, and named separately so it does not bury the real breakage.
+- `archive` — headings in `backlog_closed.md` that carry no parseable entry name. The
+  archive is parsed by a simpler path than the live file and edited under different
+  circumstances; when its conventions drift, entry→archive links vanish with nothing to
+  show for it. The counter earned itself on its first run: the archive strikes closed
+  entries through (`### ~~NAME~~ — CLOSED S191`), 45 names were being lost to the tildes,
+  and seven live references were being reported as broken because their target could not
+  be seen.
+- **Quoting a dead name on purpose:** end the line with `<!-- no-refs -->` and no token on
+  it is read as a reference. An entry written *about* broken references quotes them, and
+  without this the report flags the entry that exists to fix them — for good, since the
+  examples never go away. It is per line, not per entry, so it cannot silence a whole entry
+  by accident, and it is invisible in rendered markdown. Backticks were tried as the signal
+  first and rejected by measurement: 53 of the 123 mentions of live entry names sit inside
+  code spans, so that rule would have discarded nearly half the real graph.
+- **freshness** — how old `backlog.html` and `graph.html` are against `backlog.md`. Both
+  are gitignored, so nothing in `git status` ever says they went stale, and this line is
+  the only signal that exists. It prints; it does not rebuild. A checker that quietly
+  regenerated the board to silence its own warning would be exactly the thing the last
+  paragraph of this section forbids.
+
+**Three artefacts, one pass.** The default run (no `--check`) writes `backlog.html` — the
+board, what is open — `graph.html` — what leans on what, which a flat list cannot show —
+and `graph.json`, the same graph for readers that cannot click. They are written together
+so they can never disagree about how fresh they are. The graph draws only entries with at
+least one link; the rest are listed underneath by priority, because "HIGH entries no one
+has connected to anything" is a finding of its own. ADR nodes are drawn as a second node
+type: the backlog and the roadmap already speak the same language — decisions — so the join
+between the two documents costs nobody a new habit. **No `depends_on` field exists and none
+is asked for.** Every link is already in the prose, which also bounds what the picture may
+claim: that two entries mention each other, not that one blocks the other.
+
+`graph.json` exists because agents are first-class readers of these files (§ the constraint
+that started this) and an agent cannot click a picture. Its most useful key is `backlinks`:
+an entry handed to an agent as a retrieval chunk carries its own outgoing references in the
+prose, but *what references it* appears nowhere the agent can see. The pipeline computed
+that all along and was throwing it away. A second key, `dependencies`, carries just the
+edges worth walking — and its length is the honest measure of how much of "what blocks
+what" this project has actually written down.
+
+**Say which relation you mean, and it becomes walkable.** The phrase in front of a name is
+kept, not just the fact that there was one: `blocked by`, `blocks NAME`, `depends on`,
+`builds on`, `parent task`, `child task`, `superseded by`, `duplicate of`, `sibling of`,
+`follow-up to`, `Cross-ref` / `related to` / `see also`. The nearest phrase before a name
+wins, so `blocked by [[X]], related to [[Y]]` labels each one correctly. Only the first
+group — blocked by, blocks, depends on, parent, child — answers *what do I fix first*;
+everything else means *see also* and is not worth walking. Measured on the day this
+shipped: of 223 links, **three** carried dependency semantics. The tooling was never the
+thing missing — nobody was writing the dependencies down.
+
+**`ROADMAP.md` is read too, for its decisions only.** The backlog cites ADRs and the
+roadmap says which phase each ADR belongs to, so the two documents already share a
+vocabulary and the chain *entry → decision → phase* exists in prose without anyone
+maintaining a mapping. Roadmap sections become a third node type, and `Dependencies:` lines
+(`ADR-024 builds on ADR-010, ADR-018, ADR-019`) become decision-to-decision edges. Both
+ends of such a claim must sit within a short distance of the phrase — without that limit
+the parser read *"Memory Upgrade (ADR-010) — … model_swap superseded by ADR-018"* as a
+statement about ADR-010, which the sentence never made.
+
+**Write a relation as `[[NAME]]` when you mean one.** A bracketed name is a reference by
+construction, so it skips every heuristic the scanner otherwise needs — no stoplist, no
+shape guard, no relation-phrase test — and if it resolves to nothing it is reported without
+softening. This is encouraged, never required, and bare names keep working: a scan that
+recognised only brackets would trade visible false positives for invisible missing edges,
+which is the worse failure for a graph whose purpose is finding links nobody maintained.
+
+**The layout is part of the build, and warm-starts from the previous one.** Coordinates are
+computed in `build.py` and stored in `graph.json`, so the picture is an artifact of the
+build rather than of whoever opened it. Deterministic is not the same as stable: seeding
+each node from a hash of its name is deterministic and was measured to still move the
+median node 303 px when a single entry was added, because a force simulation has many
+near-equivalent minima. Starting from the previous layout brings that to 7 px. Delete
+`graph.json` to force a fresh layout.
+
+**`build.py` has no third-party dependencies, and that is a decision, not an accident.**
+It has no `pyproject.toml` and no virtualenv of its own; it runs under any Python, which is
+what lets one copy of it serve six projects with six different toolchains. Anything that
+needs a package must be optional, imported inside the function that needs it, and reachable
+without installing anything into a project — `uv run --with <pkg> python tools/backlog/build.py`
+is the pattern. Measured 2026-08-10 on the dpc-messenger machine: `sqlite3` is in the
+standard library, `grafeo` and `networkx` are present in the client venv, `duckdb` is
+present in neither that venv nor the system interpreter.
 
 **Not checked, and why.** *How long an entry has sat on the observation shelf* — we record
 when an entry was **raised**, never when it landed on the shelf, so any age computed from
