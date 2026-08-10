@@ -130,6 +130,8 @@ Voice channels deferred to v2 — fundamentally different from Telegram voice me
 - File/image forwarding
 - **Thread-per-conversation:** Discord thread created per conversation session. Thread title = session topic (first 100 chars). Thread auto-archives after 1 hour of inactivity (Discord default)
 
+**Deferred (Mike, 2026-08-11):** Discord stays as it is for now and may be removed later, so the remainder of Phase 2 — 004e threads, 004f file forwarding, both marked nice-to-have — is not tracked as work. The backlog tracker for this decision was closed the same day; phase status lives here and in `tasks/adr-025-discord-integration/`.
+
 ### Phase 3: Rich Features (future)
 - Discord embeds for structured messages (knowledge commits, morning briefs)
 - Reaction-based feedback collection
