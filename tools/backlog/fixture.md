@@ -61,11 +61,37 @@ would have to contain the very thing this file must not contain. It is asserted 
 
 ### OLD-DUPLICATE: pre-cutoff legacy entry
 
-- **Observed.** Must warn only — migration is new-entries-only (§7).
+- **Observed.** The first of a duplicated pair; the refusal is reported on the second.
 
 ### OLD-DUPLICATE: the same legacy name again
 
-- **Observed.** Must warn, not refuse: both are pre-cutoff.
+- **Observed.** Must be **refused despite being pre-cutoff** (ADR-039). A duplicate name
+  corrupts the graph for every reader today, whatever year the entry was written in — that
+  is a different class from envelope incompleteness, which stays date-gated. Until
+  2026-08-10 this case expected a warning.
+
+### ASIDE-IN-NAME (original triage, S143 2026-05-23)
+
+- **Observed.** Must be refused twice: once because the name carries an aside that the
+  parser cannot round-trip, and once as a duplicate of `ASIDE-IN-NAME` below — which is the
+  point, since keying the dedup on the full name is exactly what hid a real duplicate for
+  months.
+
+### ASIDE-IN-NAME: the same name without the aside
+
+- **Observed.** The clean half of the pair above.
+
+### COLON-IN-NAME:1-MORE: a colon inside the name run (LOW, open, 2026-08-11 — CC: fixture)
+
+- **Observed.** Must be refused dateless. The envelope uses `:` to separate name from
+  description, so this parses as `COLON-IN-NAME` and every reference to the full name
+  resolves to nothing.
+
+### EMPHASISED-ENVELOPE: priority wrapped in markdown emphasis (**HIGH**, open, 2026-08-11 — CC: fixture)
+
+- **Observed.** Must be refused as a post-cutoff entry, and must still parse as HIGH — the
+  value is recovered on read so a legacy entry does not lose its priority, and refused on
+  write so nothing new comes to depend on the tolerance.
 
 ## IN REVIEW
 

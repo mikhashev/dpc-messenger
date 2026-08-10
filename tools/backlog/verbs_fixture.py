@@ -1,0 +1,170 @@
+"""Watch each write verb fire, against a throwaway backlog.
+
+Run it:  uv run python tools/backlog/verbs_fixture.py
+
+`fixture.md` proves the read rules by containing one deliberate violation each. The write
+verbs cannot be proved that way — they are not a property of a file, they are what happens
+to a file — so they get this instead: a two-entry backlog in a temp directory, every verb
+run against it, and an assertion about what the file says afterwards.
+
+Stdlib only and no virtualenv, the same constraint build.py itself carries.
+"""
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+from datetime import date
+from pathlib import Path
+
+BUILD = Path(__file__).resolve().parent / "build.py"
+TODAY = date.today().isoformat()
+
+BACKLOG = f"""# Fixture backlog for the write verbs
+
+## OPEN
+
+### ALPHA-ENTRY-EXISTS: the verb fixture needs one entry to move around (LOW, open, {TODAY} — CC: verb fixture)
+
+- **Observed.** Referenced by [[BETA-ENTRY-POINTS-AT-ALPHA]] so a rename has something to rewrite.
+
+### BETA-ENTRY-POINTS-AT-ALPHA: an entry whose body cites another by name (LOW, open, {TODAY} — CC: verb fixture)
+
+- **Observed.** Cross-ref: [[ALPHA-ENTRY-EXISTS]].
+
+## IN PROGRESS
+
+## DONE — AWAITING OBSERVATION
+"""
+
+ARCHIVE = """# Fixture archive
+
+---
+"""
+
+passed, failed = [], []
+
+
+def check(label, condition, detail=""):
+    (passed if condition else failed).append(label)
+    print(f"  {'ok  ' if condition else 'FAIL'}  {label}" + (f"\n          {detail}" if not condition and detail else ""))
+
+
+def run(work, *args):
+    r = subprocess.run([sys.executable, str(BUILD), *args, str(work / "backlog.md")],
+                       capture_output=True, text=True, encoding="utf-8", errors="replace")
+    return r.returncode, (r.stdout or "") + (r.stderr or "")
+
+
+def main():
+    work = Path(tempfile.mkdtemp(prefix="backlog-verbs-"))
+    try:
+        (work / "backlog.md").write_text(BACKLOG, encoding="utf-8")
+        (work / "backlog_closed.md").write_text(ARCHIVE, encoding="utf-8")
+
+        code, out = run(work, "--check")
+        check("the fixture backlog starts clean", code == 0, out[-400:])
+
+        # --- add -------------------------------------------------------------------
+        code, out = run(work, "add", "GAMMA-ENTRY-WAS-ADDED",
+                        "--desc=an entry written by the add verb",
+                        "--priority=HIGH", "--origin=CC: verb fixture",
+                        "--observed=written by build.py add")
+        text = (work / "backlog.md").read_text(encoding="utf-8")
+        check("add writes an entry that passes the checker", code == 0, out[-400:])
+        check("add writes the full envelope",
+              f"### GAMMA-ENTRY-WAS-ADDED: an entry written by the add verb (HIGH, open, {TODAY} — CC: verb fixture)" in text)
+        check("add puts the new entry at the top of its section",
+              text.index("GAMMA-ENTRY-WAS-ADDED") < text.index("ALPHA-ENTRY-EXISTS"))
+
+        code, out = run(work, "add", "notaname", "--desc=x", "--priority=LOW",
+                        "--origin=y", "--observed=z")
+        check("add refuses a name that is not SCREAMING-KEBAB", code == 2)
+
+        code, out = run(work, "add", "DELTA-NO-BODY", "--desc=x", "--priority=LOW",
+                        "--origin=y")
+        check("add refuses an entry with no body", code == 2)
+
+        code, out = run(work, "add", "EPSILON-CYRILLIC",
+                        "--desc=описание",
+                        "--priority=LOW", "--origin=y", "--observed=z")
+        text = (work / "backlog.md").read_text(encoding="utf-8")
+        check("a write whose result would refuse is not written at all",
+              code == 1 and "EPSILON-CYRILLIC" not in text, out[-400:])
+
+        # --- move ------------------------------------------------------------------
+        code, out = run(work, "move", "ALPHA-ENTRY-EXISTS", "--to=IN PROGRESS", "--by=CC")
+        text = (work / "backlog.md").read_text(encoding="utf-8")
+        check("move relocates the entry", code == 0, out[-400:])
+        check("move rewrites the status in the heading to match the section",
+              "ALPHA-ENTRY-EXISTS: the verb fixture needs one entry to move around (LOW, in-progress," in text)
+        check("move records the actor as an event",
+              f"- **taken:** CC · {TODAY}" in text)
+
+        run(work, "move", "ALPHA-ENTRY-EXISTS", "--to=OPEN", "--by=Ark")
+        text = (work / "backlog.md").read_text(encoding="utf-8")
+        check("a second move appends rather than replaces",
+              text.count("- **taken:**") == 2)
+        check("moving back rewrites the status again",
+              "ALPHA-ENTRY-EXISTS: the verb fixture needs one entry to move around (LOW, open," in text)
+
+        code, out = run(work, "move", "ALPHA-ENTRY-EXISTS", "--to=NO SUCH SECTION")
+        check("move refuses an unknown section", code == 2)
+
+        # --- rename ----------------------------------------------------------------
+        before_stale = re.search(r"(\d+) stale references", run(work, "--check")[1])
+        code, out = run(work, "rename", "ALPHA-ENTRY-EXISTS", "ALPHA-ENTRY-WAS-RENAMED")
+        text = (work / "backlog.md").read_text(encoding="utf-8")
+        check("rename rewrites the heading", code == 0 and "### ALPHA-ENTRY-WAS-RENAMED:" in text, out[-400:])
+        check("rename rewrites the inbound reference in the same edit",
+              "[[ALPHA-ENTRY-WAS-RENAMED]]" in text and "[[ALPHA-ENTRY-EXISTS]]" not in text)
+        after_stale = re.search(r"(\d+) stale references", run(work, "--check")[1])
+        check("rename adds no dangling reference of its own",
+              before_stale and after_stale and before_stale.group(1) == after_stale.group(1),
+              f"{before_stale and before_stale.group(1)} -> {after_stale and after_stale.group(1)}")
+
+        code, out = run(work, "rename", "BETA-ENTRY-POINTS-AT-ALPHA", "ALPHA-ENTRY-WAS-RENAMED")
+        check("rename refuses a collision", code == 2)
+
+        # --- close -----------------------------------------------------------------
+        code, out = run(work, "close", "ALPHA-ENTRY-WAS-RENAMED", "--session=S1",
+                        "--resolution=fixed", "--evidence=commit deadbeef, seen at startup",
+                        "--by=CC")
+        text = (work / "backlog.md").read_text(encoding="utf-8")
+        arc = (work / "backlog_closed.md").read_text(encoding="utf-8")
+        # The heading is gone; the *name* is not, because the other entry still cites it.
+        # That is the intended shape — a live entry may lean on a closed one, which is why
+        # the archive is read for names at all.
+        check("close removes the entry from the working file",
+              code == 0 and "### ALPHA-ENTRY-WAS-RENAMED" not in text, out[-400:])
+        check("a reference to the closed entry survives and still resolves",
+              "[[ALPHA-ENTRY-WAS-RENAMED]]" in text)
+        check("close writes a closure line carrying a resolution",
+              f"**Closed:** S1 · {TODAY} · fixed · commit deadbeef, seen at startup · closed by CC" in arc)
+        check("close marks the archived heading closed",
+              "ALPHA-ENTRY-WAS-RENAMED: the verb fixture needs one entry to move around (LOW, closed," in arc)
+        check("close carries the body across", "- **Observed.** Referenced by" in arc)
+
+        code, out = run(work, "close", "BETA-ENTRY-POINTS-AT-ALPHA", "--session=S1",
+                        "--resolution=solvedish", "--evidence=x")
+        check("close refuses a resolution outside the six", code == 2)
+
+        code, out = run(work, "close", "BETA-ENTRY-POINTS-AT-ALPHA", "--session=S1",
+                        "--resolution=fixed")
+        check("close refuses a closure with no evidence", code == 2)
+
+        code, out = run(work, "close", "NO-SUCH-ENTRY", "--session=S1",
+                        "--resolution=fixed", "--evidence=x")
+        check("close refuses a name that is not in the file", code == 2)
+
+        code, out = run(work, "--check")
+        check("the file is still clean after every verb has run", code == 0, out[-400:])
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+
+    print(f"\n{len(passed)} passed, {len(failed)} failed")
+    return 1 if failed else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

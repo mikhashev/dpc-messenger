@@ -1,9 +1,22 @@
-"""Render backlog.md into a scannable board and a link graph.
+"""Render backlog.md into a scannable board and a link graph, validate it, and write it.
 
-Re-run after any backlog edit:  uv run python tools/backlog/build.py
-Writes tools/backlog/backlog.html and tools/backlog/graph.html in one pass, so the
-two artefacts can never disagree about how fresh they are.
-Reads only; never writes to backlog.md.
+    uv run python tools/backlog/build.py                 # rebuild board + graph
+    uv run python tools/backlog/build.py --check         # validate, write nothing
+    uv run python tools/backlog/build.py add NAME    --desc=… --priority=… --origin=…
+    uv run python tools/backlog/build.py move NAME   --to='IN PROGRESS' [--by=CC]
+    uv run python tools/backlog/build.py rename OLD NEW
+    uv run python tools/backlog/build.py close NAME  --session=S72 --resolution=fixed \\
+                                                     --evidence='…' [--by=CC]
+
+The board and the graph are written in one pass, so the two artefacts can never disagree
+about how fresh they are.
+
+Rendering and `--check` never touch backlog.md. The four verbs do (ADR-039): each writes
+the file, re-runs `--check` over the result in a scratch copy first, and refuses to keep a
+write that would introduce a refusal. Add `--dry-run` to validate without writing.
+
+The verbs are convenience, not the guarantee — the file opens in any editor, so `--check`
+is what actually holds the format. See docs/BACKLOG_FORMAT.md.
 """
 import html
 import json
@@ -19,10 +32,21 @@ sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
 ROOT = Path(__file__).resolve().parents[2]   # tools/backlog/build.py -> repo root
 
+# ADR-039 item 1: the four mutations are subcommands of this script rather than a sibling,
+# so the thing that writes an entry and the thing that validates it can never drift apart.
+# A verb is only ever argv[1]; anywhere else the word is an entry name, not a command.
+VERBS = ("add", "close", "move", "rename")
+VERB = sys.argv[1] if len(sys.argv) > 1 and sys.argv[1] in VERBS else ""
+
 # An explicit path lets --check run against any project's backlog (and against a fixture,
 # which is how the rules below are tested). Without one it reads this project's.
-_paths = [a for a in sys.argv[1:] if not a.startswith("-")]
-SRC = Path(_paths[0]).resolve() if _paths else ROOT / "backlog.md"
+# A positional is a file only if it ends in `.md`; the rest are the verb's own arguments
+# (an entry name, a new name), which must not be mistaken for a source path.
+_paths = [a for a in sys.argv[1 + bool(VERB):] if not a.startswith("-")]
+_md = [a for a in _paths if a.endswith(".md")]
+ARGS = [a for a in _paths if not a.endswith(".md")]
+SRC = Path((_md or _paths or [""])[0]).resolve() if (_md or (_paths and not VERB)) \
+    else ROOT / "backlog.md"
 # Where the rendered views land. Defaults beside this script, which is right for the
 # project the script lives in and wrong for every other one: without `--out`, running
 # `build.py ../other-project/backlog.md` would have quietly overwritten this project's
@@ -42,6 +66,64 @@ ARCHIVE = SRC.parent / "backlog_closed.md"
 ROADMAP = SRC.parent / "ROADMAP.md"
 
 PRIORITIES = ["CRITICAL", "HIGH", "MEDIUM", "LOW", "RESEARCH", "—"]
+CUTOFF = "2026-08-10"          # BACKLOG_FORMAT.md §6 — envelope required from here on
+RESOLUTIONS = {"fixed", "disproved", "moot", "superseded", "duplicate", "wontfix"}
+# §2: the section an entry sits under *is* its status, and the heading duplicates it. Both
+# the checker and the write verbs read this one map, so a `move` cannot write a status the
+# checker would then refuse.
+SECTION_STATUS_BASE = {
+    "OPEN": "open",
+    "IN PROGRESS": "in-progress",
+    "DONE": "done-awaiting-observation",
+    "BLOCKED": "open",
+    "BACKLOG": "open",
+    "IDEAS": "open",
+}
+
+
+def env_span(head):
+    """Index range of the LAST top-level (...) group in a heading, or None.
+
+    Walks back over balanced parens. `\\(([^()]*)\\)` cannot nest, so on a heading whose
+    origin quotes someone verbatim and that quote carries its own parentheses, it returned
+    the inner aside and lost the envelope entirely — reporting a complete entry as missing
+    its priority and origin. Found by Warren on the first real entry written to the new
+    standard; the seven-entry fixture had no nested parens to catch it.
+
+    One function, two callers: the parser reads the envelope through it and the write verbs
+    rewrite the status inside it. A second copy of this walk is a second place to fix.
+    """
+    s = head.rstrip()
+    if not s.endswith(")"):
+        return None
+    depth = 0
+    for k in range(len(s) - 1, -1, -1):
+        if s[k] == ")":
+            depth += 1
+        elif s[k] == "(":
+            depth -= 1
+            if depth == 0:
+                return k, len(s)
+    return None
+
+
+def section_status_map(all_lines):
+    """§5 — a file with its own section names declares the mapping in front matter."""
+    m = dict(SECTION_STATUS_BASE)
+    fm = re.match(r"^---\n(.*?)\n---\n", "\n".join(all_lines), re.DOTALL)
+    if fm:
+        in_sections = False
+        for raw in fm.group(1).split("\n"):
+            if re.match(r"^sections:\s*$", raw):
+                in_sections = True
+                continue
+            if in_sections:
+                pair = re.match(r'^\s+"?([^":]+)"?\s*:\s*(\S+)\s*$', raw)
+                if pair:
+                    m[pair.group(1).strip().upper()] = pair.group(2)
+                    continue
+                in_sections = False
+    return m
 
 # An entry name is a SCREAMING-KEBAB sentence (§1). The same shape appearing in a body is
 # a reference to another entry — that is the whole edge model, and it needs no new field.
@@ -126,24 +208,16 @@ for i, line in enumerate(lines):
     name = re.split(r"[:—]", head)[0].strip()
     rest = head[len(name):].lstrip(" :—").strip()
 
-    # The envelope is the LAST top-level (...) group, matched by walking back over
-    # balanced parens. `\(([^()]*)\)` cannot nest, so on a heading whose origin quotes
-    # someone verbatim and that quote carries its own parentheses,
-    # it returned the inner aside and lost the envelope entirely, reporting a complete
-    # entry as missing its priority and origin. Found by Warren on the first real entry
-    # written to the new standard; the seven-entry fixture had no nested parens to catch it.
-    env = ""
-    s = head.rstrip()
-    if s.endswith(")"):
-        depth = 0
-        for k in range(len(s) - 1, -1, -1):
-            if s[k] == ")":
-                depth += 1
-            elif s[k] == "(":
-                depth -= 1
-                if depth == 0:
-                    env = s[k + 1:-1]
-                    break
+    _sp = env_span(head)
+    env = head.rstrip()[_sp[0] + 1:_sp[1] - 1] if _sp else ""
+
+    # Markdown emphasis at the head of the envelope hid a real priority for three weeks:
+    # `(**HIGH — Mike 2026-07-17 …` reads as no priority at all, because every match below
+    # anchors at the first character. The value is present and only decoration covers it,
+    # so decoration is stripped before reading rather than the entry being refused. New
+    # entries are refused on it separately (§8) so nothing comes to rely on the tolerance.
+    env_raw = env
+    env = re.sub(r"^[\s*_`]+", "", env)
 
     # Priority is read only from that envelope. Scanning the whole heading once picked
     # up prose like "P0 needs Mike's verb" and turned a MEDIUM entry into a CRITICAL one.
@@ -210,7 +284,7 @@ for i, line in enumerate(lines):
         "ref": _nm.group(0) if _nm else "",
         "section": section, "name": name, "desc": desc, "pri": pri, "pri_typo": pri_typo,
         "when": when, "first": first, "line": i + 1,
-        "status": status, "origin": origin, "head": head, "env": env,
+        "status": status, "origin": origin, "head": head, "env": env, "env_raw": env_raw,
         "body": "\n".join(lines[i + 1:end]),
         "is_name": bool(_nm),
         "done": "✅" in head, "part": "🟡" in head,
@@ -416,37 +490,337 @@ adr_dep_edges = [(a, b, r) for a, b, r in road_deps if a in cited_adr or b in ci
 dependencies = sorted({(a, b, r) for a, b, r in edges + arc_edges + adr_edges + adr_dep_edges
                        if r in DEPENDENCY_RELS})
 
+# ------------------------------------------------------------------------ verbs
+# ADR-039 items 1, 5 and 7. Four mutations that write the file, then re-run this same
+# checker against the result and refuse to keep the write if the result carries a refusal.
+# Warnings never block: the live file carries 99 of them, and a `close` that recites them
+# every time is how people learn to stop reading the output.
+#
+# The script is convenience, not the guarantee (item 2). The file still opens in any
+# editor; what these verbs buy is that the common path is correct by construction, and
+# that a rename cannot leave the inbound references behind.
+
+def _flag(name, default=None):
+    for a in sys.argv[1:]:
+        if a.startswith(f"--{name}="):
+            return a.split("=", 1)[1]
+    return default
+
+
+def _die(*msg):
+    for m in msg:
+        print(m)
+    sys.exit(2)
+
+
+def _find(name):
+    hits = [e for e in entries if e["ref"] == name or e["name"] == name]
+    if not hits:
+        near = [e["ref"] for e in entries if e["ref"] and name.upper() in e["ref"]][:5]
+        _die(f"no entry named «{name}» in {SRC.name}.",
+             *([f"  closest by name: {', '.join(near)}"] if near else []))
+    if len(hits) > 1:
+        _die(f"«{name}» matches {len(hits)} entries (lines "
+             f"{', '.join(str(h['line']) for h in hits)}). Two entries under one name is "
+             f"itself a refusal — fix the duplicate before moving either.")
+    return hits[0]
+
+
+def _span(e):
+    """The entry's own lines: heading through the last non-blank before the next heading.
+
+    Blank separators belong to the file's layout, not to the entry, so they stay behind
+    when the block moves and are not duplicated where it lands.
+    """
+    start = e["line"] - 1
+    end = start + 1
+    while end < len(lines) and not re.match(r"^#{2,3} ", lines[end]):
+        end += 1
+    while end > start + 1 and not lines[end - 1].strip():
+        end -= 1
+    return start, end
+
+
+def _body_of(block):
+    """Entry lines without the heading and without the blank that follows it."""
+    body = block[1:]
+    while body and not body[0].strip():
+        body.pop(0)
+    return body
+
+
+def _rewrite_status(head, status):
+    """Put `status` into the heading's envelope, leaving the rest of it byte-identical.
+
+    §2 says the section is the status and the heading duplicates it, so a verb that moves
+    an entry between sections has to write both — otherwise the very check that catches
+    drift would fire on the move that was supposed to be correct.
+    """
+    sp = env_span(head)
+    if not sp:
+        return head
+    s = head.rstrip()
+    inner = s[sp[0] + 1:sp[1] - 1]
+    meta, sep, rest = inner.partition("—")
+    new_meta, n = re.subn(r"\b(open|in-progress|done-awaiting-observation|closed)\b",
+                          status, meta, count=1)
+    if not n:
+        # No status token yet (a legacy heading). Write it after the priority if there is
+        # one, and at the front if there is not — never silently leave it absent.
+        m = re.match(r"^(\s*(?:CRIT|CRITICAL|HIGH|MEDIUM|LOW|RESEARCH|NORMAL))\b", meta)
+        new_meta = (f"{m.group(1)}, {status}{meta[m.end():]}" if m
+                    else f"{status}, {meta.lstrip()}")
+    return s[:sp[0]] + "(" + new_meta + sep + rest + ")"
+
+
+def _section_at(all_lines, wanted):
+    """(actual heading text, index to insert at) for the section whose name starts with
+    `wanted`. New entries land at the top of their section: newest first is how every
+    reader of this file already scans it."""
+    for i, ln in enumerate(all_lines):
+        m = re.match(r"^## (.+)", ln)
+        if m and m.group(1).strip().upper().startswith(wanted.strip().upper()):
+            j = i + 1
+            while j < len(all_lines) and not all_lines[j].strip():
+                j += 1
+            return m.group(1).strip(), j
+    have = [re.match(r"^## (.+)", ln).group(1).strip()
+            for ln in all_lines if re.match(r"^## (.+)", ln)]
+    _die(f"no section starting «{wanted}» in {SRC.name}.",
+         "  sections: " + " · ".join(have))
+
+
+def _validate(src_text, arc_text):
+    """Run this same script's --check over the candidate files, in a scratch directory.
+
+    Validating a copy rather than the real file is the whole point: a mutation that would
+    introduce a refusal never reaches disk, so the file on disk is never briefly invalid.
+    """
+    import shutil, subprocess, tempfile          # only this path pays for them
+    tmp = Path(tempfile.mkdtemp(prefix="backlog-verb-"))
+    try:
+        (tmp / SRC.name).write_text(src_text, encoding="utf-8")
+        (tmp / ARCHIVE.name).write_text(arc_text, encoding="utf-8")
+        if ROADMAP.exists():
+            shutil.copyfile(ROADMAP, tmp / ROADMAP.name)
+        # The decisions come along even though no verb touches them: without them the
+        # validation run reports a different warning count than a plain --check on the
+        # same content, and a number that moves for no reason is a number nobody trusts.
+        _dec = SRC.parent / "docs" / "decisions"
+        if _dec.is_dir():
+            shutil.copytree(_dec, tmp / "docs" / "decisions")
+        r = subprocess.run([sys.executable, str(Path(__file__).resolve()),
+                            "--check", str(tmp / SRC.name)],
+                           capture_output=True, text=True, encoding="utf-8",
+                           errors="replace")
+        return r.returncode, (r.stdout or "") + (r.stderr or "")
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def _commit(src_text, arc_text, announcement):
+    code, out = _validate(src_text, arc_text)
+    if code != 0:
+        print("refused — the result would not pass --check, so nothing was written:\n")
+        keep = False
+        for ln in out.split("\n"):
+            if ln.startswith("REFUSE"):
+                keep = True
+            elif ln and not ln.startswith(" "):
+                keep = False
+            if keep:
+                print("  " + ln)
+        sys.exit(1)
+    if "--dry-run" in sys.argv:
+        print("dry run — validated, nothing written.")
+        print("ANNOUNCE  " + announcement)
+        return
+    SRC.write_text(src_text, encoding="utf-8")
+    ARCHIVE.write_text(arc_text, encoding="utf-8")
+    summary = next((ln for ln in out.split("\n") if " entries · " in ln), "")
+    print(f"written   {SRC.name}" + (f" + {ARCHIVE.name}" if arc_text != _ARC_TEXT else ""))
+    if summary:
+        print("check     " + summary)
+    # Item 7: the announcement is a text line in the closure-line grammar and nothing else.
+    # No JSON payload, deliberately — a payload is an invitation to grow these lines into
+    # the sync channel ADR-039 declines to build. Sending it is the caller's job.
+    print("ANNOUNCE  " + announcement)
+    print("rebuild   uv run python tools/backlog/build.py")
+
+
+_ARC_TEXT = ARCHIVE.read_text(encoding="utf-8-sig") if ARCHIVE.exists() else ""
+_TODAY = date.today().isoformat()
+
+if VERB:
+    _when = _flag("date", _TODAY)
+    _by = (_flag("by") or "").strip()
+    _smap = section_status_map(lines)
+
+    def _status_for(sec_name):
+        for key, st in _smap.items():
+            if sec_name.upper().startswith(key):
+                return st
+        _die(f"section «{sec_name}» maps to no status — declare it in front matter (§5).")
+
+if VERB == "close":
+    if not ARGS:
+        _die("usage: build.py close NAME --session=S72 --resolution=fixed --evidence='…' "
+             "[--by=CC] [--date=YYYY-MM-DD] [--dry-run]")
+    e = _find(ARGS[0])
+    res = (_flag("resolution") or "").strip().lower()
+    if res not in RESOLUTIONS:
+        _die(f"--resolution must be one of {'/'.join(sorted(RESOLUTIONS))} (§3); "
+             f"got «{_flag('resolution') or ''}».",
+             "The resolution says why the entry left, which is the thing 83 of 85 archived "
+             "closure lines do not say.")
+    ev = (_flag("evidence") or "").strip()
+    if not ev:
+        _die("--evidence is mandatory (§3), and its type follows the resolution: a commit "
+             "hash and the observation for `fixed`; the measurement that falsified it for "
+             "`disproved`; what changed for `moot`; the id or ADR for `superseded` and "
+             "`duplicate`; Mike's verb for `wontfix`.")
+    ses = (_flag("session") or "").strip()
+    if not ses:
+        _die("--session is mandatory: the closure line opens with it (§3).")
+    ses = ses if ses.upper().startswith("S") else "S" + ses
+    closure = (f"**Closed:** {ses.upper()} · {_when} · {res} · {ev}"
+               + (f" · closed by {_by}" if _by else ""))
+
+    start, end = _span(e)
+    block = lines[start:end]
+    # An archived entry keeps its heading, but its status token now lies: it sits in a date
+    # batch, not in a status section, and retrieval hands an agent the heading without
+    # either. Writing `closed` into it is the same §2 argument that put status there.
+    head_closed = _rewrite_status(block[0], "closed")
+    new_lines = lines[:start] + lines[end:]
+
+    arc = _ARC_TEXT.split("\n") if _ARC_TEXT else ["# Closed entries", ""]
+    idx = next((i for i, ln in enumerate(arc)
+                if re.match(rf"^## {re.escape(_when)}\b", ln)), -1)
+    if idx < 0:
+        top = 0
+        while top < len(arc) and not arc[top].startswith("## "):
+            top += 1
+        arc[top:top] = [f"## {_when} — closed with build.py", ""]
+        idx = top
+    j = idx + 1
+    while j < len(arc) and not arc[j].strip():
+        j += 1
+    arc[j:j] = [head_closed, "", closure, ""] + _body_of(block) + [""]
+
+    _commit("\n".join(new_lines), "\n".join(arc),
+            f"close {e['ref'] or e['name']} · {res} · {ev[:60]}"
+            + (f" · {_by}" if _by else ""))
+    sys.exit(0)
+
+if VERB == "move":
+    if not ARGS or not _flag("to"):
+        _die("usage: build.py move NAME --to='IN PROGRESS' [--by=CC] [--dry-run]")
+    e = _find(ARGS[0])
+    start, end = _span(e)
+    block = lines[start:end]
+    sec_name, _ = _section_at(lines, _flag("to"))
+    if e["section"].upper() == sec_name.upper():
+        _die(f"«{e['ref'] or e['name']}» already sits under «{sec_name}».")
+    status = _status_for(sec_name)
+    block[0] = _rewrite_status(block[0], status)
+    # Item 5: people are recorded as events. The line is appended and never replaced, so
+    # what the file holds is a history of who picked it up rather than a field that goes
+    # stale the way `Updated:` did. The current assignee is the last such line, derived.
+    if _by:
+        block = block + [f"- **taken:** {_by} · {_when}"]
+    rest = lines[:start] + lines[end:]
+    _, at_idx = _section_at(rest, sec_name)
+    rest[at_idx:at_idx] = block + [""]
+    _commit("\n".join(rest), _ARC_TEXT,
+            f"move {e['ref'] or e['name']} · {status}" + (f" · {_by}" if _by else ""))
+    sys.exit(0)
+
+if VERB == "rename":
+    if len(ARGS) < 2:
+        _die("usage: build.py rename OLD-NAME NEW-NAME [--dry-run]")
+    old, new = ARGS[0], ARGS[1]
+    e = _find(old)
+    if not re.fullmatch(r"[A-Z][A-Z0-9]*(?:-[A-Z0-9]+)+", new):
+        _die(f"«{new}» is not a name (§1): SCREAMING-KEBAB, at least two segments, "
+             f"no lowercase and no punctuation inside the name.")
+    if any(x["ref"] == new for x in entries):
+        _die(f"«{new}» is already an entry — a rename that collides is a merge, and this "
+             f"verb will not guess which body survives.")
+    # The reference model is the token itself, so a rename that does not rewrite the
+    # inbound references manufactures exactly the dangling links this tool reports. Both
+    # files, one edit — the archive cites live entries too.
+    tok = re.compile(rf"(?<![A-Za-z0-9-]){re.escape(old)}(?![A-Za-z0-9-])")
+    hits = sum(len(tok.findall(ln)) for ln in lines) + len(tok.findall(_ARC_TEXT))
+    new_lines = [tok.sub(new, ln) for ln in lines]
+    start, end = _span(e)
+    # The trace quotes a name that no longer exists, which is precisely the shape this
+    # tool reports as a dangling reference — so the line carries the standard's own
+    # opt-out. Without it the rename verb manufactures one stale reference per rename.
+    new_lines.insert(end, f"- **Renamed** {_when}: was `{old}`. Inbound references were "
+                          f"rewritten in the same edit; a reference to the old name in a "
+                          f"commit message or a chat log will not resolve. <!-- no-refs -->")
+    _commit("\n".join(new_lines), tok.sub(new, _ARC_TEXT),
+            f"rename {old} → {new} · {hits} references rewritten"
+            + (f" · {_by}" if _by else ""))
+    sys.exit(0)
+
+if VERB == "add":
+    if not ARGS:
+        _die("usage: build.py add NAME --desc='claim, not topic' --priority=HIGH "
+             "--origin=\"Mike: '…'\" [--section=OPEN] [--observed='…'] "
+             "[--first-step='…'] [--dry-run]")
+    name = ARGS[0]
+    if not re.fullmatch(r"[A-Z][A-Z0-9]*(?:-[A-Z0-9]+)+", name):
+        _die(f"«{name}» is not a name (§1): SCREAMING-KEBAB, at least two segments.",
+             "Names are claims, not topics: FILE-NOTE-HAS-NO-TIME-AND-NO-AUTHOR, not "
+             "FILE-NOTE-BUG. And keep counts out of it — a count in a handle starts lying "
+             "the day the measurement moves.")
+    if any(x["ref"] == name for x in entries):
+        _die(f"«{name}» is already an entry (line {_find(name)['line']}).")
+    desc = (_flag("desc") or (ARGS[1] if len(ARGS) > 1 else "")).strip()
+    if not desc:
+        _die("--desc is mandatory (§1): one line, a claim rather than a topic.")
+    pri = (_flag("priority") or "").strip().upper()
+    pri = {"CRIT": "CRITICAL", "NORMAL": "MEDIUM", "MED": "MEDIUM"}.get(pri, pri)
+    if pri not in ("CRITICAL", "HIGH", "MEDIUM", "LOW", "RESEARCH"):
+        _die(f"--priority must be CRITICAL/HIGH/MEDIUM/LOW/RESEARCH; got «{pri}».")
+    origin = (_flag("origin") or "").strip()
+    if not origin:
+        _die("--origin is mandatory (§1): who raised it, in their words when there are "
+             "words. An entry with no origin cannot be taken back to the person who "
+             "wanted it.")
+    sec_name, _ = _section_at(lines, _flag("section", "OPEN"))
+    status = _status_for(sec_name)
+    body = []
+    if _flag("observed"):
+        body.append(f"- **Observed.** {_flag('observed')}")
+    if _flag("inferred"):
+        body.append(f"- **Inferred.** {_flag('inferred')}")
+    if _flag("first-step"):
+        body.append(f"- **First step:** {_flag('first-step')}")
+    if _flag("body"):
+        body.extend(_flag("body").split("\\n"))
+    if not body:
+        _die("an entry with no body is a title. Give at least --observed: what was seen, "
+             "with a file:line, a log line or a measurement.")
+    head = f"### {name}: {desc} ({pri}, {status}, {_when} — {origin})"
+    rest = list(lines)
+    _, at_idx = _section_at(rest, sec_name)
+    rest[at_idx:at_idx] = [head, ""] + body + [""]
+    _commit("\n".join(rest), _ARC_TEXT,
+            f"add {name} · {pri.lower()} · {sec_name.lower()}"
+            + (f" · {_by}" if _by else ""))
+    sys.exit(0)
+
 if "--check" in sys.argv:
     # Validate the file against docs/BACKLOG_FORMAT.md. Reports, never rewrites:
     # every automated classifier in this repo's history has documented its own false
     # positives, so the script's job is to point, not to edit.
-    CUTOFF = "2026-08-10"          # BACKLOG_FORMAT.md §6 — envelope required from here on
-    RESOLUTIONS = {"fixed", "disproved", "moot", "superseded", "duplicate", "wontfix"}
-    SECTION_STATUS = {
-        "OPEN": "open",
-        "IN PROGRESS": "in-progress",
-        "DONE": "done-awaiting-observation",
-        "BLOCKED": "open",
-        "BACKLOG": "open",
-        "IDEAS": "open",
-    }
-
     # BACKLOG_FORMAT.md §5 promises that a file with its own section names declares the
     # mapping in front matter rather than renaming. Without this the checker only ever
     # worked for one project, which is not what the standard says.
-    fm = re.match(r"^---\n(.*?)\n---\n", "\n".join(lines), re.DOTALL)
-    if fm:
-        in_sections = False
-        for raw in fm.group(1).split("\n"):
-            if re.match(r"^sections:\s*$", raw):
-                in_sections = True
-                continue
-            if in_sections:
-                pair = re.match(r'^\s+"?([^":]+)"?\s*:\s*(\S+)\s*$', raw)
-                if pair:
-                    SECTION_STATUS[pair.group(1).strip().upper()] = pair.group(2)
-                    continue
-                in_sections = False
+    SECTION_STATUS = section_status_map(lines)
 
     def canonical(sec: str) -> str | None:
         for key, st in SECTION_STATUS.items():
@@ -477,14 +851,42 @@ if "--check" in sys.argv:
         new = bool(e["when"]) and e["when"] >= CUTOFF
         hard = refusals if new else warnings
 
+        # ADR-039: refusals split by defect class, not only by date. A malformed or
+        # duplicated name corrupts the graph for every reader today, whatever year the
+        # entry was written in; envelope incompleteness is migration debt and stays
+        # date-gated. `structural` is therefore not `hard`.
+        structural = refusals
+
         if sec_status is None:
             at(e, f"section «{e['section']}» is not one of the recognised lifecycle "
-                  f"sections and no front-matter mapping covers it (§2, §5)", hard)
+                  f"sections and no front-matter mapping covers it (§2, §5)", structural)
 
-        if e["name"] in seen:
-            at(e, f"duplicate name — already used at {SRC.name}:{seen[e['name']]}", hard)
+        # Keyed on the NAME_RE run, not on the whole parsed name. Keyed on the name, an
+        # aside on one copy — `NAME (original triage, S143 …)` — made two copies of one
+        # entry compare unequal, and the duplicate went unseen for months.
+        key = e["ref"] or e["name"]
+        if key in seen:
+            at(e, f"duplicate name «{key}» — already used at {SRC.name}:{seen[key]}", structural)
         else:
-            seen[e["name"]] = e["line"]
+            seen[key] = e["line"]
+
+        # A name the parser cannot round-trip. Two shapes, both measured live:
+        #   NAME (aside …)   — the aside survives into the name and hides duplicates
+        #   NAME:1-MORE-NAME — the split eats the tail, and references to the full name
+        #                      resolve to nothing
+        # A heading with no name run at all is a rubric, not a malformed entry: it warns,
+        # because the sweep that turns rubrics into entries is a different job.
+        if e["ref"]:
+            tail = e["head"][len(e["ref"]):]
+            if e["name"] != e["ref"]:
+                at(e, f"name carries more than the name — parsed «{e['name']}», "
+                      f"which is «{e['ref']}» plus an aside. Move the aside after a colon "
+                      f"so it lands in the description (§1)", structural)
+            elif tail.startswith(":") and not tail[1:2].isspace():
+                at(e, f"colon inside the name — «{e['head'][:60]}». The envelope uses «:» "
+                      f"to separate name from description, so the name parses as "
+                      f"«{e['ref']}» and every reference to the full name resolves to "
+                      f"nothing (§1)", structural)
 
         if e["status"] and sec_status and e["status"] != sec_status:
             at(e, f"heading says status «{e['status']}» but the section implies "
@@ -496,6 +898,11 @@ if "--check" in sys.argv:
             if not tokens & RESOLUTIONS:
                 at(e, f"closure line carries no known resolution "
                       f"({'/'.join(sorted(RESOLUTIONS))}): «{cl.strip()[:70]}»", hard)
+
+        if new and re.match(r"^\s*[*_`]", e["env_raw"]):
+            at(e, "markdown emphasis at the start of the envelope — the priority is read "
+                  "from the first character, so «(**HIGH …» reads as no priority at all. "
+                  "The value is recovered on read, but new entries write it plain", refusals)
 
         if new:
             missing = [f for f, v in (("priority", e["pri"] != "—" or e["pri_typo"]),
@@ -528,6 +935,94 @@ if "--check" in sys.argv:
             if missing:
                 at(e, f"missing {', '.join(missing)} (pre-cutoff entry, not required)", warnings)
 
+    # ADR-039 item 6: one validator, two formats. The decisions sit next to the backlog and
+    # are cited by 86 of its links, and nothing checked them at all — 26 of 39 carry no
+    # front matter and the drift was invisible. The record boundary differs (a whole file
+    # per decision rather than a heading), so the metadata placement differs: ADRs keep
+    # per-file front matter, the backlog keeps its heading envelope. The rules are the same
+    # rules: required fields, a closed vocabulary, and references that resolve.
+    DECISIONS = SRC.parent / "docs" / "decisions"
+    # `implemented` is not in TEMPLATE.md's lifecycle and is written in two files anyway.
+    # It says something the enum cannot — accepted-and-built, as against accepted-and-owed
+    # — so the vocabulary is widened to match what the corpus means rather than the corpus
+    # rewritten to match a list. TEMPLATE.md carries the same five words.
+    ADR_STATUS = {"proposed", "rejected", "accepted", "deprecated", "implemented"}
+    # Front matter is required from this number on, the way the envelope is required from a
+    # date on: 001–026 predate the template, 027 is where it starts. A rule that refuses
+    # what the migration policy forbids rewriting is a permanently red light.
+    ADR_FM_FROM = 27
+    adr_meta, adr_nums, adr_dupes = {}, set(), []
+
+    def _adr_fm(text):
+        m = re.match(r"^---\r?\n(.*?)\r?\n---\r?\n", text, re.DOTALL)
+        if not m:
+            return None
+        fm = {}
+        for raw in m.group(1).split("\n"):
+            kv = re.match(r"^([a-z_]+):\s*(.*)$", raw)
+            if kv:
+                fm[kv.group(1)] = kv.group(2).strip()
+        return fm
+
+    adr_no_fm = 0
+    if DECISIONS.is_dir():
+        _files = sorted(DECISIONS.glob("[0-9]*.md"))
+        for f in _files:
+            m = re.match(r"^(\d{3})-[a-z0-9]+(?:-[a-z0-9]+)*\.md$", f.name)
+            if not m:
+                refusals.append(f"{f.name}\n    filename is not NNN-kebab-title.md, so the "
+                                f"decision's number cannot be read from where it is cited")
+                continue
+            num = int(m.group(1))
+            if num in adr_nums:
+                adr_dupes.append((adr_meta[num][0].name, f.name))
+            adr_nums.add(num)
+            adr_meta[num] = (f, _adr_fm(f.read_text(encoding="utf-8-sig")))
+        for first, second in adr_dupes:
+            refusals.append(f"{second}  ADR-{first[:3]}\n    also claimed by {first} — two "
+                            f"files under one number means every reference to it resolves "
+                            f"to whichever is read first, and only one of them is checked")
+
+        for num, (f, fm) in sorted(adr_meta.items()):
+            tag = f"ADR-{num:03d}"
+            bucket = refusals if num >= ADR_FM_FROM else warnings
+            text = f.read_text(encoding="utf-8-sig")
+
+            def _adr(msg, into=None):
+                (into if into is not None else bucket).append(f"{f.name}  {tag}\n    {msg}")
+
+            if fm is None:
+                adr_no_fm += 1
+                _adr(f"no YAML front matter. Required from {ADR_FM_FROM:03d} on "
+                     f"(TEMPLATE.md): adr, title, status, date")
+            else:
+                missing = [k for k in ("adr", "title", "status", "date") if not fm.get(k)]
+                if missing:
+                    _adr(f"front matter is missing {', '.join(missing)}")
+                if fm.get("adr") and fm["adr"].strip().lstrip("0") != str(num):
+                    # Structural, and refused whatever the number: the file says it is one
+                    # decision and its name says another, so a citation lands on neither.
+                    _adr(f"front matter says adr: {fm['adr']} but the filename says "
+                         f"{num:03d} — one of the two is wrong", refusals)
+                st = (fm.get("status") or "").strip().strip('"').lower()
+                head = st.split()[0] if st else ""
+                if head and not (head in ADR_STATUS or re.fullmatch(r"superseded-by-\d{3}", head)):
+                    _adr(f"status «{head}» is outside the vocabulary "
+                         f"({'/'.join(sorted(ADR_STATUS))}/superseded-by-NNN)")
+                elif st != head:
+                    _adr(f"status carries a qualifier — «{st[:60]}». The field is the "
+                         f"machine-readable one; put the qualification in the body", warnings)
+                if fm.get("date") and not re.fullmatch(r"20\d\d-\d\d-\d\d", fm["date"].strip()):
+                    _adr(f"date «{fm['date'][:20]}» is not YYYY-MM-DD")
+                for key in ("depends_on", "related", "supersedes"):
+                    for ref in re.findall(r"ADR-(\d{2,3})", fm.get(key, "")):
+                        if int(ref) not in adr_nums:
+                            _adr(f"{key} points at ADR-{int(ref):03d}, which is not a file "
+                                 f"in {DECISIONS.name}/", warnings)
+            if not re.search(r"^## Decision\b", text, re.M):
+                _adr("no `## Decision` section — Context + Decision is the minimum an ADR "
+                     "has to carry (TEMPLATE.md, RFC 3)")
+
     for line in refusals:
         print(f"REFUSE  {line}")
     for line in warnings:
@@ -555,6 +1050,27 @@ if "--check" in sys.argv:
             print(f"    «{h}»")
         if len(archive_unparsed) > 10:
             print(f"    … and {len(archive_unparsed) - 10} more")
+
+    # ADR-039: the closure-line rule read only the live file, and the live file has no
+    # closure lines — they all sit in the archive, which was parsed for names and nothing
+    # else. 83 of them carry no resolution token. They are pre-standard and §3 forbids
+    # backfilling one, so this reports rather than refuses; a closure written on or after
+    # the cutoff is a different matter and is refused above once it lands in the archive.
+    arc_closures, arc_tokenless = 0, []
+    if ARCHIVE.exists():
+        for cl in re.findall(r"\*\*Closed:\*\*(.+)", ARCHIVE.read_text(encoding="utf-8-sig")):
+            arc_closures += 1
+            if not {t.strip().lower() for t in cl.split("·")} & RESOLUTIONS:
+                arc_tokenless.append(cl.strip()[:70])
+    if arc_tokenless:
+        print(f"\nclosure  {ARCHIVE.name}: {len(arc_tokenless)} of {arc_closures} closure "
+              f"lines carry no resolution from the six (§3), so the archive cannot say why "
+              f"an entry left. Pre-standard; §3 forbids backfilling one, and this counts "
+              f"rather than refuses:")
+        for cl in arc_tokenless[:5]:
+            print(f"    «{cl}»")
+        if len(arc_tokenless) > 5:
+            print(f"    … and {len(arc_tokenless) - 5} more")
 
     stated_n = sum(1 for d in dangling if d[3])
     # The dependency count rides in the headline next to the warning count, and for the
@@ -585,6 +1101,25 @@ if "--check" in sys.argv:
               f"and {len(set(adr_dep_edges))} are drawn — a phase reaches the graph only "
               f"if the "
               f"backlog actually cites one of its decisions.")
+    # ADR-039: the trigger for revisiting identifiers reads "if the false-positive share
+    # rises across two consecutive monthly checks" — and nothing stored a history, so the
+    # trigger could never fire. One appended line per run turns it into two lines of a file
+    # instead of two months of somebody's memory. Local, gitignored, never read by the tool.
+    if SRC == ROOT / "backlog.md":
+        try:
+            hist = OUT / "check_history.log"
+            hist.open("a", encoding="utf-8").write(
+                f"{date.today().isoformat()} · entries {len(entries)} · refusals "
+                f"{len(refusals)} · warnings {len(warnings)} · stale {len(dangling)} · "
+                f"stated {stated_n} · shortened {len(short_refs)} · deps {dep_all}\n")
+        except OSError as exc:                      # a log that cannot be written is not
+            print(f"note   could not append to check_history.log: {exc}")   # a failed check
+
+    if adr_meta:
+        print(f"\ndecisions  {DECISIONS.parent.name}/{DECISIONS.name}: {len(adr_meta)} "
+              f"files, {adr_no_fm} without front matter — required from "
+              f"{ADR_FM_FROM:03d} on, so the older ones warn rather than refuse. The "
+              f"backlog cites {len(cited_adr)} of them.")
     print(f"Rules: docs/BACKLOG_FORMAT.md §8. Cutoff for the required envelope: {CUTOFF}.")
     print("Stale and shortened references do not set the exit code: they are content, not "
           "structure, and this checker points rather than edits.")
