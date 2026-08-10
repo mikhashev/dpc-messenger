@@ -1,9 +1,24 @@
+---
+adr: 028
+title: "Agent web authentication via cookie sharing"
+status: accepted
+date: 2026-05-22
+deciders: [Mike]
+consulted: [Ark, CC]
+informed: []
+depends_on: []
+related: [ADR-029]
+supersedes: []
+---
+
 # ADR-028: Agent Web Authentication via Cookie Sharing
 
-**Status:** Accepted
-**Date:** 2026-05-22
 **Authors:** Ark, CC (review)
 **Scope:** dpc-client (Rust + Python + UI)
+
+<!-- Status and date moved into the front matter above, 2026-08-10, when --check began
+     reading docs/decisions/. This was the one file between 027 and 039 without it. -->
+
 
 ## Context
 

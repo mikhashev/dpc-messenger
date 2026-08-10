@@ -176,6 +176,34 @@ refusing on legacy content would leave the exit code stuck at 1 and mean nothing
 violation in an older entry warns instead, and the warning count is the migration debt
 meter — it goes down by touching entries, not by a sprint.
 
+**Refuses regardless of date** (ADR-039) — a defect in this class corrupts the graph for
+every reader *today*, whatever year the entry was written in, so the cutoff below does not
+apply to it. Envelope incompleteness is migration debt and stays date-gated; these are not:
+
+- a **duplicate name**, compared on the `SCREAMING-KEBAB` run rather than the whole parsed
+  name. Keyed on the whole name, an aside on one copy — `NAME (original triage, S143 …)` —
+  made two copies of one entry compare unequal, and a real duplicate went unseen for months;
+- a **name the parser cannot round-trip**: a name carrying an aside (as above), or a colon
+  inside the name run (`NAME:1-MORE-NAME`), which parses as `NAME` and leaves every reference
+  to the full name resolving to nothing — that is where a dangling token in the stale report
+  came from;
+- a **section** that is neither recognised nor mapped in front matter.
+
+A heading with no name run at all is a *rubric*, not a malformed entry, and warns: turning
+rubrics into entries is a separate job and refusing them would light the exit code
+permanently red, which §8 exists to avoid.
+
+**Tolerated on read, refused on write:** markdown emphasis at the start of the envelope.
+`(**HIGH — …` reads as *no priority at all*, because the priority is matched from the first
+character — a HIGH set on 2026-07-17 was invisible on the board for three weeks. The
+information is present and only decoration hides it, so decoration is stripped before the
+priority, status and origin are read, and a post-cutoff entry that writes it is refused so
+nothing new comes to depend on the tolerance.
+
+**Reported, never refused:** closure lines in `backlog_closed.md` carrying no resolution from
+the six in §3 — 83 of 84 at the time of writing. They are pre-standard, and §3 forbids
+backfilling one, so the checker counts them and says why the archive cannot explain itself.
+
 **Refuses** (exit 1) — structure that breaks tooling or misleads a reader:
 
 - a duplicate entry name within a project;
@@ -317,6 +345,62 @@ that two of the six backlogs are gitignored and there is no CI. The four tracked
 can additionally hang it on a pre-commit hook. The maintainer running it before declaring
 an audit done is the actual enforcement point; the format living in the maintainer's own
 instructions (see §9) is what prevents drift in the first place.
+
+### The same pass reads `docs/decisions/`
+
+One validator, two formats (ADR-039 item 6). The decisions sit next to the backlog, 26 of
+the backlog's links point at them, and nothing checked them at all — so `--check` reads
+them too. The record boundary differs: an ADR is a whole file and keeps per-file YAML front
+matter, an entry is a heading and keeps its envelope. The rules are the same rules —
+required fields, a closed vocabulary, references that resolve, and a migration cutoff
+(front matter is required from ADR-027 on; 001–026 warn).
+
+The full list, and the fixture that watches each rule fire, live in
+[docs/decisions/TEMPLATE.md](decisions/TEMPLATE.md#validation).
+
+## 8a. Writing an entry with the tool
+
+Editing the file by hand stays correct and always will — §8 is what holds the format, and
+no script can be the only way in. The four verbs exist so that the common path is right by
+construction, and so that a rename cannot leave its inbound references behind (ADR-039).
+
+```bash
+uv run python tools/backlog/build.py add NAME-IS-A-CLAIM \
+    --desc='what happens, when'  --priority=HIGH  --origin="Mike: '…'" \
+    --observed='file:line or a measurement'  [--first-step='…']  [--section=OPEN]
+
+uv run python tools/backlog/build.py move NAME --to='IN PROGRESS' [--by=CC]
+uv run python tools/backlog/build.py rename OLD-NAME NEW-NAME
+uv run python tools/backlog/build.py close NAME --session=S72 --resolution=fixed \
+    --evidence='commit abc1234, observed in the 2026-08-11 startup log' [--by=CC]
+```
+
+What each one guarantees, beyond typing less:
+
+- **Every verb validates before it writes.** The candidate file is checked in a scratch
+  copy and the write is kept only if the result carries no refusal. Warnings never block —
+  the live file carries 99 of them, and a `close` that recites them every time is how
+  people learn to stop reading the output. `--dry-run` validates and writes nothing.
+- **`close` cannot omit the resolution or the evidence.** 83 of 85 archived closure lines
+  say nothing about why the entry left; that is the failure this verb exists to stop
+  repeating. It also rewrites the heading status to `closed` on the way to the archive,
+  because the archived entry no longer sits in a status section and retrieval hands an
+  agent the heading without either.
+- **`move` rewrites the heading status to match the destination section**, so the §2
+  drift check cannot fire on a move that was meant to be correct.
+- **`move --by` appends `- **taken:** who · date` and never replaces it.** People are
+  recorded as events, not as a field: the current assignee is the last such line, derived
+  and not editable, which is the property that keeps it from rotting the way `Updated:`
+  did. There is still no `owner:` field (§4).
+- **`rename` rewrites every inbound reference in `backlog.md` and `backlog_closed.md` in
+  the same edit**, and leaves a trace line carrying `<!-- no-refs -->` — quoting the dead
+  name without that marker would manufacture exactly the dangling reference this tool
+  reports.
+
+The verbs are watched to fire: `uv run python tools/backlog/verbs_fixture.py` builds a
+throwaway backlog, runs all four plus every refusal path, and asserts what the file says
+afterwards. Same rule as the read fixture — a rule nobody has seen fire is written down,
+not enforced.
 
 ## 9. Who this binds
 
