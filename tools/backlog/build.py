@@ -23,9 +23,16 @@ ROOT = Path(__file__).resolve().parents[2]   # tools/backlog/build.py -> repo ro
 # which is how the rules below are tested). Without one it reads this project's.
 _paths = [a for a in sys.argv[1:] if not a.startswith("-")]
 SRC = Path(_paths[0]).resolve() if _paths else ROOT / "backlog.md"
-DST = Path(__file__).resolve().parent / "backlog.html"
-GRAPH_DST = Path(__file__).resolve().parent / "graph.html"
-JSON_DST = Path(__file__).resolve().parent / "graph.json"
+# Where the rendered views land. Defaults beside this script, which is right for the
+# project the script lives in and wrong for every other one: without `--out`, running
+# `build.py ../other-project/backlog.md` would have quietly overwritten this project's
+# board with another project's entries. `--check` never writes, so the hazard only exists
+# on a plain run — and a plain run against a foreign file now refuses instead (see below).
+_out = [a.split("=", 1)[1] for a in sys.argv[1:] if a.startswith("--out=")]
+OUT = Path(_out[0]).resolve() if _out else Path(__file__).resolve().parent
+DST = OUT / "backlog.html"
+GRAPH_DST = OUT / "graph.html"
+JSON_DST = OUT / "graph.json"
 # Entries retire to a second file. An open entry that leans on a closed one is worth
 # seeing, so the archive is read for names only — never rendered as a board.
 ARCHIVE = SRC.parent / "backlog_closed.md"
@@ -584,6 +591,16 @@ if "--check" in sys.argv:
     for line in freshness():
         print(line)
     sys.exit(1 if refusals else 0)
+
+# Past this point the script writes. Rendering a foreign backlog into this project's
+# output directory would replace one project's board with another's, silently and with no
+# way to tell from the file which project it describes.
+if SRC != ROOT / "backlog.md" and not _out:
+    print(f"{SRC} is not this project's backlog, and no --out=DIR was given.\n"
+          f"Refusing to overwrite {OUT} with another project's entries.\n"
+          f"  read-only report:  build.py --check {SRC}\n"
+          f"  render elsewhere:  build.py {SRC} --out=<that project's dir>")
+    sys.exit(2)
 
 order = ["OPEN", "IN PROGRESS", "DONE", "BACKLOG", "IDEAS"]
 def sec_rank(s):
