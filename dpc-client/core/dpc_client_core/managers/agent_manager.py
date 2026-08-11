@@ -329,7 +329,7 @@ class DpcAgentManager:
                             )
                             from dpc_client_core.dpc_agent.text_extract import extract_text, is_binary
                             from dpc_client_core.dpc_agent.indexing_pipeline import (
-                                _extract_heading, _build_doc_text, _BACKFILL_SKIP, read_file_meta,
+                                document_fields, _BACKFILL_SKIP, read_file_meta,
                             )
                             from dpc_client_core.dpc_agent.index_keys import (
                                 KEY_FORMAT, build_ext_roots, ext_key, l5_key, l6_key,
@@ -371,16 +371,15 @@ class DpcAgentManager:
                                     text = extract_text(f)
                                     if not text:
                                         continue
-                                    heading = _extract_heading(text)
                                     file_meta = read_file_meta(knowledge_dir, f.name)
                                     key = l5_key(f, knowledge_dir)
-                                    doc_text = _build_doc_text(key, heading, text)
+                                    heading, doc_text, excerpt = document_fields(key, text)
                                     collected.append((
                                         key, doc_text,
                                         {"source_file": key, "heading": heading,
                                          "source_layer": file_meta.source_layer,
                                          "source_path": str(f),
-                                         "char_count": len(text), "text": text[:500]},
+                                         "char_count": len(text), "text": excerpt},
                                         "L5",
                                     ))
                                     _claim(f)
@@ -397,14 +396,13 @@ class DpcAgentManager:
                                         text = extract_text(f)
                                         if not text:
                                             continue
-                                        heading = _extract_heading(text)
                                         key = l6_key(f, l6_dir)
-                                        doc_text = _build_doc_text(key, heading, text)
+                                        heading, doc_text, excerpt = document_fields(key, text)
                                         collected.append((
                                             key, doc_text,
                                             {"source_file": key, "heading": heading,
                                              "source_layer": "L6", "char_count": len(text),
-                                             "source_path": str(f), "text": text[:500]},
+                                             "source_path": str(f), "text": excerpt},
                                             "L6",
                                         ))
                                         _claim(f)
@@ -435,14 +433,13 @@ class DpcAgentManager:
                                         text = extract_text(f)
                                         if not text:
                                             continue
-                                        heading = _extract_heading(text)
                                         key = ext_key(f, ext_roots)
-                                        doc_text = _build_doc_text(key, heading, text)
+                                        heading, doc_text, excerpt = document_fields(key, text)
                                         collected.append((
                                             key, doc_text,
                                             {"source_file": key, "heading": heading,
                                              "source_layer": "EXT", "char_count": len(text),
-                                             "source_path": str(f), "text": text[:500]},
+                                             "source_path": str(f), "text": excerpt},
                                             "EXT",
                                         ))
                                         ext_count += 1

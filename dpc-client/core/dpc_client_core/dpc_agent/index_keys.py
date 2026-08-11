@@ -47,11 +47,13 @@ log = logging.getLogger(__name__)
 # rows left by v2 all carry unchanged hashes, so nothing short of a rebuild removes
 # them. v4 stores source_path on the stored node: v3 rows were written by a backend
 # that dropped the field, and their hashes did not move when it started keeping it.
-# v5 drops the front-matter envelope before the heading, the excerpt and the
-# embedded text are taken. v4 rows carry "Commit Identification" as their heading
-# and a hash as their excerpt, and their content hashes did not move when that
-# stopped being how they are read.
-KEY_FORMAT = "layer_addressed_v5"
+# v5 dropped the front-matter envelope before the heading, the excerpt and the
+# embedded text were taken — but only in this package's two functions, while the
+# path a live agent rebuilds through read the pieces itself. So v5 indexes were
+# stamped new and built old: every shared-knowledge row came back headed
+# "Commit Identification". v6 is the same change reaching the same place, and it
+# has to be a new marker because v5 rows are wrong and their hashes did not move.
+KEY_FORMAT = "layer_addressed_v6"
 
 L5_PREFIX = "knowledge"
 L6_PREFIX = "L6"

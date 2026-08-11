@@ -154,8 +154,9 @@ def test_key_format_marker_is_set():
 
     The literal is pinned on purpose: a bump costs every agent a full reindex, so it
     has to be a decision someone makes, not a value that drifts. Changing it here is
-    the second half of that decision — v5 takes the heading, the excerpt and the
-    embedded text from the document body instead of its front matter, and v4 rows
-    carry unchanged hashes, so only a rebuild re-reads them.
+    the second half of that decision — v6 takes the heading, the excerpt and the
+    embedded text from the document body on the path a live agent rebuilds
+    through, which v5 changed everywhere except there. v5 rows are wrong and
+    their hashes did not move, so only a rebuild re-reads them.
     """
-    assert KEY_FORMAT == "layer_addressed_v5"
+    assert KEY_FORMAT == "layer_addressed_v6"

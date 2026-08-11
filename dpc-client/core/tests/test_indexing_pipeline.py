@@ -152,3 +152,23 @@ def test_the_same_document_reads_the_same_on_either_line_ending(tmp_path):
 
     assert metas[0]["heading"] == metas[1]["heading"]
     assert metas[1]["text"].startswith("# How The Relay Reattributes An Author")
+
+
+def test_every_indexing_path_reads_a_document_the_same_way():
+    """The fix that missed: three call sites kept reading the raw text.
+
+    `_strip_front_matter` was added to this module's two functions, and the path a
+    live agent rebuilds through — agent_manager's per-file sync — called the
+    pieces directly instead. The index came back stamped with the new format and
+    every shared-knowledge row still headed by its envelope. One entry point is
+    the repair; this asserts nobody re-opens the second one.
+    """
+    import pathlib
+    source = (
+        pathlib.Path(__file__).resolve().parents[1]
+        / "dpc_client_core" / "managers" / "agent_manager.py"
+    ).read_text(encoding="utf-8")
+
+    assert "document_fields(" in source
+    assert "_extract_heading(" not in source, "read the document through document_fields"
+    assert "_build_doc_text(" not in source, "read the document through document_fields"

@@ -76,6 +76,21 @@ def _build_doc_text(filename: str, heading: str, content: str) -> str:
     return " ".join(parts)
 
 
+def document_fields(source_key: str, text: str) -> "tuple[str, str, str]":
+    """How a document is read: its heading, what gets embedded, what gets shown.
+
+    One function because there are five call sites and they must agree. They did
+    not: the strip that drops the commit envelope was added to the two in this
+    module, while the three in agent_manager — the path a live agent actually
+    rebuilds through — kept calling the pieces directly on the raw text. The
+    index came back stamped with the new format and every shared-knowledge row
+    still headed by its envelope.
+    """
+    body = _strip_front_matter(text)
+    heading = _extract_heading(body)
+    return heading, _build_doc_text(source_key, heading, body), body[:500]
+
+
 def index_single_file(
     path: pathlib.Path,
     embedding_provider,
@@ -95,10 +110,8 @@ def index_single_file(
     if not text:
         return 0
 
-    body = _strip_front_matter(text)
-    heading = _extract_heading(body)
     _src = source_file_key or path.name
-    doc_text = _build_doc_text(_src, heading, body)
+    heading, doc_text, excerpt = document_fields(_src, text)
 
     meta = {
         "source_file": _src,
@@ -107,7 +120,7 @@ def index_single_file(
         # Where the document actually lives. The key names it; this reaches it.
         "source_path": str(path),
         "char_count": len(text),
-        "text": body[:500],
+        "text": excerpt,
     }
 
     vector = np.array(embedding_provider.embed(doc_text), dtype=np.float32).reshape(1, -1)
@@ -189,10 +202,8 @@ def full_rebuild(
         text = extract_text(f)
         if not text:
             continue
-        body = _strip_front_matter(text)
-        heading = _extract_heading(body)
         _src = l5_key(f, knowledge_dir)
-        doc_text = _build_doc_text(_src, heading, body)
+        heading, doc_text, excerpt = document_fields(_src, text)
         file_meta = read_file_meta(knowledge_dir, f.name)
         all_doc_texts.append(doc_text)
         all_metas.append({
@@ -201,7 +212,7 @@ def full_rebuild(
             "source_layer": file_meta.source_layer,
             "source_path": str(f),
             "char_count": len(text),
-            "text": body[:500],
+            "text": excerpt,
         })
 
     if not all_doc_texts:
