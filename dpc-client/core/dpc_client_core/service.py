@@ -35,7 +35,7 @@ from .firewall import ContextFirewall
 from .hub_client import HubClient
 from .p2p_manager import P2PManager
 from .llm_manager import LLMManager, PROVIDER_MAP
-from .local_api import LocalApiServer
+from .local_api import LocalApiServer, sends_own_response, slow_command
 from .file_server import FileServer
 from .context_cache import ContextCache
 from .settings import Settings
@@ -1706,6 +1706,7 @@ class CoreService:
 
         return local_ips
 
+    @sends_own_response
     async def get_status(self, command_id: str = None, _websocket = None) -> Dict[str, Any]:
         """
         Aggregates status from all components.
@@ -1911,6 +1912,7 @@ class CoreService:
                 "message": str(e)
             }
 
+    @slow_command
     async def get_provider_balance(self, alias: Optional[str] = None) -> Dict[str, Any]:
         """
         Query a pay-per-use provider's account balance (e.g. DeepSeek /user/balance).
@@ -4053,6 +4055,7 @@ class CoreService:
         """Delegated to KnowledgeService."""
         return self.knowledge_service._get_or_create_conversation_monitor(conversation_id, instruction_set_name)
 
+    @slow_command
     async def end_conversation_session(
         self,
         conversation_id: str,
@@ -6936,6 +6939,7 @@ class CoreService:
         except Exception as e:
             logger.error("Ark response to CC's @Ark mention failed: %s", e, exc_info=True)
 
+    @sends_own_response
     async def execute_ai_query(self, command_id: str, prompt: str, context_ids: list = None, compute_host: str = None, model: str = None, provider: str = None, include_context: bool = True, ai_scope: str = None, instruction_set_name: str = None, agent_llm_provider: str = None, **kwargs):
         """
         Orchestrates an AI query and sends the response back to the UI.

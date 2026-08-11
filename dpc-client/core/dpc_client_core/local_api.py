@@ -33,6 +33,28 @@ _DEBUG_WS = os.environ.get("DPC_DEBUG_WS") == "1"
 WS_TOKEN_PATH = Path.home() / ".dpc" / ".ws_token"
 AUTH_TIMEOUT_SECONDS = 5.0
 
+
+def sends_own_response(handler):
+    """Dispatch as a task; the handler answers the client itself.
+
+    It is handed command_id and _websocket and is responsible for the reply.
+    """
+    handler.dpc_sends_own_response = True
+    return handler
+
+
+def slow_command(handler):
+    """Dispatch as a task and answer normally when it returns.
+
+    The message loop otherwise awaits each handler inline, so one slow command
+    holds back every request behind it on the same socket. Mark a handler that
+    waits on something outside this process — a model, a peer, a remote API.
+    Marking changes ordering: this command may finish after commands sent later,
+    so do not mark one whose effect a following command depends on.
+    """
+    handler.dpc_slow = True
+    return handler
+
 _UI_LOG_LEVELS = {
     "debug": ui_logger.debug,
     "info":  ui_logger.info,
@@ -409,6 +431,36 @@ class LocalApiServer:
         async with lock:
             await client.send(message)
 
+    async def _run_and_respond(
+        self,
+        websocket: WebSocketServerProtocol,
+        command_id: str,
+        command: str,
+        handler_method,
+        payload: dict,
+    ) -> None:
+        """Await a slow handler off the read loop and answer when it returns.
+
+        Same response and error shapes as the inline path, so a caller cannot
+        tell which way its command was dispatched.
+        """
+        try:
+            result = await handler_method(**payload)
+            response = {"id": command_id, "command": command, "status": "OK", "payload": result}
+        except Exception as e:
+            logger.error("Error processing command: %s", e, exc_info=True)
+            response = {
+                "id": command_id,
+                "command": command,
+                "status": "ERROR",
+                "payload": {"message": str(e)},
+            }
+        try:
+            await self._send_locked(websocket, json.dumps(response))
+            logger.debug("Response sent for '%s' (id=%s)", command, command_id)
+        except Exception:
+            logger.debug("Client gone before '%s' (id=%s) could answer", command, command_id)
+
     async def _handler(self, websocket: WebSocketServerProtocol):
         if not await self._authenticate(websocket):
             return
@@ -452,13 +504,14 @@ class LocalApiServer:
                         else:
                             logger.debug("Executing command '%s' with payload: %s", command, sanitized_payload)
 
-                        # For long-running tasks, run them in the background
-                        # get_status can take 30s on Linux (IP detection), execute_ai_query for AI
-                        if command in ["execute_ai_query", "get_status"]:
-                            # Pass the command_id to the handler
+                        if getattr(handler_method, "dpc_sends_own_response", False):
                             payload['command_id'] = command_id
                             payload['_websocket'] = websocket
                             asyncio.create_task(handler_method(**payload))
+                        elif getattr(handler_method, "dpc_slow", False):
+                            asyncio.create_task(self._run_and_respond(
+                                websocket, command_id, command, handler_method, payload
+                            ))
                         else:
                             # For short tasks, await the result and send it back
                             result = await handler_method(**payload)
