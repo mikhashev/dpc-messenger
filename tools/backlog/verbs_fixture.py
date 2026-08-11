@@ -72,6 +72,12 @@ def main():
                         "--observed=written by build.py add")
         text = (work / "backlog.md").read_text(encoding="utf-8")
         check("add writes an entry that passes the checker", code == 0, out[-400:])
+        # What the tool SAYS is acted on as surely as what it writes. The hint used to
+        # be a literal naming this project, so a verb run against another project's
+        # backlog told them to rebuild ours.
+        check("the rebuild hint names the file the verb wrote",
+              str(work / "backlog.md") in out and "tools/backlog/build.py" not in out,
+              out[-400:])
         check("add writes the full envelope",
               f"### GAMMA-ENTRY-WAS-ADDED: an entry written by the add verb (HIGH, open, {TODAY} — CC: verb fixture)" in text)
         check("add puts the new entry at the top of its section",

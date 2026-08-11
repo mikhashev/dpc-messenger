@@ -60,6 +60,22 @@ JSON_DST = OUT / "graph.json"
 # Entries retire to a second file. An open entry that leans on a closed one is worth
 # seeing, so the archive is read for names only — never rendered as a board.
 ARCHIVE = SRC.parent / "backlog_closed.md"
+
+
+def rebuild_command() -> str:
+    """The command that rebuilds the board this run actually touched.
+
+    It used to be a literal, true only for the project the script lives in. A verb
+    run against another project's backlog wrote their file and then told them to
+    rebuild ours: their views stayed stale and ours were regenerated for nothing.
+    The whole point of the standard is that other projects use this script, and
+    this line is the last thing the operator reads.
+    """
+    if SRC == ROOT / "backlog.md":
+        return "uv run python tools/backlog/build.py"
+    return f"build.py {SRC} --out={_out[0] if _out else SRC.parent}"
+
+
 # Read for its decisions only. The roadmap is where a decision's phase is written down,
 # and the backlog is where the same decisions are cited — so it is the far bank of the
 # bridge between the two documents, not a second backlog.
@@ -371,7 +387,7 @@ def freshness():
             out.append(f"STALE   {p.name} has never been built")
         elif src_m - p.stat().st_mtime > 60:
             out.append(f"STALE   {p.name} is {_ago(src_m - p.stat().st_mtime)} older than "
-                       f"{SRC.name} — rebuild: uv run python tools/backlog/build.py")
+                       f"{SRC.name} — rebuild: {rebuild_command()}")
         else:
             out.append(f"fresh   {p.name} (built {_ago(time.time() - p.stat().st_mtime)} ago)")
     return out
@@ -656,7 +672,7 @@ def _commit(src_text, arc_text, announcement):
     # No JSON payload, deliberately — a payload is an invitation to grow these lines into
     # the sync channel ADR-039 declines to build. Sending it is the caller's job.
     print("ANNOUNCE  " + announcement)
-    print("rebuild   uv run python tools/backlog/build.py")
+    print("rebuild   " + rebuild_command())
 
 
 _ARC_TEXT = ARCHIVE.read_text(encoding="utf-8-sig") if ARCHIVE.exists() else ""
