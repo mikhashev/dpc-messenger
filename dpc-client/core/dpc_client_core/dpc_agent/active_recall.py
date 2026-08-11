@@ -13,8 +13,8 @@ import logging
 import os
 import pathlib
 import time
-from collections import Counter
-from dataclasses import dataclass, replace
+from collections import Counter, OrderedDict
+from dataclasses import dataclass, field, replace
 from typing import Dict, List, Optional
 
 from .hybrid_search import SearchResult
@@ -313,6 +313,19 @@ class AccessCounts:
     injections_by_key: Dict[str, int]
     reads_by_key: Dict[str, int]
     reads_by_path: Dict[str, int]
+    # Reads that went to an address the same turn had printed. A subset of the two
+    # above, kept apart because "the agent opened this" and "the hint worked" are
+    # different questions, and one column answering both is where the one-in-four
+    # figure came from. Empty for turns recorded before the read carried the field.
+    follows_by_key: Dict[str, int] = field(default_factory=dict)
+    follows_by_path: Dict[str, int] = field(default_factory=dict)
+
+    def follows_for(self, meta: Dict) -> int:
+        n = self.follows_by_key.get(meta.get("source_file", ""), 0)
+        source_path = meta.get("source_path", "")
+        if source_path:
+            n += self.follows_by_path.get(_norm_path(source_path), 0)
+        return n
 
     def reads_for(self, meta: Dict) -> int:
         n = self.reads_by_key.get(meta.get("source_file", ""), 0)
@@ -405,6 +418,8 @@ def _build_access_counts(agent_root: pathlib.Path) -> AccessCounts:
     injections: List[tuple] = []
     reads_by_key: Dict[str, int] = Counter()
     reads_by_path: Dict[str, int] = Counter()
+    follows_by_key: Dict[str, int] = Counter()
+    follows_by_path: Dict[str, int] = Counter()
     oldest_read = ""
 
     # Source 1: hints injected into context (knowledge_access.jsonl), recorded by key.
@@ -425,10 +440,15 @@ def _build_access_counts(agent_root: pathlib.Path) -> AccessCounts:
             # No filtering by whether the word "knowledge" appears in the path.
             # That stood in for "is this a knowledge file" and got it wrong both
             # ways. A path that names no indexed document simply matches nothing.
+            followed = entry.get("via_hint") is True
             if os.path.isabs(path_val):
                 reads_by_path[_norm_path(path_val)] += 1
+                if followed:
+                    follows_by_path[_norm_path(path_val)] += 1
             else:
                 reads_by_key[_norm_key(path_val)] += 1
+                if followed:
+                    follows_by_key[_norm_key(path_val)] += 1
 
     injections_by_key: Dict[str, int] = Counter()
     for ts, files in injections:
@@ -441,6 +461,8 @@ def _build_access_counts(agent_root: pathlib.Path) -> AccessCounts:
         injections_by_key=dict(injections_by_key),
         reads_by_key=dict(reads_by_key),
         reads_by_path=dict(reads_by_path),
+        follows_by_key=dict(follows_by_key),
+        follows_by_path=dict(follows_by_path),
     )
 
 
@@ -508,6 +530,38 @@ def _apply_decay(
     return scored
 
 
+_OFFERED_ADDRESSES: "OrderedDict[str, set]" = OrderedDict()
+_OFFERED_TASKS_KEPT = 32
+
+
+def _remember_offered(task_id: str, addresses: List[Optional[str]]) -> None:
+    """Keep what a turn was offered, so a read in that turn can say it followed one."""
+    if not task_id:
+        return
+    printed = {_norm_path(a) for a in addresses if a}
+    if not printed:
+        return
+    _OFFERED_ADDRESSES[task_id] = printed
+    _OFFERED_ADDRESSES.move_to_end(task_id)
+    while len(_OFFERED_ADDRESSES) > _OFFERED_TASKS_KEPT:
+        _OFFERED_ADDRESSES.popitem(last=False)
+
+
+def followed_a_hint(task_id: str, path: str) -> Optional[bool]:
+    """Did this read go to an address the same turn was shown?
+
+    None when the turn was offered nothing — a read then is neither a follow nor a
+    refusal to follow, and counting it either way is what made the old join wrong.
+    The alternative to this field is joining the two logs afterwards by path and
+    time, which credits a document the agent found on its own and misses the one it
+    tried and failed to open.
+    """
+    offered = _OFFERED_ADDRESSES.get(task_id)
+    if not offered:
+        return None
+    return _norm_path(path) in offered
+
+
 def _log_knowledge_access(
     results: List[SearchResult],
     mode: str,
@@ -529,6 +583,7 @@ def _log_knowledge_access(
     files = [r.chunk_meta.get("source_file", "unknown") for r in results]
     entry = {"ts": utc_now_iso(), "task_id": task_id, "mode": mode, "files": files,
              "addresses": list(addresses or []), "useful": None}
+    _remember_offered(task_id, list(addresses or []))
     try:
         with open(access_path, "a", encoding="utf-8") as f:
             f.write(json.dumps(entry, ensure_ascii=False) + "\n")

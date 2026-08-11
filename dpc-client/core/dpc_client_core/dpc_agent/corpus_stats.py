@@ -17,6 +17,12 @@ Three columns per corpus:
     documents  what it contributes to the index    — from the index, exact
     shown      slots it has taken                  — current-scheme keys only
     opened     times the agent went there          — scheme-independent, exact
+    followed   of those, times a hint sent it      — only where the read recorded it
+
+`opened` counts any read of an indexed document, however the agent got there, and
+reading it as a follow rate is what produced the one-in-four figure that started
+the corpus argument. `followed` is the narrower number and the honest one, and it
+is zero for everything read before the reads began saying so.
 """
 
 from __future__ import annotations
@@ -106,6 +112,7 @@ def corpus_stats(agent_root: pathlib.Path, firewall, agent_id: str,
         else:
             ignored += n
 
+    followed: Dict[str, int] = {}
     for path_str, n in counts.reads_by_path.items():
         key = _key_for_read(pathlib.Path(path_str), agent_root, home / "knowledge", roots)
         if key and key in keys:
@@ -113,10 +120,18 @@ def corpus_stats(agent_root: pathlib.Path, firewall, agent_id: str,
     for key, n in counts.reads_by_key.items():
         if key in keys:
             opened[corpus_of(key)] = opened.get(corpus_of(key), 0) + n
+    for path_str, n in counts.follows_by_path.items():
+        key = _key_for_read(pathlib.Path(path_str), agent_root, home / "knowledge", roots)
+        if key and key in keys:
+            followed[corpus_of(key)] = followed.get(corpus_of(key), 0) + n
+    for key, n in counts.follows_by_key.items():
+        if key in keys:
+            followed[corpus_of(key)] = followed.get(corpus_of(key), 0) + n
 
     corpora: List[dict] = [
         {"corpus": name, "documents": documents.get(name, 0),
-         "shown": shown.get(name, 0), "opened": opened.get(name, 0)}
+         "shown": shown.get(name, 0), "opened": opened.get(name, 0),
+         "followed": followed.get(name, 0)}
         for name in sorted(set(documents) | set(shown) | set(opened),
                            key=lambda n: (-documents.get(n, 0), n))
     ]

@@ -333,6 +333,11 @@ def _execute_single_tool(
         tool_log_entry["session_id"] = session_id
     if error_category:
         tool_log_entry["error_category"] = error_category
+    if fn_name == "read_file":
+        from .active_recall import followed_a_hint
+        _via = followed_a_hint(task_id, str((args_for_log or {}).get("path", "")))
+        if _via is not None:
+            tool_log_entry["via_hint"] = _via
     append_jsonl(logs_dir / "tools.jsonl", tool_log_entry)
 
     return {
