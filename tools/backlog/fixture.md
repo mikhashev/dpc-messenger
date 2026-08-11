@@ -9,7 +9,9 @@ sections:
 
 Run it: `uv run python tools/backlog/build.py --check tools/backlog/fixture.md`
 
-Expected: 6 refusals, 3 warnings, exit 1. Five entries must produce nothing at all.
+Expected: 11 refusals, 5 warnings, exit 1. Six entries must produce nothing at all.
+(The line said 6 and 3 until 2026-08-11; the counts had drifted as rules were added and
+nobody re-measured. These two are measured, not remembered.)
 
 The non-English rule is the one rule not testable from here — a fixture entry proving it
 would have to contain the very thing this file must not contain. It is asserted inside
@@ -104,3 +106,16 @@ would have to contain the very thing this file must not contain. It is asserted 
 ### ORPHANED: section neither recognised nor mapped (LOW, open, 2026-08-11 — CC: fixture)
 
 - **Observed.** Must be refused.
+
+## DONE — AWAITING OBSERVATION
+
+### OBSERVATION-IN-THE-BODY: the shelf entry that has already been seen working (LOW, done-awaiting-observation, 2026-08-11 — CC: fixture)
+
+- **Observed.** Must warn: this entry says it was observed in production and still sits in
+  the section that waits for an observation. Confirmed in production 2026-08-11.
+
+### NOT-YET-OBSERVED: the honest shelf entry that must stay silent (LOW, done-awaiting-observation, 2026-08-11 — CC: fixture)
+
+- **Observed.** Must produce **nothing at all** — the phrase the rule above looks for is
+  present here in its negated form, which is how twenty-seven real entries are written:
+  not yet observed in production.

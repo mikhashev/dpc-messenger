@@ -68,6 +68,17 @@ ROADMAP = SRC.parent / "ROADMAP.md"
 PRIORITIES = ["CRITICAL", "HIGH", "MEDIUM", "LOW", "RESEARCH", "—"]
 CUTOFF = "2026-08-10"          # BACKLOG_FORMAT.md §6 — envelope required from here on
 RESOLUTIONS = {"fixed", "disproved", "moot", "superseded", "duplicate", "wontfix"}
+# The shelf is left by recording an observation, and only `close` moves the entry — so an
+# observation written into a body and nowhere else leaves the entry sitting there. Four did,
+# for a week, until they were read by hand on 2026-08-11. The negated form is the trap: the
+# twenty-seven honest entries on the shelf say "not yet observed in production", which
+# contains the phrase this looks for, so a match is only a match when nothing negates it in
+# the run-up to it.
+OBSERVED_RE = re.compile(r"observed in production|confirmed in production|"
+                         r"наблюдено в проде|наблюдалось в проде|подтверждено в проде|"
+                         r"live-verif\w* passed", re.I)
+NOT_OBSERVED_RE = re.compile(r"not yet|never|pending|awaiting|ещё не|еще не|"
+                             r"нет наблюдени|ждёт наблюдени|ждет наблюдени", re.I)
 # §2: the section an entry sits under *is* its status, and the heading duplicates it. Both
 # the checker and the write verbs read this one map, so a `move` cannot write a status the
 # checker would then refuse.
@@ -891,6 +902,22 @@ if "--check" in sys.argv:
         if e["status"] and sec_status and e["status"] != sec_status:
             at(e, f"heading says status «{e['status']}» but the section implies "
                   f"«{sec_status}» — one of the two is wrong", hard)
+
+        # An entry that has already been seen working, still waiting to be seen working.
+        # Warns rather than refuses: the observation is prose, and reading prose is exactly
+        # where a checker should point rather than decide.
+        if sec_status == "done-awaiting-observation":
+            # Heading first, and this is the whole point of the check: all four entries
+            # that prompted it wrote the observation into the heading, where the eye slides
+            # over it and the parser never looked. A body-only scan found none of them.
+            said = e["head"] + "\n" + e["body"]
+            for m in OBSERVED_RE.finditer(said):
+                if NOT_OBSERVED_RE.search(said[max(0, m.start() - 40):m.start()]):
+                    continue
+                at(e, f"the entry records an observation in production («{m.group(0)}») "
+                      f"while the entry still sits in the section that waits for one — "
+                      f"close it with that observation as the evidence (§3)", warnings)
+                break
 
         # A closure line anywhere in the body must carry a known resolution (§3).
         for cl in re.findall(r"\*\*Closed:\*\*(.+)", e["body"]):
