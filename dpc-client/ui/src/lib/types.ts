@@ -230,6 +230,7 @@ export interface KnowledgeEntry {
 // Full proposal payload (knowledge_commit_proposed event) — superset of KnowledgeCommit.
 // Used by KnowledgeCommitDialog.svelte for the commit review/vote UI.
 export interface KnowledgeCommitProposal extends KnowledgeCommit {
+    conversation_id?: string;
     summary: string;
     entries: KnowledgeEntry[];   // Override base entries?: unknown[]
     participants: string[];

@@ -2,7 +2,7 @@
 <!-- FIXED VERSION - Proper URI detection for Direct TLS vs WebRTC -->
 
 <script lang="ts">
-  import { onMount } from "svelte";
+  import { onMount, untrack } from "svelte";
   import { writable } from "svelte/store";
   import { connectionStatus, nodeStatus, sendCommand, resetReconnection, connectToCoreService, knowledgeCommitProposal, personalContext, tokenWarning, extractionFailure, availableProviders, peerProviders, unreadMessageCounts, resetUnreadCount, setActiveChat, newSessionProposal, proposeNewSession, voteNewSession, defaultProviders, providersList, groupChats, listAgents, agentsList, sleepStateChanged, sleepProgress, sleepAgentStates, tokenUsageUpdated, setGroupReasoningEffort, updateAgentConfig } from "$lib/coreService";
   import { confirmAsync } from "$lib/utils/dialog";
@@ -158,7 +158,7 @@
   let showAgentBoard = $state(false);
   let showCommitDialog = $state(false);
   let commitVoteError = $state("");
-  let isExtractingKnowledge = $state(false);
+  let extractingChats = $state(new Set<string>());
   let showNewSessionDialog = $state(false);  // v0.11.3: mutual session approval
   let showNewGroupDialog = $state(false);  // v0.19.0: group chat creation
   // showGroupInviteDialog + pendingGroupInvite moved to GroupPanel.svelte (Step 7)
@@ -805,15 +805,27 @@
     // The dialog used to close on click, before the backend answered. When a
     // vote is refused — another node's vote closed the session first — the
     // refusal went nowhere and the click looked accepted.
-    const result = await sendCommand("vote_knowledge_commit", {
-      proposal_id,
-      vote,
-      comment,
-      entries,
-      summary
-    });
-    if (result && result.status === "error") {
-      commitVoteError = result.message || "Vote could not be cast";
+    if (!proposal_id) {
+      commitVoteError = "";
+      showCommitDialog = false;
+      knowledgeCommitProposal.set(null);
+      return;
+    }
+    let result: any;
+    try {
+      result = await sendCommand("vote_knowledge_commit", {
+        proposal_id,
+        vote,
+        comment,
+        entries,
+        summary
+      });
+    } catch (err: any) {
+      commitVoteError = err?.message || "Vote could not be cast";
+      return;
+    }
+    if (result === false) {
+      commitVoteError = "Not connected to the backend — vote was not sent";
       return;
     }
     commitVoteError = "";
@@ -847,10 +859,38 @@
 
   async function handleEndSession(conversationId: string) {
     // No confirm dialog — user can Reject the proposal if extraction was accidental.
-    isExtractingKnowledge = true;
+    extractingChats = new Set(extractingChats).add(conversationId);
     sendCommand("end_conversation_session", {
       conversation_id: conversationId
     });
+  }
+
+  // untrack is load-bearing: this is called from an $effect and reads
+  // extractingChats, so a tracked read makes the effect its own trigger.
+  function stopExtracting(conversationId: string | null) {
+    untrack(() => {
+      if (!conversationId) {
+        if (extractingChats.size === 0) return;
+        extractingChats = new Set();
+        return;
+      }
+      if (!extractingChats.has(conversationId)) return;
+      const remaining = new Set(extractingChats);
+      remaining.delete(conversationId);
+      extractingChats = remaining;
+    });
+  }
+
+  function chatLabel(chatId: string): string {
+    if (!chatId) return '';
+    if (chatId.startsWith('group-')) {
+      return $groupChats?.get(chatId)?.name || 'group chat';
+    }
+    const agent = $agentsList?.find((a: any) => a.agent_id === chatId);
+    if (agent) return agent.name || chatId;
+    const aiChat = $aiChats?.get(chatId);
+    if (aiChat) return aiChat.name || chatId;
+    return getPeerDisplayName(chatId);
   }
 
   function handleNewChat(chatId: string) {
@@ -1093,7 +1133,7 @@
             contextAgents={effectiveTokenUsage.contextAgents ?? null}
             messageCount={$chatHistories.get(activeChatId)?.length ?? 0}
             bind:enableMarkdown
-            isExtracting={isExtractingKnowledge}
+            isExtracting={extractingChats.has(activeChatId)}
             {isSleeping}
             sleepCurrent={activeAgentSleep?.current ?? 0}
             sleepTotal={activeAgentSleep?.total ?? 0}
@@ -1294,6 +1334,7 @@
 <KnowledgeCommitDialog
   bind:open={showCommitDialog}
   proposal={$knowledgeCommitProposal}
+  sourceChat={chatLabel($knowledgeCommitProposal?.conversation_id ?? '')}
   voteError={commitVoteError}
   on:vote={handleCommitVote}
   on:close={closeCommitDialog}
@@ -1510,7 +1551,7 @@
 
 <!-- KnowledgeEventsPanel: commit/token/extraction/context hash events -->
 <KnowledgeEventsPanel
-  onOpenCommitDialog={() => { showCommitDialog = true; isExtractingKnowledge = false; }}
+  onOpenCommitDialog={(conversationId) => { showCommitDialog = true; stopExtracting(conversationId); }}
   onUpdateTokenUsage={(convId, usage) => {
     tokenUsageMap = new Map(tokenUsageMap);
     tokenUsageMap.set(convId, usage);
@@ -1519,10 +1560,10 @@
     showTokenWarning = true;
     tokenWarningMessage = message;
   }}
-  onShowExtractionFailure={(message) => {
+  onShowExtractionFailure={(message, conversationId) => {
     showExtractionFailure = true;
     extractionFailureMessage = message;
-    isExtractingKnowledge = false;
+    stopExtracting(conversationId);
   }}
   onShowCommitResult={(message, type, result) => {
     commitResultMessage = message;

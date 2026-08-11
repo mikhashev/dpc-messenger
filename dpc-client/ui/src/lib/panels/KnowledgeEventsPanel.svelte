@@ -27,10 +27,10 @@
     onUpdateContextHash,
     onUpdatePeerContextHash,
   }: {
-    onOpenCommitDialog: () => void;
+    onOpenCommitDialog: (conversationId: string | null) => void;
     onUpdateTokenUsage: (conversationId: string, usage: { used: number; limit: number; historyTokens?: number; tokensAfterLastResponse?: number; tokensAfterLastResponseAt?: string | null; contextAgent?: string; contextAgents?: Array<{name: string, tokens: number, limit: number, percent: number}> | null }) => void;
     onShowTokenWarning: (message: string) => void;
-    onShowExtractionFailure: (message: string) => void;
+    onShowExtractionFailure: (message: string, conversationId: string | null) => void;
     onShowCommitResult: (message: string, type: 'info' | 'error' | 'warning', result: any) => void;
     onCloseCommitDialog: () => void;
     onUpdateContextHash: (hash: string) => void;
@@ -44,7 +44,7 @@
   // Open commit dialog when proposal received
   $effect(() => {
     if ($knowledgeCommitProposal) {
-      onOpenCommitDialog();
+      onOpenCommitDialog($knowledgeCommitProposal.conversation_id ?? null);
 
       (async () => {
         const notified = await showNotificationIfBackground({
@@ -98,7 +98,7 @@
   $effect(() => {
     if ($extractionFailure) {
       const { conversation_id, reason } = $extractionFailure;
-      onShowExtractionFailure(`Knowledge extraction failed for ${conversation_id}: ${reason}`);
+      onShowExtractionFailure(`Knowledge extraction failed for ${conversation_id}: ${reason}`, conversation_id ?? null);
     }
   });
 
