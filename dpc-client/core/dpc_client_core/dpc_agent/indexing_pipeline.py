@@ -42,6 +42,25 @@ def should_index(filepath: str) -> bool:
     return True
 
 
+def _strip_front_matter(text: str) -> str:
+    """Return the document body, without a leading `---` delimited block.
+
+    Knowledge commits open with an envelope of commit id, hashes and signatures,
+    and the lines inside it start with `#`. Read as markdown that made every one
+    of those documents headed "Commit Identification" and excerpted as a hash —
+    identical to each other and silent about their contents. The envelope is not
+    the document, and it should reach neither the heading, the excerpt, nor the
+    embedding.
+    """
+    if not text.startswith("---"):
+        return text
+    lines = text.split("\n")
+    for i, line in enumerate(lines[1:], start=1):
+        if line.rstrip() == "---":
+            return "\n".join(lines[i + 1:]).lstrip("\n")
+    return text
+
+
 def _extract_heading(text: str) -> str:
     """Extract first markdown heading from text."""
     match = re.search(r'^#+ (.+)$', text, re.MULTILINE)
@@ -76,9 +95,10 @@ def index_single_file(
     if not text:
         return 0
 
-    heading = _extract_heading(text)
+    body = _strip_front_matter(text)
+    heading = _extract_heading(body)
     _src = source_file_key or path.name
-    doc_text = _build_doc_text(_src, heading, text)
+    doc_text = _build_doc_text(_src, heading, body)
 
     meta = {
         "source_file": _src,
@@ -87,7 +107,7 @@ def index_single_file(
         # Where the document actually lives. The key names it; this reaches it.
         "source_path": str(path),
         "char_count": len(text),
-        "text": text[:500],
+        "text": body[:500],
     }
 
     vector = np.array(embedding_provider.embed(doc_text), dtype=np.float32).reshape(1, -1)
@@ -169,9 +189,10 @@ def full_rebuild(
         text = extract_text(f)
         if not text:
             continue
-        heading = _extract_heading(text)
+        body = _strip_front_matter(text)
+        heading = _extract_heading(body)
         _src = l5_key(f, knowledge_dir)
-        doc_text = _build_doc_text(_src, heading, text)
+        doc_text = _build_doc_text(_src, heading, body)
         file_meta = read_file_meta(knowledge_dir, f.name)
         all_doc_texts.append(doc_text)
         all_metas.append({
@@ -180,7 +201,7 @@ def full_rebuild(
             "source_layer": file_meta.source_layer,
             "source_path": str(f),
             "char_count": len(text),
-            "text": text[:500],
+            "text": body[:500],
         })
 
     if not all_doc_texts:

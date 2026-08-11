@@ -47,7 +47,11 @@ log = logging.getLogger(__name__)
 # rows left by v2 all carry unchanged hashes, so nothing short of a rebuild removes
 # them. v4 stores source_path on the stored node: v3 rows were written by a backend
 # that dropped the field, and their hashes did not move when it started keeping it.
-KEY_FORMAT = "layer_addressed_v4"
+# v5 drops the front-matter envelope before the heading, the excerpt and the
+# embedded text are taken. v4 rows carry "Commit Identification" as their heading
+# and a hash as their excerpt, and their content hashes did not move when that
+# stopped being how they are read.
+KEY_FORMAT = "layer_addressed_v5"
 
 L5_PREFIX = "knowledge"
 L6_PREFIX = "L6"

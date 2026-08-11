@@ -11,7 +11,12 @@ from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 
 LAYER_WEIGHTS: Dict[str, float] = {
-    "L6": 1.5,
+    # L6 was 1.5 from ADR-010 — human-verified therefore most valuable — while
+    # every one of its hints was unreadable (323 of 323 files headed by their
+    # envelope), so the boost was being applied to noise. Set to 1.0 on
+    # 2026-08-12, dated and reversible; the decision it feeds is in
+    # AR-CORPUS-MISALIGNMENT.
+    "L6": 1.0,
     "L1": 1.3,
     "L7": 0.6,
     "L5": 1.0,
