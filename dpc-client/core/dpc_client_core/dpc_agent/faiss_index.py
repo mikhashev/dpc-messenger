@@ -14,7 +14,7 @@ from typing import List, Optional, Tuple
 
 import numpy as np
 
-from .index_meta import read_meta, write_meta
+from .index_meta import atomic_write_bytes, read_meta, write_meta
 
 log = logging.getLogger(__name__)
 
@@ -122,7 +122,10 @@ class FaissIndex:
         self.index_dir.mkdir(parents=True, exist_ok=True)
         if self._index is not None:
             import faiss
-            faiss.write_index(self._index, str(self._index_path))
+            # Written beside and moved into place: a reader arriving mid-write would
+            # otherwise meet a truncated index, and `load()` answers that with False —
+            # one turn of recall returning nothing, with no line anywhere saying why.
+            atomic_write_bytes(self._index_path, lambda p: faiss.write_index(self._index, p))
         # This file is shared with agent_manager, which keeps file_hashes and
         # header.key_format in it. Writing the document whole dropped both.
         doc = read_meta(self._meta_path)

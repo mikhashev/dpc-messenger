@@ -46,13 +46,66 @@ def read_meta(path: pathlib.Path) -> dict:
     return doc if isinstance(doc, dict) else {}
 
 
-def write_meta(path: pathlib.Path, doc: dict) -> None:
-    """Replace the file in one step, so no reader can see it half-written.
+_REPLACE_ATTEMPTS = 20
+_REPLACE_PAUSE = 0.05
 
-    `load()` catches its own parse failure and returns False, which reads as an empty
-    index rather than as an error — a torn read is therefore silent recall of nothing.
+
+def replace_when_the_readers_let_go(tmp: pathlib.Path, path: pathlib.Path) -> None:
+    """Move the finished file into place, waiting out a reader that has it open.
+
+    On POSIX a rename over an open file is fine — the reader keeps the old inode. On
+    Windows it is `PermissionError: [WinError 5]`, and the readers here are the ones
+    that matter: recall opens the index on every message. Found by the concurrent-reader
+    test, which failed on the very first run of the "trivially atomic" version.
+
+    A reader holds the file for milliseconds, so a second of patience covers it many
+    times over, and the wait costs nobody anything — every writer of these files runs on
+    the index writer's own thread. If the wait is not enough the exception is raised: the
+    save is lost and the stored index stays whole, which the next pass repairs. That is
+    the right way round — a lost save is visible in the counts, a torn file is not.
+    """
+    import time
+
+    for attempt in range(_REPLACE_ATTEMPTS):
+        try:
+            os.replace(tmp, path)
+            return
+        except PermissionError:
+            if attempt == _REPLACE_ATTEMPTS - 1:
+                log.warning("could not replace %s — a reader held it for %.1fs",
+                            path.name, _REPLACE_ATTEMPTS * _REPLACE_PAUSE)
+                raise
+            time.sleep(_REPLACE_PAUSE)
+
+
+def atomic_write_text(path: pathlib.Path, text: str) -> None:
+    """Replace a file in one step, so no reader can see it half-written.
+
+    Every reader of an index file answers a parse failure the same way — `load()`
+    catches it and returns False, which reads as "no index" rather than as an error.
+    So a torn read is not a crash anybody investigates; it is one turn of recall
+    silently returning nothing. The writers are serialised against each other by the
+    index writer, but readers are not serialised against anyone: they only read, and
+    there is nothing for them to hold.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(path.name + ".tmp")
-    tmp.write_text(json.dumps(doc, ensure_ascii=False, indent=2), encoding="utf-8")
-    os.replace(tmp, path)
+    tmp.write_text(text, encoding="utf-8")
+    replace_when_the_readers_let_go(tmp, path)
+
+
+def atomic_write_bytes(path: pathlib.Path, write: "callable") -> None:
+    """The same, for a writer that insists on producing the file itself.
+
+    `faiss.write_index` takes a path, not a buffer, so it writes into a temporary name
+    and the finished file is moved into place.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".tmp")
+    write(str(tmp))
+    replace_when_the_readers_let_go(tmp, path)
+
+
+def write_meta(path: pathlib.Path, doc: dict) -> None:
+    """Replace the meta document in one step. See `atomic_write_text`."""
+    atomic_write_text(path, json.dumps(doc, ensure_ascii=False, indent=2))
