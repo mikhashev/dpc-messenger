@@ -968,6 +968,15 @@ class CoreService:
         self._is_running = False
         logger.info("Shutting down components")
 
+        # Tools run on a pool the interpreter joins at exit, and a tool waiting for its
+        # turn on an index writer would hold that join. Nothing queued now is worth
+        # waiting for — the next start rebuilds whatever this one drops.
+        try:
+            from dpc_client_core.dpc_agent.index_writer import begin_shutdown
+            begin_shutdown()
+        except Exception:
+            logger.debug("index writer shutdown flag not set", exc_info=True)
+
         # Cancel all background tasks first
         logger.debug("Cancelling %d background tasks", len(self._background_tasks))
         for task in self._background_tasks:

@@ -13,9 +13,12 @@ someone else's rebuild — 12 s for the largest agent. A queue lets a loop calle
 instead of wait, and lets two approvals in quick succession serialise inside the
 worker without either voter's turn stopping.
 
-The scope is one directory. A rebuild of a 2000-document agent must not delay a write
-to a 90-document one, so the registry is keyed by the resolved index path and each
-agent gets its own worker.
+The scope is one directory **within one process**. A rebuild of a 2000-document agent
+must not delay a write to a 90-document one, so each agent gets its own worker. Nothing
+here coordinates across processes: a second D-PC instance, or a script pointed at the
+same `~/.dpc`, gets its own registry and can still interleave read-modify-write on
+`index_meta.json`. No production code does that today and this is an accepted risk
+rather than an oversight — written down because an external reviewer had to ask.
 
 The worker is a daemon thread, and for the same reason as the browser session's:
 a mutation parked on a dead handle must not keep the process alive after shutdown.
@@ -24,10 +27,11 @@ a mutation parked on a dead handle must not keep the process alive after shutdow
 from __future__ import annotations
 
 import logging
+import os
 import pathlib
 import queue
 import threading
-from concurrent.futures import Future
+from concurrent.futures import Future, TimeoutError as FuturesTimeout
 from typing import Any, Callable, Dict, Optional
 
 log = logging.getLogger(__name__)
@@ -94,10 +98,53 @@ class _IndexWriter:
 _writers: Dict[str, _IndexWriter] = {}
 _registry_lock = threading.Lock()
 
+# The longest a caller will wait for its turn before treating the queue as broken.
+# Chosen from the slowest legitimate pass anybody has measured — a full rebuild on the
+# node without a GPU took 2256 s — not from taste. It is a deadlock backstop, not a
+# latency promise: a wait this long is already a defect, and the point is that it ends.
+_QUEUE_CEILING = 3600.0
+_WAIT_SLICE = 0.5
+
+_shutting_down = threading.Event()
+
+
+class IndexWriterUnavailable(RuntimeError):
+    """Raised instead of waiting forever for a queue that will not drain."""
+
+
+def begin_shutdown() -> None:
+    """Stop new callers from waiting on the queue, because the process is leaving.
+
+    A tool runs on the shared agent pool, whose workers the interpreter joins at exit.
+    So a tool parked on `Future.result()` holds the whole process — the same shape as
+    the browser session's parked call, one level removed. Once shutdown starts, waiting
+    for an index write is pointless: whatever it was going to write, the next start
+    rebuilds. Named by an external reviewer, 2026-08-12.
+    """
+    _shutting_down.set()
+
 
 def writer_for(index_dir: pathlib.Path) -> _IndexWriter:
-    """The one worker that owns this directory, created on first use."""
-    key = str(pathlib.Path(index_dir).resolve()).lower()
+    """The one worker that owns this directory, created on first use.
+
+    Keyed by the directory's identity — `(st_dev, st_ino)` — rather than by how its path
+    is spelled. Spelling cannot answer this question: `normcase` follows the operating
+    system's convention, and the filesystem is what decides. They agree on Windows and on
+    Linux and disagree on macOS, whose default APFS is case-insensitive while
+    `posixpath.normcase` is the identity — so `.../Agent` and `.../agent`, one directory,
+    would get two workers and the interleaving would be back on the one platform nobody
+    watches. Both external reviewers found this independently. `realpath` does not help;
+    it does not fold case on a case-insensitive volume.
+
+    A directory that does not exist yet has no identity, so those fall back to the
+    normalised path — a first write creates it and every later call keys by inode.
+    """
+    path = pathlib.Path(index_dir)
+    try:
+        st = path.stat()
+        key = "%s:%s" % (st.st_dev, st.st_ino)
+    except OSError:
+        key = os.path.normcase(os.path.realpath(path))
     with _registry_lock:
         writer = _writers.get(key)
         if writer is None:
@@ -115,11 +162,32 @@ def write_index(index_dir: pathlib.Path, fn: Callable[[], Any]) -> Any:
 
     Never call this from the event loop: use `write_index_async`, or the wait becomes
     a freeze for the length of whatever the worker is doing for that agent.
+
+    The wait is bounded twice over. It ends when shutdown starts, because this runs on a
+    pool worker the interpreter joins at exit and an unbounded wait here would hold the
+    process; and it ends at `_QUEUE_CEILING` regardless, because a queue that has not
+    drained in an hour is not going to. Both raise rather than return, since a caller
+    that believes its document was indexed is worse than one that is told it was not.
     """
     writer = writer_for(index_dir)
     if writer.owns_current_thread:
         return fn()
-    return writer.submit(fn).result()
+    future = writer.submit(fn)
+    waited = 0.0
+    while True:
+        try:
+            return future.result(timeout=_WAIT_SLICE)
+        except FuturesTimeout:
+            waited += _WAIT_SLICE
+            if _shutting_down.is_set():
+                future.cancel()
+                raise IndexWriterUnavailable(
+                    "index write abandoned: the process is shutting down")
+            if waited >= _QUEUE_CEILING:
+                future.cancel()
+                raise IndexWriterUnavailable(
+                    "index write gave up after %.0fs — the writer for %s is not draining"
+                    % (waited, index_dir))
 
 
 async def write_index_async(index_dir: pathlib.Path, fn: Callable[[], Any]) -> Any:

@@ -81,7 +81,34 @@ def test_the_same_directory_is_one_worker_however_the_path_is_spelled(tmp_path):
     other_spelling = tmp_path / "state" / ".." / "state" / "memory_index"
 
     assert writer_for(nested) is writer_for(other_spelling)
-    assert writer_for(nested) is writer_for(pathlib.Path(str(nested).upper()))
+
+
+def test_one_directory_is_one_worker_whatever_the_filesystem_thinks_of_case(tmp_path):
+    """The question is the filesystem's, not the operating system's.
+
+    An earlier version keyed by `normcase`, which lowercases on Windows and does nothing
+    on POSIX — right on Windows and Linux, wrong on macOS, whose default filesystem is
+    case-insensitive while `posixpath.normcase` is the identity. That would give one
+    macOS directory two workers, which is the interleaving this class exists to prevent,
+    on the one platform nobody watches. So the test asks the filesystem in front of it
+    rather than assuming a platform.
+    """
+    nested = tmp_path / "state" / "memory_index"
+    nested.mkdir(parents=True)
+    shouted = pathlib.Path(str(nested).upper())
+
+    same_directory = shouted.exists() and shouted.stat().st_ino == nested.stat().st_ino
+    if not same_directory:
+        pytest.skip("this filesystem is case-sensitive — the two spellings are two directories")
+
+    assert writer_for(nested) is writer_for(shouted)
+
+
+def test_two_genuinely_different_directories_are_two_workers(tmp_path):
+    a, b = tmp_path / "a", tmp_path / "b"
+    a.mkdir(), b.mkdir()
+
+    assert writer_for(a) is not writer_for(b)
 
 
 def test_a_mutation_that_reaches_for_the_same_writer_runs_inline(tmp_path):
@@ -161,6 +188,50 @@ def test_a_mutation_cannot_kill_the_worker(tmp_path):
     t.join(timeout=5)
 
     assert served == ["still serving"], "the worker died and its queue will never drain again"
+
+
+def test_a_caller_stops_waiting_when_the_process_is_leaving(tmp_path):
+    """A tool waiting for its turn runs on a pool worker the interpreter joins at exit.
+
+    So an unbounded wait here holds the whole process — the browser bug's shape, one
+    level removed. Once shutdown starts there is nothing worth waiting for: the next
+    start rebuilds whatever this one drops.
+    """
+    from dpc_client_core.dpc_agent import index_writer
+
+    release = threading.Event()
+    parked = threading.Event()
+    blocker = threading.Thread(
+        target=lambda: write_index(tmp_path, lambda: (parked.set(), release.wait(timeout=10))),
+        daemon=True,
+    )
+    blocker.start()
+    assert parked.wait(timeout=5)
+
+    outcome = []
+    waiter = threading.Thread(
+        target=lambda: outcome.append(_capture(lambda: write_index(tmp_path, lambda: "never"))),
+        daemon=True,
+    )
+    waiter.start()
+    time.sleep(0.2)  # long enough to be genuinely queued behind the parked mutation
+    index_writer.begin_shutdown()
+    try:
+        waiter.join(timeout=5)
+        assert outcome and isinstance(outcome[0], index_writer.IndexWriterUnavailable), (
+            "the caller must be told, not left waiting — a hang here holds the process"
+        )
+    finally:
+        index_writer._shutting_down.clear()
+        release.set()
+        blocker.join(timeout=5)
+
+
+def _capture(fn):
+    try:
+        return fn()
+    except BaseException as exc:  # noqa: BLE001 — the test wants the exception itself
+        return exc
 
 
 def test_the_writer_thread_cannot_hold_the_process_open(tmp_path):
