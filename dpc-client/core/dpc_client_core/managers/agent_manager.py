@@ -532,7 +532,13 @@ class DpcAgentManager:
                             if to_embed or removed_files or needs_full_rebuild:
                                 backend.save()
                                 try:
-                                    _md = old_meta if isinstance(old_meta, dict) else {}
+                                    from ..dpc_agent.index_meta import read_meta, write_meta
+                                    # Re-read rather than reuse the snapshot taken at the
+                                    # top of this run: backend.save() has just written a
+                                    # fresh chunks list into the same file, and writing
+                                    # the old picture back over it is what left the native
+                                    # agent with 328 vectors and 23 chunks.
+                                    _md = read_meta(meta_path)
                                     # header.model_name is read at startup to detect
                                     # model swap → forced full rebuild. Must persist on
                                     # save or every restart trips the mismatch check.
@@ -543,10 +549,7 @@ class DpcAgentManager:
                                     _hdr["key_format"] = KEY_FORMAT
                                     _md["file_hashes"] = new_hashes
                                     _md.pop("extra_hash", None)
-                                    meta_path.write_text(
-                                        _json.dumps(_md, ensure_ascii=False, indent=2),
-                                        encoding="utf-8",
-                                    )
+                                    write_meta(meta_path, _md)
                                 except Exception as _e:
                                     log.debug("Failed to save file_hashes meta: %s", _e)
 

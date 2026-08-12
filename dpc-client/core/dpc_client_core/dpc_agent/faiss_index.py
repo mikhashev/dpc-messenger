@@ -14,6 +14,8 @@ from typing import List, Optional, Tuple
 
 import numpy as np
 
+from .index_meta import read_meta, write_meta
+
 log = logging.getLogger(__name__)
 
 
@@ -121,10 +123,15 @@ class FaissIndex:
         if self._index is not None:
             import faiss
             faiss.write_index(self._index, str(self._index_path))
-        self._meta_path.write_text(json.dumps({
-            "header": asdict(self._header),
-            "chunks": self._chunks,
-        }, ensure_ascii=False, indent=2), encoding="utf-8")
+        # This file is shared with agent_manager, which keeps file_hashes and
+        # header.key_format in it. Writing the document whole dropped both.
+        doc = read_meta(self._meta_path)
+        stored_header = doc.get("header") or {}
+        foreign = {k: v for k, v in stored_header.items()
+                   if k not in IndexHeader.__dataclass_fields__}
+        doc["header"] = {**foreign, **asdict(self._header)}
+        doc["chunks"] = self._chunks
+        write_meta(self._meta_path, doc)
         log.info("Saved FAISS index: %d vectors", self._header.chunk_count)
 
     def load(self) -> bool:
