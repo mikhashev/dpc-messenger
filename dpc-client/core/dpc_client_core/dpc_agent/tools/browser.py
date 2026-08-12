@@ -21,7 +21,9 @@ import platform
 import re
 import ssl
 import time
-from concurrent.futures import ThreadPoolExecutor
+import queue
+import threading
+from concurrent.futures import Future
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from html.parser import HTMLParser
@@ -987,6 +989,60 @@ async def _llm_summarize_snapshot(
         return _truncate_snapshot(snapshot_text, max_chars)
 
 
+class _PinnedThread:
+    """One daemon thread that runs every call belonging to one browser session.
+
+    Deliberately not a `ThreadPoolExecutor`, though it wears the same `submit`
+    so `loop.run_in_executor` accepts it. A pool worker parked on a dead
+    Playwright IPC keeps the whole process alive after everything else has
+    stopped: `ThreadPoolExecutor._adjust_thread_count` registers every worker in
+    `concurrent.futures.thread._threads_queues`, and `_python_exit` joins each
+    thread in that map - through `threading._register_atexit`, so it runs before
+    the interpreter joins non-daemon threads (CPython 3.12, `thread.py:205`
+    and `:23-31`). The daemon flag cannot help against an explicit join.
+
+    Observed 2026-08-12 17:32: a shutdown left the process alive with
+    `camoufox-agent_001_0` inside `AuthBrowser.close()` ->
+    `_dispatcher_fiber.switch()`, minutes after the service logged itself down
+    and one second after its own 5 s timeout had force-killed the browser
+    subprocess. Killing the child does not unpark the fiber.
+
+    A raw daemon thread is in no such map and is not waited for, so the same
+    parked call costs a leaked thread in a process that is exiting anyway.
+    """
+
+    def __init__(self, name: str):
+        self._queue: "queue.Queue[Optional[tuple]]" = queue.Queue()
+        self._thread = threading.Thread(target=self._run, name=name, daemon=True)
+        self._thread.start()
+
+    def _run(self) -> None:
+        while True:
+            item = self._queue.get()
+            if item is None:
+                return
+            fn, args, kwargs, future = item
+            if not future.set_running_or_notify_cancel():
+                continue  # the caller's wait_for timed out and cancelled it
+            try:
+                future.set_result(fn(*args, **kwargs))
+            except BaseException as exc:  # noqa: BLE001 - mirrors executor semantics
+                future.set_exception(exc)
+
+    def submit(self, fn, *args: Any, **kwargs: Any) -> Future:
+        future: Future = Future()
+        self._queue.put((fn, args, kwargs, future))
+        return future
+
+    def shutdown(self) -> None:
+        """Ask the thread to stop after whatever it is currently running.
+
+        Never waits: the reason this class exists is that the current call may
+        never return.
+        """
+        self._queue.put(None)
+
+
 class AuthBrowser:
     """Restricted Camoufox wrapper for authenticated browser sessions
     (ADR-028 T4, extended for ADR-029 Task 002).
@@ -1063,7 +1119,7 @@ class AuthBrowser:
         # Scopes the `data-dpc-el` marks to one snapshot, so a mark left on an
         # element this walk no longer reaches cannot answer a current ref.
         self._snapshot_serial: int = 0
-        self._executor: Optional[ThreadPoolExecutor] = None
+        self._executor: Optional["_PinnedThread"] = None
         self._last_activity: float = time.monotonic()
         # PIDs of the Camoufox/Firefox subprocess tree spawned by this
         # browser, captured at launch. Used only as a last-resort kill when
@@ -1072,35 +1128,28 @@ class AuthBrowser:
         # _force_kill_process.
         self._browser_pids: set[int] = set()
 
-    def _get_executor(self) -> ThreadPoolExecutor:
-        """Lazy single-worker executor pinned to this AuthBrowser.
+    def _get_executor(self) -> "_PinnedThread":
+        """Lazy single-thread runner pinned to this AuthBrowser.
 
         Playwright sync API objects (Page, BrowserContext, Browser) are
         thread-affine — every call must come from the thread that owns
         the connection. The agent loop is async, so direct calls would
         cross threads via `asyncio.to_thread` (which uses the default
         pool and hands out arbitrary workers). Routing every sync call
-        for one AuthBrowser through one dedicated executor keeps every
+        for one AuthBrowser through one dedicated thread keeps every
         Playwright op on the same thread for the lifetime of the
         session, eliminating the `cannot switch to a different thread`
         error surfaced in S155.
 
-        A worker parked on a dead Playwright IPC still holds the
-        interpreter at exit: `_python_exit` joins pool workers whatever
-        their daemon flag says. Nothing here can change that, so it is
-        not attempted — the shutdown thread dump names the stuck call
-        instead."""
+        See `_PinnedThread` for why this is not a ThreadPoolExecutor."""
         if self._executor is None:
-            self._executor = ThreadPoolExecutor(
-                max_workers=1,
-                thread_name_prefix=f"camoufox-{self._agent_id}",
-            )
+            self._executor = _PinnedThread(f"camoufox-{self._agent_id}")
         return self._executor
 
     def _shutdown_executor(self) -> None:
         if self._executor is not None:
             try:
-                self._executor.shutdown(wait=False, cancel_futures=True)
+                self._executor.shutdown()
             except Exception:
                 pass
             self._executor = None
@@ -2054,10 +2103,12 @@ class AuthBrowser:
         teardown) runs unconditionally in the finally block — even after a
         disconnect — so the subprocess and its OS pipe are always released;
         skipping it orphaned the pipe and left a Windows IOCP overlapped
-        read pending → ProactorEventLoop spin at shutdown. It is bounded by
-        the caller's `_run_in_session` timeout + the daemon executor, so a
-        doomed IPC here can never block process exit. Registry / lock /
-        executor teardown always runs too."""
+        read pending → ProactorEventLoop spin at shutdown. This call can
+        itself hang forever — Playwright's `__exit__` parks in its dispatcher
+        fiber and does not return even after the subprocess is killed
+        (observed 2026-08-12 17:32) — which is why the thread it runs on is a
+        daemon `_PinnedThread` rather than a pool worker the interpreter
+        joins. Registry / lock / thread teardown always runs too."""
         try:
             if not self._disconnected:
                 url = ""
