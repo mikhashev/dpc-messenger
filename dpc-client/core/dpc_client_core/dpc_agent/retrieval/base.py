@@ -181,6 +181,10 @@ class RetrievalBackend:
     vector: VectorIndex
     text: TextIndex
     fuser: HybridFuser
+    # Which implementations these are, as one string. Stored in the index meta so a
+    # later run can tell that the index it found was built by a different backend —
+    # the hashes alone cannot, they describe the corpus and not who indexed it.
+    backend_id: str = ""
 
     def load(self) -> bool:
         """Load both indexes. True only if BOTH loaded successfully."""

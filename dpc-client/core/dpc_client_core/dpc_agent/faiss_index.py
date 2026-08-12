@@ -145,6 +145,20 @@ class FaissIndex:
             if self._index_path.exists():
                 import faiss
                 self._index = faiss.read_index(str(self._index_path))
+            # A row number is only meaningful against the chunk list: `search` maps
+            # `idx` into it, so a list shorter than the index makes later rows
+            # unreachable and earlier rows answer for other documents. That state has
+            # happened — 328 vectors against 23 chunks — and it looked like a healthy
+            # index from every angle except this comparison. Refusing here is the same
+            # answer as a missing file, which the caller already handles by rebuilding.
+            stored_rows = self._index.ntotal if self._index is not None else 0
+            if stored_rows != len(self._chunks):
+                log.warning(
+                    "Index and chunk list disagree (%d vectors, %d chunks) — refusing to load",
+                    stored_rows, len(self._chunks),
+                )
+                self.clear()
+                return False
             return True
         except Exception as e:
             log.warning("Failed to load FAISS index: %s", e)

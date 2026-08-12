@@ -43,7 +43,7 @@ def test_an_index_built_by_a_previous_scheme_is_rebuilt_not_extended(legacy_agen
     Their hashes are current — the documents did not change, the code did — so an
     incremental pass would walk past every one of them and report success.
     """
-    decision = rebuild_decision(legacy_agent_root / "state" / "memory_index", "BAAI/bge-m3")
+    decision = rebuild_decision(legacy_agent_root / "state" / "memory_index", "BAAI/bge-m3", "native+native")
 
     assert decision.needed
     assert LEGACY_KEY_FORMAT in decision.message  # the log has to name what it found
@@ -53,7 +53,7 @@ def test_an_index_built_by_this_scheme_is_left_alone(legacy_agent_root):
     index_dir = legacy_agent_root / "state" / "memory_index"
     write_legacy_index_header(index_dir, key_format=KEY_FORMAT)
 
-    decision = rebuild_decision(index_dir, "BAAI/bge-m3")
+    decision = rebuild_decision(index_dir, "BAAI/bge-m3", "native+native")
 
     assert not decision.needed
     assert decision.message == ""  # nothing happened; nothing to say
@@ -64,12 +64,12 @@ def test_an_unreadable_header_is_rebuilt_rather_than_guessed_at(tmp_path):
     index_dir.mkdir()
     (index_dir / "index_meta.json").write_text("{not json", encoding="utf-8")
 
-    assert rebuild_decision(index_dir, "BAAI/bge-m3").needed
+    assert rebuild_decision(index_dir, "BAAI/bge-m3", "native+native").needed
 
 
 def test_a_missing_index_rebuilds_without_claiming_a_migration(tmp_path):
     """Absent is not legacy. A first run should not log as though it found old rows."""
-    decision = rebuild_decision(tmp_path / "memory_index", "BAAI/bge-m3")
+    decision = rebuild_decision(tmp_path / "memory_index", "BAAI/bge-m3", "native+native")
 
     assert decision.needed
     assert decision.message == ""

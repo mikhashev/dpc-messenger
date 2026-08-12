@@ -138,7 +138,7 @@ class RebuildDecision:
     message: str = ""
 
 
-def rebuild_decision(index_dir: pathlib.Path, actual_model: str) -> RebuildDecision:
+def rebuild_decision(index_dir: pathlib.Path, actual_model: str, backend_id: str) -> RebuildDecision:
     """Can the index on disk be brought up to date incrementally, or must it be rebuilt?
 
     An incremental pass only touches documents whose content hash moved, so it cannot
@@ -176,7 +176,45 @@ def rebuild_decision(index_dir: pathlib.Path, actual_model: str) -> RebuildDecis
             message=f"Memory index key format outdated ({stored_key_format!r}), forcing rebuild",
         )
 
+    # An index built by one retrieval backend cannot be read by another, and the
+    # staleness map does not say so: it describes the corpus, not who indexed it.
+    # Flip retrieval_vector and the hashes still match every document, so the
+    # incremental pass finds nothing to do and the new backend is left holding an
+    # index it never wrote — empty, and permanently, because every later start
+    # agrees with the same map.
+    #
+    # An absent marker is an index written before this field existed, not a
+    # mismatch. Forcing a rebuild on it would re-embed every pool on the next
+    # start for no reason; the sync stamps the field instead, and the comparison
+    # starts protecting from then on.
+    stored_backend = header.get("backend", "")
+    if stored_backend and stored_backend != backend_id:
+        return RebuildDecision(
+            needed=True,
+            message=(
+                f"Memory index was built by a different retrieval backend "
+                f"({stored_backend!r} -> {backend_id!r}), forcing rebuild"
+            ),
+        )
+
     return RebuildDecision(needed=False)
+
+
+def map_outlives_index(loaded: bool, indexed_items: int, mapped_documents: int) -> bool:
+    """Does the staleness map describe an index that is no longer there?
+
+    The map and the index are two files that have to agree, and only one of them is
+    consulted before the pass decides it has nothing to do. So an index that went away
+    — a backend switched under it, a state directory deleted by hand, a load refused
+    because its rows and its chunk list disagreed — reads as a corpus fully indexed:
+    nothing is re-embedded, and the emptiness is permanent, because the next start
+    finds the same agreeing pair.
+
+    Only the empty case is treated as disagreement. A count that merely drifts is not
+    evidence of the same failure and forcing a rebuild on it would re-embed the fleet
+    over an off-by-one.
+    """
+    return bool(mapped_documents) and (not loaded or indexed_items == 0)
 
 
 def full_rebuild(

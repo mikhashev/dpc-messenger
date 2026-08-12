@@ -309,7 +309,9 @@ class DpcAgentManager:
                     # indexing_pipeline so it can be tested against the state older
                     # versions actually wrote.
                     from dpc_client_core.dpc_agent.indexing_pipeline import rebuild_decision
-                    _decision = rebuild_decision(index_dir, _actual_model)
+                    from dpc_client_core.dpc_agent.retrieval import resolve_backend_id
+                    _backend_id = resolve_backend_id(agent_root)
+                    _decision = rebuild_decision(index_dir, _actual_model, _backend_id)
                     needs_full_rebuild = _decision.needed
                     if _decision.message:
                         log.info("%s", _decision.message)
@@ -457,10 +459,45 @@ class DpcAgentManager:
                                 except Exception:
                                     old_meta = {}
                             old_hashes: dict = old_meta.get("file_hashes", {}) if isinstance(old_meta, dict) else {}
+                            # An index written before the backend marker existed carries
+                            # no opinion about who built it. Stamp it once, without a
+                            # rebuild, so the next backend change is detectable — and
+                            # make that stamp reason enough to write the file, or a pass
+                            # with nothing else to do would never get round to it.
+                            _needs_backend_stamp = not (
+                                old_meta.get("header", {}) if isinstance(old_meta, dict) else {}
+                            ).get("backend")
 
                             # Legacy pool-hash meta: no per-file map, force clear to avoid duplicates
                             if not old_hashes and ("extra_hash" in old_meta or meta_path.exists()):
                                 needs_full_rebuild = True
+
+                            # The staleness map only means anything against the index it
+                            # was written for. A backend switch, a state directory removed
+                            # by hand, or an index that refuses to load leaves an empty
+                            # index behind a map saying every document is present — the
+                            # pass then finds nothing to do, and the emptiness is
+                            # permanent, because every later start reads the same agreeing
+                            # pair. Loaded here rather than after the hash loop so the
+                            # answer can still change what that loop decides.
+                            if not needs_full_rebuild:
+                                from dpc_client_core.dpc_agent.indexing_pipeline import map_outlives_index
+                                _loaded = backend.load()
+                                if map_outlives_index(_loaded, backend.vector.total_items, len(old_hashes)):
+                                    log.warning(
+                                        "[%s] memory index is empty but its file map lists %d documents "
+                                        "— rebuilding rather than trusting the map",
+                                        self.agent_id, len(old_hashes),
+                                    )
+                                    needs_full_rebuild = True
+                                    # Drop the half-loaded state here, where the decision
+                                    # is made, rather than leaving it live until the
+                                    # clear() further down: the two are separated by the
+                                    # whole hash comparison, and anything inserted between
+                                    # them would be reading an index we have just declared
+                                    # unusable.
+                                    backend.vector.clear()
+                                    backend.text.clear()
 
                             new_hashes: dict = {}
                             to_embed: list = []   # (source_file, doc_text, meta)
@@ -490,7 +527,7 @@ class DpcAgentManager:
                                 backend.vector.clear()
                                 backend.text.clear()
                             else:
-                                backend.load()
+                                # already loaded above, before the hash comparison
                                 # remove_by_source kills all rows for source_file, must precede add for modified entries
                                 modified_or_removed = [f for f, _, _ in to_embed if f in old_hashes] + removed_files
                                 if modified_or_removed:
@@ -529,7 +566,7 @@ class DpcAgentManager:
                                         backend.text.end_batch()
 
                             # meta save last = commit point for crash safety
-                            if to_embed or removed_files or needs_full_rebuild:
+                            if to_embed or removed_files or needs_full_rebuild or _needs_backend_stamp:
                                 backend.save()
                                 try:
                                     from ..dpc_agent.index_meta import read_meta, write_meta
@@ -547,6 +584,7 @@ class DpcAgentManager:
                                     _hdr = _md.setdefault("header", {})
                                     _hdr["model_name"] = _actual_model
                                     _hdr["key_format"] = KEY_FORMAT
+                                    _hdr["backend"] = backend.backend_id or _backend_id
                                     _md["file_hashes"] = new_hashes
                                     _md.pop("extra_hash", None)
                                     write_meta(meta_path, _md)
