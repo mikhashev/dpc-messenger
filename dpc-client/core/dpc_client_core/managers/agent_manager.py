@@ -623,10 +623,15 @@ class DpcAgentManager:
                         except Exception as e:
                             log.warning("Background memory indexing failed: %s", e)
 
-                    loop = asyncio.get_event_loop()
-                    loop.run_in_executor(None, _sync_index)
+                    # On this agent's index writer rather than an arbitrary pool worker:
+                    # it is the longest mutation there is, and while it runs the tools,
+                    # the L6 reindex and the purge must queue behind it instead of
+                    # writing the same files underneath it. Still fire-and-forget —
+                    # startup does not wait for the corpus.
+                    from dpc_client_core.dpc_agent.index_writer import writer_for
+                    writer_for(index_dir).submit(_sync_index)
                     log.info(
-                        "Memory: %s index update started in thread",
+                        "Memory: %s index update started on the index writer",
                         "first-use" if needs_full_rebuild else "per-file",
                     )
                 log.info("Memory system initialized (model=%s, active_recall=%s)", _actual_model, mem_cfg.active_recall)

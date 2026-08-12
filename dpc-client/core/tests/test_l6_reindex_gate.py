@@ -54,8 +54,12 @@ def commit_file(tmp_path):
 
 
 def _run(svc, commit_file, caplog):
+    # Async since the reindex runs on each agent's index writer and this handler is on
+    # the event loop — the gate it is tested for is unchanged.
+    import asyncio
+
     with caplog.at_level("INFO"):
-        svc._reindex_commit_into_agents(commit_file.name)
+        asyncio.run(svc._reindex_commit_into_agents(commit_file.name))
     return [r.getMessage() for r in caplog.records]
 
 

@@ -1020,13 +1020,19 @@ Respond in JSON format:
         except Exception as e:
             logger.error("Error in _on_vote_received: %s", e, exc_info=True)
 
-    def _reindex_commit_into_agents(self, markdown_file: str) -> None:
+    async def _reindex_commit_into_agents(self, markdown_file: str) -> None:
         """Add an approved commit to the index of each agent allowed the shared layer.
 
         Lifted out of the approval handler so the gate can be tested. Inline, it sat
         behind everything else that handler does, and the one branch whose whole job is
         to refuse never ran: `L6 reindex skipped` has zero occurrences across every log
         on this machine, against 175 reindexes.
+
+        Async because each agent's mutation now runs on that agent's index writer, and
+        this handler runs on the event loop: waiting on the writer here would stop
+        every other coroutine for as long as that agent's queue is busy, which can be
+        a full rebuild. Awaiting costs the same wall-clock for the commit and nothing
+        for anybody else.
         """
         firewall = self.firewall
         commit_path = self.dpc_home_dir / markdown_file
@@ -1054,20 +1060,26 @@ Respond in JSON format:
             if not index_dir.exists():
                 continue
             from .dpc_agent.index_keys import l6_key
+            from .dpc_agent.index_writer import write_index_async
             from .dpc_agent.indexing_pipeline import index_single_file
             from .dpc_agent.retrieval import make_backend_for_agent
-            backend = make_backend_for_agent(agent_mgr.agent_root)
-            if not backend.vector.load():
-                continue
-            backend.text.load()
             # Same key shape as the full rebuild, from the same helper, so this
             # incremental add replaces the rebuilt entry instead of sitting beside it.
             _l6_key = l6_key(commit_path, self.dpc_home_dir / "knowledge")
-            index_single_file(commit_path, agent._embedding_provider, backend,
-                              source_layer="L6", source_file_key=_l6_key)
-            backend.save()
-            logger.info("MEM-3.7: reindexed L6 commit %s for agent %s",
-                        commit_path.name, agent_mgr.agent_id)
+
+            def _add_commit(agent_root=agent_mgr.agent_root, provider=agent._embedding_provider):
+                backend = make_backend_for_agent(agent_root)
+                if not backend.vector.load():
+                    return False
+                backend.text.load()
+                index_single_file(commit_path, provider, backend,
+                                  source_layer="L6", source_file_key=_l6_key)
+                backend.save()
+                return True
+
+            if await write_index_async(index_dir, _add_commit):
+                logger.info("MEM-3.7: reindexed L6 commit %s for agent %s",
+                            commit_path.name, agent_mgr.agent_id)
 
     async def _on_commit_approved(self, commit) -> None:
         """Notify the UI that consensus was reached and the commit was approved."""
@@ -1104,7 +1116,7 @@ Respond in JSON format:
 
         # MEM-3.7 trigger #2: incremental reindex for Active Recall (L6)
         try:
-            self._reindex_commit_into_agents(markdown_file)
+            await self._reindex_commit_into_agents(markdown_file)
         except Exception as e:
             logger.warning("MEM-3.7 L6 reindex failed for commit %s: %s", commit.commit_id, e)
 

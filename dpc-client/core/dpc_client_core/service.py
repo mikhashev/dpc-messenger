@@ -7562,6 +7562,7 @@ class CoreService:
         """
         try:
             from dpc_client_core.dpc_agent.index_keys import l6_key
+            from dpc_client_core.dpc_agent.index_writer import write_index_async
             from dpc_client_core.dpc_agent.retrieval import make_backend_for_agent
             l6_dir = DPC_HOME_DIR / "knowledge"
             keys = [l6_key(p, l6_dir) for p in sorted(l6_dir.glob("*.md")) if p.is_file()]
@@ -7576,15 +7577,25 @@ class CoreService:
                 if allowed:
                     report.append({"agent_id": root.name, "gate": "open"})
                     continue
-                backend = make_backend_for_agent(root)
-                if not backend.vector.load():
+                def _purge(root=root):
+                    backend = make_backend_for_agent(root)
+                    if not backend.vector.load():
+                        return None
+                    backend.text.load()
+                    removed_vectors = backend.vector.remove_by_sources(keys)
+                    removed_text = backend.text.remove_by_sources(keys)
+                    backend.save()
+                    return removed_vectors, removed_text
+
+                # Awaited on that agent's index writer: this coroutine runs on the loop,
+                # and waiting for a queue that may be draining a full rebuild would stop
+                # everything else for its length.
+                removed = await write_index_async(root / "state" / "memory_index", _purge)
+                if removed is None:
                     report.append({"agent_id": root.name, "gate": "closed",
                                    "skipped": "no vector index"})
                     continue
-                backend.text.load()
-                removed_vectors = backend.vector.remove_by_sources(keys)
-                removed_text = backend.text.remove_by_sources(keys)
-                backend.save()
+                removed_vectors, removed_text = removed
                 logger.info("Shared layer purged from %s: %d vectors, %d text rows",
                             root.name, removed_vectors, removed_text)
                 report.append({"agent_id": root.name, "gate": "closed",

@@ -277,11 +277,16 @@ def write_file(ctx: ToolContext, path: str, content: str) -> str:
                 provider = getattr(agent, '_embedding_provider', None) if agent else None
                 if provider:
                     from ..indexing_pipeline import index_single_file
+                    from ..index_writer import write_index
                     from ..retrieval import make_backend_for_agent
                     index_dir = ctx.agent_root / "state" / "memory_index"
                     if index_dir.exists():
-                        backend = make_backend_for_agent(ctx.agent_root)
-                        if backend.vector.load():
+                        def _add_to_index():
+                            # Built inside the writer: a backend made outside it would
+                            # have read the index before another mutation wrote it.
+                            backend = make_backend_for_agent(ctx.agent_root)
+                            if not backend.vector.load():
+                                return False
                             backend.text.load()
                             # Same key shape as the full rebuild, from the same helper —
                             # an incremental add under a different name would sit beside
@@ -290,6 +295,9 @@ def write_file(ctx: ToolContext, path: str, content: str) -> str:
                             _l5_key = l5_key(file_path, ctx.agent_root / "knowledge")
                             index_single_file(file_path, provider, backend, source_layer="L5", source_file_key=_l5_key)
                             backend.save()
+                            return True
+
+                        if write_index(index_dir, _add_to_index):
                             log.info("Incremental reindex: added %s to retrieval backend", file_path.name)
             except Exception as e:
                 log.warning("Incremental reindex failed for %s: %s", path, e)
@@ -338,21 +346,26 @@ def repo_delete(ctx: ToolContext, path: str, recursive: bool = False) -> str:
             # Remove from retrieval backend if knowledge file
             if path.startswith("knowledge/") and not path.endswith("_index.md"):
                 try:
+                    from ..index_writer import write_index
                     from ..retrieval import make_backend_for_agent
                     index_dir = ctx.agent_root / "state" / "memory_index"
                     if index_dir.exists():
                         from ..index_keys import l5_key
-                        backend = make_backend_for_agent(ctx.agent_root)
                         # Delete by the key the file was indexed under, not by its bare
                         # name: a mismatch here leaves the deleted file in the index and
                         # Active Recall keeps offering a path that no longer exists.
                         source_file = l5_key(target, ctx.agent_root / "knowledge")
-                        if backend.vector.load():
-                            backend.vector.remove_by_source(source_file)
-                            backend.vector.save()
-                        if backend.text.load():
-                            backend.text.remove_by_source(source_file)
-                            backend.text.save()
+
+                        def _remove_from_index():
+                            backend = make_backend_for_agent(ctx.agent_root)
+                            if backend.vector.load():
+                                backend.vector.remove_by_source(source_file)
+                                backend.vector.save()
+                            if backend.text.load():
+                                backend.text.remove_by_source(source_file)
+                                backend.text.save()
+
+                        write_index(index_dir, _remove_from_index)
                         log.info("Removed %s from retrieval backend", source_file)
                 except Exception as e:
                     log.warning("Index cleanup failed for %s: %s", path, e)
