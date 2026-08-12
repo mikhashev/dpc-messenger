@@ -52,6 +52,24 @@ def _get_knowledge_graph(agent_root: pathlib.Path):
     return _kg_cache[key]
 
 
+def task_query(task: Dict[str, Any]) -> str:
+    """What this task is asking, as one string, for whoever needs to search on it.
+
+    One function because two places were reading the same intent from two different
+    keys. The recall block is entered on `task["content"]` and then searches on
+    `task["text"]`, and the only producer — `Agent.process` — writes `text` and never
+    `content`. So the gate was always false unless conversation history existed, and
+    Active Recall was skipped in silence for every scheduled task (which carries no
+    history at all) and for the first message of every conversation. Measured on iris,
+    2026-08-12: a scheduled task and an opening message produced no recall line of any
+    kind; her second message in the same conversation produced all of them.
+
+    `content` stays accepted — callers outside this repository may set it, and it costs
+    one `or`.
+    """
+    return task.get("text", "") or task.get("content", "") or ""
+
+
 def _build_user_content(task: Dict[str, Any]) -> Any:
     """Build user message content. Supports text + optional image."""
     text = task.get("text", "")
@@ -494,15 +512,14 @@ def build_llm_messages(
     # Active Recall hints (ADR-010, WIRE-2)
     # Q1 = current user message (from task), Q2 = recent context window.
     # conversation_history excludes current message (see agent.py:207 prior_history),
-    # so we use task["content"] as the primary query — fixes off-by-one (S79).
+    # so the task's own text is the primary query — fixes off-by-one (S79).
     _CONTEXT_MSGS = 10
-    if conversation_history or task.get("content"):
+    _human_text = task_query(task)
+    if conversation_history or _human_text:
         _recent = (conversation_history or [])[-_CONTEXT_MSGS:]
         _context_parts = [_h["content"] for _h in _recent
                           if _h.get("role") in ("user", "assistant") and _h.get("content")]
         _context_text = " ".join(_context_parts)
-
-        _human_text = task.get("text", "") or task.get("content", "")
 
         _query_text = _human_text or _context_text
         if _query_text:
