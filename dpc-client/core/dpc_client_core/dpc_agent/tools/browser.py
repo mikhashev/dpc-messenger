@@ -469,6 +469,50 @@ def get_fetch_sessions() -> dict[str, "AuthBrowser"]:
     return _fetch_sessions
 
 
+async def sweep_closed_windows() -> int:
+    """Close headed sessions whose window the person has closed.
+
+    Separate from the idle sweep and running far more often, because the
+    two answer different questions. Idle asks how long nobody has used a
+    browser and can afford half an hour; this asks whether the window is
+    still there at all, and the person who closed it expects the processes
+    to go with it. Returns the number of sessions released.
+    """
+    released = 0
+    for agent_id, session in list(_active_browser_sessions.items()):
+        if not session._headed:
+            continue
+        started = time.monotonic()
+        try:
+            gone = await _run_in_session(
+                session, "window_is_gone",
+                _touch=False, _timeout=WINDOW_PROBE_TIMEOUT_SECONDS,
+            )
+        except Exception as e:
+            # Includes the timeout. A session that does not answer is not a
+            # closed window — it is a busy or wedged one, and closing it
+            # would take a live page away. Skip it and ask again next tick;
+            # the idle sweep is what eventually collects a wedged session.
+            log.debug("window probe failed for %s: %s", agent_id, e)
+            continue
+        log.debug(
+            "window probe for %s: gone=%s in %.0f ms",
+            agent_id, gone, (time.monotonic() - started) * 1000,
+        )
+        if not gone:
+            continue
+        log.info("Window closed for %s — releasing the browser", agent_id)
+        try:
+            await _run_in_session(session, "close", _touch=False)
+        except Exception as e:
+            log.warning(
+                "Error releasing %s after its window went away: %s", agent_id, e
+            )
+        _active_browser_sessions.pop(agent_id, None)
+        released += 1
+    return released
+
+
 async def cleanup_idle_browser_sessions() -> int:
     """Close browser sessions idle longer than IDLE_TIMEOUT_SECONDS.
 
@@ -2160,17 +2204,61 @@ class AuthBrowser:
         if _fetch_sessions.get(self._agent_id) is self:
             _fetch_sessions.pop(self._agent_id, None)
 
+    def window_is_gone(self) -> bool:
+        """True when this session no longer has a window behind it.
+
+        Asked, not subscribed to. The sync Playwright client dispatches
+        events only while its thread is inside a call, and a session whose
+        agent has finished parks on its queue — so the `disconnected`
+        listener attached at open never gets a chance to fire. Measured
+        2026-08-13: a window closed by hand left seven Camoufox processes
+        and 620 MB alive for as long as it was watched, with not one line
+        in the log. The round trip here doubles as the flush that lets any
+        pending event through.
+
+        Only the browser-is-gone markers count. A timeout or a failed
+        navigation leaves a perfectly usable window, and answering that by
+        tearing the browser down would take the page out from under the
+        person sitting in front of it."""
+        if self._disconnected:
+            return True
+        page = self._page
+        if page is None:
+            return True
+        try:
+            page.title()
+            return False
+        except Exception as exc:
+            return _is_session_dead(exc)
+
     def _on_browser_disconnected(self, *args: Any) -> None:
         """Fired by Playwright when the browser process detaches."""
         if self._disconnected:
             return
         self._disconnected = True
         log.info(
-            "Camoufox browser disconnected (agent=%s) — removed from active set",
+            "Camoufox browser disconnected (agent=%s) — releasing it",
             self._agent_id,
         )
         _active_camoufox_browsers.discard(self)
         self._deregister()
+        # Hand the teardown to this session's own thread rather than just
+        # dropping the handles: without `close()` the Camoufox context
+        # manager never exits, so the driver subprocess and its pipe
+        # outlive the browser and nothing can reach them afterwards — the
+        # registries this method just emptied were the only way in.
+        # Queued rather than called here, because this runs inside
+        # Playwright's event dispatch and the teardown talks to the same
+        # connection. `close()` shuts the thread down when it is done.
+        executor = self._executor
+        if executor is not None:
+            try:
+                executor.submit(self.close)
+                return
+            except Exception as exc:
+                log.debug(
+                    "could not queue close for agent=%s: %s", self._agent_id, exc
+                )
         self._shutdown_executor()
 
 
@@ -2208,25 +2296,50 @@ def _get_or_create_session(
 
 IDLE_TIMEOUT_SECONDS = 30 * 60
 
+# How often to ask a headed session whether its window is still there.
+# The person who closed it should not wait minutes for the processes to
+# follow, and the question costs one round trip to a browser that is
+# already running.
+WINDOW_PROBE_INTERVAL_SECONDS = 30
+
+# One idle sweep per this many probe ticks — keeps the original five
+# minutes without a second loop.
+IDLE_SWEEP_EVERY_N_PROBES = 10
+
+# The probe waits far less than an ordinary call. Sessions are asked one
+# after another, so a single wedged browser would otherwise hold the whole
+# tick for the two minutes an agent's own call is allowed — and every
+# other window would go unnoticed for that long. A browser that cannot
+# answer in ten seconds is not the case this sweep is looking for.
+WINDOW_PROBE_TIMEOUT_SECONDS = 10
+
 
 _SESSION_CALL_TIMEOUT = 120  # seconds — prevents hung executor from blocking the event loop forever
 
 
 async def _run_in_session(
-    session: "AuthBrowser", method_name: str, *args: Any, **kwargs: Any,
+    session: "AuthBrowser", method_name: str, *args: Any,
+    _touch: bool = True, _timeout: float = _SESSION_CALL_TIMEOUT,
+    **kwargs: Any,
 ) -> Any:
     """Invoke a sync AuthBrowser method on the session's dedicated
     single-worker thread. Required because Playwright sync API objects
     (Page, Context, Browser) are thread-affine; every call must come
-    from the thread that owns the connection."""
-    session._last_activity = time.monotonic()
+    from the thread that owns the connection.
+
+    `_touch=False` for calls the housekeeping makes on its own behalf:
+    the window probe runs every half minute, and counting it as use would
+    keep the idle timer permanently reset — a session nobody had touched
+    for hours would look busy because we kept asking whether it was."""
+    if _touch:
+        session._last_activity = time.monotonic()
     loop = asyncio.get_running_loop()
     method = getattr(session, method_name)
     return await asyncio.wait_for(
         loop.run_in_executor(
             session._get_executor(), lambda: method(*args, **kwargs),
         ),
-        timeout=_SESSION_CALL_TIMEOUT,
+        timeout=_timeout,
     )
 
 

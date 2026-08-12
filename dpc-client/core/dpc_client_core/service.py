@@ -950,11 +950,32 @@ class CoreService:
         self._shutdown_event.set()
 
     async def _browser_idle_cleanup_loop(self) -> None:
-        """Periodically close idle Camoufox browser sessions (CAMOUFOX-IDLE-LEAK fix)."""
-        from .dpc_agent.tools.browser import cleanup_idle_browser_sessions
+        """Release Camoufox browser sessions nobody is using any more.
+
+        Two rhythms, one loop. Every tick asks each headed session whether
+        its window is still there, because a window the person closed
+        cannot announce itself and should not outlive them by minutes.
+        Every tenth tick runs the idle sweep at its original cadence, which
+        answers a different question and can afford to be slow.
+        """
+        from .dpc_agent.tools.browser import (
+            IDLE_SWEEP_EVERY_N_PROBES,
+            WINDOW_PROBE_INTERVAL_SECONDS,
+            cleanup_idle_browser_sessions,
+            sweep_closed_windows,
+        )
+        tick = 0
         while not self._shutdown_event.is_set():
             try:
-                await asyncio.sleep(300)
+                await asyncio.sleep(WINDOW_PROBE_INTERVAL_SECONDS)
+                tick += 1
+                released = await sweep_closed_windows()
+                if released:
+                    logger.info(
+                        "Browser window sweep: released %d session(s)", released
+                    )
+                if tick % IDLE_SWEEP_EVERY_N_PROBES:
+                    continue
                 closed = await cleanup_idle_browser_sessions()
                 if closed:
                     logger.info("Browser idle cleanup: closed %d session(s)", closed)
