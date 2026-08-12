@@ -565,6 +565,26 @@ class DpcAgentManager:
                                     if hasattr(backend.text, "end_batch"):
                                         backend.text.end_batch()
 
+                            # The map may only claim what was actually embedded. The loop
+                            # above `break`s on shutdown, and everything below it still
+                            # runs — so a pass cut in the middle used to commit a hash for
+                            # every document it had *collected*, including the batches it
+                            # never reached. The next start then found every hash current,
+                            # re-embedded nothing, and the missing documents stayed missing
+                            # for good: not the torn file that `load()` refuses, nor the
+                            # empty index that `map_outlives_index` rebuilds, but a short
+                            # index behind a full map, which nothing was looking for.
+                            # Found by both external reviewers, independently, in the same
+                            # place.
+                            from dpc_client_core.dpc_agent.indexing_pipeline import keep_only_what_landed
+                            keep_only_what_landed(new_hashes, to_embed, embedded)
+                            if len(to_embed) != embedded:
+                                log.warning(
+                                    "[%s] indexing stopped after %d of %d documents — "
+                                    "the file map keeps the rest stale so the next start re-embeds them",
+                                    self.agent_id, embedded, len(to_embed),
+                                )
+
                             # meta save last = commit point for crash safety
                             if to_embed or removed_files or needs_full_rebuild or _needs_backend_stamp:
                                 backend.save()
@@ -629,7 +649,14 @@ class DpcAgentManager:
                     # writing the same files underneath it. Still fire-and-forget —
                     # startup does not wait for the corpus.
                     from dpc_client_core.dpc_agent.index_writer import writer_for
-                    writer_for(index_dir).submit(_sync_index)
+                    _pass = writer_for(index_dir).submit(_sync_index)
+                    # Nobody waits for this future, so without a callback a failure lands
+                    # on a garbage-collected future and the only line in the log is the
+                    # one below saying the pass started. Intention is not outcome.
+                    _pass.add_done_callback(lambda f: (
+                        f.exception() is not None
+                        and log.warning("[%s] memory index pass failed: %s", self.agent_id, f.exception())
+                    ))
                     log.info(
                         "Memory: %s index update started on the index writer",
                         "first-use" if needs_full_rebuild else "per-file",

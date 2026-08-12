@@ -200,6 +200,25 @@ def rebuild_decision(index_dir: pathlib.Path, actual_model: str, backend_id: str
     return RebuildDecision(needed=False)
 
 
+def keep_only_what_landed(file_hashes: dict, planned: list, embedded: int) -> dict:
+    """Drop from the staleness map every document the pass did not get to.
+
+    The map is written after the embedding loop, and the loop `break`s on shutdown. So a
+    pass cut in the middle used to record a current hash for documents it never embedded,
+    and the next start read those hashes, found nothing to do, and left the documents out
+    of the index for good. Not the torn file `load()` refuses, nor the empty index
+    `map_outlives_index` rebuilds — a short index behind a full map, which nothing else
+    is looking for.
+
+    `planned` is the list the loop walked, in order; `embedded` is how far it got. What
+    remains stale is exactly the tail, and stale is the right answer: the next pass will
+    see the hash missing and embed the document.
+    """
+    for entry in planned[embedded:]:
+        file_hashes.pop(entry[0], None)
+    return file_hashes
+
+
 def map_outlives_index(loaded: bool, indexed_items: int, mapped_documents: int) -> bool:
     """Does the staleness map describe an index that is no longer there?
 
