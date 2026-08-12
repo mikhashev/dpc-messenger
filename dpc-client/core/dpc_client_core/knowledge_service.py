@@ -1080,6 +1080,9 @@ Respond in JSON format:
             if await write_index_async(index_dir, _add_commit):
                 logger.info("MEM-3.7: reindexed L6 commit %s for agent %s",
                             commit_path.name, agent_mgr.agent_id)
+            else:
+                logger.warning("MEM-3.7: L6 commit %s not indexed for %s — the index would not load",
+                               commit_path.name, agent_mgr.agent_id)
 
     async def _on_commit_approved(self, commit) -> None:
         """Notify the UI that consensus was reached and the commit was approved."""

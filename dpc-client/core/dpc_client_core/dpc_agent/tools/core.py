@@ -299,6 +299,13 @@ def write_file(ctx: ToolContext, path: str, content: str) -> str:
 
                         if write_index(index_dir, _add_to_index):
                             log.info("Incremental reindex: added %s to retrieval backend", file_path.name)
+                        else:
+                            # The index refused to load, so this document is not in it and
+                            # will not be until the next start rebuilds. Said out loud
+                            # because the silence is the defect: recall then answers
+                            # without it and nothing anywhere reports a gap.
+                            log.warning("Incremental reindex skipped for %s — the index would not load",
+                                        file_path.name)
             except Exception as e:
                 log.warning("Incremental reindex failed for %s: %s", path, e)
 

@@ -11,12 +11,14 @@ Contract invariants common to VectorIndex and TextIndex:
 - Lifecycle: __init__ -> load() -> (add | search | remove)* -> save()
 - Empty index: load() returns False when nothing on disk; search() returns []
   (never raises) when the index is empty.
-- Thread-safety: implementations are NOT required to be thread-safe. Caller
-  owns synchronization (asyncio / threading lock) if concurrent access is
-  needed. FAISS and bm25s are single-threaded today and no production
-  call-site dispatches them concurrently.
-- Concurrent writers: last writer wins. Caller serializes if precise
-  ordering matters.
+- Thread-safety: implementations are NOT required to be thread-safe, and that has
+  not changed. What changed on 2026-08-12 is who owns the coordination: every
+  production mutation now runs on one serial writer per index directory
+  (`dpc_agent/index_writer.py`), so callers no longer serialise themselves and
+  "last writer wins" no longer describes this system. Readers are deliberately
+  outside that queue and rely on saves being atomic instead.
+- Concurrent writers: one per directory per process, by construction. Across
+  processes nothing coordinates — see `index_writer`'s docstring.
 - save() semantics: file-based backends persist to disk; self-persistent
   backends (Grafeo) may make this a no-op since state is already durable.
 """
