@@ -224,7 +224,15 @@ class OllamaProvider(AIProvider):
                 )
             self._last_thinking = response['message'].thinking
             content = response['message']['content']
+            # A chat answer is read by a person who can see it is reasoning, and the
+            # alternative here is a blank message — so this path keeps the fallback
+            # and says in the log that it fired. The vision path does not: see the
+            # note there for why the same trade goes the other way.
             if not content and self._last_thinking:
+                logger.warning(
+                    "OllamaProvider '%s': no answer, returning %d characters of "
+                    "reasoning in its place.", self.alias, len(self._last_thinking),
+                )
                 content = self._last_thinking
             return content
         except asyncio.TimeoutError:
@@ -300,8 +308,21 @@ class OllamaProvider(AIProvider):
                 )
             self._last_thinking = response['message'].thinking
             content = response['message']['content']
+            # No fallback to the reasoning here, unlike the two text paths. What a
+            # vision call returns is read as a description of what is in the image —
+            # a transcription, a QC verdict — and reasoning handed back in that slot
+            # is a plausible lie in the one place a plausible lie is worst. Measured
+            # 2026-08-13: a page whose reasoning ran the token budget out returned
+            # 0 characters of content beside 13,788 of thinking; with the fallback,
+            # that arrives at the caller as the answer. Empty is the honest report,
+            # and `describe_image` already says "returned no description" for it.
             if not content and self._last_thinking:
-                content = self._last_thinking
+                logger.warning(
+                    "OllamaProvider '%s': vision call produced %d characters of "
+                    "reasoning and no answer — reporting empty rather than passing "
+                    "the reasoning off as the answer.",
+                    self.alias, len(self._last_thinking),
+                )
             return content
         except asyncio.TimeoutError:
             raise RuntimeError(f"Ollama vision query '{self.alias}' timed out after {timeout}s.")
@@ -437,7 +458,15 @@ class OllamaProvider(AIProvider):
                 input=args or {},
             ))
 
+        # Same trade as the chat path: an agent round with neither an answer nor a
+        # tool call is a dead round, and the reasoning is better than nothing to
+        # continue from. Logged, so the round can be told apart afterwards.
         if not content and not tool_calls_raw and self._last_thinking:
+            logger.warning(
+                "OllamaProvider '%s': round produced neither an answer nor a tool "
+                "call, continuing on %d characters of reasoning.",
+                self.alias, len(self._last_thinking),
+            )
             content = self._last_thinking
         if on_chunk and content:
             await on_chunk(content, conversation_id)

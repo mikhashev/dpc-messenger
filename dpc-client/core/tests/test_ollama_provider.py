@@ -369,3 +369,49 @@ class TestVisionKeepAlive:
         await p.generate_with_vision("q", [{"base64": "x", "mime_type": "image/png"}])
 
         assert captured["keep_alive"] == 0
+
+
+class TestReasoningIsNotAnAnswer:
+    """A model that spends its whole output budget reasoning returns nothing.
+    Handing the reasoning back in the answer's place turns a failure anybody
+    could detect into a description that reads as real — and vision output is
+    read as what is in the image."""
+
+    @pytest.mark.asyncio
+    async def test_a_vision_call_with_no_answer_returns_nothing(self):
+        p = _make({"model": "qwen3-vl:8b"})
+
+        async def fake_chat(**kwargs):
+            return _Resp(_Msg("", thinking="Let me look at the top left corner…"))
+
+        p.client = SimpleNamespace(chat=fake_chat)
+        out = await p.generate_with_vision("transcribe", [{"base64": "abc", "mime_type": "image/png"}])
+
+        assert out == ""
+        assert "corner" not in out
+
+    @pytest.mark.asyncio
+    async def test_the_reasoning_is_still_available_to_a_caller_that_asks(self):
+        """Reporting empty must not throw the reasoning away — the log line and
+        `get_last_thinking` are how a failure gets explained."""
+        p = _make({"model": "qwen3-vl:8b"})
+
+        async def fake_chat(**kwargs):
+            return _Resp(_Msg("", thinking="…reasoning…"))
+
+        p.client = SimpleNamespace(chat=fake_chat)
+        await p.generate_with_vision("transcribe", [{"base64": "abc", "mime_type": "image/png"}])
+
+        assert p.get_last_thinking() == "…reasoning…"
+
+    @pytest.mark.asyncio
+    async def test_a_chat_answer_still_falls_back(self):
+        """The opposite trade, deliberately: a person reading a chat can see
+        that an answer is reasoning, and the alternative is a blank message."""
+        p = _make()
+
+        async def fake_chat(**kwargs):
+            return _Resp(_Msg("", thinking="thinking out loud"))
+
+        p.client = SimpleNamespace(chat=fake_chat)
+        assert await p.generate_response("hello") == "thinking out loud"
