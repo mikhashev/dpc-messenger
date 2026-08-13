@@ -213,6 +213,10 @@
             sender: msg.sender_node_id,
             senderName: msg.sender_name,
             text: msg.text || "",
+            // The number the record already carries. Without it an image
+            // message showed no index until the page was reloaded and the
+            // history came back off disk with one.
+            msg_index: msg.msg_index,
             timestamp: Date.now()
           };
           if (msg.attachments && msg.attachments.length > 0) {

@@ -393,6 +393,8 @@ export interface GroupMessageEvent {
 export interface GroupFileEvent {
     group_id: string;
     message_id?: string;
+    /** Position of this message in the conversation, assigned when it was stored. */
+    msg_index?: number;
     sender_node_id?: string;
     sender_name?: string;
     filename: string;

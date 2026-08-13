@@ -5414,14 +5414,12 @@ class CoreService:
             ui_dedup_key = f"group_image_ui:{group_id}:{filename}"
             if ui_dedup_key not in self._processed_message_ids:
                 self._processed_message_ids.add(ui_dedup_key)
-                await self.local_api.broadcast_event("group_file_received", {
-                    "sender_node_id": "user",
-                    "sender_name": "You",
-                    "text": full_text,
-                    "message_id": image_msg_id,
-                    "attachments": [attachment],
-                    "group_id": group_id,
-                })
+                # Stored before the broadcast, because the index is assigned on
+                # the way in and the interface has nothing to show without it.
+                # The other order left every image message on screen without the
+                # number its record on disk already carried. Same shape as the
+                # text path above: store, then read the index, then announce.
+                msg_index = None
                 if _group_monitor:
                     _group_monitor.add_message(
                         "user", full_text, [attachment],
@@ -5431,6 +5429,16 @@ class CoreService:
                         sender_type="human",
                     )
                     _group_monitor.save_history()
+                    msg_index = _group_monitor.get_last_msg_index()
+                await self.local_api.broadcast_event("group_file_received", {
+                    "sender_node_id": "user",
+                    "sender_name": "You",
+                    "text": full_text,
+                    "message_id": image_msg_id,
+                    "msg_index": msg_index,
+                    "attachments": [attachment],
+                    "group_id": group_id,
+                })
 
             # Fan-out to connected members
             connected_peers = self.p2p_coordinator.get_connected_peers()
@@ -5588,20 +5596,23 @@ class CoreService:
                 message_id = hashlib.sha256(
                     f"{self.p2p_manager.node_id}:group-voice-send:{group_id}:{final_filename}".encode()
                 ).hexdigest()[:16]
-                await self.local_api.broadcast_event("group_file_received", {
-                    "sender_node_id": "user",
-                    "sender_name": "You",
-                    "text": "",
-                    "message_id": message_id,
-                    "attachments": [attachment],
-                    "group_id": group_id,
-                })
+                msg_index = None
                 if _group_monitor:
                     _group_monitor.add_message(
                         "user",
                         f"Sent voice message: {final_filename} ({size_mb} MB)",
                         [attachment],
                     )
+                    msg_index = _group_monitor.get_last_msg_index()
+                await self.local_api.broadcast_event("group_file_received", {
+                    "sender_node_id": "user",
+                    "sender_name": "You",
+                    "text": "",
+                    "message_id": message_id,
+                    "msg_index": msg_index,
+                    "attachments": [attachment],
+                    "group_id": group_id,
+                })
 
             # Fan-out to connected members
             connected_peers = self.p2p_coordinator.get_connected_peers()
