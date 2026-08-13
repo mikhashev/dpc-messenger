@@ -474,3 +474,141 @@ def test_the_transcription_is_asked_for_at_temperature_zero(ctx, tiny, tmp_path)
     vision = _Recording()
     _read(_ctx_with_vision(ctx, vision, tmp_path), tiny, "2", mode="vision")
     assert vision.kwargs.get("temperature") == 0
+
+
+# ------------------------------------------------- fitting the answer's budget
+
+def test_a_range_too_long_to_return_says_where_it_stopped(ctx, tmp_path, monkeypatch):
+    """A tool result is cut at 15 000 characters by the agent loop, and the cut
+    lands mid-JSON — the caller gets something unparseable. Observed 2026-08-14:
+    an agent asked for twenty pages of an eighty-page document, the answer was
+    20 364 characters, and five rounds went into working around the wreckage."""
+    monkeypatch.setattr(D, "MAX_TEXT_CHARS", 5)
+    out = _read(ctx, tiny_two_page(tmp_path), "1-2")
+
+    assert out["pages_read"] == [1, 2]
+    assert [p["page"] for p in out["per_page"]] == [1], "the budget was not applied"
+    assert out["pages_omitted_for_size"] == [2]
+    assert any("left out of this answer" in w for w in out["warnings"])
+    assert len(json.dumps(out)) < 15000
+
+
+def test_the_first_page_is_always_returned_however_long_it_is(ctx, tmp_path, monkeypatch):
+    """Otherwise a document with one long page answers with nothing at all."""
+    monkeypatch.setattr(D, "MAX_TEXT_CHARS", 1)
+    out = _read(ctx, tiny_two_page(tmp_path), "1")
+    assert [p["page"] for p in out["per_page"]] == [1]
+    assert out["pages_omitted_for_size"] == []
+
+
+def tiny_two_page(tmp_path) -> Path:
+    p = tmp_path / "two.pdf"
+    p.write_bytes(TINY_PDF)
+    return p
+
+
+# ------------------------------------------------------------- writing it out
+
+def test_save_to_writes_the_pages_and_keeps_them_out_of_the_answer(ctx, tmp_path):
+    """Eighty pages cannot be read into a conversation however it is split: the
+    document has to land somewhere and be read from there."""
+    target = tmp_path / "out" / "doc.md"
+    out = _read(ctx, tiny_two_page(tmp_path), "1-2", save_to=str(target))
+
+    assert out["saved_to"] == str(target)
+    assert target.exists()
+    written = target.read_text(encoding="utf-8")
+    assert "Hello document" in written
+    assert "## Page 1" in written and "## Page 2" in written
+    assert all("text" not in p for p in out["per_page"]), "the text came back as well"
+    assert out["per_page"][0]["chars"] == len("Hello document")
+
+
+def test_save_to_appends_so_a_long_document_arrives_in_pieces(ctx, tmp_path):
+    target = tmp_path / "doc.md"
+    _read(ctx, tiny_two_page(tmp_path), "1", save_to=str(target))
+    _read(ctx, tiny_two_page(tmp_path), "2", save_to=str(target))
+    written = target.read_text(encoding="utf-8")
+    assert written.count("## Page 1") == 1 and written.count("## Page 2") == 1
+
+
+def test_a_refused_write_is_reported_and_the_reading_still_returns(ctx, tmp_path, monkeypatch):
+    def deny(ctx_, path, require_write=False):
+        if require_write:
+            raise PermissionError("Sandbox violation: not writable")
+        return Path(path)
+
+    monkeypatch.setattr(D, "_resolve_file_path", deny)
+    out = _read(ctx, tiny_two_page(tmp_path), "1", save_to="/etc/passwd")
+    assert out["saved_to"] is None
+    assert any("could not write" in w for w in out["warnings"])
+    assert "Hello document" in out["per_page"][0]["text"], "the pages were lost with the write"
+
+
+def test_the_answer_says_where_it_is_in_the_document(ctx, tmp_path):
+    """Same shape read_file uses: what you have, out of how much, and the call
+    that continues. An agent that cannot see the edge of what it received has no
+    way to know it is missing anything."""
+    out = _read(ctx, tiny_two_page(tmp_path), "1")
+    assert out["position"].startswith("[Pages 1-1 of 2")
+    assert "1 pages not read" in out["position"]
+    assert "continue: pages='2-2'" in out["position"]
+
+    whole = _read(ctx, tiny_two_page(tmp_path), "1-2")
+    assert "whole document" in whole["position"]
+    assert "continue" not in whole["position"]
+
+
+def test_the_tool_says_out_loud_that_it_can_look_at_a_page():
+    """Forge read an eighty-page PDF without ever learning the tool has eyes.
+    The routes have to be in the first sentence, not the fourth."""
+    (entry,) = D.get_tools()
+    description = entry.schema["description"]
+    head = description[:200].lower()
+    assert "vision" in head, "an agent skimming the first line cannot tell"
+    assert "save_to" in description
+    assert "position" in description
+
+
+def test_the_returned_range_has_no_hole_in_it(ctx, tmp_path, monkeypatch):
+    """Filling the budget with whatever fits next produced pages 1-13 and 16 on
+    the eighty-page document, plus a continue hint pointing at 14 — a range a
+    reader cannot act on. It stops at the first page that does not fit."""
+    monkeypatch.setattr(D, "MAX_TEXT_CHARS", 5)
+    out = _read(ctx, tiny_two_page(tmp_path), "1-2")
+    returned = [p["page"] for p in out["per_page"]]
+    assert returned == list(range(returned[0], returned[-1] + 1))
+    assert min(out["pages_omitted_for_size"]) > max(returned)
+
+
+def test_what_was_written_is_what_the_position_reports(ctx, tmp_path):
+    """With save_to the pages leave the answer, and the count of characters must
+    follow them out — it read 0 chars while writing 16 KB in the first version."""
+    target = tmp_path / "doc.md"
+    out = _read(ctx, tiny_two_page(tmp_path), "1-2", save_to=str(target))
+    assert "| 14 chars" in out["position"]
+
+
+def _pages(*lengths):
+    return [{"page": i + 1, "text": "x" * n} for i, n in enumerate(lengths)]
+
+
+def test_the_budget_stops_at_the_first_page_that_does_not_fit(monkeypatch):
+    """The distinguishing case the two-page fixture cannot show: a long page in
+    the middle with a short one behind it. Skipping would return 1 and 3."""
+    monkeypatch.setattr(D, "MAX_TEXT_CHARS", 100)
+    kept, omitted, spent = D._fit_to_budget(_pages(50, 500, 10))
+    assert [p["page"] for p in kept] == [1]
+    assert omitted == [2, 3]
+    assert spent == 50
+
+
+def test_everything_that_fits_is_returned():
+    kept, omitted, spent = D._fit_to_budget(_pages(10, 20, 30))
+    assert [p["page"] for p in kept] == [1, 2, 3] and omitted == [] and spent == 60
+
+
+def test_one_page_longer_than_the_whole_budget_still_comes_back(monkeypatch):
+    monkeypatch.setattr(D, "MAX_TEXT_CHARS", 10)
+    kept, omitted, _ = D._fit_to_budget(_pages(5000, 1))
+    assert [p["page"] for p in kept] == [1] and omitted == [2]

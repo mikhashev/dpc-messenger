@@ -52,6 +52,22 @@ log = logging.getLogger(__name__)
 MAX_PAGES_PER_CALL = 20
 DEFAULT_PAGES = 10
 
+# What a tool may hand back before the agent loop cuts it off: 15 000 characters
+# (`dpc_agent/loop.py:_truncate_tool_result`), and the cut lands mid-JSON, so
+# what arrives is not even parseable. Pages are the wrong unit to bound a
+# response by — twenty pages of a real paper are 60 000 characters and can never
+# fit. So the text is filled to a budget and the response says which pages it
+# stopped at, which is the difference between a short answer and a broken one.
+MAX_TEXT_CHARS = 11000
+
+# Small formatting pieces for the written-out form, kept here so the writer
+# below reads as one statement rather than a wall of escapes.
+NL = chr(10)
+NL2 = NL * 2
+PAGE_HEADING = "## Page {n}" + NL2
+FILE_HEADING = "# {name}" + NL2 + "pages {first}-{last} of {total}" + NL2
+
+
 # Fonts whose glyphs have no Latin meaning at all: symbol, extension, blackboard
 # and the mathabx family. A Latin letter or an ASCII punctuation mark coming out
 # of one of these is a lie by construction — the font's ToUnicode map is wrong.
@@ -238,6 +254,29 @@ def _page_fonts_and_images(page) -> Tuple[Set[str], Optional[int]]:
     return fonts, images
 
 
+def _fit_to_budget(
+    pages: List[Dict[str, Any]]
+) -> Tuple[List[Dict[str, Any]], List[int], int]:
+    """Split pages into what fits in one answer and what does not.
+
+    Stops at the first page that would overflow rather than skipping it: filling
+    the remaining room with whatever comes next leaves a hole in the middle of
+    the range and a continue hint pointing at a page already returned — the run
+    on the eighty-page document came back as pages 1-13 and 16, which is not a
+    thing a reader can act on. The first page is always kept, however long it
+    is, because an answer with no pages at all is worse than a long one.
+    """
+    kept: List[Dict[str, Any]] = []
+    spent = 0
+    for index, entry in enumerate(pages):
+        text = entry.get("text") or ""
+        if kept and spent + len(text) > MAX_TEXT_CHARS:
+            return kept, [e["page"] for e in pages[index:]], spent
+        spent += len(text)
+        kept.append(entry)
+    return kept, [], spent
+
+
 def _read_page(doc, number: int) -> Dict[str, Any]:
     """One page, and never an exception: a broken page is a marked page.
 
@@ -418,6 +457,7 @@ async def read_document(
     mode: str = "auto",
     max_vision_pages: int = DEFAULT_MAX_VISION_PAGES,
     vision_model: Optional[str] = None,
+    save_to: Optional[str] = None,
 ) -> str:
     """
     Read the text of a PDF, page by page, and report what each page gave up.
@@ -433,6 +473,10 @@ async def read_document(
             it, nothing is spent and the answer says what it would have cost.
         vision_model: provider alias for the vision route. None uses the
             configured vision provider.
+        save_to: write the pages to this file instead of returning them. The
+            answer then carries the per-page metadata and the path, and the
+            document never passes through the conversation — which is how a
+            long one is read at all.
 
     Returns:
         JSON with per-page routes, character counts, image counts, the pages
@@ -525,12 +569,60 @@ async def read_document(
             "unreliable-mathematics check did not run"
         )
 
+    # Written out instead of returned: the pages go to a file, the answer keeps
+    # the metadata. A tool result is capped at 15 000 characters, so an eighty
+    # page document cannot be read into a conversation however many calls it is
+    # split into — it has to land somewhere and be read from there.
+    saved_to = None
+    if save_to:
+        try:
+            target = _resolve_file_path(ctx, save_to, require_write=True)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            body = NL2.join(
+                (PAGE_HEADING.format(n=e['page']) + (e.get('text') or '')).rstrip()
+                for e in per_page
+            )
+            header = FILE_HEADING.format(
+                name=source.name, first=wanted[0], last=wanted[-1], total=total
+            )
+            existing = target.read_text(encoding='utf-8') if target.exists() else ''
+            target.write_text(
+                (existing + NL2 if existing else header) + body + NL,
+                encoding='utf-8',
+            )
+            saved_to = str(target)
+        except PermissionError as exc:
+            warnings.append(f"could not write to '{save_to}': {exc}")
+        except OSError as exc:
+            warnings.append(f"could not write to '{save_to}': {type(exc).__name__}: {exc}")
+
+    # Fill to the budget, then stop and say so. A page is kept whole or not at
+    # all: half a page of text with no marker is the failure this is preventing.
+    kept: List[Dict[str, Any]] = []
+    omitted: List[int] = []
+    spent = 0
+    if saved_to:
+        spent = sum(len(e.get("text") or "") for e in per_page)
+        kept = [{k: v for k, v in e.items() if k != "text"} for e in per_page]
+        per_page = []
+    if per_page:
+        kept, omitted, spent = _fit_to_budget(per_page)
+    if omitted:
+        warnings.append(
+            f"pages {omitted[0]}-{omitted[-1]} were read and left out of this answer "
+            f"to stay under the {MAX_TEXT_CHARS}-character limit a tool result has. "
+            f"Continue with pages='{omitted[0]}-{omitted[-1]}', or pass save_to to "
+            f"write the whole range to a file instead of returning it."
+        )
+
     payload = {
         "path": str(source),
         "sha256": digest,
         "pages_total": total,
         "pages_read": wanted,
-        "per_page": per_page,
+        "per_page": kept,
+        "pages_omitted_for_size": omitted,
+        "saved_to": saved_to,
         "unreadable_pages": unreadable,
         "pages_with_unreliable_math": wants_eye,
         "figures_not_seen": figures_unseen,
@@ -547,10 +639,25 @@ async def read_document(
         "elapsed_sec": round(time.perf_counter() - started, 3),
         "warnings": warnings,
     }
-    if len(wanted) < total:
-        remaining = [n for n in range(1, total + 1) if n not in wanted]
+    returned = [p["page"] for p in kept]
+    unread = [n for n in range(1, total + 1) if n not in returned]
+    # Where this answer sits in the document, in the same shape read_file uses —
+    # what you have, out of how much, and the call that continues. An agent that
+    # cannot see the edges of what it received has no way to know it is missing
+    # anything, which is how twenty pages of an eighty-page document get treated
+    # as the whole thing.
+    payload["position"] = (
+        f"[Pages {returned[0]}-{returned[-1]} of {total} | {spent:,} chars"
+        + (f" | {len(unread)} pages not read" if unread else " | whole document")
+        + (f" | continue: pages='{unread[0]}-{min(unread[0] + DEFAULT_PAGES - 1, total)}'"
+           if unread else "")
+        + "]"
+        if returned
+        else f"[No pages returned of {total}]"
+    )
+    if unread:
         payload["continue_hint"] = (
-            f"{len(remaining)} pages not read; the next is page {remaining[0]}"
+            f"{len(unread)} pages not read; the next is page {unread[0]}"
         )
     return json.dumps(payload, ensure_ascii=False)
 
@@ -567,17 +674,20 @@ def get_tools() -> List[ToolEntry]:
             schema={
                 "name": "read_document",
                 "description": (
-                    "Read the text of a PDF page by page. Returns the text of each "
-                    "page plus what that page gave up: how many characters, how many "
-                    "images the text route did not look at, and whether the page's "
-                    "mathematics is unreliable because a symbol font mapped its glyphs "
-                    "into Latin letters. Mathematics is never repaired — a page flagged "
-                    "as unreliable is returned as extracted, and the honest way to read "
-                    "its formulas is the paper's HTML source or an eye on the page. "
-                    "A page with no text layer is a scan: it is rendered and read by the "
-                    "configured vision provider — which may be a model on this machine or "
-                    "on a peer — bounded by max_vision_pages and cached by file hash. The "
-                    "tool itself opens no URL."
+                    "Read a PDF — the text layer where there is one, and the local "
+                    "vision model where there is not. A page with no text is a scan: "
+                    "it is rendered and transcribed automatically (bounded by "
+                    "max_vision_pages, cached by file hash, ~40 s a page on a shared "
+                    "GPU), and mode='vision' transcribes pages that do have text, for "
+                    "when the text layer is wrong rather than missing. Returns each "
+                    "page plus what it cost: characters, images the text route did not "
+                    "look at, and whether the page's mathematics is unreliable because "
+                    "a symbol font mapped its glyphs into Latin letters — never "
+                    "repaired, so a flagged page comes back exactly as extracted. The "
+                    "answer carries a `position` line saying which pages of how many "
+                    "you have and how to continue. For a document too long to read "
+                    "into a conversation, pass save_to: the pages are written to that "
+                    "file and only the metadata comes back. Local only: no network."
                 ),
                 "parameters": {
                     "type": "object",
