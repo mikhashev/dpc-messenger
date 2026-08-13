@@ -722,7 +722,7 @@ def get_tools() -> List[ToolEntry]:
                             "type": "integer",
                             "description": (
                                 "How many pages this call may spend on the vision model "
-                                "(default 2, about 25 s each on a shared GPU). If more "
+                                "(default 2, about 40 s each on a shared GPU). If more "
                                 "pages need it, none are read and the answer says which "
                                 "and what it would have cost."
                             ),
@@ -732,6 +732,18 @@ def get_tools() -> List[ToolEntry]:
                             "description": (
                                 "Provider alias for the vision route. Omit to use the "
                                 "configured vision provider."
+                            ),
+                        },
+                        "save_to": {
+                            "type": "string",
+                            "description": (
+                                "Write the pages to this file instead of returning "
+                                "them; the answer keeps the per-page metadata and the "
+                                "path. This is how a document too long for a "
+                                "conversation is read at all — call repeatedly with "
+                                "successive ranges and the file grows. Relative paths "
+                                "resolve to the agent sandbox; absolute paths require "
+                                "extended-path write access."
                             ),
                         },
                     },

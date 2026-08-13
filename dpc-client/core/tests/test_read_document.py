@@ -612,3 +612,23 @@ def test_one_page_longer_than_the_whole_budget_still_comes_back(monkeypatch):
     monkeypatch.setattr(D, "MAX_TEXT_CHARS", 10)
     kept, omitted, _ = D._fit_to_budget(_pages(5000, 1))
     assert [p["page"] for p in kept] == [1] and omitted == [2]
+
+
+def test_every_argument_the_tool_takes_is_one_the_model_can_pass():
+    """The description promised save_to for two commits while the schema did not
+    list it: prose the model can read, a parameter it cannot send. Same shape as
+    the defects this file keeps finding — the capability exists and the consumer
+    cannot reach it."""
+    import inspect
+
+    (entry,) = D.get_tools()
+    advertised = set(entry.schema["parameters"]["properties"])
+    accepted = {
+        name
+        for name, param in inspect.signature(entry.handler).parameters.items()
+        if name != "ctx" and param.kind is not param.VAR_KEYWORD
+    }
+    assert accepted == advertised, (
+        f"only in the signature: {accepted - advertised}; "
+        f"only in the schema: {advertised - accepted}"
+    )
