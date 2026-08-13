@@ -301,6 +301,16 @@ def _execute_shell_command(command: str, working_dir: str | None, timeout: int) 
             timeout=timeout,
             cwd=working_dir,
             env={**os.environ, "PYTHONIOENCODING": "utf-8"},
+            # Nobody is sitting at this process. Without it the child inherits
+            # the service's own console, so anything that asks a question —
+            # PowerShell's "Do you want to continue? [Y] Yes [N] No" on
+            # Invoke-WebRequest without -UseBasicParsing, an npm prompt, a
+            # credential helper — prints into the operator's terminal and waits
+            # there for the full timeout while the agent waits for it. Closed
+            # stdin turns that into an immediate default answer, which for a
+            # confirmation is "no": the command fails in a second and says so,
+            # instead of hanging for minutes on a question the agent cannot see.
+            stdin=subprocess.DEVNULL,
         )
 
         parts = []

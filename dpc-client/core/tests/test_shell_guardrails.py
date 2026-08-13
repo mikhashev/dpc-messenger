@@ -318,3 +318,46 @@ class TestCwdEnforcement:
             ctx = self._make_ctx(pathlib.Path(tmpdir))
             result = run_shell(ctx, "echo hi", cwd="C:\\Windows")
             assert "outside allowed sandbox" in result or "not a valid directory" in result
+
+
+class TestNobodyIsSittingAtThisProcess:
+    """A command that asks a question must fail, not wait.
+
+    Observed 2026-08-14 on the AI Studio fleet: an agent ran a PowerShell script
+    using Invoke-WebRequest without -UseBasicParsing, PowerShell printed "Do you
+    want to continue? [Y] Yes [A] Yes to All [N] No …" into the *operator's*
+    terminal, and the call sat there. The approval the user had already given in
+    the interface is our gate; this was a second one, asked of somebody the agent
+    cannot reach.
+    """
+
+    def test_the_child_gets_no_stdin(self, monkeypatch):
+        import subprocess
+
+        from dpc_client_core.dpc_agent.tools import shell as shell_tool
+
+        seen = {}
+
+        def _fake_run(command, **kwargs):
+            seen.update(kwargs)
+            return subprocess.CompletedProcess(command, 0, "ok", "")
+
+        monkeypatch.setattr(subprocess, "run", _fake_run)
+        shell_tool._execute_shell_command("echo hi", None, 30)
+
+        assert seen.get("stdin") is subprocess.DEVNULL, (
+            "the child inherits the service console and can block on a prompt"
+        )
+
+    def test_a_command_that_reads_input_ends_instead_of_hanging(self):
+        """The real thing, end to end: a child that waits for a line gets EOF."""
+        import time
+
+        from dpc_client_core.dpc_agent.tools import shell as shell_tool
+
+        started = time.perf_counter()
+        out = shell_tool._execute_shell_command(
+            'python -c "import sys; print(sys.stdin.read() or \'EOF\')"', None, 30
+        )
+        assert time.perf_counter() - started < 20, "it waited for input nobody can give"
+        assert "timed out" not in out
