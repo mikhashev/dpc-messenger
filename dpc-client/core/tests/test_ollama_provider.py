@@ -27,7 +27,27 @@ def _make(config=None):
     return OllamaProvider("ollama_test", cfg)
 
 
+@pytest.fixture(autouse=True)
+def _no_daemon(monkeypatch):
+    """This file promises no network, and capability detection now asks the
+    daemon whenever it can reach one. So here it deliberately cannot: the
+    two detection tests below are about the fallback name lists, and the
+    daemon path is covered in test_ollama_asks_the_daemon.py."""
+    from dpc_client_core.providers import ollama_provider as op
+    op._MODEL_CAPABILITIES.clear()
+
+    def _refuse(*a, **k):
+        raise RuntimeError("no daemon in this file")
+
+    monkeypatch.setattr(op.ollama, "Client", _refuse)
+    yield
+    op._MODEL_CAPABILITIES.clear()
+
+
 def test_supports_thinking_detection():
+    """The fallback list, not the truth. Measured 2026-08-13: the daemon
+    says lfm2.5 *can* think, so with a daemon reachable this same model
+    answers True — which is the defect the list was hiding."""
     assert _make({"model": "deepseek-r1:8b"}).supports_thinking() is True
     assert _make({"model": "lfm2.5:latest"}).supports_thinking() is False
 

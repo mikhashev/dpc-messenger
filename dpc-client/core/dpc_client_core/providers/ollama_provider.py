@@ -39,6 +39,48 @@ OLLAMA_THINKING_MODELS = [
     "qwen3",            # Qwen3 family (3b, 8b, 14b, 30b, 32b, 235b) — native think param
 ]
 
+# What the daemon says a model can do, keyed by model name. Both lists above
+# are a copy of knowledge Ollama already has, and a copy goes stale the day a
+# model is published: muse-glimmer is vision- and thinking-capable and appears
+# in neither. So ask, and keep the lists for a daemon too old to answer.
+# Cached process-wide because the answer cannot change without the model being
+# pulled again; measured 2026-08-13: 72 ms on the first call, 3 ms after.
+_MODEL_CAPABILITIES: Dict[str, Optional[frozenset]] = {}
+_UNASKED = object()
+
+# The question is asked from paths that run on the event loop. Against a
+# local daemon it costs milliseconds, but `host` may be another machine, and
+# a black-hole address with no timeout hangs on the SYN for as long as the OS
+# allows — measured: with this timeout the same call raises ConnectTimeout in
+# 1.01 s. This is the deadline, not an expectation.
+_CAPABILITY_TIMEOUT_SECONDS = 2.0
+
+
+def _reported_capabilities(model: str, host: Optional[str]) -> Optional[frozenset]:
+    """Capabilities as Ollama reports them, or None if it could not be asked.
+
+    Three answers, and they must stay three. A frozenset is what the daemon
+    said — empty means it answered and named nothing. None means nobody
+    could tell us, either because the daemon is unreachable or because it is
+    old enough not to carry the field at all, and then the substring lists
+    below decide. Folding the third case into an empty set would quietly
+    strip vision from a model that has it."""
+    cached = _MODEL_CAPABILITIES.get(model, _UNASKED)
+    if cached is not _UNASKED:
+        return cached  # type: ignore[return-value]
+    try:
+        info = ollama.Client(
+            host=host, timeout=_CAPABILITY_TIMEOUT_SECONDS
+        ).show(model)
+    except Exception as e:
+        # Not cached: a daemon that is down now may be up on the next call.
+        logger.debug("Ollama could not describe %s: %s", model, e)
+        return None
+    reported = getattr(info, "capabilities", None)
+    caps = None if reported is None else frozenset(reported)
+    _MODEL_CAPABILITIES[model] = caps
+    return caps
+
 
 class OllamaProvider(AIProvider):
     def __init__(self, alias: str, config: Dict[str, Any]):
@@ -98,19 +140,52 @@ class OllamaProvider(AIProvider):
                 )
 
     def supports_vision(self) -> bool:
-        """Check if this Ollama model supports vision/multimodal inputs."""
+        """Whether this model takes images — the daemon's answer if there is
+        one, the name list only when there is not."""
+        caps = _reported_capabilities(self.model, self.config.get("host"))
+        if caps is not None:
+            return "vision" in caps
         return any(vm in self.model.lower() for vm in OLLAMA_VISION_MODELS)
 
     def supports_thinking(self) -> bool:
-        """Check if this Ollama model is a thinking/reasoning model."""
+        """Whether this model can reason before answering. Can, not should —
+        see `_think_flag`."""
+        caps = _reported_capabilities(self.model, self.config.get("host"))
+        if caps is not None:
+            return "thinking" in caps
         return any(tm in self.model.lower() for tm in OLLAMA_THINKING_MODELS)
+
+    def _think_flag(self) -> Optional[bool]:
+        """What to send as `think`, letting the configuration overrule the
+        capability.
+
+        A model that *can* think is not a model that *should* on every call:
+        qwen3.5:9b spent a whole QC verdict reasoning and returned nothing —
+        83,693 characters of thinking, `done_reason=length`, empty content.
+        Until now the capability decided alone, and the only way to say no
+        was to keep the model out of a hardcoded list.
+
+        This is the one place `think` is decided; it used to be three copies
+        at the call sites. When the per-call effort selector arrives it plugs
+        in here and outranks the configuration, which outranks the
+        capability — a second source deciding the same flag is how the two
+        lists above came to disagree with the daemon."""
+        configured = self.config.get("think")
+        if configured is not None:
+            return bool(configured)
+        return True if self.supports_thinking() else None
 
     def _build_options(self, **kwargs) -> Optional[Dict[str, Any]]:
         options: Dict[str, Any] = {}
         if self.config.get("context_window"):
             options["num_ctx"] = self.config["context_window"]
-        temp = kwargs.get("temperature", self.temperature)
-        if temp != 0.7:
+        # Send a temperature when somebody chose one. The previous rule
+        # skipped the value 0.7 to mean "unset", which made a configured 0.7
+        # indistinguishable from silence: five of the seven Ollama providers
+        # on this machine ask for 0.7 in providers.json and were running at
+        # the model's own default instead — 1.0 on the two that were checked.
+        temp = kwargs.get("temperature", self.config.get("temperature"))
+        if temp is not None:
             options["temperature"] = temp
         for key in OLLAMA_SAMPLING_PARAMS:
             if key in self.config:
@@ -136,7 +211,7 @@ class OllamaProvider(AIProvider):
                         model=self.model,
                         messages=[message],
                         options=options,
-                        think=True if self.supports_thinking() else None,
+                        think=self._think_flag(),
                     ),
                     timeout=timeout
                 )
@@ -206,7 +281,7 @@ class OllamaProvider(AIProvider):
                         model=self.model,
                         messages=[message],
                         options=options,
-                        think=True if self.supports_thinking() else None,
+                        think=self._think_flag(),
                         # Keep the VL model resident for a bit so back-to-back agent
                         # QC calls don't cold-start a reload each time (was 0 =
                         # unload immediately). Configurable via providers.json
@@ -328,7 +403,7 @@ class OllamaProvider(AIProvider):
                         messages=ollama_messages,
                         tools=ollama_tools,
                         options=options,
-                        think=True if self.supports_thinking() else None,
+                        think=self._think_flag(),
                     ),
                     timeout=timeout,
                 )

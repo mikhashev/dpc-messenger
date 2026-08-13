@@ -1,0 +1,145 @@
+"""What a model can do, and what temperature it actually runs at.
+
+Both were decided in our code by values that could not say "nobody chose":
+a name absent from a list meant "cannot", and the number 0.7 meant "unset".
+"""
+
+from __future__ import annotations
+
+import pytest
+
+from dpc_client_core.providers import ollama_provider as OP
+
+
+class FakeShow:
+    def __init__(self, capabilities):
+        self.capabilities = capabilities
+
+
+class ShowWithoutTheField:
+    """An older daemon: it answers, and its answer has no capabilities."""
+
+
+class FakeClient:
+    """Stands in for the daemon. `answer` may raise to mean 'not reachable'."""
+
+    calls = 0
+    timeout = None
+
+    def __init__(self, host=None, timeout=None):
+        self.host = host
+        FakeClient.timeout = timeout
+
+    def show(self, model):
+        FakeClient.calls += 1
+        if FakeClient.answer is None:
+            raise RuntimeError("connection refused")
+        if FakeClient.answer == "no-field":
+            return ShowWithoutTheField()
+        return FakeShow(FakeClient.answer)
+
+
+@pytest.fixture(autouse=True)
+def clean_capabilities(monkeypatch):
+    OP._MODEL_CAPABILITIES.clear()
+    FakeClient.calls = 0
+    FakeClient.answer = ["completion"]
+    monkeypatch.setattr(OP.ollama, "Client", FakeClient)
+    yield
+    OP._MODEL_CAPABILITIES.clear()
+
+
+def _provider(**config):
+    config.setdefault("model", "muse-glimmer:latest")
+    return OP.OllamaProvider("test_alias", config)
+
+
+def test_a_model_in_no_list_is_still_seen_as_vision_capable():
+    """muse-glimmer is in neither list, and the daemon says it takes images."""
+    FakeClient.answer = ["completion", "vision", "tools", "thinking"]
+    assert _provider().supports_vision() is True
+
+
+def test_the_daemon_can_also_say_no_for_a_model_the_list_would_accept():
+    """The list matches by substring, so it answers for names it has never
+    seen. The daemon answers for the model actually installed."""
+    FakeClient.answer = ["completion"]
+    assert _provider(model="qwen3.5-something-textonly").supports_vision() is False
+
+
+def test_an_unreachable_daemon_falls_back_to_the_list():
+    FakeClient.answer = None
+    assert _provider(model="qwen3-vl:8b").supports_vision() is True
+    assert _provider(model="muse-glimmer:latest").supports_vision() is False
+
+
+def test_a_daemon_that_answers_without_the_field_leaves_the_lists_in_charge():
+    """An older daemon replies, and its reply has no capabilities at all.
+    Reading that as "answered, named nothing" would strip vision from a model
+    that has it — qwen3-vl would stop taking images and image QC would fail."""
+    FakeClient.answer = "no-field"
+    assert _provider(model="qwen3-vl:8b").supports_vision() is True
+    assert _provider(model="muse-glimmer:latest").supports_vision() is False
+
+
+def test_a_daemon_that_cannot_answer_is_asked_again_next_time():
+    """A refusal is not an answer: the daemon may be starting up."""
+    FakeClient.answer = None
+    _provider().supports_vision()
+    _provider().supports_vision()
+    assert FakeClient.calls == 2
+
+
+def test_the_question_carries_a_deadline():
+    """This runs on the event loop, and `host` may be another machine. With
+    no timeout a black-hole address hangs on the SYN for as long as the OS
+    allows; measured with this one, the same call raises in 1.01 s."""
+    _provider().supports_vision()
+    assert FakeClient.timeout == OP._CAPABILITY_TIMEOUT_SECONDS
+
+
+def test_the_daemon_is_asked_once_per_model():
+    FakeClient.answer = ["completion", "vision"]
+    p = _provider()
+    p.supports_vision()
+    p.supports_thinking()
+    _provider().supports_vision()
+    assert FakeClient.calls == 1
+
+
+def test_a_configured_temperature_is_sent_even_when_it_equals_the_old_default():
+    """0.7 used to mean "unset" and was dropped, so a provider asking for 0.7
+    silently ran at whatever the model itself defaults to."""
+    options = _provider(temperature=0.7)._build_options()
+    assert options["temperature"] == 0.7
+
+
+def test_no_configured_temperature_sends_none():
+    assert (_provider()._build_options() or {}).get("temperature") is None
+
+
+def test_an_explicit_argument_beats_the_configuration():
+    options = _provider(temperature=0.7)._build_options(temperature=0.2)
+    assert options["temperature"] == 0.2
+
+
+def test_thinking_is_on_for_a_capable_model_when_nothing_says_otherwise():
+    FakeClient.answer = ["completion", "thinking"]
+    assert _provider()._think_flag() is True
+
+
+def test_thinking_is_absent_for_a_model_that_cannot():
+    FakeClient.answer = ["completion"]
+    assert _provider()._think_flag() is None
+
+
+def test_the_configuration_can_turn_thinking_off_on_a_capable_model():
+    """The case that had no expression before: a model that can think, on a
+    call where thinking eats the whole budget and leaves no answer."""
+    FakeClient.answer = ["completion", "thinking"]
+    assert _provider(think=False)._think_flag() is False
+
+
+def test_the_configuration_can_turn_thinking_on_for_a_model_we_cannot_ask_about():
+    FakeClient.answer = None
+    assert _provider(think=True)._think_flag() is True
