@@ -1127,6 +1127,18 @@ if "--check" in sys.argv:
     print(f"Of the {len(dangling)} stale, {stated_n} sit next to a stated relation and "
           f"{len(dangling) - stated_n} are bare mentions. The first number is the one to "
           f"drive to zero; the total is an upper bound on real breakage, not a count of it.")
+
+    # §6 says the debt of untranslated prose is measured here, and until now nothing
+    # measured it: the language check covers the name and description of a post-cutoff
+    # entry and never looks at a body, so Russian paragraphs added to an old Russian
+    # entry — which is what §6 asks you to translate as you touch it — passed in silence.
+    # A count rather than a warning: 163 of 234 would drown every other line, and the
+    # standard's own rule is that this goes down by touching, not by a sprint.
+    ru_bodies = sum(1 for e in entries if re.search(r"[Ѐ-ӿ]", e["body"]))
+    if ru_bodies:
+        print(f"{ru_bodies} of {len(entries)} entries carry Russian prose in the body "
+              f"(§6: an entry becomes English when it is edited for another reason — "
+              f"this is the debt meter, not a warning).")
     dep_n = sum(1 for _, _, r in edges + arc_edges + adr_edges if r in DEPENDENCY_RELS)
     print(f"Links found in prose: {len(edges)} entry→entry, {len(arc_edges)} entry→archive, "
           f"{len(adr_edges)} entry→ADR"
