@@ -175,6 +175,7 @@
     type: 'ollama',
     model: '',
     peer_id: '',  // For dpc_agent remote inference
+    think: false, // Reasoning is opt-in on a new provider — see the form's help text
   };
 
   // Load config when modal opens
@@ -439,6 +440,7 @@
       type: 'ollama',
       model: '',
       peer_id: '',  // For dpc_agent remote inference
+      think: false, // Reasoning is opt-in on a new provider — see the form's help text
     };
   }
 
@@ -455,6 +457,9 @@
 
     if (newProvider.type === 'ollama') {
       provider.host = 'http://127.0.0.1:11434';
+      // Only when the form says so: leaving the key out means the model decides,
+      // and that is a third state rather than a synonym for off.
+      if (newProvider.think !== undefined) provider.think = newProvider.think;
     } else if (newProvider.type === 'openai_compatible') {
       provider.base_url = 'https://api.openai.com/v1';
       provider.api_key_env = 'OPENAI_API_KEY';
@@ -1528,6 +1533,30 @@
                   placeholder="Or enter exact value (tokens)"
                   class="custom-context-input"
                 />
+              </div>
+            {/if}
+
+            {#if newProvider.type === 'ollama'}
+              <div class="form-group">
+                <label for="new-think">Thinking</label>
+                <select
+                  id="new-think"
+                  value={newProvider.think === undefined ? '' : newProvider.think ? 'on' : 'off'}
+                  on:change={(e) => {
+                    const val = (e.target as HTMLSelectElement).value;
+                    newProvider.think = val === '' ? undefined : val === 'on';
+                  }}
+                >
+                  <option value="off">Always off (default)</option>
+                  <option value="on">Always on</option>
+                  <option value="">Model default (on if the model can)</option>
+                </select>
+                <p class="help-text">
+                  A new provider starts with reasoning off, because that is the
+                  setting that cannot fail: a model which spends its whole output
+                  budget thinking answers with nothing. Turn it on where the
+                  reasoning is what you came for.
+                </p>
               </div>
             {/if}
 
