@@ -20,8 +20,26 @@ import pytest
 
 from dpc_client_core.dpc_agent.tools import document as D
 
-MATH_PAPER = Path(os.path.expanduser("~/Downloads/2510.13406v1.pdf"))
-SCANNED = Path(os.path.expanduser("~/Downloads/0001202607260003.pdf"))
+def _sample(name: str) -> Path:
+    """Where a reference document might be on a node that is not this one.
+
+    The papers live in one developer's Downloads folder, and the other nodes
+    get them the way this project moves files at all — over a DPC chat, which
+    lands them under the conversation's files directory. Looking in both
+    places is the difference between these tests running on Linux and being
+    skipped there forever.
+    """
+    home = Path(os.path.expanduser("~"))
+    candidates = [home / "Downloads" / name, home / ".dpc" / "documents" / name]
+    candidates += sorted((home / ".dpc" / "conversations").glob(f"*/files/{name}"))
+    for path in candidates:
+        if path.exists():
+            return path
+    return candidates[0]
+
+
+MATH_PAPER = _sample("2510.13406v1.pdf")
+SCANNED = _sample("0001202607260003.pdf")
 
 # A two-page PDF written by hand: page 1 carries text, page 2 carries nothing.
 # pdfium rebuilds the missing xref, which is what makes this short enough to
