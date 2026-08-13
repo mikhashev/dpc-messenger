@@ -273,3 +273,15 @@ def test_an_inventory_that_raises_returns_no_count_rather_than_zero():
 
     fonts, images = D._page_fonts_and_images(_Page())
     assert images is None and fonts == set()
+
+
+def test_a_path_that_is_not_ascii_still_opens(ctx, tmp_path):
+    """The Windows hazard, kept as a guard for every platform: a C library
+    handed a path through a byte-oriented API loses non-ASCII names. The three
+    nodes this runs on are Windows, Linux and macOS, and only one of them is
+    ever tested by hand."""
+    folder = tmp_path / "документы"
+    folder.mkdir()
+    target = folder / "статья с пробелом.pdf"
+    target.write_bytes(TINY_PDF)
+    assert "Hello document" in _read(ctx, target, "1")["per_page"][0]["text"]
