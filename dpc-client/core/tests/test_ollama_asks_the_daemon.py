@@ -143,3 +143,13 @@ def test_the_configuration_can_turn_thinking_off_on_a_capable_model():
 def test_the_configuration_can_turn_thinking_on_for_a_model_we_cannot_ask_about():
     FakeClient.answer = None
     assert _provider(think=True)._think_flag() is True
+
+
+def test_the_log_says_which_flag_was_sent(caplog):
+    """A model may reason after being told not to — qwen3-vl returned 6,725
+    characters of thinking on a `think=False` call. Without this line there is
+    nothing to tell that apart from the flag never having been sent."""
+    FakeClient.answer = ["completion", "thinking"]
+    with caplog.at_level("DEBUG", logger=OP.logger.name):
+        _provider(context_window=16384, think=False)._build_options()
+    assert "think=False" in caplog.text

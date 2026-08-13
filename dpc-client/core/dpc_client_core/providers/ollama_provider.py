@@ -190,8 +190,15 @@ class OllamaProvider(AIProvider):
         for key in OLLAMA_SAMPLING_PARAMS:
             if key in self.config:
                 options[key] = self.config[key]
+        # `think` is logged beside the options because it is the one parameter
+        # whose effect cannot be read back from the answer: a model may reason
+        # after being told not to, and without this line there is no way to
+        # tell that from the flag never having been sent.
         if options:
-            logger.debug(f"OllamaProvider '{self.alias}': options={options}")
+            logger.debug(
+                "OllamaProvider '%s': options=%s think=%s",
+                self.alias, options, self._think_flag(),
+            )
         return options or None
 
     async def generate_response(self, prompt: str, **kwargs) -> str:
