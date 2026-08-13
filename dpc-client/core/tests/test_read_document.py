@@ -285,3 +285,23 @@ def test_a_path_that_is_not_ascii_still_opens(ctx, tmp_path):
     target = folder / "статья с пробелом.pdf"
     target.write_bytes(TINY_PDF)
     assert "Hello document" in _read(ctx, target, "1")["per_page"][0]["text"]
+
+
+def test_the_attribution_api_answers_on_this_build(tiny):
+    """The detector's input comes out of the pdfium binary, not out of our
+    code, and pdfium has renamed its font functions across majors before. This
+    pins the call itself on whatever platform runs the suite — without it, a
+    build where attribution silently stopped working would still be green,
+    because every page would come back `detector: unavailable` and the flags
+    would simply never fire.
+    """
+    import pypdfium2 as pdfium
+
+    doc = pdfium.PdfDocument(tiny)
+    textpage = doc[0].get_textpage()
+    text = textpage.get_text_range()
+    fonts = D._char_fonts(textpage)
+
+    assert fonts is not None, "per-character font attribution is unavailable on this build"
+    assert len(fonts) == len(text)
+    assert set(fonts) == {"Helvetica"}
