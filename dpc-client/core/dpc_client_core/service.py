@@ -708,6 +708,23 @@ class CoreService:
             except Exception as e:
                 logger.warning("Eager index rebuild failed for %s: %s", agent_dir.name, e)
 
+    async def _warm_tokenizers(self) -> None:
+        """Ask the token counter to load what the configured Ollama models need."""
+        try:
+            counter = getattr(self.llm_manager, "token_count_manager", None)
+            if counter is None or not hasattr(counter, "warm_tokenizers"):
+                return
+            # The live provider objects, not the file: whatever the manager
+            # actually built is what will be counting tokens.
+            models = [
+                getattr(provider, "model", None)
+                for provider in self.llm_manager.providers.values()
+                if type(provider).__name__ == "OllamaProvider"
+            ]
+            await counter.warm_tokenizers(models)
+        except Exception as exc:
+            logger.debug("Tokenizer warm-up skipped: %s", exc)
+
     async def start(self):
         """Starts all background services and runs indefinitely."""
         if self._is_running:
@@ -721,6 +738,17 @@ class CoreService:
         # Run knowledge integrity check
         logger.info("Running knowledge integrity check")
         await self._startup_integrity_check()
+
+        # The tokenizers for the local models, if any are missing. Counting
+        # happens while answering somebody, which is on the loop, and fetching
+        # there is refused on purpose — so without this a missing tokenizer
+        # stays missing for the life of the process and every count is the
+        # four-characters guess. Backgrounded: nothing waits on it, and it is
+        # silent when they are already cached.
+        warm_task = asyncio.create_task(self._warm_tokenizers())
+        warm_task.set_name("warm_tokenizers")
+        self._background_tasks.add(warm_task)
+        warm_task.add_done_callback(self._background_tasks.discard)
 
         # Start all background tasks
         listen_host = self.settings.get_p2p_listen_host()

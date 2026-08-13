@@ -104,3 +104,48 @@ def test_a_repo_that_failed_once_is_not_asked_again(counter, monkeypatch, caplog
 
     assert len(attempts) == 1, f"the load was retried: {attempts}"
     assert caplog.text.count("is not cached") == 1
+
+
+def test_the_warm_up_runs_off_the_loop_and_covers_the_models_it_was_given(counter, monkeypatch):
+    """Everything that counts tokens does so while answering somebody, which is
+    on the loop, where fetching is refused. Without a moment off the loop a
+    missing tokenizer stays missing for the life of the process."""
+    import asyncio
+
+    loops = []
+    fetched = []
+
+    class _Fake:
+        @staticmethod
+        def from_pretrained(repo, **kw):
+            try:
+                asyncio.get_running_loop()
+                loops.append(repo)
+            except RuntimeError:
+                pass
+            if kw.get("local_files_only"):
+                raise OSError("not cached")
+            fetched.append(repo)
+            return f"tok:{repo}"
+
+    import transformers
+
+    monkeypatch.setattr(transformers, "AutoTokenizer", _Fake)
+    asyncio.run(counter.warm_tokenizers(["qwen3-vl:8b", "llama3.1:8b"]))
+
+    assert loops == [], "a load ran on the event loop"
+    assert set(fetched) == {"Qwen/Qwen2.5-7B", "gpt2"}
+    assert counter._hf_tokenizer_cache["gpt2"] == "tok:gpt2"
+
+
+def test_the_warm_up_asks_for_nothing_when_there_are_no_local_models(counter, monkeypatch):
+    import asyncio
+
+    import transformers
+
+    monkeypatch.setattr(
+        transformers, "AutoTokenizer",
+        type("F", (), {"from_pretrained": staticmethod(lambda *a, **k: (_ for _ in ()).throw(AssertionError("asked anyway")))}),
+    )
+    asyncio.run(counter.warm_tokenizers([]))
+    asyncio.run(counter.warm_tokenizers(["deepseek-v4-pro"]))

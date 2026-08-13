@@ -213,6 +213,53 @@ class TokenCountManager:
             "message_count": message_count
         }
 
+    async def warm_tokenizers(self, models) -> None:
+        """Load the tokenizers these models need, off the event loop, once.
+
+        Everything that counts tokens does so while answering somebody, and
+        that is on the loop — where fetching is refused, correctly. Left at
+        that, a tokenizer that is missing stays missing for the life of the
+        process however long the network is up. Startup is the one moment
+        with nobody waiting, so the fetch belongs here: a worker thread, one
+        pass over the models this install actually has, and silence when they
+        are already cached.
+        """
+        import asyncio
+
+        # First match wins, exactly as the lookup does at count time. A set
+        # comprehension over every matching prefix looks equivalent and is not:
+        # "qwen3-vl" starts with both "qwen3" and "qwen", so it would fetch the
+        # Qwen2 tokenizer as well — a download for a repo no count will ever ask
+        # for. The test caught it; the two rules have to be the same rule.
+        repos = set()
+        for model in models:
+            family = str(model or "").split(":")[0].lower()
+            for prefix, repo in self.OLLAMA_TOKENIZER_MAP.items():
+                if family.startswith(prefix):
+                    repos.add(repo)
+                    break
+        if not repos:
+            return
+
+        def _load():
+            for repo in sorted(repos):
+                if repo in self._hf_tokenizer_cache or repo in self._tokenizer_failures:
+                    continue
+                try:
+                    from transformers import AutoTokenizer
+
+                    self._hf_tokenizer_cache[repo] = AutoTokenizer.from_pretrained(
+                        repo, local_files_only=True
+                    )
+                except Exception:
+                    tokenizer = self._fetch_tokenizer(repo, "startup")
+                    if tokenizer is None:
+                        self._tokenizer_failures.add(repo)
+                    else:
+                        self._hf_tokenizer_cache[repo] = tokenizer
+
+        await asyncio.get_running_loop().run_in_executor(None, _load)
+
     def _fetch_tokenizer(self, hf_model: str, model: str):
         """Download a tokenizer, but only where the wait harms nobody.
 
