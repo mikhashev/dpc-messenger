@@ -80,3 +80,27 @@ def test_a_failed_fetch_costs_the_count_and_not_the_call(counter, monkeypatch, c
     with caplog.at_level("WARNING"):
         assert counter._fetch_tokenizer("Qwen/Qwen2.5-7B", "qwen3-vl:8b") is None
     assert "could not be fetched" in caplog.text
+
+
+def test_a_repo_that_failed_once_is_not_asked_again(counter, monkeypatch, caplog):
+    """Before the negative cache, every count retried the load and printed the
+    same warning — three times in one millisecond in the log of 2026-08-14
+    01:46:12. With a fetch behind that retry it would also mean a download
+    attempt per call."""
+    monkeypatch.setenv("HF_HUB_OFFLINE", "1")
+    attempts = []
+
+    import transformers
+
+    def _record(repo, **kw):
+        attempts.append(repo)
+        raise OSError("not in cache")
+
+    monkeypatch.setattr(transformers, "AutoTokenizer",
+                        type("F", (), {"from_pretrained": staticmethod(_record)}))
+    with caplog.at_level("WARNING"):
+        for _ in range(3):
+            counter.count_tokens("пример текста", "qwen3-vl:8b")
+
+    assert len(attempts) == 1, f"the load was retried: {attempts}"
+    assert caplog.text.count("is not cached") == 1

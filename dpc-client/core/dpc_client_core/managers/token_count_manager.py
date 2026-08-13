@@ -79,6 +79,13 @@ class TokenCountManager:
         Sets up tokenizer cache for HuggingFace models.
         """
         self._tokenizer_cache: Dict[str, Any] = {}  # Cache HuggingFace tokenizers by model name
+        # Repos that could not be loaded. Only successes were remembered before,
+        # so a model with no tokenizer retried from_pretrained() and printed the
+        # same warning on every single count — three times in one millisecond in
+        # the log of 2026-08-14 01:46:12. With the fetch added, retrying would
+        # also mean re-attempting a download per call, which is worse than the
+        # noise: one attempt per repo per process is the whole intent.
+        self._tokenizer_failures: set = set()
 
     def count_tokens(self, text: str, model: str) -> int:
         """Count tokens in text for a given model.
@@ -281,6 +288,8 @@ class TokenCountManager:
             for family, hf_model in self.OLLAMA_TOKENIZER_MAP.items():
                 if model_family.startswith(family):
                     # Reuse already-loaded tokenizer for the same HF model
+                    if hf_model in self._tokenizer_failures:
+                        return None
                     if hf_model in self._hf_tokenizer_cache:
                         tokenizer = self._hf_tokenizer_cache[hf_model]
                         self._tokenizer_cache[model] = tokenizer
@@ -296,6 +305,7 @@ class TokenCountManager:
                     except Exception:
                         tokenizer = self._fetch_tokenizer(hf_model, model)
                         if tokenizer is None:
+                            self._tokenizer_failures.add(hf_model)
                             return None
 
                     self._hf_tokenizer_cache[hf_model] = tokenizer
