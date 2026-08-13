@@ -6,6 +6,14 @@ handed to an agent came back as replacement characters — and came back as a
 *string*, so nothing reported a failure. This tool reads the text layer of a
 PDF instead, page by page, and says per page what it got and what it did not.
 
+A page with no text layer is a scan, and the only local way to read one is to
+render it and look. That route exists here, and every part of it is bounded:
+it never starts without being asked or without the page proving it has no
+text, it never runs more pages than the caller allowed, it refuses in advance
+with the price rather than spending it, and a page it has read once is not
+read again. The GPU is shared with everything else on the machine, which is
+what all of that is protecting.
+
 What it deliberately does **not** do:
 
 - **repair mathematics.** Measured on four TeX documents 2026-08-13: the
@@ -15,14 +23,17 @@ What it deliberately does **not** do:
   emits 27 NUL bytes that carry nothing to repair. A substitution table would
   therefore be both endless and a lie on prose (`P` really is `P` most of the
   time). It detects and flags instead: an honest gap beats a plausible repair.
-- **render or call a model.** No vision, no GPU, no network in this tool. The
-  scan route and the arXiv-HTML route are separate steps, and the second one
-  is a separate tool because a file reader that quietly reaches the network
-  would misrepresent what the firewall panel promises about it.
+- **fetch anything.** This tool opens no URL of its own; the arXiv-HTML route,
+  which is the only one that can return a paper's real formulas, is a separate
+  tool, because a file reader that quietly reached out would misrepresent what
+  the firewall panel promises about it. Note what that does *not* say: the
+  vision provider it hands a page to may itself be a peer's model reached over
+  P2P, which is how a node with no GPU reads a scan at all.
 """
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 import logging
@@ -55,6 +66,23 @@ SYMBOL_FONT_MARKERS = (
 # Below this codepoint a character from a symbol font is suspect. Everything a
 # real mathematical symbol needs lives above it.
 SUSPECT_BELOW = 0x2000
+
+# The vision route, and every number here is a bound rather than a preference.
+VISION_DPI = 150                    # 2162 image tokens for an A4 page, measured
+DEFAULT_MAX_VISION_PAGES = 2        # per call; the caller raises it deliberately
+# Measured 2026-08-13: 15 s on a prose scan, 40 s on a page of dense
+# mathematics. The refusal quotes the pessimistic end — a price that turns out
+# lower is a good surprise, and `vision_seconds` reports what it actually was.
+VISION_SECONDS_PER_PAGE = 40
+MAX_RENDER_MEGAPIXELS = 40          # a hostile MediaBox renders into whatever it likes
+VISION_PROMPT = (
+    "Transcribe this page exactly as printed, in reading order. Write any "
+    "mathematics as LaTeX. Output only the transcription."
+)
+VISION_TEMPERATURE = 0
+# Bumped when the prompt changes, because a cached transcription made by a
+# different instruction is a different answer to a different question.
+VISION_PROMPT_VERSION = 1
 
 
 def _parse_pages(spec: Optional[str], total: int) -> Tuple[List[int], List[str]]:
@@ -262,7 +290,135 @@ def _read_page(doc, number: int) -> Dict[str, Any]:
     return entry
 
 
-def read_document(ctx: ToolContext, path: str, pages: Optional[str] = None) -> str:
+def _cache_path(ctx: ToolContext, digest: str, page: int, model: str, dpi: int) -> Path:
+    """Where a page already read by the model is kept.
+
+    Keyed by the file's own hash rather than its name, so the same document
+    read from two places is read once, and by model, dpi and prompt version,
+    because changing any of those changes the answer.
+    """
+    root = getattr(ctx, "agent_root", None) or Path.home() / ".dpc"
+    folder = Path(root) / "state" / "doc_cache"
+    folder.mkdir(parents=True, exist_ok=True)
+    stamp = f"{digest[:16]}-p{page}-{model}-{dpi}-v{VISION_PROMPT_VERSION}"
+    safe = "".join(c if c.isalnum() or c in "-_." else "_" for c in stamp)
+    return folder / f"{safe}.json"
+
+
+def _render_page(doc, number: int, dpi: int) -> Tuple[Optional[bytes], Optional[str]]:
+    """A page as PNG bytes, or the reason it was not rendered.
+
+    The size is asked for before anything is allocated: a page's MediaBox is
+    whatever the document says it is, and a hostile one asks for a bitmap the
+    size of the machine's memory. 40 megapixels is far above any real page —
+    A4 at 150 dpi is 2.2 — and far below anything that hurts.
+    """
+    try:
+        page = doc[number - 1]
+        width_pt, height_pt = page.get_size()
+        megapixels = (width_pt * dpi / 72) * (height_pt * dpi / 72) / 1_000_000
+        if megapixels > MAX_RENDER_MEGAPIXELS:
+            return None, (
+                f"page {number} would render to {megapixels:.0f} megapixels at "
+                f"{dpi} dpi, over the {MAX_RENDER_MEGAPIXELS} limit; not rendered"
+            )
+        import io
+
+        image = page.render(scale=dpi / 72).to_pil()
+        buffer = io.BytesIO()
+        image.save(buffer, format="PNG")
+        return buffer.getvalue(), None
+    except Exception as exc:
+        return None, f"page {number} could not be rendered: {type(exc).__name__}: {exc}"
+
+
+async def _read_page_with_vision(
+    ctx: ToolContext, doc, entry: Dict[str, Any], digest: str, model: Optional[str], dpi: int
+) -> None:
+    """Fill a page's text in by looking at it. Mutates `entry` in place."""
+    number = entry["page"]
+    alias = model or "default"
+    cache = _cache_path(ctx, digest, number, alias, dpi)
+    if cache.exists():
+        try:
+            cached = json.loads(cache.read_text(encoding="utf-8"))
+            entry.update(
+                route="vision", text=cached["text"], chars=len(cached["text"]),
+                model=cached.get("model"), cached=True, seconds=0.0,
+                note=f"page {number} was read by a vision model earlier and is served from cache",
+            )
+            return
+        except Exception as exc:
+            log.debug("unreadable cache entry %s: %s", cache, exc)
+
+    llm = getattr(getattr(ctx, "dpc_service", None), "llm_manager", None)
+    if llm is None:
+        entry["note"] = f"page {number} needs an eye and no model is reachable from here"
+        return
+
+    png, problem = _render_page(doc, number, dpi)
+    if png is None:
+        entry["note"] = problem
+        return
+
+    started = time.perf_counter()
+    try:
+        meta = await llm.query(
+            prompt=VISION_PROMPT,
+            provider_alias=model,  # None → the configured vision provider
+            images=[{"base64": base64.b64encode(png).decode("ascii"), "mime_type": "image/png"}],
+            return_metadata=True,
+            # A copy has no business being creative. The alias this runs through
+            # carries whatever temperature its owner chose for describing
+            # pictures — 0.7 on this machine — and that is the wrong setting for
+            # transcribing one. Per-call wins over the alias: kwargs reach
+            # `_build_options` through `LLMManager.query`.
+            temperature=VISION_TEMPERATURE,
+        )
+    except Exception as exc:
+        entry["note"] = f"page {number}: the vision model failed — {type(exc).__name__}: {exc}"
+        entry["seconds"] = round(time.perf_counter() - started, 1)
+        return
+    seconds = round(time.perf_counter() - started, 1)
+
+    text = (meta.get("response", "") if isinstance(meta, dict) else str(meta)) or ""
+    used = (meta.get("model") if isinstance(meta, dict) else None) or alias
+    if not text.strip():
+        # The provider stopped substituting reasoning for an empty answer, so an
+        # empty answer is what it is: the page was not read, and saying so is the
+        # whole point of the exercise.
+        entry.update(seconds=seconds, model=used)
+        entry["note"] = (
+            f"page {number}: the vision model returned nothing after {seconds} s — "
+            f"the page is unread, not empty"
+        )
+        return
+
+    entry.update(
+        route="vision", text=text, chars=len(text), model=used, cached=False,
+        seconds=seconds,
+        note=(
+            f"page {number} has no text layer and was transcribed by a vision model "
+            f"in {seconds} s — a transcription, not the document's own characters"
+        ),
+    )
+    try:
+        cache.write_text(
+            json.dumps({"text": text, "model": used, "seconds": seconds}, ensure_ascii=False),
+            encoding="utf-8",
+        )
+    except Exception as exc:
+        log.debug("could not cache page %s of %s: %s", number, digest[:8], exc)
+
+
+async def read_document(
+    ctx: ToolContext,
+    path: str,
+    pages: Optional[str] = None,
+    mode: str = "auto",
+    max_vision_pages: int = DEFAULT_MAX_VISION_PAGES,
+    vision_model: Optional[str] = None,
+) -> str:
     """
     Read the text of a PDF, page by page, and report what each page gave up.
 
@@ -271,6 +427,12 @@ def read_document(ctx: ToolContext, path: str, pages: Optional[str] = None) -> s
         path: Relative (sandbox) or absolute (firewall-checked) path to a PDF
         pages: "3", "1-5", "2,7,9-12". Omitted reads the first 10. Twenty pages
             per call at most; call again for the rest.
+        mode: "auto" sends only pages with no text layer to the vision model,
+            "text" never does, "vision" sends every requested page.
+        max_vision_pages: how many pages this call may spend on the model. Over
+            it, nothing is spent and the answer says what it would have cost.
+        vision_model: provider alias for the vision route. None uses the
+            configured vision provider.
 
     Returns:
         JSON with per-page routes, character counts, image counts, the pages
@@ -314,6 +476,39 @@ def read_document(ctx: ToolContext, path: str, pages: Optional[str] = None) -> s
 
     per_page = [_read_page(doc, n) for n in wanted]
 
+    # The eye, and only where it was asked for or proved necessary. Deciding
+    # this after every page has been inventoried — which costs about 5 ms a
+    # page — is what lets the refusal below quote a real number instead of
+    # discovering the cost halfway through spending it.
+    if mode not in ("auto", "text", "vision"):
+        notes.append(f"mode '{mode}' is not one of auto/text/vision; read as text only")
+        mode = "text"
+    if mode == "vision":
+        candidates = [p for p in per_page if p["route"] != "failed"]
+    elif mode == "auto":
+        candidates = [p for p in per_page if p["route"] == "no_text_layer" and p.get("images")]
+    else:
+        candidates = []
+
+    # The digest identifies the document in the answer and keys the page cache.
+    # It streams a megabyte at a time, and tools run in an executor thread
+    # (`dpc_agent/loop.py:378`), so neither memory nor the service's event loop
+    # pays for a large file — only the read itself, once per call.
+    digest = _file_digest(source)
+    refused_pages: List[int] = []
+    if len(candidates) > max(0, max_vision_pages):
+        refused_pages = [p["page"] for p in candidates]
+        notes.append(
+            f"{len(candidates)} pages were put to the vision model and this call allows "
+            f"{max_vision_pages}: pages {refused_pages} were not looked at. That would "
+            f"take roughly {len(candidates) * VISION_SECONDS_PER_PAGE} s on a GPU shared "
+            f"with everything else here. Call again with a narrower range, or raise "
+            f"max_vision_pages deliberately."
+        )
+    else:
+        for entry in candidates:
+            await _read_page_with_vision(ctx, doc, entry, digest, vision_model, VISION_DPI)
+
     unreadable = [p["page"] for p in per_page if p["route"] in ("no_text_layer", "failed")]
     wants_eye = [p["page"] for p in per_page if p.get("suspect_chars")]
     figures_unseen = [
@@ -332,13 +527,18 @@ def read_document(ctx: ToolContext, path: str, pages: Optional[str] = None) -> s
 
     payload = {
         "path": str(source),
-        "sha256": _file_digest(source),
+        "sha256": digest,
         "pages_total": total,
         "pages_read": wanted,
         "per_page": per_page,
         "unreadable_pages": unreadable,
         "pages_with_unreliable_math": wants_eye,
         "figures_not_seen": figures_unseen,
+        "vision_pages": [p["page"] for p in per_page if p["route"] == "vision"],
+        "vision_pages_refused": refused_pages,
+        # What this document cost, so the next decision about the cap is a
+        # number rather than a taste.
+        "vision_seconds": round(sum(p.get("seconds") or 0 for p in per_page), 1),
         # The document is data, not instruction. Nothing in this repository has
         # carried this field before; a page that asks the agent to do something
         # is a page quoting itself, and the tool gates decide what asking can
@@ -374,7 +574,10 @@ def get_tools() -> List[ToolEntry]:
                     "into Latin letters. Mathematics is never repaired — a page flagged "
                     "as unreliable is returned as extracted, and the honest way to read "
                     "its formulas is the paper's HTML source or an eye on the page. "
-                    "Local only: no network, no vision model, no GPU."
+                    "A page with no text layer is a scan: it is rendered and read by the "
+                    "configured vision provider — which may be a model on this machine or "
+                    "on a peer — bounded by max_vision_pages and cached by file hash. The "
+                    "tool itself opens no URL."
                 ),
                 "parameters": {
                     "type": "object",
@@ -394,12 +597,39 @@ def get_tools() -> List[ToolEntry]:
                                 "first 10. At most 20 pages per call."
                             ),
                         },
+                        "mode": {
+                            "type": "string",
+                            "enum": ["auto", "text", "vision"],
+                            "description": (
+                                "'auto' (default) reads the text layer and sends only "
+                                "pages that have none — scans — to the vision provider. "
+                                "'text' never uses a model. 'vision' transcribes "
+                                "every requested page, which is slow and worth it only "
+                                "when the text layer is wrong rather than missing."
+                            ),
+                        },
+                        "max_vision_pages": {
+                            "type": "integer",
+                            "description": (
+                                "How many pages this call may spend on the vision model "
+                                "(default 2, about 25 s each on a shared GPU). If more "
+                                "pages need it, none are read and the answer says which "
+                                "and what it would have cost."
+                            ),
+                        },
+                        "vision_model": {
+                            "type": "string",
+                            "description": (
+                                "Provider alias for the vision route. Omit to use the "
+                                "configured vision provider."
+                            ),
+                        },
                     },
                     "required": ["path"],
                 },
             },
             handler=read_document,
-            timeout_sec=120,
+            timeout_sec=600,  # two vision pages at the measured tail, plus margin
             is_core=False,
             # Reading a document is reading a file the agent was pointed at, and
             # the path gates decide which files those are — but a new tool is off

@@ -12,9 +12,11 @@ tests skip when the files are absent rather than pretending to pass.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -75,10 +77,29 @@ def tiny(tmp_path):
     return p
 
 
-def _read(ctx, path, pages=None):
-    out = D.read_document(ctx, str(path), pages)
+def _read(ctx, path, pages=None, **kw):
+    out = asyncio.run(D.read_document(ctx, str(path), pages, **kw))
     assert not out.startswith("⚠️"), out
     return json.loads(out)
+
+
+class _Vision:
+    """A stand-in for the local model: counts calls, answers what it is told to."""
+
+    def __init__(self, answer="Транскрипция страницы", fail=False):
+        self.answer, self.fail, self.calls = answer, fail, []
+
+    async def query(self, prompt=None, provider_alias=None, images=None, return_metadata=False, **kw):
+        self.calls.append({"alias": provider_alias, "images": len(images or [])})
+        if self.fail:
+            raise RuntimeError("model is on fire")
+        return {"response": self.answer, "model": provider_alias or "test-vl"}
+
+
+def _ctx_with_vision(ctx, vision, tmp_path):
+    ctx.dpc_service = SimpleNamespace(llm_manager=vision)
+    ctx.agent_root = tmp_path / "agent"
+    return ctx
 
 
 # --------------------------------------------------------------------- ranges
@@ -164,7 +185,7 @@ def test_a_broken_page_does_not_take_the_range_with_it(ctx):
 def test_a_file_that_is_not_a_pdf_is_refused_by_name(ctx, tmp_path):
     other = tmp_path / "notes.docx"
     other.write_bytes(b"PK\x03\x04")
-    assert "not supported yet" in D.read_document(ctx, str(other))
+    assert "not supported yet" in asyncio.run(D.read_document(ctx, str(other)))
 
 
 def test_a_denied_path_is_reported_not_raised(monkeypatch, tiny):
@@ -172,7 +193,7 @@ def test_a_denied_path_is_reported_not_raised(monkeypatch, tiny):
         raise PermissionError("Sandbox violation: nope")
 
     monkeypatch.setattr(D, "_resolve_file_path", deny)
-    assert "Access denied" in D.read_document(_Ctx(), str(tiny))
+    assert "Access denied" in asyncio.run(D.read_document(_Ctx(), str(tiny)))
 
 
 # ------------------------------------------------------------- the detector
@@ -323,3 +344,133 @@ def test_the_attribution_api_answers_on_this_build(tiny):
     assert fonts is not None, "per-character font attribution is unavailable on this build"
     assert len(fonts) == len(text)
     assert set(fonts) == {"Helvetica"}
+
+
+# ---------------------------------------------------------------- the eye
+
+def test_the_model_is_never_called_for_a_page_that_has_text(ctx, tiny, tmp_path):
+    """Auto means auto: a page with a text layer is read from the text layer,
+    and a GPU shared with everything else on the machine stays free."""
+    vision = _Vision()
+    out = _read(_ctx_with_vision(ctx, vision, tmp_path), tiny, "1", mode="auto")
+    assert vision.calls == []
+    assert out["vision_pages"] == [] and out["vision_seconds"] == 0.0
+
+
+def test_text_mode_refuses_the_eye_even_when_the_page_needs_it(ctx, tiny, tmp_path):
+    vision = _Vision()
+    out = _read(_ctx_with_vision(ctx, vision, tmp_path), tiny, "2", mode="text")
+    assert vision.calls == []
+    assert out["unreadable_pages"] == [2]
+
+
+def test_a_page_read_by_the_model_says_it_was_a_transcription(ctx, tiny, tmp_path):
+    vision = _Vision(answer="Статья 2. Цели настоящего Федерального закона")
+    out = _read(_ctx_with_vision(ctx, vision, tmp_path), tiny, "2", mode="vision")
+    page = out["per_page"][0]
+    assert len(vision.calls) == 1 and vision.calls[0]["images"] == 1
+    assert page["route"] == "vision"
+    assert "Статья 2" in page["text"]
+    assert "transcribed by a vision model" in page["note"]
+    assert out["vision_pages"] == [2] and out["vision_seconds"] >= 0
+
+
+def test_the_same_page_is_not_read_twice(ctx, tiny, tmp_path):
+    """A 22-page scan is ten minutes of a shared GPU. Paying that twice for the
+    same file is the cost this cache exists to refuse."""
+    vision = _Vision()
+    c = _ctx_with_vision(ctx, vision, tmp_path)
+    first = _read(c, tiny, "2", mode="vision")["per_page"][0]
+    second = _read(c, tiny, "2", mode="vision")["per_page"][0]
+    assert len(vision.calls) == 1, "the second read went to the model again"
+    assert second["cached"] is True and second["text"] == first["text"]
+
+
+def test_the_cache_is_keyed_by_content_not_by_name(ctx, tiny, tmp_path):
+    """The same document under two names is one document."""
+    vision = _Vision()
+    c = _ctx_with_vision(ctx, vision, tmp_path)
+    _read(c, tiny, "2", mode="vision")
+    twin = tmp_path / "renamed.pdf"
+    twin.write_bytes(tiny.read_bytes())
+    assert _read(c, twin, "2", mode="vision")["per_page"][0]["cached"] is True
+    assert len(vision.calls) == 1
+
+
+def test_over_the_cap_nothing_is_spent_and_the_price_is_quoted(ctx, tiny, tmp_path):
+    """The refusal has to arrive before the cost, not after it — which is why
+    every page is inventoried first."""
+    vision = _Vision()
+    out = _read(_ctx_with_vision(ctx, vision, tmp_path), tiny, "1-2", mode="vision",
+                max_vision_pages=1)
+    assert vision.calls == [], "pages were read despite the cap"
+    assert out["vision_pages"] == []
+    assert out["vision_pages_refused"] == [1, 2]
+    assert any("would take roughly" in w or "not looked at" in w for w in out["warnings"])
+
+
+def test_a_model_that_answers_with_nothing_leaves_the_page_unread(ctx, tiny, tmp_path):
+    """The provider stopped passing reasoning off as an answer; the page must
+    not now be reported as read with an empty body."""
+    vision = _Vision(answer="   ")
+    out = _read(_ctx_with_vision(ctx, vision, tmp_path), tiny, "2", mode="vision")
+    page = out["per_page"][0]
+    assert page["route"] != "vision"
+    assert "unread, not empty" in page["note"]
+    assert 2 in out["unreadable_pages"]
+
+
+def test_a_model_that_raises_is_reported_and_the_call_survives(ctx, tiny, tmp_path):
+    out = _read(_ctx_with_vision(ctx, _Vision(fail=True), tmp_path), tiny, "1-2", mode="vision")
+    assert any("model is on fire" in (p.get("note") or "") for p in out["per_page"])
+    assert "Hello document" in out["per_page"][0]["text"], "page 1's text survived"
+
+
+def test_no_model_in_reach_is_said_rather_than_crashed(ctx, tiny):
+    out = _read(ctx, tiny, "2", mode="vision")
+    assert "no model is reachable" in out["per_page"][0]["note"]
+
+
+def test_a_page_too_large_to_render_is_refused_before_it_is_rendered(ctx, tmp_path):
+    """A MediaBox is whatever the document says it is. 200000 points square is
+    173,611 megapixels at 150 dpi — the guard reads the size, not the bitmap."""
+    huge = tmp_path / "huge.pdf"
+    huge.write_bytes(TINY_PDF.replace(b"/MediaBox [0 0 200 200]", b"/MediaBox [0 0 200000 200000]"))
+    vision = _Vision()
+    out = _read(_ctx_with_vision(ctx, vision, tmp_path), huge, "2", mode="vision")
+    assert vision.calls == [], "the model was handed a bitmap that should not exist"
+    assert "megapixels" in out["per_page"][0]["note"]
+
+
+def test_an_unknown_mode_reads_text_and_says_so(ctx, tiny, tmp_path):
+    vision = _Vision()
+    out = _read(_ctx_with_vision(ctx, vision, tmp_path), tiny, "2", mode="clairvoyance")
+    assert vision.calls == []
+    assert any("not one of auto/text/vision" in w for w in out["warnings"])
+
+
+@pytest.mark.skipif(not SCANNED.exists(), reason="the reference scan is not on this machine")
+def test_a_real_scan_routes_itself_to_the_eye(ctx, tmp_path):
+    """The auto rule end to end on the document it was written for: no text
+    layer plus an image is the page a model has to read."""
+    vision = _Vision()
+    out = _read(_ctx_with_vision(ctx, vision, tmp_path), SCANNED, "2", mode="auto")
+    assert len(vision.calls) == 1
+    assert out["vision_pages"] == [2]
+
+
+def test_the_transcription_is_asked_for_at_temperature_zero(ctx, tiny, tmp_path):
+    """Scenario Б is "copy it exactly". The alias this runs through carries the
+    temperature its owner picked for describing pictures — 0.7 here — and a
+    copy has no business being creative."""
+
+    class _Recording(_Vision):
+        async def query(self, prompt=None, provider_alias=None, images=None,
+                        return_metadata=False, **kw):
+            self.kwargs = kw
+            return await super().query(prompt=prompt, provider_alias=provider_alias,
+                                       images=images, return_metadata=return_metadata)
+
+    vision = _Recording()
+    _read(_ctx_with_vision(ctx, vision, tmp_path), tiny, "2", mode="vision")
+    assert vision.kwargs.get("temperature") == 0
