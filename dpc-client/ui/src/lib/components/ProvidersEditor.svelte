@@ -24,6 +24,10 @@
     temperature?: number;    // Model creativity (0.0-2.0, default 0.7)
     max_tokens?: number;     // Max output tokens (zai/anthropic)
     top_p?: number;          // Nucleus sampling (zai, ollama)
+    // Whether the model reasons before answering. Unset is not the same as
+    // false: unset lets the capability decide, false says no to a model that
+    // can (Ollama only).
+    think?: boolean;
     // Ollama sampling params (unset = modelfile default)
     min_p?: number;
     presence_penalty?: number;
@@ -136,6 +140,16 @@
     const t = editedConfig?.providers[i]?.temperature;
     if (customTempMode[i] || (t !== undefined && !TEMPERATURE_PRESETS.some(p => p.value === t))) return 'custom';
     return t ?? '';
+  }
+
+  // Three states, and a checkbox can only hold two. Leaving it out is the
+  // third: the daemon reports whether the model can think and that decides.
+  // Saying no explicitly is what a checkbox cannot express, and it is the
+  // case that matters — a model that spends its whole budget reasoning
+  // answers with nothing at all.
+  function thinkSelectValue(i: number): string {
+    const t = editedConfig?.providers[i]?.think;
+    return t === undefined ? '' : t ? 'on' : 'off';
   }
 
   function getSamplingParam(i: number, key: string): number | '' {
@@ -1260,6 +1274,31 @@
 
                     {#if editedConfig.providers[i].type === 'ollama'}
                       <div class="form-group">
+                        <label for="think-{i}">Thinking</label>
+                        <select
+                          id="think-{i}"
+                          value={thinkSelectValue(i)}
+                          on:change={(e) => {
+                            if (!editedConfig) return;
+                            const val = (e.target as HTMLSelectElement).value;
+                            editedConfig.providers[i].think =
+                              val === '' ? undefined : val === 'on';
+                            editedConfig = editedConfig;
+                          }}
+                        >
+                          <option value="">Model default (on if the model can)</option>
+                          <option value="on">Always on</option>
+                          <option value="off">Always off</option>
+                        </select>
+                        <p class="help-text">
+                          Reasoning before the answer. Turn it off when a model
+                          spends its whole output budget thinking and returns
+                          nothing — that is a real failure we have seen, not a
+                          preference about style.
+                        </p>
+                      </div>
+
+                      <div class="form-group">
                         <label for="sampling-{i}">Sampling Parameters (optional)</label>
                         <p class="help-text">Empty = model default. Check actual values via the ⓘ Query Info button.</p>
                         <div class="sampling-grid" id="sampling-{i}">
@@ -1373,6 +1412,10 @@
 
                     {#if provider.temperature !== undefined}
                       <p><strong>Temperature:</strong> {provider.temperature}</p>
+                    {/if}
+
+                    {#if provider.think !== undefined}
+                      <p><strong>Thinking:</strong> {provider.think ? 'always on' : 'always off'}</p>
                     {/if}
 
                     {#if OLLAMA_SAMPLING_PARAMS.some(p => (provider as any)[p.key] !== undefined)}
