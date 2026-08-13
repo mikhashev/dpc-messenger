@@ -848,17 +848,30 @@ class DpcLlmAdapter:
         # Make a copy to avoid modifying original
         messages = list(messages)
 
+        # An empty description is a failed vision call, and it has to read as
+        # one. Announcing "here is the visual analysis" over nothing tells the
+        # agent it has seen the image when it has not — the same substitution
+        # the provider stopped making when it quit returning reasoning in the
+        # answer's place, one layer up.
+        if not (description or "").strip():
+            header = (
+                "[The user has shared an image. The vision model returned no "
+                "description, so you have not seen it — say so rather than "
+                "guessing at its contents.]"
+            )
+        else:
+            header = (
+                "[The user has shared an image. Here is the visual analysis]:\n"
+                f"{description}"
+            )
+
         # Find the last user message and inject description
         for i in range(len(messages) - 1, -1, -1):
             if messages[i].get("role") == "user":
                 content = messages[i].get("content")
 
                 # Build the enhanced content with image context
-                enhanced_text = (
-                    f"[The user has shared an image. Here is the visual analysis]:\n"
-                    f"{description}\n\n"
-                    f"[User's message]: "
-                )
+                enhanced_text = f"{header}\n\n[User's message]: "
 
                 if isinstance(content, str):
                     messages[i] = {
