@@ -91,6 +91,28 @@ def _hf_required_models() -> set:
             if isinstance(model, str) and model:
                 wanted.add(model)
 
+    # The tokenizers the token counter loads for local models. They were the one
+    # source missing here, and the omission had a shape: everything else was
+    # cached, so the process went offline, and then the counter could not fetch
+    # the tokenizer it wanted even though the network was there. Falling back to
+    # one-token-per-four-characters costs about a fifth of the count on Russian
+    # (measured 315 against 382 on one page), so this is not cosmetic.
+    try:
+        from dpc_client_core.managers.token_count_manager import TokenCountManager
+
+        providers_path = _HFPath.home() / ".dpc" / "providers.json"
+        providers = _hf_json.loads(providers_path.read_text(encoding="utf-8"))
+        for entry in providers.get("providers", []):
+            if entry.get("type") != "ollama":
+                continue
+            family = str(entry.get("model") or "").split(":")[0].lower()
+            for prefix, repo in TokenCountManager.OLLAMA_TOKENIZER_MAP.items():
+                if family.startswith(prefix):
+                    wanted.add(repo)
+                    break
+    except Exception:
+        pass
+
     # Whisper has no module constant — the id lives in providers.json, which
     # is also the only place that knows whether this install has one at all.
     try:

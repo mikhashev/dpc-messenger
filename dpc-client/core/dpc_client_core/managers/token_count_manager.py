@@ -206,6 +206,57 @@ class TokenCountManager:
             "message_count": message_count
         }
 
+    def _fetch_tokenizer(self, hf_model: str, model: str):
+        """Download a tokenizer, but only where the wait harms nobody.
+
+        A tokenizer is metadata — a few megabytes, not the weights — so fetching
+        one that is missing beats counting characters forever. Two conditions,
+        both about who pays for the wait. There must be no event loop under us:
+        this is called from the loop as well as from worker threads, and a
+        synchronous download on the loop stops Telegram, the WebSocket and P2P
+        for its duration. And the process must not be in offline mode, which is
+        a decision somebody made deliberately — `[hf] offline_mode`, or the
+        startup check finding every declared model already cached — and not one
+        to quietly overrule.
+        """
+        import asyncio
+        import os
+
+        try:
+            asyncio.get_running_loop()
+            on_loop = True
+        except RuntimeError:
+            on_loop = False
+        offline = os.environ.get("HF_HUB_OFFLINE") == "1"
+
+        if on_loop or offline:
+            logger.warning(
+                "Tokenizer %s is not cached, so token counts for %s are estimated at "
+                "four characters each — about a fifth low on Russian. Not fetching it "
+                "here: %s.",
+                hf_model, model,
+                "this call is on the event loop" if on_loop
+                else "the process is in offline mode",
+            )
+            return None
+
+        try:
+            from transformers import AutoTokenizer
+
+            logger.info("Fetching tokenizer %s for %s (a few MB, once)", hf_model, model)
+            tokenizer = AutoTokenizer.from_pretrained(hf_model)
+            logger.info(
+                "Tokenizer %s cached — token counts for %s are exact from here on",
+                hf_model, model,
+            )
+            return tokenizer
+        except Exception as exc:
+            logger.warning(
+                "Tokenizer %s could not be fetched (%s) — counting characters for %s",
+                hf_model, exc, model,
+            )
+            return None
+
     def _get_tokenizer_for_ollama(self, model: str) -> Optional[Any]:
         """Get HuggingFace tokenizer for Ollama model.
 
@@ -236,23 +287,16 @@ class TokenCountManager:
                         logger.info("Reusing cached tokenizer for %s: %s", model, hf_model)
                         return tokenizer
 
-                    # Try local cache only — never do a network download on
-                    # the event loop.  from_pretrained() is synchronous and
-                    # blocks the entire asyncio loop (Telegram, WebSocket,
-                    # P2P) until the HTTP request completes or times out.
+                    # The cache first, always: from_pretrained() is synchronous
+                    # and a download on the event loop would stop Telegram, the
+                    # WebSocket and P2P until the HTTP request finishes.
                     try:
                         logger.info("Loading tokenizer for %s: %s (local cache)", model, hf_model)
                         tokenizer = AutoTokenizer.from_pretrained(hf_model, local_files_only=True)
                     except Exception:
-                        logger.warning(
-                            "Tokenizer %s not in local cache — falling back to "
-                            "character estimation for %s. Run "
-                            "'python -c \"from transformers import AutoTokenizer; "
-                            "AutoTokenizer.from_pretrained(\\'%s\\')\"' "
-                            "to download it.",
-                            hf_model, model, hf_model,
-                        )
-                        return None
+                        tokenizer = self._fetch_tokenizer(hf_model, model)
+                        if tokenizer is None:
+                            return None
 
                     self._hf_tokenizer_cache[hf_model] = tokenizer
                     self._tokenizer_cache[model] = tokenizer
