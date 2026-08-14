@@ -1210,13 +1210,22 @@ class KnowledgeGraph:
         if self._backend.get_node(node_id) is None:
             self._backend.add_node(GraphNode(node_id=node_id, node_type=node_type, label=label))
 
-    def _add_edge_safe(self, src: str, tgt: str, etype: EdgeType, justification: str, t_created: str, properties: dict | None = None) -> None:
-        if not self._edge_exists(src, tgt, etype):
-            self._backend.add_edge(GraphEdge(
-                source_id=src, target_id=tgt, edge_type=etype,
-                t_created=t_created, justification=justification,
-                properties=properties if properties is not None else {"source": "structural"},
-            ))
+    def _add_edge_safe(self, src: str, tgt: str, etype: EdgeType, justification: str, t_created: str, properties: dict | None = None) -> bool:
+        """Add the edge unless it is already there. True iff this call wrote one.
+
+        The return value exists because a caller that counts its own attempts cannot
+        tell an insertion from a duplicate, and the nightly relation counter did
+        exactly that — reporting "N relations (from N candidates)" every single night,
+        which it could not help doing.
+        """
+        if self._edge_exists(src, tgt, etype):
+            return False
+        self._backend.add_edge(GraphEdge(
+            source_id=src, target_id=tgt, edge_type=etype,
+            t_created=t_created, justification=justification,
+            properties=properties if properties is not None else {"source": "structural"},
+        ))
+        return True
 
     def _edge_exists(self, src: str, tgt: str, etype: EdgeType) -> bool:
         return self._backend.edge_exists(src, tgt, etype)

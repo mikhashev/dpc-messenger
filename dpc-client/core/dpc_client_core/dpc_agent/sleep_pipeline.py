@@ -757,10 +757,10 @@ async def run_sleep(
                     props = {"source": "llm_relation"}
                     if rel.get("needs_review"):
                         props["needs_review"] = True
-                    _kg._add_edge_safe(src_id, tgt_id, edge_type, justification, now, props)
-                    added += 1
-                if added:
-                    log.info("Sleep pipeline: LLM extracted %d relations (from %d candidates)", added, len(extracted_relations))
+                    if _kg._add_edge_safe(src_id, tgt_id, edge_type, justification, now, props):
+                        added += 1
+                if added or extracted_relations:
+                    log.info("Sleep pipeline: LLM relations — %d new of %d proposed", added, len(extracted_relations))
             except Exception as e:
                 log.debug("Sleep pipeline: LLM relation extraction failed: %s", e)
 
