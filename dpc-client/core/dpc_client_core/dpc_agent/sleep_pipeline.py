@@ -190,10 +190,15 @@ def _write_sleep_state(conversation_dir: Path, state: Dict[str, Any]) -> None:
     path.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
-#: How many nightly dumps to keep per agent. Seven is a week of nights: enough to go
-#: back past a bad run nobody noticed the same day, small enough that the largest
-#: agent's backups cost about 18 MB. Hand-taken dumps are kept by naming them
-#: something other than the nightly pattern — rotation only ever touches its own.
+#: How many automatic dumps to keep per agent — seven **sleeps**, not seven nights.
+#: Nothing in this system schedules sleep: a human runs it, from `/sleep` in the 1:1
+#: chat or the UI button, and only on an empty chat. So the backup cadence is exactly
+#: the cadence of that ritual, and a quiet week takes no copies at all. Seven is enough
+#: to reach back past a bad run nobody noticed the same day, and costs about 18 MB on
+#: the largest agent. Hand-taken dumps are kept by naming them something other than the
+#: pattern below — rotation only ever touches its own.
+#: (The first version of this comment said "every night on its own". Ark and GLM 5.2
+#: caught it independently: there is no night in the code.)
 GRAPH_EXPORT_KEEP = 7
 GRAPH_EXPORT_DIR = "knowledge_graph_export"
 _NIGHTLY_SUFFIX = "-nightly.jsonl"

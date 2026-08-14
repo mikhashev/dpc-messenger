@@ -1,9 +1,11 @@
-"""Sleep leaves the graph a copy of itself, and keeps a week of them.
+"""Sleep leaves the graph a copy of itself, and keeps the last few.
 
 The class that makes this matter is `llm_relation`: 40.8% of the fleet's edges and
 57.2% of warren's, written only by sleep and reconstructible from nothing outside the
-store. A dump taken by hand exists until someone forgets, which is why this hangs off
-the one event that happens every night on its own.
+store. Hanging the copy off sleep is right — it is the moment those edges have just
+been written — but it buys a cadence, not a schedule: **nothing runs sleep by clock**,
+a human does, and only on an empty chat. Seven kept dumps are seven sleeps. A quiet
+week produces none, and these tests say "sleep", never "night", for that reason.
 """
 
 from __future__ import annotations
@@ -62,7 +64,7 @@ def test_an_empty_graph_is_not_backed_up(agent, tmp_path):
     assert SP._export_graph_snapshot("agent_test", tmp_path / "conversations" / "agent_test") is None
 
 
-def test_only_the_last_week_of_nights_is_kept(agent, tmp_path):
+def test_only_the_last_few_sleeps_are_kept(agent, tmp_path):
     _graph_with_content(agent)
     export_dir = agent / SP.GRAPH_EXPORT_DIR
     export_dir.mkdir(exist_ok=True)
