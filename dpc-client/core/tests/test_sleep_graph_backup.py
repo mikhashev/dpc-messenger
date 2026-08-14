@@ -101,3 +101,45 @@ def test_a_backup_that_dies_halfway_leaves_the_previous_one_alone(agent, tmp_pat
     leftovers = list((agent / SP.GRAPH_EXPORT_DIR).glob("*.part"))
     assert leftovers, "the half-written file stays as .part and never claims the name"
     assert all(p.suffix == ".part" for p in leftovers)
+
+
+def test_rotation_refuses_to_evict_history_when_the_graph_shrinks(agent, tmp_path):
+    """Raised by Fable 5: rotation must not finish off a damaged graph.
+
+    The standing symptom on this fleet is a store that reopens smaller. If that ever
+    reaches the class nothing rebuilds, the graph is damaged-but-not-empty, sleep still
+    completes, and seven more successful backups evict the last copy that still had
+    those edges in it.
+    """
+    kg = _graph_with_content(agent)
+    conv = tmp_path / "conversations" / "agent_test"
+    export_dir = agent / SP.GRAPH_EXPORT_DIR
+
+    # One real dump, then copies of it stamped earlier — the timestamp has second
+    # resolution, so a loop of exports inside one second would all be the same file.
+    good = SP._export_graph_snapshot("agent_test", conv)
+    for day in range(1, SP.GRAPH_EXPORT_KEEP + 1):
+        (export_dir / f"202608{day:02d}T000000Z-nightly.jsonl").write_text(
+            good.read_text(encoding="utf-8"), encoding="utf-8")
+    good.unlink()  # or the next export, landing in the same second, would overwrite it
+    assert len(list(export_dir.glob("*-nightly.jsonl"))) == SP.GRAPH_EXPORT_KEEP
+
+    # The graph loses its irreplaceable edge, and the next sleep still finishes.
+    kg.backend.clear_structural_edges()
+    for edge in list(kg.backend.iter_edges()):
+        if edge.properties.get("source") == "llm_relation":
+            kg.backend._conn.execute(
+                "DELETE FROM edges WHERE source_id=? AND target_id=?",
+                (edge.source_id, edge.target_id))
+            kg.backend._conn.commit()
+    assert kg.snapshot()["edges_by_source"].get("llm_relation", 0) == 0
+
+    SP._export_graph_snapshot("agent_test", conv)
+
+    kept = sorted(export_dir.glob("*-nightly.jsonl"))
+    assert len(kept) == SP.GRAPH_EXPORT_KEEP + 1, "nothing may be evicted on a shrink"
+    with kept[0].open(encoding="utf-8") as fh:
+        oldest = json.loads(fh.readline())
+    assert oldest["snapshot"]["edges_by_source"]["llm_relation"] == 1, (
+        "the surviving history must still contain the edges that went missing"
+    )

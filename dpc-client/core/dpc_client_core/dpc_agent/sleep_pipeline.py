@@ -219,20 +219,49 @@ def _export_graph_snapshot(agent_id: Optional[str], conversation_dir: Path) -> O
     if kg.backend.node_count() == 0:
         return None
 
+    previous = sorted((agent_root / GRAPH_EXPORT_DIR).glob(f"*{_NIGHTLY_SUFFIX}"))
+    irreplaceable_before = _llm_relation_count(previous[-1]) if previous else 0
+
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     target = agent_root / GRAPH_EXPORT_DIR / f"{stamp}{_NIGHTLY_SUFFIX}"
     written = kg.export_to(target)
 
-    nightly = sorted(target.parent.glob(f"*{_NIGHTLY_SUFFIX}"))
-    for old in nightly[:-GRAPH_EXPORT_KEEP]:
-        try:
-            old.unlink()
-        except OSError as e:
-            log.debug("Could not rotate out %s: %s", old.name, e)
+    # Rotation must never be the thing that finishes off a damaged graph. The standing
+    # symptom on this fleet is a store that reopens smaller; if that ever reaches the
+    # class nothing rebuilds, the graph is damaged-but-not-empty, sleep still completes,
+    # and seven more successful backups would quietly evict the last copy that still
+    # had those edges in it. So: a shrink means keep everything and say so. Raised by
+    # Fable 5 in review as the thing to fix here before anything else.
+    irreplaceable_now = kg.snapshot().get("edges_by_source", {}).get("llm_relation", 0)
+    if previous and irreplaceable_now < irreplaceable_before:
+        log.warning(
+            "Sleep: knowledge graph backed up, but llm_relation fell from %d to %d — "
+            "keeping every previous dump instead of rotating, because one of them is "
+            "the last copy that still has those edges",
+            irreplaceable_before, irreplaceable_now,
+        )
+    else:
+        nightly = sorted(target.parent.glob(f"*{_NIGHTLY_SUFFIX}"))
+        for old in nightly[:-GRAPH_EXPORT_KEEP]:
+            try:
+                old.unlink()
+            except OSError as e:
+                log.debug("Could not rotate out %s: %s", old.name, e)
 
-    log.info("Sleep: knowledge graph backed up — %d nodes, %d edges → %s",
-             written["nodes"], written["edges"], target.name)
+    log.info("Sleep: knowledge graph backed up — %d nodes, %d edges, %d irreplaceable → %s",
+             written["nodes"], written["edges"], irreplaceable_now, target.name)
     return target
+
+
+def _llm_relation_count(dump: Path) -> int:
+    """How many irreplaceable edges a previous dump holds, read from its own header."""
+    try:
+        with dump.open(encoding="utf-8") as fh:
+            first = fh.readline()
+        header = json.loads(first) if first.strip() else {}
+    except (OSError, json.JSONDecodeError):
+        return 0
+    return ((header.get("snapshot") or {}).get("edges_by_source") or {}).get("llm_relation", 0)
 
 
 def _collect_group_archive_digests(group_dir: Path, agent_id: str) -> List[Dict[str, Any]]:
@@ -807,7 +836,16 @@ async def run_sleep(
                 if added or extracted_relations:
                     log.info("Sleep pipeline: LLM relations — %d new of %d proposed", added, len(extracted_relations))
             except Exception as e:
-                log.debug("Sleep pipeline: LLM relation extraction failed: %s", e)
+                # WARNING, not debug. This is the only writer of the only edge class
+                # with no source outside the graph — 40.8% of the fleet's edges and
+                # growing. If it dies (a provider alias rots, the response shape
+                # changes) everything around it still reports success: sleep completes,
+                # the brief renders, the backup dumps a graph that has quietly stopped
+                # growing. GLM 5.2 called this the single point where this whole
+                # architecture can fail invisibly forever.
+                log.warning("Sleep pipeline: LLM relation extraction failed — the "
+                            "irreplaceable edge class gained nothing this cycle: %s", e,
+                            exc_info=True)
 
         morning_brief["generated_at"] = datetime.now(timezone.utc).isoformat()
         morning_brief["consumed"] = False

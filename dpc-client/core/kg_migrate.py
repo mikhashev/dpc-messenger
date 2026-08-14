@@ -126,17 +126,28 @@ def verify(args: argparse.Namespace) -> int:
     # explained. The transform this was written for drops knowledge-file nodes, and a
     # dropped node takes its edges with it — an edge whose endpoint was declared gone
     # is collateral, not loss.
-    lost_nodes = before_nodes - after_nodes
-    declared = args.expect_dropped or 0
-    print(f"nodes       : {len(lost_nodes)} missing, {declared} declared")
-    if len(lost_nodes) != declared:
-        failures.append(
-            f"{len(lost_nodes)} nodes missing, {declared} declared — "
-            f"a delta has to be written down before the run, not explained after")
-    for node in sorted(lost_nodes)[:5]:
-        print(f"    dropped: {node[0]} ({node[1]})")
+    # Gone means the id is absent afterwards, not that some field of it changed.
+    # Reading this off the tuple difference let a node that survived with a new label
+    # count as dropped, and every genuinely lost edge touching it was then filed as
+    # collateral — a lost llm_relation edge passed the gate green. Found by Fable 5 in
+    # review, with a reproduction; the transform this gate exists for is a declared
+    # node drop, which is exactly the moment node tuples change.
+    before_ids = {n[0] for n in before_nodes}
+    after_ids = {n[0] for n in after_nodes}
+    dropped_ids = before_ids - after_ids
+    changed = {n[0] for n in before_nodes - after_nodes} - dropped_ids
 
-    dropped_ids = {n[0] for n in lost_nodes}
+    declared = args.expect_dropped or 0
+    print(f"nodes       : {len(dropped_ids)} gone, {declared} declared"
+          + (f", {len(changed)} still present but altered" if changed else ""))
+    if len(dropped_ids) != declared:
+        failures.append(
+            f"{len(dropped_ids)} nodes gone, {declared} declared — "
+            f"a delta has to be written down before the run, not explained after")
+    for node_id in sorted(dropped_ids)[:5]:
+        print(f"    dropped: {node_id}")
+    for node_id in sorted(changed)[:5]:
+        print(f"    altered: {node_id}")
     lost_edges = before_edges - after_edges
     collateral = {e for e in lost_edges if e[0] in dropped_ids or e[1] in dropped_ids}
     unexplained = lost_edges - collateral

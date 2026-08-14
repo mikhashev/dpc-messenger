@@ -130,3 +130,31 @@ def test_prepare_moves_the_old_store_aside_before_building_the_new_one(tmp_path,
     rebuilt = KnowledgeGraph(agent_root, backend="sqlite")
     assert rebuilt.snapshot()["edges_by_source"]["llm_relation"] == 2
     rebuilt.backend.close()
+
+
+def test_a_relabelled_node_cannot_launder_a_lost_edge(tmp_path, capsys):
+    """Found by Fable 5 in review, demonstrated before it was fixed.
+
+    `dropped_ids` was read off the difference of node *tuples*, so a node that survives
+    with a changed label, layer or exempt flag looked dropped — and every genuinely
+    lost edge touching it was then filed as collateral. The transform this gate exists
+    for is a declared node drop, which is exactly when node tuples change.
+    """
+    src = _graph(tmp_path / "src", llm=1, structural=0, gliner=0)
+    before = _dump(src, tmp_path / "before.jsonl")
+
+    rewritten = []
+    for line in before.read_text(encoding="utf-8").splitlines():
+        record = json.loads(line)
+        if record.get("kind") == "edge":
+            continue  # the llm_relation edge is lost outright
+        if record.get("node_id") == "e:a":
+            record["label"] = "a (renamed by the transform)"
+        rewritten.append(json.dumps(record, ensure_ascii=False))
+    after = tmp_path / "after.jsonl"
+    after.write_text("\n".join(rewritten) + "\n", encoding="utf-8")
+
+    rc = _verify(before, after, expect_dropped=1)
+    out = capsys.readouterr().out
+    assert rc == 1, "a node that is still there cannot excuse the loss of its edges"
+    assert "llm_relation edges vanished" in out
