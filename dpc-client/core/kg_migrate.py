@@ -49,11 +49,19 @@ def _read_dump(path: Path) -> tuple[dict, set, set, Counter]:
     edges: set = set()
     by_source: Counter = Counter()
     with path.open(encoding="utf-8") as fh:
-        for line in fh:
+        for lineno, line in enumerate(fh, 1):
             line = line.strip()
             if not line:
                 continue
-            r = json.loads(line)
+            try:
+                r = json.loads(line)
+            except json.JSONDecodeError as e:
+                # A dump cut mid-record. The operator asked whether a migration was
+                # sound and deserves an answer, not a traceback. (Ark.)
+                raise SystemExit(
+                    f"{path}:{lineno} is not a whole record — the dump is truncated "
+                    f"or corrupt, and nothing after this line was read ({e})"
+                ) from None
             kind = r.get("kind")
             if kind == "header":
                 header = r
@@ -96,10 +104,31 @@ def prepare(args: argparse.Namespace) -> int:
     print("  2. restart the service")
     print("  3. export the agent again through the service, then:")
     print(f"     kg_migrate.py verify {args.dump} <the-new-dump.jsonl>")
+    print("     — the import above reported skipped=0; if a later run does not, the")
+    print("       dump held records this build does not understand and the gate's")
+    print("       counts will not tell you which")
+    print("  4. once verify is green, rename the store you migrated *from* — this tool")
+    print("     only moved the target aside, and the source is still sitting there.")
+    print("     A later flip back to the old backend would open it in silence, and by")
+    print("     then it is a graph several sleeps out of date. (Ark's point.)")
     return 0
 
 
 def verify(args: argparse.Namespace) -> int:
+    """Compare two dumps class by class. What this proves, and what it does not.
+
+    It compares a **projection**, not the whole record: a node by
+    (id, type, label, layer, exempt) and an edge by (ends, type, justification,
+    confidence, properties). Node `properties` are not compared at all, and neither
+    are `t_created`, `t_invalidated` or `edge_weight` on edges. A transform that
+    silently rewrote a `file_mtime`, resurrected an invalidated edge or dropped an
+    edge weight would pass this gate green. That is deliberate for the migration this
+    was built for — `import_from` carries every field verbatim and the round-trip test
+    checks all of them, so the carrier is proven elsewhere and the gate is here to
+    guard identity and the fate of the irreplaceable class. It stops being adequate
+    the moment someone points it at a second transform, and the L5/L6 relabelling is
+    the first candidate. (Boundary named by Ark, Fable 5 and GLM 5.2 independently.)
+    """
     before_header, before_nodes, before_edges, before_src = _read_dump(Path(args.before))
     after_header, after_nodes, after_edges, after_src = _read_dump(Path(args.after))
 

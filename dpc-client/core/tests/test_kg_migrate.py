@@ -158,3 +158,16 @@ def test_a_relabelled_node_cannot_launder_a_lost_edge(tmp_path, capsys):
     out = capsys.readouterr().out
     assert rc == 1, "a node that is still there cannot excuse the loss of its edges"
     assert "llm_relation edges vanished" in out
+
+
+def test_a_dump_cut_mid_record_says_so_instead_of_tracebacking(tmp_path):
+    """The operator asked whether a migration was sound; they deserve an answer. (Ark.)"""
+    src = _graph(tmp_path / "src")
+    before = _dump(src, tmp_path / "before.jsonl")
+    text = before.read_text(encoding="utf-8")
+    torn = tmp_path / "torn.jsonl"
+    torn.write_text(text[: len(text) - 40], encoding="utf-8")
+
+    with pytest.raises(SystemExit) as excinfo:
+        _verify(before, torn)
+    assert "truncated or corrupt" in str(excinfo.value)

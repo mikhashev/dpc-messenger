@@ -192,3 +192,30 @@ def test_a_record_this_version_does_not_understand_is_skipped_not_fatal(tmp_path
     assert result["nodes"] == 3, "the three known nodes must still arrive"
     assert result["skipped"] == 4, "the unknown node and its three edges"
     assert target.backend.node_count() == 3 and target.backend.edge_count() == 0
+
+
+def test_two_facades_on_one_root_share_the_live_handle():
+    """The property the nightly backup rests on, pinned rather than inherited.
+
+    Ark flagged that `_export_graph_snapshot` builds its own `KnowledgeGraph` instead
+    of going through the service's cached one, and asked whether a second in-process
+    handle on a live `.grafeo` works at all — a second *process* certainly does not
+    (PermissionError / X003 / X001, measured). It works because the backend keys a
+    singleton on the resolved path, so both facades end up on one `GrafeoDB`. That is
+    also why nothing on the backup path may call close(): it would shut the store the
+    service is still using.
+    """
+    import tempfile
+    from pathlib import Path
+
+    root = Path(tempfile.mkdtemp())
+    first = KnowledgeGraph(root, backend="grafeo")
+    second = KnowledgeGraph(root, backend="grafeo")
+    try:
+        assert first.backend._db is second.backend._db, (
+            "a second facade must not open a second handle on a live store"
+        )
+        first.backend.add_node(GraphNode(node_id="e:x", node_type=NodeType.ENTITY, label="x"))
+        assert second.backend.node_count() == 1, "and both must see the same graph"
+    finally:
+        first.backend.close()

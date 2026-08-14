@@ -215,6 +215,15 @@ def _export_graph_snapshot(agent_id: Optional[str], conversation_dir: Path) -> O
     if not agent_root.is_dir():
         return None
 
+    # This builds its own facade rather than borrowing the service's, and that is safe
+    # only because the grafeo backend keys a singleton on the resolved store path — both
+    # end up on one handle. A *second process* cannot open a live `.grafeo` at all, and
+    # a second handle in this one would hit the same wall. Two consequences worth
+    # stating rather than inheriting: never call `close()` on this facade (it would shut
+    # the store the service is still serving from), and if that singleton ever goes
+    # away, this line has to become the cached lookup instead. Ark asked whether this
+    # path was ever measured; `test_two_facades_on_one_root_share_the_live_handle` now
+    # holds it.
     kg = KnowledgeGraph(agent_root)
     if kg.backend.node_count() == 0:
         return None
