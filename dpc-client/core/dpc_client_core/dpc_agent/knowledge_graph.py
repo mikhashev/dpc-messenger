@@ -1070,14 +1070,55 @@ class GrafeoGraphBackend(GraphBackend):
         return len(new_edges), orphan_sources
 
 
+#: What an agent may say about its own graph backend, in `<agent_root>/config.json`.
+_KG_BACKEND_KEY = "kg_backend"
+
+
+def _agent_kg_backend_override(agent_root: Path) -> Optional[str]:
+    """This agent's own choice of backend, or None to fall through to the global one.
+
+    A value the code does not recognise is ignored with a warning rather than obeyed:
+    a typo in one agent's config must not decide which file its graph lives in, and
+    silently opening the wrong store is exactly the failure the migration is trying
+    not to repeat.
+    """
+    config_path = agent_root / "config.json"
+    if not config_path.is_file():
+        return None
+    try:
+        value = json.loads(config_path.read_text(encoding="utf-8")).get(_KG_BACKEND_KEY)
+    except (OSError, json.JSONDecodeError) as e:
+        log.warning("Could not read %s for a backend override: %s", config_path, e)
+        return None
+    if value is None:
+        return None
+    if not isinstance(value, str) or value.strip().lower() not in ("sqlite", "grafeo"):
+        log.warning(
+            "%s sets %s=%r, which is not a backend this build knows — using the global setting",
+            config_path, _KG_BACKEND_KEY, value,
+        )
+        return None
+    chosen = value.strip().lower()
+    log.info("KnowledgeGraph: %s selects backend %r for itself", agent_root.name, chosen)
+    return chosen
+
+
 class KnowledgeGraph:
     """High-level API for the agent knowledge graph."""
 
     def __init__(self, agent_root: Path, backend: Optional[str] = None):
-        # Backend selection (ADR-024 Phase 1.5): explicit `backend` arg
-        # wins (used by tests + integration scripts); otherwise read
-        # [knowledge_graph] backend from settings, defaulting to "sqlite"
-        # until Grafeo migration Level 2 + Level 3 verification close.
+        # Backend selection, three levels, most specific first: the explicit argument
+        # (tests and integration scripts), then this agent's own config.json, then the
+        # global [knowledge_graph] setting.
+        #
+        # The middle one exists because the setting is fleet-global, and a fleet-global
+        # switch is the only migration it can express: all eight agents at once, on a
+        # store format nobody has moved before. Everyone who looked at that plan asked
+        # for the same thing — one agent, then a day of watching, then the rest — and
+        # nothing in the code could say it. The precedent is `sleep_provider_alias`,
+        # read the same way from the same file.
+        if backend is None:
+            backend = _agent_kg_backend_override(agent_root)
         if backend is None:
             from dpc_client_core.settings import Settings
             # Settings takes the DPC home directory; the agent root lives
