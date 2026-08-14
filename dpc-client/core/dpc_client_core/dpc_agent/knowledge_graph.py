@@ -228,7 +228,11 @@ class GraphBackend(ABC):
 
     @abstractmethod
     def iter_nodes(self) -> Iterator[GraphNode]:
-        """Every node in the store, in a stable order.
+        """Every node in the store, once each; order is not part of the contract.
+
+        SQLite sorts by primary key and Grafeo returns whatever its MATCH yields, so
+        two dumps of the same graph agree as sets and need not agree line by line —
+        which is what any comparison of them has to be written against.
 
         The one thing this interface could not do until 2026-08-14, and the reason a
         graph could not be moved, backed up or read from outside the process holding
@@ -607,9 +611,10 @@ _grafeo_instance_cache: "Dict[str, Any]" = {}
 class GrafeoGraphBackend(GraphBackend):
     """Grafeo-based graph storage (ADR-024 migration).
 
-    Phase 2: implements init_schema, add_node, get_node, node_count with
-    parity tests against SQLiteGraphBackend. Remaining 9 ABC methods still
-    raise NotImplementedError (Phase 2.5+ scope).
+    Implements the whole interface, with parity tests against SQLiteGraphBackend.
+    (This paragraph said "remaining 9 ABC methods still raise NotImplementedError"
+    long after they stopped doing so — a comment is a claim, and it outlives the
+    session that wrote it.)
 
     Mapping (D1=A, D2=a per S123 design review):
     - Grafeo node label = NodeType.value (5 labels: KnowledgeFile, Entity,
@@ -1174,12 +1179,27 @@ class KnowledgeGraph:
         return {"nodes": nodes, "edges": edges, "path": str(path)}
 
     def import_from(self, path: Path, merge: bool = False) -> dict:
-        """Read a dump back in. Refuses a store that already holds anything.
+        """Read a dump back in, and refuse one that cannot prove it is whole.
 
-        The refusal is the point: importing over a live graph silently mixes two
-        histories, and the caller who wanted that can say so with `merge=True`.
-        Unknown record kinds are skipped rather than fatal, so a dump written by a
-        later version still loads what this version understands.
+        Two refusals, and the second is the one that earns its keep. Importing over a
+        live graph silently mixes two histories, so a non-empty target is refused
+        unless the caller says `merge=True`. And a dump whose record count disagrees
+        with its own header is refused outright: a backup that cannot tell you it
+        arrived short is worse than no backup, because it hands back a smaller graph
+        with no sign that anything is missing. Both reviewers caught that the first
+        version checked only the format, and only if a header happened to appear —
+        lose the header and nothing was checked at all.
+
+        Unknown record *kinds* are counted and skipped, so a dump from a later version
+        still loads what this version understands. An unknown node or edge *type* is
+        treated the same way rather than raising, and any edge touching a node that
+        was skipped goes with it — otherwise the import dies on a missing endpoint
+        halfway through and leaves a half-built graph behind.
+
+        `merge=True` is not idempotent for edges: both backends upsert a node by id,
+        but `add_edge` inserts unconditionally, so importing the same dump twice
+        doubles them. Fine for a migration, where the target is always empty; not yet
+        fine for restoring into a graph that is still being written to.
         """
         path = Path(path)
         if not merge:
@@ -1189,7 +1209,10 @@ class KnowledgeGraph:
                     f"refusing to import into a graph that already holds {existing} "
                     f"records — pass merge=True to add to it on purpose"
                 )
+        header = None
         nodes = edges = skipped = 0
+        seen_nodes = seen_edges = 0
+        skipped_node_ids: set[str] = set()
         with path.open("r", encoding="utf-8") as fh:
             for line in fh:
                 line = line.strip()
@@ -1197,15 +1220,28 @@ class KnowledgeGraph:
                     continue
                 record = json.loads(line)
                 kind = record.get("kind")
-                if kind == "header":
+                if header is None:
+                    if kind != "header":
+                        raise ValueError(
+                            f"{path} does not begin with a dump header — it is truncated, "
+                            f"concatenated, or not a dump at all (first record: {kind!r})"
+                        )
                     if record.get("format") != DUMP_FORMAT:
                         raise ValueError(
                             f"{path} is not a {DUMP_FORMAT} dump (format={record.get('format')!r})"
                         )
+                    header = record
                 elif kind == "node":
+                    seen_nodes += 1
+                    try:
+                        node_type = NodeType(record["node_type"])
+                    except ValueError:
+                        skipped += 1
+                        skipped_node_ids.add(record["node_id"])
+                        continue
                     self._backend.add_node(GraphNode(
                         node_id=record["node_id"],
-                        node_type=NodeType(record["node_type"]),
+                        node_type=node_type,
                         label=record["label"],
                         source_layer=record.get("source_layer", "L7"),
                         exempt=bool(record.get("exempt", False)),
@@ -1213,10 +1249,20 @@ class KnowledgeGraph:
                     ))
                     nodes += 1
                 elif kind == "edge":
+                    seen_edges += 1
+                    if (record["source_id"] in skipped_node_ids
+                            or record["target_id"] in skipped_node_ids):
+                        skipped += 1
+                        continue
+                    try:
+                        edge_type = EdgeType(record["edge_type"])
+                    except ValueError:
+                        skipped += 1
+                        continue
                     self._backend.add_edge(GraphEdge(
                         source_id=record["source_id"],
                         target_id=record["target_id"],
-                        edge_type=EdgeType(record["edge_type"]),
+                        edge_type=edge_type,
                         t_created=record.get("t_created", ""),
                         t_invalidated=record.get("t_invalidated"),
                         confidence=record.get("confidence", 1.0),
@@ -1227,6 +1273,18 @@ class KnowledgeGraph:
                     edges += 1
                 else:
                     skipped += 1
+
+        expected = (header or {}).get("snapshot") or {}
+        want_nodes = expected.get("nodes_total")
+        want_edges = expected.get("edges_total")
+        if (want_nodes, want_edges) != (None, None) and (
+            seen_nodes != want_nodes or seen_edges != want_edges
+        ):
+            raise ValueError(
+                f"{path} is incomplete: its header promises {want_nodes} nodes and "
+                f"{want_edges} edges, the file carries {seen_nodes} and {seen_edges}"
+            )
+
         log.info("Knowledge graph imported: %d nodes, %d edges from %s (%d records skipped)",
                  nodes, edges, path, skipped)
         return {"nodes": nodes, "edges": edges, "skipped": skipped}

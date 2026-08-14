@@ -140,3 +140,55 @@ def test_an_interrupted_export_does_not_replace_the_last_good_one(tmp_path, monk
         kg.export_to(tmp_path / "dump.jsonl")
 
     assert (tmp_path / "dump.jsonl").read_text(encoding="utf-8") == good
+
+
+@pytest.mark.parametrize("backend", BACKENDS)
+def test_a_truncated_dump_is_refused_instead_of_restoring_short(tmp_path, backend):
+    """The failure this guard exists for: a backup that comes back smaller in silence.
+
+    Both reviewers caught that the first version checked only the format, and only if
+    a header happened to appear — so a dump cut short, or one that lost its first
+    line, imported cleanly with fewer edges and nothing said.
+    """
+    source = KnowledgeGraph(tmp_path / "src", backend=backend)
+    _populate(source)
+    source.export_to(tmp_path / "dump.jsonl")
+    lines = (tmp_path / "dump.jsonl").read_text(encoding="utf-8").splitlines(keepends=True)
+
+    (tmp_path / "cut.jsonl").write_text("".join(lines[:-1]), encoding="utf-8")
+    target = KnowledgeGraph(tmp_path / "cut", backend=backend)
+    with pytest.raises(ValueError, match="incomplete"):
+        target.import_from(tmp_path / "cut.jsonl")
+
+    (tmp_path / "headless.jsonl").write_text("".join(lines[1:]), encoding="utf-8")
+    other = KnowledgeGraph(tmp_path / "headless", backend=backend)
+    with pytest.raises(ValueError, match="does not begin with a dump header"):
+        other.import_from(tmp_path / "headless.jsonl")
+
+
+@pytest.mark.parametrize("backend", BACKENDS)
+def test_a_record_this_version_does_not_understand_is_skipped_not_fatal(tmp_path, backend):
+    """A dump from a later version must load what it can, and say what it could not.
+
+    Skipping a node means skipping the edges that touch it, or the import dies on a
+    missing endpoint and leaves half a graph behind.
+    """
+    source = KnowledgeGraph(tmp_path / "src", backend=backend)
+    _populate(source)
+    source.export_to(tmp_path / "dump.jsonl")
+
+    lines = (tmp_path / "dump.jsonl").read_text(encoding="utf-8").splitlines()
+    rewritten = []
+    for line in lines:
+        record = json.loads(line)
+        if record.get("node_id") == "e:p2p":
+            record["node_type"] = "Hypergraph"  # a type invented after this version
+        rewritten.append(json.dumps(record, ensure_ascii=False))
+    (tmp_path / "future.jsonl").write_text("\n".join(rewritten) + "\n", encoding="utf-8")
+
+    target = KnowledgeGraph(tmp_path / "dst", backend=backend)
+    result = target.import_from(tmp_path / "future.jsonl")
+
+    assert result["nodes"] == 3, "the three known nodes must still arrive"
+    assert result["skipped"] == 4, "the unknown node and its three edges"
+    assert target.backend.node_count() == 3 and target.backend.edge_count() == 0
