@@ -7586,6 +7586,49 @@ class CoreService:
             logger.error("get_graph_snapshot failed for %s: %s", agent_id, e, exc_info=True)
             return {"status": "error", "message": str(e)}
 
+    async def export_knowledge_graph(self, agent_id: str = None, out_path: str = None) -> Dict[str, Any]:
+        """Write an agent's whole graph to a JSONL dump, from inside this process.
+
+        The only place it can be done from. A second process cannot open a live
+        `.grafeo` at all — measured on this box: copying it fails with PermissionError
+        and leaves a torn zero-byte file, opening it fails GRAFEO-X003, opening it
+        read-only fails GRAFEO-X001. So the dump has to come from the handle the
+        service already holds, which is what `_get_knowledge_graph` returns: the same
+        instance Active Recall queries, not a fresh one.
+
+        This is what makes the export real rather than laboratory. Until it existed
+        the only graph anyone could read from outside was the stale file lying next to
+        the live one — the mistake three analyses in a row made. It is also the
+        measurement: every share of `llm_relation` quoted so far is arithmetic over
+        totals, and a dump counts it edge by edge.
+
+        Defaults to `<agent_root>/knowledge_graph_export/<timestamp>.jsonl`. Takes
+        seconds on the largest agent here, but it iterates the live store, so a pass
+        writing at the same moment can leave the header disagreeing with the body —
+        the import refuses that, which is the right answer: run it again.
+        """
+        if agent_id is None:
+            agent_id = self._get_default_agent_id()
+        try:
+            from dpc_client_core.dpc_agent.context import _get_knowledge_graph
+            agent_root = DPC_HOME_DIR / "agents" / agent_id
+            if not agent_root.is_dir():
+                return {"status": "error", "message": f"No such agent: {agent_id}"}
+            kg = _get_knowledge_graph(agent_root)
+            if kg is None:
+                return {"status": "error", "message": "Knowledge graph unavailable"}
+            if out_path:
+                target = Path(out_path)
+            else:
+                stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+                target = agent_root / "knowledge_graph_export" / f"{stamp}.jsonl"
+            result = kg.export_to(target)
+            return {"status": "ok", "agent_id": agent_id, **result,
+                    "bytes": target.stat().st_size}
+        except Exception as e:
+            logger.error("export_knowledge_graph failed for %s: %s", agent_id, e, exc_info=True)
+            return {"status": "error", "message": str(e)}
+
     async def get_corpus_stats(self, agent_id: str = None) -> Dict[str, Any]:
         """What each indexed corpus contributes and what the agent does with it.
 

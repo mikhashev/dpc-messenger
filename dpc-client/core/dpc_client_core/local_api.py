@@ -172,6 +172,10 @@ ALLOWED_COMMANDS: frozenset = frozenset({
     # anywhere else while the backend runs, which is how three analyses came to
     # measure a file from May and call it the live graph.
     "get_graph_snapshot",
+    # The whole graph out to a file, for the same reason and from the same handle:
+    # the first backup this store has ever had, the only way to move it to the other
+    # backend, and the measurement that replaces arithmetic over totals.
+    "export_knowledge_graph",
     # What each indexed corpus costs and returns — the evidence the "what belongs in
     # the index" decision waits on, reported rather than argued.
     "get_corpus_stats",
