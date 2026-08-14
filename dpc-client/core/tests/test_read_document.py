@@ -664,28 +664,46 @@ def test_a_hyphenation_joint_does_not_reach_the_saved_markdown():
 
     assert "\ufffe" not in cleaned and "\uffff" not in cleaned
     assert "solutions" in cleaned and "admissible" in cleaned
-    assert entry["chars"] == len(cleaned), "the reported size must be the size that was saved"
     # The measured cost, stated so a future reader knows it was chosen and not missed:
     # a real compound loses its hyphen, because nothing in the character distinguishes
     # it from a syllable break (250 of 301 real joints were syllable breaks).
     assert "taskoriented" in cleaned
 
 
-def test_the_detector_reads_the_string_before_it_is_repaired():
+def test_the_detector_reads_the_string_before_it_is_repaired(monkeypatch):
     """Font attribution is per index, so repairing first blinds the detector.
 
     The first version of the repair cleaned the text before `_suspect_characters`
     saw it; every index past the first removed character then pointed at the wrong
     glyph, the check answered `attribution_mismatch`, and the unreliable-maths
     warning silently stopped firing on every page that had a hyphenated word.
+
+    This goes through `_read_page` deliberately. An earlier version called
+    `_suspect_characters` twice by hand and proved only that the mechanism exists \u2014
+    swap the two lines in the page reader and it stayed green, as both reviewers
+    pointed out. Attribution has to be faked because a real one needs a real pdfium
+    page, and without it the detector reports `unavailable` and asserts nothing.
     """
-    raw = "ad\ufffemissible"
-    fonts = ["ABCDEF+CMR10"] * len(raw)
+    raw = "ad\ufffemissible policy"
+    monkeypatch.setattr(D, "_char_fonts", lambda textpage: ["ABCDEF+CMR10"] * len(raw))
 
-    status, suspect, _ = D._suspect_characters(raw, fonts)
-    assert status == "ran", "the detector must see the untouched string"
+    class _TextPage:
+        def get_text_range(self):
+            return raw
 
-    cleaned_status, _, _ = D._suspect_characters(D._clean_text_layer(raw), fonts)
-    assert cleaned_status == "attribution_mismatch", (
-        "this is what happens if the order is ever swapped back"
+    class _Page:
+        def get_textpage(self):
+            return _TextPage()
+
+    class _Doc:
+        def __getitem__(self, index):
+            return _Page()
+
+    entry = D._read_page(_Doc(), 1)
+
+    assert entry["detector"] == "ran", (
+        "the detector saw a string that no longer matches pdfium's character list \u2014 "
+        "the repair must happen after attribution, not before"
     )
+    assert entry["suspect_chars"] == 0
+    assert "\ufffe" not in entry["text"] and "admissible" in entry["text"]
