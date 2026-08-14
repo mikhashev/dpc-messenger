@@ -18,7 +18,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field, asdict
 from enum import Enum
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Iterator, List, Optional
 
 from .index_keys import l5_key, l6_key
 
@@ -28,6 +28,11 @@ from .index_keys import l5_key, l6_key
 #: rebuilds from the cached findings (gliner_ner), and what has no source outside the
 #: graph at all (llm_relation) — which is the only class where a missing edge is gone.
 _SOURCE_MARKERS = ("structural", "gliner_ner", "llm_relation")
+
+#: Version tag in every dump's header line. Bump it when a record shape changes in a
+#: way an older reader would misread — a dump outlives the code that wrote it, and
+#: this is the only thing that will tell the reader so.
+DUMP_FORMAT = "dpc-kg-dump/1"
 
 
 def _snapshot_dict(store_path, backend: str, nodes_by_type: dict, edges_by_type: dict,
@@ -221,6 +226,26 @@ class GraphBackend(ABC):
         """
         ...
 
+    @abstractmethod
+    def iter_nodes(self) -> Iterator[GraphNode]:
+        """Every node in the store, in a stable order.
+
+        The one thing this interface could not do until 2026-08-14, and the reason a
+        graph could not be moved, backed up or read from outside the process holding
+        it. Both backends had the primitive one level down the whole time — two
+        SELECTs, or one MATCH — it was simply never lifted to where callers live.
+        Generators, not lists: the dump streams, and nothing needs the graph twice
+        over in memory.
+        """
+        ...
+
+    @abstractmethod
+    def iter_edges(self) -> Iterator[GraphEdge]:
+        """Every edge in the store, endpoints named by node_id rather than by
+        whatever internal identifier the backend uses — that is what makes a dump
+        portable between the two."""
+        ...
+
     def wal_info(self) -> dict:
         """What the store's write-ahead log looks like right now, or {} if it has none.
 
@@ -391,6 +416,24 @@ class SQLiteGraphBackend(GraphBackend):
             (source_id, target_id, edge_type.value),
         ).fetchone()
         return row is not None
+
+    def iter_nodes(self) -> Iterator[GraphNode]:
+        for row in self._conn.execute(
+            "SELECT node_id, node_type, label, source_layer, exempt, properties "
+            "FROM nodes ORDER BY node_id"
+        ):
+            yield GraphNode(
+                node_id=row[0], node_type=NodeType(row[1]), label=row[2],
+                source_layer=row[3], exempt=bool(row[4]),
+                properties=json.loads(row[5]) if row[5] else {},
+            )
+
+    def iter_edges(self) -> Iterator[GraphEdge]:
+        for row in self._conn.execute(
+            "SELECT source_id, target_id, edge_type, t_created, t_invalidated, "
+            "confidence, justification, edge_weight, properties FROM edges ORDER BY rowid"
+        ):
+            yield self._row_to_edge(row)
 
     def snapshot(self) -> dict:
         c = self._conn
@@ -773,6 +816,28 @@ class GrafeoGraphBackend(GraphBackend):
     def edge_count(self) -> int:
         return self._db.edge_count
 
+    def iter_nodes(self) -> Iterator[GraphNode]:
+        for r in self._db.execute_cypher(
+            "MATCH (n) RETURN n.node_id AS nid, labels(n)[0] AS lbl, n.label AS l, "
+            "n.source_layer AS sl, n.exempt AS ex, n.properties AS props"
+        ):
+            yield GraphNode(
+                node_id=r["nid"], node_type=NodeType(r["lbl"]), label=r["l"],
+                source_layer=r["sl"], exempt=bool(r["ex"]),
+                properties=json.loads(r["props"]) if r["props"] else {},
+            )
+
+    def iter_edges(self) -> Iterator[GraphEdge]:
+        # Endpoints come back as node_id, not as Grafeo's internal int id, so the
+        # dump means the same thing on the other backend.
+        for r in self._db.execute_cypher(
+            "MATCH (a)-[r]->(b) RETURN a.node_id AS src, b.node_id AS tgt, "
+            "type(r) AS et, r.t_created AS tc, r.t_invalidated AS ti, "
+            "r.confidence AS conf, r.justification AS j, r.edge_weight AS ew, "
+            "r.properties AS p"
+        ):
+            yield self._cypher_row_to_edge(r)
+
     def snapshot(self) -> dict:
         def rows(query, params=None):
             try:
@@ -1048,6 +1113,123 @@ class KnowledgeGraph:
     def snapshot(self) -> dict:
         """What this graph contains right now — see GraphBackend.snapshot."""
         return self._backend.snapshot()
+
+    def export_to(self, path: Path) -> dict:
+        """Write the whole graph to a JSONL dump. Returns what went out.
+
+        One line per record, header first, then every node, then every edge — nodes
+        before edges because both backends refuse an edge whose endpoints are not
+        there yet, SQLite by foreign key and Grafeo by raising. The format is
+        deliberately dull: a reader with no code from this project can open it, and
+        the header carries the same `snapshot()` dict the team already reads.
+
+        This is the only way a graph leaves its store. Until it existed the live file
+        was the single copy — unreadable from outside, uncopyable on Windows while the
+        service holds it, and impossible to move to the other backend. A dump is
+        therefore three things at once: the migration carrier, the first backup this
+        graph has ever had, and the measurement, since counting a dump beats
+        extrapolating from totals.
+
+        Written to a `.part` file and renamed, so an interrupted export leaves the
+        previous dump intact rather than a half-written one wearing its name.
+        """
+        path = Path(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        partial = path.with_name(path.name + ".part")
+        nodes = edges = 0
+        with partial.open("w", encoding="utf-8", newline="\n") as fh:
+            fh.write(json.dumps({
+                "kind": "header",
+                "format": DUMP_FORMAT,
+                "exported_at": _utc_now(),
+                "snapshot": self.snapshot(),
+            }, ensure_ascii=False) + "\n")
+            for node in self._backend.iter_nodes():
+                fh.write(json.dumps({
+                    "kind": "node",
+                    "node_id": node.node_id,
+                    "node_type": node.node_type.value,
+                    "label": node.label,
+                    "source_layer": node.source_layer,
+                    "exempt": bool(node.exempt),
+                    "properties": node.properties,
+                }, ensure_ascii=False) + "\n")
+                nodes += 1
+            for edge in self._backend.iter_edges():
+                fh.write(json.dumps({
+                    "kind": "edge",
+                    "source_id": edge.source_id,
+                    "target_id": edge.target_id,
+                    "edge_type": edge.edge_type.value,
+                    "t_created": edge.t_created,
+                    "t_invalidated": edge.t_invalidated,
+                    "confidence": edge.confidence,
+                    "justification": edge.justification,
+                    "edge_weight": edge.edge_weight,
+                    "properties": edge.properties,
+                }, ensure_ascii=False) + "\n")
+                edges += 1
+        partial.replace(path)
+        log.info("Knowledge graph exported: %d nodes, %d edges → %s", nodes, edges, path)
+        return {"nodes": nodes, "edges": edges, "path": str(path)}
+
+    def import_from(self, path: Path, merge: bool = False) -> dict:
+        """Read a dump back in. Refuses a store that already holds anything.
+
+        The refusal is the point: importing over a live graph silently mixes two
+        histories, and the caller who wanted that can say so with `merge=True`.
+        Unknown record kinds are skipped rather than fatal, so a dump written by a
+        later version still loads what this version understands.
+        """
+        path = Path(path)
+        if not merge:
+            existing = self._backend.node_count() + self._backend.edge_count()
+            if existing:
+                raise ValueError(
+                    f"refusing to import into a graph that already holds {existing} "
+                    f"records — pass merge=True to add to it on purpose"
+                )
+        nodes = edges = skipped = 0
+        with path.open("r", encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                record = json.loads(line)
+                kind = record.get("kind")
+                if kind == "header":
+                    if record.get("format") != DUMP_FORMAT:
+                        raise ValueError(
+                            f"{path} is not a {DUMP_FORMAT} dump (format={record.get('format')!r})"
+                        )
+                elif kind == "node":
+                    self._backend.add_node(GraphNode(
+                        node_id=record["node_id"],
+                        node_type=NodeType(record["node_type"]),
+                        label=record["label"],
+                        source_layer=record.get("source_layer", "L7"),
+                        exempt=bool(record.get("exempt", False)),
+                        properties=record.get("properties") or {},
+                    ))
+                    nodes += 1
+                elif kind == "edge":
+                    self._backend.add_edge(GraphEdge(
+                        source_id=record["source_id"],
+                        target_id=record["target_id"],
+                        edge_type=EdgeType(record["edge_type"]),
+                        t_created=record.get("t_created", ""),
+                        t_invalidated=record.get("t_invalidated"),
+                        confidence=record.get("confidence", 1.0),
+                        justification=record.get("justification", ""),
+                        edge_weight=record.get("edge_weight", "medium"),
+                        properties=record.get("properties") or {},
+                    ))
+                    edges += 1
+                else:
+                    skipped += 1
+        log.info("Knowledge graph imported: %d nodes, %d edges from %s (%d records skipped)",
+                 nodes, edges, path, skipped)
+        return {"nodes": nodes, "edges": edges, "skipped": skipped}
 
     def bulk_import_knowledge_files(self, knowledge_dir: Path, source_layer: str = "L5") -> int:
         """Create KnowledgeFile nodes from existing .md files.
