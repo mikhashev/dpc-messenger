@@ -190,6 +190,51 @@ def _write_sleep_state(conversation_dir: Path, state: Dict[str, Any]) -> None:
     path.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
+#: How many nightly dumps to keep per agent. Seven is a week of nights: enough to go
+#: back past a bad run nobody noticed the same day, small enough that the largest
+#: agent's backups cost about 18 MB. Hand-taken dumps are kept by naming them
+#: something other than the nightly pattern — rotation only ever touches its own.
+GRAPH_EXPORT_KEEP = 7
+GRAPH_EXPORT_DIR = "knowledge_graph_export"
+_NIGHTLY_SUFFIX = "-nightly.jsonl"
+
+
+def _export_graph_snapshot(agent_id: Optional[str], conversation_dir: Path) -> Optional[Path]:
+    """Write the agent's graph out, and keep the last few nights of them.
+
+    Returns the dump path, or None when there is no graph to dump. Called from the
+    tail of a completed sleep — see the call site for why there and not elsewhere.
+    """
+    from .knowledge_graph import KnowledgeGraph
+    from .utils import get_agent_root
+
+    if agent_id:
+        agent_root = get_agent_root(agent_id)
+    else:
+        agent_root = conversation_dir.parent.parent / "agents" / conversation_dir.name
+    if not agent_root.is_dir():
+        return None
+
+    kg = KnowledgeGraph(agent_root)
+    if kg.backend.node_count() == 0:
+        return None
+
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    target = agent_root / GRAPH_EXPORT_DIR / f"{stamp}{_NIGHTLY_SUFFIX}"
+    written = kg.export_to(target)
+
+    nightly = sorted(target.parent.glob(f"*{_NIGHTLY_SUFFIX}"))
+    for old in nightly[:-GRAPH_EXPORT_KEEP]:
+        try:
+            old.unlink()
+        except OSError as e:
+            log.debug("Could not rotate out %s: %s", old.name, e)
+
+    log.info("Sleep: knowledge graph backed up — %d nodes, %d edges → %s",
+             written["nodes"], written["edges"], target.name)
+    return target
+
+
 def _collect_group_archive_digests(group_dir: Path, agent_id: str) -> List[Dict[str, Any]]:
     """Collect archived session digests from a specific group's archive/.
 
@@ -792,6 +837,19 @@ async def run_sleep(
                 log.info("Sleep: tier1 consolidation — %d stale of %d files", consolidation_result.get("stale_marked", 0), consolidation_result.get("total", 0))
         except Exception as e:
             log.warning("Sleep: tier1 consolidation failed (non-fatal): %s", e)
+
+        # The graph's backup, taken where it belongs: right after the one writer that
+        # produces edges nothing can rebuild. A dump only ever taken by hand is a dump
+        # that exists until someone forgets, and this class is 40.8% of the fleet's
+        # edges — 57.2% on warren — with no source outside the store.
+        #
+        # Sleep is the moment: the run has just finished writing, no pass is clearing
+        # structural edges underneath, and the agent is by definition not busy.
+        # Non-fatal by construction — a failed backup must never cost a night's work.
+        try:
+            _export_graph_snapshot(agent_id, conversation_dir)
+        except Exception as e:
+            log.warning("Sleep: knowledge graph export failed (non-fatal): %s", e)
 
         log.info("Sleep pipeline complete: %d sessions analyzed, morning_brief.json written", len(digests))
 
