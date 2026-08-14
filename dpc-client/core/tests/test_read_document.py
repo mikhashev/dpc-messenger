@@ -632,3 +632,60 @@ def test_every_argument_the_tool_takes_is_one_the_model_can_pass():
         f"only in the signature: {accepted - advertised}; "
         f"only in the schema: {advertised - accepted}"
     )
+
+
+def test_a_hyphenation_joint_does_not_reach_the_saved_markdown():
+    """pypdfium2 returns U+FFFE where a PDF broke a word across two lines.
+
+    It is a permanently-reserved noncharacter, and a word split by one is
+    unfindable: 239 of them went into one saved paper and 66 into another, which
+    is why `admissible` — a term that paper's own summary leans on — appeared
+    four times in it instead of five.
+    """
+    raw = "existing solu\ufffetions, an ad\ufffemissible policy, and a task\ufffeoriented agent\uffff"
+
+    # Through the page reader, not through the helper: a test that called
+    # _clean_text_layer directly passed with the repair removed from the call site,
+    # which is the whole failure this file exists to catch.
+    class _TextPage:
+        def get_text_range(self):
+            return raw
+
+    class _Page:
+        def get_textpage(self):
+            return _TextPage()
+
+    class _Doc:
+        def __getitem__(self, index):
+            return _Page()
+
+    entry = D._read_page(_Doc(), 1)
+    cleaned = entry["text"]
+
+    assert "\ufffe" not in cleaned and "\uffff" not in cleaned
+    assert "solutions" in cleaned and "admissible" in cleaned
+    assert entry["chars"] == len(cleaned), "the reported size must be the size that was saved"
+    # The measured cost, stated so a future reader knows it was chosen and not missed:
+    # a real compound loses its hyphen, because nothing in the character distinguishes
+    # it from a syllable break (250 of 301 real joints were syllable breaks).
+    assert "taskoriented" in cleaned
+
+
+def test_the_detector_reads_the_string_before_it_is_repaired():
+    """Font attribution is per index, so repairing first blinds the detector.
+
+    The first version of the repair cleaned the text before `_suspect_characters`
+    saw it; every index past the first removed character then pointed at the wrong
+    glyph, the check answered `attribution_mismatch`, and the unreliable-maths
+    warning silently stopped firing on every page that had a hyphenated word.
+    """
+    raw = "ad\ufffemissible"
+    fonts = ["ABCDEF+CMR10"] * len(raw)
+
+    status, suspect, _ = D._suspect_characters(raw, fonts)
+    assert status == "ran", "the detector must see the untouched string"
+
+    cleaned_status, _, _ = D._suspect_characters(D._clean_text_layer(raw), fonts)
+    assert cleaned_status == "attribution_mismatch", (
+        "this is what happens if the order is ever swapped back"
+    )
