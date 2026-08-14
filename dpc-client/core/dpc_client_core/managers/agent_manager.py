@@ -629,6 +629,16 @@ class DpcAgentManager:
                                 _archive_dir = Path(os.environ.get("DPC_HOME", Path.home() / ".dpc")) / "conversations" / (self.agent_id or "agent_001") / "archive"
                                 _kg.extract_structural_edges(knowledge_dir, _archive_dir if _archive_dir.exists() else None)
                                 log.info("Knowledge graph built: %d nodes, %d edges", _kg.backend.node_count(), _kg.backend.edge_count())
+                                # The other half of the pair: this is what the pass left
+                                # behind, by writer. Compared against the same breakdown
+                                # logged at the next open, it says whether anything was
+                                # actually lost in between and — the part that matters —
+                                # whether it was a class that rebuilds itself.
+                                try:
+                                    log.info("Knowledge graph after pass: edges_by_source=%s wal=%s",
+                                             _kg.backend.snapshot().get("edges_by_source"), _kg.backend.wal_info())
+                                except Exception as _e:
+                                    log.debug("post-pass graph breakdown unavailable: %s", _e)
                             except Exception as e:
                                 log.warning("Knowledge graph build failed (non-fatal): %s", e)
 

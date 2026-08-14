@@ -23,9 +23,17 @@ from typing import Any, Dict, List, Optional
 from .index_keys import l5_key, l6_key
 
 
+#: The `properties.source` markers every writer stamps its edges with. Counting by
+#: them separates what an indexing pass rebuilds for free (structural), what a sleep
+#: rebuilds from the cached findings (gliner_ner), and what has no source outside the
+#: graph at all (llm_relation) — which is the only class where a missing edge is gone.
+_SOURCE_MARKERS = ("structural", "gliner_ner", "llm_relation")
+
+
 def _snapshot_dict(store_path, backend: str, nodes_by_type: dict, edges_by_type: dict,
                    kf_edges_by_type: dict, kf_structural: int,
-                   kf_nodes_keyed: int, kf_nodes_legacy_stem: int) -> dict:
+                   kf_nodes_keyed: int, kf_nodes_legacy_stem: int,
+                   edges_by_source: dict | None = None) -> dict:
     """One shape for both backends, so a reader compares numbers and not formats.
 
     `kf_edges_non_structural` is the number the whole key-as-id migration rested on:
@@ -50,6 +58,7 @@ def _snapshot_dict(store_path, backend: str, nodes_by_type: dict, edges_by_type:
         "kf_edges_non_structural": kf_edges_total - kf_structural,
         "kf_nodes_keyed": kf_nodes_keyed,
         "kf_nodes_legacy_stem": kf_nodes_legacy_stem,
+        "edges_by_source": dict(sorted((edges_by_source or {}).items())),
     }
 
 
@@ -211,6 +220,17 @@ class GraphBackend(ABC):
         someone who did not write the code and asked to check a number.
         """
         ...
+
+    def wal_info(self) -> dict:
+        """What the store's write-ahead log looks like right now, or {} if it has none.
+
+        Not abstract: a backend that commits synchronously has nothing to report and
+        should not be forced to say so. Exists because the counts at open have
+        repeatedly disagreed with the counts a pass left behind, and every explanation
+        offered for that so far has been an inference about WAL behaviour that nobody
+        could see. This is the line that turns the next restart into a measurement.
+        """
+        return {}
 
     @abstractmethod
     def clear_structural_edges(self) -> int:
@@ -392,8 +412,18 @@ class SQLiteGraphBackend(GraphBackend):
         legacy = c.execute(
             "SELECT count(*) FROM nodes WHERE node_id LIKE ? AND node_id NOT LIKE '%/%'",
             (kf,)).fetchone()[0]
+        edges_by_source = {}
+        for src in _SOURCE_MARKERS:
+            n = c.execute(
+                "SELECT count(*) FROM edges WHERE properties LIKE ? OR properties LIKE ?",
+                (f'%"source": "{src}"%', f'%"source":"{src}"%')).fetchone()[0]
+            if n:
+                edges_by_source[src] = n
+        unmarked = sum(edges_by_type.values()) - sum(edges_by_source.values())
+        if unmarked:
+            edges_by_source["(unmarked)"] = unmarked
         return _snapshot_dict(self._db_path, "sqlite", nodes_by_type, edges_by_type,
-                              kf_edges_by_type, structural, keyed, legacy)
+                              kf_edges_by_type, structural, keyed, legacy, edges_by_source)
 
     def clear_structural_edges(self) -> int:
         # Canonical marker is source=structural. Legacy edges (pre-KG-LLM-MARKER
@@ -773,8 +803,27 @@ class GrafeoGraphBackend(GraphBackend):
         structural = structural_rows[0]["c"] if structural_rows else 0
         keyed = keyed_rows[0]["c"] if keyed_rows else 0
         all_kf = all_kf_rows[0]["c"] if all_kf_rows else 0
+        edges_by_source = {}
+        for src in _SOURCE_MARKERS:
+            r = rows("MATCH ()-[r]->() WHERE r.properties CONTAINS $a "
+                     "OR r.properties CONTAINS $b RETURN count(r) AS c",
+                     {"a": f'"source": "{src}"', "b": f'"source":"{src}"'})
+            n = r[0]["c"] if r else 0
+            if n:
+                edges_by_source[src] = n
+        unmarked = sum(edges_by_type.values()) - sum(edges_by_source.values())
+        if unmarked:
+            edges_by_source["(unmarked)"] = unmarked
         return _snapshot_dict(self._db_path, "grafeo", nodes_by_type, edges_by_type,
-                              kf_edges_by_type, structural, keyed, all_kf - keyed)
+                              kf_edges_by_type, structural, keyed, all_kf - keyed,
+                              edges_by_source)
+
+    def wal_info(self) -> dict:
+        try:
+            return dict(self._db.wal_status())
+        except Exception as e:  # binding surface differs by version
+            log.debug("wal_status unavailable: %s", e)
+            return {}
 
     def close(self) -> None:
         # Drop from the singleton cache so a subsequent
@@ -978,6 +1027,19 @@ class KnowledgeGraph:
             "KnowledgeGraph initialized at %s [backend=%s] (%d nodes, %d edges)",
             db_path, backend, self._backend.node_count(), self._backend.edge_count(),
         )
+        # What the store held before anything in this process touched it, broken down
+        # by writer. The count on the line above has repeatedly opened lower than the
+        # count the previous session's pass reported, and with only a total there is no
+        # way to tell a rebuildable class going missing from the one class that cannot
+        # come back. This line answers that on the next restart instead of the next
+        # theory. Kept cheap: a handful of counting queries, once per open.
+        try:
+            log.info(
+                "KnowledgeGraph at open: edges_by_source=%s wal=%s",
+                self._backend.snapshot().get("edges_by_source"), self._backend.wal_info(),
+            )
+        except Exception as e:
+            log.debug("open-time graph breakdown unavailable: %s", e)
 
     @property
     def backend(self) -> GraphBackend:
