@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import inspect
 import logging
 import time
 from dataclasses import dataclass, field
@@ -141,6 +142,11 @@ class AgentTelegramBridge:
         self._conflict_logged = False
         self._bot_username: Optional[str] = None
         self._session = None
+        self._retry_task = None  # background reconnect after a network failure at start
+        # Called once the bot is actually polling. The owner wires the event emitter to
+        # the bridge here rather than after start() returns, because a start that
+        # succeeds on a background retry has no return value anyone is waiting on.
+        self._on_started: Optional[Callable] = None
 
         # Rate limiting state
         self._event_times: Dict[str, List[float]] = {}  # event_type -> list of timestamps
@@ -194,8 +200,18 @@ class AgentTelegramBridge:
         """
         Start the Telegram bot with polling for incoming messages.
 
+        A network failure here is retried in the background rather than given up on.
+        The failure this guards against is not exotic: a machine that has just woken
+        up runs the service before its network is back, and one attempt at that moment
+        cost this bridge a whole session — 2026-08-14, down from 12:56 to 16:46, with
+        the operator finding out by writing to a bot nobody was listening to. The
+        conversation-level bot survived the same outage because it retries with
+        backoff (`telegram_manager.py`); this is the same policy, off the startup path
+        so a dead network delays nothing else.
+
         Returns:
-            True if started successfully, False otherwise
+            True if started successfully, False otherwise — False with a retry pending
+            is the normal outcome of a network failure, not a final answer.
         """
         if self._enabled:
             log.warning("AgentTelegramBridge already running")
@@ -214,6 +230,58 @@ class AgentTelegramBridge:
 
         if not self.allowed_chat_ids:
             log.warning("No chat IDs configured, Telegram bridge disabled")
+            return False
+
+        try:
+            from telegram.error import NetworkError
+        except ImportError:
+            log.error("python-telegram-bot not installed. Install with: pip install python-telegram-bot")
+            return False
+
+        try:
+            return await self._start_once()
+        except NetworkError as e:
+            log.warning(
+                "Agent Telegram bridge could not reach Telegram at startup (%s) — "
+                "retrying in the background", e,
+            )
+            if self._retry_task is None or self._retry_task.done():
+                self._retry_task = asyncio.create_task(self._retry_start_until_up())
+            return False
+
+    async def _retry_start_until_up(self) -> None:
+        """Keep trying to start after a network failure, with the sibling's backoff."""
+        from telegram.error import NetworkError
+
+        base_delay, max_delay, attempt = 10, 1800, 0
+        while not self._enabled:
+            delay = min(base_delay * (2 ** attempt), max_delay)
+            if delay >= max_delay:
+                log.error(
+                    "Agent Telegram bridge giving up after backoff reached %ds — "
+                    "the channel stays down until the next restart", max_delay,
+                )
+                return
+            await asyncio.sleep(delay)
+            attempt += 1
+            try:
+                if await self._start_once():
+                    log.info("Agent Telegram bridge recovered on background attempt %d", attempt)
+                    return
+                log.warning("Agent Telegram bridge attempt %d refused to start; not retrying", attempt)
+                return
+            except NetworkError as e:
+                log.warning("Agent Telegram bridge attempt %d failed (%s), retrying", attempt, e)
+            except Exception as e:
+                log.error("Agent Telegram bridge attempt %d failed permanently: %s", attempt, e)
+                return
+
+    async def _start_once(self) -> bool:
+        """One start attempt. Raises NetworkError so the caller can decide to retry."""
+        try:
+            from telegram.error import NetworkError
+        except ImportError:
+            log.error("python-telegram-bot not installed. Install with: pip install python-telegram-bot")
             return False
 
         try:
@@ -288,19 +356,49 @@ class AgentTelegramBridge:
             self._enabled = True
             _ACTIVE_BOT_TOKENS.add(self.bot_token)
             log.info("Agent Telegram bridge polling started (two-way communication enabled)")
+            if self._on_started is not None:
+                try:
+                    result = self._on_started()
+                    if inspect.isawaitable(result):
+                        await result
+                except Exception as e:
+                    log.error("Telegram bridge started but its owner failed to wire it up: %s", e)
             return True
 
         except ImportError:
             log.error("python-telegram-bot not installed. Install with: pip install python-telegram-bot")
             return False
+        except NetworkError:
+            # Telegram is unreachable, which says nothing about this bridge being
+            # misconfigured. Hand it up so start() can schedule the retry; a partially
+            # built Application is dropped here rather than left holding its pool.
+            await self._discard_partial_application()
+            raise
         except Exception as e:
             log.error(f"Failed to start agent Telegram bridge: {e}", exc_info=True)
             return False
+
+    async def _discard_partial_application(self) -> None:
+        """Throw away an Application that failed mid-start, so a retry builds a fresh one."""
+        app, self._application = self._application, None
+        self._bot = None
+        if app is None:
+            return
+        try:
+            await app.shutdown()
+        except Exception as e:
+            log.debug("Discarding partially started Telegram application: %s", e)
 
     async def stop(self) -> None:
         """Stop the bridge and polling."""
         self._enabled = False
         _ACTIVE_BOT_TOKENS.discard(self.bot_token)
+
+        # A reconnect still waiting on its backoff must not outlive the bridge, or it
+        # comes back up minutes after someone asked for it to be down.
+        if self._retry_task is not None and not self._retry_task.done():
+            self._retry_task.cancel()
+        self._retry_task = None
 
         # Stop the application and updater
         if self._application:

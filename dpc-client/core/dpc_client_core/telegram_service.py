@@ -439,8 +439,18 @@ class TelegramService:
                 if not agent_id or not agent.get("telegram_enabled", False):
                     continue
                 try:
-                    await dpc_agent_provider._ensure_manager(agent_id=agent_id)
-                    logger.info("Auto-started Telegram bridge for agent %s on service startup", agent_id)
+                    manager = await dpc_agent_provider._ensure_manager(agent_id=agent_id)
+                    # Read the outcome rather than the attempt. The bridge reports a
+                    # failed start by returning False, not by raising, so announcing
+                    # success here on the way past printed "Auto-started Telegram
+                    # bridge" sixteen milliseconds after the ERROR saying it had not
+                    # started — and that INFO line is what anyone reads.
+                    bridge = getattr(manager, "_telegram_bridge", None)
+                    if bridge is None or not getattr(bridge, "_enabled", False):
+                        logger.warning(
+                            "Telegram bridge for agent %s did NOT come up on service startup", agent_id)
+                    else:
+                        logger.info("Auto-started Telegram bridge for agent %s on service startup", agent_id)
                 except Exception as e:
                     logger.warning("Failed to auto-start Telegram bridge for agent %s: %s", agent_id, e)
         except Exception as e:

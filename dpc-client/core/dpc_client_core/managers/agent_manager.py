@@ -817,24 +817,33 @@ class DpcAgentManager:
                 agent_manager=self,
             )
 
+            # Wiring runs when the bot is actually polling, which is not necessarily
+            # when start() returns: a start that failed on the network comes up later
+            # from the bridge's own retry, and an emitter that was never connected
+            # would leave a live bot that reports nothing.
+            agent_desc = self.agent_id if self.agent_id else "singleton"
+
+            def _wire_to_emitter():
+                emitter = get_event_emitter()
+                emitter.add_listener(
+                    create_telegram_bridge_callback(self._telegram_bridge, agent_id=self.agent_id))
+                log.info(
+                    f"Telegram bridge started for agent {agent_desc}, "
+                    f"connected to event emitter (filter={len(self._telegram_bridge.event_filter)} events, "
+                    f"chat_ids={chat_ids})"
+                )
+
+            self._telegram_bridge._on_started = _wire_to_emitter
+
             # Start bridge
             success = await self._telegram_bridge.start()
             if not success:
-                agent_desc = self.agent_id if self.agent_id else "singleton"
                 log.warning(f"Failed to start Telegram bridge for agent {agent_desc}")
-                self._telegram_bridge = None
+                if getattr(self._telegram_bridge, "_retry_task", None) is None:
+                    self._telegram_bridge = None
+                else:
+                    log.info(f"Telegram bridge for agent {agent_desc} is retrying in the background")
                 return
-
-            # Connect to event emitter, scoped to this agent's conversation_id
-            emitter = get_event_emitter()
-            emitter.add_listener(create_telegram_bridge_callback(self._telegram_bridge, agent_id=self.agent_id))
-
-            agent_desc = self.agent_id if self.agent_id else "singleton"
-            log.info(
-                f"Telegram bridge started for agent {agent_desc}, "
-                f"connected to event emitter (filter={len(self._telegram_bridge.event_filter)} events, "
-                f"chat_ids={chat_ids})"
-            )
 
         except ImportError as e:
             log.warning(f"Telegram bridge not available: {e}")
