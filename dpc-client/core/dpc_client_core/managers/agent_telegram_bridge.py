@@ -774,7 +774,13 @@ Send a voice message and it will be transcribed and processed\\.
         Callback data format: "shell:{request_id}:{approve|reject}"
         """
         query = update.callback_query
-        await query.answer()
+        try:
+            await query.answer()
+        except Exception as e:
+            # A query Telegram considers too old still carries the decision, and
+            # the message can still be edited — losing the whole handler here is
+            # how a press ends up looking like nothing happened at all.
+            log.info("Could not acknowledge shell approval press: %s", e)
 
         chat_id = str(query.message.chat.id)
         if chat_id not in self.allowed_chat_ids:

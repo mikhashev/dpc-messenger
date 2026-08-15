@@ -3982,8 +3982,12 @@ class CoreService:
                     agent_name=agent_name,
                     timeout_seconds=timeout_seconds,
                 )
+                logger.info("Shell approval %s offered in Telegram for %s", request_id, agent_id)
             except Exception as e:
                 logger.warning("Failed to offer shell approval %s in Telegram: %s", request_id, e)
+        else:
+            logger.info("Shell approval %s offered on the interface only (no bridge for %s)",
+                        request_id, agent_id or "<unknown agent>")
 
     async def announce_shell_approval_closed(
         self,
@@ -4005,6 +4009,7 @@ class CoreService:
         if bridge:
             try:
                 await bridge.close_shell_approval(request_id, outcome)
+                logger.info("Shell approval %s withdrawn from Telegram: %s", request_id, outcome)
             except Exception as e:
                 logger.debug("Could not withdraw shell approval %s from Telegram: %s", request_id, e)
 

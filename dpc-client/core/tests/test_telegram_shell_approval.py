@@ -141,6 +141,25 @@ async def test_no_rejects_through_the_service():
 
 
 @pytest.mark.asyncio
+async def test_a_stale_query_still_delivers_the_decision():
+    """Telegram refuses to acknowledge a press it considers too old. The press
+    still carries the answer and the message can still be edited, so losing the
+    handler there is what makes a press look like nothing happened."""
+    service = FakeService()
+    bridge = make_bridge(service)
+
+    class StaleQuery(FakeQuery):
+        async def answer(self):
+            raise RuntimeError("Query is too old and response timeout expired")
+
+    query = StaleQuery("shell:abc123:approve", 77)
+    await bridge._handle_shell_callback(types.SimpleNamespace(callback_query=query), None)
+
+    assert service.approved == ["abc123"]
+    assert query.texts and "Approved" in query.texts[-1]
+
+
+@pytest.mark.asyncio
 async def test_a_button_pressed_from_another_chat_decides_nothing():
     service = FakeService()
     bridge = make_bridge(service, chat_ids=("77",))
