@@ -6,11 +6,11 @@ import logging
 import uuid
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any, Optional, List, Union
 
 import ollama
 
-from .base import AIProvider
+from .base import AIProvider, normalize_reasoning_effort
 
 logger = logging.getLogger(__name__)
 
@@ -94,6 +94,12 @@ class OllamaProvider(AIProvider):
         except RuntimeError:
             self._own_loop = None
         self._last_thinking: Optional[str] = None
+        # Said once per provider, not once per round: both are properties of the
+        # (model, alias) pair, so repeating them per call would bury the log
+        # without telling anyone anything new.
+        self._effort_clamped_logged = False
+        self._effort_ignored_logged = False
+        self._effort_unknown_logged = False
 
     @asynccontextmanager
     async def _client(self):
@@ -155,9 +161,9 @@ class OllamaProvider(AIProvider):
             return "thinking" in caps
         return any(tm in self.model.lower() for tm in OLLAMA_THINKING_MODELS)
 
-    def _think_flag(self) -> Optional[bool]:
-        """What to send as `think`, letting the configuration overrule the
-        capability.
+    def _think_flag(self, effort: Optional[str] = None) -> Optional[Union[bool, str]]:
+        """What to send as `think`: the per-call effort if there is a usable
+        one, else the configuration, else the capability.
 
         A model that *can* think is not a model that *should* on every call:
         qwen3.5:9b spent a whole QC verdict reasoning and returned nothing —
@@ -166,10 +172,60 @@ class OllamaProvider(AIProvider):
         was to keep the model out of a hardcoded list.
 
         This is the one place `think` is decided; it used to be three copies
-        at the call sites. When the per-call effort selector arrives it plugs
-        in here and outranks the configuration, which outranks the
+        at the call sites. The per-call effort selector promised here has now
+        arrived and outranks the configuration, which outranks the
         capability — a second source deciding the same flag is how the two
-        lists above came to disagree with the daemon."""
+        lists above came to disagree with the daemon.
+
+        Two things the daemon taught us in the measuring, both load-bearing:
+
+        `max` is sent as `high`. On qwen3.8 with a fixed seed the two produce
+        byte-identical traces, so nothing is lost; and the Python SDK types the
+        field as `Literal['low','medium','high']`, so `max` dies in pydantic
+        before a request leaves the process. The clamp is therefore both free
+        and required. If a future model ever separates them, the log line below
+        is how anyone will find out the downgrade was happening.
+
+        A level sent to a model that cannot think is **refused**, not ignored:
+        `400 "<model> does not support thinking"`. So the effort is dropped for
+        such a model rather than passed on — a group-scoped effort must not be
+        able to kill every call an agent makes because of the model it sits on.
+        `think=False` is the only value every model accepts."""
+        level = normalize_reasoning_effort(effort)
+        if level is not None:
+            if self.supports_thinking():
+                if level == "max":
+                    if not self._effort_clamped_logged:
+                        logger.info(
+                            "OllamaProvider '%s': effort 'max' sent as 'high' — the "
+                            "daemon treats them alike on this model and the SDK "
+                            "cannot express 'max'.", self.alias,
+                        )
+                        self._effort_clamped_logged = True
+                    return "high"
+                return level
+            if not self._effort_ignored_logged:
+                logger.info(
+                    "OllamaProvider '%s': reasoning_effort='%s' ignored — %s does "
+                    "not report thinking, and a level would be refused with a 400.",
+                    self.alias, level, self.model,
+                )
+                self._effort_ignored_logged = True
+        elif (effort or "").strip():
+            # A word arrived and it is not one we know. Falling through to the
+            # configuration is the right behaviour — guessing at a level would be
+            # the very substitution this vocabulary exists to stop — but doing it
+            # silently is not: `none` and `minimal` are real DeepSeek words that a
+            # group's stored effort can carry to an Ollama agent, and without this
+            # line they would read as "the operator chose the configured value".
+            # The empty string is not this case: it is the header's own "Config".
+            if not self._effort_unknown_logged:
+                logger.info(
+                    "OllamaProvider '%s': reasoning_effort=%r is not a level this "
+                    "provider knows — using the configured value instead.",
+                    self.alias, effort,
+                )
+                self._effort_unknown_logged = True
         configured = self.config.get("think")
         if configured is not None:
             return bool(configured)
@@ -197,7 +253,7 @@ class OllamaProvider(AIProvider):
         if options:
             logger.debug(
                 "OllamaProvider '%s': options=%s think=%s",
-                self.alias, options, self._think_flag(),
+                self.alias, options, self._think_flag(kwargs.get("reasoning_effort")),
             )
         return options or None
 
@@ -218,7 +274,7 @@ class OllamaProvider(AIProvider):
                         model=self.model,
                         messages=[message],
                         options=options,
-                        think=self._think_flag(),
+                        think=self._think_flag(kwargs.get("reasoning_effort")),
                     ),
                     timeout=timeout
                 )
@@ -296,7 +352,7 @@ class OllamaProvider(AIProvider):
                         model=self.model,
                         messages=[message],
                         options=options,
-                        think=self._think_flag(),
+                        think=self._think_flag(kwargs.get("reasoning_effort")),
                         # Keep the VL model resident for a bit so back-to-back agent
                         # QC calls don't cold-start a reload each time (was 0 =
                         # unload immediately). Configurable via providers.json
@@ -431,7 +487,7 @@ class OllamaProvider(AIProvider):
                         messages=ollama_messages,
                         tools=ollama_tools,
                         options=options,
-                        think=self._think_flag(),
+                        think=self._think_flag(kwargs.get("reasoning_effort")),
                     ),
                     timeout=timeout,
                 )

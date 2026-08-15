@@ -153,3 +153,104 @@ def test_the_log_says_which_flag_was_sent(caplog):
     with caplog.at_level("DEBUG", logger=OP.logger.name):
         _provider(context_window=16384, think=False)._build_options()
     assert "think=False" in caplog.text
+
+
+# --- the per-call effort selector, wired 2026-08-15 ---
+#
+# Every number and refusal asserted below was measured against the live daemon
+# (ollama 0.32.13) before the code was written; the review brief and both
+# external reviews carry the payloads.
+
+
+def test_a_level_reaches_the_daemon_unchanged():
+    FakeClient.answer = ["completion", "thinking"]
+    provider = _provider()
+    assert provider._think_flag("low") == "low"
+    assert provider._think_flag("medium") == "medium"
+    assert provider._think_flag("high") == "high"
+
+
+def test_max_is_sent_as_high_because_it_is_the_same_thing_here():
+    """Measured by seed on qwen3.8: `high` and `max` produce byte-identical
+    traces. And the SDK types the field `Literal['low','medium','high']`, so
+    `max` would die in pydantic before a request left the process."""
+    FakeClient.answer = ["completion", "thinking"]
+    assert _provider()._think_flag("max") == "high"
+
+
+def test_xhigh_becomes_high_and_not_max():
+    """The vendor who publishes a table maps `xhigh` to *high*. Rewriting it to
+    `max` sent a caller one notch above high to the dearest effort there is."""
+    FakeClient.answer = ["completion", "thinking"]
+    assert _provider()._think_flag("xhigh") == "high"
+
+
+def test_an_effort_beats_the_configuration():
+    """Nearer scope wins — the precedence `_think_flag`'s docstring promised."""
+    FakeClient.answer = ["completion", "thinking"]
+    assert _provider(think=False)._think_flag("high") == "high"
+
+
+def test_a_level_is_dropped_for_a_model_that_cannot_think():
+    """The daemon refuses it: 400 "<model> does not support thinking". A group
+    knob must not be able to kill every call an agent makes."""
+    FakeClient.answer = ["completion"]
+    assert _provider()._think_flag("high") is None
+
+
+def test_dropping_the_level_still_honours_an_explicit_configuration():
+    FakeClient.answer = ["completion"]
+    assert _provider(think=False)._think_flag("high") is False
+
+
+def test_a_word_nobody_recognises_changes_nothing():
+    """Unknown means unknown: fall back to what would have happened anyway,
+    rather than guess at a level."""
+    FakeClient.answer = ["completion", "thinking"]
+    assert _provider()._think_flag("banana") is True
+    assert _provider()._think_flag("") is True
+    assert _provider()._think_flag(None) is True
+
+
+def test_the_clamp_is_said_once_and_only_once(caplog):
+    FakeClient.answer = ["completion", "thinking"]
+    provider = _provider()
+    with caplog.at_level("INFO"):
+        provider._think_flag("max")
+        provider._think_flag("max")
+    assert sum("sent as 'high'" in r.getMessage() for r in caplog.records) == 1
+
+
+def test_the_ignored_effort_is_said_once_and_only_once(caplog):
+    FakeClient.answer = ["completion"]
+    provider = _provider()
+    with caplog.at_level("INFO"):
+        provider._think_flag("high")
+        provider._think_flag("low")
+    assert sum("ignored" in r.getMessage() for r in caplog.records) == 1
+
+
+def test_an_unknown_word_says_so_once(caplog):
+    """The docstring of the shared normalizer promises the provider will say
+    when it discards a caller's word. `none` and `minimal` are real DeepSeek
+    levels that a group's stored effort can carry to an Ollama agent."""
+    FakeClient.answer = ["completion", "thinking"]
+    provider = _provider()
+    with caplog.at_level("INFO"):
+        assert provider._think_flag("none") is True
+        assert provider._think_flag("minimal") is True
+    assert sum("is not a level this provider knows" in r.getMessage()
+               for r in caplog.records) == 1
+
+
+def test_the_headers_own_config_value_is_not_an_unknown_word(caplog):
+    """The selector's first option sends the empty string. Treating that as a
+    discarded word would put a line in the log on every ordinary call."""
+    FakeClient.answer = ["completion", "thinking"]
+    provider = _provider()
+    with caplog.at_level("INFO"):
+        assert provider._think_flag("") is True
+        assert provider._think_flag(None) is True
+        assert provider._think_flag("   ") is True
+    assert not any("is not a level this provider knows" in r.getMessage()
+                   for r in caplog.records)

@@ -16,6 +16,41 @@ class ModelNotCachedError(Exception):
         self.download_size_gb = download_size_gb
         super().__init__(f"Model '{model_name}' not found in cache: {cache_path}")
 
+# --- Shared reasoning-effort vocabulary ---
+
+# The words the chat header offers, in ascending order of intent. They are an
+# ordinal, not a calibration: each provider maps them onto whatever its own API
+# and model actually do, and the same word buys different depths in different
+# places. Ollama's daemon accepts these four and treats `max` as `high` —
+# measured 2026-08-15, byte-identical traces at a fixed seed. DeepSeek accepts
+# seven words and runs three efforts, aliasing `medium` and `xhigh` onto `high`
+# — that one is the vendor's published table, not our measurement; ours was too
+# weak to separate them and only agrees with it. A shared *spelling* is the most
+# that can be shared: a shared mapping would have to be wrong somewhere.
+REASONING_EFFORTS = ("low", "medium", "high", "max")
+
+
+def normalize_reasoning_effort(value: Optional[str]) -> Optional[str]:
+    """The requested effort as one of `REASONING_EFFORTS`, or None if it is not
+    one of them.
+
+    `xhigh` is folded into `high` because that is what the one vendor who
+    publishes a table says it means (api-docs.deepseek.com/guides/thinking_mode:
+    `xhigh -> high`), and because Ollama's daemon refuses the word outright.
+    Rewriting it to `max` — which this codebase did until 2026-08-15 — sent a
+    caller asking for one notch above high to the most expensive effort the API
+    has, which is an escalation wearing the clothes of a translation.
+
+    Returning None for anything else is deliberate: an unknown word must not be
+    guessed at. What the caller's provider does with None is the provider's
+    decision, and it should say so in the log rather than substitute silently.
+    """
+    word = (value or "").strip().lower()
+    if word == "xhigh":
+        word = "high"
+    return word if word in REASONING_EFFORTS else None
+
+
 # --- Shared thinking model constants ---
 
 OPENAI_THINKING_MODELS = [
