@@ -78,7 +78,12 @@ def rates_at(model_key: str, moment: Optional[datetime] = None) -> Dict[str, flo
     if when.tzinfo is None:
         when = when.replace(tzinfo=timezone.utc)
     if when < NEW_TARIFF_FROM:
-        return PAY_PER_USE_RATES[model_key]
+        if model_key in PAY_PER_USE_RATES:
+            return PAY_PER_USE_RATES[model_key]
+        # A model only the new tariff names, priced at a moment before that
+        # tariff: no old rate for it exists. Its own table is the only figure
+        # there is, and `compute_cost_usd` promises never to raise — a cost
+        # meter that throws is a cost meter nobody calls.
     base = PAY_PER_USE_RATES_FROM_2026_08_16[model_key]
     if not _is_peak(when):
         return base
@@ -95,8 +100,15 @@ def _resolve_pay_model(provider_alias: str, model: Optional[str]) -> Optional[st
     This resolves a *name*, not a price: the price also depends on when the call
     was made, and folding the two together is what let one flat number stand in
     for a tariff that has hours.
+
+    Membership is tested against **both** tables. Testing only the old one is a
+    trap with a delay on it: the two carry the same two keys today, so the day a
+    model exists in the new table alone it would resolve to None, fall through
+    to "subscription", and be billed at **$0.00 in silence** — a cost meter
+    reading zero because the model is unknown looks exactly like a cost meter
+    reading zero because the calls were free (GLM 5.3, 2026-08-15).
     """
-    if model and model in PAY_PER_USE_RATES:
+    if model and (model in PAY_PER_USE_RATES or model in PAY_PER_USE_RATES_FROM_2026_08_16):
         return model
     hay = f"{model or ''} {provider_alias or ''}".lower()
     if "deepseek" in hay:

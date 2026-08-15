@@ -1,6 +1,18 @@
-"""Tests for dpc_agent.pricing — per-provider USD cost, DeepSeek cache split."""
+"""Tests for dpc_agent.pricing — per-provider USD cost, DeepSeek cache split.
+
+The rate tests below name the moment they price at. Four of them used to leave
+`at` unset, which means "now", and asserted the pre-2026-08-16 numbers: green
+until the tariff changed and red on every machine afterwards, for no reason
+connected to the code. A test that asserts a rate has to say which tariff it is
+asserting.
+"""
+
+from datetime import datetime, timezone
 
 import pytest
+
+# Any moment before the switchover; the new-tariff tests use their own constants.
+AT_OLD_TARIFF = datetime(2026, 8, 15, 12, 0, tzinfo=timezone.utc)
 
 from dpc_client_core.dpc_agent.pricing import (
     compute_cost_usd,
@@ -32,6 +44,7 @@ def test_flash_cost_with_cache_split():
     cost = compute_cost_usd(
         "deepseek_flash", 1000, 500,
         model="deepseek-v4-flash", cache_hit_tokens=200, cache_miss_tokens=800,
+        at=AT_OLD_TARIFF,
     )
     expected = (200 * 0.0028 + 800 * 0.14 + 500 * 0.28) / 1_000_000
     assert cost == pytest.approx(expected)
@@ -41,6 +54,7 @@ def test_pro_cost_with_cache_split():
     cost = compute_cost_usd(
         "deepseek_pro", 1000, 1000,
         model="deepseek-v4-pro", cache_hit_tokens=0, cache_miss_tokens=1000,
+        at=AT_OLD_TARIFF,
     )
     expected = (1000 * 0.435 + 1000 * 0.87) / 1_000_000
     assert cost == pytest.approx(expected)
@@ -56,7 +70,7 @@ def test_flash_and_pro_differ():
 # --- conservative fallback: no cache split → all prompt billed as cache-miss ---
 
 def test_conservative_treats_all_prompt_as_miss():
-    cost = compute_cost_usd("deepseek_flash", 1000, 500, model="deepseek-v4-flash")
+    cost = compute_cost_usd("deepseek_flash", 1000, 500, model="deepseek-v4-flash", at=AT_OLD_TARIFF)
     expected = (1000 * 0.14 + 500 * 0.28) / 1_000_000  # hit=0, miss=1000
     assert cost == pytest.approx(expected)
 
@@ -74,12 +88,12 @@ def test_cache_hit_is_cheaper_than_miss():
 # --- resolution by alias substring when the model string is unavailable ---
 
 def test_resolve_by_alias_when_model_missing():
-    assert compute_cost_usd("deepseek_pro", 1000, 0, cache_miss_tokens=1000) == pytest.approx(
-        1000 * 0.435 / 1_000_000
-    )
-    assert compute_cost_usd("deepseek_flash", 1000, 0, cache_miss_tokens=1000) == pytest.approx(
-        1000 * 0.14 / 1_000_000
-    )
+    assert compute_cost_usd(
+        "deepseek_pro", 1000, 0, cache_miss_tokens=1000, at=AT_OLD_TARIFF
+    ) == pytest.approx(1000 * 0.435 / 1_000_000)
+    assert compute_cost_usd(
+        "deepseek_flash", 1000, 0, cache_miss_tokens=1000, at=AT_OLD_TARIFF
+    ) == pytest.approx(1000 * 0.14 / 1_000_000)
 
 
 # --- back-compat: legacy positional call (no model/cache kwargs) still works ---
@@ -94,8 +108,6 @@ def test_never_raises_on_negative_or_none_like():
 
 
 # --- the tariff has a clock now (DeepSeek, from 2026-08-16 16:00 UTC) ---
-
-from datetime import datetime, timezone
 
 from dpc_client_core.dpc_agent.pricing import NEW_TARIFF_FROM, rates_at
 
@@ -159,3 +171,66 @@ def test_a_naive_moment_is_read_as_utc():
 
 def test_subscription_providers_are_untouched_by_the_clock():
     assert compute_cost_usd("zai_coding_glm", 10_000, 5_000, at=AFTER_PEAK) == 0.0
+
+
+# --- the two traps GLM 5.3 found by moving the clock, 2026-08-16 ---
+
+def test_the_rate_tests_do_not_depend_on_what_day_it_is():
+    """The suite must not go red because the tariff changed on schedule.
+
+    Four tests above asserted the old numbers through the default `at=None`,
+    which means "now". They were green only while "now" was before
+    2026-08-16 16:00 UTC. This pins the property rather than the arithmetic:
+    the same call priced at a stated moment must give the same answer whatever
+    the wall clock says.
+    """
+    args = ("deepseek_flash", 1000, 500)
+    kw = dict(model="deepseek-v4-flash", cache_hit_tokens=200, cache_miss_tokens=800)
+    old = (200 * 0.0028 + 800 * 0.14 + 500 * 0.28) / 1_000_000
+    new_off = (200 * 0.007 + 800 * 0.22 + 500 * 0.66) / 1_000_000
+    assert compute_cost_usd(*args, **kw, at=AT_OLD_TARIFF) == pytest.approx(old)
+    assert compute_cost_usd(*args, **kw, at=AFTER_OFF_PEAK) == pytest.approx(new_off)
+    assert new_off > old, "the change this whole module exists for"
+
+
+def test_a_model_known_only_to_the_new_table_is_still_pay_per_use():
+    """Resolution used to test membership in the old table alone. Both tables
+    carry the same keys today, so the failure was scheduled rather than
+    present: a model added to the new table only would resolve to nothing,
+    fall through to subscription, and bill $0.00 without saying so."""
+    from dpc_client_core.dpc_agent import pricing
+
+    pricing.PAY_PER_USE_RATES_FROM_2026_08_16["deepseek-v5-future"] = {
+        "cache_hit": 0.01, "cache_miss": 0.5, "output": 1.5,
+    }
+    try:
+        assert get_billing_model("whatever", model="deepseek-v5-future") == "pay_per_use"
+        cost = compute_cost_usd(
+            "whatever", 1000, 1000, model="deepseek-v5-future",
+            cache_miss_tokens=1000, at=AFTER_OFF_PEAK,
+        )
+        assert cost == pytest.approx((1000 * 0.5 + 1000 * 1.5) / 1_000_000)
+        assert cost > 0, "a model we know the price of must never bill as free"
+    finally:
+        pricing.PAY_PER_USE_RATES_FROM_2026_08_16.pop("deepseek-v5-future", None)
+
+
+def test_a_new_table_model_priced_before_the_new_table_existed_does_not_raise():
+    """The contract says "never raises", and it was formally false for one case
+    the union fix created: a model only the new tariff names, asked for at a
+    moment before that tariff. There is no old rate for it; its own table is
+    the only figure that exists, and a cost meter that throws is one nobody
+    calls. (Ark and Warren, reading the diff, 2026-08-15.)"""
+    from dpc_client_core.dpc_agent import pricing
+
+    pricing.PAY_PER_USE_RATES_FROM_2026_08_16["deepseek-v5-future"] = {
+        "cache_hit": 0.01, "cache_miss": 0.5, "output": 1.5,
+    }
+    try:
+        cost = compute_cost_usd(
+            "whatever", 1000, 1000, model="deepseek-v5-future",
+            cache_miss_tokens=1000, at=AT_OLD_TARIFF,
+        )
+        assert cost == pytest.approx((1000 * 0.5 + 1000 * 1.5) / 1_000_000)
+    finally:
+        pricing.PAY_PER_USE_RATES_FROM_2026_08_16.pop("deepseek-v5-future", None)
