@@ -84,6 +84,7 @@ async def test_request_is_offered_with_two_buttons():
         reason="Requires approval: rm -rf",
         agent_name="Ark",
         timeout_seconds=60,
+        chat_id="77",
     )
 
     assert len(bridge._bot.sent) == 1
@@ -230,7 +231,7 @@ async def test_a_request_answered_while_the_offer_was_in_flight_is_withdrawn():
     try:
         await service.announce_shell_approval_request(
             request_id="r2", command="ls", reason="", agent_id="agent_007",
-            agent_name="Ark", timeout_seconds=60,
+            agent_name="Ark", timeout_seconds=60, telegram_chat_id="77",
         )
     finally:
         shell_tool._pending_approvals.pop("r2", None)
@@ -258,8 +259,9 @@ def test_the_bot_actually_listens_for_the_shell_buttons():
 
 @pytest.mark.asyncio
 async def test_the_service_offers_the_request_to_both_surfaces():
-    """The fan-out is the whole point: the socket keeps the desktop toast and
-    the bridge puts the same request on the phone."""
+    """Both surfaces, when the run came from Telegram: the socket keeps the
+    desktop toast and the bridge puts the same request in the chat the person
+    is writing from. `telegram_chat_id` is what makes the second one happen."""
     from dpc_client_core.service import CoreService
 
     events = []
@@ -287,7 +289,7 @@ async def test_the_service_offers_the_request_to_both_surfaces():
     shell_tool._pending_approvals["r1"] = {"decision": None}
     try:
         await service.announce_shell_approval_request(
-            request_id="r1", command="rm -rf ./x", reason="why",
+            request_id="r1", command="rm -rf ./x", reason="why", telegram_chat_id="77",
             agent_id="agent_007", agent_name="Ark", timeout_seconds=60,
         )
     finally:
@@ -376,3 +378,85 @@ async def test_the_tool_announces_through_the_service_not_the_socket(tmp_path):
     entry["event"].set()
 
     assert await task == "❌ Command rejected by user."
+
+
+# --- where the button may appear (2026-08-16) ---
+#
+# It used to appear in every allowed chat. On this machine that was four, while
+# the agent worked in the desktop group chat and nobody had written to it on
+# Telegram at all: ~120 messages carrying a Yes button for a command outside
+# the sandbox, three quarters of them to chats with no relation to the agent —
+# and the callback accepts a press from any allowed chat.
+
+
+@pytest.mark.asyncio
+async def test_a_run_that_did_not_come_from_telegram_is_not_offered_there():
+    """The condition the ordinary reply path already uses: no originating chat,
+    no Telegram. The desktop still gets its toast — that is the service's job,
+    not the bridge's."""
+    bridge = make_bridge(chat_ids=("77", "88", "99"))
+
+    await bridge.notify_shell_approval(request_id="abc", command="ls")
+
+    assert bridge._bot.sent == []
+    assert bridge._pending_shell == {}
+
+
+@pytest.mark.asyncio
+async def test_only_the_originating_chat_is_offered_the_button():
+    bridge = make_bridge(chat_ids=("77", "88", "99"))
+
+    await bridge.notify_shell_approval(request_id="abc", command="ls", chat_id="88")
+
+    assert [s["chat_id"] for s in bridge._bot.sent] == ["88"]
+    assert bridge._pending_shell["abc"] == [("88", 101)]
+
+
+@pytest.mark.asyncio
+async def test_a_chat_we_would_refuse_a_press_from_is_not_offered_the_button():
+    """`_handle_shell_callback` rejects a press from outside allowed_chat_ids,
+    so offering the button there can only produce a dead end."""
+    bridge = make_bridge(chat_ids=("77",))
+
+    await bridge.notify_shell_approval(request_id="abc", command="ls", chat_id="12345")
+
+    assert bridge._bot.sent == []
+    assert bridge._pending_shell == {}
+
+
+@pytest.mark.asyncio
+async def test_the_service_leaves_telegram_alone_for_a_desktop_run():
+    """The half that made this a security question rather than a noise one:
+    without an originating chat the bridge is not consulted at all."""
+    from dpc_client_core.service import CoreService
+    from dpc_client_core.dpc_agent.tools import shell as shell_tool
+
+    events = []
+
+    class FakeLocalApi:
+        async def broadcast_event(self, name, payload):
+            events.append(name)
+
+    offered = []
+    bridge = types.SimpleNamespace(
+        notify_shell_approval=lambda **kw: _record(offered, kw),
+        close_shell_approval=lambda *a: None,
+    )
+    manager = types.SimpleNamespace(_telegram_bridge=bridge)
+    provider = types.SimpleNamespace(_managers={"agent_007": manager})
+
+    service = CoreService.__new__(CoreService)
+    service.local_api = FakeLocalApi()
+    service.llm_manager = types.SimpleNamespace(providers={"dpc_agent": provider})
+
+    shell_tool._pending_approvals["r3"] = {"decision": None}
+    try:
+        await service.announce_shell_approval_request(
+            request_id="r3", command="ls", reason="", agent_id="agent_007",
+            agent_name="Ark", timeout_seconds=60,
+        )
+    finally:
+        shell_tool._pending_approvals.pop("r3", None)
+
+    assert offered == [], "a desktop-initiated run must not ring the phone"
+    assert "shell_approval_request" in events, "the interface still gets it"

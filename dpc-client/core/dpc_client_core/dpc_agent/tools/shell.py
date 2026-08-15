@@ -259,6 +259,11 @@ def _request_approval(ctx: ToolContext, command: str, reason: str, cwd: str, tim
                 agent_id=agent_id,
                 agent_name=agent_name,
                 timeout_seconds=APPROVAL_TTL_SECONDS,
+                # Empty unless this run came from Telegram. The same field that
+                # decides where the agent's answer goes decides where the
+                # approval is offered — otherwise the button appears in chats
+                # nobody is talking in, and anyone there can press it.
+                telegram_chat_id=getattr(ctx, "reply_telegram_chat_id", "") or "",
             ))
             if not offered:
                 log.warning("No main event loop available to announce shell_approval_request")

@@ -3958,11 +3958,17 @@ class CoreService:
         agent_id: str,
         agent_name: str,
         timeout_seconds: int = 0,
+        telegram_chat_id: str = "",
     ) -> None:
         """Put a tier-1 approval request in front of every surface that can answer it.
 
         The tool that raises the request knows nothing about transports; this is
         where the list of them lives.
+
+        `telegram_chat_id` is the chat the run came from, empty when it did not
+        come from Telegram at all. Telegram is offered the request only then and
+        only there: the interface is always shown it, because the interface is
+        where the operator who started a desktop run is sitting.
         """
         if self.local_api:
             await self.local_api.broadcast_event("shell_approval_request", {
@@ -3972,7 +3978,7 @@ class CoreService:
                 "agent_name": agent_name,
             })
 
-        bridge = self._get_agent_telegram_bridge(agent_id)
+        bridge = self._get_agent_telegram_bridge(agent_id) if telegram_chat_id else None
         if bridge:
             try:
                 await bridge.notify_shell_approval(
@@ -3981,8 +3987,12 @@ class CoreService:
                     reason=reason,
                     agent_name=agent_name,
                     timeout_seconds=timeout_seconds,
+                    chat_id=telegram_chat_id,
                 )
-                logger.info("Shell approval %s offered in Telegram for %s", request_id, agent_id)
+                logger.info(
+                    "Shell approval %s offered in Telegram chat %s for %s",
+                    request_id, telegram_chat_id, agent_id,
+                )
             except Exception as e:
                 logger.warning("Failed to offer shell approval %s in Telegram: %s", request_id, e)
 

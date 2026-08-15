@@ -830,14 +830,44 @@ Send a voice message and it will be transcribed and processed\\.
         reason: str = "",
         agent_name: str = "",
         timeout_seconds: int = 0,
+        chat_id: str = "",
     ) -> None:
-        """Show a tier-1 shell command here with Yes/No buttons.
+        """Show a tier-1 shell command in ONE chat with Yes/No buttons.
+
+        `chat_id` is the chat the run came from; without it nothing is sent.
+        This used to loop over every allowed chat, and on this machine that
+        meant a prompt to run an arbitrary command *outside the sandbox*
+        reached four chats while the agent was working in the desktop group
+        chat and nobody had written to it on Telegram at all. Three of those
+        chats had no relation to the agent — and since the callback handler
+        accepts a press from any allowed chat, the fan-out was widening who
+        could authorise execution rather than merely making noise.
+
+        The rule is the one the ordinary reply path already follows
+        (`agent.py`, `reply_telegram_chat_id`): the approval appears where the
+        conversation is happening, and nowhere else.
 
         Sent as plain text: the command is arbitrary shell and MarkdownV2 would
         have to escape it back into something the reader has to decode before
         deciding.
         """
         if not self._enabled or not self._bot:
+            return
+
+        target = str(chat_id or "")
+        if not target:
+            log.debug(
+                "Shell approval %s not offered on Telegram: the run did not come from there",
+                request_id,
+            )
+            return
+        if target not in self.allowed_chat_ids:
+            # Offering a button whose press would then be rejected is worse
+            # than not offering it.
+            log.warning(
+                "Shell approval %s not offered to chat %s: not an allowed chat",
+                request_id, target,
+            )
             return
 
         from telegram import InlineKeyboardButton, InlineKeyboardMarkup
@@ -853,20 +883,19 @@ Send a voice message and it will be transcribed and processed\\.
             InlineKeyboardButton("❌ No", callback_data=f"shell:{request_id}:reject"),
         ]])
 
-        delivered = []
-        for chat_id in self.allowed_chat_ids:
-            try:
-                sent = await self._bot.send_message(
-                    chat_id=chat_id,
-                    text="\n".join(lines),
-                    reply_markup=keyboard,
-                )
-                delivered.append((chat_id, getattr(sent, "message_id", None)))
-            except Exception as e:
-                log.warning(f"Failed to send shell approval to chat {chat_id}: {e}")
+        try:
+            sent = await self._bot.send_message(
+                chat_id=target,
+                text="\n".join(lines),
+                reply_markup=keyboard,
+            )
+        except Exception as e:
+            log.warning(f"Failed to send shell approval to chat {target}: {e}")
+            return
 
-        if delivered:
-            self._pending_shell[request_id] = delivered
+        # Still a list: close_shell_approval withdraws whatever was delivered,
+        # and one delivery is the shape that list now has.
+        self._pending_shell[request_id] = [(target, getattr(sent, "message_id", None))]
 
     async def close_shell_approval(self, request_id: str, outcome: str) -> int:
         """Take the buttons off a request answered elsewhere or expired.
