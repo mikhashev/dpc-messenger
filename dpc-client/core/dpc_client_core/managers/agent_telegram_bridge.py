@@ -868,11 +868,18 @@ Send a voice message and it will be transcribed and processed\\.
         if delivered:
             self._pending_shell[request_id] = delivered
 
-    async def close_shell_approval(self, request_id: str, outcome: str) -> None:
-        """Take the buttons off a request answered on the desktop or expired."""
+    async def close_shell_approval(self, request_id: str, outcome: str) -> int:
+        """Take the buttons off a request answered elsewhere or expired.
+
+        Returns how many messages were actually rewritten, so the caller can
+        log what happened instead of what it attempted: this is a no-op
+        whenever the press came from here, and used to be logged as a
+        withdrawal anyway.
+        """
         delivered = self._pending_shell.pop(request_id, None)
         if not delivered or not self._bot:
-            return
+            return 0
+        closed = 0
         for chat_id, message_id in delivered:
             if message_id is None:
                 continue
@@ -882,8 +889,10 @@ Send a voice message and it will be transcribed and processed\\.
                     message_id=message_id,
                     text=outcome,
                 )
+                closed += 1
             except Exception as e:
                 log.debug(f"Could not close shell approval message in {chat_id}: {e}")
+        return closed
 
     async def notify_knowledge_proposal(
         self,

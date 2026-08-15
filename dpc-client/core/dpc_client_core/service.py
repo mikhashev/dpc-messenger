@@ -3985,6 +3985,20 @@ class CoreService:
                 logger.info("Shell approval %s offered in Telegram for %s", request_id, agent_id)
             except Exception as e:
                 logger.warning("Failed to offer shell approval %s in Telegram: %s", request_id, e)
+
+            # Posting to Telegram takes about a second, and the desktop can
+            # answer inside it — observed 2026-08-15, where the withdrawal ran
+            # before the message existed and left a live button on a decision
+            # already made. Withdraw what was just posted instead.
+            from .dpc_agent.tools.shell import _pending_approvals
+
+            entry = _pending_approvals.get(request_id)
+            if entry is None or entry.get("decision"):
+                await self.announce_shell_approval_closed(
+                    request_id=request_id,
+                    agent_id=agent_id,
+                    outcome="⌛ Answered before this arrived.",
+                )
         else:
             logger.info("Shell approval %s offered on the interface only (no bridge for %s)",
                         request_id, agent_id or "<unknown agent>")
@@ -4008,8 +4022,9 @@ class CoreService:
         bridge = self._get_agent_telegram_bridge(agent_id)
         if bridge:
             try:
-                await bridge.close_shell_approval(request_id, outcome)
-                logger.info("Shell approval %s withdrawn from Telegram: %s", request_id, outcome)
+                closed = await bridge.close_shell_approval(request_id, outcome)
+                if closed:
+                    logger.info("Shell approval %s withdrawn from Telegram: %s", request_id, outcome)
             except Exception as e:
                 logger.debug("Could not withdraw shell approval %s from Telegram: %s", request_id, e)
 
@@ -4039,7 +4054,7 @@ class CoreService:
         await self.announce_shell_approval_closed(
             request_id=request_id,
             agent_id=entry.get("agent_id", ""),
-            outcome="✅ Approved on the desktop.",
+            outcome="✅ Approved elsewhere.",
         )
 
         if add_to_whitelist:
@@ -4067,7 +4082,7 @@ class CoreService:
         await self.announce_shell_approval_closed(
             request_id=request_id,
             agent_id=entry.get("agent_id", ""),
-            outcome="❌ Rejected on the desktop.",
+            outcome="❌ Rejected elsewhere.",
         )
 
         logger.info("Shell command rejected: %s", request_id)

@@ -188,11 +188,55 @@ async def test_an_answer_elsewhere_takes_the_buttons_away_once():
     bridge = make_bridge()
     bridge._pending_shell["abc123"] = [("77", 101)]
 
-    await bridge.close_shell_approval("abc123", "✅ Approved on the desktop.")
-    await bridge.close_shell_approval("abc123", "✅ Approved on the desktop.")
+    first = await bridge.close_shell_approval("abc123", "✅ Approved elsewhere.")
+    second = await bridge.close_shell_approval("abc123", "✅ Approved elsewhere.")
 
     assert len(bridge._bot.edited) == 1
     assert bridge._bot.edited[0]["message_id"] == 101
+    # The count is what lets the caller log the outcome instead of the attempt:
+    # the second call withdrew nothing and must not be reported as a withdrawal.
+    assert (first, second) == (1, 0)
+
+
+@pytest.mark.asyncio
+async def test_a_request_answered_while_the_offer_was_in_flight_is_withdrawn():
+    """Posting to Telegram takes about a second and the desktop can answer
+    inside it. Observed 2026-08-15: the withdrawal ran before the message
+    existed, and the button stayed live on a decision already made."""
+    from dpc_client_core.service import CoreService
+    from dpc_client_core.dpc_agent.tools import shell as shell_tool
+
+    events = []
+
+    class FakeLocalApi:
+        async def broadcast_event(self, name, payload):
+            events.append(name)
+
+    offered = []
+    withdrawn = []
+    bridge = types.SimpleNamespace(
+        notify_shell_approval=lambda **kw: _record(offered, kw),
+        close_shell_approval=lambda *a: _record(withdrawn, a),
+    )
+    manager = types.SimpleNamespace(_telegram_bridge=bridge)
+    provider = types.SimpleNamespace(_managers={"agent_007": manager})
+
+    service = CoreService.__new__(CoreService)
+    service.local_api = FakeLocalApi()
+    service.llm_manager = types.SimpleNamespace(providers={"dpc_agent": provider})
+
+    # The desktop already answered: the entry carries a decision.
+    shell_tool._pending_approvals["r2"] = {"decision": "approved"}
+    try:
+        await service.announce_shell_approval_request(
+            request_id="r2", command="ls", reason="", agent_id="agent_007",
+            agent_name="Ark", timeout_seconds=60,
+        )
+    finally:
+        shell_tool._pending_approvals.pop("r2", None)
+
+    assert offered, "the offer still goes out — the race is not preventable, only repaired"
+    assert withdrawn and withdrawn[0][0] == "r2"
 
 
 def test_the_bot_actually_listens_for_the_shell_buttons():
@@ -237,20 +281,29 @@ async def test_the_service_offers_the_request_to_both_surfaces():
     service.local_api = FakeLocalApi()
     service.llm_manager = types.SimpleNamespace(providers={"dpc_agent": provider})
 
-    await service.announce_shell_approval_request(
-        request_id="r1", command="rm -rf ./x", reason="why",
-        agent_id="agent_007", agent_name="Ark", timeout_seconds=60,
-    )
+    from dpc_client_core.dpc_agent.tools import shell as shell_tool
+
+    # A request nobody has answered yet, which is what the offer is for.
+    shell_tool._pending_approvals["r1"] = {"decision": None}
+    try:
+        await service.announce_shell_approval_request(
+            request_id="r1", command="rm -rf ./x", reason="why",
+            agent_id="agent_007", agent_name="Ark", timeout_seconds=60,
+        )
+    finally:
+        shell_tool._pending_approvals.pop("r1", None)
+
     assert events[0][0] == "shell_approval_request"
     assert events[0][1]["command"] == "rm -rf ./x"
     assert offered[0]["command"] == "rm -rf ./x"
     assert offered[0]["timeout_seconds"] == 60
+    assert not withdrawn, "a live request must not be withdrawn on the way out"
 
     await service.announce_shell_approval_closed(
-        request_id="r1", agent_id="agent_007", outcome="✅ Approved on the desktop.",
+        request_id="r1", agent_id="agent_007", outcome="✅ Approved elsewhere.",
     )
     assert events[1][0] == "shell_approval_expired"
-    assert withdrawn[0] == ("r1", "✅ Approved on the desktop.")
+    assert withdrawn[0] == ("r1", "✅ Approved elsewhere.")
 
 
 async def _noop():
