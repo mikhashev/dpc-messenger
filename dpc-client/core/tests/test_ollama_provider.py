@@ -34,14 +34,14 @@ def _no_daemon(monkeypatch):
     two detection tests below are about the fallback name lists, and the
     daemon path is covered in test_ollama_asks_the_daemon.py."""
     from dpc_client_core.providers import ollama_provider as op
-    op._MODEL_CAPABILITIES.clear()
+    op._MODEL_INFO.clear()
 
     def _refuse(*a, **k):
         raise RuntimeError("no daemon in this file")
 
     monkeypatch.setattr(op.ollama, "Client", _refuse)
     yield
-    op._MODEL_CAPABILITIES.clear()
+    op._MODEL_INFO.clear()
 
 
 def test_supports_thinking_detection():

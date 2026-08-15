@@ -132,6 +132,15 @@
     return 'Default (0.7)';
   }
 
+  // DeepSeek accepts the number and ignores it while thinking is on: measured
+  // 2026-08-15 -- with thinking off, temperature 0.0 returned the same answer
+  // five times out of five; with thinking on it returned four different ones.
+  // The backend stops sending it there, so the field must stop looking like a
+  // control the operator can use without turning thinking off first.
+  function temperatureIsInert(p: { type: ProviderType; thinking?: { enabled?: boolean } }): boolean {
+    return p.type === 'deepseek' && p.thinking?.enabled !== false;
+  }
+
   // Selecting "Custom..." must show the manual input even while temperature is
   // still unset — tracked per provider index, reset on entering edit mode.
   let customTempMode: Record<number, boolean> = {};
@@ -1254,7 +1263,11 @@
                         {/each}
                         <option value="custom">Custom...</option>
                       </select>
-                      <p class="help-text">Controls creativity: 0.2 = deterministic, 1.5 = creative</p>
+                      {#if temperatureIsInert(editedConfig.providers[i])}
+                        <p class="help-text warn">Not sent while thinking is enabled — DeepSeek ignores it. Turn thinking off for this alias to steer sampling.</p>
+                      {:else}
+                        <p class="help-text">Controls creativity: 0.2 = deterministic, 1.5 = creative</p>
+                      {/if}
 
                       {#if tempSelectValue(i) === 'custom'}
                         <input
@@ -1609,7 +1622,14 @@
             {#if newProvider.type !== 'dpc_agent' && newProvider.type !== 'local_whisper'}
               <div class="form-group">
                 <label for="new-temperature">Temperature (optional)</label>
-                <input id="new-temperature" type="number" step="0.1" min="0" max="2" bind:value={newProvider.temperature} placeholder="0.7" />
+                <!-- The placeholder used to read 0.7 for every provider type, and an
+                     example number in an empty field is an invitation: five Ollama
+                     aliases on this machine carried a 0.7 nobody had chosen. It now
+                     names what silence actually buys for the type being added. -->
+                <input id="new-temperature" type="number" step="0.1" min="0" max="2" bind:value={newProvider.temperature} placeholder={temperatureDefaultLabel(newProvider.type)} />
+                {#if temperatureIsInert(newProvider)}
+                  <p class="help-text warn">Not sent while thinking is enabled — DeepSeek ignores it.</p>
+                {/if}
               </div>
             {/if}
 

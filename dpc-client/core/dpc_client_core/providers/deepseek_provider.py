@@ -86,6 +86,10 @@ class DeepSeekProvider(AIProvider):
 
         self._last_thinking: Optional[str] = None
 
+        # Said once per provider: the reason is a property of the alias, not of
+        # the call, so repeating it per request would bury the log.
+        self._sampling_inert_logged = False
+
         # CoT replay cache (Phase 3): reasoning_content keyed by tool_call id so a
         # later round can resend the real chain-of-thought instead of a placeholder.
         self._cot_cache: Dict[str, str] = {}
@@ -194,6 +198,40 @@ class DeepSeekProvider(AIProvider):
             body["reasoning_effort"] = effort
         return body
 
+    def _sampling_params(self, temperature_override: Optional[float] = None) -> Dict[str, Any]:
+        """`temperature` and `top_p` — or neither, while thinking is on.
+
+        The vendor documents both (with the two penalties) as accepted and
+        ignored in thinking mode. We had never checked that, and a change that
+        stops sending a field must not rest on somebody's sentence, so it was
+        measured on `deepseek-v4-flash`, 5 replies per cell to "name one
+        animal": thinking **off**, temperature 0.0 returned the same word 5/5
+        and 2.0 returned 5 different ones — the probe can see the field. With
+        thinking **on**, temperature 0.0 returned 4 different words out of 5.
+        A temperature that is honoured collapses that cell; this one did not.
+
+        So the number changes no answer, and sending it changes only what the
+        operator believes: both live aliases configure 0.6 and think on every
+        call, which makes the field in the editor a dial wired to nothing.
+        Withholding it says so in the log instead. If DeepSeek ever begins
+        honouring it, this is one condition to delete."""
+        if not self.thinking_enabled:
+            params: Dict[str, Any] = {"temperature": self._effective_temperature(temperature_override)}
+            if self.top_p is not None:
+                params["top_p"] = self.top_p
+            return params
+        if not self._sampling_inert_logged:
+            self._sampling_inert_logged = True
+            logger.info(
+                "DeepSeekProvider '%s': temperature=%s and top_p=%s not sent — the "
+                "API ignores them while thinking is enabled (measured 2026-08-15). "
+                "Turn thinking off for this alias if you need to steer sampling.",
+                self.alias,
+                self._effective_temperature(temperature_override),
+                self.top_p,
+            )
+        return {}
+
     def _effective_temperature(self, override: Optional[float] = None) -> float:
         if override is not None:
             return override
@@ -212,11 +250,9 @@ class DeepSeekProvider(AIProvider):
                 "model": self.model,
                 "max_tokens": self.max_tokens,
                 "messages": [{"role": "user", "content": prompt}],
-                "temperature": self._effective_temperature(kwargs.get("temperature")),
                 "extra_body": self._build_extra_body(),
+                **self._sampling_params(kwargs.get("temperature")),
             }
-            if self.top_p is not None:
-                params["top_p"] = self.top_p
             resp = await self.client.chat.completions.create(**params)
             msg = resp.choices[0].message
             self._last_thinking = getattr(msg, "reasoning_content", None)
@@ -245,12 +281,10 @@ class DeepSeekProvider(AIProvider):
                 "model": self.model,
                 "max_tokens": self.max_tokens,
                 "messages": [{"role": "user", "content": prompt}],
-                "temperature": self._effective_temperature(),
                 "extra_body": self._build_extra_body(),
                 "stream": True,
+                **self._sampling_params(),
             }
-            if self.top_p is not None:
-                params["top_p"] = self.top_p
 
             full_text = ""
             thinking_text = ""
@@ -438,11 +472,9 @@ class DeepSeekProvider(AIProvider):
                 "messages": openai_messages,
                 "tools": openai_tools,
                 "tool_choice": "auto",
-                "temperature": self._effective_temperature(),
                 "extra_body": extra_body,
+                **self._sampling_params(),
             }
-            if self.top_p is not None:
-                params["top_p"] = self.top_p
 
             resp = await self.client.chat.completions.create(**params)
             msg = resp.choices[0].message

@@ -45,8 +45,10 @@ OLLAMA_THINKING_MODELS = [
 # in neither. So ask, and keep the lists for a daemon too old to answer.
 # Cached process-wide because the answer cannot change without the model being
 # pulled again; measured 2026-08-13: 72 ms on the first call, 3 ms after.
-_MODEL_CAPABILITIES: Dict[str, Optional[frozenset]] = {}
-_UNASKED = object()
+# The whole answer is kept rather than the capability list alone: the same
+# response also carries the model's own sampling defaults, and reading them
+# from a second call would double a question the daemon has already answered.
+_MODEL_INFO: Dict[str, Any] = {}
 
 # The question is asked from paths that run on the event loop. Against a
 # local daemon it costs milliseconds, but `host` may be another machine, and
@@ -65,9 +67,18 @@ def _reported_capabilities(model: str, host: Optional[str]) -> Optional[frozense
     old enough not to carry the field at all, and then the substring lists
     below decide. Folding the third case into an empty set would quietly
     strip vision from a model that has it."""
-    cached = _MODEL_CAPABILITIES.get(model, _UNASKED)
-    if cached is not _UNASKED:
-        return cached  # type: ignore[return-value]
+    info = _describe(model, host)
+    if info is None:
+        return None
+    reported = getattr(info, "capabilities", None)
+    return None if reported is None else frozenset(reported)
+
+
+def _describe(model: str, host: Optional[str]) -> Optional[Any]:
+    """The daemon's whole answer about a model, or None if it could not be
+    asked. One call per model per process."""
+    if model in _MODEL_INFO:
+        return _MODEL_INFO[model]
     try:
         info = ollama.Client(
             host=host, timeout=_CAPABILITY_TIMEOUT_SECONDS
@@ -76,10 +87,28 @@ def _reported_capabilities(model: str, host: Optional[str]) -> Optional[frozense
         # Not cached: a daemon that is down now may be up on the next call.
         logger.debug("Ollama could not describe %s: %s", model, e)
         return None
-    reported = getattr(info, "capabilities", None)
-    caps = None if reported is None else frozenset(reported)
-    _MODEL_CAPABILITIES[model] = caps
-    return caps
+    _MODEL_INFO[model] = info
+    return info
+
+
+def _model_default(model: str, host: Optional[str], key: str) -> Optional[str]:
+    """A sampling default from the model's own Modelfile, as the daemon reports
+    it, or None if it does not name one.
+
+    `/api/show` returns these as the text of the PARAMETER lines — one
+    `name<spaces>value` per line — which is why this parses rather than
+    indexes. Only the value is returned, and as a string: it is for a log
+    line, and rounding it into a float would let `1` come back as `1.0` and
+    read as a number we chose."""
+    info = _describe(model, host)
+    text = getattr(info, "parameters", None) if info is not None else None
+    if not text:
+        return None
+    for line in text.splitlines():
+        name, _, value = line.strip().partition(" ")
+        if name == key and value.strip():
+            return value.strip()
+    return None
 
 
 class OllamaProvider(AIProvider):
@@ -100,6 +129,7 @@ class OllamaProvider(AIProvider):
         self._effort_clamped_logged = False
         self._effort_ignored_logged = False
         self._effort_unknown_logged = False
+        self._temperature_override_logged = False
 
     @asynccontextmanager
     async def _client(self):
@@ -231,6 +261,36 @@ class OllamaProvider(AIProvider):
             return bool(configured)
         return True if self.supports_thinking() else None
 
+    def _warn_if_temperature_overrides_the_model(self, sent: Any) -> None:
+        """Say once that a configured temperature is displacing the model's own.
+
+        This board found five of seven Ollama aliases carrying `temperature:
+        0.7` that nobody had chosen — the number the old code used as a
+        sentinel for "unset", written into the config file by the editor's own
+        placeholder. They now reach the daemon, and 0.7 against a Modelfile
+        that asks for 1 is a quieter model than its author shipped. Nothing is
+        changed here: the operator's number is sent, and the log names both so
+        the choice can be seen rather than inherited.
+
+        Deliberately not gated on thinking. The decided package narrowed this
+        to thinking-on calls by analogy with DeepSeek, where the vendor
+        documents the field as ignored while reasoning; on Ollama no such
+        claim exists and none was measured, so the informative event is the
+        override itself, which is exactly as unintended on a model that cannot
+        think."""
+        if self._temperature_override_logged:
+            return
+        default = _model_default(self.model, self.config.get("host"), "temperature")
+        if default is None or str(sent) == default:
+            return
+        self._temperature_override_logged = True
+        logger.info(
+            "OllamaProvider '%s': sending temperature=%s; %s asks for %s in its "
+            "own Modelfile. Clear the field in the providers editor to run at "
+            "the model's default.",
+            self.alias, sent, self.model, default,
+        )
+
     def _build_options(self, **kwargs) -> Optional[Dict[str, Any]]:
         options: Dict[str, Any] = {}
         if self.config.get("context_window"):
@@ -243,6 +303,7 @@ class OllamaProvider(AIProvider):
         temp = kwargs.get("temperature", self.config.get("temperature"))
         if temp is not None:
             options["temperature"] = temp
+            self._warn_if_temperature_overrides_the_model(temp)
         for key in OLLAMA_SAMPLING_PARAMS:
             if key in self.config:
                 options[key] = self.config[key]

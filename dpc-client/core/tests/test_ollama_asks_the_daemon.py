@@ -12,8 +12,10 @@ from dpc_client_core.providers import ollama_provider as OP
 
 
 class FakeShow:
-    def __init__(self, capabilities):
+    def __init__(self, capabilities, parameters=None):
         self.capabilities = capabilities
+        if parameters is not None:
+            self.parameters = parameters
 
 
 class ShowWithoutTheField:
@@ -36,17 +38,18 @@ class FakeClient:
             raise RuntimeError("connection refused")
         if FakeClient.answer == "no-field":
             return ShowWithoutTheField()
-        return FakeShow(FakeClient.answer)
+        return FakeShow(FakeClient.answer, FakeClient.parameters)
 
 
 @pytest.fixture(autouse=True)
 def clean_capabilities(monkeypatch):
-    OP._MODEL_CAPABILITIES.clear()
+    OP._MODEL_INFO.clear()
     FakeClient.calls = 0
     FakeClient.answer = ["completion"]
+    FakeClient.parameters = None
     monkeypatch.setattr(OP.ollama, "Client", FakeClient)
     yield
-    OP._MODEL_CAPABILITIES.clear()
+    OP._MODEL_INFO.clear()
 
 
 def _provider(**config):
@@ -254,3 +257,71 @@ def test_the_headers_own_config_value_is_not_an_unknown_word(caplog):
         assert provider._think_flag("   ") is True
     assert not any("is not a level this provider knows" in r.getMessage()
                    for r in caplog.records)
+
+
+# --- a configured temperature displacing the model's own ---
+
+MODELFILE = "temperature                    1\ntop_k                          20"
+
+
+def test_the_log_names_both_numbers(caplog):
+    """0.7 is the number the editor writes by itself; 1 is what the model asks
+    for. Neither is legible without the other."""
+    FakeClient.parameters = MODELFILE
+    p = _provider(temperature=0.7)
+    with caplog.at_level("INFO"):
+        options = p._build_options()
+    assert options["temperature"] == 0.7  # sent, not silently corrected
+    line = [r.getMessage() for r in caplog.records if "Modelfile" in r.getMessage()]
+    assert len(line) == 1
+    assert "0.7" in line[0] and "asks for 1" in line[0]
+
+
+def test_agreeing_with_the_model_is_not_worth_a_line(caplog):
+    FakeClient.parameters = MODELFILE
+    with caplog.at_level("INFO"):
+        _provider(temperature=1)._build_options()
+    assert not [r for r in caplog.records if "Modelfile" in r.getMessage()]
+
+
+def test_a_model_that_names_no_temperature_is_not_guessed_at(caplog):
+    """Silence from the daemon is not evidence of a default, so say nothing."""
+    FakeClient.parameters = "top_k                          20"
+    with caplog.at_level("INFO"):
+        _provider(temperature=0.7)._build_options()
+    assert not [r for r in caplog.records if "Modelfile" in r.getMessage()]
+
+
+def test_an_unreachable_daemon_says_nothing_and_still_sends(caplog):
+    FakeClient.answer = None  # connection refused
+    with caplog.at_level("INFO"):
+        options = _provider(temperature=0.7)._build_options()
+    assert options["temperature"] == 0.7
+    assert not [r for r in caplog.records if "Modelfile" in r.getMessage()]
+
+
+def test_the_override_is_named_once(caplog):
+    FakeClient.parameters = MODELFILE
+    p = _provider(temperature=0.7)
+    with caplog.at_level("INFO"):
+        p._build_options()
+        p._build_options()
+    assert len([r for r in caplog.records if "Modelfile" in r.getMessage()]) == 1
+
+
+def test_no_temperature_configured_is_still_silence(caplog):
+    FakeClient.parameters = MODELFILE
+    with caplog.at_level("INFO"):
+        options = _provider()._build_options()
+    assert "temperature" not in (options or {})
+    assert not [r for r in caplog.records if "Modelfile" in r.getMessage()]
+
+
+def test_one_show_call_answers_both_questions():
+    """Capabilities and defaults come from the same response; asking twice
+    would double a question the daemon has already answered."""
+    FakeClient.parameters = MODELFILE
+    p = _provider(temperature=0.7)
+    p.supports_thinking()
+    p._build_options()
+    assert FakeClient.calls == 1

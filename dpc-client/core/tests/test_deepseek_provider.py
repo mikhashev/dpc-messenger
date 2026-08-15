@@ -230,10 +230,13 @@ async def test_generate_with_tools_maps_response_to_contract():
     assert tc.name == "list_dir"
     assert tc.input == {"path": "/tmp"}
 
-    # thinking on by default → extra_body carries enabled; config temperature respected
+    # thinking on by default → extra_body carries enabled, and the config
+    # temperature is *withheld*: the API ignores it while reasoning (measured
+    # 2026-08-15), and a number on the wire that changes no answer only makes
+    # the editor's field look like a control.
     _, kwargs = p.client.chat.completions.create.call_args
     assert kwargs["extra_body"] == {"thinking": {"type": "enabled"}}
-    assert kwargs["temperature"] == 0.7
+    assert "temperature" not in kwargs
     assert kwargs["tool_choice"] == "auto"
 
 
@@ -489,3 +492,49 @@ async def test_cot_replay_falls_back_to_placeholder_when_uncached():
     asst = [m for m in captured["messages"] if m.get("role") == "assistant" and m.get("tool_calls")]
     assert asst[0]["reasoning_content"] == " "
 
+
+# --- sampling fields while thinking is on (measured inert 2026-08-15) ---
+
+def test_no_temperature_or_top_p_while_thinking():
+    """The API ignores both while reasoning, so the request stops carrying them.
+
+    Measured, not assumed: with thinking off, temperature 0.0 returned the same
+    word 5/5 and 2.0 returned five different ones; with thinking on, 0.0 returned
+    four different words out of five.
+    """
+    p = _make({"thinking": {"enabled": True}, "temperature": 0.6, "top_p": 0.9})
+    assert p._sampling_params() == {}
+
+
+def test_sampling_is_sent_when_thinking_is_off():
+    p = _make({"thinking": {"enabled": False}, "temperature": 0.6, "top_p": 0.9})
+    assert p._sampling_params() == {"temperature": 0.6, "top_p": 0.9}
+
+
+def test_top_p_stays_absent_when_unset():
+    """None means "the API's default", which is said by silence, not by a null."""
+    p = _make({"thinking": {"enabled": False}, "temperature": 0.6})
+    assert p._sampling_params() == {"temperature": 0.6}
+
+
+def test_a_per_call_temperature_is_honoured_when_thinking_is_off():
+    p = _make({"thinking": {"enabled": False}, "temperature": 0.6})
+    assert p._sampling_params(0.1)["temperature"] == 0.1
+
+
+def test_the_withheld_number_is_named_once(caplog):
+    """Once per provider: the reason belongs to the alias, not to the call."""
+    p = _make({"thinking": {"enabled": True}, "temperature": 0.6})
+    with caplog.at_level("INFO"):
+        p._sampling_params()
+        p._sampling_params()
+    lines = [r.getMessage() for r in caplog.records if "not sent" in r.getMessage()]
+    assert len(lines) == 1
+    assert "0.6" in lines[0]
+
+
+def test_nothing_is_said_when_the_field_is_actually_used(caplog):
+    p = _make({"thinking": {"enabled": False}, "temperature": 0.6})
+    with caplog.at_level("INFO"):
+        p._sampling_params()
+    assert not [r for r in caplog.records if "not sent" in r.getMessage()]

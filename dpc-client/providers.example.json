@@ -13,7 +13,8 @@
       "model": "llama3.1:8b",
       "host": "http://127.0.0.1:11434",
       "context_window": 131072,
-      "temperature": 0.7
+      "_temperature": "omitted on purpose: Ollama sends no temperature unless you set one, and the model's own Modelfile default applies. Copying a number here overrides the model author's choice.",
+      "_temperature_note": "Every alias on this machine that carried 0.7 had inherited it from this file, not chosen it."
     },
     {
       "_comment": "Local Ollama vision provider - For image analysis queries",
@@ -309,7 +310,7 @@
       "type": "Provider type: 'ollama', 'openai_compatible', 'anthropic', 'zai', 'zai_coding', 'deepseek', 'local_whisper', 'gemini', 'github_models', or 'gigachat'",
       "model": "Model identifier (e.g., 'llama3.1:8b', 'gpt-4o', 'claude-3-5-sonnet-20240620', 'glm-4.7', 'openai/whisper-large-v3')",
       "context_window": "Optional: Override default context window size in tokens",
-      "temperature": "Optional: Model creativity/randomness (0.0-2.0, default: 0.7). Lower = deterministic, higher = creative"
+      "temperature": "Optional: Model creativity/randomness (0.0-2.0). Leave it out unless you have chosen a value: on Ollama the model's own default applies, on DeepSeek the API's 1.0 does -- and DeepSeek ignores the field entirely while thinking is enabled (measured 2026-08-15)"
     },
     "ollama_fields": {
       "host": "Ollama API endpoint (default: http://127.0.0.1:11434)"
