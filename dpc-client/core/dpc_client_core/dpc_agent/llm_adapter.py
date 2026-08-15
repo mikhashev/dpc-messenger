@@ -141,7 +141,8 @@ class DpcLlmAdapter:
             messages: List of message dicts with role/content
             model: Optional model override (ignored, uses DPC's configured provider)
             tools: Optional list of tool schemas (handled via prompt injection)
-            reasoning_effort: Effort level (low/medium/high) - passed to provider if supported
+            reasoning_effort: one word from the shared scale (off/low/medium/high/max),
+                passed to the provider, which maps it onto what its own model can do
             max_tokens: Max completion tokens
             on_stream_chunk: Optional async callback for streaming: await on_stream_chunk(chunk, conversation_id)
             conversation_id: Optional conversation ID for streaming callbacks

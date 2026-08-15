@@ -10,7 +10,7 @@ from typing import Dict, Any, Optional, List, Union
 
 import ollama
 
-from .base import AIProvider, normalize_reasoning_effort
+from .base import AIProvider, REASONING_OFF, normalize_reasoning_effort
 
 logger = logging.getLogger(__name__)
 
@@ -220,8 +220,15 @@ class OllamaProvider(AIProvider):
         `400 "<model> does not support thinking"`. So the effort is dropped for
         such a model rather than passed on — a group-scoped effort must not be
         able to kill every call an agent makes because of the model it sits on.
-        `think=False` is the only value every model accepts."""
+        `think=False` is the only value every model accepts — which is also why
+        `off` is answered before the capability is consulted at all. It is the
+        foot of the same scale, not a fifth level, and it closes the asymmetry
+        this method shipped with: a per-call effort could switch a configured
+        `think: false` back **on** and had no way to say the opposite, so the
+        nearer scope only ever won in the expensive direction."""
         level = normalize_reasoning_effort(effort)
+        if level == REASONING_OFF:
+            return False
         if level is not None:
             if self.supports_thinking():
                 if level == "max":
@@ -252,8 +259,9 @@ class OllamaProvider(AIProvider):
             if not self._effort_unknown_logged:
                 logger.info(
                     "OllamaProvider '%s': reasoning_effort=%r is not a level this "
-                    "provider knows — using the configured value instead.",
-                    self.alias, effort,
+                    "provider knows — it was dropped, and `think` is decided by "
+                    "the configuration or, failing that, by what %s reports.",
+                    self.alias, effort, self.model,
                 )
                 self._effort_unknown_logged = True
         configured = self.config.get("think")
@@ -267,10 +275,10 @@ class OllamaProvider(AIProvider):
         This board found five of seven Ollama aliases carrying `temperature:
         0.7` that nobody had chosen — the number the old code used as a
         sentinel for "unset", written into the config file by the editor's own
-        placeholder. They now reach the daemon, and 0.7 against a Modelfile
-        that asks for 1 is a quieter model than its author shipped. Nothing is
-        changed here: the operator's number is sent, and the log names both so
-        the choice can be seen rather than inherited.
+        placeholder. They now reach the daemon and displace whatever the
+        Modelfile asks for. Which of the two numbers is better is not for this
+        code to say: the operator's is sent either way, and the log names both
+        so that a value can be seen rather than inherited.
 
         Deliberately not gated on thinking. The decided package narrowed this
         to thinking-on calls by analogy with DeepSeek, where the vendor

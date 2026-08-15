@@ -325,3 +325,40 @@ def test_one_show_call_answers_both_questions():
     p.supports_thinking()
     p._build_options()
     assert FakeClient.calls == 1
+
+
+# --- Off: the foot of the scale, and the direction the header could not reach ---
+
+
+def test_off_turns_thinking_off_on_a_model_that_can_think():
+    FakeClient.answer = ["completion", "thinking"]
+    assert _provider()._think_flag("off") is False
+
+
+def test_off_beats_a_configuration_that_says_yes():
+    """Nearer scope wins in both directions now, not only upward."""
+    FakeClient.answer = ["completion", "thinking"]
+    assert _provider(think=True)._think_flag("off") is False
+
+
+def test_off_is_safe_on_a_model_that_cannot_think():
+    """`think=False` is the one value every model accepts — measured against a
+    daemon that answers a *level* on such a model with a 400. So `off` is not
+    gated on the capability the way the levels are."""
+    FakeClient.answer = ["completion"]
+    assert _provider()._think_flag("off") is False
+
+
+def test_off_says_nothing_in_the_log(caplog):
+    """It is an understood word, not a discarded one."""
+    FakeClient.answer = ["completion"]
+    with caplog.at_level("INFO"):
+        _provider()._think_flag("off")
+    assert not [r for r in caplog.records if "ignored" in r.getMessage()]
+
+
+def test_a_level_still_reaches_an_alias_that_configured_no():
+    """The other half of the same precedence: config is a default, and the
+    header is nearer. Off is what makes that symmetric rather than one-way."""
+    FakeClient.answer = ["completion", "thinking"]
+    assert _provider(think=False)._think_flag("high") == "high"

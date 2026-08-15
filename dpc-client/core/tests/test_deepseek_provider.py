@@ -538,3 +538,41 @@ def test_nothing_is_said_when_the_field_is_actually_used(caplog):
     with caplog.at_level("INFO"):
         p._sampling_params()
     assert not [r for r in caplog.records if "not sent" in r.getMessage()]
+
+
+# --- Off in the chat header: the alias-level toggle was the only one there was ---
+
+def test_off_disables_thinking_for_this_call_only():
+    """The header outranks the alias, and `off` is the direction it could not
+    express before: DeepSeek's own `none` effort leaves thinking running."""
+    p = _make({"thinking": {"enabled": True}, "reasoning_effort": "max"})
+    assert p._build_extra_body("off") == {"thinking": {"type": "disabled"}}
+    # the alias is untouched — the next call without an override still thinks
+    assert p._build_extra_body()["thinking"] == {"type": "enabled"}
+
+
+def test_off_never_reaches_the_wire_as_an_effort():
+    """`off` is not one of DeepSeek's seven words; sent as one it would 400.
+
+    This pins an invariant, not a branch: it holds because `off` is what turns
+    thinking off, and no effort is sent then. Neutralising an explicit filter
+    for it left this green — which is what proved the filter was decoration.
+    """
+    body = _make({"reasoning_effort": "high"})._build_extra_body("off")
+    assert "reasoning_effort" not in body
+
+
+def test_off_gives_the_temperature_back():
+    """Sampling is inert only while reasoning. Turn reasoning off for a call and
+    the number is live again, so withholding it there would remove a control
+    exactly where it works."""
+    p = _make({"thinking": {"enabled": True}, "temperature": 0.6, "top_p": 0.9})
+    assert p._sampling_params() == {}
+    assert p._sampling_params(reasoning_effort="off") == {"temperature": 0.6, "top_p": 0.9}
+
+
+def test_an_alias_with_thinking_off_is_not_switched_on_by_a_level():
+    """Config says no; a level says how much. The nearer scope wins on the
+    effort, but it cannot manufacture a thinking mode the alias disabled."""
+    p = _make({"thinking": {"enabled": False}})
+    assert p._build_extra_body("high") == {"thinking": {"type": "disabled"}}

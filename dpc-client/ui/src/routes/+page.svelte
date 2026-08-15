@@ -1043,10 +1043,12 @@
               <span class="group-effort-label">Thinking effort:</span>
               <select
                 class="group-effort-select"
+                title="One scale for a group whose agents sit on different models: each provider maps it onto what it can actually do. On local Ollama models Max is the same depth as High (measured), and on a model that reports no thinking every level is dropped — Off is the one value all of them accept."
                 value={$groupChats.get(activeChatId)?.reasoning_effort || ''}
                 onchange={(e: Event) => setGroupReasoningEffort(activeChatId, (e.currentTarget as HTMLSelectElement).value)}
               >
                 <option value="">Config</option>
+                <option value="off">Off</option>
                 <option value="low">Low</option>
                 <option value="medium">Medium</option>
                 <option value="high">High</option>
@@ -1060,10 +1062,12 @@
               <span class="group-effort-label">Thinking effort:</span>
               <select
                 class="group-effort-select"
+                title="One scale for a group whose agents sit on different models: each provider maps it onto what it can actually do. On local Ollama models Max is the same depth as High (measured), and on a model that reports no thinking every level is dropped — Off is the one value all of them accept."
                 value={$agentsList.find((a: any) => a.agent_id === activeChatId)?.reasoning_effort || ''}
                 onchange={async (e: Event) => { await updateAgentConfig(activeChatId, { reasoning_effort: (e.currentTarget as HTMLSelectElement).value }); await listAgents(); }}
               >
                 <option value="">Config</option>
+                <option value="off">Off</option>
                 <option value="low">Low</option>
                 <option value="medium">Medium</option>
                 <option value="high">High</option>

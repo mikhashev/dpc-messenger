@@ -29,10 +29,20 @@ class ModelNotCachedError(Exception):
 # that can be shared: a shared mapping would have to be wrong somewhere.
 REASONING_EFFORTS = ("low", "medium", "high", "max")
 
+# The foot of the same scale, and deliberately not a member of it: `off` is not
+# an amount of thinking, and code that iterates the levels must not offer it as
+# one. It sits here so the header can carry a single ordered control — off, low,
+# medium, high — in which the contradictory state (an effort chosen while
+# thinking is off) cannot be expressed at all. Each provider translates it into
+# its own way of saying no: Ollama `think=False`, the one value every model
+# accepts; DeepSeek `thinking: {type: disabled}`, because its own `none` effort
+# does not disable anything while the request still asks to think.
+REASONING_OFF = "off"
+
 
 def normalize_reasoning_effort(value: Optional[str]) -> Optional[str]:
-    """The requested effort as one of `REASONING_EFFORTS`, or None if it is not
-    one of them.
+    """The requested effort as one of `REASONING_EFFORTS`, or `REASONING_OFF`,
+    or None if it is neither.
 
     `xhigh` is folded into `high` because that is what the one vendor who
     publishes a table says it means (api-docs.deepseek.com/guides/thinking_mode:
@@ -48,6 +58,8 @@ def normalize_reasoning_effort(value: Optional[str]) -> Optional[str]:
     word = (value or "").strip().lower()
     if word == "xhigh":
         word = "high"
+    if word == REASONING_OFF:
+        return REASONING_OFF
     return word if word in REASONING_EFFORTS else None
 
 

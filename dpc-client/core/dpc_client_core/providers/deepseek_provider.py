@@ -10,7 +10,7 @@ from typing import Dict, Any, Optional, List, Union
 
 from openai import AsyncOpenAI
 
-from .base import AIProvider, normalize_reasoning_effort
+from .base import AIProvider, REASONING_OFF, normalize_reasoning_effort
 
 logger = logging.getLogger(__name__)
 
@@ -184,21 +184,45 @@ class DeepSeekProvider(AIProvider):
         `xhigh`, not translating them."""
         return normalize_reasoning_effort(value)
 
+    def _thinking_for_call(self, reasoning_effort: Optional[str] = None) -> bool:
+        """Whether this one call reasons: the header's `off` beats the alias.
+
+        Until now the only switch was `thinking.enabled` in providers.json —
+        per alias, therefore shared by every conversation that alias serves.
+        The header could raise the effort and never lower it past the floor,
+        because the vendor's own `none` effort does **not** disable anything
+        while the request still carries `thinking: {type: enabled}`; the off
+        switch is the thinking block itself, which no per-call path reached."""
+        return self.thinking_enabled and self._normalize_effort(reasoning_effort) != REASONING_OFF
+
     def _build_extra_body(self, reasoning_effort: Optional[str] = None) -> Dict[str, Any]:
         """DeepSeek thinking toggle. Always sent — {type: disabled} is required to
         override the default-on thinking. A per-call reasoning_effort (e.g. a UI
         toggle) wins over the provider-config default; a None/invalid override falls
         back to the config value, so callers that pass nothing keep the configured
-        effort (no silent downgrade). Either is only sent when thinking is enabled."""
+        effort (no silent downgrade). Either is only sent when thinking is enabled.
+
+        `off` is not an effort and never reaches the wire as one: it turns the
+        thinking block to disabled, which is the only thing DeepSeek listens to."""
+        thinking = self._thinking_for_call(reasoning_effort)
         body: Dict[str, Any] = {
-            "thinking": {"type": "enabled" if self.thinking_enabled else "disabled"}
+            "thinking": {"type": "enabled" if thinking else "disabled"}
         }
+        # No second filter for `off` here, though one looks natural: `off` is
+        # the one word that makes `thinking` false above, so the branch below is
+        # already unreachable for it. Written as a guard it would never fire —
+        # and a test can pass over a guard that cannot fire without exercising
+        # anything, which is how a defence becomes decoration.
         effort = self._normalize_effort(reasoning_effort) or self._reasoning_effort
-        if self.thinking_enabled and effort:
+        if thinking and effort:
             body["reasoning_effort"] = effort
         return body
 
-    def _sampling_params(self, temperature_override: Optional[float] = None) -> Dict[str, Any]:
+    def _sampling_params(
+        self,
+        temperature_override: Optional[float] = None,
+        reasoning_effort: Optional[str] = None,
+    ) -> Dict[str, Any]:
         """`temperature` and `top_p` — or neither, while thinking is on.
 
         The vendor documents both (with the two penalties) as accepted and
@@ -214,8 +238,12 @@ class DeepSeekProvider(AIProvider):
         operator believes: both live aliases configure 0.6 and think on every
         call, which makes the field in the editor a dial wired to nothing.
         Withholding it says so in the log instead. If DeepSeek ever begins
-        honouring it, this is one condition to delete."""
-        if not self.thinking_enabled:
+        honouring it, this is one condition to delete.
+
+        The condition is the *call's* thinking state, not the alias's: a header
+        set to Off turns the field back into a live control for that call, and
+        withholding it there would take away sampling exactly where it works."""
+        if not self._thinking_for_call(reasoning_effort):
             params: Dict[str, Any] = {"temperature": self._effective_temperature(temperature_override)}
             if self.top_p is not None:
                 params["top_p"] = self.top_p
@@ -473,7 +501,7 @@ class DeepSeekProvider(AIProvider):
                 "tools": openai_tools,
                 "tool_choice": "auto",
                 "extra_body": extra_body,
-                **self._sampling_params(),
+                **self._sampling_params(reasoning_effort=reasoning_effort),
             }
 
             resp = await self.client.chat.completions.create(**params)
