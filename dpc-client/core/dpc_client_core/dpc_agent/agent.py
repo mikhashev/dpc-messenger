@@ -96,6 +96,7 @@ class DpcAgent:
         firewall_profile: Optional[str] = None,  # Per-agent permission profile (Phase 2)
         service: Optional[Any] = None,  # CoreService reference for commit proposals
         compute_host: str = "",  # Optional remote peer node_id for LLM inference
+        run_gate: Optional[Any] = None,  # Per-agent run gate, shared with the manager
     ):
         """
         Initialize the agent.
@@ -114,6 +115,10 @@ class DpcAgent:
         self._provider_alias = provider_alias  # Store for LLM adapter
         self._firewall_profile = firewall_profile  # Store for tool permission lookups
         self._service = service  # CoreService — used by tools that need firewall access
+        # The queue is the second door into a run. It takes the manager's gate,
+        # so a scheduled task cannot land in a conversation mid-chat; a bare
+        # agent gets its own, which serialises nothing but keeps the code honest.
+        self._run_gate = run_gate if run_gate is not None else asyncio.Lock()
         # Note: ensure_agent_dirs() is already called by DpcAgentManager, so we don't call it here
 
         # Initialize components
@@ -914,6 +919,16 @@ class DpcAgent:
             return f"Execute the following scheduled task: {json.dumps(task_data, ensure_ascii=False)}"
 
     async def _execute_task(self, task: Task) -> str:
+        """Execute a queued task, one run at a time for this agent.
+
+        This is the second door into a run. A check_back deliberately replies
+        into the conversation it came from, so without the gate a scheduled task
+        lands its turn in the middle of a live chat.
+        """
+        async with self._run_gate:
+            return await self._execute_task_guarded(task)
+
+    async def _execute_task_guarded(self, task: Task) -> str:
         """
         Execute a queued task.
 

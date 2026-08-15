@@ -31,6 +31,25 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 
+# One run at a time per agent, across every surface that can start one.
+#
+# Keyed by agent identity rather than held on an object, because neither object
+# is unique per agent: the manager builds a second DpcAgent per provider alias
+# over the same agent_root, and a second provider instance would build a second
+# manager. A gate on either would be two gates over one set of files.
+_RUN_GATES: Dict[str, asyncio.Lock] = {}
+
+
+def get_run_gate(agent_id: Optional[str]) -> asyncio.Lock:
+    """Return the run gate for an agent identity, creating it on first ask."""
+    key = agent_id or "__singleton__"
+    gate = _RUN_GATES.get(key)
+    if gate is None:
+        gate = asyncio.Lock()
+        _RUN_GATES[key] = gate
+    return gate
+
+
 class DpcAgentManager:
     """
     Manages the embedded agent within DPC Messenger.
@@ -57,6 +76,10 @@ class DpcAgentManager:
         self.service = service
         self.config = config
         self.agent_id = agent_id  # Store agent_id for per-agent configuration
+        # One run at a time per agent identity, not per manager object: a second
+        # provider instance would otherwise hand the same agent a second gate,
+        # which is the failure that disqualified putting this on the agent.
+        self._run_gate = get_run_gate(agent_id)
         self._agent_display_name: str | None = None  # Cached display name from config.json
         self._stop_event = threading.Event()
         self._interrupt_events: Dict[str, asyncio.Event] = {}
@@ -163,6 +186,7 @@ class DpcAgentManager:
             firewall_profile=self.agent_id,  # Per-agent profile key for per-agent permissions
             service=self.service,            # For tools that need service access
             compute_host=self.config.get("compute_host", ""),  # Remote peer for LLM inference
+            run_gate=self._run_gate,          # Same gate as process_message — the queue is the second door
         )
 
         # Cache for reuse
@@ -220,6 +244,7 @@ class DpcAgentManager:
             service=self.service,             # For tools that need firewall access
             provider_alias=self.config.get("provider_alias"),  # Per-agent Main LLM for inference
             compute_host=self.config.get("compute_host", ""),  # Remote peer for LLM inference
+            run_gate=self._run_gate,          # Same gate as process_message — the queue is the second door
         )
 
         # Start task processor if enabled
@@ -889,7 +914,20 @@ class DpcAgentManager:
         log.warning("No active agent loop for conversation %s", conversation_id)
         return False
 
-    async def process_message(
+    async def process_message(self, *args, **kwargs) -> str:
+        """Run a message through the agent, one run at a time for this agent.
+
+        The gate is held across the run *and* the reads that follow it: the
+        agent publishes usage, trace and cap info on itself and this method
+        reads them after `process` returns, so a second run finishing in that
+        window writes its thinking and tool calls into the first one's history.
+        Both doors into a run take this same gate — see `DpcAgent._execute_task`
+        for the other one.
+        """
+        async with self._run_gate:
+            return await self._process_message_guarded(*args, **kwargs)
+
+    async def _process_message_guarded(
         self,
         message: str,
         conversation_id: str,

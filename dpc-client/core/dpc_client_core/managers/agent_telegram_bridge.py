@@ -764,9 +764,14 @@ Send a voice message and it will be transcribed and processed\\.
         application.add_handler(CallbackQueryHandler(self._handle_vote_callback, pattern=r"^vote:"))
         application.add_handler(CallbackQueryHandler(self._handle_shell_callback, pattern=r"^shell:"))
 
-        application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self._handle_message))
-        application.add_handler(MessageHandler(filters.VOICE, self._handle_voice_message))
-        application.add_handler(MessageHandler(filters.PHOTO, self._handle_photo_message))
+        # block=False on the three handlers that await a whole agent run.
+        # Telegram gives this Application one update at a time; a handler that
+        # holds that slot for the length of a run is what left a shell approval
+        # unanswerable from the phone that raised it. Serialisation of the runs
+        # themselves now lives on the agent's run gate, not on this queue.
+        application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self._handle_message, block=False))
+        application.add_handler(MessageHandler(filters.VOICE, self._handle_voice_message, block=False))
+        application.add_handler(MessageHandler(filters.PHOTO, self._handle_photo_message, block=False))
 
     async def _handle_shell_callback(self, update, context):
         """Handle the Yes/No buttons on a tier-1 shell approval.

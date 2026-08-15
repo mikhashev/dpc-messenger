@@ -8,6 +8,8 @@ an agent postponing forever, the overlap guard stops ten identical wake-ups.
 
 from types import SimpleNamespace
 
+import asyncio
+
 import pytest
 
 from dpc_client_core.dpc_agent.tools.core import _CHECK_BACK_MAX_DEPTH, schedule_task
@@ -158,7 +160,7 @@ def test_the_executor_passes_the_depth_through():
     import inspect
     from dpc_client_core.dpc_agent.agent import DpcAgent
 
-    src = inspect.getsource(DpcAgent._execute_task)
+    src = inspect.getsource(DpcAgent._execute_task_guarded)
     assert 'task.task_type == "check_back"' in src, "the type is not handled at all"
     assert "check_back_depth=depth" in src, "depth never reaches process()"
 
@@ -282,6 +284,7 @@ async def test_a_group_wake_up_publishes_into_that_group():
             return "msg-1"
 
     agent = DpcAgent.__new__(DpcAgent)
+    agent._run_gate = asyncio.Lock()
     agent._service = _Service()
     agent.display_name = "Ark"
     agent.agent_root = NS(name="agent_001")
@@ -319,6 +322,7 @@ async def test_a_one_to_one_wake_up_does_not_go_looking_for_a_group():
             calls.append(kw)
 
     agent = DpcAgent.__new__(DpcAgent)
+    agent._run_gate = asyncio.Lock()
     agent._service = _Service()
     agent.display_name = "Ark"
     agent.agent_root = NS(name="agent_001")
