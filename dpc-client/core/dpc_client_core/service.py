@@ -3950,6 +3950,64 @@ class CoreService:
             return {"status": "success", "request_id": request_id, "approved": bool(approved)}
         return {"status": "error", "message": f"Unknown or expired request_id: {request_id}"}
 
+    async def announce_shell_approval_request(
+        self,
+        request_id: str,
+        command: str,
+        reason: str,
+        agent_id: str,
+        agent_name: str,
+        timeout_seconds: int = 0,
+    ) -> None:
+        """Put a tier-1 approval request in front of every surface that can answer it.
+
+        The tool that raises the request knows nothing about transports; this is
+        where the list of them lives.
+        """
+        if self.local_api:
+            await self.local_api.broadcast_event("shell_approval_request", {
+                "request_id": request_id,
+                "command": command,
+                "reason": reason,
+                "agent_name": agent_name,
+            })
+
+        bridge = self._get_agent_telegram_bridge(agent_id)
+        if bridge:
+            try:
+                await bridge.notify_shell_approval(
+                    request_id=request_id,
+                    command=command,
+                    reason=reason,
+                    agent_name=agent_name,
+                    timeout_seconds=timeout_seconds,
+                )
+            except Exception as e:
+                logger.warning("Failed to offer shell approval %s in Telegram: %s", request_id, e)
+
+    async def announce_shell_approval_closed(
+        self,
+        request_id: str,
+        agent_id: str,
+        outcome: str,
+    ) -> None:
+        """Withdraw a request from the surfaces that are still showing it.
+
+        Two surfaces can now answer the same request, so whichever one did not
+        has to stop offering a button that resolves to nothing.
+        """
+        if self.local_api:
+            await self.local_api.broadcast_event("shell_approval_expired", {
+                "request_id": request_id,
+            })
+
+        bridge = self._get_agent_telegram_bridge(agent_id)
+        if bridge:
+            try:
+                await bridge.close_shell_approval(request_id, outcome)
+            except Exception as e:
+                logger.debug("Could not withdraw shell approval %s from Telegram: %s", request_id, e)
+
     async def shell_approve_command(self, request_id: str, add_to_whitelist: bool = False) -> Dict[str, Any]:
         """Approve a Tier 1 shell command.
 
@@ -3973,6 +4031,12 @@ class CoreService:
         if event:
             event.set()
 
+        await self.announce_shell_approval_closed(
+            request_id=request_id,
+            agent_id=entry.get("agent_id", ""),
+            outcome="✅ Approved on the desktop.",
+        )
+
         if add_to_whitelist:
             tokens = command.strip().split()
             cmd_prefix = " ".join(tokens[:2]) if len(tokens) >= 2 else tokens[0] if tokens else command
@@ -3994,6 +4058,12 @@ class CoreService:
         event = entry.get("event")
         if event:
             event.set()
+
+        await self.announce_shell_approval_closed(
+            request_id=request_id,
+            agent_id=entry.get("agent_id", ""),
+            outcome="❌ Rejected on the desktop.",
+        )
 
         logger.info("Shell command rejected: %s", request_id)
         return {"status": "ok", "request_id": request_id}
@@ -6278,8 +6348,15 @@ class CoreService:
         await self.knowledge_service._on_proposal_received_from_peer(proposal)
 
     def _get_agent_telegram_bridge(self, conversation_id: str):
-        """Delegated to KnowledgeService."""
-        return self.knowledge_service._get_agent_telegram_bridge(conversation_id)
+        """Return the AgentTelegramBridge for an agent conversation, or None.
+
+        Goes straight to the lookup rather than through KnowledgeService: a
+        shell approval can be raised before that service exists, and the walk
+        it was delegating to is the same one.
+        """
+        from .managers.agent_telegram_bridge import get_agent_telegram_bridge
+
+        return get_agent_telegram_bridge(getattr(self, "llm_manager", None), conversation_id)
 
     async def _on_vote_received(self, vote) -> None:
         """Delegated to KnowledgeService."""

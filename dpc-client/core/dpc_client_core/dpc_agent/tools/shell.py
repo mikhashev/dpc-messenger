@@ -211,6 +211,7 @@ def _request_approval(ctx: ToolContext, command: str, reason: str, cwd: str, tim
     On approval, service.py executes the command and stores the result.
     Returns the actual command output to the agent — approval is transparent.
     """
+    import asyncio
     import time
     import uuid
     import threading
@@ -223,12 +224,15 @@ def _request_approval(ctx: ToolContext, command: str, reason: str, cwd: str, tim
     agent_profile = getattr(agent_obj, "_firewall_profile", None) or agent_name
     event = threading.Event()
 
+    agent_id = getattr(getattr(ctx, "agent_root", None), "name", "") or ""
+
     _pending_approvals[request_id] = {
         "command": command,
         "cwd": cwd or str(ctx.agent_root),
         "timeout": timeout,
         "agent_name": agent_name,
         "agent_profile": agent_profile,
+        "agent_id": agent_id,
         "ctx": ctx,
         "created_at": time.time(),
         "event": event,
@@ -236,25 +240,32 @@ def _request_approval(ctx: ToolContext, command: str, reason: str, cwd: str, tim
     }
 
     dpc_service = getattr(ctx, "dpc_service", None)
-    local_api = getattr(dpc_service, "local_api", None) if dpc_service else None
-    if local_api:
-        import asyncio
+    main_loop = getattr(ctx, "_event_loop", None)
+
+    def _on_main_loop(coro) -> bool:
+        """Hand a coroutine to the service loop from this executor thread."""
+        if main_loop is None or not main_loop.is_running():
+            coro.close()
+            return False
+        asyncio.run_coroutine_threadsafe(coro, main_loop)
+        return True
+
+    if dpc_service is not None:
         try:
-            coro = local_api.broadcast_event("shell_approval_request", {
-                "request_id": request_id,
-                "command": command,
-                "reason": reason,
-                "agent_name": agent_name,
-            })
-            main_loop = getattr(ctx, "_event_loop", None)
-            if main_loop and main_loop.is_running():
-                asyncio.run_coroutine_threadsafe(coro, main_loop)
-            else:
-                log.warning("No main event loop available for shell_approval_request broadcast")
+            offered = _on_main_loop(dpc_service.announce_shell_approval_request(
+                request_id=request_id,
+                command=command,
+                reason=reason,
+                agent_id=agent_id,
+                agent_name=agent_name,
+                timeout_seconds=APPROVAL_TTL_SECONDS,
+            ))
+            if not offered:
+                log.warning("No main event loop available to announce shell_approval_request")
         except Exception as e:
-            log.warning("Failed to broadcast shell_approval_request: %s", e)
+            log.warning("Failed to announce shell_approval_request: %s", e)
     else:
-        log.warning("No local_api available for shell_approval_request broadcast")
+        log.warning("No service available to announce shell_approval_request")
 
     log.info("run_shell TIER1 approval requested: %r (id=%s), blocking executor thread", command, request_id)
 
@@ -265,15 +276,15 @@ def _request_approval(ctx: ToolContext, command: str, reason: str, cwd: str, tim
 
     if not signaled or entry is None:
         log.info("Shell approval timed out (%ds): %s — %r", APPROVAL_TTL_SECONDS, request_id, command)
-        if local_api:
+        if dpc_service is not None:
             try:
-                coro = local_api.broadcast_event("shell_approval_expired", {
-                    "request_id": request_id,
-                })
-                if main_loop and main_loop.is_running():
-                    asyncio.run_coroutine_threadsafe(coro, main_loop)
+                _on_main_loop(dpc_service.announce_shell_approval_closed(
+                    request_id=request_id,
+                    agent_id=agent_id,
+                    outcome="⌛ Expired — the agent stopped waiting for this one.",
+                ))
             except Exception as e:
-                log.warning("Failed to broadcast shell_approval_expired: %s", e)
+                log.warning("Failed to announce shell_approval_closed: %s", e)
         return f"⏳ Command approval timed out after {APPROVAL_TTL_SECONDS}s: `{command}`"
 
     if entry.get("decision") == "rejected":

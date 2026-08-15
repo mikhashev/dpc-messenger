@@ -81,6 +81,22 @@ def escape_markdown(text: str) -> str:
     return "".join(f"\\{c}" if c in special_chars else c for c in text)
 
 
+def get_agent_telegram_bridge(llm_manager, agent_id: str):
+    """Return the AgentTelegramBridge for an agent id, or None.
+
+    The bridge hangs off the per-agent manager held by the dpc_agent provider.
+    knowledge_service found it by this walk first; it lives here now so a second
+    caller cannot drift from a private copy of the same path.
+    """
+    if not agent_id or not str(agent_id).startswith("agent_"):
+        return None
+    providers = getattr(llm_manager, "providers", None) or {}
+    provider = providers.get("dpc_agent")
+    managers = getattr(provider, "_managers", None) or {}
+    manager = managers.get(agent_id)
+    return getattr(manager, "_telegram_bridge", None) if manager else None
+
+
 @dataclass
 class RateLimitConfig:
     """Configuration for rate limiting."""
@@ -159,6 +175,11 @@ class AgentTelegramBridge:
         # Pending knowledge commit proposals awaiting Telegram approval
         # Maps proposal_id -> chat_id so vote callbacks can identify who to respond to
         self._pending_proposals: Dict[str, str] = {}
+
+        # Tier-1 shell approvals shown here: request_id -> [(chat_id, message_id), ...].
+        # The desktop can answer the same request, so the messages have to be findable
+        # again to take their buttons away.
+        self._pending_shell: Dict[str, List[tuple]] = {}
 
         # Semaphore to limit concurrent Telegram API calls (prevents pool exhaustion)
         self._send_semaphore = asyncio.Semaphore(3)  # Max 3 concurrent sends
@@ -302,25 +323,7 @@ class AgentTelegramBridge:
             # Create application for polling (this manages the bot instance)
             self._application = Application.builder().token(self.bot_token).request(request).build()
 
-            # Add handlers for commands
-            self._application.add_handler(CommandHandler("start", self._handle_start_command))
-            self._application.add_handler(CommandHandler("help", self._handle_help_command))
-            self._application.add_handler(CommandHandler("status", self._handle_status_command))
-            self._application.add_handler(CommandHandler("newsession", self._handle_newsession_command))
-            self._application.add_handler(CommandHandler("extract_knowledge", self._handle_extract_knowledge_command))
-            self._application.add_handler(CommandHandler("sleep", self._handle_sleep_command))
-
-            # Add handler for inline keyboard votes on knowledge commit proposals
-            self._application.add_handler(CallbackQueryHandler(self._handle_vote_callback, pattern=r"^vote:"))
-
-            # Add handler for regular messages (non-commands)
-            self._application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self._handle_message))
-
-            # Add handler for voice messages
-            self._application.add_handler(MessageHandler(filters.VOICE, self._handle_voice_message))
-
-            # Add handler for photo messages (vision analysis)
-            self._application.add_handler(MessageHandler(filters.PHOTO, self._handle_photo_message))
+            self._register_handlers(self._application)
 
             async def _on_error(update, context):
                 from telegram.error import Conflict
@@ -741,6 +744,135 @@ Send a voice message and it will be transcribed and processed\\.
         except Exception as e:
             log.error(f"Error handling vote callback: {e}", exc_info=True)
             await query.edit_message_text(f"❌ Error: {escape_markdown(str(e)[:200])}", parse_mode="MarkdownV2")
+
+    def _register_handlers(self, application) -> None:
+        """Attach every handler this bridge answers to.
+
+        Separate from start() so what the bot listens for can be checked without
+        a network round trip — an unregistered handler is otherwise invisible
+        until someone presses the button in production.
+        """
+        from telegram.ext import MessageHandler, filters, CommandHandler, CallbackQueryHandler
+
+        application.add_handler(CommandHandler("start", self._handle_start_command))
+        application.add_handler(CommandHandler("help", self._handle_help_command))
+        application.add_handler(CommandHandler("status", self._handle_status_command))
+        application.add_handler(CommandHandler("newsession", self._handle_newsession_command))
+        application.add_handler(CommandHandler("extract_knowledge", self._handle_extract_knowledge_command))
+        application.add_handler(CommandHandler("sleep", self._handle_sleep_command))
+
+        application.add_handler(CallbackQueryHandler(self._handle_vote_callback, pattern=r"^vote:"))
+        application.add_handler(CallbackQueryHandler(self._handle_shell_callback, pattern=r"^shell:"))
+
+        application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self._handle_message))
+        application.add_handler(MessageHandler(filters.VOICE, self._handle_voice_message))
+        application.add_handler(MessageHandler(filters.PHOTO, self._handle_photo_message))
+
+    async def _handle_shell_callback(self, update, context):
+        """Handle the Yes/No buttons on a tier-1 shell approval.
+
+        Callback data format: "shell:{request_id}:{approve|reject}"
+        """
+        query = update.callback_query
+        await query.answer()
+
+        chat_id = str(query.message.chat.id)
+        if chat_id not in self.allowed_chat_ids:
+            await query.edit_message_text("⛔ Unauthorized.")
+            return
+
+        parts = (query.data or "").split(":", 2)
+        if len(parts) != 3:
+            await query.edit_message_text("❌ Invalid approval data.")
+            return
+
+        _, request_id, decision = parts
+        service = getattr(self._agent_manager, "service", None) if self._agent_manager else None
+        if not service:
+            await query.edit_message_text("⚠️ Service not available.")
+            return
+
+        # Forget the message before answering: the service withdraws the request
+        # from the other surfaces, and this one is about to write its own outcome.
+        self._pending_shell.pop(request_id, None)
+
+        try:
+            if decision == "approve":
+                result = await service.shell_approve_command(request_id)
+            else:
+                result = await service.shell_reject_command(request_id)
+
+            if result.get("status") == "ok":
+                label = "✅ Approved — running." if decision == "approve" else "❌ Rejected."
+            else:
+                # Either the desktop answered first or the 60s window closed.
+                label = "⌛ This request is already closed."
+            await query.edit_message_text(label)
+        except Exception as e:
+            log.error(f"Error handling shell approval callback: {e}", exc_info=True)
+            await query.edit_message_text(f"❌ Error: {str(e)[:200]}")
+
+    async def notify_shell_approval(
+        self,
+        request_id: str,
+        command: str,
+        reason: str = "",
+        agent_name: str = "",
+        timeout_seconds: int = 0,
+    ) -> None:
+        """Show a tier-1 shell command here with Yes/No buttons.
+
+        Sent as plain text: the command is arbitrary shell and MarkdownV2 would
+        have to escape it back into something the reader has to decode before
+        deciding.
+        """
+        if not self._enabled or not self._bot:
+            return
+
+        from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+
+        lines = [f"🔧 {agent_name or 'Agent'} wants to run a shell command:", "", command]
+        if reason:
+            lines += ["", reason]
+        if timeout_seconds:
+            lines += ["", f"Expires in {timeout_seconds}s — after that the agent gives up on it."]
+
+        keyboard = InlineKeyboardMarkup([[
+            InlineKeyboardButton("✅ Yes", callback_data=f"shell:{request_id}:approve"),
+            InlineKeyboardButton("❌ No", callback_data=f"shell:{request_id}:reject"),
+        ]])
+
+        delivered = []
+        for chat_id in self.allowed_chat_ids:
+            try:
+                sent = await self._bot.send_message(
+                    chat_id=chat_id,
+                    text="\n".join(lines),
+                    reply_markup=keyboard,
+                )
+                delivered.append((chat_id, getattr(sent, "message_id", None)))
+            except Exception as e:
+                log.warning(f"Failed to send shell approval to chat {chat_id}: {e}")
+
+        if delivered:
+            self._pending_shell[request_id] = delivered
+
+    async def close_shell_approval(self, request_id: str, outcome: str) -> None:
+        """Take the buttons off a request answered on the desktop or expired."""
+        delivered = self._pending_shell.pop(request_id, None)
+        if not delivered or not self._bot:
+            return
+        for chat_id, message_id in delivered:
+            if message_id is None:
+                continue
+            try:
+                await self._bot.edit_message_text(
+                    chat_id=chat_id,
+                    message_id=message_id,
+                    text=outcome,
+                )
+            except Exception as e:
+                log.debug(f"Could not close shell approval message in {chat_id}: {e}")
 
     async def notify_knowledge_proposal(
         self,

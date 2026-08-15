@@ -285,14 +285,9 @@ class KnowledgeService:
 
     def _get_agent_telegram_bridge(self, conversation_id: str):
         """Return the AgentTelegramBridge for an agent conversation, or None."""
-        if not conversation_id or not conversation_id.startswith("agent_"):
-            return None
-        dpc_agent_provider = self.llm_manager.providers.get("dpc_agent")
-        if dpc_agent_provider and hasattr(dpc_agent_provider, '_managers'):
-            mgr = dpc_agent_provider._managers.get(conversation_id)
-            if mgr:
-                return getattr(mgr, '_telegram_bridge', None)
-        return None
+        from .managers.agent_telegram_bridge import get_agent_telegram_bridge
+
+        return get_agent_telegram_bridge(self.llm_manager, conversation_id)
 
     # ─────────────────────────────────────────────────────────────
     # Conversation monitor management
