@@ -1229,7 +1229,12 @@ for s in sections:
     items.sort(key=lambda e: (PRIORITIES.index(e["pri"]) if e["pri"] in PRIORITIES else 9,
                               e["when"] or "0000"), reverse=False)
     rows.append(f'<section class="sec" data-sec="{esc(s)}">')
-    rows.append(f'<h2>{esc(s)} <span class="cnt">{len(items)}</span></h2>')
+    # <details> keeps the fold state in an attribute of its own, deliberately
+    # separate from the `hidden` class the filter sets: a search that matches
+    # inside a folded section must be able to open it without fighting the
+    # filter for the same flag.
+    rows.append('<details class="fold" open>')
+    rows.append(f'<summary><h2>{esc(s)} <span class="cnt">{len(items)}</span></h2></summary>')
     mix = Counter(e["pri"] for e in items)
     bar = "".join(
         f'<span class="seg {PRI_CLASS.get(p, "none")}" style="flex:{mix[p]}" '
@@ -1249,11 +1254,12 @@ for s in sections:
         first = f'<p class="f">{md(cut)}</p>' if e["first"] else ""
         rows.append(
             f'<li class="item" data-pri="{esc(e["pri"])}" '
+            f'data-when="{esc(e["when"] or "")}" '
             f'data-q="{esc((e["name"] + " " + e["desc"]).lower())}">'
             f'<div class="hd">{chip(e["pri"])}<code>{esc(e["name"])}</code>{mark}{when}</div>'
             f'{desc}{first}</li>'
         )
-    rows.append("</ul></section>")
+    rows.append("</ul></details></section>")
 
 body = "\n".join(rows)
 today = date.today().isoformat()
@@ -1309,6 +1315,15 @@ color:var(--ink-mut);cursor:pointer}
 .fbtn[aria-pressed="true"]{background:var(--accent-sunk);border-color:var(--accent);color:var(--accent);font-weight:600}
 .sec{margin-top:2.6rem}
 .sec h2{font-size:1.35rem;margin:0 0 .5rem;color:var(--ink-str);letter-spacing:-.01em}
+.fold>summary{cursor:pointer;list-style:none;display:flex;align-items:baseline;gap:.5rem}
+.fold>summary::-webkit-details-marker{display:none}
+.fold>summary::before{content:"be";color:var(--ink-faint);font-size:.8em;transition:transform .12s}
+.fold:not([open])>summary::before{transform:rotate(-90deg)}
+.fold>summary h2{display:inline}
+.fold>summary:hover h2{color:var(--accent)}
+.sbtn{font:inherit;font-size:.85rem;padding:.25rem .6rem;border:1px solid var(--rule);border-radius:999px;background:transparent;color:var(--ink-faint);cursor:pointer}
+.sbtn[aria-pressed=true]{color:var(--ink-str);border-color:var(--accent)}
+.controls .sep{width:1px;align-self:stretch;background:var(--rule);margin:0 .3rem}
 .sec h2 .cnt{font-family:var(--mono);font-size:.9rem;color:var(--ink-faint);font-variant-numeric:tabular-nums}
 .bar{display:flex;gap:2px;height:8px;border-radius:2px;overflow:hidden;margin:.2rem 0 .4rem}
 .seg{display:block;min-width:3px}
@@ -1349,9 +1364,33 @@ font-size:.82rem;color:var(--ink-faint)}
 
 JS = """
 const q=document.getElementById('q'),btns=[...document.querySelectorAll('.fbtn')];
-let pri=new Set();
+const sbtns=[...document.querySelectorAll('.sbtn[data-sort]')],foldall=document.getElementById('foldall');
+const folds=[...document.querySelectorAll('details.fold')];
+let pri=new Set(),sortMode='';
+// Remember the order the page was built in, so returning to it needs no re-sort
+// and no assumption about what the build's key was.
+document.querySelectorAll('.list').forEach(l=>{
+  [...l.children].forEach((it,i)=>{it.dataset.i=i;});
+});
+function sortItems(){
+  document.querySelectorAll('.list').forEach(l=>{
+    const items=[...l.children];
+    items.sort((a,b)=>{
+      if(!sortMode) return (+a.dataset.i)-(+b.dataset.i);
+      // An entry with no date has no place on a date axis: park it at the end
+      // of either direction rather than letting '' sort as the oldest possible.
+      const aw=a.dataset.when||'',bw=b.dataset.when||'';
+      if(!aw&&!bw) return (+a.dataset.i)-(+b.dataset.i);
+      if(!aw) return 1;
+      if(!bw) return -1;
+      return sortMode==='newest'?bw.localeCompare(aw):aw.localeCompare(bw);
+    });
+    items.forEach(it=>l.appendChild(it));
+  });
+}
 function apply(){
   const t=q.value.trim().toLowerCase();
+  const filtering=!!t||pri.size>0;
   document.querySelectorAll('.sec').forEach(sec=>{
     let shown=0;
     sec.querySelectorAll('.item').forEach(it=>{
@@ -1360,8 +1399,28 @@ function apply(){
       const ok=okP&&okQ; it.classList.toggle('hidden',!ok); if(ok)shown++;
     });
     sec.classList.toggle('hidden',shown===0);
+    // A match inside a folded section would otherwise be invisible: the
+    // section header would sit there claiming hits nobody can see. Filtering
+    // opens what it matches and gives the fold back when the filter clears.
+    const d=sec.querySelector('details.fold');
+    if(!d) return;
+    if(filtering){
+      if(shown&&!d.open){d.dataset.reopen='1';d.open=true;}
+    }else if(d.dataset.reopen){delete d.dataset.reopen;d.open=false;}
   });
 }
+sbtns.forEach(b=>b.addEventListener('click',()=>{
+  const m=b.dataset.sort;
+  sortMode=sortMode===m?'':m;
+  sbtns.forEach(o=>o.setAttribute('aria-pressed',String(o.dataset.sort===sortMode)));
+  sortItems();
+}));
+foldall.addEventListener('click',()=>{
+  const anyOpen=folds.some(d=>d.open);
+  folds.forEach(d=>{d.open=!anyOpen;delete d.dataset.reopen;});
+  foldall.setAttribute('aria-pressed',String(anyOpen));
+  foldall.textContent=anyOpen?'unfold all':'fold all';
+});
 q.addEventListener('input',apply);
 btns.forEach(b=>b.addEventListener('click',()=>{
   const p=b.dataset.pri;
@@ -1375,6 +1434,18 @@ filters = "".join(
     f'<button class="fbtn" type="button" data-pri="{esc(p)}" aria-pressed="false">'
     f'{esc(p)} {by_pri.get(p, 0)}</button>'
     for p in PRIORITIES if by_pri.get(p)
+)
+
+# Two questions, two orders. Priority-first answers "what do I fix"; date-first
+# answers "what has been sitting here" and "what is fresh" — the second is the
+# one the default order hid, because date is only the tie-breaker inside a
+# priority and it sorts oldest first, so an entry filed this morning lands under
+# sixty older ones. Sorting happens in the browser over the rows already on the
+# page: no second file to go stale, and it composes with the search and the
+# priority buttons instead of replacing them.
+sorters = "".join(
+    f'<button class="sbtn" type="button" data-sort="{k}" aria-pressed="false">{lab}</button>'
+    for k, lab in (("newest", "newest first"), ("oldest", "oldest first"))
 )
 
 doc = f"""<!doctype html>
@@ -1416,6 +1487,9 @@ doc = f"""<!doctype html>
 <div class="controls">
   <input id="q" type="search" placeholder="search name and description" aria-label="Search entries">
   {filters}
+  <span class="sep" aria-hidden="true"></span>
+  {sorters}
+  <button class="sbtn" type="button" id="foldall" aria-pressed="false">fold all</button>
 </div>
 
 {body}
