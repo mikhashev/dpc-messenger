@@ -10,15 +10,18 @@ from typing import Dict, Any, Optional, List, Union
 
 from openai import AsyncOpenAI
 
-from .base import AIProvider
+from .base import AIProvider, normalize_reasoning_effort
 
 logger = logging.getLogger(__name__)
 
 DEEPSEEK_DEFAULT_BASE_URL = "https://api.deepseek.com"
 
-# DeepSeek reasoning effort levels accepted on the wire. "xhigh" is mapped to
-# "max" (matches hermes/pi). Anything else → omit (server default, currently high).
-_VALID_REASONING_EFFORT = {"low", "medium", "high", "max"}
+# The wire accepts more words than we offer: `none, minimal, low, medium, high,
+# xhigh, max` (the server names them itself when it refuses one), running three
+# actual efforts — `medium` and `xhigh` both resolve to *high*, per the vendor's
+# published table. We speak the shared four from `base.REASONING_EFFORTS` and
+# keep no local copy of that list: the copy we used to keep is what let
+# `xhigh -> max` survive as an escalation nobody had checked against the vendor.
 
 
 class DeepSeekProvider(AIProvider):
@@ -72,7 +75,7 @@ class DeepSeekProvider(AIProvider):
         # override DeepSeek's default-on behaviour.
         self.thinking_enabled = config.get("thinking", {}).get("enabled", True)
 
-        # Optional reasoning effort (top-of-body via extra_body). xhigh -> max.
+        # Optional reasoning effort (top-of-body via extra_body).
         self._reasoning_effort = self._normalize_effort(config.get("reasoning_effort"))
 
         self.top_p = config.get("top_p")  # None => API default
@@ -166,12 +169,16 @@ class DeepSeekProvider(AIProvider):
 
     @staticmethod
     def _normalize_effort(value: Optional[str]) -> Optional[str]:
-        """Strip/lowercase, map xhigh -> max, validate against the accepted set.
-        Returns None for empty/invalid (-> server default)."""
-        raw = (value or "").strip().lower()
-        if raw == "xhigh":
-            raw = "max"
-        return raw if raw in _VALID_REASONING_EFFORT else None
+        """The shared vocabulary, so this provider and Ollama read one word the
+        same way. Returns None for empty or unrecognised (-> the caller's
+        fallback).
+
+        This used to map `xhigh -> max` to match another tool's spelling. The
+        vendor's own table says `xhigh` means *high*
+        (api-docs.deepseek.com/guides/thinking_mode), and `max` is a different,
+        dearer effort — so the rewrite was quietly upgrading whoever asked for
+        `xhigh`, not translating them."""
+        return normalize_reasoning_effort(value)
 
     def _build_extra_body(self, reasoning_effort: Optional[str] = None) -> Dict[str, Any]:
         """DeepSeek thinking toggle. Always sent — {type: disabled} is required to

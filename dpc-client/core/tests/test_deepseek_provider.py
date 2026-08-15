@@ -61,7 +61,8 @@ def test_reasoning_effort_mapping():
     assert _make({"reasoning_effort": "high"})._build_extra_body() == {
         "thinking": {"type": "enabled"}, "reasoning_effort": "high",
     }
-    assert _make({"reasoning_effort": "xhigh"})._build_extra_body()["reasoning_effort"] == "max"
+    # The vendor maps xhigh to *high*; sending "max" upgraded whoever asked for it.
+    assert _make({"reasoning_effort": "xhigh"})._build_extra_body()["reasoning_effort"] == "high"
     # invalid effort → omitted
     assert "reasoning_effort" not in _make({"reasoning_effort": "bogus"})._build_extra_body()
     # effort ignored when thinking disabled
@@ -79,7 +80,7 @@ def test_reasoning_effort_per_call_override():
     assert p._build_extra_body(None)["reasoning_effort"] == "max"
     # Explicit override wins.
     assert p._build_extra_body("high")["reasoning_effort"] == "high"
-    assert p._build_extra_body("xhigh")["reasoning_effort"] == "max"
+    assert p._build_extra_body("xhigh")["reasoning_effort"] == "high"
     # Invalid / "auto" override -> fall back to config (graceful, no downgrade).
     assert p._build_extra_body("auto")["reasoning_effort"] == "max"
     assert p._build_extra_body("bogus")["reasoning_effort"] == "max"
@@ -487,3 +488,4 @@ async def test_cot_replay_falls_back_to_placeholder_when_uncached():
     await p.generate_with_tools(messages=replay, tools=[])
     asst = [m for m in captured["messages"] if m.get("role") == "assistant" and m.get("tool_calls")]
     assert asst[0]["reasoning_content"] == " "
+

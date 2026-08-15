@@ -1218,27 +1218,3 @@ class DpcLlmAdapter:
         return await self.chat(messages=messages, tools=tools, **kwargs)
 
 
-def normalize_reasoning_effort(effort: str, default: str = "medium") -> str:
-    """
-    Normalize reasoning effort level.
-
-    Maps various effort levels to standard values.
-    """
-    effort_lower = effort.lower().strip()
-
-    # Map to standard values
-    effort_map = {
-        "low": "low",
-        "minimal": "low",
-        "fast": "low",
-        "medium": "medium",
-        "normal": "medium",
-        "default": "medium",
-        "high": "high",
-        "thorough": "high",
-        "deep": "high",
-        "xhigh": "high",
-        "extended": "high",
-    }
-
-    return effort_map.get(effort_lower, default)
