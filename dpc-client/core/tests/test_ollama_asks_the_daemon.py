@@ -173,10 +173,12 @@ def test_a_level_reaches_the_daemon_unchanged():
     assert provider._think_flag("high") == "high"
 
 
-def test_max_is_sent_as_high_because_it_is_the_same_thing_here():
-    """Measured by seed on qwen3.8: `high` and `max` produce byte-identical
-    traces. And the SDK types the field `Literal['low','medium','high']`, so
-    `max` would die in pydantic before a request left the process."""
+def test_max_is_sent_as_high_because_the_sdk_refuses_the_word():
+    """The SDK types the field `Literal['low','medium','high']`, so `max` dies
+    in pydantic before a request leaves the process — that is the reason and it
+    holds for every model. The old name said "because it is the same thing
+    here", which was measured on qwen3.8 at a fixed seed and is false on
+    muse-glimmer."""
     FakeClient.answer = ["completion", "thinking"]
     assert _provider()._think_flag("max") == "high"
 

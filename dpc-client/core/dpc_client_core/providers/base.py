@@ -21,8 +21,13 @@ class ModelNotCachedError(Exception):
 # The words the chat header offers, in ascending order of intent. They are an
 # ordinal, not a calibration: each provider maps them onto whatever its own API
 # and model actually do, and the same word buys different depths in different
-# places. Ollama's daemon accepts these four and treats `max` as `high` —
-# measured 2026-08-15, byte-identical traces at a fixed seed. DeepSeek accepts
+# places. Ollama takes these four and never sees `max`: the Python SDK types
+# the field `Literal['low','medium','high']`, so we send `high` in its place.
+# Whether that loses anything is per model — on qwen3.8 a fixed seed made the
+# two byte-identical (2026-08-15), on muse-glimmer two independent sweeps
+# separated them. This comment said "the daemon treats max as high" until
+# 2026-08-16, which was one model's result written as the daemon's rule.
+# DeepSeek accepts
 # seven words and runs three efforts, aliasing `medium` and `xhigh` onto `high`
 # — that one is the vendor's published table, not our measurement; ours was too
 # weak to separate them and only agrees with it. A shared *spelling* is the most
