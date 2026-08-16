@@ -152,6 +152,25 @@ class DeepSeekProvider(AIProvider):
             "prompt_cache_miss_tokens": _miss or 0,
         }
 
+    def _effort_label(self, requested: Optional[str], extra_body: Dict[str, Any]) -> str:
+        """What the usage line should say this call asked for.
+
+        Read out of the request body it lies, and it lies about the loudest
+        choice there is: `off` never travels as an effort — it turns the
+        thinking block off — so a body with no `reasoning_effort` key was
+        reported as `server-default`, i.e. as nobody having expressed a
+        preference. Found by the live acceptance of `dd6b709f` on 2026-08-16,
+        where the room was switched to `off` at 20:37:13 and the four calls
+        that followed all logged `server-default`; a colleague read those lines
+        as evidence the room was on `high`.
+
+        Four words, and the two silences are kept apart on purpose: `off` (this
+        call asked for it), `alias-off` (this alias is configured never to
+        think), a level, or `server-default` (nobody said anything)."""
+        if extra_body.get("thinking", {}).get("type") == "disabled":
+            return REASONING_OFF if self._normalize_effort(requested) == REASONING_OFF else "alias-off"
+        return extra_body.get("reasoning_effort", "server-default")
+
     def _record_usage(
         self,
         raw_usage: Any,
@@ -367,7 +386,7 @@ class DeepSeekProvider(AIProvider):
                 getattr(resp, "usage", None),
                 path="plain",
                 conversation_id=kwargs.get("conversation_id"),
-                effort=extra_body.get("reasoning_effort", "server-default"),
+                effort=self._effort_label(kwargs.get("reasoning_effort"), extra_body),
             )
             return msg.content or ""
 
@@ -415,7 +434,7 @@ class DeepSeekProvider(AIProvider):
                         chunk_usage,
                         path="plain-stream",
                         conversation_id=conversation_id,
-                        effort=extra_body.get("reasoning_effort", "server-default"),
+                        effort=self._effort_label(None, extra_body),
                     )
                 if not chunk.choices:
                     continue
@@ -638,7 +657,7 @@ class DeepSeekProvider(AIProvider):
                 path="tools",
                 conversation_id=conversation_id,
                 tool_calls=len(tool_calls_raw),
-                effort=extra_body.get("reasoning_effort", "server-default"),
+                effort=self._effort_label(reasoning_effort, extra_body),
             )
             return {
                 "content": content,

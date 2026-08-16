@@ -221,3 +221,69 @@ def test_a_provider_with_nothing_to_report_still_gets_an_estimate():
     _msg, usage = asyncio.run(_adapter(_SilentProvider()).chat(MESSAGES))
     assert usage["prompt_tokens"] > 0
     assert usage["completion_tokens"] > 0
+
+
+# --- the effort the line reports must be the one the call asked for ---
+#
+# Found by the live acceptance of dd6b709f (2026-08-16, 20:37 local): the room
+# was switched to `off` at 20:37:13 and the four calls that followed logged
+# `effort=server-default`. `off` never reaches the wire as an effort — it turns
+# the thinking block off — so a label read out of the request body reports the
+# loudest choice an operator can make as no choice at all. Ark read those lines
+# as "the group is on high", which is what a mislabelled record does next.
+
+
+@pytest.mark.asyncio
+async def test_a_call_that_asked_for_off_says_off(caplog):
+    p = _make()
+    p.client.chat.completions.create = AsyncMock(return_value=_resp())
+
+    with caplog.at_level(logging.INFO):
+        await p.generate_with_tools(
+            messages=[{"role": "user", "content": "hi"}], tools=[], reasoning_effort="off"
+        )
+
+    said = [r.getMessage() for r in caplog.records if "DeepSeek usage" in r.getMessage()][0]
+    assert "effort=off" in said
+
+
+@pytest.mark.asyncio
+async def test_an_alias_that_never_thinks_is_not_the_same_as_no_preference(caplog):
+    """Two different silences: this alias was configured not to think, and
+    nobody expressed a preference. A burn parser needs to tell them apart."""
+    p = _make({"thinking": {"enabled": False}})
+    p.client.chat.completions.create = AsyncMock(return_value=_resp())
+
+    with caplog.at_level(logging.INFO):
+        await p.generate_response("hi")
+
+    said = [r.getMessage() for r in caplog.records if "DeepSeek usage" in r.getMessage()][0]
+    assert "effort=alias-off" in said
+
+
+@pytest.mark.asyncio
+async def test_a_level_is_still_reported_as_itself(caplog):
+    p = _make()
+    p.client.chat.completions.create = AsyncMock(return_value=_resp())
+
+    with caplog.at_level(logging.INFO):
+        await p.generate_with_tools(
+            messages=[{"role": "user", "content": "hi"}], tools=[], reasoning_effort="high"
+        )
+
+    said = [r.getMessage() for r in caplog.records if "DeepSeek usage" in r.getMessage()][0]
+    assert "effort=high" in said
+
+
+@pytest.mark.asyncio
+async def test_nothing_asked_anywhere_is_still_server_default(caplog):
+    """No per-call effort, no configured one: the server picks, and the line
+    must not invent a word for that."""
+    p = _make()
+    p.client.chat.completions.create = AsyncMock(return_value=_resp())
+
+    with caplog.at_level(logging.INFO):
+        await p.generate_response("hi")
+
+    said = [r.getMessage() for r in caplog.records if "DeepSeek usage" in r.getMessage()][0]
+    assert "effort=server-default" in said
