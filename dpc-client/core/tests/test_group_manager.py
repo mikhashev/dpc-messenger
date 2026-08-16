@@ -435,3 +435,27 @@ class TestEffortTransitionsAreAudible:
             "worth naming, because afterwards nothing distinguishes it from a room that never had one"
         )
         assert manager.get_group("group-fromelsewhere").reasoning_effort is None
+        assert "-> high" not in said, (
+            "the first version wrote `none -> high` here for a room that stayed empty, "
+            "and this very test passed while asserting the opposite value two lines up"
+        )
+        assert "carried reasoning_effort high, kept none" in said
+
+    def test_a_sync_that_would_clear_the_room_says_what_was_kept(self, manager, caplog):
+        """The mirror case, and the one that reads worst when it lies.
+
+        A sync arriving without an effort must not be reported as the room
+        losing one — that is the exact false signal this layer exists to kill.
+        """
+        gid = manager.create_group("Keep", "", []).group_id
+        manager.set_group_reasoning_effort(gid, "high")
+        remote = manager.get_group(gid).to_dict()
+        remote["version"] += 5
+        remote["reasoning_effort"] = None
+        caplog.clear()
+        with caplog.at_level(logging.INFO, logger="dpc_client_core.managers.group_manager"):
+            manager.apply_sync(remote)
+        said = " ".join(r.getMessage() for r in caplog.records)
+        assert manager.get_group(gid).reasoning_effort == "high"
+        assert "high -> none" not in said, "the room kept high; saying it lost it is the lie"
+        assert "carried reasoning_effort none, kept high" in said

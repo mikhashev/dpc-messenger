@@ -20,7 +20,7 @@ logger = logging.getLogger(__name__)
 
 
 def _note_effort(group_id: str, old: Optional[str], new: Optional[str], source: str) -> None:
-    """The call site can only report the value that arrived; this says when the room's own moved."""
+    """A transition. Call only where `new` is the value the room ends up holding."""
     if old == new:
         return
     logger.info(
@@ -591,13 +591,17 @@ class GroupManager:
         remote = GroupMetadata.from_dict(remote_group)
 
         local = self._groups.get(remote.group_id)
-        _note_effort(
-            remote.group_id,
-            local.reasoning_effort if local else None,
-            remote.reasoning_effort,
-            "a sync carried a different value, which is discarded for the local one",
-        )
+        # Not an arrow. What a sync does here is discard the value it carried and
+        # keep the local one, so a transition would name a state the room never
+        # entered — the first version of this line did exactly that, and its own
+        # test asserted the opposite value two lines further down.
+        carried = remote.reasoning_effort
         remote.reasoning_effort = local.reasoning_effort if local else None
+        if carried != remote.reasoning_effort:
+            logger.info(
+                "Group %s: a sync carried reasoning_effort %s, kept %s",
+                remote.group_id, carried or "none", remote.reasoning_effort or "none",
+            )
         if local is None and remote.reasoning_effort is None:
             logger.info(
                 "Group %s arrived by sync with no local copy — reasoning_effort starts empty",
