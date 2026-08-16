@@ -1317,11 +1317,11 @@ color:var(--ink-mut);cursor:pointer}
 .sec h2{font-size:1.35rem;margin:0 0 .5rem;color:var(--ink-str);letter-spacing:-.01em}
 .fold>summary{cursor:pointer;list-style:none;display:flex;align-items:baseline;gap:.5rem}
 .fold>summary::-webkit-details-marker{display:none}
-.fold>summary::before{content:"be";color:var(--ink-faint);font-size:.8em;transition:transform .12s}
+.fold>summary::before{content:"\\25BE";display:inline-block;color:var(--ink-faint);font-size:.8em;transition:transform .12s}
 .fold:not([open])>summary::before{transform:rotate(-90deg)}
 .fold>summary h2{display:inline}
 .fold>summary:hover h2{color:var(--accent)}
-.sbtn{font:inherit;font-size:.85rem;padding:.25rem .6rem;border:1px solid var(--rule);border-radius:999px;background:transparent;color:var(--ink-faint);cursor:pointer}
+.sbtn{font:inherit;font-size:.95rem;padding:.3rem .75rem;border:1px solid var(--rule);border-radius:999px;background:transparent;color:var(--ink-faint);cursor:pointer}
 .sbtn[aria-pressed=true]{color:var(--ink-str);border-color:var(--accent)}
 .controls .sep{width:1px;align-self:stretch;background:var(--rule);margin:0 .3rem}
 .sec h2 .cnt{font-family:var(--mono);font-size:.9rem;color:var(--ink-faint);font-variant-numeric:tabular-nums}
