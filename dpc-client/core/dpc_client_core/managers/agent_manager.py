@@ -937,6 +937,8 @@ class DpcAgentManager:
         image_base64: Optional[str] = None,
         image_mime: str = "image/png",
         image_caption: Optional[str] = None,
+        # Attachment metadata for the history record (the image itself travels in image_base64)
+        attachments: Optional[List[Dict[str, Any]]] = None,
         # Phase 3: Per-agent provider selection
         agent_llm_provider: Optional[str] = None,
         # Sender attribution (e.g. "mike (Telegram)" vs "User")
@@ -1008,6 +1010,7 @@ class DpcAgentManager:
             monitor.add_message(
                 role="user",
                 content=message,
+                attachments=attachments,
                 timestamp=utc_now_iso(),
                 sender_node_id=node_id,
                 sender_name=sender_name

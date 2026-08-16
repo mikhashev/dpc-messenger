@@ -1323,6 +1323,10 @@ Send a voice message and it will be transcribed and processed\\.
 
             conversation_id = self._agent_id if self._unified_conversation and self._agent_id else f"telegram-{chat_id}"
 
+            attachment = self._keep_incoming_photo(
+                conversation_id, bytes(photo_bytes), update.message.message_id
+            )
+
             response = await self._message_handler(
                 message=message_text,
                 conversation_id=conversation_id,
@@ -1332,6 +1336,7 @@ Send a voice message and it will be transcribed and processed\\.
                 image_base64=image_base64,
                 image_mime="image/jpeg",
                 image_caption=caption or None,
+                attachments=[attachment] if attachment else None,
             )
 
             # Send response
@@ -1353,6 +1358,47 @@ Send a voice message and it will be transcribed and processed\\.
         except Exception as e:
             log.error(f"Error processing photo message: {e}", exc_info=True)
             await update.message.reply_text(f"❌ Error processing photo: {str(e)[:200]}")
+
+    def _keep_incoming_photo(
+        self, conversation_id: str, photo_bytes: bytes, message_id: int
+    ) -> Optional[Dict[str, Any]]:
+        """Write the photo beside its conversation and describe it as an attachment.
+
+        Location and shape are the conversation-level bridge's, not a second
+        convention invented here: `telegram_coordinator._handle_photo` already
+        saves into `<conversation>/files/telegram_photo_<id>.jpg` and hangs a
+        dict of the same keys on the message, which `add_message` persists and
+        the interface already renders.
+
+        Without it the record of the turn is the caption alone. The picture
+        still reaches the model — it travels separately as base64 — so the
+        conversation keeps a question about a screenshot with no screenshot,
+        and the vision description that answered it is not kept either.
+
+        A failure here must not cost the message: the model still receives the
+        image, so this logs and returns None rather than raising.
+        """
+        try:
+            files_dir = Path.home() / ".dpc" / "conversations" / conversation_id / "files"
+            files_dir.mkdir(parents=True, exist_ok=True)
+            filename = f"telegram_photo_{message_id}.jpg"
+            path = files_dir / filename
+            path.write_bytes(photo_bytes)
+            return {
+                "type": "image",
+                "filename": filename,
+                "file_path": str(path),
+                "size_bytes": len(photo_bytes),
+                "mime_type": "image/jpeg",
+                "source": "telegram",
+                "telegram_message_id": message_id,
+            }
+        except OSError as e:
+            log.warning(
+                "Could not keep the incoming photo for %s: %s — the model still sees it, the record will not",
+                conversation_id, e,
+            )
+            return None
 
     async def _broadcast_history_to_ui(self, conversation_id: str) -> None:
         """
