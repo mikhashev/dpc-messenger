@@ -85,6 +85,10 @@ class DeepSeekProvider(AIProvider):
         self.max_retry_seconds = config.get("max_retry_seconds", 600)
 
         self._last_thinking: Optional[str] = None
+        # The token accounting of the last call, whichever entry point made it.
+        # Cleared at the start of every call so a failure cannot be priced with
+        # the numbers of the success before it.
+        self._last_usage: Optional[Dict[str, Any]] = None
 
         # Said once per provider: the reason is a property of the alias, not of
         # the call, so repeating it per request would bury the log.
@@ -108,6 +112,74 @@ class DeepSeekProvider(AIProvider):
 
     def get_last_thinking(self) -> Optional[str]:
         return self._last_thinking
+
+    def get_last_usage(self) -> Optional[Dict[str, Any]]:
+        """What the vendor said the last call cost in tokens, or None.
+
+        The caller that most needs this is the one that used to guess: the
+        agent's text path counts tokens locally and prices the guess, which on
+        this provider is wrong in both directions at once — the cache split is
+        invisible, so every prompt token bills as a miss (dearer), and
+        reasoning tokens do not appear in the answer text (cheaper)."""
+        return self._last_usage
+
+    @staticmethod
+    def _usage_from_response(u: Any) -> Dict[str, Any]:
+        """The vendor's token accounting, in this project's shape.
+
+        DeepSeek reports the cache split natively (prompt_tokens = hit + miss)
+        and leaves the OpenAI-compat `prompt_tokens_details.cached_tokens` at
+        0, so the native fields win and the compat one is only a fallback."""
+        prompt_tokens = getattr(u, "prompt_tokens", 0) or 0
+        _hit = getattr(u, "prompt_cache_hit_tokens", None)
+        _miss = getattr(u, "prompt_cache_miss_tokens", None)
+        if _hit is None:
+            _details = getattr(u, "prompt_tokens_details", None)
+            _hit = getattr(_details, "cached_tokens", 0) if _details else 0
+        if _miss is None:
+            _miss = max(0, prompt_tokens - (_hit or 0))
+        _completion = getattr(u, "completion_tokens", 0) or 0
+        _ctd = getattr(u, "completion_tokens_details", None)
+        _reasoning = (getattr(_ctd, "reasoning_tokens", 0) or 0) if _ctd else 0
+        return {
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": _completion,
+            "reasoning_tokens": _reasoning,
+            "content_tokens": max(0, _completion - _reasoning),
+            "total_tokens": getattr(u, "total_tokens", 0) or 0,
+            "cache_read_input_tokens": _hit or 0,
+            "prompt_cache_hit_tokens": _hit or 0,
+            "prompt_cache_miss_tokens": _miss or 0,
+        }
+
+    def _record_usage(
+        self,
+        raw_usage: Any,
+        *,
+        path: str,
+        conversation_id: Optional[str] = None,
+        tool_calls: int = 0,
+        effort: Any = "server-default",
+    ) -> Dict[str, Any]:
+        """Keep the accounting and write the one line the burn history is made of.
+
+        `path` is new and it is not decoration: until 2026-08-16 this line was
+        written by the tool path alone, so the 5,406 lines the burn rate was
+        measured from are all `tools`. Plain calls joining that series unmarked
+        would change what the file means with nothing in the file to say so."""
+        usage = self._usage_from_response(raw_usage) if raw_usage is not None else None
+        if usage is None:
+            return {}
+        self._last_usage = usage
+        logger.info(
+            "DeepSeek usage: alias=%s conv=%s prompt=%d (hit=%d/miss=%d), "
+            "completion=%d (reasoning=%d/content=%d), tool_calls=%d, effort=%s, path=%s",
+            self.alias, conversation_id or "-", usage["prompt_tokens"],
+            usage["prompt_cache_hit_tokens"], usage["prompt_cache_miss_tokens"],
+            usage["completion_tokens"], usage["reasoning_tokens"],
+            usage["content_tokens"], tool_calls, effort, path,
+        )
+        return usage
 
     def supports_balance(self) -> bool:
         return True
@@ -270,20 +342,33 @@ class DeepSeekProvider(AIProvider):
     # --- plain text generation ---
 
     async def generate_response(self, prompt: str, **kwargs) -> str:
-        """Non-streaming text generation."""
+        """Non-streaming text generation.
+
+        Returns the text, and leaves the accounting on `get_last_usage()` —
+        sleep synthesis, the AI chat and everything else without tools comes
+        through here, and until 2026-08-16 every one of those calls was priced
+        by a guess with no record of its own."""
         self._last_thinking = None
+        self._last_usage = None
 
         async def _call():
+            extra_body = self._build_extra_body()
             params: Dict[str, Any] = {
                 "model": self.model,
                 "max_tokens": self.max_tokens,
                 "messages": [{"role": "user", "content": prompt}],
-                "extra_body": self._build_extra_body(),
+                "extra_body": extra_body,
                 **self._sampling_params(kwargs.get("temperature")),
             }
             resp = await self.client.chat.completions.create(**params)
             msg = resp.choices[0].message
             self._last_thinking = getattr(msg, "reasoning_content", None)
+            self._record_usage(
+                getattr(resp, "usage", None),
+                path="plain",
+                conversation_id=kwargs.get("conversation_id"),
+                effort=extra_body.get("reasoning_effort", "server-default"),
+            )
             return msg.content or ""
 
         try:
@@ -303,14 +388,20 @@ class DeepSeekProvider(AIProvider):
     ) -> str:
         """Streaming text generation. Calls on_chunk(text, conversation_id) per token."""
         self._last_thinking = None
+        self._last_usage = None
 
         async def _call():
+            extra_body = self._build_extra_body()
             params: Dict[str, Any] = {
                 "model": self.model,
                 "max_tokens": self.max_tokens,
                 "messages": [{"role": "user", "content": prompt}],
-                "extra_body": self._build_extra_body(),
+                "extra_body": extra_body,
                 "stream": True,
+                # A stream reports its usage only if asked, in a final chunk
+                # that carries no choices — which is why the skip below now
+                # reads the chunk before discarding it.
+                "stream_options": {"include_usage": True},
                 **self._sampling_params(),
             }
 
@@ -318,6 +409,14 @@ class DeepSeekProvider(AIProvider):
             thinking_text = ""
             stream = await self.client.chat.completions.create(**params)
             async for chunk in stream:
+                chunk_usage = getattr(chunk, "usage", None)
+                if chunk_usage is not None:
+                    self._record_usage(
+                        chunk_usage,
+                        path="plain-stream",
+                        conversation_id=conversation_id,
+                        effort=extra_body.get("reasoning_effort", "server-default"),
+                    )
                 if not chunk.choices:
                     continue
                 delta = chunk.choices[0].delta
@@ -473,6 +572,7 @@ class DeepSeekProvider(AIProvider):
         as consumed by llm_adapter._chat_native_tools.
         """
         self._last_thinking = None
+        self._last_usage = None
         openai_messages = self._anthropic_to_openai_messages(
             system, messages, reasoning_echo=self.thinking_enabled
         )
@@ -533,39 +633,12 @@ class DeepSeekProvider(AIProvider):
             if on_chunk and content:
                 await on_chunk(content, conversation_id)
 
-            u = resp.usage
-            prompt_tokens = getattr(u, "prompt_tokens", 0) or 0
-            # DeepSeek reports the cache split natively (prompt_tokens = hit + miss)
-            # and leaves the OpenAI-compat prompt_tokens_details.cached_tokens at 0,
-            # so prefer the native fields and fall back only if they are absent.
-            _hit = getattr(u, "prompt_cache_hit_tokens", None)
-            _miss = getattr(u, "prompt_cache_miss_tokens", None)
-            if _hit is None:
-                _details = getattr(u, "prompt_tokens_details", None)
-                _hit = getattr(_details, "cached_tokens", 0) if _details else 0
-            if _miss is None:
-                _miss = max(0, prompt_tokens - (_hit or 0))
-            _completion = getattr(u, "completion_tokens", 0) or 0
-            _ctd = getattr(u, "completion_tokens_details", None)
-            _reasoning = (getattr(_ctd, "reasoning_tokens", 0) or 0) if _ctd else 0
-            usage = {
-                "prompt_tokens": prompt_tokens,
-                "completion_tokens": _completion,
-                "reasoning_tokens": _reasoning,
-                "content_tokens": max(0, _completion - _reasoning),
-                "total_tokens": getattr(u, "total_tokens", 0) or 0,
-                "cache_read_input_tokens": _hit or 0,
-                "prompt_cache_hit_tokens": _hit or 0,
-                "prompt_cache_miss_tokens": _miss or 0,
-            }
-            logger.info(
-                "DeepSeek usage: alias=%s conv=%s prompt=%d (hit=%d/miss=%d), "
-                "completion=%d (reasoning=%d/content=%d), tool_calls=%d, effort=%s",
-                self.alias, conversation_id or "-", usage["prompt_tokens"],
-                usage["prompt_cache_hit_tokens"], usage["prompt_cache_miss_tokens"],
-                usage["completion_tokens"], usage["reasoning_tokens"],
-                usage["content_tokens"], len(tool_calls_raw),
-                extra_body.get("reasoning_effort", "server-default"),
+            usage = self._record_usage(
+                resp.usage,
+                path="tools",
+                conversation_id=conversation_id,
+                tool_calls=len(tool_calls_raw),
+                effort=extra_body.get("reasoning_effort", "server-default"),
             )
             return {
                 "content": content,

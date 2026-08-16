@@ -272,8 +272,38 @@ class DpcLlmAdapter:
                     response_msg["tool_calls"] = tool_calls
                     log.info(f"Found {len(tool_calls)} tool call(s): {[tc['function']['name'] for tc in tool_calls]}")
 
-            # Count tokens accurately using TokenCountManager (reuse existing)
+            # What the provider says beats what we can work out, and on DeepSeek
+            # the two differ in both directions at once: the estimate below sees
+            # no cache split, so every prompt token bills as a miss (dearer than
+            # the truth), and it cannot see reasoning tokens at all, because they
+            # are not in the answer text (cheaper than the truth). The tool path
+            # has preferred the reported numbers since it was written; this one
+            # counted for itself and priced its own count.
             model_name = self.default_model()
+            reported = (
+                provider.get_last_usage()
+                if hasattr(provider, "get_last_usage") else None
+            )
+            if reported:
+                usage: Dict[str, Any] = dict(reported)
+                usage.setdefault(
+                    "cost",
+                    compute_cost_usd(
+                        self._provider_alias or "",
+                        int(usage.get("prompt_tokens", 0)),
+                        int(usage.get("completion_tokens", 0)),
+                        model=model_name,
+                        cache_hit_tokens=int(usage.get("prompt_cache_hit_tokens", 0) or 0),
+                        cache_miss_tokens=(
+                            int(usage["prompt_cache_miss_tokens"])
+                            if usage.get("prompt_cache_miss_tokens") is not None
+                            else None
+                        ),
+                    ),
+                )
+                return response_msg, usage
+
+            # Count tokens accurately using TokenCountManager (reuse existing)
             if self._token_counter:
                 prompt_tokens = self._token_counter.count_tokens(prompt, model_name)
                 completion_tokens = self._token_counter.count_tokens(response, model_name)
@@ -282,7 +312,7 @@ class DpcLlmAdapter:
                 prompt_tokens = len(prompt) // 4
                 completion_tokens = len(response) // 4
 
-            usage: Dict[str, Any] = {
+            usage = {
                 "prompt_tokens": prompt_tokens,
                 "completion_tokens": completion_tokens,
                 "total_tokens": prompt_tokens + completion_tokens,
