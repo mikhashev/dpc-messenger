@@ -1043,7 +1043,7 @@
               <span class="group-effort-label">Thinking effort:</span>
               <select
                 class="group-effort-select"
-                title="One scale for a group whose agents sit on different models: each provider maps it onto what it can actually do. On local Ollama models Max is the same depth as High (measured), and on a model that reports no thinking every level is dropped — Off is the one value all of them accept."
+                title="One scale for a room whose agents sit on different models: each provider maps it onto what its own model can do, so the same word can mean different depths here. Max cannot be sent to a local Ollama model at all and arrives as High. A model that reports no thinking drops every level — Off is the one value all of them accept."
                 value={$groupChats.get(activeChatId)?.reasoning_effort || ''}
                 onchange={(e: Event) => setGroupReasoningEffort(activeChatId, (e.currentTarget as HTMLSelectElement).value)}
               >
@@ -1062,7 +1062,7 @@
               <span class="group-effort-label">Thinking effort:</span>
               <select
                 class="group-effort-select"
-                title="One scale for a group whose agents sit on different models: each provider maps it onto what it can actually do. On local Ollama models Max is the same depth as High (measured), and on a model that reports no thinking every level is dropped — Off is the one value all of them accept."
+                title="One scale for a room whose agents sit on different models: each provider maps it onto what its own model can do, so the same word can mean different depths here. Max cannot be sent to a local Ollama model at all and arrives as High. A model that reports no thinking drops every level — Off is the one value all of them accept."
                 value={$agentsList.find((a: any) => a.agent_id === activeChatId)?.reasoning_effort || ''}
                 onchange={async (e: Event) => { await updateAgentConfig(activeChatId, { reasoning_effort: (e.currentTarget as HTMLSelectElement).value }); await listAgents(); }}
               >

@@ -221,7 +221,21 @@ def test_the_clamp_is_said_once_and_only_once(caplog):
     with caplog.at_level("INFO"):
         provider._think_flag("max")
         provider._think_flag("max")
-    assert sum("sent as 'high'" in r.getMessage() for r in caplog.records) == 1
+    assert sum("could not send effort 'max'" in r.getMessage() for r in caplog.records) == 1
+
+
+def test_the_clamp_does_not_claim_the_two_are_one_depth(caplog):
+    """The line used to say the daemon treats max and high alike. Two reviewers
+    measured muse-glimmer separating them, so the claim was false on an
+    installed model — and a clamp leaves no counterfactual for anyone to
+    notice. It may say what could not be sent; it may not say what the daemon
+    thinks."""
+    FakeClient.answer = ["completion", "thinking"]
+    with caplog.at_level("INFO"):
+        _provider()._think_flag("max")
+    said = " ".join(r.getMessage() for r in caplog.records)
+    assert "treats them alike" not in said
+    assert "same depth" not in said
 
 
 def test_the_ignored_effort_is_said_once_and_only_once(caplog):

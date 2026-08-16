@@ -209,12 +209,16 @@ class OllamaProvider(AIProvider):
 
         Two things the daemon taught us in the measuring, both load-bearing:
 
-        `max` is sent as `high`. On qwen3.8 with a fixed seed the two produce
-        byte-identical traces, so nothing is lost; and the Python SDK types the
-        field as `Literal['low','medium','high']`, so `max` dies in pydantic
-        before a request leaves the process. The clamp is therefore both free
-        and required. If a future model ever separates them, the log line below
-        is how anyone will find out the downgrade was happening.
+        `max` is sent as `high` because the Python SDK types the field as
+        `Literal['low','medium','high']`: `max` dies in pydantic before a
+        request leaves the process, so the clamp is what makes such a call
+        possible at all. It is required and it is not free. On qwen3.8 a fixed
+        seed makes the two byte-identical, which is where "nothing is lost"
+        came from — but `muse-glimmer` separates them, measured twice
+        independently and in opposite directions, so on that model the clamp
+        sends a depth nobody asked for. Sending the real `max` means reaching
+        past the SDK with a raw body, and that is not worth doing while no
+        agent sits on such an alias.
 
         A level sent to a model that cannot think is **refused**, not ignored:
         `400 "<model> does not support thinking"`. So the effort is dropped for
@@ -234,9 +238,10 @@ class OllamaProvider(AIProvider):
                 if level == "max":
                     if not self._effort_clamped_logged:
                         logger.info(
-                            "OllamaProvider '%s': effort 'max' sent as 'high' — the "
-                            "daemon treats them alike on this model and the SDK "
-                            "cannot express 'max'.", self.alias,
+                            "OllamaProvider '%s': could not send effort 'max' — the SDK "
+                            "types the field as low/medium/high, so 'high' went to %s "
+                            "instead. Some models treat the two as one depth and some "
+                            "do not.", self.alias, self.model,
                         )
                         self._effort_clamped_logged = True
                     return "high"
