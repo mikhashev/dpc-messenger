@@ -31,7 +31,7 @@ from .memory import Memory, generate_smart_index
 from .skill_store import SkillStore
 from .skill_reflection import SkillReflector, REFLECTION_ROUNDS_THRESHOLD
 from .context import build_llm_messages
-from .loop import run_llm_loop
+from .loop import run_llm_loop, RECORDED_USAGE_FIELDS
 from .utils import (
     get_agent_root, ensure_agent_dirs, utc_now_iso, append_jsonl
 )
@@ -45,6 +45,30 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 CONTEXT_ROUND_RESERVE_TOKENS = 16384
+
+
+def tokens_block(usage: Dict[str, Any]) -> Dict[str, Any]:
+    """What a finished task cost in tokens, for the record that outlives the log.
+
+    The task result has carried a `tokens` field since it was written and it
+    has been `{}` in all 133 files on this machine, because it asks
+    `usage.get("tokens", {})` while the loop keeps its counters flat and
+    creates no such key. The numbers were one name away the whole time.
+
+    Provider-shaped fields (`RECORDED_USAGE_FIELDS`) are copied only when the
+    provider reported them. Absent, not zero: the only reason this field went
+    unnoticed for a year is that an empty value reads as a measurement.
+    """
+    block = {
+        "prompt_tokens": usage.get("prompt_tokens", 0),
+        "completion_tokens": usage.get("completion_tokens", 0),
+        "total_tokens": usage.get("total_tokens", 0),
+    }
+    for field in RECORDED_USAGE_FIELDS:
+        value = usage.get(field)
+        if value is not None:
+            block[field] = value
+    return block
 
 
 def select_prior_history(
@@ -408,6 +432,10 @@ class DpcAgent:
             "response_preview": response[:200] if response else "",
             "rounds": usage.get("rounds", 0),
             "cost_usd": usage.get("cost", 0),
+            # The same block as the task result, under the same names: this is
+            # the series a burn rate is computed from, and it has carried a
+            # cost with no decomposition since it was written.
+            "tokens": tokens_block(usage),
             "tokens_estimated_total": cap_info.get("estimated_tokens_before", 0),
             "tokens_context_window": _ctx_window,
             "context_trimmed": bool(_trimmed),
@@ -427,7 +455,7 @@ class DpcAgent:
                 "response": response or "",
                 "rounds": usage.get("rounds", 0),
                 "cost_usd": usage.get("cost", 0),
-                "tokens": usage.get("tokens", {}),
+                "tokens": tokens_block(usage),
             }
             (results_dir / f"{event_task_id}.json").write_text(
                 _json.dumps(result_data, ensure_ascii=False, indent=2),

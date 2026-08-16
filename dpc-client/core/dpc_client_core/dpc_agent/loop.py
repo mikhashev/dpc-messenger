@@ -47,6 +47,31 @@ log = logging.getLogger(__name__)
 DEFAULT_MAX_ROUNDS = 200
 DEFAULT_TIMEOUT_SEC = 120
 
+# Usage counters only some providers report. DeepSeek splits its prompt into
+# cache hit and miss and names its reasoning tokens; nobody else does. They are
+# summed across the rounds of one task and left **absent** when no round
+# reported them — a present-and-empty field reads as "we looked and there was
+# nothing", which is exactly how `tokens: {}` sat in every task result for a
+# year with the numbers one key away.
+OPTIONAL_USAGE_FIELDS = (
+    "prompt_cache_hit_tokens",
+    "prompt_cache_miss_tokens",
+    "reasoning_tokens",
+)
+
+# What a finished task records about its own accounting: the summed counters
+# above plus the effort word, which is recorded once rather than added up.
+RECORDED_USAGE_FIELDS = OPTIONAL_USAGE_FIELDS + ("reasoning_effort",)
+
+
+def merge_optional_usage(accumulated: Dict[str, Any], usage: Dict[str, Any]) -> None:
+    """Add one round's provider-shaped counters to the task's running total."""
+    for field in OPTIONAL_USAGE_FIELDS:
+        value = usage.get(field)
+        if value is None:
+            continue
+        accumulated[field] = accumulated.get(field, 0) + int(value)
+
 # Shared ThreadPoolExecutor for tool execution (fixes memory leak from creating new executors)
 # Using max_workers=4 allows parallel tool execution while limiting resource usage
 _SHARED_EXECUTOR: Optional[ThreadPoolExecutor] = None
@@ -625,6 +650,11 @@ async def run_llm_loop(
                 accumulated_usage["total_tokens"] += usage.get("total_tokens", 0)
                 accumulated_usage["cost"] += usage.get("cost", 0)
                 accumulated_usage["rounds"] += 1
+                merge_optional_usage(accumulated_usage, usage)
+                if reasoning_effort:
+                    # Recorded, not summed: it is the word this task was run
+                    # with, and it is what joins a cost to a decision.
+                    accumulated_usage["reasoning_effort"] = reasoning_effort
                 # Carry forward thinking from each round (last non-empty thinking wins)
                 if msg.get("thinking"):
                     accumulated_usage["thinking"] = msg["thinking"]
