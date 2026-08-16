@@ -1040,10 +1040,10 @@
 
           {#if !chatHeaderCollapsed && isGroupChat}
             <div class="group-effort">
-              <span class="group-effort-label">Thinking effort:</span>
+              <span class="group-effort-label">Reasoning:</span>
               <select
                 class="group-effort-select"
-                title="One scale for a room whose agents sit on different models: each provider maps it onto what its own model can do, so the same word can mean different depths here. Max cannot be sent to a local Ollama model at all and arrives as High. A model that reports no thinking drops every level — Off is the one value all of them accept."
+                title="How hard the model reasons before answering — the field is `reasoning_effort` in the code and in DeepSeek's own API, which is why the label says Reasoning rather than Thinking. One scale for a room whose agents sit on different models: each provider maps it onto what its own model can do, so the same word can mean different depths here. Max cannot be sent to a local Ollama model at all and arrives as High. A model that reports no thinking drops every level — Off is the one value all of them accept, and it is a switch rather than an amount."
                 value={$groupChats.get(activeChatId)?.reasoning_effort || ''}
                 onchange={(e: Event) => setGroupReasoningEffort(activeChatId, (e.currentTarget as HTMLSelectElement).value)}
               >
@@ -1059,10 +1059,10 @@
 
           {#if !chatHeaderCollapsed && isActuallyAIChat}
             <div class="group-effort">
-              <span class="group-effort-label">Thinking effort:</span>
+              <span class="group-effort-label">Reasoning:</span>
               <select
                 class="group-effort-select"
-                title="One scale for a room whose agents sit on different models: each provider maps it onto what its own model can do, so the same word can mean different depths here. Max cannot be sent to a local Ollama model at all and arrives as High. A model that reports no thinking drops every level — Off is the one value all of them accept."
+                title="How hard the model reasons before answering — the field is `reasoning_effort` in the code and in DeepSeek's own API, which is why the label says Reasoning rather than Thinking. One scale for a room whose agents sit on different models: each provider maps it onto what its own model can do, so the same word can mean different depths here. Max cannot be sent to a local Ollama model at all and arrives as High. A model that reports no thinking drops every level — Off is the one value all of them accept, and it is a switch rather than an amount."
                 value={$agentsList.find((a: any) => a.agent_id === activeChatId)?.reasoning_effort || ''}
                 onchange={async (e: Event) => { await updateAgentConfig(activeChatId, { reasoning_effort: (e.currentTarget as HTMLSelectElement).value }); await listAgents(); }}
               >
