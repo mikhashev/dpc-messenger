@@ -82,8 +82,16 @@ async def test_a_word_that_is_not_a_position_is_still_refused(tmp_path):
 
 @pytest.mark.asyncio
 async def test_every_position_the_header_offers_is_accepted(tmp_path):
-    """The list under test is the one the control draws — if a sixth position
-    is ever added to the header, this is where the two go out of step."""
+    """The five positions the header draws today, all accepted.
+
+    Honest about what this does *not* do (Johnny, review of `f6e48ba9`): the
+    list below is a third copy of the vocabulary, not the control itself. The
+    header's own copy is five hardcoded `<option>` tags in `+page.svelte`, so
+    a sixth position added there would be refused by the validator, reported
+    as OK by the envelope, and this test would stay green — which is the
+    original defect, one copy further along. Closing that means the control
+    reading its positions from the backend; until then this pins the current
+    five and nothing about agreement."""
     node = _Node(tmp_path)
     gid = node.group_manager.create_group("Room", "", []).group_id
 
