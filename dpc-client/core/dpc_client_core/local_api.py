@@ -243,9 +243,9 @@ def _sanitize_payload_for_logging(payload: dict, max_length: int = 30) -> dict:
     return sanitized
 
 
-def _log_error_under_ok(command: str, result) -> None:
+def _log_error_under_ok(command: str, result, envelope: str = "OK") -> None:
     """H2 Step 0 — the envelope is left as it is; only the silence becomes audible."""
-    if not isinstance(result, dict):
+    if envelope != "OK" or not isinstance(result, dict):
         return
     inner = result.get("status")
     if not isinstance(inner, str) or inner.casefold() != "error":
@@ -629,6 +629,10 @@ class LocalApiServer:
         """Helper to send a response to all connected UI clients."""
         if not self._clients:
             return
+        # The third dispatch branch: a handler decorated @sends_own_response builds its
+        # own envelope, so the two sites above never see it. execute_ai_query is here,
+        # and that is the Local AI Chat path the next two records are built on.
+        _log_error_under_ok(command, payload, status)
         response = {"id": command_id, "command": command, "status": status, "payload": payload}
         message = json.dumps(response)
         # Per-client locks (see broadcast_event for rationale).

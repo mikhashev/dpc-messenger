@@ -292,3 +292,50 @@ async def test_a_command_that_succeeded_says_nothing(caplog):
         await server._handler(ws)
 
     assert not [r for r in caplog.records if _UNDER_OK in r.getMessage()]
+
+
+async def test_a_handler_that_answers_for_itself_is_covered_too(caplog):
+    """The third dispatch branch: @sends_own_response builds its own envelope.
+
+    execute_ai_query is one of the two, and it is the Local AI Chat path, so
+    leaving it out would mean the next two records are accepted on a path where
+    an error under OK is still silent.
+    """
+    from dpc_client_core.local_api import LocalApiServer
+
+    server = LocalApiServer(object(), port=0)
+    ws = _FakeWS([])
+    server._clients.add(ws)
+
+    with caplog.at_level(logging.WARNING, logger="dpc_client_core.local_api"):
+        await server.send_response_to_all(
+            "q", "execute_ai_query", "OK",
+            {"status": "error", "message": "no provider for that alias"},
+        )
+
+    said = [r.getMessage() for r in caplog.records if _UNDER_OK in r.getMessage()]
+    assert said, "a self-answering handler must not be the one place that stays quiet"
+    assert "execute_ai_query" in said[0]
+    assert ws.sent[0]["status"] == "OK"
+
+
+async def test_an_honest_error_envelope_is_not_called_a_lie(caplog):
+    """A command that answers ERROR is reporting correctly — say nothing.
+
+    Without this the envelope argument is decoration: the check would fire on
+    the one shape that is already honest, and the log would stop meaning
+    'something failed silently'.
+    """
+    from dpc_client_core.local_api import LocalApiServer
+
+    server = LocalApiServer(object(), port=0)
+    ws = _FakeWS([])
+    server._clients.add(ws)
+
+    with caplog.at_level(logging.WARNING, logger="dpc_client_core.local_api"):
+        await server.send_response_to_all(
+            "q", "execute_ai_query", "ERROR",
+            {"status": "error", "message": "no provider for that alias"},
+        )
+
+    assert not [r for r in caplog.records if _UNDER_OK in r.getMessage()]
