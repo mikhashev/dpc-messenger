@@ -243,6 +243,20 @@ def _sanitize_payload_for_logging(payload: dict, max_length: int = 30) -> dict:
     return sanitized
 
 
+def _log_error_under_ok(command: str, result) -> None:
+    """H2 Step 0 — the envelope is left as it is; only the silence becomes audible."""
+    if not isinstance(result, dict):
+        return
+    inner = result.get("status")
+    if not isinstance(inner, str) or inner.casefold() != "error":
+        return
+    detail = result.get("message") or result.get("error") or ""
+    logger.warning(
+        "Command '%s' answered an error under an OK envelope: %s",
+        command, str(detail)[:300] or "(no message given)",
+    )
+
+
 class LocalApiServer:
     def __init__(self, core_service: "CoreService", host: str = "127.0.0.1", port: int = 9999):
         self.core_service = core_service
@@ -450,6 +464,7 @@ class LocalApiServer:
         """
         try:
             result = await handler_method(**payload)
+            _log_error_under_ok(command, result)
             response = {"id": command_id, "command": command, "status": "OK", "payload": result}
         except Exception as e:
             logger.error("Error processing command: %s", e, exc_info=True)
@@ -519,6 +534,7 @@ class LocalApiServer:
                         else:
                             # For short tasks, await the result and send it back
                             result = await handler_method(**payload)
+                            _log_error_under_ok(command, result)
                             response = {"id": command_id, "command": command, "status": "OK", "payload": result}
                             await self._send_locked(websocket, json.dumps(response))
                             # Mike S141: pair every "Executing command" with a

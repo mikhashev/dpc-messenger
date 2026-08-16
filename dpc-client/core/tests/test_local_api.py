@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import logging
 from pathlib import Path
 import pytest
 import websockets
@@ -206,3 +207,88 @@ def test_allowed_commands_have_matching_coreservice_methods():
         f"{len(missing)} ALLOWED_COMMANDS entries have no matching CoreService method "
         f"and are not on the local_api short-circuit list: {missing}"
     )
+
+# --- H2 Step 0: an error under an OK envelope must at least be said out loud ---
+# The envelope itself is unchanged on purpose (that is Step 1 and needs a window
+# with a human at the screen). These three watch the line, and the third one is
+# what stops the other two from passing vacuously: a handler that succeeded must
+# produce no warning at all, or the log fills with noise and nobody reads it.
+
+_UNDER_OK = "answered an error under an OK envelope"
+
+
+async def test_an_inline_command_answering_error_is_logged_and_still_stamped_ok(caplog):
+    from dpc_client_core.local_api import LocalApiServer
+
+    class FakeCore:
+        async def get_conversation_history(self, conversation_id=None):
+            return {"status": "error", "message": "Agent not found: local_ai"}
+
+    server = LocalApiServer(FakeCore(), port=0)
+    server._auth_token = "token"
+    ws = _FakeWS([
+        json.dumps({"command": "auth", "token": "token"}),
+        json.dumps({"id": "inline", "command": "get_conversation_history",
+                    "payload": {"conversation_id": "local_ai"}}),
+    ])
+
+    with caplog.at_level(logging.WARNING, logger="dpc_client_core.local_api"):
+        await server._handler(ws)
+
+    said = [r.getMessage() for r in caplog.records if _UNDER_OK in r.getMessage()]
+    assert said, "the inline path is the one almost every command takes"
+    assert "get_conversation_history" in said[0]
+    assert "Agent not found: local_ai" in said[0]
+
+    answer = [m for m in ws.sent if m.get("id") == "inline"]
+    assert answer[0]["status"] == "OK", "Step 0 changes nothing the interface can see"
+    assert answer[0]["payload"]["status"] == "error"
+
+
+async def test_a_slow_command_answering_error_is_logged_too(caplog):
+    from dpc_client_core.local_api import LocalApiServer, slow_command
+
+    class FakeCore:
+        @slow_command
+        async def end_conversation_session(self, conversation_id=None):
+            return {"status": "error", "message": "extraction already running"}
+
+    server = LocalApiServer(FakeCore(), port=0)
+    server._auth_token = "token"
+    ws = _FakeWS([
+        json.dumps({"command": "auth", "token": "token"}),
+        json.dumps({"id": "slow", "command": "end_conversation_session",
+                    "payload": {"conversation_id": "g"}}),
+    ])
+
+    with caplog.at_level(logging.WARNING, logger="dpc_client_core.local_api"):
+        await server._handler(ws)
+        await asyncio.sleep(0.05)
+
+    said = [r.getMessage() for r in caplog.records if _UNDER_OK in r.getMessage()]
+    assert said, "the two envelope sites must not drift apart"
+    assert "end_conversation_session" in said[0]
+
+    answer = [m for m in ws.sent if m.get("id") == "slow"]
+    assert answer[0]["status"] == "OK"
+
+
+async def test_a_command_that_succeeded_says_nothing(caplog):
+    from dpc_client_core.local_api import LocalApiServer
+
+    class FakeCore:
+        async def get_conversation_history(self, conversation_id=None):
+            return {"status": "success", "messages": []}
+
+    server = LocalApiServer(FakeCore(), port=0)
+    server._auth_token = "token"
+    ws = _FakeWS([
+        json.dumps({"command": "auth", "token": "token"}),
+        json.dumps({"id": "ok", "command": "get_conversation_history",
+                    "payload": {"conversation_id": "g"}}),
+    ])
+
+    with caplog.at_level(logging.WARNING, logger="dpc_client_core.local_api"):
+        await server._handler(ws)
+
+    assert not [r for r in caplog.records if _UNDER_OK in r.getMessage()]
