@@ -1,6 +1,7 @@
 """Tests for GroupManager - group chat metadata CRUD and persistence."""
 
 import json
+import logging
 import tempfile
 from pathlib import Path
 import pytest
@@ -391,3 +392,46 @@ class TestUpdateTopicVersioning:
         loaded = reloaded.get_group(group.group_id)
         assert loaded.topic == "new topic"
         assert loaded.version == group.version
+
+
+class TestEffortTransitionsAreAudible:
+    """The second layer of the effort hunt.
+
+    A line at the point of use can only say `None -> ceiling`, and that same
+    sentence covers a resolver that missed, a room that never had a value, and
+    a value dropped during a sync. These say which, and only when it moves —
+    a line on every unchanged read would be noise nobody reads.
+    """
+
+    def test_setting_the_room_says_what_it_moved_from(self, manager, caplog):
+        gid = manager.create_group("Effort", "", []).group_id
+        with caplog.at_level(logging.INFO, logger="dpc_client_core.managers.group_manager"):
+            manager.set_group_reasoning_effort(gid, "high")
+        moved = [r.getMessage() for r in caplog.records if "reasoning_effort" in r.getMessage()]
+        assert moved, "the one deliberate transition must be in the log"
+        assert "none -> high" in moved[0]
+
+    def test_setting_it_to_what_it_already_is_says_nothing(self, manager, caplog):
+        gid = manager.create_group("Effort", "", []).group_id
+        manager.set_group_reasoning_effort(gid, "high")
+        caplog.clear()
+        with caplog.at_level(logging.INFO, logger="dpc_client_core.managers.group_manager"):
+            manager.set_group_reasoning_effort(gid, "high")
+        assert not [r for r in caplog.records if "reasoning_effort" in r.getMessage()]
+
+    def test_a_group_arriving_by_sync_with_no_local_copy_says_it_starts_empty(self, manager, caplog):
+        remote = GroupMetadata(
+            group_id="group-fromelsewhere",
+            name="Elsewhere",
+            members=["dpc-node-other"],
+            version=3,
+            reasoning_effort="high",
+        ).to_dict()
+        with caplog.at_level(logging.INFO, logger="dpc_client_core.managers.group_manager"):
+            manager.apply_sync(remote)
+        said = " ".join(r.getMessage() for r in caplog.records)
+        assert "starts empty" in said, (
+            "a room that materialises from a sync keeps no effort — that is the moment "
+            "worth naming, because afterwards nothing distinguishes it from a room that never had one"
+        )
+        assert manager.get_group("group-fromelsewhere").reasoning_effort is None

@@ -19,6 +19,16 @@ from dataclasses import dataclass, asdict, field
 logger = logging.getLogger(__name__)
 
 
+def _note_effort(group_id: str, old: Optional[str], new: Optional[str], source: str) -> None:
+    """The call site can only report the value that arrived; this says when the room's own moved."""
+    if old == new:
+        return
+    logger.info(
+        "Group %s reasoning_effort %s -> %s (%s)",
+        group_id, old or "none", new or "none", source,
+    )
+
+
 @dataclass
 class GroupMetadata:
     """Metadata for a group chat."""
@@ -204,6 +214,7 @@ class GroupManager:
                         )
                         continue
                     group = GroupMetadata.from_dict(data)
+                    _note_effort(group.group_id, None, group.reasoning_effort, "read from disk at startup")
                     self._groups[group.group_id] = group
                     loaded += 1
                 except Exception as e:
@@ -387,6 +398,7 @@ class GroupManager:
         group = self._groups.get(group_id)
         if not group:
             return None
+        _note_effort(group_id, group.reasoning_effort, effort, "set by command")
         group.reasoning_effort = effort
         group.version += 1
         self._save_group(group_id)
@@ -579,7 +591,18 @@ class GroupManager:
         remote = GroupMetadata.from_dict(remote_group)
 
         local = self._groups.get(remote.group_id)
+        _note_effort(
+            remote.group_id,
+            local.reasoning_effort if local else None,
+            remote.reasoning_effort,
+            "a sync carried a different value, which is discarded for the local one",
+        )
         remote.reasoning_effort = local.reasoning_effort if local else None
+        if local is None and remote.reasoning_effort is None:
+            logger.info(
+                "Group %s arrived by sync with no local copy — reasoning_effort starts empty",
+                remote.group_id,
+            )
         self._marker_survives_sync(local, remote)
         if local and local.version > remote.version:
             logger.debug(
