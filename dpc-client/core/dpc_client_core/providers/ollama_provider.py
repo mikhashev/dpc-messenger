@@ -129,6 +129,7 @@ class OllamaProvider(AIProvider):
         self._effort_clamped_logged = False
         self._effort_ignored_logged = False
         self._effort_unknown_logged = False
+        self._effort_over_configured_off_logged = False
         self._temperature_override_logged = False
 
     @asynccontextmanager
@@ -202,10 +203,18 @@ class OllamaProvider(AIProvider):
         was to keep the model out of a hardcoded list.
 
         This is the one place `think` is decided; it used to be three copies
-        at the call sites. The per-call effort selector promised here has now
-        arrived and outranks the configuration, which outranks the
-        capability — a second source deciding the same flag is how the two
-        lists above came to disagree with the daemon.
+        at the call sites — a second source deciding the same flag is how the
+        two lists above came to disagree with the daemon.
+
+        The precedence between the per-call effort and the configuration is
+        asymmetric, by decision (Mike, 2026-08-16): **a room may always spend
+        less than the alias was set up to spend, and may never spend more.**
+        So a per-call `off` beats a configured `think: true`, and a per-call
+        *level* does not beat a configured `think: false`. That flag is
+        written by whoever owns the alias, and it is usually there for the
+        reason below — a model whose thinking eats the answer. Whoever turns
+        a knob in a room cannot see that, and until now could switch such a
+        model back on from another window.
 
         Two things the daemon taught us in the measuring, both load-bearing:
 
@@ -226,15 +235,25 @@ class OllamaProvider(AIProvider):
         able to kill every call an agent makes because of the model it sits on.
         `think=False` is the only value every model accepts — which is also why
         `off` is answered before the capability is consulted at all. It is the
-        foot of the same scale, not a fifth level, and it closes the asymmetry
-        this method shipped with: a per-call effort could switch a configured
-        `think: false` back **on** and had no way to say the opposite, so the
-        nearer scope only ever won in the expensive direction."""
+        foot of the same scale, not a fifth level, and it is the direction the
+        nearer scope is allowed to win in."""
         level = normalize_reasoning_effort(effort)
         if level == REASONING_OFF:
             return False
         if level is not None:
             if self.supports_thinking():
+                configured = self.config.get("think")
+                if configured is not None and not configured:
+                    if not self._effort_over_configured_off_logged:
+                        logger.info(
+                            "OllamaProvider '%s': reasoning_effort='%s' was not "
+                            "applied — this alias sets think: false, and a level "
+                            "chosen elsewhere does not switch thinking back on. "
+                            "Send 'off' to go lower, or change the alias.",
+                            self.alias, level,
+                        )
+                        self._effort_over_configured_off_logged = True
+                    return False
                 if level == "max":
                     if not self._effort_clamped_logged:
                         logger.info(

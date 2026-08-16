@@ -35,6 +35,7 @@ from .firewall import ContextFirewall
 from .hub_client import HubClient
 from .p2p_manager import P2PManager
 from .llm_manager import LLMManager, PROVIDER_MAP
+from .providers.base import REASONING_EFFORTS, REASONING_OFF
 from .local_api import LocalApiServer, sends_own_response, slow_command
 from .file_server import FileServer
 from .context_cache import ContextCache
@@ -5295,15 +5296,25 @@ class CoreService:
 
     async def set_group_reasoning_effort(self, group_id: str, reasoning_effort: Optional[str] = None) -> Dict[str, Any]:
         """Set a local, group-scoped reasoning_effort override for this node's agents
-        (low/medium/high/max, or 'auto'/empty to clear -> fall back to provider config).
-        Local operational knob — applies only to this node's agents, not synced to peers."""
+        (off/low/medium/high/max, or 'auto'/empty to clear -> fall back to provider config).
+        Local operational knob — applies only to this node's agents, not synced to peers.
+
+        `off` is a position of the control and not one of the levels, which is
+        why it is named separately: the header has drawn it since the control
+        was built and this validator knew four words, so the one setting that
+        spends *less* was the only one a room could not choose. The refusal
+        came back as `{"status": "error"}` — reported as OK by the envelope
+        today — so the header showed the choice as taken and nothing was
+        stored. The vocabulary is imported rather than spelled again here,
+        because `providers.base` is what every provider translates from and a
+        second copy is how the two came to disagree in the first place."""
         group = self.group_manager.get_group(group_id)
         if not group:
             return {"status": "error", "message": f"Group {group_id} not found"}
         effort = (reasoning_effort or "").strip().lower() or None
         if effort in ("auto", "default"):
             effort = None
-        if effort is not None and effort not in ("low", "medium", "high", "max"):
+        if effort is not None and effort != REASONING_OFF and effort not in REASONING_EFFORTS:
             return {"status": "error", "message": f"Invalid reasoning_effort: {reasoning_effort}"}
         updated = self.group_manager.set_group_reasoning_effort(group_id, effort)
         if not updated:

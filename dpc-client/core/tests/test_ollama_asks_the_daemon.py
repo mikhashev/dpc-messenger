@@ -188,10 +188,14 @@ def test_xhigh_becomes_high_and_not_max():
     assert _provider()._think_flag("xhigh") == "high"
 
 
-def test_an_effort_beats_the_configuration():
-    """Nearer scope wins — the precedence `_think_flag`'s docstring promised."""
+def test_the_configuration_is_a_ceiling_the_room_can_lower():
+    """This was `test_an_effort_beats_the_configuration`, and the old name was
+    the defect: the nearer scope won in both directions, including the
+    expensive one. Both halves now live in one assertion so the asymmetry
+    cannot be half-read."""
     FakeClient.answer = ["completion", "thinking"]
-    assert _provider(think=False)._think_flag("high") == "high"
+    assert _provider(think=True)._think_flag("off") is False      # lower — allowed
+    assert _provider(think=False)._think_flag("high") is False    # raise — refused
 
 
 def test_a_level_is_dropped_for_a_model_that_cannot_think():
@@ -371,8 +375,38 @@ def test_off_says_nothing_in_the_log(caplog):
     assert not [r for r in caplog.records if "ignored" in r.getMessage()]
 
 
-def test_a_level_still_reaches_an_alias_that_configured_no():
-    """The other half of the same precedence: config is a default, and the
-    header is nearer. Off is what makes that symmetric rather than one-way."""
+def test_a_level_does_not_switch_on_an_alias_that_configured_no():
+    """The precedence is asymmetric on purpose (Mike, 2026-08-16): a room may
+    spend less than the alias was set up to spend and may never spend more.
+    `think: false` is written by whoever owns the alias, and it is usually
+    there because thinking ruins that model's answers — which is not visible
+    from the room that turns the knob."""
     FakeClient.answer = ["completion", "thinking"]
-    assert _provider(think=False)._think_flag("high") == "high"
+    assert _provider(think=False)._think_flag("high") is False
+
+
+def test_the_level_that_was_not_applied_says_so_once(caplog):
+    """A control that quietly does nothing is the failure this whole thread is
+    about. The line has to name the alias, because the operator sees one room
+    and the reason lives in one provider entry."""
+    FakeClient.answer = ["completion", "thinking"]
+    provider = _provider(think=False)
+    with caplog.at_level("INFO"):
+        provider._think_flag("high")
+        provider._think_flag("high")
+    said = [r.getMessage() for r in caplog.records if "not applied" in r.getMessage()]
+    assert len(said) == 1
+    assert "think: false" in said[0]
+
+
+def test_a_level_still_reaches_an_alias_that_configured_yes():
+    """Nothing changes for the alias that asked for thinking: the level is the
+    nearer scope and it decides the depth."""
+    FakeClient.answer = ["completion", "thinking"]
+    assert _provider(think=True)._think_flag("high") == "high"
+
+
+def test_a_level_still_reaches_an_alias_that_configured_nothing():
+    """No `think` key means no opinion, not an opinion of no."""
+    FakeClient.answer = ["completion", "thinking"]
+    assert _provider()._think_flag("high") == "high"
