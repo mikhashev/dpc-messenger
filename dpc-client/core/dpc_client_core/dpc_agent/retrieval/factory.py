@@ -161,6 +161,7 @@ def _derive_embedding_metadata(agent_config: dict) -> tuple[str, int]:
     provider = get_embedding_provider(
         model_name=mem_cfg.embedding_model,
         local_files_only=True,
+        device=mem_cfg.embedding_device,
     )
     return provider.model_name, provider.dimensions
 

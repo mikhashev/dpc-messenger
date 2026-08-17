@@ -222,11 +222,15 @@ class DpcAgentManager:
             else None
         )
 
+        from dpc_client_core.dpc_agent.memory_config import get_memory_config
         agent_config = AgentConfig(
             budget_usd=self.config.get("budget_usd"),
             max_rounds=self.config.get("max_rounds", 200),
             enable_task_queue=self.config.get("enable_task_queue", True),
             billing_model=self.config.get("billing_model", "subscription"),
+            embedding_device=get_memory_config(
+                _per_agent_profile or self.config
+            ).embedding_device,
         )
 
         # Get LLMManager from CoreService
@@ -362,7 +366,9 @@ class DpcAgentManager:
                                 KEY_FORMAT, build_ext_roots, ext_key, l5_key, l6_key,
                             )
                             provider = get_embedding_provider(
-                                model_name=_actual_model, max_tokens=int(mem_cfg.max_tokens)
+                                model_name=_actual_model,
+                                max_tokens=int(mem_cfg.max_tokens),
+                                device=mem_cfg.embedding_device,
                             ) if _provider_ref is None else _provider_ref
                             # The agent built its provider before this config was read, so
                             # state the window here too — otherwise the setting applies only

@@ -28,6 +28,14 @@ class MemoryConfig:
     # not decide how much memory an indexing pass needs. Changing it moves the vectors
     # of every document longer than the limit, so it wants a reindex, not a restart.
     max_tokens: int = 4096
+    # Where the embedding model runs. None keeps the automatic choice — cuda, then
+    # mps, then cpu — which is what every install had before this field existed.
+    # "cpu" is the reason it exists: the card this process shares is the binding
+    # constraint on the model the agents wait for, and embeddings are background
+    # work (indexing, Active Recall) whose latency nobody watches. The model is a
+    # per-process singleton, so the first agent to build it decides for all of
+    # them; a later disagreement is logged rather than silently honoured.
+    embedding_device: Optional[str] = None
 
     @classmethod
     def from_dict(cls, data: dict) -> "MemoryConfig":

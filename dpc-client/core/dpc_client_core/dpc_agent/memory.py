@@ -290,6 +290,18 @@ def get_embedding_provider(model_name: str = "BAAI/bge-m3", **kwargs) -> "Embedd
             provider.max_tokens = int(requested)
             if provider._model is not None:
                 provider._apply_token_limit()
+        wanted_device = kwargs.get("device")
+        if wanted_device is not None and wanted_device != provider.device:
+            # Unlike max_tokens, this one cannot be reconciled after the fact: the
+            # weights are already on a device and moving them is not what a caller
+            # asking for a provider expects to trigger. Saying so is the point —
+            # the setting is per agent and the model is per process, so a second
+            # agent asking for something else must not read as if it were obeyed.
+            log.warning(
+                "Embedding model %s already loaded on %s; request for %s ignored "
+                "(one model per process, first caller decides)",
+                model_name, provider.device, wanted_device,
+            )
         return provider
 
 
