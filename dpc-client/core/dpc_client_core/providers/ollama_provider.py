@@ -57,6 +57,17 @@ _MODEL_INFO: Dict[str, Any] = {}
 # 1.01 s. This is the deadline, not an expectation.
 _CAPABILITY_TIMEOUT_SECONDS = 2.0
 
+# The deadline a call gets when neither the caller nor the alias names one.
+# Raised from 300s on 2026-08-17, and the old number was not a budget: it was
+# headroom for a large model's first VRAM load, doing duty as a deadline for
+# everything. It was paid three times in one day — a sleep synthesis over a
+# hundred archives died on it twice overnight and took both morning briefs
+# with it, and an agent tool round died on it the next afternoon. Nobody waits
+# on these calls the way a person waits on a chat reply, so a generous
+# deadline costs only that a genuinely stuck daemon is noticed later; a short
+# one costs the work.
+DEFAULT_TIMEOUT_SECONDS = 900.0
+
 
 def _reported_capabilities(model: str, host: Optional[str]) -> Optional[frozenset]:
     """Capabilities as Ollama reports them, or None if it could not be asked.
@@ -379,11 +390,10 @@ class OllamaProvider(AIProvider):
 
             options = self._build_options(**kwargs)
 
-            # Timeout: the caller's first, then providers.json "timeout", then 300s.
-            # The default is headroom for a large model's first VRAM load, not a
-            # budget for batch work — a caller that knows its own workload is a
-            # long one has to be able to say so, the way the vision path allows.
-            timeout = kwargs.get("timeout", self.config.get("timeout", 300.0))
+            # Timeout: the caller's first, then the alias config, then the module
+            # default. A caller that knows its own workload is a long one has to be
+            # able to say so, the way the vision path always allowed.
+            timeout = kwargs.get("timeout", self.config.get("timeout", DEFAULT_TIMEOUT_SECONDS))
 
             async with self._client() as client:
                 response = await asyncio.wait_for(
@@ -462,7 +472,7 @@ class OllamaProvider(AIProvider):
             options = self._build_options(**kwargs)
 
             # Vision queries may take longer; respect provider config timeout first
-            timeout = kwargs.get("timeout", self.config.get("timeout", 300.0))
+            timeout = kwargs.get("timeout", self.config.get("timeout", DEFAULT_TIMEOUT_SECONDS))
 
             async with self._client() as client:
                 response = await asyncio.wait_for(
@@ -597,7 +607,7 @@ class OllamaProvider(AIProvider):
         ollama_tools = self._anthropic_to_openai_tools(tools)
 
         options = self._build_options(**kwargs)
-        timeout = kwargs.get("timeout", self.config.get("timeout", 300.0))
+        timeout = kwargs.get("timeout", self.config.get("timeout", DEFAULT_TIMEOUT_SECONDS))
 
         try:
             async with self._client() as client:

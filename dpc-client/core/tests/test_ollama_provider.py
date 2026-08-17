@@ -106,6 +106,41 @@ async def _slow_chat(*_a, **_k):
 
 
 @pytest.mark.asyncio
+async def test_an_alias_naming_no_timeout_gets_the_module_default(monkeypatch):
+    """The number nobody chose is the one most calls run under, so it is asserted
+    rather than left to a literal three call sites apart. Captured at the deadline
+    itself instead of waited out — the point is which value was handed to
+    `wait_for`, not that a quarter of an hour passes."""
+    from dpc_client_core.providers import ollama_provider as op
+
+    seen = {}
+    real_wait_for = asyncio.wait_for
+
+    async def _capture(awaitable, timeout):
+        seen["timeout"] = timeout
+        return await real_wait_for(awaitable, timeout)
+
+    class _Msg(dict):
+        """Item access and attribute access both, because the plain path reads
+        `response['message']['content']` and the tools path uses getattr."""
+
+        def __init__(self, content):
+            super().__init__(content=content)
+            self.content = content
+            self.thinking = None
+            self.tool_calls = []
+
+    monkeypatch.setattr(op.asyncio, "wait_for", _capture)
+    provider = _make()  # no "timeout" key in this config
+    provider.client.chat = AsyncMock(return_value=_Resp(_Msg("ok")))
+
+    await provider.generate_response("x")
+
+    assert seen["timeout"] == op.DEFAULT_TIMEOUT_SECONDS
+    assert op.DEFAULT_TIMEOUT_SECONDS == 900.0
+
+
+@pytest.mark.asyncio
 async def test_a_callers_timeout_is_used_instead_of_the_alias_config():
     """Sleep runs one synthesis over the whole archive under a number chosen as
     headroom for a first VRAM load. Until this, no caller could say otherwise:
