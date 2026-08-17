@@ -116,6 +116,14 @@ Rules:
 SYNTHESIS_BUDGET_FACTOR = 0.85
 SYNTHESIS_OUTPUT_RESERVE_TOKENS = 4000
 
+# One unattended call over the whole archive, sized against the provider default
+# of 300s that is meant as headroom for a model's first VRAM load. A local
+# thinking model reading a hundred archives exceeded that and took the entire
+# morning brief with it, because nothing here retries. Nobody is waiting on this
+# call, so the cost of it being generous is only that a genuinely stuck daemon is
+# noticed later; the cost of it being short is a night with no brief.
+SYNTHESIS_TIMEOUT_SECONDS = 1800.0
+
 
 def _compute_synthesis_budget(context_window: int, template_overhead_tokens: int) -> int:
     """Tokens available for findings_text after reserving output + template overhead.
@@ -807,7 +815,11 @@ async def run_sleep(
             entity_section=entity_section,
         )
 
-        response = await llm_manager.query(synthesis_prompt, provider_alias=provider_alias)
+        response = await llm_manager.query(
+            synthesis_prompt,
+            provider_alias=provider_alias,
+            timeout=SYNTHESIS_TIMEOUT_SECONDS,
+        )
         if not response or not response.strip():
             raise ValueError(
                 "LLM returned empty response (extended thinking may have consumed all output tokens)"

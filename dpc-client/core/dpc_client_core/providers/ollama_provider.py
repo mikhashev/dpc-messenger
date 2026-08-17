@@ -357,9 +357,11 @@ class OllamaProvider(AIProvider):
 
             options = self._build_options(**kwargs)
 
-            # Timeout: configurable via providers.json "timeout" field (default 300s).
-            # Large models (9B+) can take >60s for initial VRAM load on first query.
-            timeout = self.config.get("timeout", 300.0)
+            # Timeout: the caller's first, then providers.json "timeout", then 300s.
+            # The default is headroom for a large model's first VRAM load, not a
+            # budget for batch work — a caller that knows its own workload is a
+            # long one has to be able to say so, the way the vision path allows.
+            timeout = kwargs.get("timeout", self.config.get("timeout", 300.0))
 
             async with self._client() as client:
                 response = await asyncio.wait_for(
@@ -570,7 +572,7 @@ class OllamaProvider(AIProvider):
         ollama_tools = self._anthropic_to_openai_tools(tools)
 
         options = self._build_options(**kwargs)
-        timeout = self.config.get("timeout", 300.0)
+        timeout = kwargs.get("timeout", self.config.get("timeout", 300.0))
 
         try:
             async with self._client() as client:

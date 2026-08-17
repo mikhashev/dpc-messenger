@@ -5,6 +5,7 @@ conversion, (2) the tool_calls_raw .id/.name/.input contract consumed by
 llm_adapter._chat_native_tools, (3) the thinking-surface fallback for
 reasoning models that leave content empty on the final turn. No network."""
 
+import asyncio
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -95,6 +96,47 @@ def test_build_options_stays_plain_dict():
     plain-dict serialization path preserves it."""
     p = _make({"min_p": 0.1})
     assert type(p._build_options()) is dict
+
+
+async def _slow_chat(*_a, **_k):
+    """A daemon that answers, but not quickly enough for a short budget."""
+    await asyncio.sleep(0.05)
+    return _Resp(SimpleNamespace(content="ok", thinking=None, tool_calls=[]),
+                 prompt_eval_count=1, eval_count=1)
+
+
+@pytest.mark.asyncio
+async def test_a_callers_timeout_is_used_instead_of_the_alias_config():
+    """Sleep runs one synthesis over the whole archive under a number chosen as
+    headroom for a first VRAM load. Until this, no caller could say otherwise:
+    the plain path read the config alone, while the vision path already took the
+    caller's. With the config's five seconds in force this call would succeed."""
+    p = _make({"timeout": 5.0})
+    p.client.chat = _slow_chat
+
+    with pytest.raises(RuntimeError, match="0.01"):
+        await p.generate_response("x", timeout=0.01)
+
+
+@pytest.mark.asyncio
+async def test_the_alias_config_still_governs_a_caller_that_says_nothing():
+    p = _make({"timeout": 0.01})
+    p.client.chat = _slow_chat
+
+    with pytest.raises(RuntimeError, match="0.01"):
+        await p.generate_response("x")
+
+
+@pytest.mark.asyncio
+async def test_the_tools_path_takes_the_callers_timeout_too():
+    """Same defect, second site: an agent loop calling tools has the same claim
+    on its own budget as a plain call does."""
+    p = _make({"timeout": 5.0})
+    p.client.chat = _slow_chat
+
+    with pytest.raises(RuntimeError, match="0.01"):
+        await p.generate_with_tools(messages=[{"role": "user", "content": "x"}],
+                                    tools=[], timeout=0.01)
 
 
 @pytest.mark.asyncio
