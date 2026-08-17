@@ -914,6 +914,37 @@ class DpcAgentManager:
         log.warning("No active agent loop for conversation %s", conversation_id)
         return False
 
+    def _resolve_reasoning_effort(self, conversation_id: Optional[str]) -> tuple:
+        """The effort this call should ask for, and which branch decided it.
+
+        The source is returned rather than logged here because it is the whole
+        point: an unresolved effort reaches the provider as None and becomes the
+        alias ceiling, which on a paid alias is the most expensive level there
+        is. A room billed at max for twelve minutes while its own metadata read
+        high, and the transition log built for that window could not fire — it
+        watches the file, and the file never moved. Only this step can say
+        whether the room answered, the agent config answered, something raised,
+        or nobody answered at all; a conversation id that is not a room never
+        consults the first branch, which is why the id is logged beside it.
+        """
+        try:
+            if conversation_id and conversation_id.startswith("group-"):
+                gm = getattr(self.service, "group_manager", None)
+                grp = gm.get_group(conversation_id) if gm else None
+                if grp is not None:
+                    effort = getattr(grp, "reasoning_effort", None)
+                    if effort:
+                        return effort, "group"
+            if self.agent_id:
+                from dpc_client_core.dpc_agent.utils import load_agent_config
+                effort = (load_agent_config(self.agent_id) or {}).get("reasoning_effort")
+                if effort:
+                    return effort, "agent-config"
+        except Exception as e:
+            log.warning("Reasoning effort could not be resolved: %s", e)
+            return None, "exception"
+        return None, "none"
+
     async def process_message(self, *args, **kwargs) -> str:
         """Run a message through the agent, one run at a time for this agent.
 
@@ -1079,18 +1110,12 @@ class DpcAgentManager:
                 if self._daily_tokens_used >= quota_limit:
                     return f"⚠️ Agent quota exceeded ({self._daily_tokens_used:,}/{quota_limit:,} tokens today). Reset at midnight UTC."
 
-            reasoning_effort = None
-            try:
-                if conversation_id and conversation_id.startswith("group-"):
-                    gm = getattr(self.service, "group_manager", None)
-                    grp = gm.get_group(conversation_id) if gm else None
-                    if grp is not None:
-                        reasoning_effort = getattr(grp, "reasoning_effort", None)
-                if not reasoning_effort and self.agent_id:
-                    from dpc_client_core.dpc_agent.utils import load_agent_config
-                    reasoning_effort = (load_agent_config(self.agent_id) or {}).get("reasoning_effort")
-            except Exception:
-                reasoning_effort = None
+            reasoning_effort, effort_source = self._resolve_reasoning_effort(conversation_id)
+            log.info(
+                "Reasoning effort for %s: %s (source=%s, agent_id=%s)",
+                conversation_id, reasoning_effort or "unresolved",
+                effort_source, self.agent_id or "unset",
+            )
 
             try:
                 interrupt_ev = asyncio.Event()
