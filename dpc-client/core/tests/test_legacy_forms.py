@@ -11,6 +11,7 @@ a previous version fails here, rather than on the first restart.
 
 from __future__ import annotations
 
+import json
 import pathlib
 
 import pytest
@@ -22,7 +23,11 @@ from dpc_client_core.dpc_agent.active_recall import (
 )
 from dpc_client_core.dpc_agent.index_keys import KEY_FORMAT
 from dpc_client_core.dpc_agent.indexing_pipeline import rebuild_decision
-from dpc_client_core.dpc_agent.memory import last_touched, read_all_meta
+from dpc_client_core.dpc_agent.memory import (
+    generate_smart_index,
+    last_touched,
+    read_all_meta,
+)
 
 from .legacy_forms import (  # noqa: F401 — legacy_agent_root is a fixture
     LEGACY_KEY_FORMAT,
@@ -140,6 +145,55 @@ def test_a_migrated_entry_still_has_a_date_to_be_judged_by(legacy_agent_root):
 
     assert last_touched(data["alpha.md"]) is not None
     assert last_touched(data["beta.md"]) is None   # this one genuinely has no date
+
+
+# --------------------------------------------------------------------------
+# F3b — a stamp somebody wrote by hand, without a time
+# --------------------------------------------------------------------------
+
+def test_a_stamp_written_as_a_bare_date_is_read_as_utc():
+    """The live form: `"last_written": "2026-08-17"` in agent_001's index.
+
+    Naive is not a shape the readers can hold — every one of them subtracts the
+    value from an aware `now` — so the parser has to decide, and UTC is what the
+    writers of every other stamp in the file meant.
+    """
+    touched = last_touched({"last_accessed": "", "last_written": "2026-08-17"})
+
+    assert touched is not None
+    assert touched.tzinfo is not None
+
+
+def test_a_stamp_written_as_a_bare_date_does_not_stop_the_index_being_built(tmp_path):
+    """The production failure, one call up from where it was diagnosed.
+
+    `generate_smart_index` is called unguarded from the agent constructor, so this
+    raising is not a missing index — it is an agent that cannot be built and a chat
+    that answers nothing.
+    """
+    knowledge = tmp_path / "knowledge"
+    knowledge.mkdir()
+    (knowledge / "memo.md").write_text("# Memo\nbody", encoding="utf-8")
+    (knowledge / "_meta.json").write_text(
+        json.dumps({"memo.md": {"last_accessed": "", "access_count": 0,
+                                "last_written": "2026-08-17", "write_count": 1,
+                                "summary": "a memo"}}),
+        encoding="utf-8",
+    )
+
+    index = generate_smart_index(knowledge)
+
+    assert "Memo" in index
+
+
+def test_stamps_of_both_shapes_in_one_entry_can_still_be_compared(tmp_path):
+    """`last_touched` takes the max of the two, and mixing shapes raises there too —
+    a second site with the same root, reached whenever a document has both dates."""
+    touched = last_touched({"last_accessed": "2026-08-16T10:00:00+00:00",
+                            "last_written": "2026-08-17"})
+
+    assert touched is not None
+    assert touched.tzinfo is not None
 
 
 # --------------------------------------------------------------------------

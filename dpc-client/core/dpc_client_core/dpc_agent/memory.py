@@ -85,11 +85,21 @@ def backfill_meta(knowledge_dir: pathlib.Path) -> Dict[str, dict]:
 
 
 def _parse_stamp(ts: str):
-    from datetime import datetime
+    """Read a stored stamp as an aware time, whatever shape it was written in.
+
+    Everything downstream compares these against an aware `now`, and a stamp
+    without an offset — a bare `2026-08-17`, which a hand-written entry may
+    carry — parses naive and makes that comparison raise. This is the one
+    place every reader of these stamps goes through, so treating an offsetless
+    value as UTC here is what keeps a single malformed line in one agent's
+    `_meta.json` from reaching the agent constructor.
+    """
+    from datetime import datetime, timezone
     try:
-        return datetime.fromisoformat(ts.replace("Z", "+00:00"))
+        parsed = datetime.fromisoformat(ts.replace("Z", "+00:00"))
     except (ValueError, TypeError, AttributeError):
         return None
+    return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=timezone.utc)
 
 
 def last_touched(entry: dict):
