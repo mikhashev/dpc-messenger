@@ -85,7 +85,7 @@ Your team connects directly — no servers, no cloud, peer-to-peer. Humans and A
 | Federation Hub | AGPL v3 |
 | Protocol Specs | CC0 |
 
-See [LICENSE.md](./LICENSE.md) for details.
+The repository declares **GPL v3** — the licence of the desktop client, which is what you install and run, and the one GitHub shows. That badge names one licence because GitHub only holds one per repository; the other three above are equally in force for their components. **[LICENSING.md](./LICENSING.md) is the authoritative statement** of which licence covers what, including the GPL section 7 exception for iOS distribution.
 
 ---
 

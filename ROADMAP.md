@@ -226,4 +226,4 @@ See `git log` for complete version history.
 
 **Last Updated:** 2026-08-09
 **Maintained By:** D-PC Messenger Core Team
-**License:** See [LICENSE.md](./LICENSE.md)
+**License:** See [LICENSING.md](./LICENSING.md)

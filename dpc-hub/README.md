@@ -640,7 +640,7 @@ Hub-specific areas:
 
 ## 📄 License
 
-This component is licensed under **AGPL v3**. See [LICENSE](../LICENSE.md) for details.
+This component is licensed under **AGPL v3** — its full text is [LICENSE-AGPL](../LICENSE-AGPL). The repository's root `LICENSE` declares GPL v3 for the desktop client; see [LICENSING.md](../LICENSING.md) for which licence covers what.
 
 **TL;DR:** You can run, modify, and distribute this software. If you run it as a network service and modify it, you must share your source code with your users.
 

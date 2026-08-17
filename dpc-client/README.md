@@ -4,7 +4,7 @@ Desktop application: Python backend ([`core/`](core/)) + Tauri/SvelteKit
 frontend ([`ui/`](ui/)). This directory is the developer entrypoint —
 end-user setup lives in [`../QUICK_START.md`](../QUICK_START.md).
 
-**License:** GPL v3 — see [`../LICENSE.md`](../LICENSE.md)
+**License:** GPL v3 — see [`../LICENSING.md`](../LICENSING.md)
 
 ---
 

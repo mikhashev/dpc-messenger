@@ -8,7 +8,7 @@ THIS SOFTWARE IS PROVIDED FOR EDUCATIONAL AND RESEARCH PURPOSES ONLY.
 
 By accessing, using, or distributing this software, you acknowledge that you
 have read, understood, and agree to comply with ALL terms and conditions
-outlined in this notice, the LICENSE.md file, and applicable laws.
+outlined in this notice, the LICENSING.md file, and applicable laws.
 
 ================================================================================
 1. NO WARRANTY - COMPLETE DISCLAIMER OF LIABILITY
@@ -231,7 +231,7 @@ The creators provide NO privacy law compliance guarantees.
 
 NOTICE: This repository is PUBLIC and open source.
 
-  ⚠️  Redistribution must comply with applicable licenses (see LICENSE.md)
+  ⚠️  Redistribution must comply with applicable licenses (see LICENSING.md)
   ⚠️  Do NOT redistribute without understanding legal obligations
   ⚠️  Access and licensing terms may change at any time
 
@@ -323,7 +323,7 @@ Document Version: 1.1
 Last Updated: 2026-04-14
 Applicable to: D-PC Messenger v0.21.0 and all versions
 
-READ LICENSE.md AND README.md FOR ADDITIONAL IMPORTANT INFORMATION
+READ LICENSING.md AND README.md FOR ADDITIONAL IMPORTANT INFORMATION
 
 ================================================================================
                     ⚠️  USE AT YOUR OWN RISK  ⚠️

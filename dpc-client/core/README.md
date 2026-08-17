@@ -4,7 +4,7 @@ Python backend service for the D-PC Messenger desktop client — runs on
 the user's machine, manages P2P connections, AI providers, the local
 WebSocket API for the UI, and the embedded autonomous agent.
 
-**License:** GPL v3 — see [`../../LICENSE.md`](../../LICENSE.md)
+**License:** GPL v3 — see [`../../LICENSING.md`](../../LICENSING.md)
 
 ---
 

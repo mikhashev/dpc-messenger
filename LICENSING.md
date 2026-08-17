@@ -159,7 +159,7 @@ before the code exists; today the repository ships only `dpc-client/`.
    - VLC (3B+ downloads) is GPL
    - Success depends on product quality, not permissive licensing
 
-**Full License:** See [LICENSE-GPL](./LICENSE-GPL) or https://www.gnu.org/licenses/gpl-3.0.html
+**Full License:** See [LICENSE](./LICENSE) or https://www.gnu.org/licenses/gpl-3.0.html
 
 ---
 
@@ -413,7 +413,7 @@ Contact: legoogmiha@gmail.com
 ## Full License Texts
 
 - **AGPL v3:** [LICENSE-AGPL](./LICENSE-AGPL)
-- **GPL v3:** [LICENSE-GPL](./LICENSE-GPL)
+- **GPL v3:** [LICENSE](./LICENSE) — also the file GitHub reads as this repository's declared licence
 - **LGPL v3:** [LICENSE-LGPL](./LICENSE-LGPL)
 - **CC0:** [LICENSE-CC0](./LICENSE-CC0)
 

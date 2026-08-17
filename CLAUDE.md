@@ -1467,4 +1467,4 @@ AI: Analyzes code → Detects Tauri 2.x → Suggests @tauri-apps/plugin-screen-c
 - Federation Hub: AGPL v3
 - Protocol Specs: CC0
 
-See `LICENSE.md` for details.
+See `LICENSING.md` for details. The root `LICENSE` file is the GPL v3 text the repository declares to GitHub; `LICENSING.md` is the authoritative per-component statement.
