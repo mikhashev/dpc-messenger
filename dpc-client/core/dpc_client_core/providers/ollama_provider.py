@@ -350,6 +350,28 @@ class OllamaProvider(AIProvider):
             )
         return options or None
 
+    def _log_usage(self, response: Any, path: str) -> None:
+        """One line per call carrying what the daemon reported, not what we guessed.
+
+        `done_reason` separates a model that stopped from one that was cut off,
+        which is the difference a whole empty-answer diagnosis rested on; it is
+        returned on every response and was read on none of the three paths.
+        Ollama reports no reasoning/content split and no cache figures — those
+        are another vendor's fields — so this says what exists and nothing it
+        cannot measure. The thinking length is a character count and is named
+        as one, because the daemon gives no token figure for it.
+        """
+        logger.info(
+            "Ollama usage: alias=%s model=%s prompt=%s completion=%s "
+            "thinking_chars=%d done=%s path=%s",
+            self.alias, self.model,
+            getattr(response, "prompt_eval_count", None),
+            getattr(response, "eval_count", None),
+            len(self._last_thinking or ""),
+            getattr(response, "done_reason", None),
+            path,
+        )
+
     async def generate_response(self, prompt: str, **kwargs) -> str:
         self._last_thinking = None  # clear from previous call
         try:
@@ -385,6 +407,7 @@ class OllamaProvider(AIProvider):
                     "reasoning in its place.", self.alias, len(self._last_thinking),
                 )
                 content = self._last_thinking
+            self._log_usage(response, "plain")
             return content
         except asyncio.TimeoutError:
             raise RuntimeError(f"Ollama provider '{self.alias}' timed out after {timeout}s.")
@@ -470,10 +493,12 @@ class OllamaProvider(AIProvider):
             if not content and self._last_thinking:
                 logger.warning(
                     "OllamaProvider '%s': vision call produced %d characters of "
-                    "reasoning and no answer — reporting empty rather than passing "
-                    "the reasoning off as the answer.",
+                    "reasoning and no answer (done=%s) — reporting empty rather "
+                    "than passing the reasoning off as the answer.",
                     self.alias, len(self._last_thinking),
+                    getattr(response, "done_reason", None),
                 )
+            self._log_usage(response, "vision")
             return content
         except asyncio.TimeoutError:
             raise RuntimeError(f"Ollama vision query '{self.alias}' timed out after {timeout}s.")
@@ -622,6 +647,7 @@ class OllamaProvider(AIProvider):
         if on_chunk and content:
             await on_chunk(content, conversation_id)
 
+        self._log_usage(response, "tools")
         prompt_tokens = getattr(response, 'prompt_eval_count', 0) or 0
         completion_tokens = getattr(response, 'eval_count', 0) or 0
         usage = {
