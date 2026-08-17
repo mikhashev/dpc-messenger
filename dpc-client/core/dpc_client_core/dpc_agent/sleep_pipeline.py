@@ -116,13 +116,23 @@ Rules:
 SYNTHESIS_BUDGET_FACTOR = 0.85
 SYNTHESIS_OUTPUT_RESERVE_TOKENS = 4000
 
+# How long a sleep may hold its own lock before a later trigger calls it stuck
+# and starts over the top of it.
+SLEEP_TIMEOUT_MINUTES = 30
+
 # One unattended call over the whole archive, sized against the provider default
 # of 300s that is meant as headroom for a model's first VRAM load. A local
 # thinking model reading a hundred archives exceeded that and took the entire
 # morning brief with it, because nothing here retries. Nobody is waiting on this
 # call, so the cost of it being generous is only that a genuinely stuck daemon is
 # noticed later; the cost of it being short is a night with no brief.
-SYNTHESIS_TIMEOUT_SECONDS = 1800.0
+#
+# Derived from the lock window rather than chosen beside it. The first version of
+# this constant was 1800.0 — exactly the window — so a synthesis that spent its
+# whole budget would cross the stuck threshold at the same instant, and the next
+# trigger would reset a run that was still working. One step of the pipeline
+# cannot be allowed to consume the whole allowance the pipeline is given.
+SYNTHESIS_TIMEOUT_SECONDS = SLEEP_TIMEOUT_MINUTES * 60 / 2
 
 
 def _compute_synthesis_budget(context_window: int, template_overhead_tokens: int) -> int:
@@ -555,7 +565,6 @@ async def run_sleep(
     force: bool = False, provider_alias: Optional[str] = None,
     progress_callback=None, group_id: Optional[str] = None,
 ) -> Dict[str, Any]:
-    SLEEP_TIMEOUT_MINUTES = 30
     state = _read_sleep_state(conversation_dir)
     if state.get("status") == "sleeping":
         started = state.get("started_at")
