@@ -918,9 +918,11 @@ class DpcAgentManager:
         """The effort this call should ask for, and which branch decided it.
 
         The source is returned rather than logged here because it is the whole
-        point: an unresolved effort reaches the provider as None and becomes the
-        alias ceiling, which on a paid alias is the most expensive level there
-        is. A room billed at max for twelve minutes while its own metadata read
+        point: an unresolved effort reaches the provider as None and becomes
+        whatever the alias config carries — `high` on both DeepSeek aliases
+        since the evening of 2026-08-16, `max` before that, and whatever the
+        next edit makes it. Silence is answered by a value nobody chose for this
+        call. A room billed at max for twelve minutes while its own metadata read
         high, and the transition log built for that window could not fire — it
         watches the file, and the file never moved. Only this step can say
         whether the room answered, the agent config answered, something raised,
