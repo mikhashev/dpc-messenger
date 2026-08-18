@@ -3,6 +3,7 @@
 
 <script lang="ts">
   import { providerBalance, getProviderBalance } from '$lib/coreService';
+  import { buildAgentModelConfigPayload } from '$lib/agentModelConfig';
 
   // DeepSeek account balance pill (Phase 2b cut 2) — always-visible operational indicator.
   let balPill = $derived.by(() => {
@@ -209,21 +210,17 @@
   async function saveModelConfig() {
     modelConfigSaving = true;
     try {
-      await onSaveAgentModelConfig(modelConfigAgentId, {
-        provider_alias: modelConfigProviderAlias,
-        sleep_provider_alias: modelConfigSleepProvider || null,
-        snapshot_summarize_provider: modelConfigSnapshotProvider || null,
-        snapshot_summarize_threshold: Number(modelConfigSnapshotThreshold) > 0
-          ? Number(modelConfigSnapshotThreshold)
-          : null,
-        compaction_enabled: modelConfigCompactionEnabled,
-        compaction_provider: modelConfigCompactionProvider || null,
-        compaction_threshold: Number(modelConfigCompactionThreshold) > 0
-          ? Number(modelConfigCompactionThreshold)
-          : null,
-        retrieval_vector: modelConfigRetrievalVector,
-        retrieval_text: modelConfigRetrievalText,
-      });
+      await onSaveAgentModelConfig(modelConfigAgentId, buildAgentModelConfigPayload({
+        providerAlias: modelConfigProviderAlias,
+        sleepProvider: modelConfigSleepProvider,
+        snapshotProvider: modelConfigSnapshotProvider,
+        snapshotThreshold: modelConfigSnapshotThreshold,
+        compactionEnabled: modelConfigCompactionEnabled,
+        compactionProvider: modelConfigCompactionProvider,
+        compactionThreshold: modelConfigCompactionThreshold,
+        retrievalVector: modelConfigRetrievalVector,
+        retrievalText: modelConfigRetrievalText,
+      }));
       showModelConfigPopup = false;
     } catch (error) {
       console.error('Failed to save agent model config:', error);
