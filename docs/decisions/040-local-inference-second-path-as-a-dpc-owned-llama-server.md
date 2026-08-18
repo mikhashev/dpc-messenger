@@ -619,8 +619,9 @@ lever was argued for.
 `restored context checkpoint (n_past = 110715, size = 584.218 MiB)`. Evictions for space,
 36 in the 26 h before, are **zero** since (`Observed`).
 
-**What it cannot buy: a second conversation.** With `OLLAMA_NUM_PARALLEL=1` the server runs
-`n_slots = 1`, and a turn from a different conversation does not queue behind the first — it
+**What it cannot buy: a second conversation.** The variable is not set in this environment; the daemon
+resolves it to `OLLAMA_NUM_PARALLEL:1` in its startup dump, and the server accordingly runs
+`n_slots = 1` (`srv load_model: initializing, n_slots = 1`), and a turn from a different conversation does not queue behind the first — it
 **erases** the first's checkpoints:
 
 ```
