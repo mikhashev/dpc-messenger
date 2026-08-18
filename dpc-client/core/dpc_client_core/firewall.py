@@ -149,6 +149,34 @@ class ContextFirewall:
                 "should serve peers from in privacy_rules.json under compute.serving_alias."
             )
 
+    def log_compute_sharing_state(self):
+        """Say the compute-sharing posture once, where the log can hear it.
+
+        `_parse_compute_settings` warns when sharing is on with no serving
+        alias, and on first construction that warning goes nowhere: CoreService
+        builds the firewall (`service.py:165`) before `run_service.main`
+        configures logging (`run_service.py:431-434`), so every line written
+        while the rules are first parsed is discarded. Measured 2026-08-18 —
+        after a restart the log held no firewall line at all, and one appeared
+        the moment the rules were reloaded through the API. A warning that
+        cannot appear is not a warning, so the service repeats the state after
+        logging exists.
+        """
+        if not self.compute_enabled:
+            logger.info("Compute sharing: disabled")
+        elif not self.compute_serving_alias:
+            logger.warning(
+                "Compute sharing is enabled but no compute.serving_alias is set — "
+                "peer inference requests will be refused. Name the alias this node "
+                "should serve peers from in privacy_rules.json under compute.serving_alias."
+            )
+        else:
+            logger.info(
+                "Compute sharing: enabled, serving peers from '%s' (%d node(s), %d group(s) allowed)",
+                self.compute_serving_alias,
+                len(self.compute_allowed_nodes), len(self.compute_allowed_groups),
+            )
+
     def _parse_transcription_settings(self):
         """Parse transcription sharing settings from the config."""
         transcription = self.rules.get('transcription', {})

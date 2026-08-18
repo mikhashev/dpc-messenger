@@ -952,6 +952,10 @@ class CoreService:
             status = "available" if available else "unavailable"
             logger.info("  %s: %s", feature, status)
 
+        # The firewall was built before logging existed, so anything it said
+        # about compute sharing at construction was thrown away (ADR-040 D4-0).
+        self.firewall.log_compute_sharing_state()
+
         # Start hub connection monitor (only if initially connected)
         if hub_connected:
             monitor_task = asyncio.create_task(self._monitor_hub_connection())

@@ -899,3 +899,47 @@ class TestComputeServingAlias:
     def test_naming_nothing_still_reaches_the_node_and_group_rules(self, firewall_serving):
         assert firewall_serving.can_request_inference("dpc-node-alice-123") is True
         assert firewall_serving.can_request_inference("dpc-node-stranger") is False
+
+
+class TestComputeSharingIsAnnouncedWhereTheLogCanHearIt:
+    """The startup warning for an unset serving alias could never appear.
+
+    `CoreService.__init__` builds the firewall (`service.py:165`) and
+    `run_service.main` configures logging afterwards (`run_service.py:431-434`),
+    so every line the firewall writes while parsing its rules the first time is
+    discarded before any handler exists. Measured 2026-08-18: after a restart
+    the log held no `Compute sharing settings updated` line at all, and one
+    appeared the moment the rules were reloaded through the API.
+    """
+
+    def _firewall(self, tmp_path, compute):
+        import json
+        f = tmp_path / ".dpc_access.json"
+        f.write_text(json.dumps({"compute": compute}))
+        return ContextFirewall(f)
+
+    def test_an_enabled_node_with_no_alias_says_so_out_loud(self, tmp_path, caplog):
+        import logging
+        fw = self._firewall(tmp_path, {"enabled": True, "allow_nodes": ["dpc-node-a"]})
+        caplog.clear()
+        with caplog.at_level(logging.WARNING):
+            fw.log_compute_sharing_state()
+        assert any("serving_alias" in r.getMessage() for r in caplog.records)
+
+    def test_an_enabled_node_names_what_it_serves(self, tmp_path, caplog):
+        import logging
+        fw = self._firewall(tmp_path, {"enabled": True, "serving_alias": "ollama_local"})
+        caplog.clear()
+        with caplog.at_level(logging.INFO):
+            fw.log_compute_sharing_state()
+        assert any("ollama_local" in r.getMessage() for r in caplog.records)
+        assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
+
+    def test_a_node_that_shares_nothing_is_not_warned_at(self, tmp_path, caplog):
+        import logging
+        fw = self._firewall(tmp_path, {"enabled": False})
+        caplog.clear()
+        with caplog.at_level(logging.INFO):
+            fw.log_compute_sharing_state()
+        assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
+        assert any("disabled" in r.getMessage() for r in caplog.records)
