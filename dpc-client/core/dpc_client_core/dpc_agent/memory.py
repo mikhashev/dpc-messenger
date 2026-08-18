@@ -427,6 +427,49 @@ class EmbeddingProvider:
             pass
         return "cpu"
 
+    def _cpu_supports_bfloat16(self) -> bool:
+        """Whether this CPU computes bfloat16 natively rather than emulating it.
+
+        Both probes are private APIs and either may vanish; a missing probe means
+        "assume not" rather than a failed load, because the wrong answer here costs
+        speed and the wrong exception costs the index.
+        """
+        try:
+            import torch
+        except ImportError:
+            return False
+        for probe in (
+            lambda: torch.cpu._is_avx512_bf16_supported(),
+            lambda: torch.ops.mkldnn._is_mkldnn_bf16_supported(),
+        ):
+            try:
+                if probe():
+                    return True
+            except Exception:
+                continue
+        return False
+
+    def _torch_dtype(self):
+        """The dtype to load in, per device, measured rather than assumed.
+
+        On this box, bge-m3 on CPU: fp32 100 ms/chunk, **fp16 626** — six times
+        slower, because x86 has no native fp16 compute and emulates it — and
+        **bfloat16 37**, which the CPU does execute natively. So half precision is a
+        penalty on CPU unless it is the half the hardware understands. Cosine between
+        fp32 and bf16 vectors measured at 0.998-1.000 with retrieval order unchanged.
+
+        cuda keeps fp16, which is what it has always used and what its kernels want.
+        """
+        try:
+            import torch
+        except ImportError:
+            return None
+        if self.device == "cuda":
+            return torch.float16
+        if self.device == "cpu" and self._cpu_supports_bfloat16():
+            return torch.bfloat16
+        return None
+
     def _load_model(self):
         if self._model is not None:
             return
@@ -436,8 +479,9 @@ class EmbeddingProvider:
             from sentence_transformers import SentenceTransformer
             import torch
             kwargs = {"device": self.device}
-            if self.device == "cuda":
-                kwargs["model_kwargs"] = {"torch_dtype": torch.float16}
+            dtype = self._torch_dtype()
+            if dtype is not None:
+                kwargs["model_kwargs"] = {"dtype": dtype}
             if self._local_files_only:
                 kwargs["local_files_only"] = True
                 try:
@@ -449,7 +493,7 @@ class EmbeddingProvider:
             else:
                 self._model = SentenceTransformer(self.model_name, **kwargs)
             self._apply_token_limit()
-            precision = "FP16" if self.device == "cuda" else "FP32"
+            precision = str(dtype).replace("torch.", "").upper() if dtype is not None else "FP32"
             log.info("Loaded embedding model %s on %s (%s, max %d tokens)",
                      self.model_name, self.device, precision, self.max_tokens)
 

@@ -73,3 +73,32 @@ def test_a_stated_model_name_builds_its_own_provider():
     assert a is not b
     assert a.model_name == "test/model-a"
     assert b.model_name == "test/model-b"
+
+
+def test_cuda_keeps_fp16_and_a_bf16_cpu_gets_bfloat16(monkeypatch):
+    import torch
+    p = memory.EmbeddingProvider(model_name="test/dtype", device="cuda")
+    assert p._torch_dtype() is torch.float16
+
+    p = memory.EmbeddingProvider(model_name="test/dtype", device="cpu")
+    monkeypatch.setattr(p, "_cpu_supports_bfloat16", lambda: True)
+    assert p._torch_dtype() is torch.bfloat16
+
+
+def test_a_cpu_without_native_bfloat16_stays_in_fp32_rather_than_fp16(monkeypatch):
+    # fp16 on a CPU that emulates it measured 6.3x slower than fp32 on this box,
+    # so "no native bf16" must fall back up to fp32, never sideways to fp16.
+    p = memory.EmbeddingProvider(model_name="test/dtype", device="cpu")
+    monkeypatch.setattr(p, "_cpu_supports_bfloat16", lambda: False)
+    assert p._torch_dtype() is None
+
+
+def test_a_probe_that_raises_is_read_as_unsupported(monkeypatch):
+    import torch
+    p = memory.EmbeddingProvider(model_name="test/dtype", device="cpu")
+    monkeypatch.setattr(torch.cpu, "_is_avx512_bf16_supported",
+                        lambda: (_ for _ in ()).throw(RuntimeError("gone")), raising=False)
+    monkeypatch.setattr(torch.ops.mkldnn, "_is_mkldnn_bf16_supported",
+                        lambda: (_ for _ in ()).throw(RuntimeError("gone")), raising=False)
+    assert p._cpu_supports_bfloat16() is False
+    assert p._torch_dtype() is None
