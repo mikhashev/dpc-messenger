@@ -607,6 +607,39 @@ Also confirmed in the same window, closing the 0e cell of the bundle falsifier:
 `srv load_model: prompt cache is enabled, size limit: 24576 MiB` — the environment variable reaches
 the child and the value format (a plain integer in MiB) is right.
 
+## What 0e bought, and what it cannot buy (`2026-08-18 20:10`)
+
+The prompt cache went in and was measured the same evening, on one agent moved to
+`qwen3.8:latest`. Both halves are worth recording, because only one of them is the half the
+lever was argued for.
+
+**What it bought, on consecutive turns of one conversation.** Seven turns in a row, same
+~110K prompt: `prompt_tps` 906.8 (cold) → 18 098 → 131 153 → 131 551 → 181 116 → 72 963 →
+209 949. A prefill of **118.6 s became 0.5–1.5 s**, and the engine names the mechanism —
+`restored context checkpoint (n_past = 110715, size = 584.218 MiB)`. Evictions for space,
+36 in the 26 h before, are **zero** since (`Observed`).
+
+**What it cannot buy: a second conversation.** With `OLLAMA_NUM_PARALLEL=1` the server runs
+`n_slots = 1`, and a turn from a different conversation does not queue behind the first — it
+**erases** the first's checkpoints:
+
+```
+slot operator(): task 7777 | new prompt, task.n_tokens = 102306
+  checking checkpoint with [111651, 111651] against 1...
+  forcing full prompt re-processing due to lack of cache data
+  erased invalidated context checkpoint (… n_swa = 0 … size = 587.896 MiB)   ×3
+  cached n_tokens = 0, memory_seq_rm [0, end)
+```
+
+1.7 GiB of usable state discarded on a **prefix mismatch, not for room** — so no cache size
+would have saved it, and when the first conversation returned it ran cold at 895 tok/s
+(`Observed`). Two facts follow. The engine's own hint blames SWA or hybrid memory while
+printing `n_swa = 0` on the same lines, which is this document's Context §1 again: the hint
+does not apply to this model. And **the binding constraint for a fleet is slots, not cache
+RAM** — which is exactly what Step-3 measures (`-np 2 --kv-unified` at 262 144), and on this
+card two slots do not fit beside a 28.3 GiB resident model at q8_0 without the KV cell
+passing first. Filed as `TWO-CONVERSATIONS-ON-ONE-SLOT-DESTROY-EACH-OTHERS-CACHE`.
+
 ## Open Questions
 
 - **Q1 — DeepSeek top-up: yes / no / how much. `Round 2, 2026-08-18`: the threshold has fired and the
