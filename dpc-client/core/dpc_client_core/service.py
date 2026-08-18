@@ -6478,10 +6478,14 @@ class CoreService:
                     # Filter providers based on firewall allowed_models setting
                     allowed_models = self.firewall.get_available_models_for_peer(peer_id, all_models)
 
-                    # Only include providers with allowed models
+                    # Only include providers with allowed models, and only the one
+                    # alias this node designates for peers (ADR-040 D4-0) — the
+                    # same rule the GET_PROVIDERS path applies, so a peer is told
+                    # the same thing whether it asked or was notified.
                     filtered_providers = [
                         p for p in all_providers
                         if p["model"] in allowed_models
+                        and p["alias"] == self.firewall.compute_serving_alias
                     ]
 
                     logger.debug("Filtered to %d providers (from %d total)", len(filtered_providers), len(all_providers))
@@ -6624,8 +6628,15 @@ class CoreService:
             logger.error("request_skill_from_peer error: %s", e, exc_info=True)
             return {"status": "error", "message": str(e)}
 
-    async def _request_inference_from_peer(self, peer_id: str, prompt: str, model: str = None, provider: str = None, images: list = None, timeout: float = 240.0) -> str:
-        """Delegated to P2PCoordinator."""
+    async def _request_inference_from_peer(self, peer_id: str, prompt: str, model: str = None, provider: str = None, images: list = None, timeout: float = None) -> str:
+        """Delegated to P2PCoordinator.
+
+        The UI door used to carry a hardcoded 240 s that no configuration could
+        reach, while the host it calls budgets 900 s for the same work (ADR-040
+        D4-0). The caller still wins when it names a timeout.
+        """
+        if timeout is None:
+            timeout = self.settings.get_remote_inference_timeout()
         return await self.p2p_coordinator.request_inference_from_peer(peer_id, prompt, model, provider, images, timeout)
 
     async def _request_transcription_from_peer(

@@ -22,6 +22,7 @@
       allow_nodes: string[];
       allow_groups: string[];
       allowed_models: string[];
+      serving_alias?: string | null;
     };
     transcription?: {
       _comment?: string;
@@ -1338,6 +1339,40 @@
                         {:else}
                           <span class="empty-small">No groups allowed</span>
                         {/each}
+                      </div>
+                    {/if}
+                  </div>
+
+                  <div class="subsection">
+                    <h4>Serving Alias</h4>
+                    <p class="help-text-small">
+                      The one provider alias peers are served from. Peers cannot choose:
+                      a request naming any other provider is refused. Leave empty to share
+                      no compute at all &mdash; unlike Allowed Models, empty here means
+                      <em>nothing</em>, not everything.
+                    </p>
+                    {#if editMode && editedRules}
+                      <input
+                        id="compute-serving-alias"
+                        name="compute-serving-alias"
+                        class="inline-input"
+                        type="text"
+                        placeholder="e.g. ollama_local (empty = share nothing)"
+                        value={editedRules.compute?.serving_alias ?? ''}
+                        on:blur={(e) => {
+                          if (editedRules?.compute) {
+                            const v = (e.currentTarget as HTMLInputElement).value.trim();
+                            editedRules.compute.serving_alias = v.length > 0 ? v : null;
+                          }
+                        }}
+                      />
+                    {:else}
+                      <div class="tags">
+                        {#if displayRules.compute.serving_alias}
+                          <span class="tag">{displayRules.compute.serving_alias}</span>
+                        {:else}
+                          <span class="empty-small">No alias designated &mdash; peer inference is refused</span>
+                        {/if}
                       </div>
                     {/if}
                   </div>

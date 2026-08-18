@@ -371,17 +371,54 @@ class OllamaProvider(AIProvider):
         are another vendor's fields — so this says what exists and nothing it
         cannot measure. The thinking length is a character count and is named
         as one, because the daemon gives no token figure for it.
+
+        The three durations are ADR-040 D4-T. Every lever in that decision is
+        argued from tokens/s at depth, and the SDK has carried `load_duration`,
+        `prompt_eval_duration` and `eval_duration` on every response while DPC
+        read none of them — so «did the lever help» had no answer but a feeling.
+        This is the whole of D4-T on the Ollama side; queue wait, swap counts and
+        VRAM headroom are not in this response and need their own reader.
         """
         logger.info(
             "Ollama usage: alias=%s model=%s prompt=%s completion=%s "
-            "thinking_chars=%d done=%s path=%s",
+            "thinking_chars=%d done=%s prompt_tps=%s eval_tps=%s load_ms=%s path=%s",
             self.alias, self.model,
             getattr(response, "prompt_eval_count", None),
             getattr(response, "eval_count", None),
             len(self._last_thinking or ""),
             getattr(response, "done_reason", None),
+            self._tokens_per_second(getattr(response, "prompt_eval_count", None),
+                                    getattr(response, "prompt_eval_duration", None)),
+            self._tokens_per_second(getattr(response, "eval_count", None),
+                                    getattr(response, "eval_duration", None)),
+            self._milliseconds(getattr(response, "load_duration", None)),
             path,
         )
+
+    @staticmethod
+    def _tokens_per_second(tokens: Any, duration_ns: Any) -> str:
+        """A rate, or the word for not knowing.
+
+        A zero duration is not a fast call, it is a daemon that reported
+        nothing; dividing by it would turn a missing measurement into an
+        infinity that looks like a record.
+        """
+        try:
+            if not tokens or not duration_ns:
+                return "n/a"
+            return "{:.1f}".format(tokens / (duration_ns / 1_000_000_000))
+        except (TypeError, ZeroDivisionError):
+            return "n/a"
+
+    @staticmethod
+    def _milliseconds(duration_ns: Any) -> str:
+        """Load time, where zero is a real answer: the model was already resident."""
+        try:
+            if duration_ns is None:
+                return "n/a"
+            return str(int(duration_ns / 1_000_000))
+        except TypeError:
+            return "n/a"
 
     async def generate_response(self, prompt: str, **kwargs) -> str:
         self._last_thinking = None  # clear from previous call

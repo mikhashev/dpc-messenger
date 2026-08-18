@@ -48,7 +48,8 @@ class DpcAgentProvider(AIProvider):
         self.peer_id = config.get("peer_id")  # Remote peer node ID
         self.remote_model = config.get("remote_model")  # Model preference on remote peer
         self.remote_provider = config.get("remote_provider")  # Provider preference on remote peer
-        self.timeout = config.get("timeout", 180)  # Timeout for remote inference (default 3 minutes)
+        # 1200 s — the host budgets 900 s for the same call (ADR-040 D4-0)
+        self.timeout = config.get("timeout", 1200.0)
 
 
         # Set model name for token counting (uses underlying provider's model)

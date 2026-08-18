@@ -125,3 +125,59 @@ async def test_the_thinking_length_is_named_as_characters_not_tokens(caplog):
         await provider.generate_with_vision("describe", [{"base64": "aGk="}])
 
     assert "thinking_chars=500" in caplog.text
+
+
+# ─────────────────────────────────────────────────────────────
+# D4-T of ADR-040: the levers cannot be told apart without a rate
+# ─────────────────────────────────────────────────────────────
+
+def _timed(**durations):
+    async def _chat(*_a, **_k):
+        return _Resp(_Msg("ok", None), prompt_eval_count=6000, eval_count=300,
+                     done_reason="stop", **durations)
+    return _chat
+
+
+@pytest.mark.asyncio
+async def test_the_line_carries_the_rate_the_levers_are_judged_by(caplog):
+    """Every lever in ADR-040 is justified by tokens/s at depth, and the SDK has
+    carried the three durations all along while DPC read none of them. Without
+    the rate, «did 0e help» is answered by feel."""
+    provider = _make()
+    # 6000 prompt tokens in 4 s = 1500 tok/s; 300 eval tokens in 6 s = 50 tok/s
+    provider.client.chat = _timed(prompt_eval_duration=4_000_000_000,
+                                  eval_duration=6_000_000_000,
+                                  load_duration=1_500_000_000)
+
+    with caplog.at_level(logging.INFO):
+        await provider.generate_response("hi")
+
+    assert "prompt_tps=1500.0" in caplog.text
+    assert "eval_tps=50.0" in caplog.text
+    assert "load_ms=1500" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_a_response_without_durations_still_logs(caplog):
+    """Older daemons and every non-Ollama double omit them; a missing rate must
+    read as unknown, not crash the call that produced a good answer."""
+    provider = _make()
+    provider.client.chat = _timed()
+
+    with caplog.at_level(logging.INFO):
+        await provider.generate_response("hi")
+
+    assert "prompt_tps=n/a" in caplog.text
+    assert "eval_tps=n/a" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_a_zero_duration_is_not_divided_by(caplog):
+    provider = _make()
+    provider.client.chat = _timed(prompt_eval_duration=0, eval_duration=0, load_duration=0)
+
+    with caplog.at_level(logging.INFO):
+        await provider.generate_response("hi")
+
+    assert "prompt_tps=n/a" in caplog.text
+    assert "load_ms=0" in caplog.text

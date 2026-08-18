@@ -132,9 +132,22 @@ class ContextFirewall:
         self.compute_allowed_nodes: List[str] = compute.get('allow_nodes', [])
         self.compute_allowed_groups: List[str] = compute.get('allow_groups', [])
         self.compute_allowed_models: List[str] = compute.get('allowed_models', [])
-        logger.debug("Compute sharing settings updated: enabled=%s, allowed_nodes=%d, allowed_groups=%d, allowed_models=%d",
+        # The one alias this node serves peers from. The peer used to name the
+        # provider itself, which meant a peer could point us at a paid alias;
+        # the host designates it instead. Unset means we serve nobody — the
+        # opposite of `allowed_models`, where empty means all, so it is said out
+        # loud here rather than left to be discovered from behaviour.
+        self.compute_serving_alias: Optional[str] = compute.get('serving_alias') or None
+        logger.debug("Compute sharing settings updated: enabled=%s, allowed_nodes=%d, allowed_groups=%d, allowed_models=%d, serving_alias=%s",
                      self.compute_enabled, len(self.compute_allowed_nodes),
-                     len(self.compute_allowed_groups), len(self.compute_allowed_models))
+                     len(self.compute_allowed_groups), len(self.compute_allowed_models),
+                     self.compute_serving_alias)
+        if self.compute_enabled and not self.compute_serving_alias:
+            logger.warning(
+                "Compute sharing is enabled but no compute.serving_alias is set — "
+                "peer inference requests will be refused. Name the alias this node "
+                "should serve peers from in privacy_rules.json under compute.serving_alias."
+            )
 
     def _parse_transcription_settings(self):
         """Parse transcription sharing settings from the config."""
@@ -953,7 +966,9 @@ class ContextFirewall:
                     "enabled": False,
                     "allow_groups": [],
                     "allow_nodes": [],
-                    "allowed_models": ["llama3.1:8b", "llama3:70b"]
+                    "allowed_models": ["llama3.1:8b", "llama3:70b"],
+                    "_serving_alias": "The one provider alias peers are served from; a peer naming any other is refused. Empty = share nothing (the opposite of allowed_models, where empty = all).",
+                    "serving_alias": None
                 },
                 "transcription": {
                     "_comment": "Transcription sharing settings - Allow peers to use your Whisper model for voice transcription",
@@ -1414,19 +1429,36 @@ class ContextFirewall:
         # Start filtering from root level
         return filter_nested_dict(device_context, "")
 
-    def can_request_inference(self, requester_node_id: str, model: str = None) -> bool:
+    def can_request_inference(self, requester_node_id: str, model: str = None,
+                              provider: str = None) -> bool:
         """
         Checks if a peer can request remote inference on this node.
 
         Args:
             requester_node_id: The node_id of the requesting peer
             model: Optional model name to check if allowed
+            provider: Optional provider alias the peer named. Only the alias
+                this node designates in `compute.serving_alias` is accepted;
+                anything else is refused, including when no model is given.
 
         Returns:
             True if the peer can request inference (and use the specified model if provided)
         """
         # Check if compute sharing is enabled
         if not self.compute_enabled:
+            return False
+
+        # A peer may ask, but it does not choose what we run. Before D4-0 the
+        # alias travelled straight from the wire to the router while this check
+        # was handed only the model, so `provider: "deepseek_pro"` with no model
+        # passed a check that had nothing to look at. Note this refuses the
+        # named alias even when serving_alias is unset — nothing designated,
+        # nothing served.
+        if provider is not None and provider != self.compute_serving_alias:
+            logger.warning(
+                "Compute denied for %s: named provider '%s' is not this node's serving alias (%s)",
+                requester_node_id, provider, self.compute_serving_alias or "unset",
+            )
             return False
 
         # Check if requester is in allowed nodes list
@@ -1699,6 +1731,10 @@ class ContextFirewall:
 
                     if 'allowed_models' in compute and not isinstance(compute['allowed_models'], list):
                         errors.append("'compute.allowed_models' must be a list")
+
+                    if 'serving_alias' in compute and compute['serving_alias'] is not None \
+                            and not isinstance(compute['serving_alias'], str):
+                        errors.append("'compute.serving_alias' must be a provider alias (a string) or null")
 
             # Validate transcription section
             if 'transcription' in config_dict:

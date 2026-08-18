@@ -466,11 +466,13 @@ GGUF, so configuration names a **GGUF path per node**.
 Compliance, not progress — each item is a measurement with a stated failing result:
 
 - [ ] **D4-0 (`Round 2 answers, 2026-08-18`; the draft had no cell for it, Johnny round 2)** — three
-      measurements, each with its failing result. **(1)** A peer request carrying `provider` and no
-      `model` is **refused**, and a request carrying a `provider` that is not `compute.serving_alias`
-      is refused too — a test that does not exist today (`test_p2p_coordinator.py` covers only
-      deny/allow by model) and that must be red before the change (fail: it passes on the unchanged
-      code → the test is asserting the old behaviour, not the new rule). **(2)** An allowed peer
+      measurements, each with its failing result. **(1)** A peer request naming a provider that is not
+      `compute.serving_alias` is **refused — including when it carries no `model`**, which is Johnny's
+      exact case (`provider: "deepseek_pro"`, no model, today passes a check that examined nothing); and
+      when `serving_alias` is unset, every peer request is refused rather than served by the router's
+      pick. A test for this does not exist today (`test_p2p_coordinator.py` covers only deny/allow by
+      model) and it must be red before the change (fail: it passes on the unchanged code → the test is
+      asserting the old behaviour, not the new rule). **(2)** An allowed peer
       request writes one accounting line naming the peer, the serving alias and the token counts (fail:
       the shared path is still billed to nobody, which is the defect this item exists for). **(3)** A
       response arriving after its `request_id` has been discarded produces a log line rather than

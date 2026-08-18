@@ -45,7 +45,9 @@ This is one of the **dual killer features** of D-PC Messenger, enabling users to
     "request_id": "uuid-here",
     "prompt": "What are some creative quest ideas for...",
     "model": "llama3-70b",  // optional
-    "provider": "ollama_text"  // optional
+    "provider": "ollama_text"  // optional, and advisory only since 2026-08-18:
+                               // the host serves from its own compute.serving_alias
+                               // and refuses any other name (ADR-040 D4-0)
   }
 }
 ```
@@ -70,13 +72,16 @@ This is one of the **dual killer features** of D-PC Messenger, enabling users to
     "enabled": true,
     "allow_groups": ["friends"],
     "allow_nodes": ["dpc-node-alice-123"],
-    "allowed_models": ["llama3.1:8b", "llama3-70b"]
+    "allowed_models": ["llama3.1:8b", "llama3-70b"],
+    "serving_alias": "ollama_local"
   }
 }
 ```
 
 **Permission Checks:**
-- `can_request_inference(node_id, model)` - Check if peer can request inference
+- `can_request_inference(node_id, model, provider)` - Check if peer can request inference.
+  An empty `allowed_models` means *all* models, as the UI says; `serving_alias` is the opposite —
+  unset means nothing is served, and a `provider` naming anything but that alias is refused.
 - `get_available_models_for_peer(node_id)` - List models peer can use
 
 ### Service Layer
@@ -90,7 +95,7 @@ This is one of the **dual killer features** of D-PC Messenger, enabling users to
 **Request-Response Pattern:**
 - Uses `asyncio.Future` for async request matching
 - Tracks pending requests in `_pending_inference_requests` dict
-- 60-second timeout for inference operations
+- Timeout for inference operations: 1200 s at every door (below)
 
 ### UI Layer
 
@@ -116,7 +121,9 @@ Edit `~/.dpc/privacy_rules.json` to enable compute sharing:
     "enabled": true,
     "allow_groups": ["friends", "colleagues"],
     "allow_nodes": ["dpc-node-alice-abc123"],
-    "allowed_models": ["llama3.1:8b", "llama3-70b"]
+    "allowed_models": ["llama3.1:8b", "llama3-70b"],
+    "_serving_alias": "Which provider alias peers are served from. Unset = share nothing.",
+    "serving_alias": "ollama_local"
   },
   "node_groups": {
     "friends": ["dpc-node-alice-abc123", "dpc-node-bob-def456"],
@@ -139,7 +146,12 @@ Edit `~/.dpc/privacy_rules.json` to enable compute sharing:
 - Compute host only sees the final assembled prompt (not raw context data)
 
 **Resource Management:**
-- Inference timeout: 60 seconds (configurable)
+- Inference timeout: **1200 seconds** at all three doors, configurable via
+  `[connection] remote_inference_timeout` (UI door), and the `timeout` key of the
+  `remote_peer` / `dpc_agent` provider aliases. There was never a single 60 s value:
+  the doors were 240 s (UI), 180 s (`dpc_agent`) and 60 s (`remote_peer`), all below the
+  host's own 900 s budget — so work that outlived the requester was abandoned while the
+  host kept generating and paying for it (ADR-040 D4-0)
 - Failed requests return clear error messages
 - No automatic retries (user must retry manually)
 
@@ -199,7 +211,7 @@ result = await core_service.send_ai_query(
    - Solution: Establish P2P connection first
 
 3. **Timeout**
-   - Error: "Inference request timed out after 60s"
+   - Error: "Inference request to <peer> timed out after 1200.0s"
    - Solution: Check if peer's AI model is running and responsive
 
 4. **Model Not Available**
@@ -260,7 +272,9 @@ Remote inference uses a **request-response pattern** over DPTP and does not supp
 2. Remote peer would need to send intermediate chunks during generation
 3. Handler would need to accumulate and forward chunks in real-time
 
-**Workaround:** Configure a longer timeout (up to 600 seconds) in the `dpc_agent` provider settings when using remote peer inference. This gives long-running queries enough time to complete.
+**Workaround:** the default is now 1200 s on every door, which is the host's own budget plus
+overhead; a shorter one can still be set per alias via `timeout`. (The former advice — «up to
+600 seconds» — described a ceiling that no longer exists.)
 
 ---
 
@@ -302,7 +316,7 @@ uv run python run_service.py
 ```bash
 # Host: Stop LLM service (e.g., stop Ollama)
 # Requestor: Try to request inference
-# Expected: Error "Inference request timed out after 60s"
+# Expected: Error "Inference request to <peer> timed out after 1200.0s"
 ```
 
 ### Automated Testing

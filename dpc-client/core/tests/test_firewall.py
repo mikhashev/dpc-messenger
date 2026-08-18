@@ -834,3 +834,68 @@ class TestAgentContextDefaultDeny:
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+
+class TestComputeServingAlias:
+    """The alias the host serves peers from — D4-0 of ADR-040.
+
+    Until 2026-08-18 the peer named the provider and the gate was handed only
+    the model, so a peer sending `provider: "deepseek_pro"` and no model passed
+    a check that had nothing to examine and the host paid for the tokens. The
+    rule is not «any alias except the default» — this box has two DeepSeek
+    aliases and only one of them is the default. The host designates one alias
+    and every other name is refused.
+    """
+
+    @pytest.fixture
+    def firewall_serving(self, tmp_path):
+        import json
+        rules_file = tmp_path / ".dpc_access.json"
+        rules_file.write_text(json.dumps({
+            "compute": {
+                "enabled": True,
+                "allow_nodes": ["dpc-node-alice-123"],
+                "serving_alias": "ollama_local",
+            }
+        }))
+        return ContextFirewall(rules_file)
+
+    @pytest.fixture
+    def firewall_without_serving(self, tmp_path):
+        import json
+        rules_file = tmp_path / ".dpc_access.json"
+        rules_file.write_text(json.dumps({
+            "compute": {
+                "enabled": True,
+                "allow_nodes": ["dpc-node-alice-123"],
+            }
+        }))
+        return ContextFirewall(rules_file)
+
+    def test_the_serving_alias_is_read_from_the_compute_block(self, firewall_serving):
+        assert firewall_serving.compute_serving_alias == "ollama_local"
+
+    def test_a_node_without_the_setting_designates_nothing(self, firewall_without_serving):
+        assert firewall_without_serving.compute_serving_alias is None
+
+    def test_the_designated_alias_is_accepted(self, firewall_serving):
+        assert firewall_serving.can_request_inference(
+            "dpc-node-alice-123", provider="ollama_local") is True
+
+    def test_a_paid_alias_that_is_not_the_default_is_still_refused(self, firewall_serving):
+        # The exact case: default_provider on this box is deepseek_flash, so a
+        # rule of «never the default» would have let deepseek_pro through.
+        assert firewall_serving.can_request_inference(
+            "dpc-node-alice-123", provider="deepseek_pro") is False
+        assert firewall_serving.can_request_inference(
+            "dpc-node-alice-123", provider="deepseek_flash") is False
+
+    def test_a_named_provider_is_refused_even_with_no_model(self, firewall_without_serving):
+        # Johnny's case verbatim: provider named, model omitted. Before D4-0 the
+        # gate saw model=None, examined nothing and returned True.
+        assert firewall_without_serving.can_request_inference(
+            "dpc-node-alice-123", provider="deepseek_pro") is False
+
+    def test_naming_nothing_still_reaches_the_node_and_group_rules(self, firewall_serving):
+        assert firewall_serving.can_request_inference("dpc-node-alice-123") is True
+        assert firewall_serving.can_request_inference("dpc-node-stranger") is False

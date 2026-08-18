@@ -143,7 +143,10 @@ class Settings:
             'webrtc_timeout': '30',
             'hole_punch_timeout': '15',
             'relay_timeout': '20',
-            'gossip_timeout': '5'  # How long to wait before falling back to gossip
+            'gossip_timeout': '5',  # How long to wait before falling back to gossip
+            # Remote inference: the host budgets 900s for the work, so a
+            # requester that gives up sooner pays for tokens it never sees
+            'remote_inference_timeout': '1200'
         }
 
         self._config['hole_punch'] = {
@@ -671,6 +674,14 @@ class Settings:
                    'hole_punch': '15', 'relay': '20', 'gossip': '5'}
         key = f'{strategy}_timeout'
         return float(self.get('connection', key, written.get(strategy, '30')))
+
+    def get_remote_inference_timeout(self) -> float:
+        """How long to wait for a peer to answer an inference request.
+
+        Named separately from the connection strategies because it bounds work,
+        not a handshake: the host's own ceiling is 900 s (ADR-040 D4-0).
+        """
+        return float(self.get('connection', 'remote_inference_timeout', '1200'))
 
     def get_hole_punch_port(self) -> int:
         """Get UDP port for hole punching."""

@@ -89,5 +89,22 @@ class RemoteInferenceResponseHandler(MessageHandler):
                     future.set_result(result_data)
                 else:
                     future.set_exception(RuntimeError(error or "Remote inference failed"))
+            else:
+                self.logger.warning(
+                    "Remote inference answer for %s arrived after its future was settled "
+                    "(peer %s, status %s) — discarded",
+                    request_id, sender_node_id, status,
+                )
+        else:
+            # The requester has already given up and the host has already paid.
+            # This used to return in silence, so the cost of every abandoned
+            # remote call was invisible on both sides of the wire.
+            self.logger.warning(
+                "Remote inference answer discarded: request %s is no longer pending "
+                "(peer %s, status %s, %d chars, %s tokens) — the requester timed out "
+                "before the host finished",
+                request_id, sender_node_id, status,
+                len(response or ""), tokens_used,
+            )
 
         return None
