@@ -653,9 +653,20 @@ passing first. Filed as `TWO-CONVERSATIONS-ON-ONE-SLOT-DESTROY-EACH-OTHERS-CACHE
 Three observations from the day the bundle shipped, each measured on this box, converge on one
 statement — **allocation is not fixed by configuration** (Mike, 2026-08-18):
 
-1. **Checkpoints are erased on a prefix change**, not evicted for room: a second conversation
-   discarded 1.7 GiB of cached state and the first came back at 895 tok/s. No cache ceiling
-   addresses this.
+1. ~~**Checkpoints are erased on a prefix change** by a second conversation.~~ **Retracted the same
+   evening — the reading was wrong, and the correct one is worse.** The engine's slot-selection lines
+   for that exact task say `prompt with length 111797, lcp = 20150, f_keep = 0.180`: the previous
+   conversation sat in the cache **whole** (6 047 MiB), the other conversation sat beside it
+   untouched (`lcp = 1`), and what arrived was **the same agent's next turn**, sharing 20 150 of
+   113 487 tokens — refused by the `f_keep < 0.25` rule. The cause is DPC's own prompt layout:
+   `context.py` puts Active Recall and a runtime block (`utc_now`, `spent_usd`, counters) **in front
+   of the history**, so the common prefix ends at ~20K every turn, with or without neighbours. Filed
+   as `THE-PROMPT-CHANGES-IN-FRONT-OF-THE-HISTORY-SO-EVERY-TURN-IS-A-CACHE-MISS` and as option (F)
+   below. (Fable 5 and GLM 5.3, round 3, independently; verified in the raw log by CC.)
+   The `n_swa = 0` remark made in passing was half wrong too: it rules out SWA and **confirms**
+   hybrid/recurrent — qwen3.8 is 16 attention layers plus 48 Gated-DeltaNet
+   (`llama_memory_recurrent: 748.13 MiB`), and a recurrent state cannot be rolled back to an
+   arbitrary position, which is why the reuse rule is strict here.
 2. **The model is evicted when a second one is asked for**, `keep_alive: -1` notwithstanding:
    `sched.go:551 — predicted to exceed available memory, evicting` at 20:17:21, two full loads in two
    minutes between one agent on `qwen3.8` and another on `muse-glimmer`.
@@ -693,8 +704,19 @@ Listed so the round that reviews them argues against something concrete. They ar
   card. A fleet served by one local alias evicts nothing; the cost is that per-agent model choice stops
   being free. Partly true today by accident — three agents share `qwen3.8:latest`.
 
-`Round 3` question for the external reviewers: which of these is load-bearing, and which is a fix that
-looks like a fix.
+- **(F) A stable prefix — added by round 3, and it is the one that pays.** Not on the original list
+  because the list was built on the misreading retracted above. Per-turn content moves into the last
+  user message as a **pure append**, replayed byte-identically; simply relocating the block behind the
+  history (F1) does not work on this hybrid model, because the recurrent state cannot be rolled back to
+  an arbitrary divergence and the engine places checkpoints only at `n−517` / `n−5`. It pays on the
+  **paid** path too — Fable measured constant cache hits of 28 928 / 32 768 tokens with the whole
+  history missing, ≈ $0.7–1.4 of a $5.3 day.
+
+`Round 3` answered: **(F) first, then the rest.** Both reviewers broke the section's own conclusion —
+slots are a throughput lever, not what decides *what fits* — and (A) as written is not reachable at
+`q8_0` at all. The order that follows from their arithmetic is (F) → a demand measurement (engine-seconds
+per day against the card's 86 400) → Stage 2 or a second card, with Step-3 measuring throughput rather
+than gating the route.
 
 ## Open Questions
 
