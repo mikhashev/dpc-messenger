@@ -551,8 +551,8 @@ Compliance, not progress — each item is a measurement with a stated failing re
 
 | Task | Status | Commit |
 |------|--------|--------|
-| D4-0: provider in the gate, host-designated `compute.serving_alias` (the peer's `provider` ignored), peer-request log line, orphan-drop log, three ceilings → 1200, semaphore | Pending — first, before the bundle | — |
-| D4-T: the tokens/s row on `_log_usage` (one line; the other three series are not in scope) | Pending — with D4-0, not after | — |
+| D4-0: provider in the gate, host-designated `compute.serving_alias` (the peer's `provider` ignored), only the serving alias advertised, peer-request log line, orphan-drop log, three ceilings → 1200, semaphore, `serving_alias` field in the firewall UI | Shipped 2026-08-18 — awaiting prod observation | `c1642362` |
+| D4-T: the tokens/s row on `_log_usage` (one line; the other three series are not in scope) | Shipped 2026-08-18 — awaiting prod observation | `c1642362` |
 | Stage 0 bundle 0a+0b+0d, one commit; **0e** is Mike's environment variable on the box (24 GiB) | Pending — after D4-0 + D4-T | — |
 | Stage 1 NVFP4-GGUF via `ollama create`, measured vs Q4_K_M/IQ4_XS at 262K | Pending — production window (27B out) | — |
 | Step-3: route (b) on the card at 262K, 2 unified slots (after 0d) | Pending — production window (27B in), read second load | — |
