@@ -731,19 +731,29 @@ def build_llm_messages(
     # when it comes back. Callers that know the record pass it as task["trigger_record"].
     trigger_record = task.get("trigger_record")
     user_content = _build_user_content(task)
-    if isinstance(user_content, str):
-        if isinstance(trigger_record, dict) and trigger_record.get("msg_index"):
-            # The body too, not only the marker: dispatchers hand the agent
-            # "[sender]: text" while the history keeps "text", so rendering the task
-            # text here would differ from the same message rendered as history next
-            # turn — found by Johnny running the shipped code, 2026-08-19.
-            body = trigger_record.get("content")
-            if isinstance(body, str) and body.strip():
-                user_content = body
-            user_content = history_prefix(trigger_record) + user_content
-        else:
-            next_idx = max((m.get("msg_index", 0) for m in conversation_history), default=0) + 1 if conversation_history else 1
-            user_content = f"[#{next_idx}] {user_content}"
+    if isinstance(trigger_record, dict) and trigger_record.get("msg_index"):
+        # The body too, not only the marker: dispatchers hand the agent
+        # "[sender]: text" while the history keeps "text", so rendering the task
+        # text here would differ from the same message rendered as history next
+        # turn — found by Johnny running the shipped code, 2026-08-19.
+        body = trigger_record.get("content")
+        body = body if isinstance(body, str) and body.strip() else None
+        if isinstance(user_content, str):
+            user_content = history_prefix(trigger_record) + (body or user_content)
+        elif isinstance(user_content, list):
+            # An image message: the text part follows the record the same way. The
+            # image itself is not in the history, so this turn still breaks the
+            # prefix when it comes back — the text is aligned, the shape is not.
+            aligned = list(user_content)
+            for i, block in enumerate(aligned):
+                if isinstance(block, dict) and block.get("type") == "text":
+                    aligned[i] = dict(block, text=history_prefix(trigger_record)
+                                      + (body or str(block.get("text", ""))))
+                    break
+            user_content = aligned
+    elif isinstance(user_content, str):
+        next_idx = max((m.get("msg_index", 0) for m in conversation_history), default=0) + 1 if conversation_history else 1
+        user_content = f"[#{next_idx}] {user_content}"
 
     # --- Soft cap: the only prunable content is in this turn's tail, and it is pruned
     # before the tail is sealed, so what is recorded is what was sent.

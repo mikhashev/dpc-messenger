@@ -153,6 +153,20 @@ class TestWhatTheModelIsShown:
         assert kinds == ["text", "image_url"]
         assert content[0]["text"].startswith("look") and content[0]["text"].endswith(TURN_CONTEXT_CLOSE)
 
+    def test_image_message_text_follows_the_record_too(self, agent_root, clocks):
+        """Johnny, second pass: the multipart branch skipped the record. The text
+        part now carries the same marker and body its history rendering will; the
+        image itself is not replayed, so an image turn still breaks the prefix —
+        the text is aligned, the shape is not, and the test says only the first."""
+        rec = {"id": "i1", "msg_index": 5, "timestamp": "2026-08-19T12:00:00+00:00",
+               "sender_name": "Mike", "content": "what is this"}
+        task = {"id": "agent_001", "type": "chat", "text": "[Mike]: what is this",
+                "image_base64": "AAAA", "image_mime": "image/png", "trigger_record": rec}
+        m, _ = build_llm_messages(agent_root=agent_root, memory=Memory(agent_root), task=task)
+        content = m[-1]["content"]
+        assert [b["type"] for b in content] == ["text", "image_url"]
+        assert content[0]["text"].startswith(history_prefix(rec) + "what is this\n\n" + TURN_CONTEXT_OPEN)
+
     def test_soft_cap_prunes_the_tail_and_the_recorded_tail_is_what_was_sent(self, agent_root, clocks):
         # a fat progress log makes "## Recent progress" appear in the tail
         logs = agent_root / "logs"
