@@ -837,6 +837,60 @@ The eight most commonly used:
 
 ---
 
+## The Ollama daemon's own environment (not DPC's, and DPC cannot set it)
+
+If you run local models through Ollama, three settings that live **outside DPC entirely**
+change how long your agents wait. DPC does not write them, does not read them, and cannot
+tell you they are missing — they belong to the Ollama service, and every user sets them by
+hand, once, per machine. They are listed here because the numbers below were measured on a
+working install and are the difference between a four-second turn and a four-minute one.
+
+| Variable | Suggested value | What it does |
+|----------|-----------------|--------------|
+| `LLAMA_ARG_CACHE_RAM` | `24576` | Prompt-cache ceiling **in MiB** (`-1` unlimited, `0` disabled). Default is `8192`. |
+| `OLLAMA_FLASH_ATTENTION` | `1` | Flash attention; required before the KV cache can be quantised. |
+| `OLLAMA_KV_CACHE_TYPE` | `q8_0` | KV cache type. Halves KV memory against the `f16` default. |
+
+**Why `LLAMA_ARG_CACHE_RAM` matters most.** `llama-server` keeps the KV state of past
+conversations so a request whose prefix it has already seen skips the prefill. One agent's
+entry measures 1.8–7.2 GiB (median 5.2), so the 8 GiB default holds about **one and a
+half** of them: on a machine running several agents the cache evicts constantly — 36
+evictions in 26 hours on the reference box — and each eviction costs that agent a full
+re-prefill on its next turn: 60–100 s at 60K tokens, 293 s measured at 164K. Raising the
+ceiling to 24 GiB holds roughly five agents' entries. The cost is **system RAM, not VRAM**,
+and it is a ceiling rather than a reservation — memory is used only as entries accumulate.
+
+**Setting it (Windows).** Ollama passes its own environment to the `llama-server` child, so
+a user-scope variable is enough — but the tray app inherits the environment it was
+*started* with, so a new terminal will not do: quit Ollama from the tray and start it
+again.
+
+```powershell
+[Environment]::SetEnvironmentVariable('LLAMA_ARG_CACHE_RAM','24576','User')
+# then: Ollama tray icon → Quit → launch Ollama again
+```
+
+On Linux/macOS put it where the service reads its environment
+(`systemctl edit ollama.service` → `Environment="LLAMA_ARG_CACHE_RAM=24576"`, or
+`launchctl setenv`), then restart the service.
+
+**Checking that it took.** In the Ollama server log
+(`%LOCALAPPDATA%\Ollama\server.log` on Windows, `journalctl -u ollama` on Linux):
+
+```
+srv    load_model: prompt cache is enabled, size limit: 24576 MiB
+```
+
+If it still says `8192`, the variable did not reach the child — the value format is not the
+suspect, it is a plain integer. The second signal, over the following day, is the count of
+`making room for prompt cache entry, removing oldest entry` lines, which should fall.
+
+> These are stopgaps for the Ollama path. When DPC runs its own inference server
+> (ADR-040 Stage 2) it passes the equivalent flags itself and this section stops being
+> the user's problem.
+
+---
+
 ## Device Identity and Multi-Device Considerations
 
 ### Device-Specific Identity
