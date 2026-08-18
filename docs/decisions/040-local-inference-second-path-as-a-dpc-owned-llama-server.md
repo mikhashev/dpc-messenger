@@ -855,6 +855,30 @@ the measurement that decides between an operating point, renting, and a second c
 and they are not the same question:** one prices what is wasted now, the other sizes what is needed. Do
 (F) first; run the demand division before any hardware decision.
 
+**The demand division, run 2026-08-19 over `events.jsonl` of all nine agents** (`task_complete` rows;
+`completion_tokens` exist only from 2026-08-16, when durable accounting landed, so three days carry the
+decode half). Rates as measured on this card at depth: prefill 900 tok/s, decode 36 tok/s. Three
+readings per day — *warm* (every turn's prefix cached, ~2K new tokens a round), *cold-first* (the first
+round of every turn re-prefills its whole context, later rounds cached — today's shape before (F)),
+*all-cold* (every round from zero — the old layout's worst case, and what `prompt_tokens` bills):
+
+| day | turns | warm h | cold-first h | all-cold h | of which decode h | avg ctx at turn start |
+|---|---|---|---|---|---|---|
+| 08-16 | 105 | 4.8 | 6.2 | 10.6 | 4.5 | 52K |
+| 08-17 | 135 | 11.1 | 12.6 | 26.6 | 10.7 | 47K |
+| 08-18 | 74 | 5.4 | 6.8 | 19.9 | 5.2 | 73K |
+
+So on the busiest day the fleet asks this card for **11–13 engine-hours of 24 with (F)**, and would have
+asked 27 without it — more than the day has, which is the arithmetic form of «the old layout could not
+carry the fleet». Two things the numbers say that the plan did not: **decode is the larger half** —
+10.7 of the 12.6 hours on 08-17 are generation, i.e. 1.4M completion tokens with reasoning at `high`,
+and (F) does not touch decode; the lever there is thinking depth per turn (Q9, the per-request budget of
+route (b)), not the cache. And the day total is not what a second card would relieve: the card is idle
+half the day and saturated at the hour when three agents answer at once — that is concurrency at the
+peak, the throughput question Step-3 measures, not capacity. Read against the two frames above: GLM's
+operating point («2–3 interactive agents plus night batch») is what these days already are; a second
+card would buy peak concurrency, not hours. Not a decision — the measurement the ADR asked for.
+
 ### Route (c) re-examined at Mike's request, and refused again
 
 Both reviewers re-opened vLLM against the round-3 findings and both closed it, with two of the original
