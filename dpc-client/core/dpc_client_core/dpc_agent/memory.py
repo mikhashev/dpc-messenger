@@ -20,6 +20,7 @@ import json
 import logging
 import os
 import pathlib
+import re
 import threading
 from dataclasses import dataclass, field, asdict
 from datetime import datetime, timezone
@@ -57,6 +58,34 @@ class FileMeta:
     stale: bool = False
 
 
+_FRONT_MATTER = re.compile(r"\A---\s*\n.*?\n---\s*(\n|$)", re.DOTALL)
+_LINE_MARKERS = re.compile(r"(?m)^[ 	]*(?:#{1,6}[ 	]+|[-*+][ 	]+|>[ 	]*)")
+
+
+def one_line_summary(text: str, limit: int = 300) -> str:
+    """Flatten a document head into a single line fit for a list entry.
+
+    `summary` is stored and rendered as one bullet in _index.md, but it was filled
+    with the first thousand characters of the document verbatim - headings, blank
+    lines and all. Clipping that by length cut through the middle of markdown, so
+    a foreign `## Executive Summary` landed in the index as if it were a section of
+    the index itself. Everything that puts a summary into a flat context goes
+    through here.
+    """
+    if not text:
+        return ""
+    text = _FRONT_MATTER.sub("", text)
+    text = _LINE_MARKERS.sub("", text)
+    text = " ".join(text.split())
+    if len(text) <= limit:
+        return text
+    cut = text[:limit]
+    space = cut.rfind(" ")
+    if space > limit // 2:
+        cut = cut[:space]
+    return cut.rstrip(" ,.;:-") + "..."
+
+
 def _meta_path_for(knowledge_file: pathlib.Path) -> pathlib.Path:
     return knowledge_file.parent / "_meta.json"
 
@@ -77,7 +106,7 @@ def backfill_meta(knowledge_dir: pathlib.Path) -> Dict[str, dict]:
         except OSError:
             content = ""
         tags = [t for t in f.stem.replace("_", "-").split("-") if len(t) > 2]
-        meta = FileMeta(summary=content.strip(), tags=tags, source_layer="L5")
+        meta = FileMeta(summary=one_line_summary(content), tags=tags, source_layer="L5")
         data[f.name] = asdict(meta)
     if data:
         write_all_meta(knowledge_dir, data)
@@ -221,7 +250,10 @@ def generate_smart_index(knowledge_dir: pathlib.Path) -> str:
     active, recent, reference, stale = [], [], [], []
 
     for fname, entry in all_meta.items():
-        summary = entry.get("summary", "")[:160]
+        # Normalised on the way out too: the stores written before this existed
+        # still hold raw document heads, and they are only rewritten when an
+        # agent's _meta.json is rebuilt from scratch.
+        summary = one_line_summary(entry.get("summary", ""), 160)
         title = fname.replace(".md", "").replace("_", " ").replace("-", " ").title()
         touched = last_touched(entry)
         if touched is None or reference_time is None:

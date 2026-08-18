@@ -95,10 +95,22 @@ def test_backfill_extracts_tags_from_filename(tmp_path):
     assert "architecture" in entry["tags"]
 
 
-def test_backfill_summary_truncates(tmp_path):
+def test_backfill_summary_is_bounded_and_flat(tmp_path):
+    """This used to assert the stored summary was the first 1000 characters.
+
+    That head carried the document's own markdown, and _index.md renders the field
+    as one bullet - so a heading from inside a document arrived looking like a
+    section of the index. The summary is now normalised to a single line and cut
+    much shorter. See tests/test_knowledge_index_stability.py.
+    """
     (tmp_path / "long.md").write_text("A" * 5000, encoding="utf-8")
+    (tmp_path / "marked.md").write_text("# Title\n\n## Section\n\nbody", encoding="utf-8")
     data = backfill_meta(tmp_path)
-    assert len(data["long.md"]["summary"]) == 1000
+
+    assert len(data["long.md"]["summary"]) <= 310
+    assert data["long.md"]["summary"].endswith("...")
+    flat = data["marked.md"]["summary"]
+    assert "\n" not in flat and "#" not in flat
 
 
 def test_read_all_meta_triggers_backfill(tmp_path):

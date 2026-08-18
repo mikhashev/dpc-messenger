@@ -133,3 +133,54 @@ class TestTheResidualCostIsKnown:
             "passes, the index now ignores reads and the memory contract changed"
         )
         assert "Ancient" in after.split("## Active (today)")[1].split("##")[0]
+
+
+class TestTheSummaryIsOneFlatLine:
+    """`summary` was the first thousand characters of the document, verbatim.
+
+    Clipping that by length cut through the middle of markdown, so a heading from
+    inside a document arrived in _index.md looking like a section of the index.
+    """
+
+    def test_headings_and_newlines_do_not_survive(self):
+        from dpc_client_core.dpc_agent.memory import one_line_summary
+        raw = "# Agent Wisdom\n\n**Created:** 2026-04-05\n\n## Executive Summary\nbody text"
+        flat = one_line_summary(raw, 160)
+        assert "\n" not in flat
+        assert "#" not in flat
+        assert flat.startswith("Agent Wisdom")
+
+    def test_front_matter_is_dropped(self):
+        from dpc_client_core.dpc_agent.memory import one_line_summary
+        flat = one_line_summary("---\nname: x\ntags: [a]\n---\n# Real Title\n\nbody", 160)
+        assert flat == "Real Title body"
+
+    def test_a_long_summary_is_cut_on_a_word(self):
+        from dpc_client_core.dpc_agent.memory import one_line_summary
+        flat = one_line_summary("word " * 100, 60)
+        assert len(flat) <= 63 and flat.endswith("...")
+        assert not flat.rstrip(".").endswith("wor")
+
+    def test_a_stored_raw_head_still_renders_flat(self, knowledge_dir):
+        """The stores written before this existed keep their raw heads, so the
+        render has to normalise on the way out as well as on the way in."""
+        meta = json.loads((knowledge_dir / "_meta.json").read_text(encoding="utf-8"))
+        meta["fresh.md"]["summary"] = "# Title\n\n## Executive Summary\n\n- point one"
+        (knowledge_dir / "_meta.json").write_text(json.dumps(meta, indent=2), encoding="utf-8")
+
+        content = generate_smart_index(knowledge_dir)
+
+        strays = [ln for ln in content.splitlines()
+                  if ln.startswith("#") and not ln.startswith("# Knowledge Index")
+                  and not ln.startswith("## Active") and not ln.startswith("## Recent")
+                  and not ln.startswith("## Reference") and not ln.startswith("## Stale")]
+        assert strays == []
+
+    def test_backfill_stores_a_flat_summary(self, tmp_path):
+        from dpc_client_core.dpc_agent.memory import backfill_meta
+        d = tmp_path / "kb"
+        d.mkdir()
+        (d / "doc.md").write_text("# Doc\n\n## Section\n\nbody", encoding="utf-8")
+        data = backfill_meta(d)
+        stored = data["doc.md"]["summary"]
+        assert "\n" not in stored and "#" not in stored
