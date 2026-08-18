@@ -110,3 +110,26 @@ class TestTheOrderIsOwnedByTheIndex:
             json.dumps(reversed_meta, indent=2), encoding="utf-8"
         )
         assert generate_smart_index(knowledge_dir) == before
+
+
+class TestTheResidualCostIsKnown:
+    """A read still reaches the index — later, through `last_touched`.
+
+    Johnny's reading, checked and confirmed: `update_access` moves `last_accessed`,
+    `last_touched` is the max of the two stamps, so the read is deferred into the
+    next rebuild rather than removed. This test states that plainly, so the day
+    someone decides the index should bucket on `last_written` alone, it fails and
+    says why instead of quietly changing what agents see.
+    """
+
+    def test_a_read_changes_the_index_at_the_next_rebuild(self, knowledge_dir):
+        before = generate_smart_index(knowledge_dir)
+        update_access(knowledge_dir, "ancient.md")
+        assert (knowledge_dir / "_index.md").read_text(encoding="utf-8") == before
+
+        after = generate_smart_index(knowledge_dir)
+        assert after != before, (
+            "a read is expected to re-bucket the file at the next rebuild; if this "
+            "passes, the index now ignores reads and the memory contract changed"
+        )
+        assert "Ancient" in after.split("## Active (today)")[1].split("##")[0]
