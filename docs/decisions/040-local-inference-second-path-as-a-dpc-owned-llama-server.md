@@ -512,7 +512,14 @@ Compliance, not progress — each item is a measurement with a stated failing re
       20-token turn overlapping a 60K prefill returns without waiting for it (fail on any → `-np 1`;
       fail on all → mainline build; fail on both → route (a) is back).
 - [ ] **KV cell at 262K** — KV **total ≈ 4 608 MiB** at q4_0 (per side 2 304; a saving of 4 096 MiB
-      against the logged 8 704 MiB at q8_0, whose own per-side figure is 4 352); paired
+      against the logged 8 704 MiB at q8_0, whose own per-side figure is 4 352);
+      **the baseline is re-confirmed live 2026-08-18** — `llama_kv_cache: size = 8704.00 MiB (262144
+      cells, 16 layers, 1/1 seqs), K (q8_0): 4352.00 MiB, V (q8_0): 4352.00 MiB` — and two facts the
+      draft did not carry surfaced with it. **The MTP draft model keeps its own cache and it is not
+      quantised**: `size = 1024.00 MiB (262144 cells, 1 layers), K (f16): 512.00 MiB, V (f16): 512.00
+      MiB`, so 1 GiB sits outside whatever `OLLAMA_KV_CACHE_TYPE` is set to. And that variable is
+      **daemon-wide**: under Ollama the KV type cannot be chosen per alias, so this cell is a fleet-wide
+      change while it is measured — one more thing route (b) makes per-server rather than per-machine; paired
       runs on five real agent transcripts (47–76K tokens) at q8_0 vs q4_0: next-action agreement
       ≥ 90 % and a 20-question recall probe within 10 points (fail → q4_0 dead for the main model).
 - [ ] **Provider parity** — `generate_with_tools`, vision via `image_url`, `generate_response_stream`,
