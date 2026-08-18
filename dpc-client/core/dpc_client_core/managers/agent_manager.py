@@ -223,14 +223,14 @@ class DpcAgentManager:
         )
 
         from dpc_client_core.dpc_agent.memory_config import get_memory_config
+        _mem_cfg_for_agent = get_memory_config(_per_agent_profile or self.config)
         agent_config = AgentConfig(
             budget_usd=self.config.get("budget_usd"),
             max_rounds=self.config.get("max_rounds", 200),
             enable_task_queue=self.config.get("enable_task_queue", True),
             billing_model=self.config.get("billing_model", "subscription"),
-            embedding_device=get_memory_config(
-                _per_agent_profile or self.config
-            ).embedding_device,
+            embedding_device=_mem_cfg_for_agent.embedding_device,
+            embedding_model=_mem_cfg_for_agent.embedding_model,
         )
 
         # Get LLMManager from CoreService

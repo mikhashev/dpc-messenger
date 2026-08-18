@@ -52,3 +52,24 @@ def test_a_later_caller_naming_the_same_device_is_silent(caplog):
     with caplog.at_level(logging.WARNING, logger=memory.log.name):
         memory.get_embedding_provider(model_name="test/device-d", device="cpu")
     assert caplog.records == []
+
+
+def test_the_model_name_has_a_default_in_the_dataclass_so_removing_it_from_config_is_safe():
+    # The nine agent profiles carried embedding_model until 2026-08-18 and it was
+    # deleted from all of them; what keeps them on bge-m3 is this default alone.
+    assert MemoryConfig().embedding_model == "BAAI/bge-m3"
+    assert get_memory_config({}).embedding_model == "BAAI/bge-m3"
+    assert get_memory_config({"memory": {"enabled": True}}).embedding_model == "BAAI/bge-m3"
+
+
+def test_the_agent_config_carries_the_model_name_as_well_as_the_device():
+    assert AgentConfig().embedding_model is None
+    assert AgentConfig(embedding_model="some/model").embedding_model == "some/model"
+
+
+def test_a_stated_model_name_builds_its_own_provider():
+    a = memory.get_embedding_provider(model_name="test/model-a", device="cpu")
+    b = memory.get_embedding_provider(model_name="test/model-b", device="cpu")
+    assert a is not b
+    assert a.model_name == "test/model-a"
+    assert b.model_name == "test/model-b"

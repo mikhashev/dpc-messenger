@@ -100,10 +100,12 @@ class AgentConfig:
     # Budget settings
     billing_model: str = "subscription"  # or "pay_per_use"
 
-    # Device for the embedding model, carried here because the agent builds the
-    # per-process singleton before the manager's index pass runs — a value that
-    # only reached the index pass would apply to nothing on the live path.
+    # Device and name of the embedding model, carried here because the agent builds
+    # the per-process singleton before the manager's index pass runs — a value that
+    # only reached the index pass would apply to nothing on the live path. None on
+    # either means "whatever get_embedding_provider defaults to".
     embedding_device: Optional[str] = None
+    embedding_model: Optional[str] = None
 
 
 class DpcAgent:
@@ -166,9 +168,13 @@ class DpcAgent:
         )
 
         from .memory import get_embedding_provider
-        self._embedding_provider = get_embedding_provider(
-            local_files_only=True, device=self.config.embedding_device
-        )
+        _embedding_kwargs = {
+            "local_files_only": True,
+            "device": self.config.embedding_device,
+        }
+        if self.config.embedding_model:
+            _embedding_kwargs["model_name"] = self.config.embedding_model
+        self._embedding_provider = get_embedding_provider(**_embedding_kwargs)
 
         # Task queue for background execution
         self.queue = TaskQueue(self.agent_root)
