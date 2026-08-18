@@ -22,6 +22,7 @@ import os
 import pathlib
 import threading
 from dataclasses import dataclass, field, asdict
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from .utils import (
@@ -178,10 +179,11 @@ def update_access(knowledge_dir: pathlib.Path, filename: str) -> None:
     meta.last_accessed = utc_now_iso()
     meta.access_count += 1
     write_file_meta(knowledge_dir, filename, meta)
-    try:
-        generate_smart_index(knowledge_dir)
-    except Exception:
-        pass
+    # The index is deliberately not regenerated here. A read is not a change to the
+    # knowledge, but it does move the file into the newest bucket, and regenerating
+    # on every read reordered the block sitting ahead of the history - three reads
+    # in one turn rewrote it three times. Rebuilding belongs to writes and to
+    # consolidation (ADR-010 Tier 1).
 
 
 def record_write(knowledge_dir: pathlib.Path, filename: str) -> None:
@@ -204,24 +206,29 @@ def record_write(knowledge_dir: pathlib.Path, filename: str) -> None:
 
 def generate_smart_index(knowledge_dir: pathlib.Path) -> str:
     """Generate _index.md with Active/Recent/Reference/Stale sections from _meta.json."""
-    from datetime import datetime, timezone
-
     all_meta = read_all_meta(knowledge_dir)
     if not all_meta:
         return ""
 
-    now = datetime.now(timezone.utc)
+    # The reference is the newest thing in the base, not the wall clock. This file
+    # sits in the cached system block ahead of the whole conversation history, so
+    # bucketing against `now` meant the same knowledge rendered differently once a
+    # day boundary passed - a changed prefix, a cold turn for every agent, and no
+    # knowledge changed. Deriving it from the data makes the bytes a function of
+    # _meta.json alone: two starts on unchanged knowledge produce the same file.
+    touch_times = [t for t in (last_touched(e) for e in all_meta.values()) if t]
+    reference_time = max(touch_times) if touch_times else None
     active, recent, reference, stale = [], [], [], []
 
     for fname, entry in all_meta.items():
         summary = entry.get("summary", "")[:160]
         title = fname.replace(".md", "").replace("_", " ").replace("-", " ").title()
         touched = last_touched(entry)
-        if touched is None:
+        if touched is None or reference_time is None:
             reference.append((fname, title, summary, ""))
             continue
         ts = touched.isoformat()
-        days = (now - touched).days
+        days = (reference_time - touched).days
         line_data = (fname, title, summary, ts)
         if days == 0:
             active.append(line_data)
@@ -231,6 +238,12 @@ def generate_smart_index(knowledge_dir: pathlib.Path) -> str:
             stale.append(line_data)
         else:
             reference.append(line_data)
+
+    # Within a section the order is the file name, not the order of keys in
+    # _meta.json. That file is rewritten on every read, so leaning on its key order
+    # would leave one more way for these bytes to move without the knowledge moving.
+    for bucket in (active, recent, reference, stale):
+        bucket.sort(key=lambda item: item[0])
 
     lines = ["# Knowledge Index", ""]
     for section, items, show_summary in [
@@ -248,8 +261,7 @@ def generate_smart_index(knowledge_dir: pathlib.Path) -> str:
             elif not show_summary and ts:
                 try:
                     accessed = datetime.fromisoformat(ts.replace("Z", "+00:00"))
-                    days = (now - accessed).days
-                    lines.append(f"- {title} (stale, last: {days} days)")
+                    lines.append(f"- {title} (stale, last: {accessed.date().isoformat()})")
                 except (ValueError, TypeError):
                     lines.append(f"- {title}")
             else:

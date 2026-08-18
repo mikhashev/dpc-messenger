@@ -134,7 +134,8 @@ def test_generate_smart_index_sections(tmp_path):
     assert "## Reference" in content
     assert "## Stale (30+ days)" in content
     assert "Fresh topic" in content
-    assert "stale, last: 45 days" in content
+    stale_date = (now - timedelta(days=45)).date().isoformat()
+    assert f"stale, last: {stale_date}" in content  # an absolute date, not a moving count
     assert (tmp_path / "_index.md").exists()
 
 
@@ -143,13 +144,25 @@ def test_generate_smart_index_empty(tmp_path):
     assert content == ""
 
 
-def test_update_access_triggers_index_refresh(tmp_path):
+def test_update_access_records_the_read_without_touching_the_index(tmp_path):
+    """This test used to require the opposite - that a read refreshes the index.
+
+    The index sits in the cached system block ahead of the conversation history, so
+    rebuilding it on every read reordered that block under the agent mid-turn. A read
+    now records the access and nothing else; rebuilding belongs to writes and to
+    consolidation. See tests/test_knowledge_index_stability.py.
+    """
     (tmp_path / "topic.md").write_text("content", encoding="utf-8")
     write_file_meta(tmp_path, "topic.md", FileMeta(summary="test"))
+    generate_smart_index(tmp_path)
+    before = (tmp_path / "_index.md").read_text(encoding="utf-8")
+
     update_access(tmp_path, "topic.md")
-    assert (tmp_path / "_index.md").exists()
-    index_text = (tmp_path / "_index.md").read_text(encoding="utf-8")
-    assert "Topic" in index_text
+
+    assert (tmp_path / "_index.md").read_text(encoding="utf-8") == before
+    meta = read_file_meta(tmp_path, "topic.md")
+    assert meta.access_count == 1
+    assert meta.last_accessed
 
 
 # --- MEM-3.1: EmbeddingProvider tests ---
