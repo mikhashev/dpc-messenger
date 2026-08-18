@@ -31,6 +31,7 @@ from .memory import Memory, generate_smart_index
 from .skill_store import SkillStore
 from .skill_reflection import SkillReflector, REFLECTION_ROUNDS_THRESHOLD
 from .context import build_llm_messages
+from .sent_annotations import SentAnnotationStore
 from .loop import run_llm_loop, RECORDED_USAGE_FIELDS
 from .utils import (
     get_agent_root, ensure_agent_dirs, utc_now_iso, append_jsonl
@@ -276,10 +277,31 @@ class DpcAgent:
             task["chat_context"] = chat_context
 
         prior_history = None
+        full_history: List[Dict[str, Any]] = []
         if conversation_monitor is not None:
-            prior_history = select_prior_history(
-                conversation_monitor.get_message_history(), trigger_message_id
-            )
+            full_history = conversation_monitor.get_message_history()
+            prior_history = select_prior_history(full_history, trigger_message_id)
+
+        # The record this turn answers. Group paths name it; the 1:1 path adds the
+        # user message to the monitor just before calling us, so it is the last
+        # record. Without an id the tail is still sent, only not remembered — the
+        # next turn pays one cold prefill instead of failing.
+        current_message_id = trigger_message_id
+        if not current_message_id and full_history and prior_history is not None:
+            last = full_history[-1]
+            if last.get("role") == "user" and last.get("id"):
+                current_message_id = str(last["id"])
+        if current_message_id:
+            for _rec in reversed(full_history):
+                if str(_rec.get("id") or "") == current_message_id:
+                    task["trigger_record"] = {
+                        "msg_index": _rec.get("msg_index"),
+                        "timestamp": _rec.get("timestamp"),
+                        "sender_name": _rec.get("sender_name"),
+                    }
+                    break
+        annotation_store = SentAnnotationStore(self.agent_root)
+        sent_annotations = annotation_store.load(conversation_id) if prior_history else None
 
         # Get firewall-controlled tool access (needed for both context and tool registry)
         allowed_tools = self._get_allowed_tools(message_source=message_source,
@@ -321,7 +343,25 @@ class DpcAgent:
             reader_identity=reader_identity,
             extended_read_enabled=extended_read,
             shared_knowledge_enabled=shared_knowledge,
+            sent_annotations=sent_annotations,
         )
+
+        # Remember the tail exactly as it went out, keyed by the message it went out
+        # on; prune ids the history no longer holds while at it. This is what makes
+        # the next prompt a pure append of this one (see sent_annotations.py).
+        _tail = cap_info.get("turn_context") or ""
+        if current_message_id and _tail:
+            try:
+                annotation_store.record(
+                    conversation_id, current_message_id, _tail,
+                    live_message_ids=[m.get("id") for m in full_history],
+                )
+            except Exception:
+                log.warning("sent_annotations: could not record tail for %s", conversation_id,
+                            exc_info=True)
+        elif _tail:
+            log.debug("sent_annotations: no message id for this turn in %s; tail not recorded",
+                      conversation_id)
 
         # Store cap_info for agent_manager to include in next request's session_state
         self._last_cap_info = cap_info

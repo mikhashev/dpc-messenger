@@ -614,6 +614,25 @@ class DpcLlmAdapter:
 
             i += 1
 
+        # A breakpoint on the last user turn: Anthropic caches the prefix up to a
+        # marked block, and the system blocks were the only marked ones — measured as
+        # a constant hit of the system size while the whole history missed. With the
+        # per-turn content now behind the history, the prefix up to here is what the
+        # next request repeats.
+        if anthropic_messages and anthropic_messages[-1].get("role") == "user":
+            last = anthropic_messages[-1]
+            content = last.get("content")
+            if isinstance(content, str):
+                last["content"] = [{"type": "text", "text": content,
+                                    "cache_control": {"type": "ephemeral"}}]
+            elif isinstance(content, list) and content:
+                tail = content[-1]
+                if isinstance(tail, dict) and tail.get("type") in ("text", "tool_result"):
+                    # A copy: the block list is shared with the loop's own messages,
+                    # and a marker left behind would ride into every later round.
+                    last["content"] = list(content[:-1]) + [
+                        dict(tail, cache_control={"type": "ephemeral"})]
+
         return system, anthropic_messages
 
     @staticmethod

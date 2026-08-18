@@ -200,7 +200,11 @@ class TestBuildLlmMessagesDerivation:
         assert [t["role"] for t in turns] == ["user", "assistant", "user", "user"]
         assert "Warren" in turns[2]["content"]
 
-    def test_1to1_payload_equivalent_to_stored_roles(self, agent_root):
+    def test_1to1_payload_equivalent_to_stored_roles(self, agent_root, monkeypatch):
+        # The per-turn tail on the current message carries a clock; two builds must
+        # read the same one for the payloads to compare (F, 2026-08-19).
+        from dpc_client_core.dpc_agent import context as _ctx
+        monkeypatch.setattr(_ctx, "utc_now_iso", lambda: "2026-08-19T00:00:00+00:00")
         history = [
             {"role": "user", "content": "q1", "sender_name": "User", "msg_index": 1},
             {"role": "assistant", "content": "a1", "sender_name": "Ark", "msg_index": 2},

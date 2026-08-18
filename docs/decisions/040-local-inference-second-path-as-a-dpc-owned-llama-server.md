@@ -646,7 +646,7 @@ Compliance, not progress — each item is a measurement with a stated failing re
 | `ProviderLimits` on local aliases; remote-share rule | Pending | — |
 | Backlog: re-title, two amendments, four new entries | Done 2026-08-18 — CC (the board is gitignored) | — |
 | Round 3 (Fable 5, GLM 5.3) on the allocation section; the section rewritten, (F) added and put first, (A) demoted to throughput, the second-conversation reading retracted | Done 2026-08-18 — CC | this commit |
-| (F) prefix-stable prompt — F2 in `context.py`, two falsifiers | **Next** — pays on both paths | — |
+| (F) prefix-stable prompt — F2 in `context.py` + `sent_annotations.py`, three falsifiers | Shipped 2026-08-19 — CC; awaiting the restart and the cache-hit reading | this commit |
 | Demand division: `events.jsonl` → engine-seconds/day against 86 400 (no GPU) | Before any hardware decision | — |
 
 ## First production reading (`2026-08-18 19:48`)
@@ -764,6 +764,19 @@ the same logs and the same sources independently; where they differ it is said s
   (Warren 28 928, Ark 32 768 — the block-aligned [static + memory + KB] prefix) and a miss equal to the
   whole history, about **$0.7-1.4 of a $5.3 day, 15-30 %** (Fable §1.4, `Observed` counts, `Inferred`
   price). ~50-100 lines in `context.py` plus one `cache_control` on the last user message.
+  **Shipped 2026-08-19 (F2, side store).** The tail rides inside `<turn_context>…</turn_context>` at
+  the end of the current user message; the system message keeps two cached blocks and a stable
+  sentence naming the block as the runtime's. History keeps what the human wrote; what was sent is
+  recorded per message id in `state/sent_annotations/<conversation>.json` and replayed on the way
+  back in — the storage contract is met beside the history, not inside it, so the UI and every other
+  reader of history.json are untouched. Two things the diagnosis had not named: the current message
+  was rendered `[#N] text` while its history rendering was `[#N | time | sender] text`, so the prefix
+  broke on the very message it introduced (one `history_prefix` for both now); and the soft-cap
+  pruning has to run before the tail is sealed, or the recorded tail is not the sent one. A third
+  falsifier joins the two above: the side store must shrink with its history (it prunes on write).
+  Not observed yet — the reading is `prompt_cache_hit_tokens` in every DeepSeek agent's
+  `events.jsonl` leaving 28 928 / 32 768 within a day of the restart, and `prompt_tps` on the first
+  returning qwen3.8 turn.
 - **(E) One local model — second, and decided by arithmetic rather than preference.** `qwen3.8` at
   262 144 is **28.0 GiB** by the loader's own buffers and `muse-glimmer` at 131 072 is **16.5 GiB**;
   44.5 GiB against a 32.6 GiB card. They cannot co-reside **at any context**, so a two-model local fleet
