@@ -280,6 +280,14 @@ confirmed independently by Ark and by CC on the logs). Four defects, each closed
   with the opposite empty-semantics is a trap that re-opens this same hole the first time someone
   leaves it blank. One named alias has one reading. This is also what D4 means by governable — the
   host allocates, not the caller.
+  **Review finding, 2026-08-18 (Ark, sharpened by Johnny): the two settings interact, and the shipped
+  default was a trap.** With the alias designating what runs, the peer's `model` no longer reaches the
+  router at all — so `allowed_models` can only *refuse*, never choose. A non-empty list that does not
+  contain the serving alias's own model makes the node advertise nothing and refuse everything, and the
+  rules template shipped `["llama3.1:8b", "llama3:70b"]` — two models nobody here serves. The template
+  now ships an empty list, and both the UI help text and the rules comment say what the list can and
+  cannot do. (On this box the live value was already `[]`, so nothing was broken here; the trap was
+  waiting for the next fresh install.)
 - **A peer's request is billed to nobody.** It belongs to no agent, so it writes no row in
   `events.jsonl` and appears in no cost series. One log line in `handle_inference_request` closes the
   record.

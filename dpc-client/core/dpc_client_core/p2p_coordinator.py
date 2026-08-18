@@ -219,8 +219,14 @@ class P2PCoordinator:
             actual_model = result.get("model", model)
             # A peer's request belongs to no agent, so it writes no row in any
             # events.jsonl and appears in no cost series. This line is the record.
+            # The counts are named `_est` because they are ours: llm_manager fills
+            # them with its own count_tokens over the prompt and the answer, not
+            # with what the engine reported. On an Ollama alias the daemon's own
+            # figures for the same call are on the neighbouring "Ollama usage:"
+            # line; whoever compares the two will find them close and different,
+            # and should not have to discover that from the numbers.
             logger.info(
-                "Peer inference served: peer=%s alias=%s model=%s prompt_tokens=%s response_tokens=%s",
+                "Peer inference served: peer=%s alias=%s model=%s prompt_tokens_est=%s response_tokens_est=%s",
                 peer_id, serving_alias, actual_model,
                 result.get("prompt_tokens"), result.get("response_tokens"),
             )

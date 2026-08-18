@@ -966,7 +966,8 @@ class ContextFirewall:
                     "enabled": False,
                     "allow_groups": [],
                     "allow_nodes": [],
-                    "allowed_models": ["llama3.1:8b", "llama3:70b"],
+                    "_allowed_models": "Empty = every model. Since the host designates serving_alias, this list can only refuse a peer that names a model; it never chooses one. A non-empty list that does not contain the serving alias's own model makes this node advertise nothing and refuse everything.",
+                    "allowed_models": [],
                     "_serving_alias": "The one provider alias peers are served from; a peer naming any other is refused. Empty = share nothing (the opposite of allowed_models, where empty = all).",
                     "serving_alias": None
                 },

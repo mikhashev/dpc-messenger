@@ -1379,7 +1379,12 @@
 
                   <div class="subsection">
                     <h4>Allowed Models</h4>
-                    <p class="help-text-small">Leave empty to allow all models.</p>
+                    <p class="help-text-small">
+                      Leave empty to allow all models. Since the Serving Alias above decides
+                      what actually runs, this list can only <em>refuse</em> a peer that names
+                      a model &mdash; it never chooses one. A list that does not contain the
+                      serving alias&rsquo;s own model makes this node advertise nothing.
+                    </p>
                     {#if editMode && editedRules}
                       <textarea
                         id="compute-allowed-models"

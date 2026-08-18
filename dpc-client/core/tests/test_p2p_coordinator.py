@@ -140,7 +140,11 @@ async def test_a_served_peer_request_is_written_down(caplog):
     line = [r.getMessage() for r in caplog.records if "Peer inference served" in r.getMessage()]
     assert len(line) == 1
     assert "peer-1" in line[0] and "ollama_local" in line[0]
-    assert "1200" in line[0] and "300" in line[0]
+    # Named `_est` on purpose: these are llm_manager's own count_tokens, not the
+    # engine's report (Ark and Johnny, review of 2026-08-18). Two numbers for one
+    # call is fine; two numbers that both look measured is not.
+    assert "prompt_tokens_est=1200" in line[0]
+    assert "response_tokens_est=300" in line[0]
 
 
 @pytest.mark.asyncio
