@@ -511,6 +511,14 @@ Compliance, not progress — each item is a measurement with a stated failing re
       on first load), tools parsed on the real template, MTP acceptance ≥ Ollama's 0.69/pos, and a
       20-token turn overlapping a 60K prefill returns without waiting for it (fail on any → `-np 1`;
       fail on all → mainline build; fail on both → route (a) is back).
+      **Rewritten `2026-08-18` after round 3: the bench as first written cannot fail the way production
+      will.** 60K + 20 tokens exercises 80K of a 262K pool, so pool exhaustion — the actual failure mode —
+      is unreachable, and the cell would go green while teaching nothing (GLM). Run it with **two
+      conversations of at least 120K each**, which is tonight's real shape (138 028 + 123 574), and record
+      which of eviction, shift or erasure the unified pool performs when the second prefill needs cells the
+      first holds. Note also that `-np 2 --kv-unified` shares one 262 144 pool rather than giving each slot
+      one, so a green run at these flags is a fleet context of 131 072 under concurrency — passing this cell
+      as written would shrink the floor the Decision Drivers declare.
 - [ ] **KV cell at 262K** — KV **total ≈ 4 608 MiB** at q4_0 (per side 2 304; a saving of 4 096 MiB
       against the logged 8 704 MiB at q8_0, whose own per-side figure is 4 352);
       **the baseline is re-confirmed live 2026-08-18** — `llama_kv_cache: size = 8704.00 MiB (262144
@@ -522,6 +530,21 @@ Compliance, not progress — each item is a measurement with a stated failing re
       change while it is measured — one more thing route (b) makes per-server rather than per-machine; paired
       runs on five real agent transcripts (47–76K tokens) at q8_0 vs q4_0: next-action agreement
       ≥ 90 % and a 20-question recall probe within 10 points (fail → q4_0 dead for the main model).
+      **Amended `2026-08-18` — the cell was written as a *fit* question and needs three corrections.**
+      (i) **The corpus is too shallow**: 47–76K predates the growth; run it at the depths we actually
+      serve, 110–140K. (ii) **A reasoning probe is mandatory** — a `think=high` task at ≥110K scored
+      against the **f16** run, because the specific damage attributed to naive low-bit KV is error
+      accumulation across long reasoning, and both the recall and next-action probes would pass a model
+      that has quietly become worse at thinking. (iii) **The asymmetric variant is the interesting one,
+      and its direction is the reverse of the folklore**: on 500 deterministic ARC-Challenge questions
+      `q4_0` on **K alone** reproduced the full collapse while `q4_0` on **V alone** changed 1/500, so
+      `K q8_0 / V q4_0` is what to measure (llama.cpp discussion #23470, external, unverified here).
+      The same source measures this model as among the least affected — Qwen3.8-27B **3/500** at
+      `q4_0` K+V, against Qwen2.5-7B's 375/500 — which is where `q4_0`'s reputation comes from.
+      Two operational notes: `OLLAMA_KV_CACHE_TYPE` is **daemon-wide**, so measuring it changes the KV
+      type for every model at once and each variant costs a restart (the prompt cache goes with it);
+      and the MTP draft keeps its own **f16** 1 024 MiB cache that no KV setting touches. The plan is
+      `ideas/dpc-research/kv-quantisation-test-plan.md`.
 - [ ] **Provider parity** — `generate_with_tools`, vision via `image_url`, `generate_response_stream`,
       the effort ordinal with the "less, never more" precedence, `get_last_usage` via the base
       contract; a silently ignored `reasoning_effort` fails this item.
@@ -583,6 +606,9 @@ Compliance, not progress — each item is a measurement with a stated failing re
 | `llamacpp_server` provider + supervisor + fetcher + UI | Pending — timing depends on Open Question 1 | — |
 | `ProviderLimits` on local aliases; remote-share rule | Pending | — |
 | Backlog: re-title, two amendments, four new entries | Done 2026-08-18 — CC (the board is gitignored) | — |
+| Round 3 (Fable 5, GLM 5.3) on the allocation section; the section rewritten, (F) added and put first, (A) demoted to throughput, the second-conversation reading retracted | Done 2026-08-18 — CC | this commit |
+| (F) prefix-stable prompt — F2 in `context.py`, two falsifiers | **Next** — pays on both paths | — |
+| Demand division: `events.jsonl` → engine-seconds/day against 86 400 (no GPU) | Before any hardware decision | — |
 
 ## First production reading (`2026-08-18 19:48`)
 
@@ -678,45 +704,122 @@ Every lever in Stage 0 was worth pulling and each did what it promised. None of 
 above, because all three are decisions about **who holds the card and in what order** — and nothing in
 DPC makes that decision today.
 
-### Candidate directions, none chosen
+### The directions, ordered by what round 3 measured (`rewritten 2026-08-18 after both reviews`)
 
-Listed so the round that reviews them argues against something concrete. They are not exclusive.
+The list below replaces the five unordered candidates this section first carried. Both reviewers read
+the same logs and the same sources independently; where they differ it is said so.
 
-- **(A) Slots.** Route (b) launched with `-np 2 --kv-unified` gives two conversations a home at once.
-  Cost is measured and unpaid: two slots at 262 144 do not fit beside a 28.3 GiB resident model at
-  `q8_0`, so the KV cell has to pass first. This is Step-3 and it is already scheduled.
-- **(B) A residency governor in DPC (D4-β).** It needs **two** numbers per model, not one — actual for
-  what is loaded (per-process committed, not `ollama ps`) and worst-case for what is planned (weights +
-  KV at full context + compute + margin). Judging by actual alone repeats the daemon's error mirrored
-  (Ark, 2026-08-18).
-- **(C) A shared prompt prefix across agents.** The cheapest of the five and the only one needing no
-  engine work: today every agent's message list opens with its own `system_prompt.md`
-  (`context.py:655`; johnny 23 842 bytes, kotler 10 549, iris 1 832 — they diverge at byte 3), so two
-  agents share no prefix and cross-agent cache reuse is **zero by construction**. Put a common preamble
-  first and the agent's identity after it, and the shared part becomes reusable. The cost is real: it
-  fights the three-block `cache_control` layout that the Anthropic path relies on, and the saving is
-  bounded by how much of the prompt can honestly be common.
-- **(D) Temporal locality instead of fairness.** If a switch costs ~118 s of prefill, a scheduler that
-  groups one agent's turns together amortises it, where round-robin pays it every time. This is policy
-  in DPC's queue, needs no engine and no new numbers — and it is the only option here that helps even
-  while a single slot remains.
-- **(E) Fewer distinct local models.** The eviction observed was between two *different* models on one
-  card. A fleet served by one local alias evicts nothing; the cost is that per-agent model choice stops
-  being free. Partly true today by accident — three agents share `qwen3.8:latest`.
+- **(F) A prefix-stable prompt within an agent — first, and the precondition for the rest.** Per-turn
+  content (Active Recall, the runtime block) moves **inside the last user message** as a pure append,
+  replayed byte-identically as history next turn (**F2**). Merely relocating the block behind the
+  history (**F1**) does not work on this model: the divergence moves to end-of-history while the
+  previous turn's checkpoints sit at `n-517` / `n-5` of the *previous* prompt — inside the old dynamic
+  tail, after the divergence — so the recurrent state cannot be rolled back and the engine re-prefills
+  from 0. Under route (b), upstream's user-boundary checkpoints (`message_delimiters`, needs `--jinja`)
+  make even F1 cheap; Ollama launches `--no-jinja` and never sees messages.
+  **Requirement, and it is a contract change:** history must store what was *sent*, not what the user
+  typed. **Two falsifiers, not one** — a returning turn's `prompt_tps` leaves the 850-950 band, *and*
+  the conversation behaves the same (tool loop intact, per-turn content honestly reproduced). The first
+  measures speed; what would break is correctness.
+  **It pays on the paid path too:** on DeepSeek the same layout produces a constant per-agent cache hit
+  (Warren 28 928, Ark 32 768 — the block-aligned [static + memory + KB] prefix) and a miss equal to the
+  whole history, about **$0.7-1.4 of a $5.3 day, 15-30 %** (Fable §1.4, `Observed` counts, `Inferred`
+  price). ~50-100 lines in `context.py` plus one `cache_control` on the last user message.
+- **(E) One local model — second, and decided by arithmetic rather than preference.** `qwen3.8` at
+  262 144 is **28.0 GiB** by the loader's own buffers and `muse-glimmer` at 131 072 is **16.5 GiB**;
+  44.5 GiB against a 32.6 GiB card. They cannot co-reside **at any context**, so a two-model local fleet
+  evicts by construction and no governor can co-schedule them — only refuse or delay. Three of nine
+  agents already share `qwen3.8`; seven of nine already share one remote alias. Per-agent model choice
+  was never free on one card; it was free while one agent used the card. This is the only direction that
+  removes a **class** rather than reducing a cost.
+- **(B) A residency governor — third, and cheaper than it looked.** The worst case does **not** need the
+  daemon's estimate: KV, the recurrent state, the draft context and the compute buffers are allocated
+  **in full at load**, so the per-process committed figure a few seconds after `model loaded` *is* the
+  worst case for that (model, `n_ctx`, KV type, `np`) tuple (Fable §2.2). The actual-vs-worst-case split
+  is real only for engines that grow KV lazily; llama.cpp is not one. A second source exists for the
+  no-load case: `common/fit.cpp` computes model+context+compute+overhead from GGUF metadata with
+  `LLAMA_LOAD_MODE_NONE` and `no_alloc` — and **D3's flag list contains `-fit off`, which discards it**
+  (GLM). The right shape: compute the verdict *before* spawn, refuse in DPC, then launch with `-fit off`
+  so nothing is silently shrunk. Two holes to write down: the governor owns only the children it spawns,
+  so the Ollama path it does not own can still thrash (GLM); and the budget it must hold is **host RAM**
+  as much as VRAM — 6-7 GiB per parked 110K conversation today, 10-15 GiB under (b) with boundary
+  checkpoints, against 31.8 GiB free.
+- **(A) Slots — a throughput lever, not what decides what fits.** This section previously called it the
+  binding constraint; both reviewers refuted that. Two shapes, and the ADR had conflated them:
+  **two slots at 262 144 each** is ~38.5 GiB at `q8_0` — not reachable; at `q4_0` KV ~30.3 GiB, on
+  paper, with ~2 GiB of margin and nothing left for a second model or a vision batch. **`-np 2
+  --kv-unified -c 262144`** costs ~+0.75 GiB and fits trivially — but the pool is **shared**, so two
+  conversations have 262 144 *between* them, which shrinks the Decision Drivers' floor by construction
+  the moment it succeeds; and tonight's own numbers (138 028 + 123 574) already exceed it, turning a
+  load-time refusal into a **mid-conversation failure**. What (A) genuinely buys, once two or more local
+  agents are active, is **concurrent decode** — 140-430 s of a turn is decode, and one slot serves one
+  agent's 36 tok/s at a time. Prefill is compute-bound and gains nothing.
+- **(C) A shared prompt prefix across agents — declined, with the mechanism.** The honest shared
+  preamble is ~1-3K tokens of a 107K prompt, so cross-agent reuse is **at most 5 % of what (F)
+  recovers** (Fable), and the valuable half — keeping a parked conversation's checkpoints across an
+  interleave — is destroyed by an erasure rule that does not look at prefixes at all:
+  `server-context.cpp:3293-3302` erases every checkpoint with `pos_max > pos_next` on lineage
+  divergence (GLM, source). On this model it also cannot be cashed without a checkpoint at the
+  preamble's end, which the Ollama build never creates. The failure nobody had named: a shared block is
+  a shared asset — one edit invalidates every agent's cache on both paths at once.
+- **(D) Temporal locality — declined as posed.** Within one model the interleave now costs the
+  returning agent **8.5 s**, measured, not 118; the ~120 s per new turn is layout, which is (F). Across
+  models it has a payload, but that payload *is* (E)'s premise paid in latency instead of in model
+  choice. And the human-facing version breaks at the moment of maximum pressure: a lever that must be
+  switched off when a person is waiting is not a lever.
 
-- **(F) A stable prefix — added by round 3, and it is the one that pays.** Not on the original list
-  because the list was built on the misreading retracted above. Per-turn content moves into the last
-  user message as a **pure append**, replayed byte-identically; simply relocating the block behind the
-  history (F1) does not work on this hybrid model, because the recurrent state cannot be rolled back to
-  an arbitrary divergence and the engine places checkpoints only at `n−517` / `n−5`. It pays on the
-  **paid** path too — Fable measured constant cache hits of 28 928 / 32 768 tokens with the whole
-  history missing, ≈ $0.7–1.4 of a $5.3 day.
+### What round 3 overturned in this document
 
-`Round 3` answered: **(F) first, then the rest.** Both reviewers broke the section's own conclusion —
-slots are a throughput lever, not what decides *what fits* — and (A) as written is not reachable at
-`q8_0` at all. The order that follows from their arithmetic is (F) → a demand measurement (engine-seconds
-per day against the card's 86 400) → Stage 2 or a second card, with Step-3 measuring throughput rather
-than gating the route.
+1. **«The binding constraint is slots, not cache RAM» is withdrawn.** The binding constraint is the
+   prompt layout, then host RAM per parked conversation, then two-model residency. Slots are throughput.
+2. **The cache is not lost to a second conversation.** It was lost to the agent's own next turn, and
+   the interleave described here as fatal was **survived fifteen minutes earlier at 8.5 s**:
+   `lcp = 107842, f_keep = 0.949`, checkpoint restored, 4 856 tokens re-prefilled (Fable §1.2,
+   `Observed`). The «seven consecutive turns» quoted above were tool rounds **inside one turn**.
+3. **The 28.3 GiB is fully accounted for by the child.** model 15 339 + KV 8 704 + RS 748 + compute
+   1 360 + draft KV 1 024 + draft compute 324 + projector ~888 + 248 = about **28 636 MiB**; the WDDM
+   counter reads 28 934 and the residual ~300 MiB is the CUDA context. `common_memory_breakdown_print`'s
+   26 151 omits the draft context and the projector. Only two numbers are wrong, and both are the
+   daemon's: `ollama ps` 17.27 and `sched.go` 69.7.
+4. **The log's «SWA or hybrid/recurrent memory» hint is boilerplate** baked into the call site
+   (`server-context.cpp:3286`, GLM) — it prints on any prefix mismatch and diagnoses nothing. The model
+   *is* hybrid (16 attention + 48 Gated-DeltaNet, `llama_memory_recurrent: 748.13 MiB`), and that is
+   what makes rollback impossible — but the loader lines prove it, not the hint.
+5. **The 20:17 eviction was arithmetic, not a broken pin.** The card was empty at 20:15:06 (the
+   five-minute TTL had expired before the restart that sends `keep_alive: -1` landed); `muse-glimmer`
+   loaded, then `qwen3.8` was asked for and evicted it. With the correct footprint (28.0) the decision
+   is the same: 28.0 > 15.0 available.
+
+### The framing question, answered
+
+Not by fewer agents. The card's own volume is **4-6 h/day with a stable prefix and 10-12 h/day without**
+(Fable, from `events.jsonl` against tonight's rates), so throughput is not what blocks nine agents. What
+blocks them is **residency** (two 27B-class models), **latency** (serial 36 tok/s decode with
+`think=high`) and **host RAM for parked state** (6-7 GiB per 110K conversation — three fit in the 24 GiB
+cache, not nine). GLM reaches the neighbouring conclusion from the capacity side — the card holds ~1.1
+full-depth conversations at `q8_0`, ~2.1 at `q4_0`, an operating point of 2-3 interactive agents plus
+night batch — and proposes the demand division (`events.jsonl` to engine-seconds/day against 86 400) as
+the measurement that decides between an operating point, renting, and a second card. **Both are right
+and they are not the same question:** one prices what is wasted now, the other sizes what is needed. Do
+(F) first; run the demand division before any hardware decision.
+
+### Route (c) re-examined at Mike's request, and refused again
+
+Both reviewers re-opened vLLM against the round-3 findings and both closed it, with two of the original
+three objections corrected. What kills it here is arithmetic, not taste: the lightest vLLM-loadable
+4-bit of this model is **18.21 GiB** against our GGUF's 15.65 (every safetensors quant on the Hub is
+2.6-6 GiB heavier), which leaves ~6 GiB of KV pool on this card — under one Johnny-sized conversation at
+bf16, and `--max-model-len 262144` does not start at all. Windows means Docker Desktop over WSL2 and a
+second CUDA stack. What is genuinely corrected: a declared hard reservation is the residency contract
+(B) is trying to rebuild, and vLLM's paged KV with LRU eviction is a scheduler under whose terms
+findings 1 and 3 cannot occur. **Reopen conditions, named:** a headless Linux GPU host, or a product
+decision to serve many peers from one host, or a sub-16 GiB vLLM-loadable artefact measured equal to
+Q4_K_M at 262K. `KVarN` (a vLLM 0.23.0 fork with 4-bit-key / 2-bit-value KV, validated on the previous
+release of this very architecture) removes the capacity half of that arithmetic — ~13-16 KiB per token
+against our 34 — and leaves platform, artefact, fork-risk (last commit 2026-06-22) and start-up in
+place. Its transferable lesson belongs to the KV cell below, not to route (c): naive low-bit KV is
+claimed to cost accuracy specifically as **error accumulation in long reasoning**, which is the regime
+these agents live in and which no fit test can see.
 
 ## Open Questions
 
