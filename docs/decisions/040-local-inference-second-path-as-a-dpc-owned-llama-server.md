@@ -140,8 +140,13 @@ lever's falsifier gives a false negative):
   `_ensure_config_exists` (`:171`) seeds `ollama_vision` into every fresh `providers.json` and a small
   separate vision model remains the right default for a node without a 27B.
 - **0d** — `bge-m3` off the GPU: an `embedding_device` field on `MemoryConfig`
-  (`memory_config.py:14-30`, none today) passed to `get_embedding_provider(device=…)` at its five call
-  sites. Banks ~1.6–1.7 GiB; CPU cost measured at 55 ms per sentence, 537 ms per ~800-token chunk
+  (`memory_config.py:14-30`, none today) passed to `get_embedding_provider(device=…)` at its call
+  sites. **Errata 2026-08-18: six, not five.** The count in the draft came from an earlier reading; a
+  repo-wide enumeration while implementing it found `managers/agent_manager.py:364` as well — the eager
+  index pass, the heaviest of the six. And the field could not live only there: the agent builds the
+  per-process singleton in its own constructor (`agent.py:164`), which runs before the manager reads
+  `MemoryConfig` at all, so the device travels on `AgentConfig` too or it applies to nothing on the live
+  path. Shipped in `bbdcf877`. Banks ~1.6–1.7 GiB; CPU cost measured at 55 ms per sentence, 537 ms per ~800-token chunk
   (`Observed`, Fable 5 §1.10). Also expected to give Step-3 the headroom a second slot needs.
 - **0e** — the host prompt cache above its 8 192 MiB default, via `LLAMA_ARG_CACHE_RAM` in the Ollama
   service environment. **`Round 2, 2026-08-18`: no longer a hypothesis, and it is the lever of the
@@ -454,8 +459,8 @@ Compliance, not progress — each item is a measurement with a stated failing re
   paths (0a).
 - `dpc-client/core/dpc_client_core/llm_manager.py` — auto-selection prefers the agent's own
   vision-capable resident provider (0b); `PROVIDER_MAP` entry (Stage 2).
-- `dpc-client/core/dpc_client_core/dpc_agent/memory_config.py`, `dpc_agent/memory.py`, the five
-  `get_embedding_provider` call sites — `embedding_device` (0d).
+- `dpc-client/core/dpc_client_core/dpc_agent/memory_config.py`, `dpc_agent/memory.py`, `dpc_agent/agent.py`
+  and the six `get_embedding_provider` call sites — `embedding_device` (0d, shipped `bbdcf877`).
 - `~/.dpc/providers.json` (this box) — `vision_provider`, `keep_alive` on the 27B alias (0a/0b).
 - `dpc-client/core/dpc_client_core/providers/base.py` — usage contract (Stage 2 precondition).
 - `dpc-client/core/dpc_client_core/providers/llamacpp_server_provider.py` — new (Stage 2).
