@@ -733,6 +733,13 @@ def build_llm_messages(
     user_content = _build_user_content(task)
     if isinstance(user_content, str):
         if isinstance(trigger_record, dict) and trigger_record.get("msg_index"):
+            # The body too, not only the marker: dispatchers hand the agent
+            # "[sender]: text" while the history keeps "text", so rendering the task
+            # text here would differ from the same message rendered as history next
+            # turn — found by Johnny running the shipped code, 2026-08-19.
+            body = trigger_record.get("content")
+            if isinstance(body, str) and body.strip():
+                user_content = body
             user_content = history_prefix(trigger_record) + user_content
         else:
             next_idx = max((m.get("msg_index", 0) for m in conversation_history), default=0) + 1 if conversation_history else 1

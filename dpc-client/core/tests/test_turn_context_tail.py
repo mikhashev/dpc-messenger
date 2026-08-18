@@ -61,11 +61,14 @@ class TestPromptIsAPureAppend:
     def test_next_turn_starts_with_previous_turn_byte_for_byte(self, agent_root, clocks):
         store = SentAnnotationStore(agent_root)
         conv = "agent_001"
+        # The dispatcher's form, not a tidy one: the group path hands the agent
+        # "[sender]: text" while the history keeps "text" (service.py, group_handler).
         rec1 = {"id": "u1", "msg_index": 1, "timestamp": "2026-08-19T10:00:00+00:00",
-                "sender_name": "Mike"}
+                "sender_name": "Mike", "content": "hello"}
 
         # turn 1: no history, the trigger record is known
-        m1, cap1 = _build(agent_root, conv, "hello", None, trigger_record=rec1)
+        m1, cap1 = _build(agent_root, conv, "[Mike]: hello", None, trigger_record=rec1)
+        assert m1[-1]["content"].startswith("[#1 | 10:00:00 | Mike] hello\n\n")
         tail1 = cap1["turn_context"]
         assert tail1.startswith("\n\n" + TURN_CONTEXT_OPEN) and tail1.endswith(TURN_CONTEXT_CLOSE)
         assert "10:00:00" in tail1  # the runtime block carries the first clock
@@ -80,8 +83,8 @@ class TestPromptIsAPureAppend:
              "timestamp": "2026-08-19T10:04:00+00:00"},
         ]
         rec2 = {"id": "u2", "msg_index": 3, "timestamp": "2026-08-19T10:05:00+00:00",
-                "sender_name": "Mike"}
-        m2, cap2 = _build(agent_root, conv, "second question", history,
+                "sender_name": "Mike", "content": "second question"}
+        m2, cap2 = _build(agent_root, conv, "[Mike]: second question", history,
                           annotations=store.load(conv), trigger_record=rec2)
 
         # The whole of turn 1 is a prefix of turn 2 — system block, and the user
@@ -126,6 +129,19 @@ class TestWhatTheModelIsShown:
         assert content.startswith("[#1 | 10:00:00 | Mike] what is up\n\n" + TURN_CONTEXT_OPEN)
         assert content.count(TURN_CONTEXT_OPEN) == 1 and content.endswith(TURN_CONTEXT_CLOSE)
         assert "## Runtime context" in cap["turn_context"]
+
+    def test_body_comes_from_the_record_that_becomes_history(self, agent_root, clocks):
+        """Johnny's repro on b43c44ec: the group dispatcher sends "[sender]: text",
+        the history keeps "text" — the marker matched, the body did not, and the
+        prefix broke a few bytes before the tail every turn."""
+        rec = {"id": "m14", "msg_index": 14, "timestamp": "2026-08-19T18:14:33+00:00",
+               "sender_name": "Mike Windows PC", "content": "@ALL ревью того что CC сделал"}
+        m, _ = _build(agent_root, "group-x", "[Mike Windows PC]: @ALL ревью того что CC сделал",
+                      None, trigger_record=rec)
+        current = m[-1]["content"].split("\n\n" + TURN_CONTEXT_OPEN)[0]
+        as_history = history_prefix(rec) + rec["content"]
+        assert current == as_history
+        assert "[Mike Windows PC]: [" not in current and current.count("Mike Windows PC") == 1
 
     def test_image_message_keeps_its_image_and_gets_the_tail_in_text(self, agent_root, clocks):
         task = {"id": "agent_001", "type": "chat", "text": "look",
