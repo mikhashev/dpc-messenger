@@ -181,3 +181,73 @@ async def test_a_zero_duration_is_not_divided_by(caplog):
 
     assert "prompt_tps=n/a" in caplog.text
     assert "load_ms=0" in caplog.text
+
+
+# ─────────────────────────────────────────────────────────────
+# 0a of ADR-040: the residency hint reached one path of three
+# ─────────────────────────────────────────────────────────────
+
+class _Capture:
+    """Records what each path hands the daemon, and answers like a daemon."""
+
+    def __init__(self):
+        self.seen = []
+
+    def __call__(self, **kwargs):
+        self.seen.append(kwargs)
+
+        async def _run():
+            return _Resp(_Msg("ok"), prompt_eval_count=1, eval_count=1, done_reason="stop")
+        return _run()
+
+
+@pytest.mark.asyncio
+async def test_a_configured_keep_alive_reaches_the_plain_path():
+    """Only the vision path ever sent it, so the model an agent talks to all day
+    was the one model with no residency hint at all — it fell to the daemon's
+    five-minute TTL and the next turn paid the prefill (ADR-040 0a)."""
+    provider = _make({"keep_alive": -1})
+    cap = _Capture()
+    provider.client.chat = cap
+
+    await provider.generate_response("hi")
+
+    assert cap.seen[0]["keep_alive"] == -1
+
+
+@pytest.mark.asyncio
+async def test_a_configured_keep_alive_reaches_the_tools_path():
+    provider = _make({"keep_alive": -1})
+    cap = _Capture()
+    provider.client.chat = cap
+
+    await provider.generate_with_tools(messages=[{"role": "user", "content": "x"}], tools=[])
+
+    assert cap.seen[0]["keep_alive"] == -1
+
+
+@pytest.mark.asyncio
+async def test_an_alias_that_says_nothing_sends_nothing():
+    """An unset value must not become a number: `keep_alive=0` unloads the model
+    immediately, which is the opposite of what this lever is for. The client
+    omits the field when it is None."""
+    provider = _make()
+    cap = _Capture()
+    provider.client.chat = cap
+
+    await provider.generate_response("hi")
+
+    assert cap.seen[0]["keep_alive"] is None
+
+
+@pytest.mark.asyncio
+async def test_the_vision_path_keeps_its_own_separate_value():
+    """`vision_keep_alive` is a different tenant's residency and stays its own
+    setting — the point of 0b is that the two models need not both be resident."""
+    provider = _make({"keep_alive": -1, "vision_keep_alive": "30s"})
+    cap = _Capture()
+    provider.client.chat = cap
+
+    await provider.generate_with_vision("describe", [{"base64": "aGk="}])
+
+    assert cap.seen[0]["keep_alive"] == "30s"

@@ -439,6 +439,13 @@ class OllamaProvider(AIProvider):
                         messages=[message],
                         options=options,
                         think=self._think_flag(kwargs.get("reasoning_effort")),
+                        # The residency hint the vision path has always sent, on the
+                        # path an agent actually talks to all day (ADR-040 0a). It is
+                        # a TTL and not a pin — under memory pressure the daemon
+                        # evicts whatever it likes — so this stops the five-minute
+                        # idle unload and nothing more. None when unset, which the
+                        # client omits from the request.
+                        keep_alive=self.config.get("keep_alive"),
                     ),
                     timeout=timeout
                 )
@@ -655,6 +662,9 @@ class OllamaProvider(AIProvider):
                         tools=ollama_tools,
                         options=options,
                         think=self._think_flag(kwargs.get("reasoning_effort")),
+                        # See the plain path: same hint, same TTL-not-a-pin caveat.
+                        # This is the path the agent loop spends its day on.
+                        keep_alive=self.config.get("keep_alive"),
                     ),
                     timeout=timeout,
                 )
