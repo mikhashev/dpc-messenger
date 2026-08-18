@@ -641,6 +641,54 @@ RAM** — which is exactly what Step-3 measures (`-np 2 --kv-unified` at 262 144
 card two slots do not fit beside a 28.3 GiB resident model at q8_0 without the KV cell
 passing first. Filed as `TWO-CONVERSATIONS-ON-ONE-SLOT-DESTROY-EACH-OTHERS-CACHE`.
 
+## Allocation is not a configuration problem (`2026-08-18, evening`)
+
+Three observations from the day the bundle shipped, each measured on this box, converge on one
+statement — **allocation is not fixed by configuration** (Mike, 2026-08-18):
+
+1. **Checkpoints are erased on a prefix change**, not evicted for room: a second conversation
+   discarded 1.7 GiB of cached state and the first came back at 895 tok/s. No cache ceiling
+   addresses this.
+2. **The model is evicted when a second one is asked for**, `keep_alive: -1` notwithstanding:
+   `sched.go:551 — predicted to exceed available memory, evicting` at 20:17:21, two full loads in two
+   minutes between one agent on `qwen3.8` and another on `muse-glimmer`.
+3. **The daemon's numbers cannot be borrowed as a budget**: `ollama ps` reported 17.27 GiB for a model
+   holding 28.3 GiB by the per-process counter, and the pre-load path predicted 69.7 GiB for a load
+   that then measured 26.1 GiB by the engine's own breakdown at the same `n_ctx = 262144`.
+
+Every lever in Stage 0 was worth pulling and each did what it promised. None of them touches the
+above, because all three are decisions about **who holds the card and in what order** — and nothing in
+DPC makes that decision today.
+
+### Candidate directions, none chosen
+
+Listed so the round that reviews them argues against something concrete. They are not exclusive.
+
+- **(A) Slots.** Route (b) launched with `-np 2 --kv-unified` gives two conversations a home at once.
+  Cost is measured and unpaid: two slots at 262 144 do not fit beside a 28.3 GiB resident model at
+  `q8_0`, so the KV cell has to pass first. This is Step-3 and it is already scheduled.
+- **(B) A residency governor in DPC (D4-β).** It needs **two** numbers per model, not one — actual for
+  what is loaded (per-process committed, not `ollama ps`) and worst-case for what is planned (weights +
+  KV at full context + compute + margin). Judging by actual alone repeats the daemon's error mirrored
+  (Ark, 2026-08-18).
+- **(C) A shared prompt prefix across agents.** The cheapest of the five and the only one needing no
+  engine work: today every agent's message list opens with its own `system_prompt.md`
+  (`context.py:655`; johnny 23 842 bytes, kotler 10 549, iris 1 832 — they diverge at byte 3), so two
+  agents share no prefix and cross-agent cache reuse is **zero by construction**. Put a common preamble
+  first and the agent's identity after it, and the shared part becomes reusable. The cost is real: it
+  fights the three-block `cache_control` layout that the Anthropic path relies on, and the saving is
+  bounded by how much of the prompt can honestly be common.
+- **(D) Temporal locality instead of fairness.** If a switch costs ~118 s of prefill, a scheduler that
+  groups one agent's turns together amortises it, where round-robin pays it every time. This is policy
+  in DPC's queue, needs no engine and no new numbers — and it is the only option here that helps even
+  while a single slot remains.
+- **(E) Fewer distinct local models.** The eviction observed was between two *different* models on one
+  card. A fleet served by one local alias evicts nothing; the cost is that per-agent model choice stops
+  being free. Partly true today by accident — three agents share `qwen3.8:latest`.
+
+`Round 3` question for the external reviewers: which of these is load-bearing, and which is a fix that
+looks like a fix.
+
 ## Open Questions
 
 - **Q1 — DeepSeek top-up: yes / no / how much. `Round 2, 2026-08-18`: the threshold has fired and the
