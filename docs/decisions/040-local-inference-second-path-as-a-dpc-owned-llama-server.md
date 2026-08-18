@@ -65,6 +65,12 @@ this machine (RTX PRO 4500 Blackwell, 32 623 MiB; Ollama 0.32.14; one process, n
    5-minute keep-alive expiry, plus `qwen3-vl:8b` loads for image pre-analysis via
    `vision_provider=ollama_vision`); a single 164 494-token prefill took 293 s (`Observed`,
    Fable 5 §1.5). The 27B itself loads in 4.0–4.8 s.
+   **Errata 2026-08-18, first D4-T line in production: 9.5 s, not 4.0–4.8.** `load_ms=9472` on a
+   `qwen3.8:latest` load, and the daemon's own log names the two reasons the earlier figure did not
+   carry: the multimodal projector (888 MiB) loads with it, and `disabling mmap for llama-server load
+   by default … reason=windows_cuda` means the weights are read rather than mapped (`Observed`). The
+   direction of the argument is unchanged — a load is seconds and a cold prefill is minutes — but the
+   ratio is 12:1, not 25:1.
 6. **The daemon's residency arithmetic is 10 GiB short.** `ollama ps` reports 18 GB for a load whose
    own buffers sum to 27.1 GiB; on that estimate the scheduler co-schedules `qwen3-vl` "alongside" a
    card with ~0.4 GiB free (`Observed`, Fable 5 §1.4). Per-process WDDM counters partition the card:
@@ -560,7 +566,8 @@ Compliance, not progress — each item is a measurement with a stated failing re
 | Task | Status | Commit |
 |------|--------|--------|
 | D4-0: provider in the gate, host-designated `compute.serving_alias` (the peer's `provider` ignored), only the serving alias advertised, peer-request log line, orphan-drop log, three ceilings → 1200, semaphore, `serving_alias` field in the firewall UI | Shipped 2026-08-18 — awaiting prod observation | `c1642362` |
-| D4-T: the tokens/s row on `_log_usage` (one line; the other three series are not in scope) | Shipped 2026-08-18 — awaiting prod observation | `c1642362` |
+| D4-T: the tokens/s row on `_log_usage` (one line; the other three series are not in scope) | **Observed in production 2026-08-18 19:48** — see below | `c1642362` |
+| Stage 0 bundle: 0a `keep_alive` on plain and tools + `keep_alive: -1` on the 27B alias; 0b `vision_provider` → `qwen3.8:latest`; 0d shipped `bbdcf877` | Shipped 2026-08-18 — awaiting the restart that loads it | `4c03b012` |
 | Stage 0 bundle 0a+0b+0d, one commit; **0e** is Mike's environment variable on the box (24 GiB) | Pending — after D4-0 + D4-T | — |
 | Stage 1 NVFP4-GGUF via `ollama create`, measured vs Q4_K_M/IQ4_XS at 262K | Pending — production window (27B out) | — |
 | Step-3: route (b) on the card at 262K, 2 unified slots (after 0d) | Pending — production window (27B in), read second load | — |
@@ -569,6 +576,36 @@ Compliance, not progress — each item is a measurement with a stated failing re
 | `llamacpp_server` provider + supervisor + fetcher + UI | Pending — timing depends on Open Question 1 | — |
 | `ProviderLimits` on local aliases; remote-share rule | Pending | — |
 | Backlog: re-title, two amendments, four new entries | Done 2026-08-18 — CC (the board is gitignored) | — |
+
+## First production reading (`2026-08-18 19:48`)
+
+The first `_log_usage` line carrying the D4-T fields, on a live agent turn (Johnny, moved to
+`qwen3.8:latest` the same hour):
+
+```
+Ollama usage: alias=qwen3.8:latest model=qwen3.8:latest prompt=107508 completion=5090
+              thinking_chars=17576 done=stop prompt_tps=906.8 eval_tps=36.3 load_ms=9472 path=tools
+```
+
+Read out: a **107 508-token** prompt prefilled at 906.8 tok/s = **118.6 s**; 5 090 tokens generated at
+36.3 tok/s = **140.2 s**; the model loaded in **9.5 s**. Sum **268.2 s** against **268.7 s** of wall
+clock (19:44:05.4 → 19:48:34.1) — the three durations reconstruct the whole call to within half a
+second, which is as much a check of the telemetry line as of the engine.
+
+Three things this fixes in the document:
+
+1. **The cost of the TTL is now a number on this box, not a reconstruction.** `ollama ps` showed
+   `until` five minutes out on the same model, because 0a had not shipped yet: had Johnny paused, his
+   next turn would have paid that 118 s again for a prompt already computed. This is the wall D1 is
+   about, measured on one agent in one turn.
+2. **The load figure is corrected** — 9.5 s, see the errata in Context §5.
+3. **Q9 gets its first data point.** At `think=high` the turn produced 17 576 characters of reasoning
+   alongside 5 090 answer tokens, so a large share of the generation time is the think tax the vision
+   move (0b) now takes on by default.
+
+Also confirmed in the same window, closing the 0e cell of the bundle falsifier:
+`srv load_model: prompt cache is enabled, size limit: 24576 MiB` — the environment variable reaches
+the child and the value format (a plain integer in MiB) is right.
 
 ## Open Questions
 
