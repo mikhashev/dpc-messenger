@@ -135,10 +135,19 @@ lever's falsifier gives a false negative):
   0a: it stops the five-minute unload, and what protects residency is removing the second tenant (0b) —
   not the flag.
 - **0b** — `vision_provider` on this box → `qwen3.8:latest` (already vision-capable and resident);
-  and the durable form: in `llm_manager.query` auto-selection (`llm_manager.py:591-593`), prefer the
-  requesting agent's own provider when it `supports_vision()` and is resident, because
-  `_ensure_config_exists` (`:171`) seeds `ollama_vision` into every fresh `providers.json` and a small
-  separate vision model remains the right default for a node without a 27B.
+  and the durable form, because `_ensure_config_exists` (`:171`) seeds `ollama_vision` into every fresh
+  `providers.json` and a small separate vision model remains the right default for a node without a 27B.
+  **`Round 2 answers, 2026-08-18`: the durable form belongs to the caller, not to `query`.** The draft
+  put it in `llm_manager.query` auto-selection (`:591-593`), and two facts refuse that: `query(prompt,
+  provider_alias=None, return_metadata, images, **kwargs)` carries **no caller identity** — every call
+  site passes `None` (`llm_adapter.py:846`, sleep pipeline, tools) — and **resident-detection does not
+  exist** anywhere in core (`/api/ps` is called nowhere) (`Observed`, Johnny round 2, re-read by CC).
+  Making `query` prefer "the requesting agent's own provider when resident" therefore means adding an
+  identity parameter to a contract every caller uses, plus a residency probe that has no
+  implementation — not the ~30 lines the draft assumed. **The vision pre-analysis call site passes the
+  requesting agent's own `provider_alias` instead of `None`;** `query` and its other callers are
+  untouched. The config change above is what works on this box today; the durable form is for a node
+  that has no 27B.
 - **0d** — `bge-m3` off the GPU: an `embedding_device` field on `MemoryConfig`
   (`memory_config.py:14-30`, none today) passed to `get_embedding_provider(device=…)` at its call
   sites. **Errata 2026-08-18: six, not five.** The count in the draft came from an earlier reading; a
@@ -159,6 +168,14 @@ lever's falsifier gives a false negative):
   is 65 % of the machine and leaves ~11 GiB for the OS, the browser and `bge-m3` once 0d moves it to
   CPU. Fable's own round-1 figure — «≥ 24 GiB holds five agents' entries» — is the right first step
   (Johnny, round 2); 40 GiB belongs to the day the fleet actually migrates.
+  **Value format (`Round 2 answers, 2026-08-18`), read from the shipped binary's own `--help` rather
+  than assumed:** `-cram, --cache-ram N — set the maximum cache size in MiB (default: 8192, -1 - no
+  limit, 0 - disable) (env: LLAMA_ARG_CACHE_RAM)`. The value is a **plain integer in MiB**, so 24 GiB
+  is `LLAMA_ARG_CACHE_RAM=24576` — not `24GiB`, not `24G` (`Observed`). This mattered because a wrong
+  format shows the default 8 GiB in the "prompt cache … size limit" line and would be misread as "the
+  variable never reached the child", which Q7 has already answered. One neighbouring flag is worth
+  recording with it: `--cache-idle-slots` is **on by default and requires `cache-ram`**, so raising the
+  ceiling also gives idle-slot saving somewhere to work for the first time.
 
 Falsifier for the bundle: if request-#1-to-#3-after-launch prefills persist at the same rate after
 the bundle, the residual cost is cross-agent cache eviction and the cache size (0e, or per-alias
@@ -249,8 +266,20 @@ confirmed independently by Ark and by CC on the logs). Four defects, each closed
   check that examined nothing. Filling `compute.allowed_models` does not close it: with `model=None`
   that branch never runs. (An empty `allowed_models` meaning *all models* is intended and the UI says
   so — that is not the defect.) With both fields omitted the alias falls to `default_provider`, which
-  on this box is paid. **Fix: the provider alias goes into the gate, and the shared alias is never
-  `default_provider`.**
+  on this box is paid.
+  **`Round 2 answers, 2026-08-18`: the draft's fix — "the shared alias is never `default_provider`" —
+  is withdrawn; it is a fix that looks like a fix.** It closes only the both-fields-empty fallback.
+  `providers.json` on this box holds 16 aliases, **two** of them DeepSeek, and `default_provider` is
+  `deepseek_flash` (`Observed`); a peer naming `deepseek_pro` is not the default and passes (Johnny,
+  round 2). **Fix as decided (Mike, 2026-08-18): the peer does not name the alias at all.** The host
+  designates what it serves — a single `compute.serving_alias` in `privacy_rules.json`; the request's
+  `provider` field is ignored, and when `serving_alias` is unset the request is refused with a stated
+  reason rather than served by whatever the router would have picked. `model` still travels and the
+  existing `allowed_models` gate is unchanged. A list (`compute.allowed_providers`) was considered and
+  rejected: `allowed_models` already means *all* when empty and the UI declares it, so a second list
+  with the opposite empty-semantics is a trap that re-opens this same hole the first time someone
+  leaves it blank. One named alias has one reading. This is also what D4 means by governable — the
+  host allocates, not the caller.
 - **A peer's request is billed to nobody.** It belongs to no agent, so it writes no row in
   `events.jsonl` and appears in no cost series. One log line in `handle_inference_request` closes the
   record.
@@ -303,6 +332,18 @@ already carries `load_duration`, `prompt_eval_duration` and `eval_duration` and 
 (`~/.dpc/agents/<id>/logs/events.jsonl`, tariffed by `dpc_agent/pricing.py`) — the gap is the four
 series above, and the peer requests that belong to no agent (D4-0). Filed as
 `THE-LEVERS-WE-ARE-ABOUT-TO-PULL-CANNOT-BE-TOLD-APART-IN-PRODUCTION`.
+
+**`Round 2 answers, 2026-08-18`: what D4-T actually ships, because "~100 lines" bought one row of four.**
+Of the four series named above, exactly one is reachable from what DPC already receives: `load_duration`,
+`prompt_eval_duration` and `eval_duration` on `ChatResponse` → **tokens/s at depth**, one line added to
+`_log_usage` (`ollama_provider.py:364-383`). The other three have no source in the process: **queue wait**
+does not exist until there is a queue (D4-β); **swap counts and evictions** live in Ollama's `server.log`,
+which DPC does not read anywhere — 0 matches for `server.log` across core (`Observed`, Johnny round 2);
+**VRAM headroom** lives in the WDDM per-process counters, outside the SDK entirely. So **D4-T = the
+tokens/s row plus the peer-request accounting line from D4-0**, and nothing else is promised here. A
+`server.log` reader (who reads, what it greps, where it writes — AP-11) is its own entry with its own
+size; without it the bundle's falsifier stays a hand-run `awk`, which is exactly the deficiency named
+above and is hereby carried forward rather than quietly declared closed.
 
 ### D5 — Fleet: the provider is a per-node capability, not a fleet uniform
 
@@ -424,6 +465,22 @@ GGUF, so configuration names a **GGUF path per node**.
 
 Compliance, not progress — each item is a measurement with a stated failing result:
 
+- [ ] **D4-0 (`Round 2 answers, 2026-08-18`; the draft had no cell for it, Johnny round 2)** — three
+      measurements, each with its failing result. **(1)** A peer request carrying `provider` and no
+      `model` is **refused**, and a request carrying a `provider` that is not `compute.serving_alias`
+      is refused too — a test that does not exist today (`test_p2p_coordinator.py` covers only
+      deny/allow by model) and that must be red before the change (fail: it passes on the unchanged
+      code → the test is asserting the old behaviour, not the new rule). **(2)** An allowed peer
+      request writes one accounting line naming the peer, the serving alias and the token counts (fail:
+      the shared path is still billed to nobody, which is the defect this item exists for). **(3)** A
+      response arriving after its `request_id` has been discarded produces a log line rather than
+      silence (fail: `inference_handler.py` still returns on the `if` with no `else`). The prod signal
+      is deliberately *not* the falsifier: the shared path carried two requests in eleven days, so
+      waiting on production here would be waiting on nothing.
+- [ ] **D4-T** — after the first agent turn, one line carries tokens/s at depth derived from
+      `load_duration`/`prompt_eval_duration`/`eval_duration` (fail: the fields are absent from the row →
+      the SDK's durations are not being read, and every later comparison of the levers is unmeasurable).
+      The other three series named in D4-T are explicitly **not** part of this cell.
 - [ ] **Stage 0 bundle** — after one day: request-#1-to-#3-after-launch prefills >10K tokens are gone
       from the Ollama log (fail: same rate → cross-agent eviction, cache size is the lever);
       `qwen3-vl` launches are zero on this box; `python.exe` dedicated usage by the WDDM counter drops
@@ -466,16 +523,19 @@ Compliance, not progress — each item is a measurement with a stated failing re
 - `dpc-client/core/dpc_client_core/providers/llamacpp_server_provider.py` — new (Stage 2).
 - `dpc-client/core/dpc_client_core/managers/llama_server_supervisor.py` — new: spawn/health/drain,
   residency policy, binary fetcher (Stage 2).
-- `dpc-client/core/dpc_client_core/p2p_coordinator.py` — provider alias into the firewall call, shared
-  alias never `default_provider`, semaphore, peer-request log line, ceiling 240 → 1200 (D4-0).
-- `dpc-client/core/dpc_client_core/firewall.py` — `can_request_inference` takes the provider (D4-0).
+- `dpc-client/core/dpc_client_core/p2p_coordinator.py` — the peer's `provider` field is ignored and the
+  host's `compute.serving_alias` is used instead, refusing with a stated reason when it is unset;
+  provider alias into the firewall call, semaphore, peer-request log line, ceiling 240 → 1200 (D4-0).
+- `dpc-client/core/dpc_client_core/firewall.py` — `can_request_inference` takes the provider, and
+  `compute.serving_alias` joins the compute block (unset = share nothing, never "share anything") (D4-0).
 - `dpc-client/core/dpc_client_core/message_handlers/inference_handler.py` — the missing `else`: a late
   response is logged rather than dropped in silence (D4-0).
 - `dpc-client/core/dpc_client_core/providers/remote_peer_provider.py`,
   `providers/dpc_agent_provider.py` — ceilings 60 and 180 → 1200 (D4-0).
 - `docs/REMOTE_INFERENCE.md` — the timeout it documents in four places is one of three and none of them
   is 60 any more; the doc is corrected in the same change (D4-0).
-- the telemetry collector on `_log_usage` (D4-T).
+- the telemetry line on `_log_usage` — the SDK's three durations, tokens/s at depth (D4-T; the other
+  three series need a `server.log` reader, filed separately).
 - `dpc-client/core/dpc_client_core/dpc_agent/budget.py` + `llm_manager.query` — `ProviderLimits`
   applied to local aliases (Stage 2 / D4-β).
 - `dpc-client/ui/src/lib/components/ProvidersEditor.svelte` — provider type (Stage 2).
@@ -489,8 +549,8 @@ Compliance, not progress — each item is a measurement with a stated failing re
 
 | Task | Status | Commit |
 |------|--------|--------|
-| D4-0: provider in the gate, shared alias ≠ `default_provider`, peer-request log line, orphan-drop log, three ceilings → 1200, semaphore | Pending — first, before the bundle | — |
-| D4-T: telemetry collector (~100 lines) | Pending — with D4-0, not after | — |
+| D4-0: provider in the gate, host-designated `compute.serving_alias` (the peer's `provider` ignored), peer-request log line, orphan-drop log, three ceilings → 1200, semaphore | Pending — first, before the bundle | — |
+| D4-T: the tokens/s row on `_log_usage` (one line; the other three series are not in scope) | Pending — with D4-0, not after | — |
 | Stage 0 bundle 0a+0b+0d, one commit; **0e** is Mike's environment variable on the box (24 GiB) | Pending — after D4-0 + D4-T | — |
 | Stage 1 NVFP4-GGUF via `ollama create`, measured vs Q4_K_M/IQ4_XS at 262K | Pending — production window (27B out) | — |
 | Step-3: route (b) on the card at 262K, 2 unified slots (after 0d) | Pending — production window (27B in), read second load | — |
@@ -539,7 +599,8 @@ Compliance, not progress — each item is a measurement with a stated failing re
   `llm/llama_server.go:446` sets `cmd.Env = os.Environ()` and the launch line carries no `--cache-ram`,
   so `LLAMA_ARG_CACHE_RAM` reaches the child; the binary's `--help` names it. The remaining check is the
   "prompt cache … size limit" line after the restart, which now reads as confirmation rather than as
-  the question.
+  the question. **The value format was still unrecorded and is now measured** (`Round 2 answers`,
+  Johnny's point 5): an integer in MiB, `24576` for 24 GiB — see 0e.
 - **Q8 — ~~Telemetry harness: own entry?~~ — DECIDED `Round 2, 2026-08-18`: yes, and it ships with the
   first package rather than after it.** See D4-T; filed as
   `THE-LEVERS-WE-ARE-ABOUT-TO-PULL-CANNOT-BE-TOLD-APART-IN-PRODUCTION`.
