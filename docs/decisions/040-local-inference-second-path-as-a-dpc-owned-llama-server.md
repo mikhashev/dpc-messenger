@@ -226,6 +226,45 @@ Qwen3.8-27B as a GGUF chosen per node, not a format.
   three *downloads* of upstream builds, not three builds; a build only if a needed flag or patch is
   missing upstream (none identified). Never hard-code Ollama's install layout: `binary_path` in
   configuration with auto-discovery as a fallback.
+- **A per-request thinking budget — a route (b) capability, added `2026-08-18` at Mike's word.** The
+  server accepts a reasoning-token budget **in the request body**, so the depth of thinking becomes a
+  per-call knob instead of a per-alias one. Read from `master` today,
+  `tools/server/server-common.cpp` ~1041–1045:
+
+  ```cpp
+  int reasoning_budget = json_value(body, "reasoning_budget_tokens",
+                         json_value(body, "thinking_budget_tokens", -1));
+  if (reasoning_budget == -1) {
+      reasoning_budget = opt.reasoning_budget;
+  }
+  ```
+
+  Three things follow, and the third contradicts what the thread concluded.
+  **(i) Both field names work** — `reasoning_budget_tokens` is read first and `thinking_budget_tokens`
+  is its fallback; the round of «one of us has the wrong name» ended with a correct name being
+  withdrawn.
+  **(ii) The request wins over the command line**, not the other way round: the CLI value is the
+  *default* used when the body omits the field. The constraint discussed in the thread — «set
+  `--reasoning-budget` globally and per-request overrides die» — is **not** what this code does, and a
+  supervisor design that avoids the CLI flag for that reason would be avoiding a hazard that master
+  does not have. The maintainer's remark that produced it predates a fix whose own changelog says
+  per-request budgets *were* silently discarded, so it was probably true of an older build. `[NV]` on
+  our pinned `b10472` — one grep before D3 encodes anything either way.
+  **(iii) Ollama cannot reach it.** Its API takes `think` as a flag or a level, not a token budget, so
+  this is one more line in the ledger of what route (b) buys that the daemon cannot.
+
+  **Why it matters here, in our own numbers:** a turn measured tonight generated 16 332 tokens with
+  57 567 characters of reasoning and spent **429 s** of its 433 in decode. Thinking depth is the
+  largest latency lever we have, it is currently a property of the alias every agent shares, and a
+  per-request budget makes it a property of the *turn* — Johnny may think for minutes; Iris answering
+  a person may not.
+
+  **The falsifier must score the trace, not only the answer.** A budget sweep that measures accuracy
+  alone can conclude «shorter is free» while the visible reasoning stops showing the step that
+  produced the answer — the monitorability concern Johnny raised (arXiv 2607.09786). For this fleet the
+  trace is a work product: it is what a person reads to decide whether to trust the turn. So the sweep
+  scores **readability of the chain at each budget**, beside accuracy, and a budget that keeps the
+  score while hiding the reasoning fails.
 - **Model source for (b2): HF GGUFs** (`unsloth/…`, `ggml-org/…` with `mmproj` and, on mainline, a
   separate `mtp-*.gguf`); whether the mainline loader takes Ollama's blob (in-blob MTP, 866 tensors) is
   `Not verified` and is not to be counted on. On this box, (b1) uses the blob directly.
