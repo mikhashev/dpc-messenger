@@ -336,6 +336,23 @@ the next step will be empty.
 
 You can add several providers and pick between them per agent later.
 
+### If you chose Ollama: three settings that live outside DPC
+
+Ollama's own defaults are tuned for one chat at a time, not for a machine
+running several agents against long contexts. Three environment variables —
+belonging to the Ollama service, not to DPC, which can neither set nor read
+them — decide whether an agent's next turn starts immediately or re-reads its
+whole conversation first. On the reference box that difference is measured in
+minutes per turn.
+
+They are set once per machine and the mechanics differ per platform, so they
+live in one place rather than being repeated here:
+**[CONFIGURATION.md → The Ollama daemon's own environment](./docs/CONFIGURATION.md#the-ollama-daemons-own-environment-not-dpcs-and-dpc-cannot-set-it)**
+— what each does, the value to use for your amount of RAM, how to set it on
+Windows / macOS / Linux, and the log line that tells you it took effect.
+
+Skip this if you only use cloud providers.
+
 ---
 
 ## Create your first AI agent

@@ -847,7 +847,7 @@ working install and are the difference between a four-second turn and a four-min
 
 | Variable | Suggested value | What it does |
 |----------|-----------------|--------------|
-| `LLAMA_ARG_CACHE_RAM` | `24576` | Prompt-cache ceiling **in MiB** (`-1` unlimited, `0` disabled). Default is `8192`. |
+| `LLAMA_ARG_CACHE_RAM` | see the table below | Prompt-cache ceiling **in MiB** (`-1` unlimited, `0` disabled). Default is `8192`. |
 | `OLLAMA_FLASH_ATTENTION` | `1` | Flash attention; required before the KV cache can be quantised. |
 | `OLLAMA_KV_CACHE_TYPE` | `q8_0` | KV cache type. Halves KV memory against the `f16` default. |
 
@@ -856,9 +856,43 @@ conversations so a request whose prefix it has already seen skips the prefill. O
 entry measures 1.8–7.2 GiB (median 5.2), so the 8 GiB default holds about **one and a
 half** of them: on a machine running several agents the cache evicts constantly — 36
 evictions in 26 hours on the reference box — and each eviction costs that agent a full
-re-prefill on its next turn: 60–100 s at 60K tokens, 293 s measured at 164K. Raising the
-ceiling to 24 GiB holds roughly five agents' entries. The cost is **system RAM, not VRAM**,
-and it is a ceiling rather than a reservation — memory is used only as entries accumulate.
+re-prefill on its next turn: 60–100 s at 60K tokens, 293 s measured at 164K. The cost is
+**system RAM, not VRAM**, and it is a ceiling rather than a reservation — memory is used
+only as entries accumulate.
+
+### How large to make it
+
+The value is not "as much as possible". Everything else on the machine has to fit
+alongside it: the OS, a browser or IDE, DPC itself with its agents, `bge-m3` when memory
+indexing runs, and Whisper when a voice message arrives. Whisper is the one that catches
+people out — it appears only while transcribing, which is exactly when the cache is
+already full.
+
+| Installed RAM | `LLAMA_ARG_CACHE_RAM` | Roughly holds |
+|---------------|----------------------|---------------|
+| 8 GB          | `0` (disable)        | nothing — the cache would push the machine into swap |
+| 16 GB         | `4096`               | less than one long conversation |
+| 24 GB         | `6144`               | about one |
+| 32 GB         | `10240`              | two |
+| 48 GB         | `16384`              | three |
+| 64 GB         | `24576`              | four to five (the reference box) |
+| 96 GB or more | `32768`              | six or more |
+
+The table is a quarter of installed RAM at the small end and rises to about a third on
+large machines, so a small node gets the *smaller* share — the opposite of what a flat
+percentage or a fixed reserve produces. If the machine starts swapping after a heavy
+session, halve the value; **slow is cheaper than swapping**, and `0` is a legitimate
+setting on a machine that cannot spare the memory.
+
+Two caveats worth reading before quoting the "holds N conversations" column:
+
+- **It depends on the KV cache type.** Entry sizes above were measured with
+  `OLLAMA_KV_CACHE_TYPE=q8_0`. A smaller KV type halves the entries, so the same ceiling
+  holds twice as many; a larger one does the reverse.
+- **Nothing measures this for you.** DPC's device context records how much RAM is
+  *installed* (`hardware.memory.ram_gb`) and not how much is free — the `free_gb` in that
+  file is disk. The variable is also read only when Ollama starts, so there is no runtime
+  adjustment to be had: pick a value for the machine, set it once, and watch for swapping.
 
 **Setting it (Windows).** Ollama passes its own environment to the `llama-server` child, so
 a user-scope variable is enough — but the tray app inherits the environment it was
