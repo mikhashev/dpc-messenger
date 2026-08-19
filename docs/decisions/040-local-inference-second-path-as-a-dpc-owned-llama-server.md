@@ -234,6 +234,17 @@ Qwen3.8-27B as a GGUF chosen per node, not a format.
   flags: the pin has 323, the only addition `--rpc`, nothing missing — the 18 flags absent from the
   vendored `llama-cpp-sys-2 0.1.151` snapshot (`--reasoning-effort` among them) are upstream on
   `b10472`, not Ollama patches.
+  *G2 ran the same day on Mike's word («гоняй»), through the new supervisor:* two pairs of cold
+  prefills, base against `GGML_CUDA_FORCE_MMQ=1` — at 77 876 tokens **886.2 / 879.5** tok/s
+  (0.76 % apart) and at 139 490 tokens **707.9 / 707.5** tok/s (0.06 % apart), with the banner
+  `CUDA : ARCHS = 750,800,860,890,900,1200,1210 | USE_GRAPHS = 1 | BLACKWELL_NATIVE_FP4 = 1`
+  captured via `CTRL_BREAK_EVENT`. Forcing MMQ moves nothing, so **the brainbake fallback
+  signature is absent on the pin — the gate's question is answered**. What the same runs also
+  show, recorded so nobody reads the band across builds: Ollama's binary prefilled 832.7/828.0 at
+  129 645 tokens, the pin does 707.9/707.5 at 139 490 — a deeper prompt on a different build, so
+  the night numbers do not transfer as-is; the pin's own baseline is now 707.9 at 139 490. A
+  `resolve_fused_ops` warning places layer 0 on CPU (fused Gated Delta Net unsupported there);
+  one layer, no visible cliff, noted for the perf record. Fleet model was reloaded after the run.
 - **A per-request thinking budget — a route (b) capability, added `2026-08-18` at Mike's word.** The
   server accepts a reasoning-token budget **in the request body**, so the depth of thinking becomes a
   per-call knob instead of a per-alias one. Read from `master` today,
