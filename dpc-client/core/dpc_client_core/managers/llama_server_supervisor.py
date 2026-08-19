@@ -18,8 +18,10 @@ than remembered:
 """
 
 import asyncio
+import json
 import logging
 import os
+import shutil
 import signal
 import socket
 import subprocess
@@ -28,7 +30,7 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from .llama_server_fetcher import DPC_HOME, ensure_binary, find_cuda_backend
+from .llama_server_fetcher import DPC_HOME, ensure_binary, find_cuda_backend, install_root
 
 logger = logging.getLogger(__name__)
 
@@ -38,14 +40,13 @@ _CREATION_NEW_PROCESS_GROUP = subprocess.CREATE_NEW_PROCESS_GROUP if sys.platfor
 
 DEFAULTS: Dict[str, Any] = {
     "n_ctx": 262144,
-    # Measured twice on 2026-08-19: the f16 default does not fit the card this
-    # fleet owns — the first live call (18:09) died with CUDA out-of-memory at
-    # model load (weights + f16 KV at 262K > 32 GB), while q8_0 ran every probe
-    # of the day at 31.9 of 32 GB and Probe D found it quality-neutral against
-    # f16 on retrieval at 233K. A default that cannot start is not a default;
-    # an alias that wants f16 back says so explicitly.
-    "cache_type_k": "q8_0",
-    "cache_type_v": "q8_0",
+    # None means AUTO: the ladder in ensure_running steps f16 -> q8_0 -> q4_0
+    # against the free VRAM the card actually has, starting each rung and
+    # reading the child's own out-of-memory verdict from its log tail (the
+    # first live call, 2026-08-19 18:09, died on f16 in 12 s — a failed rung is
+    # cheap). An alias that names a type gets exactly that type, one attempt.
+    "cache_type_k": None,
+    "cache_type_v": None,
     # Measured 2026-08-19 on b10472 at 139 490 tokens: without an explicit
     # -ngl the server left one context at 0/66 layers on the GPU-less side of
     # the split and the draft contexts at 57-59/66, disabling fused Gated
@@ -82,6 +83,43 @@ def _free_port() -> int:
         return s.getsockname()[1]
 
 
+# The KV-cache ladder: quality order, and the first rung whose start survives
+# wins. Which rung fits is a property of the card's free memory at launch
+# time, not of a constant — the 2026-08-19 18:09 call died on f16 at 262K on a
+# card where q8_0 filled 31.9 of 32 GB, and the same f16 would fit a 48 GB
+# card without anyone changing a line.
+KV_LADDER = ("f16", "q8_0", "q4_0")
+
+_OOM_MARKERS = ("out of memory", "failed to allocate", "cuda error")
+
+
+def _free_vram_mib() -> Optional[int]:
+    """Free VRAM of the first NVIDIA GPU in MiB, or None when there is no
+    signal. The same nvidia-smi the device-context collector already uses."""
+    if not shutil.which("nvidia-smi"):
+        return None
+    try:
+        out = subprocess.run(
+            ["nvidia-smi", "--query-gpu=memory.free", "--format=csv,noheader,nounits"],
+            capture_output=True, text=True, timeout=10,
+        )
+        return int(out.stdout.strip().splitlines()[0])
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return None
+
+
+def _looks_like_oom(log_lines: List[str]) -> bool:
+    joined = "\n".join(log_lines or []).lower()
+    return any(marker in joined for marker in _OOM_MARKERS)
+
+
+def _gguf_mib(path: str) -> int:
+    try:
+        return os.path.getsize(path) // (1024 * 1024)
+    except OSError:
+        return 0
+
+
 class LlamaServerSupervisor:
     """Owns the `llama-server` child process for one alias.
 
@@ -103,15 +141,17 @@ class LlamaServerSupervisor:
 
     # --- command assembly, pure and table-testable -------------------------
 
-    def build_command(self, binary: Path, port: int) -> List[str]:
+    def build_command(self, binary: Path, port: int, cache_type: Optional[str] = None) -> List[str]:
         c = self.config
         cmd: List[str] = [str(binary)]
         cmd += ["-m", str(c["gguf_path"])]
         cmd += ["-c", str(c["n_ctx"])]
-        if c["cache_type_k"]:
-            cmd += ["-ctk", str(c["cache_type_k"])]
-        if c["cache_type_v"]:
-            cmd += ["-ctv", str(c["cache_type_v"])]
+        ctk = cache_type or c["cache_type_k"]
+        ctv = cache_type or c["cache_type_v"]
+        if ctk:
+            cmd += ["-ctk", str(ctk)]
+        if ctv:
+            cmd += ["-ctv", str(ctv)]
         if c["n_gpu_layers"]:
             cmd += ["-ngl", str(c["n_gpu_layers"])]
         if c["flash_attn"]:
@@ -146,7 +186,11 @@ class LlamaServerSupervisor:
     # --- lifecycle -----------------------------------------------------------
 
     async def ensure_running(self) -> Dict[str, Any]:
-        """The server is up and its /props are returned; starts it if needed."""
+        """The server is up and its /props are returned; starts it if needed.
+
+        A cache type the alias set explicitly is started once, as configured.
+        Without one, the KV ladder in `_launch_auto_kv` picks the rung that
+        fits the free VRAM the card has right now."""
         async with self._start_lock:
             if self._draining:
                 raise LlamaServerError(f"llama-server[{self.alias}] is draining; new calls refused")
@@ -154,19 +198,94 @@ class LlamaServerSupervisor:
                 return self.props
             binary = ensure_binary(self.config)
             self.port = self.port or _free_port()
-            cmd = self.build_command(binary, self.port)
-            env = self.build_env(binary)
-            logger.info("llama-server[%s] starting on :%d", self.alias, self.port)
-            self._log_path.parent.mkdir(parents=True, exist_ok=True)
-            self._log_fh = open(self._log_path, "ab")
-            self._proc = await self._spawn(cmd, env)
+            if self.config.get("cache_type_k") is not None or self.config.get("cache_type_v") is not None:
+                return await self._launch(binary)
+            return await self._launch_auto_kv(binary)
+
+    # --- the KV ladder --------------------------------------------------------
+
+    def _fit_key(self) -> str:
+        c = self.config
+        return ":".join(str(x) for x in (
+            _gguf_mib(c["gguf_path"]), c["n_ctx"], c["n_gpu_layers"],
+            c["n_parallel"], c["spec_draft_n_max"],
+        ))
+
+    @staticmethod
+    def _fit_memo_path() -> Path:
+        return install_root() / ".dpc-kv-fit.json"
+
+    def _read_fit_memo(self) -> Dict[str, Any]:
+        try:
+            return json.loads(self._fit_memo_path().read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return {}
+
+    def _write_fit_memo(self, key: str, cache_type: str, free_mib: Optional[int]) -> None:
+        # Best-effort: a memo that cannot be written only costs the ladder a
+        # re-run, never a start.
+        try:
+            memo = self._read_fit_memo()
+            memo[key] = {"type": cache_type, "free_mib": free_mib or 0, "ts": int(time.time())}
+            path = self._fit_memo_path()
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps(memo), encoding="utf-8")
+        except (OSError, ValueError):
+            logger.debug("llama-server[%s]: could not write the KV fit memo", self.alias, exc_info=True)
+
+    async def _launch_auto_kv(self, binary: Path) -> Dict[str, Any]:
+        """Start at the best rung the card can hold, stepping down on the
+        child's own out-of-memory verdict. A rung that fit is memoised with
+        the free-VRAM level it fit at, and reused only while the card has at
+        least that much free again — a busier card re-runs the ladder."""
+        key = self._fit_key()
+        free = _free_vram_mib()
+        memo = self._read_fit_memo().get(key)
+        memo_hit = bool(memo and free is not None and free >= (memo.get("free_mib") or 0))
+        if memo_hit:
+            candidates = (memo["type"],)
+        else:
+            gguf_mib = _gguf_mib(self.config["gguf_path"])
+            if free is not None and gguf_mib and free < gguf_mib + 4096:
+                raise LlamaServerError(
+                    f"llama-server[{self.alias}]: {free} MiB free on the GPU against a "
+                    f"{gguf_mib} MiB model — no KV type will fit; free the card or point "
+                    "the alias at a smaller model"
+                )
+            candidates = KV_LADDER
+        for cache_type in candidates:
             try:
-                await self._wait_healthy()
-                self.props = await self._get("/props")
-                return self.props
-            except Exception as e:
-                await self.stop()
-                raise
+                props = await self._launch(binary, cache_type=cache_type)
+            except LlamaServerError as e:
+                if not _looks_like_oom(e.log_lines) or cache_type == candidates[-1]:
+                    raise
+                logger.warning(
+                    "llama-server[%s]: KV %s did not fit (out of memory); stepping down",
+                    self.alias, cache_type,
+                )
+                continue
+            if not memo_hit:
+                self._write_fit_memo(key, cache_type, free)
+            return props
+        raise LlamaServerError(f"llama-server[{self.alias}] unreachable ladder state")
+
+    async def _launch(self, binary: Path, cache_type: Optional[str] = None) -> Dict[str, Any]:
+        cmd = self.build_command(binary, self.port, cache_type=cache_type)
+        env = self.build_env(binary)
+        logger.info(
+            "llama-server[%s] starting on :%d (kv=%s)",
+            self.alias, self.port, cache_type or "configured",
+        )
+        self._log_path.parent.mkdir(parents=True, exist_ok=True)
+        self._log_fh = open(self._log_path, "ab")
+        self._proc = await self._spawn(cmd, env)
+        try:
+            await self._wait_healthy()
+            self.props = await self._get("/props")
+            return self.props
+        except Exception as e:
+            await self.stop()
+            raise
 
     async def _spawn(self, cmd: List[str], env: Dict[str, str]) -> asyncio.subprocess.Process:
         return await asyncio.create_subprocess_exec(

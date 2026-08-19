@@ -70,12 +70,138 @@ class TestFlagAssembly:
         assert cmd[cmd.index("-ngl") + 1] == "999"
 
     def test_kv_defaults_to_q8_after_the_first_live_call_oomed_on_f16(self):
-        # 2026-08-19 18:09: an alias with no cache types loaded f16 KV at 262K
-        # and died with CUDA out-of-memory on a card every probe of the day had
-        # filled to 31.9/32 GB with q8_0. The default is what fits.
-        cmd = _sup().build_command(BINARY, 1)
+        # Superseded the same evening by the VRAM ladder: None now means the
+        # supervisor resolves the rung against free memory at launch. What
+        # stays pinned here is that an unconfigured alias launches with SOME
+        # quantised cache once the ladder has spoken, never bare f16.
+        cmd = _sup().build_command(BINARY, 1, cache_type="q8_0")
         assert cmd[cmd.index("-ctk") + 1] == "q8_0"
         assert cmd[cmd.index("-ctv") + 1] == "q8_0"
+
+
+class TestTheKvLadder:
+    """The KV type is chosen by what the card can hold, not by a constant."""
+
+    def _sup_with_launch(self, outcomes):
+        sup = _sup()
+        attempts = []
+
+        async def fake_launch(binary, cache_type=None):
+            attempts.append(cache_type)
+            outcome = outcomes[len(attempts) - 1]
+            if isinstance(outcome, Exception):
+                raise outcome
+            return outcome
+
+        sup._launch = fake_launch
+        return sup, attempts
+
+    @pytest.mark.asyncio
+    async def test_f16_steps_down_to_q8_0_on_the_childs_own_oom_verdict(self, monkeypatch):
+        # The 18:09 live call: f16 KV at 262K died with CUDA out-of-memory on
+        # a card where q8_0 fills 31.9 of 32 GB. The child's log tail is the
+        # verdict; the next rung launches, and the win is memoised with the
+        # free-VRAM level it was earned at.
+        import dpc_client_core.managers.llama_server_supervisor as mod
+
+        monkeypatch.setattr(mod, "ensure_binary", lambda cfg: BINARY)
+        monkeypatch.setattr(mod, "_free_vram_mib", lambda: 31200)
+        sup, attempts = self._sup_with_launch([
+            LlamaServerError("died", ["0.12.019 E CUDA error: out of memory"]),
+            {"total_slots": 4},
+        ])
+        sup._read_fit_memo = lambda: {}
+        written = []
+        sup._write_fit_memo = lambda key, t, free: written.append((key, t, free))
+
+        props = await sup.ensure_running()
+
+        assert props == {"total_slots": 4}
+        assert attempts == ["f16", "q8_0"]
+        assert written and written[0][1] == "q8_0" and written[0][2] == 31200
+
+    @pytest.mark.asyncio
+    async def test_a_non_oom_failure_is_not_stepped_down(self, monkeypatch):
+        import dpc_client_core.managers.llama_server_supervisor as mod
+
+        monkeypatch.setattr(mod, "ensure_binary", lambda cfg: BINARY)
+        monkeypatch.setattr(mod, "_free_vram_mib", lambda: 31200)
+        sup, attempts = self._sup_with_launch([
+            LlamaServerError("died", ["exited with 3 before becoming healthy"]),
+        ])
+        sup._read_fit_memo = lambda: {}
+
+        with pytest.raises(LlamaServerError):
+            await sup.ensure_running()
+        assert attempts == ["f16"]
+
+    @pytest.mark.asyncio
+    async def test_the_fit_memo_short_circuits_the_ladder(self, monkeypatch):
+        import dpc_client_core.managers.llama_server_supervisor as mod
+
+        monkeypatch.setattr(mod, "ensure_binary", lambda cfg: BINARY)
+        monkeypatch.setattr(mod, "_free_vram_mib", lambda: 31200)
+        sup, attempts = self._sup_with_launch([{"total_slots": 4}])
+        sup._read_fit_memo = lambda: {sup._fit_key(): {"type": "q8_0", "free_mib": 28000}}
+        rewritten = []
+        sup._write_fit_memo = lambda *a: rewritten.append(a)
+
+        await sup.ensure_running()
+
+        assert attempts == ["q8_0"]
+        assert rewritten == []
+
+    @pytest.mark.asyncio
+    async def test_a_busier_card_re_runs_the_ladder_instead_of_trusting_the_memo(self, monkeypatch):
+        import dpc_client_core.managers.llama_server_supervisor as mod
+
+        monkeypatch.setattr(mod, "ensure_binary", lambda cfg: BINARY)
+        monkeypatch.setattr(mod, "_free_vram_mib", lambda: 20000)
+        monkeypatch.setattr(mod, "_gguf_mib", lambda path: 10000)
+        sup, attempts = self._sup_with_launch([
+            LlamaServerError("died", ["E CUDA error: out of memory"]),
+            LlamaServerError("died", ["E CUDA error: out of memory"]),
+            {"total_slots": 4},
+        ])
+        sup._read_fit_memo = lambda: {sup._fit_key(): {"type": "q8_0", "free_mib": 31200}}
+        sup._write_fit_memo = lambda *a: None
+
+        await sup.ensure_running()
+
+        assert attempts == ["f16", "q8_0", "q4_0"]
+
+    @pytest.mark.asyncio
+    async def test_an_alias_that_names_a_type_gets_exactly_one_attempt(self, monkeypatch):
+        import dpc_client_core.managers.llama_server_supervisor as mod
+
+        monkeypatch.setattr(mod, "ensure_binary", lambda cfg: BINARY)
+        sup, attempts = self._sup_with_launch([{"total_slots": 4}])
+        sup.config["cache_type_k"] = "q4_0"
+
+        await sup.ensure_running()
+
+        assert attempts == [None]
+
+    @pytest.mark.asyncio
+    async def test_a_card_that_cannot_hold_even_the_model_fails_fast(self, monkeypatch):
+        import dpc_client_core.managers.llama_server_supervisor as mod
+
+        monkeypatch.setattr(mod, "ensure_binary", lambda cfg: BINARY)
+        monkeypatch.setattr(mod, "_free_vram_mib", lambda: 8000)
+        monkeypatch.setattr(mod, "_gguf_mib", lambda path: 17000)
+        sup, attempts = self._sup_with_launch([])
+
+        with pytest.raises(LlamaServerError, match="no KV type will fit"):
+            await sup.ensure_running()
+        assert attempts == []
+
+    def test_the_oom_verdict_reader(self):
+        from dpc_client_core.managers.llama_server_supervisor import _looks_like_oom
+
+        assert _looks_like_oom(["0.12.019 E CUDA error: out of memory"])
+        assert _looks_like_oom(["ggml_backend_cuda_host_malloc: failed to allocate 1 MiB"])
+        assert not _looks_like_oom(["exited with 3221226505 before becoming healthy"])
+        assert not _looks_like_oom([])
 
     def test_gpu_layers_and_flash_attn_and_mmproj(self):
         cmd = _sup(n_gpu_layers=999, flash_attn=True, mmproj="mm.gguf").build_command(BINARY, 1)
