@@ -628,3 +628,51 @@ class TestReasoningAccounting:
         )
         assert out["reasoning_tokens"] == 50
         assert out["content_tokens"] == 50
+
+    @pytest.mark.asyncio
+    async def test_the_streaming_entry_estimates_too_four_of_four(self, caplog):
+        # Johnny's review find: the streaming entry was the one of four that
+        # did not pass reasoning_text, and the correct argument is the LOCAL
+        # accumulator — self._last_thinking is still None at the usage chunk,
+        # which arrives before the post-loop assignment. Without the fold the
+        # stream's usage line reads a honest-looking reasoning=0.
+        import logging
+
+        p = _provider()
+        p.supervisor = _FakeSupervisor()
+        chunks = [
+            SimpleNamespace(choices=[SimpleNamespace(delta=SimpleNamespace(reasoning_content="t" * 400, content=None))], usage=None),
+            SimpleNamespace(choices=[SimpleNamespace(delta=SimpleNamespace(reasoning_content=None, content="ok"))], usage=None),
+            SimpleNamespace(choices=[], usage=SimpleNamespace(prompt_tokens=9, completion_tokens=120, total_tokens=129)),
+        ]
+
+        class _Stream:
+            def __aiter__(self):
+                self._iter = iter(chunks)
+                return self
+
+            async def __anext__(self):
+                try:
+                    return next(self._iter)
+                except StopIteration:
+                    raise StopAsyncIteration
+
+        client, completions = _fake_client(SimpleNamespace(choices=None, usage=None))
+
+        async def fake_create(**params):
+            return _Stream()
+
+        completions.create = fake_create
+
+        async def _ensure():
+            return client
+
+        p._ensure = _ensure
+
+        with caplog.at_level(logging.INFO, logger="dpc_client_core.providers.llamacpp_server_provider"):
+            out = await p.generate_response_stream("hi")
+
+        assert out == "ok"
+        assert p._last_usage["reasoning_tokens"] == 100  # 400 chars / 4
+        assert p._last_usage["content_tokens"] == 20
+        assert any("split=estimated" in r.getMessage() for r in caplog.records)

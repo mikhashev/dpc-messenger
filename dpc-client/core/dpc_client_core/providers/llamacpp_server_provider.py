@@ -485,6 +485,11 @@ class LlamaServerProvider(DeepSeekProvider):
                             path="plain-stream",
                             conversation_id=conversation_id,
                             effort=self._effort_label(None, extra_body),
+                            # The local accumulator, not self._last_thinking:
+                            # usage arrives on the terminal chunk, before the
+                            # post-loop assignment — the field is still None
+                            # here, and the estimate would silently read 0.
+                            reasoning_text=thinking_text or None,
                         )
                     if not chunk.choices:
                         continue
