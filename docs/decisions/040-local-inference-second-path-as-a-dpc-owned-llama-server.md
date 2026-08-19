@@ -250,9 +250,11 @@ Qwen3.8-27B as a GGUF chosen per node, not a format.
   warning belonged to a context loaded at **0/66 layers on the GPU**, not to one layer: without an
   explicit `-ngl` the server parked one context entirely on the CPU (fused Gated Delta Net
   disabled there) and the speculative draft contexts at 57–59/66. With `n_gpu_layers = 999`
-  **every** context loads 66/66, the warnings go 5 → 0, dmon shows sustained SM 100 % (the
-  default dipped 61–99) at ≤200 W, and prefill at the same 139 490 tokens reads **784.4 against
-  704.5 tok/s — +11.3 %**. The supervisor's default is now `n_gpu_layers: 999` with the
+  **every** context loads 66/66, the warnings go 5 → 0, dmon shows SM held at 99–100 % by minute
+  averages (the default's minute averages dipped to ~70 with power dips to ~158 W) — and the
+  200 W the card draws there is not «far from any ceiling» but its TDP, per the CPU-Z read of
+  2026-08-19: the RTX PRO 4500 ran the prefill at its power ceiling, peaking at 76 °C. Prefill
+  at the same 139 490 tokens reads **784.4 against 704.5 tok/s — +11.3 %**. The supervisor's default is now `n_gpu_layers: 999` with the
   measurement in a comment, overridable per alias. **The pin's performance baseline is therefore
   784.4 tok/s at 139 490 tokens in the production flag configuration** — the earlier 707.9 was
   taken in what the server decided on its own and is superseded, per Ark's rule recorded here: a
