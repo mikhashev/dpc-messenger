@@ -10,7 +10,7 @@
 
   const dispatch = createEventDispatcher();
 
-  type ProviderType = 'ollama' | 'openai_compatible' | 'anthropic' | 'zai' | 'zai_coding' | 'deepseek' | 'local_whisper' | 'dpc_agent' | 'gemini' | 'github_models' | 'gigachat';
+  type ProviderType = 'ollama' | 'openai_compatible' | 'anthropic' | 'zai' | 'zai_coding' | 'deepseek' | 'llamacpp_server' | 'local_whisper' | 'dpc_agent' | 'gemini' | 'github_models' | 'gigachat';
 
   type Provider = {
     alias: string;
@@ -34,6 +34,10 @@
     repeat_penalty?: number;
     top_k?: number;
     num_predict?: number;
+    // llamacpp_server specific: the model file the DPC-owned llama-server
+    // child serves, and the per-request thinking cap (ADR-040 route b2)
+    gguf_path?: string;
+    reasoning_budget_tokens?: number;
     // Local Whisper specific (v0.13.1+)
     device?: string;         // 'cuda', 'cpu', or 'auto'
     compile_model?: boolean; // torch.compile optimization
@@ -123,12 +127,20 @@
     { key: 'num_predict', step: 1, min: -2, max: 1000000, isInt: true, hint: 'max tokens' },
   ];
 
+  // The llamacpp_server sampling subset the model card actually prescribes
+  // (thinking mode: temperature 1.0, top_p 0.95, top_k 20); temperature has
+  // its own generic field above, so these two are the remainder.
+  const LLAMA_SAMPLING_PARAMS = [
+    { key: 'top_p', step: 0.05, min: 0, max: 1, isInt: false, hint: '0.0–1.0' },
+    { key: 'top_k', step: 1, min: 0, max: 200, isInt: true, hint: 'integer' },
+  ];
+
   // Unset temperature means different things per provider type: ollama omits
   // the key (modelfile default applies), deepseek/zai_coding fall back to 1.0,
   // the rest send self.temperature = 0.7.
   function temperatureDefaultLabel(type: ProviderType): string {
     if (type === 'ollama') return 'Model default (not sent)';
-    if (type === 'deepseek' || type === 'zai_coding') return 'Provider default (1.0)';
+    if (type === 'deepseek' || type === 'zai_coding' || type === 'llamacpp_server') return 'Provider default (1.0)';
     return 'Default (0.7)';
   }
 
@@ -488,6 +500,17 @@
       provider.model = newProvider.model || 'deepseek-v4-flash';
       provider.base_url = 'https://api.deepseek.com';
       provider.context_window = 1000000;
+    } else if (newProvider.type === 'llamacpp_server') {
+      // The form's single Model field carries the GGUF path — that is the one
+      // thing this type cannot default. Everything else has a measured default
+      // in the supervisor (n_ctx 262144, -ngl 999, MTP draft 3, --jinja).
+      provider.gguf_path = newProvider.model || '';
+      provider.context_window = 262144;
+      // The card's thinking-mode sampling, prefilled so the alias is honest
+      // from birth; the backend logs an advisory when these are missing.
+      provider.temperature = 1.0;
+      provider.top_p = 0.95;
+      provider.top_k = 20;
     } else if (newProvider.type === 'local_whisper') {
       provider.device = 'auto';
       provider.compile_model = true;
@@ -758,6 +781,7 @@
                         <option value="zai">Z.AI</option>
                         <option value="zai_coding">Z.AI Coding Plan</option>
                         <option value="deepseek">DeepSeek</option>
+                        <option value="llamacpp_server">llama-server (local, DPC pin)</option>
                         <option value="local_whisper">Local Whisper</option>
                         <option value="dpc_agent">DPC Agent</option>
                         <option value="gemini">Google Gemini</option>
@@ -888,6 +912,45 @@
                           placeholder="http://127.0.0.1:11434"
                         />
                         <p class="help-text">No API key needed for Ollama</p>
+                      </div>
+                    {/if}
+
+                    {#if editedConfig.providers[i].type === 'llamacpp_server'}
+                      <div class="form-group">
+                        <label for="gguf-{i}">GGUF path</label>
+                        <input
+                          id="gguf-{i}"
+                          type="text"
+                          bind:value={editedConfig.providers[i].gguf_path}
+                          placeholder="C:\models\qwen3.8-27b-Q4_K_M.gguf"
+                        />
+                        <p class="help-text">
+                          Absolute path to the model file. DPC starts its own llama-server on it
+                          (ADR-040): first call fetch-verifies the pinned binary, then serves —
+                          no host, no key.
+                        </p>
+                      </div>
+
+                      <div class="form-group">
+                        <label for="reasoning-budget-{i}">Reasoning budget (tokens, optional)</label>
+                        <input
+                          id="reasoning-budget-{i}"
+                          type="number"
+                          value={editedConfig.providers[i].reasoning_budget_tokens ?? ''}
+                          on:input={(e) => {
+                            if (!editedConfig) return;
+                            const raw = (e.target as HTMLInputElement).value;
+                            const n = parseInt(raw);
+                            editedConfig.providers[i].reasoning_budget_tokens = raw === '' || isNaN(n) ? undefined : n;
+                            editedConfig = editedConfig;
+                          }}
+                          placeholder="e.g. 10000"
+                        />
+                        <p class="help-text">
+                          Caps thinking per request. Without it the template's own default
+                          effort (xhigh) is unbounded — on deep context it can spend the whole
+                          window thinking and answer nothing.
+                        </p>
                       </div>
                     {/if}
 
@@ -1315,12 +1378,18 @@
                           preference about style.
                         </p>
                       </div>
+                    {/if}
 
+                    {#if editedConfig.providers[i].type === 'ollama' || editedConfig.providers[i].type === 'llamacpp_server'}
                       <div class="form-group">
                         <label for="sampling-{i}">Sampling Parameters (optional)</label>
-                        <p class="help-text">Empty = model default. Check actual values via the ⓘ Query Info button.</p>
+                        <p class="help-text">
+                          {editedConfig.providers[i].type === 'llamacpp_server'
+                            ? 'Empty = provider default. The model card prescribes top_p 0.95 and top_k 20 for thinking mode.'
+                            : 'Empty = model default. Check actual values via the ⓘ Query Info button.'}
+                        </p>
                         <div class="sampling-grid" id="sampling-{i}">
-                          {#each OLLAMA_SAMPLING_PARAMS as param}
+                          {#each (editedConfig.providers[i].type === 'llamacpp_server' ? LLAMA_SAMPLING_PARAMS : OLLAMA_SAMPLING_PARAMS) as param}
                             <div class="sampling-field">
                               <label for="sampling-{param.key}-{i}">{param.key}</label>
                               <input
@@ -1436,8 +1505,8 @@
                       <p><strong>Thinking:</strong> {provider.think ? 'always on' : 'always off'}</p>
                     {/if}
 
-                    {#if OLLAMA_SAMPLING_PARAMS.some(p => (provider as any)[p.key] !== undefined)}
-                      <p><strong>Sampling:</strong> {OLLAMA_SAMPLING_PARAMS.filter(p => (provider as any)[p.key] !== undefined).map(p => `${p.key}=${(provider as any)[p.key]}`).join(', ')}</p>
+                    {#if [...OLLAMA_SAMPLING_PARAMS, ...LLAMA_SAMPLING_PARAMS].some(p => (provider as any)[p.key] !== undefined)}
+                      <p><strong>Sampling:</strong> {[...OLLAMA_SAMPLING_PARAMS, ...LLAMA_SAMPLING_PARAMS].filter(p => (provider as any)[p.key] !== undefined).map(p => `${p.key}=${(provider as any)[p.key]}`).join(', ')}</p>
                     {/if}
 
                     {#if provider.type === 'ollama'}
