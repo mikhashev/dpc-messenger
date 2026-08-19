@@ -321,6 +321,19 @@ Qwen3.8-27B as a GGUF chosen per node, not a format.
   that simply was not there. Found by Ark reading the element on screen (#183); the Add form now
   carries the option, and its model field relabels itself to «GGUF path» with a placeholder and a
   no-host-no-key hint for this type.*
+- **The first live call OOMed, and the default that caused it became a computation (`3ea7747e`,
+  then `d288af5c` same evening, on Mike's ask: «вычисляться исходя из того что у ноды из железа
+  установлено и доступно по памяти»).** At 18:09 an alias on the qwen3.8 blob started with the
+  supervisor's f16 KV default and died with CUDA out-of-memory at model load — weights + f16 KV
+  at 262K exceed a 32 GB card that q8_0 fills to 31.9. The interim q8_0 hard default was then
+  replaced by the ladder: an alias that names a cache type gets exactly that, once; without one,
+  the supervisor walks **f16 → q8_0 → q4_0**, reading each rung's verdict from the child's own
+  log tail (a failed rung cost 12 s live), and memoises the winner with the free-VRAM level it
+  fit at — reused only while the card has at least that much free again, so a busier card re-runs
+  the ladder rather than trusting a stale fit. Free VRAM comes from the same `nvidia-smi` the
+  device-context collector uses; a card that cannot hold even the weights fails fast with a plain
+  sentence. The error path carried the log tail into the group chat verbatim — the unhealthy-start
+  contract held in its first live fire.
 - **A per-request thinking budget — a route (b) capability, added `2026-08-18` at Mike's word.** The
   server accepts a reasoning-token budget **in the request body**, so the depth of thinking becomes a
   per-call knob instead of a per-alias one. Read from `master` today,
