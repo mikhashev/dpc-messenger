@@ -261,6 +261,31 @@ Qwen3.8-27B as a GGUF chosen per node, not a format.
   («one layer») came
   from the warning line alone — the `load_tensors: offloaded` line right above it says 0/66 and
   is the one that names the real unit.
+  *Effort dictionary probe, same evening («давай оба по очереди»):* the vendor's effort string is
+  a **lever, not decoration** — on one multi-step question through `--jinja`, `chat_template_kwargs.
+  reasoning_effort` scales thinking **6 492 → 14 989 → 33 966 chars** (low/medium/xhigh, 5.2×,
+  temp 0, seed 7, pin's own template). No-kwargs is byte-identical to xhigh (same 15 808 completion
+  tokens) — the template default is xhigh, confirmed. Our fleet words `high` and `max` are
+  **refused loudly**: HTTP 500, the template's `raise_exception('Unexpected reasoning effort …')`
+  — no silent ignore exists on this path, so the provider maps the ordinal before sending.
+  Proposed mapping for Mike's word: `high → xhigh`, `max → xhigh`, `medium/low` direct,
+  `off → enable_thinking=false` (one cheap probe to verify in step 3). The morning «2+2» null
+  result was the question's triviality, not the lever's absence — Ark's #154 withdrawal is not
+  needed, though his three hard route-(b) arguments (slots, MTP n=3, slot-save-path) stand
+  regardless.
+  *Probe D, redone honestly:* at 233K context `xhigh` thought past the entire 24 000-token budget
+  (68 572 chars, `finish=length`, empty answer) — and the budget cannot grow, 233K + 40K exceeds
+  the 262K window. That is an operational bound in its own right: a deep-context top-effort turn
+  can out-think any budget that fits, which is the per-request `reasoning_budget_tokens` argument
+  in its live form (caught after one run this time, not four). The pair then ran at `medium`:
+  **q8_0 and q4_0 at 233 314 prompt tokens both finish naturally and both score 7/7 facts**
+  (driver versions 595.71/596.36/596.72/596.86, installer path and byte size, the
+  separate-window decision, Ark named with his own «secondary source» caveat); the answers match
+  each other and the ground truth, q4_0's marginally richer (timestamps, message-number
+  citations), thinking lengths diverge (3 555 vs 4 285 chars — KV moves the trajectory from the
+  first tokens). f16 control at 139 624: same quality, `stop`. **On this task shape q4_0's
+  −4.1 GiB costs nothing measurable**; one question, one seed, retrieval-heavy — attribution-
+  sensitive shapes at this depth remain untested, and the deferred vendor-sampling run is noted.
 - **A per-request thinking budget — a route (b) capability, added `2026-08-18` at Mike's word.** The
   server accepts a reasoning-token budget **in the request body**, so the depth of thinking becomes a
   per-call knob instead of a per-alias one. Read from `master` today,
