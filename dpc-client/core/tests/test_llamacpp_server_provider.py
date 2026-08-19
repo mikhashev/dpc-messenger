@@ -676,3 +676,68 @@ class TestReasoningAccounting:
         assert p._last_usage["reasoning_tokens"] == 100  # 400 chars / 4
         assert p._last_usage["content_tokens"] == 20
         assert any("split=estimated" in r.getMessage() for r in caplog.records)
+
+
+class TestTheBudgetClamp:
+    """A budget above the output window never binds - the window ends first
+    (measured live: budget 10000 at max_tokens 8192 thought 19 019 chars and
+    answered nothing). The clamp keeps thinking inside the window it shares
+    with the answer: effective = min(budget, max_tokens - 2048). And the
+    clamp reads the SAME max_tokens the request carries - per-call in plain
+    and vision, the alias field in tools and stream - because a clamp
+    guarding a different window than the wire diverges from the request."""
+
+    def test_the_clamp_cuts_an_alias_budget_to_the_window(self):
+        p = _provider(reasoning_budget_tokens=10000)
+        body = p._build_extra_body(None, None, effective_max_tokens=8192)
+        assert body["reasoning_budget_tokens"] == 6144  # 8192 - 2048
+
+    def test_a_budget_below_the_clamp_passes_untouched(self):
+        p = _provider(reasoning_budget_tokens=3000)
+        body = p._build_extra_body(None, None, effective_max_tokens=8192)
+        assert body["reasoning_budget_tokens"] == 3000
+
+    def test_the_clamp_follows_a_per_call_max_tokens_not_the_field(self):
+        # The sharp case from review: the caller narrows the window to 4000
+        # per call; a clamp reading the alias field (8192) would send 6144
+        # into a 4000-token window - truncation by our own hand.
+        p = _provider(reasoning_budget_tokens=10000)
+        body = p._build_extra_body(
+            "medium", 50000, effective_max_tokens=4000
+        )
+        assert body["reasoning_budget_tokens"] == 1952  # 4000 - 2048
+
+    @pytest.mark.asyncio
+    async def test_the_plain_path_passes_its_wire_max_tokens_to_the_clamp(self):
+        p = _provider(reasoning_budget_tokens=10000)
+        p.supervisor = _FakeSupervisor()
+        client, completions = _fake_client(_chat_resp(content="ok"))
+
+        async def _ensure():
+            return client
+
+        p._ensure = _ensure
+
+        await p.generate_response("q", max_tokens=4000)
+
+        body = completions.bodies[0]
+        assert body["max_tokens"] == 4000
+        assert body["extra_body"]["reasoning_budget_tokens"] == 1952
+
+    def test_thinking_off_sends_no_budget_at_all(self):
+        p = _provider(reasoning_budget_tokens=10000)
+        body = p._build_extra_body("off", None, effective_max_tokens=8192)
+        assert "reasoning_budget_tokens" not in body
+        assert body["chat_template_kwargs"] == {"enable_thinking": False}
+
+    def test_the_none_and_zero_window_contract(self):
+        # None: the caller told us nothing about the window - the clamp stays
+        # silent (the request itself then rides the server default). 0: the
+        # window is known and degenerate - the clamp fires and the existing
+        # budget<=0 fallback lands it at 1, not uncapped (review, Johnny's
+        # find sharpened by Ark: truthiness made 0 a silent bypass).
+        p = _provider(reasoning_budget_tokens=10000)
+        silent = p._build_extra_body(None, None, effective_max_tokens=None)
+        assert silent["reasoning_budget_tokens"] == 10000
+        degenerate = p._build_extra_body(None, None, effective_max_tokens=0)
+        assert degenerate["reasoning_budget_tokens"] == 1

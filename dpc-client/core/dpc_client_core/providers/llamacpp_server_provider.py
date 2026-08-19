@@ -220,10 +220,17 @@ class LlamaServerProvider(DeepSeekProvider):
             return mapped
         return None
 
+    # The answer reserve of the budget clamp: a budget that leaves no room
+    # for content turns "empty answer by truncation" into "clipped answer" —
+    # strictly better, and the heavy-turn cure is max_tokens, not a smaller
+    # budget (review, 2026-08-20).
+    BUDGET_ANSWER_RESERVE = 2048
+
     def _build_extra_body(
         self,
         reasoning_effort: Optional[str] = None,
         reasoning_budget_tokens: Optional[int] = None,
+        effective_max_tokens: Optional[int] = None,
     ) -> Dict[str, Any]:
         """The llama-server request-body dialect.
 
@@ -252,6 +259,18 @@ class LlamaServerProvider(DeepSeekProvider):
         # default is `xhigh`, and capping only named efforts would leave the
         # strongest thinking as the one unbounded path — exactly backwards.
         if word != REASONING_OFF and budget:
+            # The clamp: thinking must leave room for the answer inside the
+            # output window it shares. A budget above the window never binds
+            # (the window ends first) — measured live: budget 10000 at
+            # max_tokens 8192 thought 19 019 chars and answered nothing.
+            # effective_max_tokens is the SAME number the request carries
+            # (per-call in plain/vision, the alias field in tools/stream) —
+            # a clamp reading a different window than the wire diverges from
+            # the request it guards.
+            if effective_max_tokens is not None:
+                budget = min(int(budget), effective_max_tokens - self.BUDGET_ANSWER_RESERVE)
+                if budget <= 0:
+                    budget = 1
             body["reasoning_budget_tokens"] = int(budget)
         return body
 
@@ -417,9 +436,13 @@ class LlamaServerProvider(DeepSeekProvider):
 
         async def _call():
             client = await self._ensure()
+            # The same expression the request below carries as max_tokens —
+            # per-call here, the alias field in tools/stream.
+            _eff_max = kwargs.get("max_tokens", self.max_tokens)
             extra_body = self._build_extra_body(
                 kwargs.get("reasoning_effort"),
                 kwargs.get("reasoning_budget_tokens"),
+                effective_max_tokens=_eff_max,
             )
             params: Dict[str, Any] = {
                 "model": self._model_name(),
@@ -463,7 +486,9 @@ class LlamaServerProvider(DeepSeekProvider):
 
         async def _call():
             client = await self._ensure()
-            extra_body = self._build_extra_body(None, reasoning_budget_tokens)
+            extra_body = self._build_extra_body(
+                None, reasoning_budget_tokens, effective_max_tokens=self.max_tokens
+            )
             params: Dict[str, Any] = {
                 "model": self._model_name(),
                 "max_tokens": self.max_tokens,
@@ -542,7 +567,10 @@ class LlamaServerProvider(DeepSeekProvider):
 
         async def _call():
             client = await self._ensure()
-            extra_body = self._build_extra_body(reasoning_effort, reasoning_budget_tokens)
+            extra_body = self._build_extra_body(
+                reasoning_effort, reasoning_budget_tokens,
+                effective_max_tokens=self.max_tokens,
+            )
             params: Dict[str, Any] = {
                 "model": self._model_name(),
                 "max_tokens": self.max_tokens,
@@ -644,7 +672,10 @@ class LlamaServerProvider(DeepSeekProvider):
                 # — caught at review, 2026-08-20).
                 extra_body = {"chat_template_kwargs": {"enable_thinking": False}}
             else:
-                extra_body = self._build_extra_body(effort, per_call_budget)
+                extra_body = self._build_extra_body(
+                    effort, per_call_budget,
+                    effective_max_tokens=kwargs.get("max_tokens", self.max_tokens),
+                )
             params: Dict[str, Any] = {
                 "model": self._model_name(),
                 "max_tokens": kwargs.get("max_tokens", self.max_tokens),
