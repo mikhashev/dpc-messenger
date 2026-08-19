@@ -22,7 +22,8 @@
     agentProgressTool = null,  // v0.15.0+: Current tool being executed
     agentProgressRound = 0,  // v0.15.0+: Current round number
     agentProgressName = "",  // S185: Agent display name for live progress
-    agentProgressAgentId = "",  // S190: Agent ID for Stop button routing
+    agentProgressAgentId = "",
+    agentProgressSpeed = null,  // S190: Agent ID for Stop button routing
     agentStreamingText = "",  // v0.16.0+: Streaming text from agent
     peerDisplayNames = new Map<string, string>(),  // v0.19.1+: Map of node_id -> display name
     selfNodeId = "",  // v0.19.1+: Current user's node ID
@@ -38,6 +39,7 @@
     agentProgressRound?: number;
     agentProgressName?: string;
     agentProgressAgentId?: string;
+    agentProgressSpeed?: Record<string, unknown> | null;
     agentStreamingText?: string;
     peerDisplayNames?: Map<string, string>;
     selfNodeId?: string;
@@ -182,6 +184,7 @@
           <AgentProgressCollapsible
             toolCalls={msg.tool_calls}
             agentName={msg.senderName || ''}
+            speed={(msg as any).speed_summary || null}
           />
         {/if}
 
@@ -276,6 +279,7 @@
       streamingText={filteredStreamingText}
       conversationId={conversationId}
       agentId={agentProgressAgentId || (conversationId.startsWith('agent_') ? conversationId : '') || defaultAgentId}
+      speed={agentProgressSpeed}
     />
   {/if}
 </div>

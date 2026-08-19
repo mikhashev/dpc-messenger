@@ -610,6 +610,45 @@ class LlamaServerSupervisor:
             self._close_log()
             logger.info("llama-server[%s] stopped (rc=%s)", self.alias, proc.returncode)
 
+    def last_task_timings(self) -> Optional[Dict[str, Any]]:
+        """Exact prefill/decode rates of the most recently finished task, read
+        from the child's own print_timing lines - the engine's numbers, not an
+        estimate. Gives the phase split to non-streaming callers (the agents'
+        tools path has no first-chunk boundary to time it by itself).
+
+        Caveat, stated: with concurrent slots the last block in the file
+        belongs to whichever task finished last - under the supervisor's
+        serialized traffic that is the caller's own task."""
+        import re
+        try:
+            with open(self._log_path, "rb") as f:
+                f.seek(0, 2)
+                size = f.tell()
+                f.seek(max(0, size - 65536))
+                tail = f.read().decode("utf-8", errors="replace")
+        except OSError:
+            return None
+        # [\d.]+ in the rate capture: the rate is fractional ("438.86 tokens
+        # per second") and a \d+ capture eats only its tail ("86").
+        pre = re.findall(
+            r"prompt eval time =\s+[\d.]+ ms /\s+(\d+) tokens \(.*?([\d.]+) tokens per second\)",
+            tail,
+        )
+        dec = re.findall(
+            r"eval time =\s+[\d.]+ ms /\s+(\d+) tokens \(.*?([\d.]+) tokens per second\)",
+            tail,
+        )
+        if not pre or not dec:
+            return None
+        n_prompt, prefill_rate = pre[-1]
+        n_gen, decode_rate = dec[-1]
+        return {
+            "prefill_tok_s": int(float(prefill_rate)),
+            "decode_tok_s": int(float(decode_rate)),
+            "engine_prompt_tokens": int(n_prompt),
+            "engine_gen_tokens": int(n_gen),
+        }
+
     def _close_log(self) -> None:
         if self._log_fh:
             try:

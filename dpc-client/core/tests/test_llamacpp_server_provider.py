@@ -741,3 +741,26 @@ class TestTheBudgetClamp:
         assert silent["reasoning_budget_tokens"] == 10000
         degenerate = p._build_extra_body(None, None, effective_max_tokens=0)
         assert degenerate["reasoning_budget_tokens"] == 1
+
+
+class TestTheSpeedPayload:
+    """The live counter beside Stop: exact prefill/decode split only where a
+    phase boundary exists (streaming — first chunk arrival); non-streaming
+    calls carry total throughput rather than a fabricated split."""
+
+    def test_streaming_gets_the_exact_split_from_first_chunk(self):
+        from dpc_client_core.providers.llamacpp_server_provider import LlamaServerProvider
+        s = LlamaServerProvider._speed_payload(100000, 2000, 150.0, 125.0, "llama.cpp", "qwen")
+        assert s["prefill_tok_s"] == 800      # 100000 / 125
+        assert s["decode_tok_s"] == 80        # 2000 / 25
+        assert s["total_tok_s"] == 680        # 102000 / 150
+
+    def test_non_streaming_carries_total_only(self):
+        from dpc_client_core.providers.llamacpp_server_provider import LlamaServerProvider
+        s = LlamaServerProvider._speed_payload(90000, 2000, 160.0, None, "llama.cpp", "qwen")
+        assert "prefill_tok_s" not in s and "decode_tok_s" not in s
+        assert s["total_tok_s"] == 575
+
+    def test_zero_elapsed_is_no_counter_at_all(self):
+        from dpc_client_core.providers.llamacpp_server_provider import LlamaServerProvider
+        assert LlamaServerProvider._speed_payload(1, 1, 0, None, "a", "m") == {}

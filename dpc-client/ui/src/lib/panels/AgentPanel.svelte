@@ -41,6 +41,10 @@
     agentProgressTool = $bindable<string | null>(null),
     agentProgressRound = $bindable<number>(0),
     agentProgressName = $bindable<string>(''),
+    agentProgressSpeed = $bindable<Record<string, unknown> | null>(null),
+    // UI-side per-turn speed samples; aggregated into the finished message on
+    // clear. Not persisted to history — a live-session view.
+    liveSpeedSamples = [],
     agentProgressAgentId = $bindable<string>(''),
     agentStreamingText = $bindable<string>(''),
   }: {
@@ -56,6 +60,8 @@
     agentProgressTool?: string | null;
     agentProgressRound?: number;
     agentProgressName?: string;
+    agentProgressSpeed?: Record<string, unknown> | null;
+    liveSpeedSamples?: Array<Record<string, any>>;
     agentProgressAgentId?: string;
     agentStreamingText?: string;
   } = $props();
@@ -214,6 +220,18 @@
         agentProgressMessage = message || null;
         agentProgressTool = tool_name || null;
         agentProgressRound = round || 0;
+        // Per-round LLM speed (llama.cpp provider only): rides the narration
+        // emits so the live counter beside Stop updates once per round.
+        // UPDATE-ONLY: the burst after a speed event carries tool-args and
+        // per-tool events WITHOUT speed — nulling on every event made the
+        // counter flash for milliseconds and die. The clear effect owns reset.
+        if ($agentProgress.speed) {
+            agentProgressSpeed = $agentProgress.speed as Record<string, unknown>;
+            // Per-round samples for the finished-message medians (Mike:
+            // «5 rounds · 8 actions — неплохо бы средние, лучше медианные»).
+            // Median, not mean: one cold first round would drag a mean.
+            liveSpeedSamples.push($agentProgress.speed);
+        }
         if ($agentProgress.agent_name) agentProgressName = $agentProgress.agent_name;
         if ($agentProgress.agent_id) agentProgressAgentId = $agentProgress.agent_id;
 
@@ -249,6 +267,52 @@
       agentProgressRound = 0;
       agentProgressName = '';
       agentProgressAgentId = '';
+      agentProgressSpeed = null;
+      // Aggregate the turn's per-round speeds onto the last agent message so
+      // the finished header (N rounds · M actions) carries medians. Client-side
+      // only — history on disk keeps its shape.
+      if (liveSpeedSamples.length > 0) {
+        const median = (key: string): number | null => {
+          const vals = liveSpeedSamples
+            .map((s) => Number(s[key]))
+            .filter((v) => Number.isFinite(v) && v > 0)
+            .sort((a, b) => a - b);
+          if (!vals.length) return null;
+          return vals[Math.floor(vals.length / 2)];
+        };
+        const summary: Record<string, any> = {
+          rounds: liveSpeedSamples.length,
+          prefill_tok_s: median('prefill_tok_s'),
+          decode_tok_s: median('decode_tok_s'),
+          total_tok_s: median('total_tok_s'),
+          model: liveSpeedSamples[liveSpeedSamples.length - 1]?.model || '',
+          median: true,
+        };
+        liveSpeedSamples.length = 0;
+        // The clear can land before the final agent message reaches the
+        // history, so attach on the next ticks too; and rebuild the Map and
+        // the array — mutating in place and setting the same reference does
+        // not notify subscribers.
+        const attach = () => {
+          const histories = get(chatHistories);
+          const hist = [...(histories.get(conversation_id) || [])];
+          for (let i = hist.length - 1; i >= 0; i--) {
+            const m: any = hist[i];
+            if (m && m.sender !== 'user' && (m.tool_calls?.length || m.senderName)) {
+              hist[i] = { ...m, speed_summary: summary };
+              const next = new Map(histories);
+              next.set(conversation_id, hist);
+              chatHistories.set(next);
+              return true;
+            }
+          }
+          return false;
+        };
+        if (!attach()) {
+          setTimeout(attach, 400);
+          setTimeout(attach, 1200);
+        }
+      }
       if (isActiveChatConv(conversation_id)) {
         const hist = get(chatHistories).get(conversation_id) || [];
         const hasPendingCommand = hist.some((m: any) => m.commandId);

@@ -658,6 +658,13 @@ async def run_llm_loop(
                 # Carry forward thinking from each round (last non-empty thinking wins)
                 if msg.get("thinking"):
                     accumulated_usage["thinking"] = msg["thinking"]
+                # Per-round live speed for the UI counter (llama.cpp provider
+                # attaches it to its usage; absent elsewhere — Ollama is out
+                # of scope by decision). Rides the next narration emit so no
+                # new event type is born for one line.
+                _round_speed = usage.get("speed")
+                if _round_speed:
+                    _round_speed["round"] = round_idx
             except Exception as e:
                 log.error(f"LLM error: {e}", exc_info=True)
                 return f"⚠️ LLM error: {e}", accumulated_usage, llm_trace
@@ -719,6 +726,11 @@ async def run_llm_loop(
                     # Intermediate per-round text is shown per-round (round_text), not
                     # assembled into the final answer (Variant 2). Final = this last round.
                     llm_trace["assistant_notes"].append(clean_content.strip()[:320])
+                    # The final no-tool round never reaches the tool-branch narration
+                    # emits below, so a simple one-round answer carried no live speed —
+                    # the counter appeared only on tool-heavy runs. Emit it here too.
+                    if _round_speed:
+                        emit_progress(clean_content.strip()[:200] or "done", None, round_idx, None, _round_speed)
                     return clean_content, accumulated_usage, llm_trace
                 if ("prompt_tokens" in usage
                         and usage.get("prompt_tokens") == 0
@@ -782,11 +794,11 @@ async def run_llm_loop(
             )
 
             if round_reasoning:
-                emit_progress(round_reasoning, None, round_idx)
+                emit_progress(round_reasoning, None, round_idx, None, _round_speed)
             elif tool_calls:
                 # No reasoning at all — emit tool names so the UI shows activity.
                 names = ", ".join(tc["function"]["name"] for tc in tool_calls)
-                emit_progress(f"→ {names}", None, round_idx)
+                emit_progress(f"→ {names}", None, round_idx, None, _round_speed)
 
             # content-prefix is shown per-round via round_text (Variant 2), not folded into
             # the final answer — keep only the trace note here.

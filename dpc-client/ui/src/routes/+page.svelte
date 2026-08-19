@@ -92,6 +92,8 @@
   let agentProgressRound = $state<number>(0);
   let agentProgressName = $state<string>('');
   let agentProgressAgentId = $state<string>('');
+  // Per-round LLM speed from the llama.cpp provider (live counter beside Stop)
+  let agentProgressSpeed = $state<Record<string, unknown> | null>(null);
   let agentStreamingText = $state<string>('');
   // Component ref — used to call flushAndCapture() in the AI response handler
   let agentPanelComp: AgentPanel | null = $state(null);
@@ -1162,6 +1164,7 @@
         agentProgressRound={agentProgressRound}
         agentProgressName={agentProgressName}
         agentProgressAgentId={agentProgressAgentId}
+        agentProgressSpeed={agentProgressSpeed}
         agentStreamingText={agentStreamingText}
         peerDisplayNames={peerDisplayNames}
         selfNodeId={$nodeStatus?.node_id || ''}
@@ -1236,6 +1239,7 @@
   bind:agentProgressRound
   bind:agentProgressName
   bind:agentProgressAgentId
+  bind:agentProgressSpeed
   bind:agentStreamingText
 />
 

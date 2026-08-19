@@ -357,6 +357,43 @@ class LlamaServerProvider(DeepSeekProvider):
             "APIConnectionError", "APITimeoutError",
         )
 
+    @staticmethod
+    def _speed_payload(
+        prompt_tokens: int,
+        completion_tokens: int,
+        elapsed_s: Optional[float],
+        t_first_chunk_s: Optional[float],
+        alias: str,
+        model: str,
+    ) -> Dict[str, Any]:
+        """Per-call speed for the live counter (llama.cpp only; Ollama is out
+        of scope by decision). Wall-clock, advisory, not exact: it includes
+        RTT to the local server and interpreter pauses; the t0 is taken AFTER
+        the server is ensured and the slot entered, so cold start and slot
+        queue stay OUT of the number (a cold first call would otherwise read
+        as a slow model). The streaming path gets the prefill/decode split
+        from the first chunk's arrival (everything before it is prefill);
+        non-streaming calls carry total throughput only — a fabricated split
+        would be an instrument that looks precise and is not.
+
+        The pinned server exposes no timing surfaces (/slots carries token
+        counts only, /metrics is 501 on this pin), so wall-clock boundaries are
+        the honest source."""
+        if not elapsed_s or elapsed_s <= 0:
+            return {}
+        out: Dict[str, Any] = {
+            "alias": alias,
+            "model": model,
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": completion_tokens,
+            "elapsed_s": round(elapsed_s, 1),
+            "total_tok_s": int((prompt_tokens + completion_tokens) / elapsed_s),
+        }
+        if t_first_chunk_s and t_first_chunk_s > 0 and (elapsed_s - t_first_chunk_s) > 0:
+            out["prefill_tok_s"] = int(prompt_tokens / t_first_chunk_s)
+            out["decode_tok_s"] = int(completion_tokens / (elapsed_s - t_first_chunk_s))
+        return out
+
     def _record_usage(
         self,
         raw_usage: Any,
@@ -366,6 +403,8 @@ class LlamaServerProvider(DeepSeekProvider):
         tool_calls: int = 0,
         effort: Any = "server-default",
         reasoning_text: Optional[str] = None,
+        elapsed_s: Optional[float] = None,
+        t_first_chunk_s: Optional[float] = None,
     ) -> Dict[str, Any]:
         """Same accounting as the parent, under this provider's own name — the
         burn history is grepped by that prefix, and a local box joining the
@@ -392,6 +431,28 @@ class LlamaServerProvider(DeepSeekProvider):
             usage["content_tokens"] = max(0, usage["completion_tokens"] - usage["reasoning_tokens"])
             estimated = True
         self._last_usage = usage
+        if elapsed_s is not None and elapsed_s > 0:
+            speed = self._speed_payload(
+                usage["prompt_tokens"], usage["completion_tokens"],
+                elapsed_s, t_first_chunk_s, self.alias, self.model or "",
+            )
+            # The engine's own per-task timings give every path the phase
+            # split, not just the streaming one: the agents' tools path has no
+            # first-chunk boundary, but the child's print_timing lines carry
+            # exact prompt-eval and eval rates for the finished task.
+            timings = None
+            if hasattr(self.supervisor, "last_task_timings"):
+                try:
+                    timings = self.supervisor.last_task_timings()
+                except Exception:
+                    timings = None
+            if timings:
+                speed.update({
+                    "prefill_tok_s": timings["prefill_tok_s"],
+                    "decode_tok_s": timings["decode_tok_s"],
+                    "speed_source": "engine",
+                })
+            usage["speed"] = speed
         logger.info(
             "llamacpp usage: alias=%s conv=%s prompt=%d, completion=%d "
             "(reasoning=%d/content=%d%s), tool_calls=%d, effort=%s, path=%s",
@@ -436,6 +497,10 @@ class LlamaServerProvider(DeepSeekProvider):
 
         async def _call():
             client = await self._ensure()
+            # Speed clock starts AFTER the server is ensured: a cold start
+            # (~a minute) inside elapsed would read as a slow model.
+            import time as _time
+            _t0 = _time.perf_counter()
             # The same expression the request below carries as max_tokens —
             # per-call here, the alias field in tools/stream.
             _eff_max = kwargs.get("max_tokens", self.max_tokens)
@@ -461,6 +526,7 @@ class LlamaServerProvider(DeepSeekProvider):
                 conversation_id=kwargs.get("conversation_id"),
                 effort=self._effort_label(kwargs.get("reasoning_effort"), extra_body),
                 reasoning_text=self._last_thinking,
+                elapsed_s=_time.perf_counter() - _t0,
             )
             return msg.content or ""
 
@@ -498,11 +564,19 @@ class LlamaServerProvider(DeepSeekProvider):
                 "stream_options": {"include_usage": True},
                 **self._sampling_on_the_wire(extra_body, self._sampling_params()),
             }
+            import time as _time
+            _t0: Optional[float] = None
+            _t_first: Optional[float] = None
             full_text = ""
             thinking_text = ""
             async with self.supervisor.call_slot():
+                # Speed clock starts inside the slot: the queue wait before it
+                # is contention, not model speed.
+                _t0 = _time.perf_counter()
                 stream = await client.chat.completions.create(**params)
                 async for chunk in stream:
+                    if _t_first is None:
+                        _t_first = _time.perf_counter() - _t0
                     chunk_usage = getattr(chunk, "usage", None)
                     if chunk_usage is not None:
                         self._record_usage(
@@ -515,6 +589,8 @@ class LlamaServerProvider(DeepSeekProvider):
                             # post-loop assignment — the field is still None
                             # here, and the estimate would silently read 0.
                             reasoning_text=thinking_text or None,
+                            elapsed_s=_time.perf_counter() - _t0,
+                            t_first_chunk_s=_t_first,
                         )
                     if not chunk.choices:
                         continue
@@ -567,6 +643,8 @@ class LlamaServerProvider(DeepSeekProvider):
 
         async def _call():
             client = await self._ensure()
+            import time as _time
+            _t0 = _time.perf_counter()  # after ensure: cold start stays out of the number
             extra_body = self._build_extra_body(
                 reasoning_effort, reasoning_budget_tokens,
                 effective_max_tokens=self.max_tokens,
@@ -608,6 +686,7 @@ class LlamaServerProvider(DeepSeekProvider):
                 tool_calls=len(tool_calls_raw),
                 effort=self._effort_label(reasoning_effort, extra_body),
                 reasoning_text=self._last_thinking,
+                elapsed_s=_time.perf_counter() - _t0,
             )
             return {
                 "content": content,
@@ -660,6 +739,8 @@ class LlamaServerProvider(DeepSeekProvider):
 
         async def _call():
             client = await self._ensure()
+            import time as _time
+            _t0 = _time.perf_counter()  # after ensure: cold start stays out of the number
             effort = kwargs.get("reasoning_effort")
             per_call_budget = kwargs.get("reasoning_budget_tokens")
             if effort is None and per_call_budget is None:
@@ -693,6 +774,7 @@ class LlamaServerProvider(DeepSeekProvider):
                 conversation_id=kwargs.get("conversation_id"),
                 effort=self._effort_label(effort, extra_body),
                 reasoning_text=self._last_thinking,
+                elapsed_s=_time.perf_counter() - _t0,
             )
             return msg.content or ""
 

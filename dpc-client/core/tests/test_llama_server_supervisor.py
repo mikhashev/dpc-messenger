@@ -492,3 +492,34 @@ class TestTheAdmissionArithmetic:
         assert props == {"total_slots": 4}
         assert attempts == [None]
         assert any("overrides arithmetic" in r.message for r in caplog.records)
+
+
+class TestEngineTimings:
+    """The supervisor reads the child's own print_timing lines for the exact
+    prefill/decode split — the engine's numbers, so non-streaming callers
+    (the agents' tools path) get real phases instead of a blended total."""
+
+    def test_parses_the_last_task_block(self, tmp_path):
+        import dpc_client_core.managers.llama_server_supervisor as mod
+        sup = _sup()
+        log = tmp_path / "llama-server-llama.cpp.log"
+        log.write_text(
+            "13.27.8 I slot print_timing: id 3 | task 2434 | prompt eval time =    2537.07 ms /  1033 tokens (    2.46 ms per token,   407.16 tokens per second)\n"
+            "13.27.8 I slot print_timing: id 3 | task 2434 |        eval time =   20142.44 ms /   671 tokens (   30.06 ms per token,    33.26 tokens per second)\n"
+            "13.55.1 I slot print_timing: id 3 | task 2717 | prompt eval time =    3693.67 ms /  1621 tokens (    2.28 ms per token,   438.86 tokens per second)\n"
+            "13.55.1 I slot print_timing: id 3 | task 2717 |        eval time =   23196.43 ms /   757 tokens (   30.68 ms per token,    32.59 tokens per second)\n",
+            encoding="utf-8",
+        )
+        sup._log_path = log
+        timings = sup.last_task_timings()
+        assert timings["prefill_tok_s"] == 438      # the LAST block, not the first
+        assert timings["decode_tok_s"] == 32
+        assert timings["engine_prompt_tokens"] == 1621
+        assert timings["engine_gen_tokens"] == 757
+
+    def test_no_timings_means_none_not_an_estimate(self, tmp_path):
+        sup = _sup()
+        log = tmp_path / "empty.log"
+        log.write_text("nothing here\n", encoding="utf-8")
+        sup._log_path = log
+        assert sup.last_task_timings() is None

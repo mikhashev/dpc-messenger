@@ -26,6 +26,7 @@
         streamingText = '',
         conversationId = '',
         agentId = '',
+        speed = null,
     }: {
         toolCalls: ToolCall[];
         agentName?: string;
@@ -35,6 +36,7 @@
         streamingText?: string;
         conversationId?: string;
         agentId?: string;
+        speed?: Record<string, any> | null;
     } = $props();
 
     let expanded = $state(isLive);
@@ -58,6 +60,52 @@
         if (next.has(round)) next.delete(round);
         else next.add(round);
         collapsedRounds = next;
+    }
+
+    // Stop used to be fire-and-forget: the envelope said OK while the payload
+    // could say error/no_active_loop, and a miss looked identical to a hit.
+    // The handler answers {status: stopped | no_active_loop | error}.
+    let stopState = $state<'idle' | 'stopping' | 'miss' | 'error'>('idle');
+    let stopNote = $state('');
+    // A new round invalidates a stale 'miss' from the previous one: the loop
+    // is demonstrably running again, so the button returns to a live Stop.
+    let lastRoundSeen: number | undefined;
+    $effect(() => {
+        const r = currentRound;
+        if (lastRoundSeen === undefined) {
+            lastRoundSeen = r;
+            return;
+        }
+        if (r !== lastRoundSeen) {
+            lastRoundSeen = r;
+            if (stopState === 'miss' || stopState === 'error') {
+                stopState = 'idle';
+                stopNote = '';
+            }
+        }
+    });
+    async function requestStop(e: Event) {
+        e.stopPropagation();
+        if (stopState === 'stopping') return;
+        stopState = 'stopping';
+        try {
+            const res: any = await sendCommand('interrupt_agent', {
+                agent_id: agentId, conversation_id: conversationId,
+            });
+            const st = res?.status || res?.payload?.status;
+            if (st === 'stopped') {
+                stopNote = 'stopping…';
+            } else if (st === 'no_active_loop') {
+                stopState = 'miss';
+                stopNote = 'no active loop';
+            } else {
+                stopState = 'error';
+                stopNote = res?.message || 'error';
+            }
+        } catch (err: any) {
+            stopState = 'error';
+            stopNote = err?.message || 'send failed';
+        }
     }
 
     // One-line result preview shown in the collapsed tool row (full output on expand).
@@ -110,14 +158,27 @@
             <span class="action-count">
                 {roundCount} {roundCount === 1 ? 'round' : 'rounds'} · {toolCalls.length} {toolCalls.length === 1 ? 'action' : 'actions'}{isLive ? '...' : ''}
             </span>
+            {#if speed && (isLive || speed.median)}
+                <span class="speed-counter" title={`model ${speed.model || speed.alias || ''}, round ${speed.round ?? '?'}, ${speed.prompt_tokens ?? 0} in / ${speed.completion_tokens ?? 0} out, ${speed.elapsed_s ?? 0}s`}>
+                    {#if speed.prefill_tok_s}
+                        <span class="speed-part">{speed.median ? 'median ' : ''}prefill: {speed.prefill_tok_s} tok/s | decode: {speed.decode_tok_s} tok/s</span>
+                    {:else if speed.total_tok_s}
+                        <span class="speed-part">{speed.median ? 'median ' : ''}{speed.total_tok_s} tok/s</span>
+                    {/if}
+                    <span class="speed-model">{speed.model || speed.alias}</span>
+                </span>
+            {/if}
             <span class="expand-icon">{expanded ? '▾' : '▸'}</span>
         </button>
-        {#if isLive && conversationId}
+        <!-- Expanded, the sticky footer Stop owns the control; the header one
+             serves the collapsed state, where the block is short. -->
+        {#if isLive && conversationId && !expanded}
             <button
                 class="stop-btn"
-                title="Stop agent"
-                onclick={(e) => { e.stopPropagation(); sendCommand('interrupt_agent', { agent_id: agentId, conversation_id: conversationId }); }}
-            >Stop</button>
+                title={stopNote || 'Stop agent'}
+                disabled={stopState === 'stopping'}
+                onclick={requestStop}
+            >{stopState === 'stopping' ? 'Stopping…' : stopState === 'miss' ? 'No active loop' : 'Stop'}</button>
         {/if}
 
         {#if expanded}
@@ -176,6 +237,23 @@
                         <span class="tool-name">{getToolLabel(currentTool)}</span>
                     </div>
                 {/if}
+                {#if isLive && conversationId}
+                    <!-- The run grows downward and autoscroll keeps the bottom in
+                         view, so the one control that ends the run must live at the
+                         bottom too — sticky, so it survives the user scrolling up
+                         mid-run. The top Stop stays for the collapsed state. -->
+                    <div class="stop-footer">
+                        <button
+                            class="stop-btn"
+                            title={stopNote || 'Stop agent'}
+                            disabled={stopState === 'stopping'}
+                            onclick={requestStop}
+                        >{stopState === 'stopping' ? 'Stopping…' : stopState === 'miss' ? 'No active loop' : 'Stop'}</button>
+                        {#if stopState === 'error'}
+                            <span class="stop-note error">{stopNote}</span>
+                        {/if}
+                    </div>
+                {/if}
             </div>
         {/if}
         <!-- During live with per-round structure, narration lives inside each round —
@@ -198,6 +276,46 @@
         border-radius: 0 6px 6px 0;
     }
 
+    .stop-footer {
+        position: sticky;
+        bottom: 0;
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        justify-content: center;
+        padding: 10px 0 8px;
+        background: linear-gradient(to top, var(--bg-primary, #111) 75%, transparent);
+    }
+    .stop-footer .stop-btn {
+        font-size: 1em;
+        padding: 8px 28px;
+        min-width: 120px;
+    }
+    .stop-note.error {
+        color: #f87171;
+        font-size: 0.85em;
+    }
+    .speed-counter {
+        display: inline-flex;
+        gap: 8px;
+        align-items: baseline;
+        margin-left: 8px;
+        font-size: 0.85em;
+        opacity: 0.85;
+    }
+    .speed-part {
+        font-variant-numeric: tabular-nums;
+        color: var(--text-secondary, #9ca3af);
+        white-space: nowrap;
+    }
+    .speed-model {
+        font-size: 0.9em;
+        color: var(--text-tertiary, #6b7280);
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        max-width: 160px;
+    }
     .tool-calls-collapsible.live {
         border-left-color: #34d399;
     }

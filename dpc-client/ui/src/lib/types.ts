@@ -264,6 +264,18 @@ export interface AgentProgressEvent {
     agent_name?: string;
     agent_id?: string;
     ts?: string;
+    // Per-round LLM speed from the llama.cpp provider (live counter beside Stop)
+    speed?: {
+        alias?: string;
+        model?: string;
+        round?: number;
+        prompt_tokens?: number;
+        completion_tokens?: number;
+        elapsed_s?: number;
+        total_tok_s?: number;
+        prefill_tok_s?: number;
+        decode_tok_s?: number;
+    } | null;
 }
 
 export interface AgentProgressClearEvent {
