@@ -634,8 +634,13 @@ class LlamaServerSupervisor:
             r"prompt eval time =\s+[\d.]+ ms /\s+(\d+) tokens \(.*?([\d.]+) tokens per second\)",
             tail,
         )
+        # (?<!prompt ) — "prompt eval time" lines contain "eval time" as a
+        # substring; without the lookbehind the decode capture lands on the
+        # true eval line only by line ORDER inside a block (review: works-by-
+        # order is the class this codebase burns out). The negative lookbehind
+        # identifies decode lines by the absence of the marker, not by position.
         dec = re.findall(
-            r"eval time =\s+[\d.]+ ms /\s+(\d+) tokens \(.*?([\d.]+) tokens per second\)",
+            r"(?<!prompt )eval time =\s+[\d.]+ ms /\s+(\d+) tokens \(.*?([\d.]+) tokens per second\)",
             tail,
         )
         if not pre or not dec:
