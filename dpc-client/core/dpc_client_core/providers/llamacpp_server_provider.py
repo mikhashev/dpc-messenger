@@ -296,6 +296,20 @@ class LlamaServerProvider(DeepSeekProvider):
             )
         return params
 
+    def _sampling_on_the_wire(
+        self,
+        extra_body: Dict[str, Any],
+        sampling: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """Sampling params the OpenAI SDK can type, plus the ones it cannot.
+
+        `top_k` is not an SDK kwarg — sent top-level it is the 18:43 TypeError
+        — but the server reads it fine from the JSON body, so it rides in
+        extra_body beside the thinking dialect."""
+        if "top_k" in sampling:
+            extra_body["top_k"] = sampling.pop("top_k")
+        return sampling
+
     def _effective_temperature(self, override: Optional[float] = None) -> float:
         if override is not None:
             return override
@@ -381,7 +395,7 @@ class LlamaServerProvider(DeepSeekProvider):
                 "max_tokens": kwargs.get("max_tokens", self.max_tokens),
                 "messages": [{"role": "user", "content": prompt}],
                 "extra_body": extra_body,
-                **self._sampling_params(kwargs.get("temperature")),
+                **self._sampling_on_the_wire(extra_body, self._sampling_params(kwargs.get("temperature"))),
             }
             async with self.supervisor.call_slot():
                 resp = await client.chat.completions.create(**params)
@@ -425,7 +439,7 @@ class LlamaServerProvider(DeepSeekProvider):
                 "extra_body": extra_body,
                 "stream": True,
                 "stream_options": {"include_usage": True},
-                **self._sampling_params(),
+                **self._sampling_on_the_wire(extra_body, self._sampling_params()),
             }
             full_text = ""
             thinking_text = ""
@@ -499,7 +513,7 @@ class LlamaServerProvider(DeepSeekProvider):
                 "tools": openai_tools,
                 "tool_choice": "auto",
                 "extra_body": extra_body,
-                **self._sampling_params(reasoning_effort=reasoning_effort),
+                **self._sampling_on_the_wire(extra_body, self._sampling_params(reasoning_effort=reasoning_effort)),
             }
             async with self.supervisor.call_slot():
                 resp = await client.chat.completions.create(**params)

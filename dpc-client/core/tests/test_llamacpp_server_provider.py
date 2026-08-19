@@ -368,6 +368,85 @@ class TestTheCallPath:
         assert p.supervisor._in_flight == 0
 
     @pytest.mark.asyncio
+    async def test_every_entry_point_builds_params_the_real_sdk_accepts(self):
+        """The contract tests the fakes cannot replace.
+
+        Three live fires in one day (f16 default, the call_slot coroutine, and
+        `top_k` as a kwarg at 18:43) were all shape errors against things the
+        provider CALLS — and every double in this suite happily accepted the
+        wrong shape, because a fake inherits the implementation's assumptions.
+        The real AsyncOpenAI client validates kwargs when the call is made,
+        before any network: pointed at a dead port, a bad kwarg raises
+        TypeError and a good shape raises a connection error. So one dead port
+        pins all three entry points against the actual SDK signature."""
+        from openai import AsyncOpenAI
+
+        from dpc_client_core.managers.llama_server_supervisor import LlamaServerSupervisor
+
+        # max_retry_seconds=0: a connection error is retryable to the
+        # provider, and the contract test must not drive its backoff budget.
+        p = _provider(top_k=20, top_p=0.95, temperature=1.0, max_retry_seconds=0)
+        p.supervisor = LlamaServerSupervisor("local_qwen38", {"gguf_path": GGUF})
+        dead = AsyncOpenAI(api_key="local", base_url="http://127.0.0.1:1/v1", max_retries=0)
+
+        async def _ensure():
+            return dead
+
+        p._ensure = _ensure
+
+        import openai
+
+        for attempt in (
+            lambda: p.generate_response("hi"),
+            lambda: p.generate_response_stream("hi"),
+            lambda: p.generate_with_tools(
+                [{"role": "user", "content": [{"type": "text", "text": "hi"}]}],
+                [{"name": "t", "description": "", "input_schema": {"type": "object"}}],
+            ),
+        ):
+            # The provider wraps transport failures in its own RuntimeError —
+            # the contract under test is that the failure is CONNECTION-class,
+            # never a TypeError the SDK raised about our kwargs.
+            with pytest.raises((RuntimeError, openai.APIConnectionError)) as ei:
+                await attempt()
+            assert not isinstance(ei.value.__cause__, TypeError), (
+                f"an entry point sends a kwarg the real SDK refuses: {ei.value.__cause__}"
+            )
+        # The slot was entered and released cleanly on each failed call, and
+        # no kwarg survived at top level that the SDK would refuse.
+        assert p.supervisor._in_flight == 0
+
+    @pytest.mark.asyncio
+    async def test_a_bad_kwarg_fails_the_signature_not_the_connection(self):
+        """The guard behind the test above: this is what 18:43 looked like.
+        The SDK refuses `top_k` as a kwarg at call time, before any network —
+        which is exactly why it must ride in extra_body, and why the contract
+        test above can run against a dead port."""
+        from openai import AsyncOpenAI
+
+        dead = AsyncOpenAI(api_key="local", base_url="http://127.0.0.1:1/v1", max_retries=0)
+        with pytest.raises(TypeError, match="top_k"):
+            dead.chat.completions.create(
+                model="m", messages=[{"role": "user", "content": "x"}], top_k=20
+            )
+
+    @pytest.mark.asyncio
+    async def test_top_k_travels_in_extra_body_not_as_an_sdk_kwarg(self):
+        p = _provider(top_k=20)
+        p.supervisor = _FakeSupervisor()
+        client, completions = _fake_client(_chat_resp())
+
+        async def _ensure():
+            return client
+
+        p._ensure = _ensure
+
+        await p.generate_response("hello")
+        body = completions.bodies[0]
+        assert "top_k" not in body
+        assert body["extra_body"]["top_k"] == 20
+
+    @pytest.mark.asyncio
     async def test_close_drains_the_child(self):
         p = _provider()
         sup = _FakeSupervisor()
