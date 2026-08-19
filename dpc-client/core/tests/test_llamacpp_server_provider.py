@@ -587,3 +587,44 @@ class TestVision:
         body = completions.bodies[0]
         assert body["extra_body"].get("reasoning_budget_tokens") == 2000
         assert "enable_thinking" not in body["extra_body"].get("chat_template_kwargs", {})
+
+
+class TestReasoningAccounting:
+    """The pinned server leaves completion_tokens_details empty (measured
+    live, 2026-08-20: 11.8K chars of thinking, reasoning=0 in usage), so the
+    split is estimated from the message body and marked, rather than letting
+    the burn history stay blind to the thinking lever it pays for."""
+
+    @pytest.mark.asyncio
+    async def test_usage_without_split_estimates_reasoning_from_the_body(self, caplog):
+        import logging
+
+        p = _provider()
+        p.supervisor = _FakeSupervisor()
+        client, completions = _fake_client(_chat_resp(content="answer", reasoning="x" * 400))
+
+        async def _ensure():
+            return client
+
+        p._ensure = _ensure
+
+        with caplog.at_level(logging.INFO, logger="dpc_client_core.providers.llamacpp_server_provider"):
+            await p.generate_response("q")
+
+        assert p._last_usage["reasoning_tokens"] == 100  # 400 chars / 4
+        assert p._last_usage["content_tokens"] == 0  # completion=7, estimate clamps at 0
+        assert any("split=estimated" in r.getMessage() for r in caplog.records)
+
+    @pytest.mark.asyncio
+    async def test_a_native_split_is_never_overwritten(self):
+        p = _provider()
+        p.supervisor = _FakeSupervisor()
+        usage = SimpleNamespace(
+            prompt_tokens=10, completion_tokens=100, total_tokens=110,
+            completion_tokens_details=SimpleNamespace(reasoning_tokens=50),
+        )
+        out = p._record_usage(
+            usage, path="plain", reasoning_text="y" * 4000,
+        )
+        assert out["reasoning_tokens"] == 50
+        assert out["content_tokens"] == 50

@@ -346,20 +346,40 @@ class LlamaServerProvider(DeepSeekProvider):
         conversation_id: Optional[str] = None,
         tool_calls: int = 0,
         effort: Any = "server-default",
+        reasoning_text: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Same accounting as the parent, under this provider's own name — the
         burn history is grepped by that prefix, and a local box joining the
-        `DeepSeek usage:` series would mislabel every line it wrote."""
+        `DeepSeek usage:` series would mislabel every line it wrote.
+
+        The pinned server never fills `completion_tokens_details` (measured
+        live, 2026-08-20 local wall clock — the A/B ran at 01:36, the vision
+        probe of the previous evening at 23:38 was 08-19: different events
+        across local midnight, not a drift; 11.8K chars of thinking,
+        `reasoning=0` in usage), so when the split is absent and the message
+        carried a reasoning block, the reasoning tokens are estimated from
+        the text — chars/4, marked `split=estimated` — rather than letting
+        the burn history stay blind to the one lever it pays for. The
+        estimate is script-blind by design (Cyrillic undercounts ~3-4x,
+        TOKEN-ESTIMATE-IS-BLIND-TO-SCRIPT): the total `completion_tokens`
+        stays exact so burn cost is never distorted, and the marker says
+        what is estimated."""
         usage = self._usage_from_response(raw_usage) if raw_usage is not None else None
         if usage is None:
             return {}
+        estimated = False
+        if not usage.get("reasoning_tokens") and reasoning_text:
+            usage["reasoning_tokens"] = max(1, len(reasoning_text) // 4)
+            usage["content_tokens"] = max(0, usage["completion_tokens"] - usage["reasoning_tokens"])
+            estimated = True
         self._last_usage = usage
         logger.info(
             "llamacpp usage: alias=%s conv=%s prompt=%d, completion=%d "
-            "(reasoning=%d/content=%d), tool_calls=%d, effort=%s, path=%s",
+            "(reasoning=%d/content=%d%s), tool_calls=%d, effort=%s, path=%s",
             self.alias, conversation_id or "-", usage["prompt_tokens"],
             usage["completion_tokens"], usage["reasoning_tokens"],
-            usage["content_tokens"], tool_calls, effort, path,
+            usage["content_tokens"], ", split=estimated" if estimated else "",
+            tool_calls, effort, path,
         )
         return usage
 
@@ -417,6 +437,7 @@ class LlamaServerProvider(DeepSeekProvider):
                 path="plain",
                 conversation_id=kwargs.get("conversation_id"),
                 effort=self._effort_label(kwargs.get("reasoning_effort"), extra_body),
+                reasoning_text=self._last_thinking,
             )
             return msg.content or ""
 
@@ -553,6 +574,7 @@ class LlamaServerProvider(DeepSeekProvider):
                 conversation_id=conversation_id,
                 tool_calls=len(tool_calls_raw),
                 effort=self._effort_label(reasoning_effort, extra_body),
+                reasoning_text=self._last_thinking,
             )
             return {
                 "content": content,
@@ -634,6 +656,7 @@ class LlamaServerProvider(DeepSeekProvider):
                 path="vision",
                 conversation_id=kwargs.get("conversation_id"),
                 effort=self._effort_label(effort, extra_body),
+                reasoning_text=self._last_thinking,
             )
             return msg.content or ""
 
