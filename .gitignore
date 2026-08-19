@@ -167,3 +167,4 @@ cc-out*.md
 # of filenames that has to be maintained every time a view is added.
 tools/backlog/*.html
 tools/backlog/*.json
+dpc-client/core/config.ini
