@@ -21,6 +21,18 @@ SLEEP_STATE_FILE = "sleep_state.json"
 MORNING_BRIEF_FILE = "morning_brief.json"
 SLEEP_FINDINGS_FILE = "sleep_findings.json"
 
+# One sleep pipeline at a time, process-wide (= per device: one backend per
+# machine). Two consolidations running together carry 92-170K-token prompts
+# against llama-server's unified 262 144-token KV pool, and the second
+# prefill eats the pool out from under the first — the server then kills
+# both with "Context size has been exceeded" (2026-08-19: three failure
+# waves, two agents lost their briefs). Chat turns don't take this lock:
+# a chat alongside a sleep stays well inside the pool; only sleep+sleep
+# overflows it. An asyncio lock serializes one event loop — both triggers
+# (agent sleep and group sleep) enter through service.py's create_task on
+# the backend's single loop; a second loop would silently un-serialize this.
+_SLEEP_PIPELINE_LOCK = asyncio.Lock()
+
 PER_SESSION_PROMPT = """\
 Analyze this single conversation session and extract key information. \
 Respond with ONLY a JSON object, no markdown fences.
@@ -588,6 +600,19 @@ async def run_sleep(
         "started_at": datetime.now(timezone.utc).isoformat(),
     })
 
+    # State is already "sleeping", so a duplicate trigger for THIS agent is
+    # still deduplicated while we wait; the queue is only ever between
+    # different agents. The "queued" report is advisory — checked before
+    # acquire, so a race can miss it; the lock itself is the guarantee.
+    if _SLEEP_PIPELINE_LOCK.locked():
+        log.info("Sleep pipeline for %s queued behind a running one",
+                 agent_id or conversation_dir.name)
+        if progress_callback:
+            try:
+                await progress_callback(0, 0, "queued", "")
+            except Exception:
+                pass
+    await _SLEEP_PIPELINE_LOCK.acquire()
     try:
         results_dir = conversation_dir / "sleep_results"
         results_dir.mkdir(exist_ok=True)
@@ -941,3 +966,5 @@ async def run_sleep(
             "error_at": datetime.now(timezone.utc).isoformat(),
         })
         return {"status": "error", "error": err_desc}
+    finally:
+        _SLEEP_PIPELINE_LOCK.release()
