@@ -2,31 +2,34 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-## Kill-switch — пять правил, которые проверяются в момент действия
+## Kill-switch — five rules checked at the moment of action, not at reading time
 
-Стоят первыми намеренно: правило в конце файла из 1400 строк вспоминается на чтении и не
-срабатывает на письме. Сработало — остановиться и закрыть проверку, потом продолжать.
+They open the file on purpose: a rule at the end of 1400 lines is recalled while reading
+and skipped while acting. One fires — stop, close the check, then continue.
 
-1. **Вывод о состоянии чата, лога или файла сделан по срезу** (`| tail`, `| head`, `| grep`,
-   `--last` ≠ 10, `Read` с offset в хвост персистнутого дампа) → вывод недействителен,
-   перечитать канал целиком. Нужен меньший объём — уменьшать выборку в самой команде.
-2. **Число пришло от коллеги, агрегатора или из моей старой записи** → первоисточник
-   (`git show`, datasheet, реестр, скрипт) либо пометка «по словам X, не проверено».
-3. **«Готово / зелено / работает / исправлено»** → назвать, что именно запускалось в этой
-   сессии, и состояние дерева (`git status`). CI в репозитории нет, поэтому «зелено» без
-   имени раннера означает только «локально, на моём тулчейне, на том слое, что я трогал».
-4. **«X отсутствует / не существует / не заведено»** → полное перечисление, иначе
-   формулировать «не нашёл в \<месте\>». Поиск по директории не видит `.gitignore`-пути,
-   а здесь в них лежат `backlog.md`, `ideas/`, `audit/`, `sprint-logs/` — для них
-   `rg --no-ignore` или явный путь к файлу.
-5. **Действие начато без явного глагола владельца** («согласен», «ок», созданный артефакт —
-   не команда) → остановиться и спросить. Составная инструкция разворачивается в очередь и
-   закрывается по частям.
+1. **A conclusion about a chat, a log or a file was drawn from a slice** (`| tail`,
+   `| head`, `| grep`, `--last` other than 10, `Read` at a tail offset on a persisted
+   dump) → the conclusion is void; re-read the channel from the start. Need less output —
+   narrow the selection inside the command, never cut the output.
+2. **A number came from a colleague, an aggregator, or my own older note** → fetch the
+   primary source (`git show`, a datasheet, the registry, a script), or mark it
+   "per X, unverified".
+3. **"Done / green / works / fixed"** → name what was actually run in this session and the
+   state of the tree (`git status`). CI is `.github/workflows/tests.yml`; until a run
+   exists for the ref in question, "green" means "locally, on my toolchain, on the layer
+   I touched".
+4. **"X is absent / does not exist / was never filed"** → enumerate, or say "not found in
+   \<place\>". A directory-wide search does not see `.gitignore`d paths, and this repo
+   keeps `backlog.md`, `ideas/`, `audit/` and `sprint-logs/` there — reach those with
+   `rg --no-ignore` or an explicit file path.
+5. **Work started without an explicit verb from the owner** ("agreed", "ok", a created
+   artefact — none of these is a command) → stop and ask. A compound instruction is
+   expanded into a queue and closed part by part.
 
-Рабочие файлы репозитория общие: в нём работает второй разработчик и вторая сессия CC —
-`git add -A` не использовать, перед правкой `backlog.md` и других общих gitignored-документов
-смотреть mtime и не считать чужое изменение своим. `backlog.md` — датированный синтез, а не
-состояние кода: entry говорит, что проверить, но не доказывает, что это до сих пор так.
+The working tree is shared — a second developer and a second CC session write here. Never
+`git add -A`; before editing `backlog.md` or another shared gitignored document, check its
+mtime and do not assume a change there is mine. `backlog.md` is a dated synthesis, not the
+state of the code: an entry tells you what to check, never that it is still true.
 
 ## Project Overview
 
