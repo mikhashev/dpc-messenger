@@ -226,6 +226,14 @@ Qwen3.8-27B as a GGUF chosen per node, not a format.
   three *downloads* of upstream builds, not three builds; a build only if a needed flag or patch is
   missing upstream (none identified). Never hard-code Ollama's install layout: `binary_path` in
   configuration with auto-discovery as a fallback.
+  *Fetched and verified 2026-08-19:* both `win-cuda-13.3-x64` assets came down through the new
+  fetcher against the release-API sha256 digests; `llama-server --version` reports
+  `build 10472, commit 60eeeb608`. The bridge on Ollama's binary was refused by Mike the same day
+  («нахуя делать зависимость от их бинаря когда можно не делать»), so (b2) is the only route and
+  G1/G2 block everything, not just speed claims. A `--help` diff against Ollama's binary's 322
+  flags: the pin has 323, the only addition `--rpc`, nothing missing — the 18 flags absent from the
+  vendored `llama-cpp-sys-2 0.1.151` snapshot (`--reasoning-effort` among them) are upstream on
+  `b10472`, not Ollama patches.
 - **A per-request thinking budget — a route (b) capability, added `2026-08-18` at Mike's word.** The
   server accepts a reasoning-token budget **in the request body**, so the depth of thinking becomes a
   per-call knob instead of a per-alias one. Read from `master` today,
@@ -487,8 +495,9 @@ GGUF, so configuration names a **GGUF path per node**.
 - Good: native on all three OSes from upstream builds (`Observed` b10472 assets); flags and version
   under DPC's control; same provider code as B1; MTP via separate `mtp-*.gguf` on ggml-org's repo.
 - Neutral: HF GGUF download per GPU node (~16 GiB + 0.87 GiB projector); a fetcher (~150 lines).
-- Bad: `sm_120` in the win-cuda-13.3 artefact `Not verified` (Ollama's cuda_v13 DLL proves the
-  toolchain emits `sm_120a` PTX, `Observed`); no Linux-CUDA asset if a Linux GPU node ever appears.
+- Bad: ~~`sm_120` in the win-cuda-13.3 artefact `Not verified`~~ — **verified 2026-08-19, G1
+  passes**: native `sm_120a` cubins, no PTX payload (see Q4); no Linux-CUDA asset if a Linux GPU
+  node ever appears.
 
 #### Option C — vLLM / SGLang
 - Good: the only native reader of NVFP4 safetensors; throughput serving.
@@ -920,6 +929,14 @@ these agents live in and which no fit test can see.
   have been enough; see D1/0a and 0e.
 - **Q4 — Does the mainline `win-cuda-13.3` artefact carry `sm_120`?** `cuobjdump --list-ptx` on its
   `ggml-cuda.dll` (two minutes). If not, the cuda-12.4 asset or an owned build. — CC
+  **CLOSED `2026-08-19`, measured on the fetched pin:** `cuobjdump --list-elf` shows native cubins
+  for `sm_86`, `sm_89`, `sm_120a`, `sm_121a` — 141 kernels each — and `--list-ptx` shows **no PTX
+  payload at all**: the artefact ships compiled cubins only, with no JIT fallback for architectures
+  outside that set. For this box (RTX PRO 4500, cc 12.0) `sm_120a` is the exact-match native
+  binary — **G1 passes**. The set is narrower than Ollama's banner
+  (`750,800,860,890,1000,1200`): the pin does not serve 7.5/8.0/10.0-class cards. Acceptable while
+  this is the only GPU node; it is also why G2 (the cuBLAS-fallback probe) must still run on this
+  exact binary before any speed number transfers — the check does not transfer between builds.
 - **Q5 — Does the mainline loader take the HF Qwen3.8 GGUF with the separate `mtp-*.gguf` at 262K,
   keeping MTP parity on (b2)?** If not, measure decode without MTP before accepting (b2) for this
   model. — CC
