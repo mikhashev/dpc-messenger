@@ -241,8 +241,9 @@ Qwen3.8-27B as a GGUF chosen per node, not a format.
   captured via `CTRL_BREAK_EVENT`. Forcing MMQ moves nothing, so **the brainbake fallback
   signature is absent on the pin — the gate's question is answered**. What the same runs also
   show, recorded so nobody reads the band across builds: Ollama's binary prefilled 832.7/828.0 at
-  129 645 tokens, the pin does 707.9/707.5 at 139 490 — a deeper prompt on a different build, so
-  the night numbers do not transfer as-is; the pin's own baseline is now 707.9 at 139 490. A
+  129 645 tokens, the pin does 707.9/707.5 at 139 490 — **not a comparison**: different build,
+  different depth, and (as the -ngl follow-up below shows) a non-production layer split. The night
+  numbers do not transfer, and neither does this gap in either direction. A
   `resolve_fused_ops` warning places layer 0 on CPU (fused Gated Delta Net unsupported there);
   one layer, no visible cliff, noted for the perf record. Fleet model was reloaded after the run.
   *The same evening, the -ngl follow-up re-read that warning properly and took the loss back.* The
@@ -252,8 +253,12 @@ Qwen3.8-27B as a GGUF chosen per node, not a format.
   **every** context loads 66/66, the warnings go 5 → 0, dmon shows sustained SM 100 % (the
   default dipped 61–99) at ≤200 W, and prefill at the same 139 490 tokens reads **784.4 against
   704.5 tok/s — +11.3 %**. The supervisor's default is now `n_gpu_layers: 999` with the
-  measurement in a comment, overridable per alias; the remaining −6 % against Ollama's binary is
-  depth plus build, not placement. Method note: the first read of the warning («one layer») came
+  measurement in a comment, overridable per alias. **The pin's performance baseline is therefore
+  784.4 tok/s at 139 490 tokens in the production flag configuration** — the earlier 707.9 was
+  taken in what the server decided on its own and is superseded, per Ark's rule recorded here: a
+  performance baseline is measured only in the final flag configuration, never in the server's
+  default, or every later number measures from a hole. Method note: the first read of the warning
+  («one layer») came
   from the warning line alone — the `load_tensors: offloaded` line right above it says 0/66 and
   is the one that names the real unit.
 - **A per-request thinking budget — a route (b) capability, added `2026-08-18` at Mike's word.** The
