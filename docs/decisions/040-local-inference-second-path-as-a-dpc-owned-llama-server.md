@@ -314,7 +314,13 @@ Qwen3.8-27B as a GGUF chosen per node, not a format.
   template default does on deep context; a new alias is prefilled with the card's thinking-mode
   sampling (temperature 1.0, top_p 0.95, top_k 20) so it is honest from birth; and the sampling
   grid carries top_p/top_k for this type beside Ollama's full set. svelte-check clean,
-  vitest 61/61.
+  vitest 61/61. *Corrected the same day, `5bed7c4e`: the editor has **two** Type dropdowns and
+  the first commit filled only the Edit one — the Add form Mike was pointed at carried no option,
+  so the type was invisible on exactly the advertised path, and two rounds of process-and-bundle
+  diagnosis (an exe theory, a reload-the-window advice) answered a loading question about a list
+  that simply was not there. Found by Ark reading the element on screen (#183); the Add form now
+  carries the option, and its model field relabels itself to «GGUF path» with a placeholder and a
+  no-host-no-key hint for this type.*
 - **A per-request thinking budget — a route (b) capability, added `2026-08-18` at Mike's word.** The
   server accepts a reasoning-token budget **in the request body**, so the depth of thinking becomes a
   per-call knob instead of a per-alias one. Read from `master` today,
