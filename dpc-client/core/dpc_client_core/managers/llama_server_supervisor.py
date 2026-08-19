@@ -195,7 +195,9 @@ def _gguf_attention_kv_dims(path: str) -> Optional[Tuple[int, int]]:
                 skip_value(struct.unpack("<I", f.read(4))[0])
 
             pat = re.compile(r"^blk\.(\d+)\.attn_k\.weight$")
+            nextn_pat = re.compile(r"^blk\.(\d+)\.nextn\.")
             layers = set()
+            draft_layers = set()
             kv_width = 0
             for _ in range(n_tensors):
                 name = read_str()
@@ -206,6 +208,14 @@ def _gguf_attention_kv_dims(path: str) -> Optional[Tuple[int, int]]:
                 if m and n_dims == 2:
                     layers.add(int(m.group(1)))
                     kv_width = dims[1]
+                nm = nextn_pat.match(name)
+                if nm:
+                    draft_layers.add(int(nm.group(1)))
+            # A block carrying nextn tensors is the MTP draft layer: the loader
+            # marks its attn_* unused (blk.64 on the production model) and
+            # allocates no KV for it. Counting it was exactly the +6 % the
+            # first formula run carried against the loader's own 8704 MiB.
+            layers -= draft_layers
             if not layers:
                 return None
             return len(layers), kv_width
@@ -215,9 +225,10 @@ def _gguf_attention_kv_dims(path: str) -> Optional[Tuple[int, int]]:
 
 def _kv_cache_mib(n_attn_layers: int, kv_width: int, n_ctx: int, cache_type: str) -> int:
     """Attention-KV bytes for one rung: 2 (K and V) x layers x width x ctx x
-    bytes-per-element. Predicts 9248 MiB for q8_0 @ 262 144 on the production
-    model against the 8704 the loader reported — ~6 % conservative, which is
-    the safe direction: over-prediction refuses early, under-prediction spills."""
+    bytes-per-element. Predicts exactly the loader's 8704 MiB for q8_0 @
+    262 144 on the production model (16 attention layers — the MTP draft
+    block is excluded; counting it was the first version's +6 % bias, in the
+    safe direction but unexplained until the load log named blk.64 unused)."""
     per_elem = _KV_BYTES_PER_ELEM.get(cache_type)
     if not per_elem:
         return 0

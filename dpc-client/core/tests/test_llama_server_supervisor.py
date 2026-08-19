@@ -371,31 +371,40 @@ class TestTheAdmissionArithmetic:
     def test_unset_slots_leave_the_server_its_own_choice(self):
         assert "-np" not in _sup().build_command(BINARY, 1)
 
-    def test_the_kv_formula_stays_conservative_against_the_loader(self):
-        # 17 attention layers x 1024 kv-width, parsed from the production
-        # GGUF's tensor directory; the loader reported 8704 MiB for q8_0 at
-        # 262 144. The formula lands within ~6 % and ABOVE the loader:
-        # over-prediction refuses early, under-prediction spills.
+    def test_the_kv_formula_matches_the_loader_once_draft_layers_are_excluded(self):
+        # 16 live attention layers x 1024 kv-width on the production model;
+        # the loader reported 8704 MiB for q8_0 at 262 144 and the formula
+        # lands on it exactly. Before the draft filter it counted the MTP
+        # block too (17 layers, +6 %) — safe, but unexplained until the load
+        # log marked blk.64.attn_* unused.
         from dpc_client_core.managers.llama_server_supervisor import _kv_cache_mib
-        predicted = _kv_cache_mib(17, 1024, 262144, "q8_0")
-        assert 8704 <= predicted <= 8704 * 1.08
+        assert _kv_cache_mib(16, 1024, 262144, "q8_0") == 8704
 
     def test_the_gguf_reader_takes_the_kv_axis_not_the_model_axis(self, tmp_path):
         # attn_k is 2-D (n_embd, n_kv_heads x head_dim); the KV width is the
         # SECOND dim. A reader taking the first would oversize the cache by
         # the GQA ratio (5120/1024 here) and refuse rungs that fit.
         import struct
+
+        def tensor(buf, name, dims):
+            buf += struct.pack("<Q", len(name)) + name
+            buf += struct.pack("<I", len(dims))
+            for d in dims:
+                buf += struct.pack("<Q", d)
+            buf += struct.pack("<I", 0) + struct.pack("<Q", 0)
+
         buf = bytearray()
         buf += b"GGUF" + struct.pack("<I", 3)
-        buf += struct.pack("<QQ", 1, 0)  # one tensor, no metadata
-        name = b"blk.3.attn_k.weight"
-        buf += struct.pack("<Q", len(name)) + name
-        buf += struct.pack("<I", 2) + struct.pack("<QQ", 5120, 1024)
-        buf += struct.pack("<I", 0) + struct.pack("<Q", 0)
+        buf += struct.pack("<QQ", 3, 0)  # three tensors, no metadata
+        tensor(buf, b"blk.3.attn_k.weight", (5120, 1024))
+        tensor(buf, b"blk.64.attn_k.weight", (5120, 1024))
+        tensor(buf, b"blk.64.nextn.eh_proj.weight", (5120, 1024))
         gguf = tmp_path / "m.gguf"
         gguf.write_bytes(bytes(buf))
 
         from dpc_client_core.managers.llama_server_supervisor import _gguf_attention_kv_dims
+        # blk.64 carries nextn tensors: it is the MTP draft layer, its attn_k
+        # is marked unused by the loader, and no KV is allocated for it.
         assert _gguf_attention_kv_dims(str(gguf)) == (1, 1024)
 
     @pytest.mark.asyncio

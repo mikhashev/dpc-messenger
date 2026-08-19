@@ -39,6 +39,7 @@
     // supervisor knobs the form exposes doors to
     gguf_path?: string;
     reasoning_budget_tokens?: number;
+    mmproj?: string;         // vision projector; absent = text-only child
     cache_type_k?: string;   // KV quant; unset = the auto ladder (q8_0 -> q4_0)
     cache_type_v?: string;
     n_parallel?: number;     // unset = the server's own slot choice
@@ -932,6 +933,21 @@
                           Absolute path to the model file. DPC starts its own llama-server on it
                           (ADR-040): first call fetch-verifies the pinned binary, then serves —
                           no host, no key.
+                        </p>
+                      </div>
+
+                      <div class="form-group">
+                        <label for="mmproj-{i}">mmproj (vision projector, optional)</label>
+                        <input
+                          id="mmproj-{i}"
+                          type="text"
+                          bind:value={editedConfig.providers[i].mmproj}
+                          placeholder="C:\models\qwen3.8-27b-mmproj.gguf"
+                        />
+                        <p class="help-text">
+                          The vision projector file passed to llama-server as --mmproj. With it
+                          the server serves images (and video) at full context; without it the
+                          alias is text-only. Needs KV headroom — q4_0 leaves it, q8_0 does not.
                         </p>
                       </div>
 

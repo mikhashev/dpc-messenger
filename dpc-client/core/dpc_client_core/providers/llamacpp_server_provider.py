@@ -24,6 +24,7 @@ dictionary comes from the model's jinja file.
 """
 
 import asyncio
+import base64
 import json
 import logging
 from pathlib import Path
@@ -133,6 +134,7 @@ class LlamaServerProvider(DeepSeekProvider):
         # be folded to `high` on its way in.
         self._reasoning_effort_raw = config.get("reasoning_effort")
         self._reasoning_budget = config.get("reasoning_budget_tokens")
+        self._mmproj = config.get("mmproj")
         self.top_p = config.get("top_p")
         self.top_k = config.get("top_k")
         self._temperature_explicit = config.get("temperature")
@@ -364,8 +366,17 @@ class LlamaServerProvider(DeepSeekProvider):
     # --- capability surface ----------------------------------------------------
 
     def supports_vision(self) -> bool:
-        """Multimodal needs --mmproj and a vision-capable GGUF; not wired yet."""
-        return False
+        """True when the alias names an mmproj, or a live child advertises it.
+
+        /props is the authority once the server is up (probed 2026-08-19:
+        `modalities: {vision: true, video: true}` with the projector blob);
+        before that, the alias's mmproj is the honest yes — a child started
+        without --mmproj serves text and nothing else."""
+        if self.supervisor is not None and self.supervisor.props:
+            modal = self.supervisor.props.get("modalities") or {}
+            if isinstance(modal, dict) and modal.get("vision"):
+                return True
+        return bool(self._mmproj)
 
     def supports_thinking(self) -> bool:
         return True
@@ -561,10 +572,89 @@ class LlamaServerProvider(DeepSeekProvider):
             ) from e
 
     async def generate_with_vision(self, prompt: str, images: List[Dict[str, Any]], **kwargs) -> str:
-        raise NotImplementedError(
-            f"Vision is not wired for llamacpp_server '{self.alias}' yet "
-            "(needs --mmproj and a multimodal GGUF)"
-        )
+        """Vision on the DPC-owned child: images ride as `image_url` content
+        blocks on the same OpenAI-compatible call, the projector comes from
+        the alias's mmproj (--mmproj on the child). Probed 2026-08-19: a
+        screenshot read accurately at full 262 144 with q4_0 KV; the first
+        probe run also showed why thinking stays off unless asked — the
+        template's own default (xhigh) spent a whole 300-token window
+        thinking and answered nothing."""
+        self._last_thinking = None
+        self._last_usage = None
+
+        content: List[Dict[str, Any]] = [{"type": "text", "text": prompt}]
+        for img in images:
+            b64 = img.get("base64") or self._read_image_as_base64(img.get("path"))
+            if not b64:
+                # A dropped image is a silent text-only answer unless someone
+                # says so here — the caller asked about a picture it will not
+                # receive (review note, 2026-08-20).
+                logging.getLogger(__name__).warning(
+                    "llamacpp_server '%s': vision call dropped an unreadable image "
+                    "(path=%s) — answering text-only",
+                    self.alias, img.get("path"),
+                )
+                continue
+            if b64.startswith("data:"):
+                content.append({"type": "image_url", "image_url": {"url": b64}})
+            else:
+                mime = img.get("mime_type") or "image/png"
+                content.append(
+                    {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{b64}"}}
+                )
+
+        async def _call():
+            client = await self._ensure()
+            effort = kwargs.get("reasoning_effort")
+            per_call_budget = kwargs.get("reasoning_budget_tokens")
+            if effort is None and per_call_budget is None:
+                # A background read, not a reasoning task: thinking off when
+                # the caller didn't ask. The ALIAS budget is deliberately not
+                # consulted here — it caps thinking for text turns, and
+                # letting it fill extra_body would silently re-enable xhigh
+                # thinking on every image (the alias carries 10000, so the
+                # "empty body" form of this default never fired on production
+                # — caught at review, 2026-08-20).
+                extra_body = {"chat_template_kwargs": {"enable_thinking": False}}
+            else:
+                extra_body = self._build_extra_body(effort, per_call_budget)
+            params: Dict[str, Any] = {
+                "model": self._model_name(),
+                "max_tokens": kwargs.get("max_tokens", self.max_tokens),
+                "messages": [{"role": "user", "content": content}],
+                "extra_body": extra_body,
+                **self._sampling_on_the_wire(extra_body, self._sampling_params(kwargs.get("temperature"))),
+            }
+            async with self.supervisor.call_slot():
+                resp = await client.chat.completions.create(**params)
+            msg = resp.choices[0].message
+            self._last_thinking = getattr(msg, "reasoning_content", None)
+            self._record_usage(
+                getattr(resp, "usage", None),
+                path="vision",
+                conversation_id=kwargs.get("conversation_id"),
+                effort=self._effort_label(effort, extra_body),
+            )
+            return msg.content or ""
+
+        try:
+            return await _call()
+        except Exception as e:
+            if self._is_retryable(e):
+                return await self._retry_with_backoff(_call, e)
+            raise RuntimeError(
+                f"llamacpp_server vision failed for '{self.alias}': "
+                f"{type(e).__name__}: {e}"
+            ) from e
+
+    @staticmethod
+    def _read_image_as_base64(path: Optional[str]) -> Optional[str]:
+        if not path:
+            return None
+        try:
+            return base64.b64encode(Path(path).read_bytes()).decode("ascii")
+        except OSError:
+            return None
 
     def _model_name(self) -> str:
         """The server serves exactly one -m model and ignores this field, but

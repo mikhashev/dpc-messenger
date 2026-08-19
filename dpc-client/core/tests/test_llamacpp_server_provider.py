@@ -458,3 +458,132 @@ class TestTheCallPath:
         await p.close()
         assert sup.drained_with is not None
         assert "local_qwen38" not in _ACTIVE_SUPERVISORS
+
+
+class TestVision:
+    """Images ride as image_url content blocks on the same OpenAI-compatible
+    call; the projector is the alias's mmproj. The wiring follows a live
+    probe (2026-08-20): the Ollama projector blob is accepted by the pinned
+    server, /props advertises vision and video, and a screenshot was read
+    accurately at full 262 144 with q4_0 KV — where the first run also showed
+    the template's xhigh default spending a whole small window thinking and
+    answering nothing, which is why the vision path defaults thinking off."""
+
+    def test_supports_vision_follows_the_alias_mmproj(self):
+        assert not _provider().supports_vision()
+        assert _provider(mmproj="mm.gguf").supports_vision()
+
+    def test_supports_vision_follows_a_live_childs_props(self):
+        # Byte-faithful to the two recorded /props bodies. The probe child
+        # (with --mmproj, 2026-08-20) answered `"modalities": {"vision":
+        # true, "video": true, "audio": false}`; the production child without
+        # a projector answered the same key with all-false the same night.
+        # `modalities` is a TOP-LEVEL dict — the review once read the probe
+        # report's extracted printout as a flat body and demanded a reconcile;
+        # these fixtures are that reconcile, from the artifacts.
+        p = _provider()
+        p.supervisor = _FakeSupervisor()
+        p.supervisor.props = {
+            "total_slots": 4,
+            "modalities": {"vision": True, "video": True, "audio": False},
+        }
+        assert p.supports_vision()
+
+        bare = _provider()
+        bare.supervisor = _FakeSupervisor()
+        bare.supervisor.props = {
+            "total_slots": 4,
+            "modalities": {"vision": False, "video": False, "audio": False},
+        }
+        assert not bare.supports_vision()
+
+    @pytest.mark.asyncio
+    async def test_images_ride_as_image_url_blocks(self):
+        p = _provider(mmproj="mm.gguf")
+        sup = _FakeSupervisor()
+        p.supervisor = sup
+        client, completions = _fake_client(_chat_resp(content="a providers panel"))
+
+        async def _ensure():
+            return client
+
+        p._ensure = _ensure
+
+        out = await p.generate_with_vision(
+            "what is this?",
+            [
+                {"base64": "AAAA"},
+                {"base64": "data:image/jpeg;base64,BBBB", "mime_type": "image/jpeg"},
+            ],
+        )
+
+        assert out == "a providers panel"
+        body = completions.bodies[0]
+        content = body["messages"][0]["content"]
+        assert content[0] == {"type": "text", "text": "what is this?"}
+        assert content[1] == {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}}
+        assert content[2] == {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64,BBBB"}}
+        # A background read, not a reasoning task: thinking off unless asked.
+        assert body["extra_body"]["chat_template_kwargs"] == {"enable_thinking": False}
+        assert sup.slot_enters == 1
+        assert p._last_usage is not None
+
+    @pytest.mark.asyncio
+    async def test_an_explicit_effort_thinks_on_the_vision_path(self):
+        p = _provider(mmproj="mm.gguf", reasoning_effort="low")
+        p.supervisor = _FakeSupervisor()
+        client, completions = _fake_client(_chat_resp(content="ok"))
+
+        async def _ensure():
+            return client
+
+        p._ensure = _ensure
+
+        await p.generate_with_vision("what?", [{"base64": "AAAA"}], reasoning_effort="low")
+
+        body = completions.bodies[0]
+        assert body["extra_body"]["chat_template_kwargs"] == {"reasoning_effort": "low"}
+        assert "enable_thinking" not in body["extra_body"].get("chat_template_kwargs", {})
+
+    @pytest.mark.asyncio
+    async def test_an_alias_budget_does_not_re_enable_thinking_on_vision(self):
+        # The production alias carries reasoning_budget_tokens=10000, and the
+        # first version of the thinking-off default only fired on an EMPTY
+        # extra_body — which the alias budget kept non-empty, so every group
+        # image would have thought xhigh inside an 8192 window. Caught at
+        # review; this test pins the production config exactly.
+        p = _provider(mmproj="mm.gguf", reasoning_budget_tokens=10000)
+        p.supervisor = _FakeSupervisor()
+        client, completions = _fake_client(_chat_resp(content="desc"))
+
+        async def _ensure():
+            return client
+
+        p._ensure = _ensure
+
+        await p.generate_with_vision("what?", [{"base64": "AAAA"}])
+
+        body = completions.bodies[0]
+        assert body["extra_body"]["chat_template_kwargs"] == {"enable_thinking": False}
+        assert "reasoning_budget_tokens" not in body["extra_body"]
+
+    @pytest.mark.asyncio
+    async def test_a_per_call_budget_on_vision_caps_thinking_instead_of_off(self):
+        # A caller passing an explicit budget asked for thinking; the cap
+        # rides, thinking stays on.
+        p = _provider(mmproj="mm.gguf")
+        p.supervisor = _FakeSupervisor()
+        client, completions = _fake_client(_chat_resp(content="desc"))
+
+        async def _ensure():
+            return client
+
+        p._ensure = _ensure
+
+        await p.generate_with_vision(
+            "what?", [{"base64": "AAAA"}], reasoning_budget_tokens=2000
+        )
+
+        body = completions.bodies[0]
+        assert body["extra_body"].get("reasoning_budget_tokens") == 2000
+        assert "enable_thinking" not in body["extra_body"].get("chat_template_kwargs", {})
