@@ -192,6 +192,32 @@ class AIProvider:
         """
         return {}
 
+    def get_last_usage(self) -> Optional[Dict[str, Any]]:
+        """What the vendor said the last call cost in tokens, or None.
+
+        The contract lives here rather than on one provider because of what its
+        absence did: `DeepSeekProvider` was the only class carrying it, three
+        others built a `usage` dict inside their tools path and returned it
+        inline, and the single reader reached for the method through `hasattr`
+        (`dpc_agent/llm_adapter.py`). So one provider was priced by what it
+        reported and every other one by an estimate the loop computed for
+        itself. A fourth private copy is not the risk; a second unread one is.
+
+        `None` means «this provider has not reported anything for the last
+        call», which is not the same as «the call was free» — a caller that
+        needs a number when there is none must say so, rather than read a zero.
+        """
+        stored = getattr(self, "_last_usage", None)
+        return dict(stored) if stored else None
+
+    def _record_last_usage(self, usage: Optional[Dict[str, Any]]) -> None:
+        """Store what the vendor reported for the call that just finished.
+
+        Copied on the way in and on the way out, so a caller that edits the dict
+        it was handed does not edit the provider's record of the call.
+        """
+        self._last_usage = dict(usage) if usage else None
+
     def supports_balance(self) -> bool:
         """Returns True if this provider can report account balance (pay-per-use APIs)."""
         return False

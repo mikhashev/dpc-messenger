@@ -280,10 +280,11 @@ class DpcLlmAdapter:
             # has preferred the reported numbers since it was written; this one
             # counted for itself and priced its own count.
             model_name = self.default_model()
-            reported = (
-                provider.get_last_usage()
-                if hasattr(provider, "get_last_usage") else None
-            )
+            # No `hasattr` guard: `get_last_usage` is on `AIProvider` and every
+            # provider answers it. The guard existed while the method was on one
+            # class out of twelve, and it is what let three providers build a
+            # usage dict privately while this reader priced its own estimate.
+            reported = provider.get_last_usage()
             if reported:
                 usage: Dict[str, Any] = dict(reported)
                 usage.setdefault(

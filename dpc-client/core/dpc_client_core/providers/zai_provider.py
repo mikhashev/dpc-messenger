@@ -397,17 +397,21 @@ class ZaiProvider(AIProvider):
             logger.info("Z.AI usage: prompt=%d, completion=%d, cache_create=%d, cache_read=%d",
                         usage_obj.input_tokens, usage_obj.output_tokens, _cache_create, _cache_read)
 
+            usage = {
+                "prompt_tokens": usage_obj.input_tokens,
+                "completion_tokens": usage_obj.output_tokens,
+                "total_tokens": usage_obj.input_tokens + usage_obj.output_tokens,
+                "cache_creation_input_tokens": getattr(usage_obj, "cache_creation_input_tokens", 0) or 0,
+                "cache_read_input_tokens": getattr(usage_obj, "cache_read_input_tokens", 0) or 0,
+            }
+            # Also kept where a caller can ask for it, rather than only returned
+            # from this one path (the usage contract on `providers/base.py`).
+            self._record_last_usage(usage)
             return {
                 "content": full_text,
                 "tool_calls_raw": tool_calls_raw,
                 "thinking": self._last_thinking,
-                "usage": {
-                    "prompt_tokens": usage_obj.input_tokens,
-                    "completion_tokens": usage_obj.output_tokens,
-                    "total_tokens": usage_obj.input_tokens + usage_obj.output_tokens,
-                    "cache_creation_input_tokens": getattr(usage_obj, "cache_creation_input_tokens", 0) or 0,
-                    "cache_read_input_tokens": getattr(usage_obj, "cache_read_input_tokens", 0) or 0,
-                },
+                "usage": usage,
             }
 
         except Exception as e:

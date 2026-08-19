@@ -22,6 +22,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from dpc_client_core.providers.base import AIProvider
 from dpc_client_core.providers.deepseek_provider import DeepSeekProvider
 from dpc_client_core.dpc_agent.llm_adapter import DpcLlmAdapter
 
@@ -171,10 +172,19 @@ class _PricedProvider:
         return self.usage
 
 
-class _SilentProvider:
-    """A provider with no usage to report — Ollama and friends."""
+class _SilentProvider(AIProvider):
+    """A provider with no usage to report for this call.
 
-    model = "qwen3.8:latest"
+    It subclasses `AIProvider` because every provider in `PROVIDER_MAP` does,
+    and because the accessor now lives on that base: a double shaped like the
+    old world — no `get_last_usage` at all — would be testing a class that can
+    no longer be registered. What it still models is the case that matters
+    here: the method exists and answers `None`, so the adapter has to fall back
+    to its own estimate.
+    """
+
+    def __init__(self):
+        super().__init__("test", {"type": "ollama", "model": "qwen3.8:latest"})
 
     async def generate_response(self, prompt, **kwargs):
         return "short answer"

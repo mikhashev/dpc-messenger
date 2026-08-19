@@ -379,6 +379,17 @@ class OllamaProvider(AIProvider):
         This is the whole of D4-T on the Ollama side; queue wait, swap counts and
         VRAM headroom are not in this response and need their own reader.
         """
+        prompt_tokens = getattr(response, "prompt_eval_count", 0) or 0
+        completion_tokens = getattr(response, "eval_count", 0) or 0
+        # The same numbers the line below prints, kept where a caller can ask for
+        # them. Until this existed the tools path built this dict privately and
+        # the text path priced a count it made itself (ADR-040, the usage
+        # contract on `providers/base.py`).
+        self._record_last_usage({
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": completion_tokens,
+            "total_tokens": prompt_tokens + completion_tokens,
+        })
         logger.info(
             "Ollama usage: alias=%s model=%s prompt=%s completion=%s "
             "thinking_chars=%d done=%s prompt_tps=%s eval_tps=%s load_ms=%s path=%s",

@@ -375,6 +375,9 @@ class ZaiCodingProvider(AIProvider):
                 "total_tokens": getattr(u, "total_tokens", 0) or 0,
                 "cache_read_input_tokens": _cached or 0,
             }
+            # Also kept where a caller can ask for it, rather than only returned
+            # from this one path (the usage contract on `providers/base.py`).
+            self._record_last_usage(usage)
             logger.info(
                 "Z.AI Coding usage: prompt=%d, completion=%d, cache_read=%d, tool_calls=%d",
                 usage["prompt_tokens"], usage["completion_tokens"],
