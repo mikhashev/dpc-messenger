@@ -226,114 +226,12 @@ Qwen3.8-27B as a GGUF chosen per node, not a format.
   three *downloads* of upstream builds, not three builds; a build only if a needed flag or patch is
   missing upstream (none identified). Never hard-code Ollama's install layout: `binary_path` in
   configuration with auto-discovery as a fallback.
-  *Fetched and verified 2026-08-19:* both `win-cuda-13.3-x64` assets came down through the new
-  fetcher against the release-API sha256 digests; `llama-server --version` reports
-  `build 10472, commit 60eeeb608`. The bridge on Ollama's binary was refused by Mike the same day
-  («нахуя делать зависимость от их бинаря когда можно не делать»), so (b2) is the only route and
-  G1/G2 block everything, not just speed claims. A `--help` diff against Ollama's binary's 322
-  flags: the pin has 323, the only addition `--rpc`, nothing missing — the 18 flags absent from the
-  vendored `llama-cpp-sys-2 0.1.151` snapshot (`--reasoning-effort` among them) are upstream on
-  `b10472`, not Ollama patches.
-  *G2 ran the same day on Mike's word («гоняй»), through the new supervisor:* two pairs of cold
-  prefills, base against `GGML_CUDA_FORCE_MMQ=1` — at 77 876 tokens **886.2 / 879.5** tok/s
-  (0.76 % apart) and at 139 490 tokens **707.9 / 707.5** tok/s (0.06 % apart), with the banner
-  `CUDA : ARCHS = 750,800,860,890,900,1200,1210 | USE_GRAPHS = 1 | BLACKWELL_NATIVE_FP4 = 1`
-  captured via `CTRL_BREAK_EVENT`. Forcing MMQ moves nothing, so **the brainbake fallback
-  signature is absent on the pin — the gate's question is answered**. What the same runs also
-  show, recorded so nobody reads the band across builds: Ollama's binary prefilled 832.7/828.0 at
-  129 645 tokens, the pin does 707.9/707.5 at 139 490 — **not a comparison**: different build,
-  different depth, and (as the -ngl follow-up below shows) a non-production layer split. The night
-  numbers do not transfer, and neither does this gap in either direction. A
-  `resolve_fused_ops` warning places layer 0 on CPU (fused Gated Delta Net unsupported there);
-  one layer, no visible cliff, noted for the perf record. Fleet model was reloaded after the run.
-  *The same evening, the -ngl follow-up re-read that warning properly and took the loss back.* The
-  warning belonged to a context loaded at **0/66 layers on the GPU**, not to one layer: without an
-  explicit `-ngl` the server parked one context entirely on the CPU (fused Gated Delta Net
-  disabled there) and the speculative draft contexts at 57–59/66. With `n_gpu_layers = 999`
-  **every** context loads 66/66, the warnings go 5 → 0, dmon shows SM held at 99–100 % by minute
-  averages (the default's minute averages dipped to ~70 with power dips to ~158 W) — and the
-  200 W the card draws there is not «far from any ceiling» but its TDP, per the CPU-Z read of
-  2026-08-19: the RTX PRO 4500 ran the prefill at its power ceiling, peaking at 76 °C. Prefill
-  at the same 139 490 tokens reads **784.4 against 704.5 tok/s — +11.3 %**. The supervisor's default is now `n_gpu_layers: 999` with the
-  measurement in a comment, overridable per alias. **The pin's performance baseline is therefore
-  784.4 tok/s at 139 490 tokens in the production flag configuration** — the earlier 707.9 was
-  taken in what the server decided on its own and is superseded, per Ark's rule recorded here: a
-  performance baseline is measured only in the final flag configuration, never in the server's
-  default, or every later number measures from a hole. Method note: the first read of the warning
-  («one layer») came
-  from the warning line alone — the `load_tensors: offloaded` line right above it says 0/66 and
-  is the one that names the real unit.
-  *Effort dictionary probe, same evening («давай оба по очереди»):* the vendor's effort string is
-  a **lever, not decoration** — on one multi-step question through `--jinja`, `chat_template_kwargs.
-  reasoning_effort` scales thinking **6 492 → 14 989 → 33 966 chars** (low/medium/xhigh, 5.2×,
-  temp 0, seed 7, pin's own template). No-kwargs is byte-identical to xhigh (same 15 808 completion
-  tokens) — the template default is xhigh, confirmed. Our fleet words `high` and `max` are
-  **refused loudly**: HTTP 500, the template's `raise_exception('Unexpected reasoning effort …')`
-  — no silent ignore exists on this path, so the provider maps the ordinal before sending.
-  Proposed mapping for Mike's word: `high → xhigh`, `max → xhigh`, `medium/low` direct,
-  `off → enable_thinking=false` (one cheap probe to verify in step 3). The morning «2+2» null
-  result was the question's triviality, not the lever's absence — Ark's #154 withdrawal is not
-  needed, though his three hard route-(b) arguments (slots, MTP n=3, slot-save-path) stand
-  regardless.
-  *Probe D, redone honestly:* at 233K context `xhigh` thought past the entire 24 000-token budget
-  (68 572 chars, `finish=length`, empty answer) — and the budget cannot grow, 233K + 40K exceeds
-  the 262K window. That is an operational bound in its own right: a deep-context top-effort turn
-  can out-think any budget that fits, which is the per-request `reasoning_budget_tokens` argument
-  in its live form (caught after one run this time, not four). The pair then ran at `medium`:
-  **q8_0 and q4_0 at 233 314 prompt tokens both finish naturally and both score 7/7 facts**
-  (driver versions 595.71/596.36/596.72/596.86, installer path and byte size, the
-  separate-window decision, Ark named with his own «secondary source» caveat); the answers match
-  each other and the ground truth, q4_0's marginally richer (timestamps, message-number
-  citations), thinking lengths diverge (3 555 vs 4 285 chars — KV moves the trajectory from the
-  first tokens). f16 control at 139 624: same quality, `stop`. **On this task shape q4_0's
-  −4.1 GiB costs nothing measurable**; one question, one seed, retrieval-heavy — attribution-
-  sensitive shapes at this depth remain untested, and the deferred vendor-sampling run is noted.
-- **Step 3 landed the same evening, `1c3a4756` — the provider exists and the dialect is the
-  template's.** `llamacpp_server` is the thirteenth type in `PROVIDER_MAP`
-  (`LlamaServerProvider`, inheriting DeepSeek's conversion/retry/usage scaffolding and none of
-  its thinking dialect): first call fetch-verifies the pin and starts the supervisor, the client
-  is lazy behind it, `close()` drains. The effort words travel **verbatim from the model's
-  dictionary** — `low/medium/xhigh`, with the shared normalizer's `xhigh→high` fold deliberately
-  not applied (it would delete the top rung before the template saw the word) — while the fleet's
-  `high`/`max` map onto `xhigh` with one log line per alias, per Mike's 2026-08-19 direction that
-  the dictionary comes from the jinja file (recorded in
-  [[OLLAMA-THINKING-EFFORT-TOGGLE]]: the selector reads its positions from the backend, and this
-  backend's honest vocabulary is the template's). `reasoning_budget_tokens` — confirmed by Mike
-  the same hour — rides per-request over the alias config and **caps the template's default
-  thinking too**, not only named efforts: the strongest path must be the bounded one. Two
-  behaviours are design-pinned until their cheap probes run on the card: `off →
-  enable_thinking=false`, and the composition of an effort word with a budget in one body — the
-  vendor's template may override the effort itself when a budget is present. Also carried:
-  temperature always sent (this server honours it while thinking, unlike DeepSeek's inert dial),
-  template 500-refusals never retried (deterministic jinja raise), a config reload adopts a live
-  child with unchanged flags instead of re-loading 30 GB, and the usage line says `llamacpp`.
-  26 tests; suite 2041 passed, the same four web-audit failures as before the change.
-- **Step 4 landed the same hour, `636eef24`: the editor offers the type.** The GGUF path is the
-  alias's one required field (everything else has a measured default in the supervisor); the
-  per-request reasoning budget has its own input whose help text names what an unbounded
-  template default does on deep context; a new alias is prefilled with the card's thinking-mode
-  sampling (temperature 1.0, top_p 0.95, top_k 20) so it is honest from birth; and the sampling
-  grid carries top_p/top_k for this type beside Ollama's full set. svelte-check clean,
-  vitest 61/61. *Corrected the same day, `5bed7c4e`: the editor has **two** Type dropdowns and
-  the first commit filled only the Edit one — the Add form Mike was pointed at carried no option,
-  so the type was invisible on exactly the advertised path, and two rounds of process-and-bundle
-  diagnosis (an exe theory, a reload-the-window advice) answered a loading question about a list
-  that simply was not there. Found by Ark reading the element on screen (#183); the Add form now
-  carries the option, and its model field relabels itself to «GGUF path» with a placeholder and a
-  no-host-no-key hint for this type.*
-- **The first live call OOMed, and the default that caused it became a computation (`3ea7747e`,
-  then `d288af5c` same evening, on Mike's ask: «вычисляться исходя из того что у ноды из железа
-  установлено и доступно по памяти»).** At 18:09 an alias on the qwen3.8 blob started with the
-  supervisor's f16 KV default and died with CUDA out-of-memory at model load — weights + f16 KV
-  at 262K exceed a 32 GB card that q8_0 fills to 31.9. The interim q8_0 hard default was then
-  replaced by the ladder: an alias that names a cache type gets exactly that, once; without one,
-  the supervisor walks **f16 → q8_0 → q4_0**, reading each rung's verdict from the child's own
-  log tail (a failed rung cost 12 s live), and memoises the winner with the free-VRAM level it
-  fit at — reused only while the card has at least that much free again, so a busier card re-runs
-  the ladder rather than trusting a stale fit. Free VRAM comes from the same `nvidia-smi` the
-  device-context collector uses; a card that cannot hold even the weights fails fast with a plain
-  sentence. The error path carried the log tail into the group chat verbatim — the unhealthy-start
-  contract held in its first live fire.
+  *(Post-acceptance, 2026-08-19: the pin was fetched and verified, gates G1/G2 closed, steps 1–4
+  of the implementation plan shipped, and the provider answered its first live calls. The
+  chronicle of that day — every measurement, error and fix — lives in
+  `ideas/dpc-research/llamacpp-server-provider-build-log-2026-08-19.md`, not here: this record is
+  a decision, and it stays frozen as accepted. The two facts that changed what this decision
+  means in practice are one line each, in Consequences below.)*
 - **A per-request thinking budget — a route (b) capability, added `2026-08-18` at Mike's word.** The
   server accepts a reasoning-token budget **in the request body**, so the depth of thinking becomes a
   per-call knob instead of a per-alias one. Read from `master` today,
@@ -622,6 +520,12 @@ GGUF, so configuration names a **GGUF path per node**.
 - **Neutral:** Ollama stays for the long tail of small aliases; `LLAMACPP-LOCAL-PROVIDER` is
   re-titled to *server*, `OLLAMA-CUSTOM-BUILD-NVFP4` closes on Stage 1's result, and the two measured
   production defects (TTL re-prefill; the daemon's footprint estimate) get entries of their own.
+- **Post-acceptance (2026-08-19), one line each:** the KV-cache default is **computed against the
+  card's free VRAM** (a ladder f16 → q8_0 → q4_0 with a memoised fit), because an f16 default
+  cannot even start on the card this fleet owns; and the effort vocabulary is **the model's own
+  template dictionary** (`low/medium/xhigh`; the fleet's `high`/`max` map onto `xhigh`, thinking
+  is capped per request via `reasoning_budget_tokens`). The day's chronicle behind both:
+  `ideas/dpc-research/llamacpp-server-provider-build-log-2026-08-19.md`.
 
 ## Confirmation
 
