@@ -38,8 +38,14 @@ _CREATION_NEW_PROCESS_GROUP = subprocess.CREATE_NEW_PROCESS_GROUP if sys.platfor
 
 DEFAULTS: Dict[str, Any] = {
     "n_ctx": 262144,
-    "cache_type_k": None,
-    "cache_type_v": None,
+    # Measured twice on 2026-08-19: the f16 default does not fit the card this
+    # fleet owns — the first live call (18:09) died with CUDA out-of-memory at
+    # model load (weights + f16 KV at 262K > 32 GB), while q8_0 ran every probe
+    # of the day at 31.9 of 32 GB and Probe D found it quality-neutral against
+    # f16 on retrieval at 233K. A default that cannot start is not a default;
+    # an alias that wants f16 back says so explicitly.
+    "cache_type_k": "q8_0",
+    "cache_type_v": "q8_0",
     # Measured 2026-08-19 on b10472 at 139 490 tokens: without an explicit
     # -ngl the server left one context at 0/66 layers on the GPU-less side of
     # the split and the draft contexts at 57-59/66, disabling fused Gated
