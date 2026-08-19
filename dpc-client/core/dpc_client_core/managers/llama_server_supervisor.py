@@ -40,7 +40,13 @@ DEFAULTS: Dict[str, Any] = {
     "n_ctx": 262144,
     "cache_type_k": None,
     "cache_type_v": None,
-    "n_gpu_layers": None,
+    # Measured 2026-08-19 on b10472 at 139 490 tokens: without an explicit
+    # -ngl the server left one context at 0/66 layers on the GPU-less side of
+    # the split and the draft contexts at 57-59/66, disabling fused Gated
+    # Delta Net there; every context fully on the GPU was worth +11.3 %
+    # (704.5 -> 784.4 tok/s) and the layer-0 warnings went 5 -> 0. An alias
+    # can still override this for a card that cannot hold all layers.
+    "n_gpu_layers": 999,
     "flash_attn": False,
     "mmproj": None,
     "spec_type": "draft-mtp",

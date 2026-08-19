@@ -245,6 +245,17 @@ Qwen3.8-27B as a GGUF chosen per node, not a format.
   the night numbers do not transfer as-is; the pin's own baseline is now 707.9 at 139 490. A
   `resolve_fused_ops` warning places layer 0 on CPU (fused Gated Delta Net unsupported there);
   one layer, no visible cliff, noted for the perf record. Fleet model was reloaded after the run.
+  *The same evening, the -ngl follow-up re-read that warning properly and took the loss back.* The
+  warning belonged to a context loaded at **0/66 layers on the GPU**, not to one layer: without an
+  explicit `-ngl` the server parked one context entirely on the CPU (fused Gated Delta Net
+  disabled there) and the speculative draft contexts at 57–59/66. With `n_gpu_layers = 999`
+  **every** context loads 66/66, the warnings go 5 → 0, dmon shows sustained SM 100 % (the
+  default dipped 61–99) at ≤200 W, and prefill at the same 139 490 tokens reads **784.4 against
+  704.5 tok/s — +11.3 %**. The supervisor's default is now `n_gpu_layers: 999` with the
+  measurement in a comment, overridable per alias; the remaining −6 % against Ollama's binary is
+  depth plus build, not placement. Method note: the first read of the warning («one layer») came
+  from the warning line alone — the `load_tensors: offloaded` line right above it says 0/66 and
+  is the one that names the real unit.
 - **A per-request thinking budget — a route (b) capability, added `2026-08-18` at Mike's word.** The
   server accepts a reasoning-token budget **in the request body**, so the depth of thinking becomes a
   per-call knob instead of a per-alias one. Read from `master` today,

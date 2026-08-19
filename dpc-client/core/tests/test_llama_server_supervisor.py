@@ -62,6 +62,13 @@ class TestFlagAssembly:
         assert "-ctk" in cmd and cmd[cmd.index("-ctk") + 1] == "q8_0"
         assert "-ctv" in cmd and cmd[cmd.index("-ctv") + 1] == "q4_0"
 
+    def test_gpu_layers_default_to_everything_after_the_split_measurement(self):
+        # Without an explicit -ngl the server parked one context entirely on
+        # the CPU (0/66) and the drafts at 57-59/66, which cost 11.3 % of
+        # prefill; the default makes that loss impossible to forget.
+        cmd = _sup().build_command(BINARY, 1)
+        assert cmd[cmd.index("-ngl") + 1] == "999"
+
     def test_gpu_layers_and_flash_attn_and_mmproj(self):
         cmd = _sup(n_gpu_layers=999, flash_attn=True, mmproj="mm.gguf").build_command(BINARY, 1)
         assert cmd[cmd.index("-ngl") + 1] == "999"
