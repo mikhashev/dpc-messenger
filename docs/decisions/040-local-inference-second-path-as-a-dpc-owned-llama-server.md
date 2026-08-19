@@ -308,6 +308,13 @@ Qwen3.8-27B as a GGUF chosen per node, not a format.
   template 500-refusals never retried (deterministic jinja raise), a config reload adopts a live
   child with unchanged flags instead of re-loading 30 GB, and the usage line says `llamacpp`.
   26 tests; suite 2041 passed, the same four web-audit failures as before the change.
+- **Step 4 landed the same hour, `636eef24`: the editor offers the type.** The GGUF path is the
+  alias's one required field (everything else has a measured default in the supervisor); the
+  per-request reasoning budget has its own input whose help text names what an unbounded
+  template default does on deep context; a new alias is prefilled with the card's thinking-mode
+  sampling (temperature 1.0, top_p 0.95, top_k 20) so it is honest from birth; and the sampling
+  grid carries top_p/top_k for this type beside Ollama's full set. svelte-check clean,
+  vitest 61/61.
 - **A per-request thinking budget — a route (b) capability, added `2026-08-18` at Mike's word.** The
   server accepts a reasoning-token budget **in the request body**, so the depth of thinking becomes a
   per-call knob instead of a per-alias one. Read from `master` today,
