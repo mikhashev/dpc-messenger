@@ -1543,6 +1543,7 @@
                 <option value="zai">Z.AI</option>
                 <option value="zai_coding">Z.AI Coding Plan</option>
                 <option value="deepseek">DeepSeek</option>
+                <option value="llamacpp_server">llama-server (local, DPC pin)</option>
                 <option value="local_whisper">Local Whisper</option>
                 <option value="dpc_agent">DPC Agent</option>
                 <option value="gemini">Google Gemini</option>
@@ -1553,13 +1554,14 @@
 
             {#if newProvider.type !== 'dpc_agent'}
               <div class="form-group">
-                <label for="new-model">Model</label>
+                <label for="new-model">{newProvider.type === 'llamacpp_server' ? 'GGUF path' : 'Model'}</label>
                 <input
                   id="new-model"
                   type="text"
                   bind:value={newProvider.model}
                   placeholder={
                     newProvider.type === 'ollama' ? 'llama3.1:8b' :
+                    newProvider.type === 'llamacpp_server' ? 'C:\\models\\qwen3.8-27b-Q4_K_M.gguf' :
                     newProvider.type === 'openai_compatible' ? 'gpt-4o' :
                     newProvider.type === 'local_whisper' ? 'openai/whisper-large-v3' :
                     newProvider.type === 'zai' ? 'glm-4.7' :
@@ -1571,6 +1573,12 @@
                     'claude-3-5-sonnet-20240620'
                   }
                 />
+                {#if newProvider.type === 'llamacpp_server'}
+                  <p class="help-text">
+                    Absolute path to the model file — DPC starts its own llama-server on it
+                    (no host, no key). The Ollama blob can be named here directly.
+                  </p>
+                {/if}
               </div>
             {/if}
 
