@@ -201,6 +201,37 @@ class TestSamplingAndLabels:
         assert "top_p" not in _provider()._sampling_params()
         assert _provider(top_p=0.95)._sampling_params()["top_p"] == 0.95
 
+    def test_top_k_rides_along_because_the_card_prescribes_it(self):
+        assert "top_k" not in _provider()._sampling_params()
+        assert _provider(top_k=20)._sampling_params()["top_k"] == 20
+
+    def test_an_alias_with_no_sampling_at_all_hears_about_it_once(self, caplog):
+        # The 2026-08-19 lesson: a probe ran greedy (temp 0, nothing else set)
+        # under a prescription that names four sampling values — and nothing
+        # in the log said a default was being used. The line fires once per
+        # alias, only while thinking is on, and not once the alias is
+        # configured.
+        import logging
+
+        p = _provider()
+        with caplog.at_level(logging.INFO, logger="dpc_client_core.providers.llamacpp_server_provider"):
+            p._sampling_params()
+            p._sampling_params()
+        advisories = [r for r in caplog.records if "no sampling configured" in r.message]
+        assert len(advisories) == 1
+        assert "top_k 20" in advisories[0].getMessage()
+
+        configured = _provider(temperature=1.0, top_p=0.95, top_k=20)
+        assert configured._sampling_params() == {
+            "temperature": 1.0, "top_p": 0.95, "top_k": 20,
+        }
+        assert configured._sampling_default_logged is False
+
+    def test_the_off_path_never_triggers_the_sampling_advisory(self):
+        p = _provider()
+        p._sampling_params(reasoning_effort="off")
+        assert p._sampling_default_logged is False
+
     def test_the_effort_label_reads_the_built_body(self):
         p = _provider()
         assert p._effort_label("off", p._build_extra_body("off")) == "off"

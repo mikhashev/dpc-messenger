@@ -134,6 +134,7 @@ class LlamaServerProvider(DeepSeekProvider):
         self._reasoning_effort_raw = config.get("reasoning_effort")
         self._reasoning_budget = config.get("reasoning_budget_tokens")
         self.top_p = config.get("top_p")
+        self.top_k = config.get("top_k")
         self._temperature_explicit = config.get("temperature")
         self.max_retry_seconds = config.get("max_retry_seconds", 600)
 
@@ -145,6 +146,7 @@ class LlamaServerProvider(DeepSeekProvider):
         self._cot_cache: Dict[str, str] = {}
 
         self._effort_translation_logged = False
+        self._sampling_default_logged = False
 
     @staticmethod
     def _retire(supervisor: LlamaServerSupervisor) -> None:
@@ -266,12 +268,32 @@ class LlamaServerProvider(DeepSeekProvider):
         temperature_override: Optional[float] = None,
         reasoning_effort: Optional[str] = None,
     ) -> Dict[str, Any]:
-        """Temperature is always sent: unlike DeepSeek's inert-while-thinking
-        dial, this server honours it (every 2026-08-19 probe ran temp 0 with
-        thinking on and got the determinism it asked for)."""
+        """Sampling is always sent: unlike DeepSeek's inert-while-thinking
+        dial, this server honours it. `top_k` rides along because the model
+        card puts it in its prescription (thinking mode: temperature 1.0,
+        top_p 0.95, top_k 20, min_p 0) and a sampling half-configured is how
+        a probe ends up greedy without anyone saying so."""
         params: Dict[str, Any] = {"temperature": self._effective_temperature(temperature_override)}
         if self.top_p is not None:
             params["top_p"] = self.top_p
+        if self.top_k is not None:
+            params["top_k"] = self.top_k
+        if (
+            not self._sampling_default_logged
+            and temperature_override is None
+            and self._temperature_explicit is None
+            and self.top_p is None
+            and self.top_k is None
+            and self._template_effort(reasoning_effort) != REASONING_OFF
+        ):
+            self._sampling_default_logged = True
+            logger.info(
+                "llamacpp_server '%s': no sampling configured on the alias; using "
+                "temperature %s with vendor defaults. The Qwen3.8 card prescribes "
+                "temperature 1.0, top_p 0.95, top_k 20, min_p 0 for thinking mode — "
+                "set them on the alias unless this model's card says otherwise.",
+                self.alias, params["temperature"],
+            )
         return params
 
     def _effective_temperature(self, override: Optional[float] = None) -> float:
