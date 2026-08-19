@@ -314,6 +314,60 @@ class TestTheCallPath:
         assert sent[0]["role"] == "system" and sent[0]["content"] == "be brief"
 
     @pytest.mark.asyncio
+    async def test_the_streaming_path_enters_the_real_supervisors_slot(self):
+        # Johnny's live TypeError (2026-08-19 21:26): `async with call_slot()`
+        # exploded because the real supervisor's method was `async def`, so it
+        # returned a coroutine instead of the slot. The fakes in these tests
+        # had the right shape and never caught it — this one uses the REAL
+        # supervisor object, only the OpenAI client stays fake.
+        from dpc_client_core.managers.llama_server_supervisor import LlamaServerSupervisor
+
+        p = _provider()
+        p.supervisor = LlamaServerSupervisor("local_qwen38", {"gguf_path": GGUF})
+        chunks = [
+            SimpleNamespace(choices=[SimpleNamespace(delta=SimpleNamespace(reasoning_content="th", content=None))], usage=None),
+            SimpleNamespace(choices=[SimpleNamespace(delta=SimpleNamespace(reasoning_content=None, content="hello "))], usage=None),
+            SimpleNamespace(choices=[SimpleNamespace(delta=SimpleNamespace(reasoning_content=None, content="world"))], usage=None),
+            SimpleNamespace(choices=[], usage=SimpleNamespace(prompt_tokens=9, completion_tokens=2, total_tokens=11)),
+        ]
+
+        class _Stream:
+            def __aiter__(self):
+                self._iter = iter(chunks)
+                return self
+
+            async def __anext__(self):
+                try:
+                    return next(self._iter)
+                except StopIteration:
+                    raise StopAsyncIteration
+
+        client, completions = _fake_client(SimpleNamespace(choices=None, usage=None))
+
+        async def fake_create(**params):
+            assert params["stream"] is True
+            assert params["stream_options"] == {"include_usage": True}
+            return _Stream()
+
+        completions.create = fake_create
+
+        async def _ensure():
+            return client
+
+        p._ensure = _ensure
+        seen = []
+
+        async def on_chunk(text, cid):
+            seen.append(text)
+
+        out = await p.generate_response_stream("hi", on_chunk=on_chunk, conversation_id="c1")
+        assert out == "hello world"
+        assert seen == ["hello ", "world"]
+        assert p.get_last_thinking() == "th"
+        assert p.get_last_usage()["completion_tokens"] == 2
+        assert p.supervisor._in_flight == 0
+
+    @pytest.mark.asyncio
     async def test_close_drains_the_child(self):
         p = _provider()
         sup = _FakeSupervisor()

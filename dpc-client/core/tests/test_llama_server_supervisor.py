@@ -270,13 +270,14 @@ class TestStopAndDrain:
     async def test_drain_refuses_new_work_and_waits_for_the_in_flight_call(self):
         sup = _sup()
         sup._proc = _FakeProc()
-        slot = await sup.call_slot()
-        draining = asyncio.create_task(sup.drain(timeout=2.0))
-        await asyncio.sleep(0.1)
-        with pytest.raises(LlamaServerError, match="draining"):
-            await sup.call_slot()
-        async with slot:
+        # Entered the way the provider enters it — `async with` on the slot
+        # itself, not on a coroutine wrapper around it.
+        async with sup.call_slot():
+            draining = asyncio.create_task(sup.drain(timeout=2.0))
             await asyncio.sleep(0.1)
+            with pytest.raises(LlamaServerError, match="draining"):
+                async with sup.call_slot():
+                    pass
         await draining
         assert sup._draining and sup._in_flight == 0
 

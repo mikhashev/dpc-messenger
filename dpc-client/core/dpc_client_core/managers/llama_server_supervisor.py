@@ -346,8 +346,14 @@ class LlamaServerSupervisor:
         except OSError:
             return []
 
-    async def call_slot(self):
-        """Claim one in-flight call; refuses while draining, so drain can wait."""
+    def call_slot(self):
+        """Claim one in-flight call; refuses while draining, so drain can wait.
+
+        Deliberately synchronous: callers use it as `async with call_slot():`
+        and an `async def` here would hand them a coroutine instead of the
+        slot — the exact TypeError Johnny hit live on 2026-08-19 21:26, which
+        every test missed because the fakes had the right shape and the one
+        real-supervisor test awaited the coroutine instead."""
         if self._draining:
             raise LlamaServerError(f"llama-server[{self.alias}] is draining; new calls refused")
         self._in_flight += 1
