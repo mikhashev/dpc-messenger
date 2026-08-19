@@ -13,6 +13,7 @@ from .providers import (
     OllamaProvider, OLLAMA_VISION_MODELS, OLLAMA_THINKING_MODELS,
     OpenAICompatibleProvider, AnthropicProvider, ZaiProvider, ZaiCodingProvider,
     DeepSeekProvider,
+    LlamaServerProvider,
     LocalWhisperProvider, RemotePeerProvider, DpcAgentProvider,
     GeminiProvider, GitHubModelsProvider, GigaChatProvider,
 )
@@ -44,6 +45,7 @@ PROVIDER_MAP = {
     "zai": ZaiProvider,
     "zai_coding": ZaiCodingProvider,  # Z.AI GLM Coding Plan (OpenAI-compatible coding/paas/v4)
     "deepseek": DeepSeekProvider,  # DeepSeek pay-per-token (OpenAI-compatible, V4 thinking)
+    "llamacpp_server": LlamaServerProvider,  # DPC-owned llama-server child (ADR-040 route b2)
     "local_whisper": LocalWhisperProvider,  # v0.13.1+: Local Whisper transcription
     "dpc_agent": DpcAgentProvider,  # Embedded autonomous AI agent
     "remote_peer": RemotePeerProvider,  # v0.18.0+: Remote peer inference
