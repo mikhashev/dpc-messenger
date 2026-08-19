@@ -288,6 +288,26 @@ Qwen3.8-27B as a GGUF chosen per node, not a format.
   first tokens). f16 control at 139 624: same quality, `stop`. **On this task shape q4_0's
   −4.1 GiB costs nothing measurable**; one question, one seed, retrieval-heavy — attribution-
   sensitive shapes at this depth remain untested, and the deferred vendor-sampling run is noted.
+- **Step 3 landed the same evening, `1c3a4756` — the provider exists and the dialect is the
+  template's.** `llamacpp_server` is the thirteenth type in `PROVIDER_MAP`
+  (`LlamaServerProvider`, inheriting DeepSeek's conversion/retry/usage scaffolding and none of
+  its thinking dialect): first call fetch-verifies the pin and starts the supervisor, the client
+  is lazy behind it, `close()` drains. The effort words travel **verbatim from the model's
+  dictionary** — `low/medium/xhigh`, with the shared normalizer's `xhigh→high` fold deliberately
+  not applied (it would delete the top rung before the template saw the word) — while the fleet's
+  `high`/`max` map onto `xhigh` with one log line per alias, per Mike's 2026-08-19 direction that
+  the dictionary comes from the jinja file (recorded in
+  [[OLLAMA-THINKING-EFFORT-TOGGLE]]: the selector reads its positions from the backend, and this
+  backend's honest vocabulary is the template's). `reasoning_budget_tokens` — confirmed by Mike
+  the same hour — rides per-request over the alias config and **caps the template's default
+  thinking too**, not only named efforts: the strongest path must be the bounded one. Two
+  behaviours are design-pinned until their cheap probes run on the card: `off →
+  enable_thinking=false`, and the composition of an effort word with a budget in one body — the
+  vendor's template may override the effort itself when a budget is present. Also carried:
+  temperature always sent (this server honours it while thinking, unlike DeepSeek's inert dial),
+  template 500-refusals never retried (deterministic jinja raise), a config reload adopts a live
+  child with unchanged flags instead of re-loading 30 GB, and the usage line says `llamacpp`.
+  26 tests; suite 2041 passed, the same four web-audit failures as before the change.
 - **A per-request thinking budget — a route (b) capability, added `2026-08-18` at Mike's word.** The
   server accepts a reasoning-token budget **in the request body**, so the depth of thinking becomes a
   per-call knob instead of a per-alias one. Read from `master` today,
