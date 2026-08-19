@@ -21,14 +21,16 @@ import asyncio
 import json
 import logging
 import os
+import re
 import shutil
 import signal
 import socket
+import struct
 import subprocess
 import sys
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from .llama_server_fetcher import DPC_HOME, ensure_binary, find_cuda_backend, install_root
 
@@ -58,7 +60,10 @@ DEFAULTS: Dict[str, Any] = {
     "mmproj": None,
     "spec_type": "draft-mtp",
     "spec_draft_n_max": 3,  # measured: acceptance 0.686 against 4's 0.578
-    "n_parallel": 1,
+    # None = the server's own choice (4 unified slots on b10472). An explicit
+    # value is ALWAYS sent, so -np 1 is expressible — the old guard ate it and
+    # the config said 1 while the server ran 4.
+    "n_parallel": None,
     "kv_unified": True,
     "cache_ram_mib": None,
     "slot_save_path": None,
@@ -83,12 +88,28 @@ def _free_port() -> int:
         return s.getsockname()[1]
 
 
-# The KV-cache ladder: quality order, and the first rung whose start survives
-# wins. Which rung fits is a property of the card's free memory at launch
-# time, not of a constant — the 2026-08-19 18:09 call died on f16 at 262K on a
-# card where q8_0 filled 31.9 of 32 GB, and the same f16 would fit a 48 GB
-# card without anyone changing a line.
-KV_LADDER = ("f16", "q8_0", "q4_0")
+# The KV-cache ladder for AUTO: the first rung that fits the card wins. f16 is
+# deliberately NOT a rung — on 2026-08-19 an f16 load at 262 144 "succeeded"
+# because WDDM does not refuse allocations, it spills them to shared memory:
+# 5.2 GiB paged out, prefill collapsed from 784 to 47-51 tok/s, and the memo
+# recorded the poisoned rung. f16 remains available as an explicit alias
+# choice, where the supervisor warns from the arithmetic and loads anyway.
+KV_LADDER = ("q8_0", "q4_0")
+
+# Admission arithmetic, not the child's OOM verdict: bytes per KV element by
+# cache type (q8_0 = 34/32 per block, q4_0 = 18/32, f16 = 2).
+_KV_BYTES_PER_ELEM = {"f16": 2.0, "bf16": 2.0, "q8_0": 34 / 32, "q4_0": 18 / 32}
+
+# Everything a loaded context costs beyond weights and attention-KV: compute
+# buffers, MTP draft contexts, the hybrid blocks' recurrent state, CUDA
+# context. Measured on qwen3.8-27B @ 262 144 on b10472 (ADR-040 table):
+# 748 + 1360 + 1024 + 324 + 1136 = 4592, rounded up.
+_FIXED_OVERHEAD_MIB = 4608
+
+# The card is shared with the desktop; a load that consumes it all is the
+# paging regime measured 2026-08-17 ("card busy computing nothing, window
+# full"). The reserve keeps that from being re-created by arithmetic.
+_DESKTOP_RESERVE_MIB = 2048
 
 _OOM_MARKERS = ("out of memory", "failed to allocate", "cuda error")
 
@@ -106,6 +127,101 @@ def _free_vram_mib() -> Optional[int]:
         return int(out.stdout.strip().splitlines()[0])
     except (OSError, ValueError, subprocess.SubprocessError):
         return None
+
+
+def _total_vram_mib() -> Optional[int]:
+    """Physical VRAM of the first NVIDIA GPU in MiB, or None without a signal.
+
+    Admission is budgeted against physical memory, not free memory: free
+    moves with the desktop and says nothing about what a load will do to it,
+    and the desktop's share is what the reserve constant is for."""
+    if not shutil.which("nvidia-smi"):
+        return None
+    try:
+        out = subprocess.run(
+            ["nvidia-smi", "--query-gpu=memory.total", "--format=csv,noheader,nounits"],
+            capture_output=True, text=True, timeout=10,
+        )
+        return int(out.stdout.strip().splitlines()[0])
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return None
+
+
+_GGUF_VALUE_SIZES = {0: 1, 1: 1, 2: 2, 3: 2, 4: 4, 5: 4, 6: 4, 7: 1, 10: 8, 11: 8, 12: 8}
+
+
+def _gguf_attention_kv_dims(path: str) -> Optional[Tuple[int, int]]:
+    """(attention layer count, kv width per layer) from a GGUF's tensor directory.
+
+    The attn_k weight of every attention block is 2-D (n_embd, n_kv_heads x
+    head_dim); the second dim is what the KV cache stores per token per layer.
+    Hybrid blocks (Gated DeltaNet here) carry no attn_k and contribute no
+    attention KV — their state is fixed size and counted in the overhead
+    constant. Returns None when the file cannot be read or has no attention.
+    """
+    try:
+        with open(path, "rb") as f:
+            if f.read(4) != b"GGUF":
+                return None
+            version = struct.unpack("<I", f.read(4))[0]
+            if version < 2:
+                return None
+            n_tensors, n_kv = struct.unpack("<QQ", f.read(16))
+
+            def read_str():
+                n = struct.unpack("<Q", f.read(8))[0]
+                return f.read(n).decode("utf-8", errors="replace")
+
+            def skip_value(t):
+                if t == 8:
+                    read_str()
+                elif t == 9:
+                    et = struct.unpack("<I", f.read(4))[0]
+                    cnt = struct.unpack("<Q", f.read(8))[0]
+                    if et == 8:
+                        for _ in range(cnt):
+                            read_str()
+                    elif et in _GGUF_VALUE_SIZES:
+                        f.seek(_GGUF_VALUE_SIZES[et] * cnt, 1)
+                    else:
+                        raise ValueError(f"unknown gguf array type {et}")
+                elif t in _GGUF_VALUE_SIZES:
+                    f.seek(_GGUF_VALUE_SIZES[t], 1)
+                else:
+                    raise ValueError(f"unknown gguf value type {t}")
+
+            for _ in range(n_kv):
+                read_str()
+                skip_value(struct.unpack("<I", f.read(4))[0])
+
+            pat = re.compile(r"^blk\.(\d+)\.attn_k\.weight$")
+            layers = set()
+            kv_width = 0
+            for _ in range(n_tensors):
+                name = read_str()
+                n_dims = struct.unpack("<I", f.read(4))[0]
+                dims = struct.unpack(f"<{n_dims}Q", f.read(8 * n_dims))
+                f.read(4 + 8)  # type + offset
+                m = pat.match(name)
+                if m and n_dims == 2:
+                    layers.add(int(m.group(1)))
+                    kv_width = dims[1]
+            if not layers:
+                return None
+            return len(layers), kv_width
+    except (OSError, ValueError, struct.error):
+        return None
+
+
+def _kv_cache_mib(n_attn_layers: int, kv_width: int, n_ctx: int, cache_type: str) -> int:
+    """Attention-KV bytes for one rung: 2 (K and V) x layers x width x ctx x
+    bytes-per-element. Predicts 9248 MiB for q8_0 @ 262 144 on the production
+    model against the 8704 the loader reported — ~6 % conservative, which is
+    the safe direction: over-prediction refuses early, under-prediction spills."""
+    per_elem = _KV_BYTES_PER_ELEM.get(cache_type)
+    if not per_elem:
+        return 0
+    return int(2 * n_attn_layers * kv_width * per_elem * n_ctx / (1024 * 1024))
 
 
 def _looks_like_oom(log_lines: List[str]) -> bool:
@@ -162,9 +278,13 @@ class LlamaServerSupervisor:
             cmd += ["--spec-type", str(c["spec_type"])]
             if c["spec_draft_n_max"]:
                 cmd += ["--spec-draft-n-max", str(c["spec_draft_n_max"])]
-        if c["n_parallel"] and c["n_parallel"] > 1:
+        # -np is sent whenever it is set, so an explicit 1 reaches the child —
+        # the old `> 1` guard ate it and the server fell back to its own 4.
+        # --kv-unified only means something above one slot; at one slot
+        # unified and split are the same pool.
+        if c["n_parallel"]:
             cmd += ["-np", str(c["n_parallel"])]
-            if c["kv_unified"]:
+            if c["n_parallel"] > 1 and c["kv_unified"]:
                 cmd += ["--kv-unified"]
         if c["cache_ram_mib"]:
             cmd += ["--cache-ram", str(c["cache_ram_mib"])]
@@ -199,6 +319,7 @@ class LlamaServerSupervisor:
             binary = ensure_binary(self.config)
             self.port = self.port or _free_port()
             if self.config.get("cache_type_k") is not None or self.config.get("cache_type_v") is not None:
+                self._warn_if_explicit_type_exceeds_budget()
                 return await self._launch(binary)
             return await self._launch_auto_kv(binary)
 
@@ -233,17 +354,62 @@ class LlamaServerSupervisor:
         except (OSError, ValueError):
             logger.debug("llama-server[%s]: could not write the KV fit memo", self.alias, exc_info=True)
 
+    def _admission(self) -> Optional[Tuple[int, int, int]]:
+        """(budget_mib, weights_mib, kv_dims) for the arithmetic, or None when
+        the card or the model cannot be sized and the ladder must fall back to
+        listening for the child's own failures. Physical VRAM minus the desktop
+        reserve is the budget: free memory moves with the desktop and predicts
+        nothing about what the load will do to it."""
+        total = _total_vram_mib()
+        if total is None:
+            return None
+        dims = _gguf_attention_kv_dims(self.config["gguf_path"])
+        weights = _gguf_mib(self.config["gguf_path"])
+        if dims is None or not weights:
+            return None
+        return total - _DESKTOP_RESERVE_MIB, weights, dims
+
+    def _predicted_total_mib(self, admission: Tuple[int, int, int], cache_type: str) -> int:
+        _, weights, (layers, width) = admission
+        return weights + _kv_cache_mib(layers, width, self.config["n_ctx"], cache_type) + _FIXED_OVERHEAD_MIB
+
+    def _warn_if_explicit_type_exceeds_budget(self) -> None:
+        """An alias that names a KV type owns the consequence — the arithmetic
+        warns, it does not refuse."""
+        admission = self._admission()
+        if admission is None:
+            return
+        budget, _, _ = admission
+        cache_type = self.config.get("cache_type_k")
+        predicted = self._predicted_total_mib(admission, cache_type)
+        if predicted > budget:
+            logger.warning(
+                "llama-server[%s]: KV %s explicitly configured — arithmetic predicts "
+                "%d MiB against a %d MiB budget; loading anyway (explicit choice "
+                "overrides arithmetic)",
+                self.alias, cache_type, predicted, budget,
+            )
+
     async def _launch_auto_kv(self, binary: Path) -> Dict[str, Any]:
-        """Start at the best rung the card can hold, stepping down on the
-        child's own out-of-memory verdict. A rung that fit is memoised with
-        the free-VRAM level it fit at, and reused only while the card has at
-        least that much free again — a busier card re-runs the ladder."""
+        """Start at the best rung the arithmetic and the card both clear.
+
+        Two gates per rung, in order: admission arithmetic (weights + KV bytes
+        for the rung + fixed overhead + desktop reserve <= physical VRAM) and,
+        for what passes, the child's own out-of-memory verdict — which under
+        WDDM is a late and unreliable signal, since Windows pages instead of
+        refusing (2026-08-19: an f16 rung "fit" that way and prefill collapsed
+        16x). A rung that fit is memoised with the free-VRAM level it fit at,
+        and reused only while the card has at least that much free again — a
+        busier card re-runs the ladder. A memoised rung the arithmetic now
+        refuses falls through to the full ladder and is allowed to rewrite
+        the memo."""
         key = self._fit_key()
         free = _free_vram_mib()
         memo = self._read_fit_memo().get(key)
         memo_hit = bool(memo and free is not None and free >= (memo.get("free_mib") or 0))
+        admission = self._admission()
         if memo_hit:
-            candidates = (memo["type"],)
+            candidates = [memo["type"]]
         else:
             gguf_mib = _gguf_mib(self.config["gguf_path"])
             if free is not None and gguf_mib and free < gguf_mib + 4096:
@@ -252,7 +418,29 @@ class LlamaServerSupervisor:
                     f"{gguf_mib} MiB model — no KV type will fit; free the card or point "
                     "the alias at a smaller model"
                 )
-            candidates = KV_LADDER
+            candidates = list(KV_LADDER)
+        if admission is not None:
+            budget, weights, _ = admission
+            for rung in KV_LADDER:
+                if rung not in candidates:
+                    candidates.append(rung)
+            for rung in list(candidates):
+                predicted = self._predicted_total_mib(admission, rung)
+                if predicted > budget:
+                    logger.warning(
+                        "llama-server[%s]: KV %s refused by arithmetic — predicted %d MiB "
+                        "(weights %d + kv %d + overhead %d) against a %d MiB budget",
+                        self.alias, rung, predicted, weights,
+                        predicted - weights - _FIXED_OVERHEAD_MIB, _FIXED_OVERHEAD_MIB, budget,
+                    )
+                    candidates.remove(rung)
+                    memo_hit = memo_hit and rung != memo.get("type")
+            if not candidates:
+                raise LlamaServerError(
+                    f"llama-server[{self.alias}]: no KV rung fits the arithmetic — "
+                    "the model is too large for this card at n_ctx "
+                    f"{self.config['n_ctx']}"
+                )
         for cache_type in candidates:
             try:
                 props = await self._launch(binary, cache_type=cache_type)

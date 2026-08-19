@@ -97,15 +97,17 @@ class TestTheKvLadder:
         return sup, attempts
 
     @pytest.mark.asyncio
-    async def test_f16_steps_down_to_q8_0_on_the_childs_own_oom_verdict(self, monkeypatch):
-        # The 18:09 live call: f16 KV at 262K died with CUDA out-of-memory on
-        # a card where q8_0 fills 31.9 of 32 GB. The child's log tail is the
+    async def test_q8_0_steps_down_to_q4_0_on_the_childs_own_oom_verdict(self, monkeypatch):
+        # The ladder's lower signal: a rung that the arithmetic clears can
+        # still die on a real CUDA out-of-memory (fragmentation, a busier
+        # desktop than the reserve models). The child's log tail is the
         # verdict; the next rung launches, and the win is memoised with the
         # free-VRAM level it was earned at.
         import dpc_client_core.managers.llama_server_supervisor as mod
 
         monkeypatch.setattr(mod, "ensure_binary", lambda cfg: BINARY)
         monkeypatch.setattr(mod, "_free_vram_mib", lambda: 31200)
+        monkeypatch.setattr(mod, "_total_vram_mib", lambda: None)
         sup, attempts = self._sup_with_launch([
             LlamaServerError("died", ["0.12.019 E CUDA error: out of memory"]),
             {"total_slots": 4},
@@ -117,8 +119,8 @@ class TestTheKvLadder:
         props = await sup.ensure_running()
 
         assert props == {"total_slots": 4}
-        assert attempts == ["f16", "q8_0"]
-        assert written and written[0][1] == "q8_0" and written[0][2] == 31200
+        assert attempts == ["q8_0", "q4_0"]
+        assert written and written[0][1] == "q4_0" and written[0][2] == 31200
 
     @pytest.mark.asyncio
     async def test_a_non_oom_failure_is_not_stepped_down(self, monkeypatch):
@@ -126,6 +128,7 @@ class TestTheKvLadder:
 
         monkeypatch.setattr(mod, "ensure_binary", lambda cfg: BINARY)
         monkeypatch.setattr(mod, "_free_vram_mib", lambda: 31200)
+        monkeypatch.setattr(mod, "_total_vram_mib", lambda: None)
         sup, attempts = self._sup_with_launch([
             LlamaServerError("died", ["exited with 3 before becoming healthy"]),
         ])
@@ -133,7 +136,7 @@ class TestTheKvLadder:
 
         with pytest.raises(LlamaServerError):
             await sup.ensure_running()
-        assert attempts == ["f16"]
+        assert attempts == ["q8_0"]
 
     @pytest.mark.asyncio
     async def test_the_fit_memo_short_circuits_the_ladder(self, monkeypatch):
@@ -141,6 +144,7 @@ class TestTheKvLadder:
 
         monkeypatch.setattr(mod, "ensure_binary", lambda cfg: BINARY)
         monkeypatch.setattr(mod, "_free_vram_mib", lambda: 31200)
+        monkeypatch.setattr(mod, "_total_vram_mib", lambda: None)
         sup, attempts = self._sup_with_launch([{"total_slots": 4}])
         sup._read_fit_memo = lambda: {sup._fit_key(): {"type": "q8_0", "free_mib": 28000}}
         rewritten = []
@@ -157,9 +161,9 @@ class TestTheKvLadder:
 
         monkeypatch.setattr(mod, "ensure_binary", lambda cfg: BINARY)
         monkeypatch.setattr(mod, "_free_vram_mib", lambda: 20000)
+        monkeypatch.setattr(mod, "_total_vram_mib", lambda: None)
         monkeypatch.setattr(mod, "_gguf_mib", lambda path: 10000)
         sup, attempts = self._sup_with_launch([
-            LlamaServerError("died", ["E CUDA error: out of memory"]),
             LlamaServerError("died", ["E CUDA error: out of memory"]),
             {"total_slots": 4},
         ])
@@ -168,13 +172,14 @@ class TestTheKvLadder:
 
         await sup.ensure_running()
 
-        assert attempts == ["f16", "q8_0", "q4_0"]
+        assert attempts == ["q8_0", "q4_0"]
 
     @pytest.mark.asyncio
     async def test_an_alias_that_names_a_type_gets_exactly_one_attempt(self, monkeypatch):
         import dpc_client_core.managers.llama_server_supervisor as mod
 
         monkeypatch.setattr(mod, "ensure_binary", lambda cfg: BINARY)
+        monkeypatch.setattr(mod, "_total_vram_mib", lambda: None)
         sup, attempts = self._sup_with_launch([{"total_slots": 4}])
         sup.config["cache_type_k"] = "q4_0"
 
@@ -328,3 +333,153 @@ class TestStart:
 
 async def _ret(value):
     return value
+
+
+class TestTheAdmissionArithmetic:
+    """The 2026-08-19 spill: WDDM does not refuse an allocation, it pages it
+    to shared memory — so an f16 rung "fit" at 262 144 by putting 5.2 GiB
+    into system RAM, prefill collapsed from 784 to 47-51 tok/s, and the memo
+    recorded the poisoned rung. The fit decision moved from the child's OOM
+    verdict to arithmetic done BEFORE the launch: weights + KV bytes for the
+    rung + fixed overhead + desktop reserve against physical VRAM."""
+
+    def _sup_with_launch(self, outcomes):
+        sup = _sup()
+        attempts = []
+
+        async def fake_launch(binary, cache_type=None):
+            attempts.append(cache_type)
+            outcome = outcomes[len(attempts) - 1]
+            if isinstance(outcome, Exception):
+                raise outcome
+            return outcome
+
+        sup._launch = fake_launch
+        return sup, attempts
+
+    def test_the_auto_ladder_has_no_rung_above_q8_0(self):
+        from dpc_client_core.managers.llama_server_supervisor import KV_LADDER
+        assert KV_LADDER == ("q8_0", "q4_0")
+
+    def test_an_explicit_single_slot_reaches_the_child(self):
+        # The old `> 1` guard ate -np 1: the config said 1 while the server
+        # ran its own 4 and nobody could see the difference.
+        cmd = _sup(n_parallel=1).build_command(BINARY, 1)
+        assert cmd[cmd.index("-np") + 1] == "1"
+        assert "--kv-unified" not in cmd  # unified == split at one slot
+
+    def test_unset_slots_leave_the_server_its_own_choice(self):
+        assert "-np" not in _sup().build_command(BINARY, 1)
+
+    def test_the_kv_formula_stays_conservative_against_the_loader(self):
+        # 17 attention layers x 1024 kv-width, parsed from the production
+        # GGUF's tensor directory; the loader reported 8704 MiB for q8_0 at
+        # 262 144. The formula lands within ~6 % and ABOVE the loader:
+        # over-prediction refuses early, under-prediction spills.
+        from dpc_client_core.managers.llama_server_supervisor import _kv_cache_mib
+        predicted = _kv_cache_mib(17, 1024, 262144, "q8_0")
+        assert 8704 <= predicted <= 8704 * 1.08
+
+    def test_the_gguf_reader_takes_the_kv_axis_not_the_model_axis(self, tmp_path):
+        # attn_k is 2-D (n_embd, n_kv_heads x head_dim); the KV width is the
+        # SECOND dim. A reader taking the first would oversize the cache by
+        # the GQA ratio (5120/1024 here) and refuse rungs that fit.
+        import struct
+        buf = bytearray()
+        buf += b"GGUF" + struct.pack("<I", 3)
+        buf += struct.pack("<QQ", 1, 0)  # one tensor, no metadata
+        name = b"blk.3.attn_k.weight"
+        buf += struct.pack("<Q", len(name)) + name
+        buf += struct.pack("<I", 2) + struct.pack("<QQ", 5120, 1024)
+        buf += struct.pack("<I", 0) + struct.pack("<Q", 0)
+        gguf = tmp_path / "m.gguf"
+        gguf.write_bytes(bytes(buf))
+
+        from dpc_client_core.managers.llama_server_supervisor import _gguf_attention_kv_dims
+        assert _gguf_attention_kv_dims(str(gguf)) == (1, 1024)
+
+    @pytest.mark.asyncio
+    async def test_a_rung_the_arithmetic_refuses_is_never_launched(self, monkeypatch):
+        # 28 GiB card -> 26624 MiB budget after the reserve. q8_0 predicts
+        # 16031 + 9248 + 4608 = 29887 (refused), q4_0 predicts 16031 + 4896
+        # + 4608 = 25535 (admitted). Only q4_0 is launched — the refusal
+        # happens without a child process, so WDDM is never asked to hold
+        # what does not fit.
+        import dpc_client_core.managers.llama_server_supervisor as mod
+
+        monkeypatch.setattr(mod, "ensure_binary", lambda cfg: BINARY)
+        monkeypatch.setattr(mod, "_free_vram_mib", lambda: 26000)
+        monkeypatch.setattr(mod, "_total_vram_mib", lambda: 28672)
+        monkeypatch.setattr(mod, "_gguf_mib", lambda path: 16031)
+        monkeypatch.setattr(mod, "_gguf_attention_kv_dims", lambda path: (17, 1024))
+        sup, attempts = self._sup_with_launch([{"total_slots": 4}])
+        sup._read_fit_memo = lambda: {}
+        # The memo writer MUST be patched: it writes to the real install path,
+        # and the first version of this test left a fake "q4_0 @ 26000" in the
+        # production file — the next backend start read it as a hit and served
+        # q4_0 instead of running the ladder.
+        sup._write_fit_memo = lambda *a: None
+
+        props = await sup.ensure_running()
+
+        assert props == {"total_slots": 4}
+        assert attempts == ["q4_0"]
+
+    @pytest.mark.asyncio
+    async def test_a_poisoned_memo_the_arithmetic_refuses_falls_to_the_ladder(self, monkeypatch):
+        # The 21:27 state, in miniature: the memo says a rung that no longer
+        # clears the arithmetic. It must not be trusted into a launch.
+        import dpc_client_core.managers.llama_server_supervisor as mod
+
+        monkeypatch.setattr(mod, "ensure_binary", lambda cfg: BINARY)
+        monkeypatch.setattr(mod, "_free_vram_mib", lambda: 30000)
+        monkeypatch.setattr(mod, "_total_vram_mib", lambda: 28672)
+        monkeypatch.setattr(mod, "_gguf_mib", lambda path: 16031)
+        monkeypatch.setattr(mod, "_gguf_attention_kv_dims", lambda path: (17, 1024))
+        sup, attempts = self._sup_with_launch([{"total_slots": 4}])
+        sup._read_fit_memo = lambda: {sup._fit_key(): {"type": "q8_0", "free_mib": 28000}}
+        rewritten = []
+        sup._write_fit_memo = lambda *a: rewritten.append(a)
+
+        await sup.ensure_running()
+
+        assert attempts == ["q4_0"]
+        assert rewritten and rewritten[0][1] == "q4_0"
+
+    @pytest.mark.asyncio
+    async def test_a_card_that_cannot_hold_any_rung_fails_without_launching(self, monkeypatch):
+        import dpc_client_core.managers.llama_server_supervisor as mod
+
+        monkeypatch.setattr(mod, "ensure_binary", lambda cfg: BINARY)
+        monkeypatch.setattr(mod, "_free_vram_mib", lambda: 26000)
+        monkeypatch.setattr(mod, "_total_vram_mib", lambda: 28672)
+        monkeypatch.setattr(mod, "_gguf_mib", lambda path: 20000)
+        monkeypatch.setattr(mod, "_gguf_attention_kv_dims", lambda path: (17, 1024))
+        sup, attempts = self._sup_with_launch([])
+
+        with pytest.raises(LlamaServerError, match="no KV rung fits"):
+            await sup.ensure_running()
+        assert attempts == []
+
+    @pytest.mark.asyncio
+    async def test_an_explicit_type_overrides_the_arithmetic_with_a_warning(self, monkeypatch, caplog):
+        # The alias owns the consequence: f16 that the arithmetic refuses is
+        # still loaded when named explicitly, and the log says so.
+        import dpc_client_core.managers.llama_server_supervisor as mod
+
+        monkeypatch.setattr(mod, "ensure_binary", lambda cfg: BINARY)
+        monkeypatch.setattr(mod, "_free_vram_mib", lambda: 30000)
+        monkeypatch.setattr(mod, "_total_vram_mib", lambda: 28672)
+        monkeypatch.setattr(mod, "_gguf_mib", lambda path: 16031)
+        monkeypatch.setattr(mod, "_gguf_attention_kv_dims", lambda path: (17, 1024))
+        sup, attempts = self._sup_with_launch([{"total_slots": 4}])
+        sup.config["cache_type_k"] = "f16"
+        sup.config["cache_type_v"] = "f16"
+
+        import logging
+        with caplog.at_level(logging.WARNING, logger="dpc_client_core.managers.llama_server_supervisor"):
+            props = await sup.ensure_running()
+
+        assert props == {"total_slots": 4}
+        assert attempts == [None]
+        assert any("overrides arithmetic" in r.message for r in caplog.records)

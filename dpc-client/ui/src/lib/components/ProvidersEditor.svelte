@@ -35,9 +35,13 @@
     top_k?: number;
     num_predict?: number;
     // llamacpp_server specific: the model file the DPC-owned llama-server
-    // child serves, and the per-request thinking cap (ADR-040 route b2)
+    // child serves, the per-request thinking cap (ADR-040 route b2), and the
+    // supervisor knobs the form exposes doors to
     gguf_path?: string;
     reasoning_budget_tokens?: number;
+    cache_type_k?: string;   // KV quant; unset = the auto ladder (q8_0 -> q4_0)
+    cache_type_v?: string;
+    n_parallel?: number;     // unset = the server's own slot choice
     // Local Whisper specific (v0.13.1+)
     device?: string;         // 'cuda', 'cpu', or 'auto'
     compile_model?: boolean; // torch.compile optimization
@@ -928,6 +932,66 @@
                           Absolute path to the model file. DPC starts its own llama-server on it
                           (ADR-040): first call fetch-verifies the pinned binary, then serves —
                           no host, no key.
+                        </p>
+                      </div>
+
+                      <div class="form-group">
+                        <label for="kv-type-{i}">KV cache type (optional)</label>
+                        <select
+                          id="kv-type-{i}"
+                          value={editedConfig.providers[i].cache_type_k ?? ''}
+                          on:change={(e) => {
+                            if (!editedConfig) return;
+                            const v = (e.target as HTMLSelectElement).value;
+                            const p = editedConfig.providers[i];
+                            if (v === '') {
+                              delete p.cache_type_k;
+                              delete p.cache_type_v;
+                            } else {
+                              p.cache_type_k = v;
+                              p.cache_type_v = v;
+                            }
+                            editedConfig = editedConfig;
+                          }}
+                        >
+                          <option value="">Auto (q8_0 → q4_0 by free VRAM)</option>
+                          <option value="q8_0">q8_0</option>
+                          <option value="q4_0">q4_0</option>
+                          <option value="f16">f16 (needs headroom — check the card)</option>
+                        </select>
+                        <p class="help-text">
+                          Auto never picks f16: on a full card Windows pages it into system RAM
+                          and prefill collapses instead of failing. An explicit choice is loaded
+                          as configured, with a warning in the log when the arithmetic says it
+                          does not fit.
+                        </p>
+                      </div>
+
+                      <div class="form-group">
+                        <label for="n-parallel-{i}">Parallel slots (optional)</label>
+                        <input
+                          id="n-parallel-{i}"
+                          type="number"
+                          min="1"
+                          value={editedConfig.providers[i].n_parallel ?? ''}
+                          on:input={(e) => {
+                            if (!editedConfig) return;
+                            const raw = (e.target as HTMLInputElement).value;
+                            const n = parseInt(raw);
+                            const p = editedConfig.providers[i];
+                            if (raw === '' || isNaN(n)) {
+                              delete p.n_parallel;
+                            } else {
+                              p.n_parallel = n;
+                            }
+                            editedConfig = editedConfig;
+                          }}
+                          placeholder="server default"
+                        />
+                        <p class="help-text">
+                          Empty = the server's own choice (4 unified slots on the pinned build).
+                          An explicit value is always sent — set 1 to serialize every request
+                          through one slot.
                         </p>
                       </div>
 
