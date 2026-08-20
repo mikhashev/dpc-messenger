@@ -240,6 +240,24 @@ class TestTheKvLadder:
         assert cmd[cmd.index("-ub") + 1] == "2048"
         assert "-b" not in _sup().build_command(BINARY, 1)
 
+    def test_the_checkpoint_knobs_are_sent_only_when_named(self):
+        """A parked deep conversation weighs 12-16 GB of which only ~2.5 GB is
+        attention KV; the rest is context checkpoints at ~585-700 MiB each. The
+        count is therefore how many conversations fit the host cache, and it has
+        to be nameable. Silence keeps the build's own 32 / 8192."""
+        cmd = _sup(ctx_checkpoints=4, checkpoint_min_step=2048).build_command(BINARY, 1)
+        assert cmd[cmd.index("--ctx-checkpoints") + 1] == "4"
+        assert cmd[cmd.index("--checkpoint-min-step") + 1] == "2048"
+        bare = _sup().build_command(BINARY, 1)
+        assert "--ctx-checkpoints" not in bare and "--checkpoint-min-step" not in bare
+
+    def test_zero_checkpoints_is_a_choice_not_a_silence(self):
+        """`0` disables checkpointing entirely, and a truthiness guard would eat
+        it — the same trap `-np 1` fell into once already."""
+        cmd = _sup(ctx_checkpoints=0, checkpoint_min_step=0).build_command(BINARY, 1)
+        assert cmd[cmd.index("--ctx-checkpoints") + 1] == "0"
+        assert cmd[cmd.index("--checkpoint-min-step") + 1] == "0"
+
     def test_cache_ram_and_slot_save_path(self):
         cmd = _sup(cache_ram_mib=24576, slot_save_path="D:/kv").build_command(BINARY, 1)
         assert cmd[cmd.index("--cache-ram") + 1] == "24576"

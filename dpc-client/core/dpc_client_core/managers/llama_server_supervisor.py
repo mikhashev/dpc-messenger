@@ -74,6 +74,18 @@ DEFAULTS: Dict[str, Any] = {
     # default is 2048 and micro-batches are cut from it.
     "n_batch": None,
     "n_ubatch": None,
+    # How many context checkpoints the child keeps per slot, and how far apart.
+    # None = the build's own 32 / 8192, which is what every install had. The
+    # reason to name them is size, not availability: a checkpoint is a snapshot
+    # of the recurrent state and costs ~585-700 MiB here, so a parked deep
+    # conversation weighs 12-16 GB of which only ~2.5 GB is attention KV. With
+    # the host cache holding whole conversations, the checkpoint count decides
+    # how many of them fit — four checkpoints put a 150K state near 5 GB.
+    # The trade is where the engine can resume from after a prefix divergence;
+    # with the stable-prefix layout the divergence sits in the turn tail, which
+    # is exactly what the surviving checkpoints cover.
+    "ctx_checkpoints": None,
+    "checkpoint_min_step": None,
     "kv_unified": True,
     "cache_ram_mib": None,
     "slot_save_path": None,
@@ -303,6 +315,10 @@ class LlamaServerSupervisor:
         # the old `> 1` guard ate it and the server fell back to its own 4.
         # --kv-unified only means something above one slot; at one slot
         # unified and split are the same pool.
+        if c["ctx_checkpoints"] is not None:
+            cmd += ["--ctx-checkpoints", str(c["ctx_checkpoints"])]
+        if c["checkpoint_min_step"] is not None:
+            cmd += ["--checkpoint-min-step", str(c["checkpoint_min_step"])]
         if c["n_batch"]:
             cmd += ["-b", str(c["n_batch"])]
         if c["n_ubatch"]:
@@ -485,9 +501,22 @@ class LlamaServerSupervisor:
     async def _launch(self, binary: Path, cache_type: Optional[str] = None) -> Dict[str, Any]:
         cmd = self.build_command(binary, self.port, cache_type=cache_type)
         env = self.build_env(binary)
+        # What the child was actually given, in one line. The prompt cache is the
+        # reason this exists: its size can arrive as LLAMA_ARG_CACHE_RAM from the
+        # environment, where it is invisible in the command line, in the config
+        # and in the child's own captured log — three readers of that log reached
+        # three different answers about it in one afternoon (2026-08-20).
+        _cache = c_ram if (c_ram := self.config.get("cache_ram_mib")) else (
+            f"{env.get('LLAMA_ARG_CACHE_RAM')} (from environment)"
+            if env.get("LLAMA_ARG_CACHE_RAM") else "build default"
+        )
         logger.info(
-            "llama-server[%s] starting on :%d (kv=%s)",
-            self.alias, self.port, cache_type or "configured",
+            "llama-server[%s] starting on :%d (kv=%s, cache_ram=%s, ctx_checkpoints=%s, "
+            "checkpoint_min_step=%s, n_ubatch=%s)",
+            self.alias, self.port, cache_type or "configured", _cache,
+            self.config.get("ctx_checkpoints") or "build default",
+            self.config.get("checkpoint_min_step") or "build default",
+            self.config.get("n_ubatch") or "build default",
         )
         self._log_path.parent.mkdir(parents=True, exist_ok=True)
         self._log_fh = open(self._log_path, "ab")
