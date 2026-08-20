@@ -5,6 +5,7 @@
      * Unified for 1:1 and group chats. Drift-style categories + human-readable labels.
      */
     import { getToolLabel, getToolArgPreview } from '$lib/utils/toolDisplay';
+    import { occupancyFromSpeed, occupancyLabel, occupancyTitle } from '$lib/utils/contextOccupancy';
     import { sendCommand } from '$lib/coreService';
 
     interface ToolCall {
@@ -108,6 +109,15 @@
         }
     }
 
+    // The occupancy half of the strip rides the same payload as the speed
+    // (loop.py: round_progress_payload) but reads differently — the denominator
+    // is the raw window and the reserve is a colour, not a subtraction. That
+    // reasoning lives in contextOccupancy.ts, where it can be tested.
+    let ctx = $derived(occupancyFromSpeed(speed));
+    let ctxTitle = $derived(
+        ctx ? occupancyTitle(ctx, { round: speed?.round, median: !!speed?.median }) : '',
+    );
+
     // One-line result preview shown in the collapsed tool row (full output on expand).
     function outputPreview(output: string, maxLen: number = 100): string {
         if (!output) return '';
@@ -159,13 +169,23 @@
                 {roundCount} {roundCount === 1 ? 'round' : 'rounds'} · {toolCalls.length} {toolCalls.length === 1 ? 'action' : 'actions'}{isLive ? '...' : ''}
             </span>
             {#if speed && (isLive || speed.median)}
-                <span class="speed-counter" title={`model ${speed.model || speed.alias || ''}, round ${speed.round ?? '?'}, ${speed.prompt_tokens ?? 0} in / ${speed.completion_tokens ?? 0} out, ${speed.elapsed_s ?? 0}s`}>
+                <span class="speed-counter" title={speed.elapsed_s ? `model ${speed.model || speed.alias || ''}, round ${speed.round ?? '?'}, ${speed.prompt_tokens ?? 0} in / ${speed.completion_tokens ?? 0} out, ${speed.elapsed_s}s` : ''}>
                     {#if speed.prefill_tok_s}
                         <span class="speed-part">{speed.median ? 'median ' : ''}prefill: {speed.prefill_tok_s} tok/s | decode: {speed.decode_tok_s} tok/s</span>
                     {:else if speed.total_tok_s}
                         <span class="speed-part">{speed.median ? 'median ' : ''}{speed.total_tok_s} tok/s</span>
                     {/if}
-                    <span class="speed-model">{speed.model || speed.alias}</span>
+                    {#if ctx}
+                        <span
+                            class="speed-part context"
+                            class:warn={ctx.warn}
+                            class:blocked={ctx.blocked}
+                            title={ctxTitle}
+                        >{occupancyLabel(ctx)}</span>
+                    {/if}
+                    {#if speed.model || speed.alias}
+                        <span class="speed-model">{speed.model || speed.alias}</span>
+                    {/if}
                 </span>
             {/if}
             <span class="expand-icon">{expanded ? '▾' : '▸'}</span>
@@ -307,6 +327,15 @@
         font-variant-numeric: tabular-nums;
         color: var(--text-secondary, #9ca3af);
         white-space: nowrap;
+    }
+    /* Amber at the backend's own >80% warning line, red once the round guard
+       would refuse the next call — the colour is the reserve made visible. */
+    .speed-part.context.warn {
+        color: var(--warning, #f59e0b);
+    }
+    .speed-part.context.blocked {
+        color: var(--danger, #ef4444);
+        font-weight: 600;
     }
     .speed-model {
         font-size: 0.9em;

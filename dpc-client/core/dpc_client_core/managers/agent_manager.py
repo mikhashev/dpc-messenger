@@ -1242,7 +1242,14 @@ class DpcAgentManager:
                     monitor.set_token_limit(context_window)
                 monitor.set_token_count(conversation_tokens)
 
-            agent_token_limit = monitor.get_token_usage().get("token_limit") or 0
+            # The group counter shows one row per agent, so each row carries its
+            # own window — the shared monitor limit would print the group's
+            # largest against every agent's usage.
+            agent_token_limit = (
+                self._resolve_context_window()
+                or monitor.get_token_usage().get("token_limit")
+                or 0
+            )
             if (conversation_id.startswith("group-") and new_token_count
                     and agent_token_limit and self.agent_id and self.service):
                 try:
@@ -1446,16 +1453,26 @@ class DpcAgentManager:
         """
         monitor = self._agent_monitors.get(conversation_id)
         config_cw = int(self.config.get("context_window", 0)) or 0
+        # This agent's own window is the authority for this agent's rounds, and
+        # it is resolved BEFORE the monitor is consulted. The monitor's
+        # token_limit is shared state: a group monitor is set to the LARGEST
+        # window among the group's agents, and history.json persists that number
+        # for every monitor that later loads the file. Trusting it gave a local
+        # 262 144-token agent a 1 000 000-token limit in a group — which is not
+        # only a wrong figure on screen: the same number calibrates the overflow
+        # guard (agent.py, AGENT-CTX-1) and its reserve, so the guard stopped
+        # refusing anything long before the model itself ran out.
+        own_window = self._resolve_context_window() or 0
         if not monitor:
             return {
                 "tokens_used": 0,
-                "tokens_limit": config_cw or 204800,
+                "tokens_limit": own_window or config_cw or 204800,
                 "usage_percent": 0,
                 "messages_count": 0,
             }
 
         usage = monitor.get_token_usage()
-        token_limit = usage.get("token_limit") or config_cw or 204800
+        token_limit = own_window or usage.get("token_limit") or config_cw or 204800
         history_tokens = usage.get("tokens_used", 0)
         tokens_after_last_response = monitor._tokens_after_last_response
         tokens_after_last_response_at = monitor._tokens_after_last_response_at

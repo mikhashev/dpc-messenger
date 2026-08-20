@@ -275,6 +275,12 @@ export interface AgentProgressEvent {
         total_tok_s?: number;
         prefill_tok_s?: number;
         decode_tok_s?: number;
+        // Window occupancy of the same round (loop.py: round_progress_payload).
+        // Present for every provider, since the window comes from the agent,
+        // not from the provider that filled the speed fields above.
+        context_used?: number;
+        context_window?: number;
+        context_reserve?: number;
     } | null;
 }
 

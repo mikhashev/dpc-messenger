@@ -457,6 +457,12 @@ class DpcAgent:
             conversation_id=conversation_id,
             stop_event=stop_event,
             reasoning_effort=reasoning_effort,
+            # The live strip carries the same pair this guard has just decided
+            # on: the window every round is measured against, and the headroom
+            # below which the next round is refused. Until now those two numbers
+            # existed only in a DEBUG line nobody watching the agent can see.
+            context_window=_ctx_window,
+            context_reserve=_reserve,
         )
 
         # Store last usage and trace for session state access by agent_manager

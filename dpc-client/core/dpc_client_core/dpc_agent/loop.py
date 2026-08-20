@@ -72,6 +72,51 @@ def merge_optional_usage(accumulated: Dict[str, Any], usage: Dict[str, Any]) -> 
             continue
         accumulated[field] = accumulated.get(field, 0) + int(value)
 
+
+def round_progress_payload(
+    speed: Optional[Dict[str, Any]],
+    *,
+    round_idx: int,
+    prompt_tokens: int,
+    context_window: Optional[int],
+    context_reserve: Optional[int],
+) -> Optional[Dict[str, Any]]:
+    """One round's live strip: how fast it ran, and how full the window was.
+
+    The speed half arrives from the provider (llama.cpp fills it, the API
+    providers do not) and is passed through untouched. The occupancy half is
+    added here rather than in a provider because no provider knows the agent's
+    window or the reserve the round guard refuses on.
+
+    Two things the reader should not have to guess:
+
+    - *Which* round the pair describes. Both halves belong to the round that
+      just finished: the numerator is what that call actually sent, counted by
+      the provider, not the pre-turn estimate. Occupancy therefore reads as of
+      that call, and the round number travels beside it.
+    - The denominator is the raw window the caller measured against — this
+      agent's own model window, resolved from its config override or its
+      provider, never the largest window in a group it happens to sit in. Raw,
+      not window-minus-reserve: it should equal the number in the provider
+      config, so the strip and the configuration cannot disagree. What the guard
+      blocks on is the reserve, carried next to the pair instead of folded into
+      it: a full bar should be explained, not merely red.
+
+    Nothing is invented. With no window known the occupancy half is absent — a
+    missing field, not a zero — and a round with neither half returns None, so
+    no empty strip is emitted.
+    """
+    payload: Dict[str, Any] = dict(speed) if speed else {}
+    if context_window and context_window > 0 and prompt_tokens > 0:
+        payload["context_used"] = int(prompt_tokens)
+        payload["context_window"] = int(context_window)
+        if context_reserve:
+            payload["context_reserve"] = int(context_reserve)
+    if not payload:
+        return None
+    payload["round"] = round_idx
+    return payload
+
 # Shared ThreadPoolExecutor for tool execution (fixes memory leak from creating new executors)
 # Using max_workers=4 allows parallel tool execution while limiting resource usage
 _SHARED_EXECUTOR: Optional[ThreadPoolExecutor] = None
@@ -203,6 +248,11 @@ def _detect_reasoning_quality(thinking: str, tool_names: List[str]) -> Dict[str,
 
     # Check for reasoning indicators
     indicators = 0
+    # Needles, not prose: these are matched against the model's own thinking,
+    # which is written in whatever language the task came in. The non-English
+    # half is data and must survive a sweep that translates the product's text
+    # — deleting it would make the detector blind to every Russian-language
+    # round while still reporting a quality verdict.
     reasoning_signals = [
         "because", "since", "therefore", "need to", "should",
         "first", "then", "next", "plan", "step",
@@ -506,6 +556,8 @@ async def run_llm_loop(
     conversation_id: Optional[str] = None,
     stop_event: Optional[asyncio.Event] = None,
     reasoning_effort: Optional[str] = None,
+    context_window: Optional[int] = None,
+    context_reserve: Optional[int] = None,
 ) -> Tuple[str, Dict[str, Any], Dict[str, Any]]:
     """
     Core LLM-with-tools loop.
@@ -523,6 +575,10 @@ async def run_llm_loop(
         max_rounds: Maximum LLM rounds before stopping
         on_stream_chunk: Optional async callback for streaming: await on_stream_chunk(chunk, conversation_id)
         conversation_id: Optional conversation ID for streaming callbacks
+        context_window: The model window the caller measured this turn against,
+            for the live occupancy strip. Absent -> the strip shows speed only.
+        context_reserve: The headroom the caller refuses a round below — shown
+            beside the pair, never subtracted from it.
 
     Returns:
         (final_text, accumulated_usage, llm_trace) tuple
@@ -658,13 +714,19 @@ async def run_llm_loop(
                 # Carry forward thinking from each round (last non-empty thinking wins)
                 if msg.get("thinking"):
                     accumulated_usage["thinking"] = msg["thinking"]
-                # Per-round live speed for the UI counter (llama.cpp provider
-                # attaches it to its usage; absent elsewhere — Ollama is out
-                # of scope by decision). Rides the next narration emit so no
-                # new event type is born for one line.
-                _round_speed = usage.get("speed")
-                if _round_speed:
-                    _round_speed["round"] = round_idx
+                # Per-round live strip for the UI counter: speed where the
+                # provider reports it (llama.cpp does, the API providers do
+                # not) plus this round's window occupancy, which every
+                # provider now carries because the caller supplies the window.
+                # Rides the next narration emit so no new event type is born
+                # for one line.
+                _round_speed = round_progress_payload(
+                    usage.get("speed"),
+                    round_idx=round_idx,
+                    prompt_tokens=round_prompt_tokens,
+                    context_window=context_window,
+                    context_reserve=context_reserve,
+                )
             except Exception as e:
                 log.error(f"LLM error: {e}", exc_info=True)
                 return f"⚠️ LLM error: {e}", accumulated_usage, llm_trace
@@ -740,9 +802,10 @@ async def run_llm_loop(
                         "dropped the request (likely context overflow). Skipping retries."
                     )
                     return (
-                        "⚠️ Провайдер отбросил запрос без обработки (zero token usage) — "
-                        "вероятно, контекст разговора превысил лимит модели. "
-                        "Начните новую сессию (New Session) или сократите историю.",
+                        "⚠️ The provider dropped the request without processing it "
+                        "(zero token usage) — the conversation has most likely "
+                        "outgrown the model's context window. End session to "
+                        "continue, or shorten the history.",
                         accumulated_usage,
                         llm_trace,
                     )

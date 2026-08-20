@@ -280,12 +280,26 @@
           if (!vals.length) return null;
           return vals[Math.floor(vals.length / 2)];
         };
+        // Context occupancy is the one number here that must NOT be a median:
+        // it grows through the turn, so the last round is the peak the next
+        // turn starts from, and an average would understate exactly the case
+        // the user needs to see. The window and the reserve travel with it so
+        // the finished header colours by the same rule as the live one.
+        const last = liveSpeedSamples[liveSpeedSamples.length - 1] || {};
+        const lastNum = (key: string): number | null => {
+          const v = Number(last[key]);
+          return Number.isFinite(v) && v > 0 ? v : null;
+        };
         const summary: Record<string, any> = {
           rounds: liveSpeedSamples.length,
           prefill_tok_s: median('prefill_tok_s'),
           decode_tok_s: median('decode_tok_s'),
           total_tok_s: median('total_tok_s'),
-          model: liveSpeedSamples[liveSpeedSamples.length - 1]?.model || '',
+          context_used: lastNum('context_used'),
+          context_window: lastNum('context_window'),
+          context_reserve: lastNum('context_reserve'),
+          round: Number(last.round) || null,
+          model: last.model || '',
           median: true,
         };
         liveSpeedSamples.length = 0;
