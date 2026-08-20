@@ -727,6 +727,28 @@ class TestTheBudgetClamp:
         assert body["max_tokens"] == 4000
         assert body["extra_body"]["reasoning_budget_tokens"] == 1952
 
+    @pytest.mark.asyncio
+    async def test_the_shape_the_sleep_synthesis_sends_lands_whole(self):
+        """The nightly synthesis asks for both at once: the room it reserved
+        for the brief, and a cap so the think block cannot spend that room
+        first. The run that produced no brief on 2026-08-20 sent neither, took
+        the provider default of 8192 and spent 4 921 of it thinking."""
+        p = _provider(reasoning_budget_tokens=10000)
+        p.supervisor = _FakeSupervisor()
+        client, completions = _fake_client(_chat_resp(content="{}"))
+
+        async def _ensure():
+            return client
+
+        p._ensure = _ensure
+
+        await p.generate_response("q", max_tokens=16384, reasoning_budget_tokens=4000)
+
+        body = completions.bodies[0]
+        assert body["max_tokens"] == 16384
+        # Under the clamp (16384 - 2048), so the caller's cap survives intact.
+        assert body["extra_body"]["reasoning_budget_tokens"] == 4000
+
     def test_thinking_off_sends_no_budget_at_all(self):
         p = _provider(reasoning_budget_tokens=10000)
         body = p._build_extra_body("off", None, effective_max_tokens=8192)

@@ -126,7 +126,30 @@ Rules:
 
 
 SYNTHESIS_BUDGET_FACTOR = 0.85
-SYNTHESIS_OUTPUT_RESERVE_TOKENS = 4000
+# The room reserved for the answer, and — since 2026-08-20 — the ceiling the call
+# actually asks for. One quantity, used at both ends on purpose: it used to be
+# two, 4000 subtracted from the input budget and never sent, while the request
+# went out at the provider default of 8192.
+#
+# Measured on the run that produced no brief (local model, 124 sessions): prompt
+# 178 731 of a 262 144 window, completion 8 192 of 8 192, `finish=length`, of
+# which 4 921 tokens were the think block and 3 271 the answer — a real,
+# well-formed brief cut mid-array. The brief needs more than 3 271 and ~83 K of
+# window sat unused.
+#
+# A fraction rather than a flat number because the fleet's windows differ by two
+# orders of magnitude: a flat 16 384 would leave a 16 000-token alias with a
+# negative input budget, which is not a reserve but a refusal.
+SYNTHESIS_OUTPUT_RESERVE_FRACTION = 0.10
+SYNTHESIS_OUTPUT_RESERVE_MIN = 4000
+SYNTHESIS_OUTPUT_RESERVE_MAX = 16384
+# What the think block may take of that room. The ceiling is the deterministic
+# half — it gives the brief space whatever the model does; this is the other
+# half, because the run above spent 60 % of its ceiling thinking and a larger
+# ceiling alone would have been partly eaten again. Three quarters stay with the
+# answer. Providers that do not read a per-request budget ignore it; they are
+# also the ones whose alias already carries a 65 536-token ceiling.
+SYNTHESIS_THINKING_SHARE = 0.25
 
 # How long a sleep may hold its own lock before a later trigger calls it stuck
 # and starts over the top of it.
@@ -147,6 +170,27 @@ SLEEP_TIMEOUT_MINUTES = 30
 SYNTHESIS_TIMEOUT_SECONDS = SLEEP_TIMEOUT_MINUTES * 60 / 2
 
 
+def _synthesis_output_reserve(context_window: int) -> int:
+    """Room for the answer: a tenth of the window, floored and capped.
+
+    Single source of truth — the input budget subtracts this and the request
+    asks for exactly this, so the two cannot drift into different numbers again.
+    """
+    return min(
+        SYNTHESIS_OUTPUT_RESERVE_MAX,
+        max(SYNTHESIS_OUTPUT_RESERVE_MIN, int(context_window * SYNTHESIS_OUTPUT_RESERVE_FRACTION)),
+    )
+
+
+def _synthesis_request_limits(context_window: int) -> Dict[str, int]:
+    """What the synthesis call asks the provider for, on this window."""
+    reserve = _synthesis_output_reserve(context_window)
+    return {
+        "max_tokens": reserve,
+        "reasoning_budget_tokens": max(1, int(reserve * SYNTHESIS_THINKING_SHARE)),
+    }
+
+
 def _compute_synthesis_budget(context_window: int, template_overhead_tokens: int) -> int:
     """Tokens available for findings_text after reserving output + template overhead.
 
@@ -154,7 +198,9 @@ def _compute_synthesis_budget(context_window: int, template_overhead_tokens: int
     helper and the observability site read from this. If the factor or
     reserve change, only this function needs editing.
     """
-    return int(context_window * SYNTHESIS_BUDGET_FACTOR) - SYNTHESIS_OUTPUT_RESERVE_TOKENS - template_overhead_tokens
+    return (int(context_window * SYNTHESIS_BUDGET_FACTOR)
+            - _synthesis_output_reserve(context_window)
+            - template_overhead_tokens)
 
 
 def _render_finding_block(seq_index: int, finding: Dict[str, Any]) -> str:
@@ -933,6 +979,11 @@ async def run_sleep(
             synthesis_prompt,
             provider_alias=provider_alias,
             timeout=SYNTHESIS_TIMEOUT_SECONDS,
+            # The ceiling this call reserved for itself, and the cap that keeps the
+            # think block from spending it. A provider that does not read either
+            # ignores them; the local one reads both, and it is the one that was
+            # writing half a brief.
+            **_synthesis_request_limits(context_window),
         )
         if not response or not response.strip():
             raise ValueError(

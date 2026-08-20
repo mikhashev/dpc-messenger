@@ -10,7 +10,7 @@ import pytest
 
 from dpc_client_core.dpc_agent.sleep_pipeline import (
     SYNTHESIS_BUDGET_FACTOR,
-    SYNTHESIS_OUTPUT_RESERVE_TOKENS,
+    _synthesis_output_reserve,
     SYNTHESIS_PROMPT,
     _collect_group_archive_digests,
     _compute_archive_hash,
@@ -326,7 +326,7 @@ def test_select_findings_within_budget_truncates_when_over_budget():
     assert selected[0] is findings[0]
     # Tokens used should not exceed budget (modulo the single-finding guarantee
     # which only kicks in if selected was empty — covered separately).
-    budget = int(16_000 * SYNTHESIS_BUDGET_FACTOR) - SYNTHESIS_OUTPUT_RESERVE_TOKENS - 1_000
+    budget = int(16_000 * SYNTHESIS_BUDGET_FACTOR) - _synthesis_output_reserve(16_000) - 1_000
     assert used <= budget
 
 
@@ -407,7 +407,7 @@ def test_compute_synthesis_budget_matches_helper_internal_calc():
     budget = _compute_synthesis_budget(context_window, template_overhead)
     expected = (
         int(context_window * SYNTHESIS_BUDGET_FACTOR)
-        - SYNTHESIS_OUTPUT_RESERVE_TOKENS
+        - _synthesis_output_reserve(context_window)
         - template_overhead
     )
     assert budget == expected
