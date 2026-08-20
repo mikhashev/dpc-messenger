@@ -481,6 +481,29 @@ class Settings:
         value = self.get('knowledge_graph', 'backend', 'sqlite').strip().lower()
         return value if value in ('sqlite', 'grafeo') else 'sqlite'
 
+    def get_gliner_device(self) -> str:
+        """Where the GLiNER entity model runs: "auto" (default), "cpu" or "cuda".
+
+        It sits beside the backend because it belongs to the same subsystem, and
+        it exists for the same reason `embedding_device` does: the card this
+        process shares is the binding constraint on the model the agents wait
+        for, and entity extraction is background work whose latency nobody
+        watches. "auto" is what every install had before this setting existed —
+        cuda when torch sees a card, cpu otherwise. An unknown value falls back
+        to "auto" rather than being obeyed: a typo must not decide what holds
+        VRAM.
+        """
+        value = self.get('knowledge_graph', 'gliner_device', 'auto').strip().lower()
+        if value in ('auto', 'cpu', 'cuda'):
+            return value
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.warning(
+            "[knowledge_graph] gliner_device=%r is not a device this build knows "
+            "(auto/cpu/cuda) — using auto", value,
+        )
+        return 'auto'
+
     def get_log_level(self) -> str:
         """Get global log level (DEBUG/INFO/WARNING/ERROR/CRITICAL)."""
         return self.get('logging', 'level', 'INFO').upper()

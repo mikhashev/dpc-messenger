@@ -121,9 +121,12 @@ GLINER_MAX_TEXT_LEN = 5000
 # a pure attribute read (safe under the GIL).
 _GLINER_MODEL: Any = None
 _GLINER_LOAD_LOCK = threading.Lock()
+#: What the loaded singleton was put on, so a later caller asking for something
+#: else is answered honestly rather than silently ignored.
+_GLINER_DEVICE: Optional[str] = None
 
 
-def _get_gliner_model():
+def _get_gliner_model(device: Optional[str] = None):
     """Return the process-wide GLiNER model, loading lazily on first call.
 
     Returns None if `gliner` is not installed — callers should treat the
@@ -131,11 +134,13 @@ def _get_gliner_model():
     extract_entities_gliner. Safe to call from any thread (including
     asyncio worker threads via to_thread()).
     """
-    global _GLINER_MODEL
+    global _GLINER_MODEL, _GLINER_DEVICE
     if _GLINER_MODEL is not None:
+        _warn_if_device_differs(device)
         return _GLINER_MODEL
     with _GLINER_LOAD_LOCK:
         if _GLINER_MODEL is not None:
+            _warn_if_device_differs(device)
             return _GLINER_MODEL
         try:
             from gliner import GLiNER
@@ -143,11 +148,37 @@ def _get_gliner_model():
         except ImportError:
             log.debug("GLiNER not installed — skip entity extraction (install with: uv sync --extra graph-ner)")
             return None
-        device = "cuda" if torch.cuda.is_available() else "cpu"
-        log.info("Loading GLiNER model %s on %s (first use, process-wide singleton)...", GLINER_MODEL_NAME, device)
-        _GLINER_MODEL = GLiNER.from_pretrained(GLINER_MODEL_NAME).to(device)
-        log.info("GLiNER model loaded on %s", device)
+        if device in (None, "auto"):
+            resolved = "cuda" if torch.cuda.is_available() else "cpu"
+            reason = "auto"
+        else:
+            resolved = device
+            reason = "configured"
+        log.info(
+            "Loading GLiNER model %s on %s (%s; first use, process-wide singleton)...",
+            GLINER_MODEL_NAME, resolved, reason,
+        )
+        _GLINER_MODEL = GLiNER.from_pretrained(GLINER_MODEL_NAME).to(resolved)
+        _GLINER_DEVICE = resolved
+        log.info("GLiNER model loaded on %s", resolved)
         return _GLINER_MODEL
+
+
+def _warn_if_device_differs(device: Optional[str]) -> None:
+    """Say it when a later caller wanted another device than the one in memory.
+
+    The same rule the embedding singleton states: one model per process, the
+    first caller decides, and moving loaded weights is not what a caller asking
+    for a model expects to trigger. Silence here would read as if the second
+    agent's setting had been obeyed.
+    """
+    if device in (None, "auto") or _GLINER_DEVICE is None or device == _GLINER_DEVICE:
+        return
+    log.warning(
+        "GLiNER already loaded on %s; request for %s ignored "
+        "(one model per process, first caller decides)",
+        _GLINER_DEVICE, device,
+    )
 
 
 @dataclass
@@ -1072,6 +1103,7 @@ class GrafeoGraphBackend(GraphBackend):
 
 #: What an agent may say about its own graph backend, in `<agent_root>/config.json`.
 _KG_BACKEND_KEY = "kg_backend"
+_GLINER_DEVICE_KEY = "gliner_device"
 
 
 def _agent_kg_backend_override(agent_root: Path) -> Optional[str]:
@@ -1103,6 +1135,33 @@ def _agent_kg_backend_override(agent_root: Path) -> Optional[str]:
     return chosen
 
 
+def _agent_gliner_device_override(agent_root: Path) -> Optional[str]:
+    """This agent's own choice of GLiNER device, or None for the global one.
+
+    Read exactly like the backend override next door, and for the same reason:
+    the setting is fleet-global, and one agent moving first is the only
+    migration a fleet-global switch cannot express. An unrecognised value is
+    ignored with a warning — a typo must not decide what holds VRAM.
+    """
+    config_path = agent_root / "config.json"
+    if not config_path.is_file():
+        return None
+    try:
+        value = json.loads(config_path.read_text(encoding="utf-8")).get(_GLINER_DEVICE_KEY)
+    except (OSError, json.JSONDecodeError) as e:
+        log.warning("Could not read %s for a gliner_device override: %s", config_path, e)
+        return None
+    if value is None:
+        return None
+    if not isinstance(value, str) or value.strip().lower() not in ("auto", "cpu", "cuda"):
+        log.warning(
+            "%s sets %s=%r, which is not a device this build knows — using the global setting",
+            config_path, _GLINER_DEVICE_KEY, value,
+        )
+        return None
+    return value.strip().lower()
+
+
 class KnowledgeGraph:
     """High-level API for the agent knowledge graph."""
 
@@ -1127,6 +1186,15 @@ class KnowledgeGraph:
             dpc_home = agent_root.parent.parent
             backend = Settings(dpc_home).get_kg_backend()
         backend = backend.strip().lower()
+
+        # Where GLiNER runs, resolved the same three levels down as the backend
+        # above: this agent's config.json, then the fleet setting, then auto.
+        # Held here rather than read per call — extract_entities_gliner runs in a
+        # worker thread and a config read per batch would be a file read per batch.
+        self._gliner_device = _agent_gliner_device_override(agent_root)
+        if self._gliner_device is None:
+            from dpc_client_core.settings import Settings
+            self._gliner_device = Settings(agent_root.parent.parent).get_gliner_device()
 
         if backend == "grafeo":
             db_path = agent_root / "knowledge_graph.grafeo"
@@ -1554,7 +1622,7 @@ class KnowledgeGraph:
         if not texts:
             return []
 
-        model = _get_gliner_model()
+        model = _get_gliner_model(getattr(self, "_gliner_device", None))
         if model is None:
             return []
 
