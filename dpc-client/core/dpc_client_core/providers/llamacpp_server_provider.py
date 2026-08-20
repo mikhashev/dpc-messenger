@@ -405,6 +405,8 @@ class LlamaServerProvider(DeepSeekProvider):
         reasoning_text: Optional[str] = None,
         elapsed_s: Optional[float] = None,
         t_first_chunk_s: Optional[float] = None,
+        finish_reason: Optional[str] = None,
+        max_tokens: Optional[int] = None,
     ) -> Dict[str, Any]:
         """Same accounting as the parent, under this provider's own name — the
         burn history is grepped by that prefix, and a local box joining the
@@ -430,6 +432,21 @@ class LlamaServerProvider(DeepSeekProvider):
             usage["reasoning_tokens"] = max(1, len(reasoning_text) // 4)
             usage["content_tokens"] = max(0, usage["completion_tokens"] - usage["reasoning_tokens"])
             estimated = True
+        # Why the caller gets to see it: `length` is the only signal that
+        # separates "the model was cut at the ceiling" from "the model
+        # finished on its own", and the two need opposite repairs. It sits on
+        # resp.choices[0] on every path and was read by nobody, so a sleep
+        # synthesis that died at the cap could not say so — three readers
+        # argued for a day over which of the two had happened.
+        if finish_reason is not None:
+            usage["finish_reason"] = finish_reason
+        # The ceiling belongs beside the count it bounds: completion == cap is
+        # the fallback truncation signal for the day finish_reason comes back
+        # empty, and a count without its window is a number the reader has to
+        # already know the answer to. Each call site passes the same
+        # expression its request carries as max_tokens.
+        if max_tokens is not None:
+            usage["max_tokens"] = max_tokens
         self._last_usage = usage
         if elapsed_s is not None and elapsed_s > 0:
             speed = self._speed_payload(
@@ -455,11 +472,13 @@ class LlamaServerProvider(DeepSeekProvider):
             usage["speed"] = speed
         logger.info(
             "llamacpp usage: alias=%s conv=%s prompt=%d, completion=%d "
-            "(reasoning=%d/content=%d%s), tool_calls=%d, effort=%s, path=%s",
+            "(reasoning=%d/content=%d%s), tool_calls=%d, effort=%s, path=%s"
+            "%s",
             self.alias, conversation_id or "-", usage["prompt_tokens"],
             usage["completion_tokens"], usage["reasoning_tokens"],
             usage["content_tokens"], ", split=estimated" if estimated else "",
             tool_calls, effort, path,
+            f", finish={finish_reason}" if finish_reason else "",
         )
         return usage
 
@@ -518,7 +537,8 @@ class LlamaServerProvider(DeepSeekProvider):
             }
             async with self.supervisor.call_slot():
                 resp = await client.chat.completions.create(**params)
-            msg = resp.choices[0].message
+            _choice = resp.choices[0]
+            msg = _choice.message
             self._last_thinking = getattr(msg, "reasoning_content", None)
             self._record_usage(
                 getattr(resp, "usage", None),
@@ -527,6 +547,8 @@ class LlamaServerProvider(DeepSeekProvider):
                 effort=self._effort_label(kwargs.get("reasoning_effort"), extra_body),
                 reasoning_text=self._last_thinking,
                 elapsed_s=_time.perf_counter() - _t0,
+                finish_reason=getattr(_choice, "finish_reason", None),
+                max_tokens=_eff_max,
             )
             return msg.content or ""
 
@@ -569,6 +591,9 @@ class LlamaServerProvider(DeepSeekProvider):
             _t_first: Optional[float] = None
             full_text = ""
             thinking_text = ""
+            # Carried across chunks: the terminal usage chunk has no choices,
+            # so the reason arrives one chunk earlier than the accounting.
+            finish_reason = None
             async with self.supervisor.call_slot():
                 # Speed clock starts inside the slot: the queue wait before it
                 # is contention, not model speed.
@@ -591,9 +616,14 @@ class LlamaServerProvider(DeepSeekProvider):
                             reasoning_text=thinking_text or None,
                             elapsed_s=_time.perf_counter() - _t0,
                             t_first_chunk_s=_t_first,
+                            finish_reason=finish_reason,
+                            max_tokens=self.max_tokens,
                         )
                     if not chunk.choices:
                         continue
+                    _fr = getattr(chunk.choices[0], "finish_reason", None)
+                    if _fr:
+                        finish_reason = _fr
                     delta = chunk.choices[0].delta
                     reasoning = getattr(delta, "reasoning_content", None)
                     if reasoning:
@@ -660,7 +690,8 @@ class LlamaServerProvider(DeepSeekProvider):
             }
             async with self.supervisor.call_slot():
                 resp = await client.chat.completions.create(**params)
-            msg = resp.choices[0].message
+            _choice = resp.choices[0]
+            msg = _choice.message
 
             content = msg.content or ""
             thinking = getattr(msg, "reasoning_content", None)
@@ -687,6 +718,8 @@ class LlamaServerProvider(DeepSeekProvider):
                 effort=self._effort_label(reasoning_effort, extra_body),
                 reasoning_text=self._last_thinking,
                 elapsed_s=_time.perf_counter() - _t0,
+                finish_reason=getattr(_choice, "finish_reason", None),
+                max_tokens=self.max_tokens,
             )
             return {
                 "content": content,
@@ -766,7 +799,8 @@ class LlamaServerProvider(DeepSeekProvider):
             }
             async with self.supervisor.call_slot():
                 resp = await client.chat.completions.create(**params)
-            msg = resp.choices[0].message
+            _choice = resp.choices[0]
+            msg = _choice.message
             self._last_thinking = getattr(msg, "reasoning_content", None)
             self._record_usage(
                 getattr(resp, "usage", None),
@@ -775,6 +809,8 @@ class LlamaServerProvider(DeepSeekProvider):
                 effort=self._effort_label(effort, extra_body),
                 reasoning_text=self._last_thinking,
                 elapsed_s=_time.perf_counter() - _t0,
+                finish_reason=getattr(_choice, "finish_reason", None),
+                max_tokens=kwargs.get("max_tokens", self.max_tokens),
             )
             return msg.content or ""
 

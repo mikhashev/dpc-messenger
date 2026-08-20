@@ -410,6 +410,77 @@ def _parse_llm_json(response: str) -> Dict[str, Any]:
         return json.loads(cleaned)
 
 
+def _last_usage_of(llm_manager, provider_alias: Optional[str]) -> Dict[str, Any]:
+    """What the provider reported for its most recent call, or nothing.
+
+    Best-effort on every step: this feeds a diagnostic, and a diagnostic that
+    can raise turns one failure into two.
+    """
+    try:
+        providers = getattr(llm_manager, "providers", None) or {}
+        alias = provider_alias or getattr(llm_manager, "default_provider", None)
+        provider = providers.get(alias) if alias else None
+        if provider is None or not hasattr(provider, "get_last_usage"):
+            return {}
+        return provider.get_last_usage() or {}
+    except Exception:
+        return {}
+
+
+def _capture_unparsable(
+    response: str,
+    err: json.JSONDecodeError,
+    *,
+    label: str,
+    usage: Optional[Dict[str, Any]] = None,
+    dump_dir: Optional[Path] = None,
+) -> Optional[Path]:
+    """Record what could not be parsed, before the exception leaves.
+
+    The 2026-08-20 synthesis failure destroyed its own evidence: the
+    exception carried a position and nothing else, so «the model wrote a
+    brief and was cut» and «the model wrote a stub and then prose» stayed
+    indistinguishable — and those two need opposite repairs. The head tells
+    which of the two it was; the tail tells whether the text stops
+    mid-word; `finish_reason` and the completion count say whether the
+    ceiling was reached. The full body goes to disk because this log
+    rotates by size, so a noisy day can delete the evidence within hours.
+    """
+    usage = usage or {}
+    head = response[:500]
+    tail = response[-200:] if len(response) > 500 else "(shorter than the head window)"
+
+    dump_path: Optional[Path] = None
+    if dump_dir is not None:
+        try:
+            dump_dir.mkdir(parents=True, exist_ok=True)
+            stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+            dump_path = dump_dir / f"failed_{label}_{stamp}.txt"
+            # errors="replace", and the guard catches ValueError beside OSError:
+            # a lone surrogate makes strict encoding raise UnicodeEncodeError,
+            # which is a ValueError — so a narrow guard would let the instrument
+            # destroy the very evidence it exists to keep, and mask the parse
+            # error on the way out.
+            dump_path.write_text(response, encoding="utf-8", errors="replace")
+        except (OSError, ValueError) as dump_err:
+            log.warning("Unparsable %s: the dump could not be written: %s", label, dump_err)
+            dump_path = None
+
+    log.error(
+        "Unparsable %s response: %s at char %d | chars=%d completion_tokens=%s/%s "
+        "finish=%s | dump=%s\n--- first 500 ---\n%s\n--- last 200 ---\n%s",
+        label, err.msg, err.pos, len(response),
+        # The ceiling beside the count: `completion_tokens=8192` only means
+        # "cut at the cap" to a reader who already knows the cap is 8192, and
+        # this is the fallback signal for the day `finish_reason` comes back
+        # empty from the pinned server.
+        usage.get("completion_tokens", "?"), usage.get("max_tokens", "?"),
+        usage.get("finish_reason", "?"),
+        dump_path or "-", head, tail,
+    )
+    return dump_path
+
+
 def _build_session_source_id(archive: str) -> tuple[str, str]:
     """Build (source_id, display_label) for a sleep session.
 
@@ -565,7 +636,16 @@ async def _analyze_single_session(
         raise ValueError(
             "LLM returned empty response (extended thinking may have consumed all output tokens)"
         )
-    finding = _parse_llm_json(response)
+    try:
+        finding = _parse_llm_json(response)
+    except json.JSONDecodeError as err:
+        _capture_unparsable(
+            response, err,
+            label="session-analysis",
+            usage=_last_usage_of(llm_manager, provider_alias),
+            dump_dir=conversation_dir / "sleep_results",
+        )
+        raise
     finding["archive_file"] = archive_file
     finding["digest_date"] = digest.get("date", "")
     finding["source"] = digest.get("source", "1:1")
@@ -858,7 +938,16 @@ async def run_sleep(
             raise ValueError(
                 "LLM returned empty response (extended thinking may have consumed all output tokens)"
             )
-        result = _parse_llm_json(response)
+        try:
+            result = _parse_llm_json(response)
+        except json.JSONDecodeError as err:
+            _capture_unparsable(
+                response, err,
+                label="synthesis",
+                usage=_last_usage_of(llm_manager, provider_alias),
+                dump_dir=results_dir,
+            )
+            raise
 
         morning_brief = result.get("morning_brief", {})
         sleep_findings = result.get("sleep_findings", {})

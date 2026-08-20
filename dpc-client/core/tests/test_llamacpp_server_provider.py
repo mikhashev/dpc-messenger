@@ -72,12 +72,15 @@ def _fake_client(resp):
     return client, completions
 
 
-def _chat_resp(content="ok", reasoning=None, tool_calls=None, usage=None):
+def _chat_resp(content="ok", reasoning=None, tool_calls=None, usage=None, finish_reason="stop"):
+    # `finish_reason` sits on the choice on every real response and the double
+    # carried no such field, so a reader of these tests could not tell that
+    # the provider was throwing it away.
     msg = SimpleNamespace(
         content=content, reasoning_content=reasoning, tool_calls=tool_calls
     )
     return SimpleNamespace(
-        choices=[SimpleNamespace(message=msg)],
+        choices=[SimpleNamespace(message=msg, finish_reason=finish_reason)],
         usage=usage or SimpleNamespace(prompt_tokens=11, completion_tokens=7, total_tokens=18),
     )
 
@@ -764,3 +767,126 @@ class TestTheSpeedPayload:
     def test_zero_elapsed_is_no_counter_at_all(self):
         from dpc_client_core.providers.llamacpp_server_provider import LlamaServerProvider
         assert LlamaServerProvider._speed_payload(1, 1, 0, None, "a", "m") == {}
+
+
+class TestTheReasonTheModelStoppedReachesTheCaller:
+    """`finish_reason` decides between two repairs and was read by nobody.
+
+    A synthesis that ends at the ceiling and one that ends because the model
+    was done look identical in the usage line, and they need opposite fixes.
+    The value sits on `choices[0]` of every response; these pin that it
+    reaches `get_last_usage()` on all four entry points, because a signal
+    wired on three of four is a signal nobody can trust.
+    """
+
+    @staticmethod
+    def _wire(p, client):
+        async def _ensure():
+            return client
+        p._ensure = _ensure
+
+    @pytest.mark.asyncio
+    async def test_plain_carries_it(self):
+        p = _provider()
+        p.supervisor = _FakeSupervisor()
+        client, _ = _fake_client(_chat_resp(finish_reason="length"))
+        self._wire(p, client)
+        await p.generate_response("hi")
+        usage = p.get_last_usage()
+        assert usage["finish_reason"] == "length"
+        assert usage["max_tokens"] == p.max_tokens
+
+    @pytest.mark.asyncio
+    async def test_tools_carries_it(self):
+        p = _provider()
+        p.supervisor = _FakeSupervisor()
+        client, _ = _fake_client(_chat_resp(content="", tool_calls=[], finish_reason="length"))
+        self._wire(p, client)
+        await p.generate_with_tools(
+            [{"role": "user", "content": [{"type": "text", "text": "read it"}]}],
+            [{"name": "read_file", "description": "", "input_schema": {"type": "object"}}],
+        )
+        usage = p.get_last_usage()
+        assert usage["finish_reason"] == "length"
+        assert usage["max_tokens"] == p.max_tokens
+
+    @pytest.mark.asyncio
+    async def test_vision_carries_it(self):
+        p = _provider(mmproj="D:/models/mmproj.gguf")
+        p.supervisor = _FakeSupervisor()
+        client, _ = _fake_client(_chat_resp(finish_reason="length"))
+        self._wire(p, client)
+        await p.generate_with_vision(
+            "what is this", [{"base64": "AAA", "mime_type": "image/png"}]
+        )
+        usage = p.get_last_usage()
+        assert usage["finish_reason"] == "length"
+        assert usage["max_tokens"] == p.max_tokens
+
+    @pytest.mark.asyncio
+    async def test_streaming_carries_it_from_the_chunk_before_the_usage_chunk(self):
+        """The terminal usage chunk has no choices, so the reason arrives one
+        chunk earlier — reading it off the usage chunk would always be None."""
+        p = _provider()
+        p.supervisor = _FakeSupervisor()
+        chunks = [
+            SimpleNamespace(
+                choices=[SimpleNamespace(
+                    delta=SimpleNamespace(reasoning_content=None, content="hi"),
+                    finish_reason=None)],
+                usage=None),
+            SimpleNamespace(
+                choices=[SimpleNamespace(
+                    delta=SimpleNamespace(reasoning_content=None, content=""),
+                    finish_reason="length")],
+                usage=None),
+            SimpleNamespace(
+                choices=[],
+                usage=SimpleNamespace(prompt_tokens=9, completion_tokens=2, total_tokens=11)),
+        ]
+
+        class _Stream:
+            def __aiter__(self):
+                async def gen():
+                    for c in chunks:
+                        yield c
+                return gen()
+
+        class _Completions:
+            async def create(self, **params):
+                return _Stream()
+
+        self._wire(p, SimpleNamespace(chat=SimpleNamespace(completions=_Completions())))
+        await p.generate_response_stream("hi")
+        usage = p.get_last_usage()
+        assert usage["finish_reason"] == "length"
+        assert usage["max_tokens"] == p.max_tokens
+
+    @pytest.mark.asyncio
+    async def test_the_log_line_says_it(self, caplog):
+        import logging
+        p = _provider()
+        p.supervisor = _FakeSupervisor()
+        client, _ = _fake_client(_chat_resp(finish_reason="length"))
+        self._wire(p, client)
+        with caplog.at_level(
+            logging.INFO, logger="dpc_client_core.providers.llamacpp_server_provider"
+        ):
+            await p.generate_response("hi")
+        assert any("finish=length" in r.getMessage() for r in caplog.records)
+
+    @pytest.mark.asyncio
+    async def test_a_response_without_the_field_records_no_key_rather_than_a_none(self):
+        """Absent is not a value: a key carrying None would read as a measured
+        'no reason' to anything that checks the trigger."""
+        p = _provider()
+        p.supervisor = _FakeSupervisor()
+        bare = SimpleNamespace(
+            choices=[SimpleNamespace(message=SimpleNamespace(
+                content="ok", reasoning_content=None, tool_calls=None))],
+            usage=SimpleNamespace(prompt_tokens=1, completion_tokens=1, total_tokens=2),
+        )
+        client, _ = _fake_client(bare)
+        self._wire(p, client)
+        await p.generate_response("hi")
+        assert "finish_reason" not in p.get_last_usage()
