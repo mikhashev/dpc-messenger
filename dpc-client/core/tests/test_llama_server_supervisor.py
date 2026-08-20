@@ -258,6 +258,17 @@ class TestTheKvLadder:
         assert cmd[cmd.index("--ctx-checkpoints") + 1] == "0"
         assert cmd[cmd.index("--checkpoint-min-step") + 1] == "0"
 
+    def test_the_cache_reuse_chunk_is_sent_only_when_named(self):
+        """The build ships this at 0 — off. With it off any divergence inside a
+        cached prefix discards everything behind it, and ours sit early: the
+        knowledge index and the scratchpad are rebuilt ahead of the whole
+        history. Silence still means the build's 0; an explicit 0 is a choice."""
+        cmd = _sup(cache_reuse=256).build_command(BINARY, 1)
+        assert cmd[cmd.index("--cache-reuse") + 1] == "256"
+        assert "--cache-reuse" not in _sup().build_command(BINARY, 1)
+        off = _sup(cache_reuse=0).build_command(BINARY, 1)
+        assert off[off.index("--cache-reuse") + 1] == "0"
+
     def test_cache_ram_and_slot_save_path(self):
         cmd = _sup(cache_ram_mib=24576, slot_save_path="D:/kv").build_command(BINARY, 1)
         assert cmd[cmd.index("--cache-ram") + 1] == "24576"
@@ -270,6 +281,21 @@ class TestTheKvLadder:
     def test_extra_args_go_last_as_an_escape_hatch(self):
         cmd = _sup(extra_args=["--overarch", "x"]).build_command(BINARY, 1)
         assert cmd[-1] == "x" and cmd[-2] == "--overarch"
+
+
+class TestTheStartLineReadsBackWhatWasChosen:
+    """The start line exists because a setting that lives in an environment
+    variable is invisible to every reader. It only does that job if it can tell
+    silence from a deliberate zero — `x or "build default"` cannot."""
+
+    def test_none_reads_as_the_builds_own_default(self):
+        from dpc_client_core.managers.llama_server_supervisor import _fmt_knob
+        assert _fmt_knob(None) == "build default"
+
+    def test_zero_reads_as_zero_because_zero_is_a_decision(self):
+        from dpc_client_core.managers.llama_server_supervisor import _fmt_knob
+        assert _fmt_knob(0) == "0"
+        assert _fmt_knob(1024) == "1024"
 
 
 class TestTheEnvironment:

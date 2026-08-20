@@ -87,6 +87,13 @@ DEFAULTS: Dict[str, Any] = {
     "ctx_checkpoints": None,
     "checkpoint_min_step": None,
     "kv_unified": True,
+    # The minimum chunk the child will try to reuse from a cached prefix by
+    # shifting KV instead of re-reading it. None = the build's own 0, which is
+    # off: today any divergence inside the prefix throws away everything behind
+    # it. Ours sit early — the knowledge index and the scratchpad are rebuilt
+    # ahead of the whole history — so this is the one flag that survives them.
+    # 0 is expressible and means off, which is why the guard tests None.
+    "cache_reuse": None,
     "cache_ram_mib": None,
     "slot_save_path": None,
     "jinja": True,
@@ -102,6 +109,15 @@ class LlamaServerError(RuntimeError):
         tail = "".join(f"\n  | {line}" for line in (log_lines or [])[-12:])
         super().__init__(f"{message}{tail}")
         self.log_lines = log_lines or []
+
+
+def _fmt_knob(value: Any) -> str:
+    """How a knob reads in the start line: silence and an explicit 0 differ.
+
+    `x or "build default"` prints "build default" for 0, and 0 is a choice for
+    every knob here — no checkpoints, no cache reuse. Only None is silence.
+    """
+    return "build default" if value is None else str(value)
 
 
 def _free_port() -> int:
@@ -327,6 +343,8 @@ class LlamaServerSupervisor:
             cmd += ["-np", str(c["n_parallel"])]
             if c["n_parallel"] > 1 and c["kv_unified"]:
                 cmd += ["--kv-unified"]
+        if c["cache_reuse"] is not None:
+            cmd += ["--cache-reuse", str(c["cache_reuse"])]
         if c["cache_ram_mib"]:
             cmd += ["--cache-ram", str(c["cache_ram_mib"])]
         if c["slot_save_path"]:
@@ -512,11 +530,12 @@ class LlamaServerSupervisor:
         )
         logger.info(
             "llama-server[%s] starting on :%d (kv=%s, cache_ram=%s, ctx_checkpoints=%s, "
-            "checkpoint_min_step=%s, n_ubatch=%s)",
+            "checkpoint_min_step=%s, n_ubatch=%s, cache_reuse=%s)",
             self.alias, self.port, cache_type or "configured", _cache,
-            self.config.get("ctx_checkpoints") or "build default",
-            self.config.get("checkpoint_min_step") or "build default",
-            self.config.get("n_ubatch") or "build default",
+            _fmt_knob(self.config.get("ctx_checkpoints")),
+            _fmt_knob(self.config.get("checkpoint_min_step")),
+            _fmt_knob(self.config.get("n_ubatch")),
+            _fmt_knob(self.config.get("cache_reuse")),
         )
         self._log_path.parent.mkdir(parents=True, exist_ok=True)
         self._log_fh = open(self._log_path, "ab")

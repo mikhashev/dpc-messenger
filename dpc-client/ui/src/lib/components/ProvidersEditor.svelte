@@ -45,6 +45,7 @@
     n_parallel?: number;     // unset = the server's own slot choice
     n_ubatch?: number;       // micro-batch; unset = the build's 512
     n_batch?: number;        // logical batch, the micro-batch's ceiling
+    cache_reuse?: number;    // KV-shift reuse chunk; unset = the build's 0 (off)
     // Local Whisper specific (v0.13.1+)
     device?: string;         // 'cuda', 'cpu', or 'auto'
     compile_model?: boolean; // torch.compile optimization
@@ -1000,6 +1001,33 @@
                           on the field above: a micro-batch larger than this is silently clamped.
                           We measured no effect from changing it on its own — it is here so that
                           raising the micro-batch past 2048 is possible rather than quietly ignored.
+                        </p>
+                      </div>
+
+                      <div class="form-group">
+                        <label for="cache-reuse-{i}">Cache reuse chunk (optional)</label>
+                        <input
+                          id="cache-reuse-{i}"
+                          type="number"
+                          min="0"
+                          step="64"
+                          value={editedConfig.providers[i].cache_reuse ?? ''}
+                          placeholder="0 — off (build default)"
+                          on:input={(e) => {
+                            if (!editedConfig) return;
+                            const raw = (e.currentTarget as HTMLInputElement).value;
+                            const n = parseInt(raw, 10);
+                            editedConfig.providers[i].cache_reuse = raw === '' || isNaN(n) ? undefined : n;
+                          }}
+                        />
+                        <p class="help-text">
+                          The smallest run of tokens the server will try to keep by shifting the KV
+                          cache when a cached prompt diverges in the middle (--cache-reuse). Off by
+                          default, and with it off one changed line early in a prompt costs a
+                          re-read of everything behind it — which matters if your prompt rebuilds
+                          anything ahead of the conversation. We have not measured a value on this
+                          fleet yet; start around 256 and watch how much of each prompt the server
+                          reports as already present.
                         </p>
                       </div>
 
