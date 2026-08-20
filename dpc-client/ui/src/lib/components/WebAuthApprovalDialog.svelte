@@ -39,11 +39,18 @@
                 <div class="approval-header">
                     <span class="approval-icon">🔑</span>
                     <span class="approval-title">Headless Login Access</span>
-                    <span class="approval-agent">
-                        {request.agent_name || request.agent_id}{#if request.conversation_title || request.conversation_id}<span
-                            class="approval-origin"
-                        > @ {request.conversation_title || request.conversation_id}</span>{/if}
-                    </span>
+                </div>
+                <!-- At full contrast and on its own line: approving a headless
+                     login without knowing who asked and from where is approving
+                     it blind. -->
+                <div class="approval-origin-line">
+                    <span class="origin-agent">{request.agent_name || request.agent_id}</span>
+                    {#if request.conversation_title || request.conversation_id}
+                        <span class="origin-sep">in</span>
+                        <span class="origin-chat"
+                            >{request.conversation_title || request.conversation_id}</span
+                        >
+                    {/if}
                 </div>
                 <div class="approval-domain">
                     <code>{request.domain}</code>
@@ -109,23 +116,27 @@
         color: var(--text-warning, #f9a825);
     }
 
-    .approval-agent {
-        margin-left: auto;
-        font-size: 0.85em;
-        opacity: 0.7;
-        max-width: 55%;
-        overflow: hidden;
-        text-overflow: ellipsis;
-        white-space: nowrap;
+    .approval-origin-line {
+        display: flex;
+        align-items: baseline;
+        gap: 6px;
+        flex-wrap: wrap;
+        margin-bottom: 8px;
+        font-size: 0.9em;
     }
 
-    /* Which chat asked. Approving a headless login without knowing where the
-       request came from is approving it blind. */
-    .approval-origin {
-        opacity: 0.8;
-        /* The separator's leading space is trimmed out of the text node, so the
-           card read «agent_001@ DPC Research». Space it here instead. */
-        margin-left: 0.35em;
+    .origin-agent {
+        font-weight: 600;
+        color: var(--text-primary, #e6e6e6);
+    }
+
+    .origin-sep {
+        opacity: 0.6;
+    }
+
+    .origin-chat {
+        font-weight: 600;
+        color: var(--text-info, #4fc3f7);
     }
 
     .approval-domain {

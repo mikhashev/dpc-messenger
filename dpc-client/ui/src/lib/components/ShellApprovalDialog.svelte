@@ -73,11 +73,19 @@
                 <div class="approval-header">
                     <span class="approval-icon">⚡</span>
                     <span class="approval-title">Shell Command Approval</span>
-                    <span class="approval-agent">
-                        {request.agent_name}{#if request.conversation_title || request.conversation_id}<span
-                            class="approval-origin"
-                        > @ {request.conversation_title || request.conversation_id}</span>{/if}
-                    </span>
+                </div>
+                <!-- Who is asking and from where, on its own line at full
+                     contrast. In the corner at 0.7 opacity it was there and
+                     still unreadable — and this is the line that makes the
+                     question answerable. -->
+                <div class="approval-origin-line">
+                    <span class="origin-agent">{request.agent_name}</span>
+                    {#if request.conversation_title || request.conversation_id}
+                        <span class="origin-sep">in</span>
+                        <span class="origin-chat"
+                            >{request.conversation_title || request.conversation_id}</span
+                        >
+                    {/if}
                 </div>
                 <div class="approval-command">
                     <code>{request.command}</code>
@@ -220,23 +228,30 @@
         color: var(--text-warning, #f9a825);
     }
 
-    .approval-agent {
-        margin-left: auto;
-        font-size: 0.85em;
-        opacity: 0.7;
-        max-width: 55%;
-        overflow: hidden;
-        text-overflow: ellipsis;
-        white-space: nowrap;
+    /* Who asked and from where. Two agents can raise the same command in two
+       chats in the same second, so this is the line that makes the request
+       answerable — it is not decoration and does not get corner treatment. */
+    .approval-origin-line {
+        display: flex;
+        align-items: baseline;
+        gap: 6px;
+        flex-wrap: wrap;
+        margin-bottom: 8px;
+        font-size: 0.9em;
     }
 
-    /* Which chat asked. Two agents can raise the same command in two chats at
-       the same moment, and then the agent name alone answers nothing. */
-    .approval-origin {
-        opacity: 0.8;
-        /* The separator's leading space is trimmed out of the text node, so the
-           card read «agent_001@ DPC Research». Space it here instead. */
-        margin-left: 0.35em;
+    .origin-agent {
+        font-weight: 600;
+        color: var(--text-primary, #e6e6e6);
+    }
+
+    .origin-sep {
+        opacity: 0.6;
+    }
+
+    .origin-chat {
+        font-weight: 600;
+        color: var(--text-info, #4fc3f7);
     }
 
     .approval-command {
