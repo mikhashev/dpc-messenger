@@ -71,6 +71,12 @@ def _run_git(ctx: ToolContext, args: List[str], cwd: Optional[str] = None) -> Di
             encoding="utf-8",
             errors="replace",
             timeout=30,
+            # Same reason as tools/shell.py: nobody is sitting at this process.
+            # git asks real questions — a credential helper on an https remote,
+            # an unknown host key — and without a closed stdin it asks them of
+            # the operator's console and waits there for the whole timeout while
+            # the agent waits for output that never comes.
+            stdin=subprocess.DEVNULL,
         )
 
         return {
@@ -130,6 +136,10 @@ def _run_git_external(repo_path: str, args: List[str], timeout: int = 30) -> Dic
             encoding="utf-8",
             errors="replace",
             timeout=timeout,
+            # See the note on the sandbox path above — this is the repo path
+            # variant, and it is the one git_push runs on, where a credential
+            # prompt is not hypothetical.
+            stdin=subprocess.DEVNULL,
         )
         return {
             "success": result.returncode == 0,

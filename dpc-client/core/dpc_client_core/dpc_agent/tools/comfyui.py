@@ -937,7 +937,13 @@ def comfyui_convert(ctx: ToolContext, input_path: str, output_path: str = "", fp
             "-movflags", "+faststart",
             str(dst),
         ]
-        result = subprocess.run(cmd, capture_output=True, encoding="utf-8", errors="replace", timeout=120)
+        # `-y` above already answers ffmpeg's only prompt, but the child still
+        # inherits the service console; closing stdin costs nothing and keeps
+        # the rule the same in all three places that spawn a process.
+        result = subprocess.run(
+            cmd, capture_output=True, encoding="utf-8", errors="replace",
+            timeout=120, stdin=subprocess.DEVNULL,
+        )
         if result.returncode != 0:
             stderr = result.stderr[-500:] if result.stderr else ""
             return f"Error: ffmpeg exit {result.returncode}: {stderr}"
