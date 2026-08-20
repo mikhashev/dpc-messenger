@@ -6,6 +6,7 @@
      */
     import { getToolLabel, getToolArgPreview } from '$lib/utils/toolDisplay';
     import { occupancyFromSpeed, occupancyLabel, occupancyTitle } from '$lib/utils/contextOccupancy';
+    import { clampDetail, formatToolInput } from '$lib/utils/toolDetail';
     import { sendCommand } from '$lib/coreService';
 
     interface ToolCall {
@@ -118,16 +119,12 @@
         ctx ? occupancyTitle(ctx, { round: speed?.round, median: !!speed?.median }) : '',
     );
 
-    // One-line result preview shown in the collapsed tool row (full output on expand).
+    // One-line result preview shown in the collapsed tool row; the expanded
+    // block below carries the arguments and the output.
     function outputPreview(output: string, maxLen: number = 100): string {
         if (!output) return '';
         const oneLine = output.replace(/\s+/g, ' ').trim();
         return oneLine.length > maxLen ? oneLine.slice(0, maxLen) + '...' : oneLine;
-    }
-
-    function truncateOutput(output: string, maxLen: number = 500): string {
-        if (!output || output.length <= maxLen) return output || '';
-        return output.slice(0, maxLen) + '...';
     }
 
     interface GroupedRound {
@@ -224,27 +221,33 @@
                             {/if}
                             {#each group.tools as tc, i}
                                 {@const globalIdx = toolCalls.indexOf(tc)}
+                                {@const hasDetail = !!(tc.input || tc.output)}
                                 <div class="tool-call-wrapper">
                                     <button
                                         class="tool-call-item"
                                         class:error={tc.is_error}
-                                        class:has-output={!!tc.output}
-                                        onclick={() => tc.output && toggleTool(globalIdx)}
+                                        class:has-output={hasDetail}
+                                        onclick={() => hasDetail && toggleTool(globalIdx)}
                                     >
                                         <span class="tool-status">{tc.is_error ? '✗' : '✓'}</span>
                                         <span class="tool-name">{getToolLabel(tc.tool)}</span>
                                         {#if getToolArgPreview(tc.tool, tc.input)}
                                             <span class="tool-arg"> — {getToolArgPreview(tc.tool, tc.input)}</span>
                                         {/if}
-                                        {#if tc.output}
+                                        {#if hasDetail}
                                             <span class="tool-expand-icon">{expandedTools.has(globalIdx) ? '▾' : '▸'}</span>
                                         {/if}
                                     </button>
                                     {#if tc.output && !expandedTools.has(globalIdx)}
                                         <div class="tool-output-preview">{outputPreview(tc.output)}</div>
                                     {/if}
-                                    {#if expandedTools.has(globalIdx) && tc.output}
-                                        <pre class="tool-output">{truncateOutput(tc.output)}</pre>
+                                    {#if expandedTools.has(globalIdx)}
+                                        {#if tc.input}
+                                            <pre class="tool-input">{clampDetail(formatToolInput(tc.input))}</pre>
+                                        {/if}
+                                        {#if tc.output}
+                                            <pre class="tool-output">{clampDetail(tc.output)}</pre>
+                                        {/if}
                                     {/if}
                                 </div>
                             {/each}
@@ -566,6 +569,22 @@
         margin-left: auto;
         font-size: 0.7em;
         color: #64748b;
+    }
+
+    /* The arguments, above the output and marked apart from it: the same block
+       now answers both "what did it run" and "what came back". */
+    .tool-input {
+        margin: 2px 0 2px 20px;
+        padding: 6px 8px;
+        background: #0f172a;
+        border-radius: 4px;
+        font-size: 0.8em;
+        color: #cbd5e1;
+        white-space: pre-wrap;
+        word-wrap: break-word;
+        max-height: 200px;
+        overflow-y: auto;
+        border-left: 2px solid #475569;
     }
 
     .tool-output {
