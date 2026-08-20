@@ -227,9 +227,9 @@
         // counter flash for milliseconds and die. The clear effect owns reset.
         if ($agentProgress.speed) {
             agentProgressSpeed = $agentProgress.speed as Record<string, unknown>;
-            // Per-round samples for the finished-message medians (Mike:
-            // «5 rounds · 8 actions — неплохо бы средние, лучше медианные»).
-            // Median, not mean: one cold first round would drag a mean.
+            // Per-round samples for the medians shown beside the finished
+            // round count. Median, not mean: one cold first round would drag
+            // a mean down and misreport the model's speed.
             liveSpeedSamples.push($agentProgress.speed);
         }
         if ($agentProgress.agent_name) agentProgressName = $agentProgress.agent_name;

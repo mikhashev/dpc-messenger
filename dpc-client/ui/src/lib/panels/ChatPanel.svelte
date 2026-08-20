@@ -1096,8 +1096,8 @@
 
     {#if $votingConversationId && $votingConversationId === activeChatId}
       <div class="voting-notice" role="status">
-        Идёт голосование по knowledge commit. Сообщения, написанные сейчас,
-        в него не войдут — они попадут в следующий.
+        A knowledge commit is being voted on. Messages written now are not part
+        of it — they will go into the next one.
       </div>
     {/if}
 
