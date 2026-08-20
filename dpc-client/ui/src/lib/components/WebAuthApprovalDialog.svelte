@@ -123,6 +123,9 @@
        request came from is approving it blind. */
     .approval-origin {
         opacity: 0.8;
+        /* The separator's leading space is trimmed out of the text node, so the
+           card read «agent_001@ DPC Research». Space it here instead. */
+        margin-left: 0.35em;
     }
 
     .approval-domain {

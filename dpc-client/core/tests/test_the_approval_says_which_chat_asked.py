@@ -190,10 +190,37 @@ class TestTheNameAnUnknownAgentGets:
         )
         assert agent_display_name(ctx) == "Johnny"
 
-    def test_an_unnamed_agent_reads_as_its_directory_not_as_the_word_agent(self, tmp_path):
+    def test_the_name_comes_from_the_agent_config_because_the_object_has_none(self, tmp_path):
+        """`DpcAgent` defines no `display_name`, so the object never had one to
+        give: the popup read «Agent» for two months and «agent_001» after the
+        default was fixed. The name lives in the agent's own config, which is
+        where AgentManager and the service have always read it."""
+        import json
+
         from dpc_client_core.dpc_agent.tools.registry import agent_display_name
 
-        ctx = types.SimpleNamespace(agent_root=tmp_path / "agent_johnny_f309700d", _agent=None)
+        root = tmp_path / "agent_001"
+        root.mkdir()
+        (root / "config.json").write_text(
+            json.dumps({"agent_id": "default", "name": "Ark"}), encoding="utf-8"
+        )
+        ctx = types.SimpleNamespace(agent_root=root, _agent=None)
+        assert agent_display_name(ctx) == "Ark"
+
+    def test_reading_the_config_never_creates_the_directory_it_reads(self, tmp_path):
+        """load_agent_config resolves through get_agent_root, which mkdirs."""
+        from dpc_client_core.dpc_agent.tools.registry import agent_display_name
+
+        root = tmp_path / "agent_ghost"
+        assert agent_display_name(types.SimpleNamespace(agent_root=root, _agent=None)) == "agent_ghost"
+        assert not root.exists()
+
+    def test_without_a_config_it_falls_back_to_the_directory(self, tmp_path):
+        from dpc_client_core.dpc_agent.tools.registry import agent_display_name
+
+        root = tmp_path / "agent_johnny_f309700d"
+        root.mkdir()
+        ctx = types.SimpleNamespace(agent_root=root, _agent=None)
         assert agent_display_name(ctx) == "agent_johnny_f309700d"
 
     def test_with_nothing_at_all_it_says_so(self):

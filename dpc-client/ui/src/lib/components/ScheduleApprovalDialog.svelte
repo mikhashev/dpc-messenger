@@ -63,6 +63,7 @@
   .origin {
     opacity: 0.7;
     font-size: 0.9em;
+    margin-left: 0.35em;
   }
 
   .more {

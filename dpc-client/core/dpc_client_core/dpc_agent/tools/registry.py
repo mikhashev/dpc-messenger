@@ -77,7 +77,22 @@ def agent_display_name(ctx: Any) -> str:
     name = getattr(agent, "display_name", "") if agent is not None else ""
     if name:
         return name
-    return getattr(getattr(ctx, "agent_root", None), "name", "") or "Unknown agent"
+    # `DpcAgent` carries no `display_name` at all — observed 2026-08-21, when the
+    # popup read «agent_001 @ DPC Research» after the default was fixed, and
+    # «Agent» before it. The name has always lived in the agent's own config,
+    # which is where AgentManager._load_display_name and the service read it.
+    # Read the file rather than load_agent_config(agent_id): that helper resolves
+    # through get_agent_root, which creates the directory it is asked about.
+    root = getattr(ctx, "agent_root", None)
+    if root is not None:
+        try:
+            import json as _json
+            cfg = _json.loads((root / "config.json").read_text(encoding="utf-8"))
+            if cfg.get("name"):
+                return str(cfg["name"])
+        except Exception:
+            pass
+    return getattr(root, "name", "") or "Unknown agent"
 
 
 def conversation_origin(ctx: Any) -> Tuple[str, str]:
