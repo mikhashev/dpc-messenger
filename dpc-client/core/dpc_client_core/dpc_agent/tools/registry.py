@@ -21,7 +21,7 @@ import json
 import logging
 import pathlib
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from ..utils import safe_relpath, is_path_in_sandbox, get_agent_root
 
@@ -62,6 +62,44 @@ def _resolve_arg_aliases(handler: Callable, args: Dict[str, Any], tool_name: str
         resolved[canonical] = resolved.pop(alias)
         log.debug("Tool %s: argument %r accepted as %r", tool_name, alias, canonical)
     return resolved
+
+
+def agent_display_name(ctx: Any) -> str:
+    """The agent's name for a person to read, or an honest identifier.
+
+    `getattr(agent, "display_name", "Agent")` turned "we do not know who is
+    asking" into a plausible signature, and it reached production twice: the
+    shell dialog on 2026-08-14 and the schedule card on 2026-08-16, both
+    reading «Agent wants …». An unknown agent is better shown as unknown, and
+    the sandbox directory is a real identifier when the object has no name.
+    """
+    agent = getattr(ctx, "_agent", None)
+    name = getattr(agent, "display_name", "") if agent is not None else ""
+    if name:
+        return name
+    return getattr(getattr(ctx, "agent_root", None), "name", "") or "Unknown agent"
+
+
+def conversation_origin(ctx: Any) -> Tuple[str, str]:
+    """(id, readable name) of the chat this run came from, or two empty strings.
+
+    Every gate that asks a person something needs this: with four agents in
+    four chats, "X wants to run Y" is unanswerable, and two agents can raise
+    the same request in the same second. The title is whatever the caller
+    already knew — a group run carries its name — and the rest is named by the
+    service, which is the one holding groups and peers. A run with no chat
+    behind it (a schedule, a sleep) stays empty rather than inventing one.
+    """
+    cid = getattr(ctx, "conversation_id", "") or ""
+    title = getattr(ctx, "conversation_title", "") or ""
+    if cid and not title:
+        resolve = getattr(getattr(ctx, "dpc_service", None), "_conversation_display_name", None)
+        if resolve is not None:
+            try:
+                title = resolve(cid) or ""
+            except Exception:  # a name is never worth failing a gate over
+                title = ""
+    return cid, title
 
 
 @dataclass

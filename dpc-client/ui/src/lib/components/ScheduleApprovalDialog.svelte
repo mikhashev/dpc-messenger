@@ -13,6 +13,9 @@
   <div class="schedule-approval" role="dialog" aria-label="Agent wants to schedule a task">
     <div class="head">
       <strong>{request.agent_name}</strong> wants to come back to this later
+      {#if request.conversation_title || request.conversation_id}<span class="origin"
+        >in {request.conversation_title || request.conversation_id}</span
+      >{/if}
       {#if queued > 1}<span class="more">+{queued - 1} more</span>{/if}
     </div>
 
@@ -55,6 +58,13 @@
     font-size: 0.9em;
   }
   .head { margin-bottom: 0.6rem; }
+  /* Which chat the request came from — the card named the agent and nothing
+     else, and one agent works in several chats. */
+  .origin {
+    opacity: 0.7;
+    font-size: 0.9em;
+  }
+
   .more {
     margin-left: 0.4rem;
     opacity: 0.7;

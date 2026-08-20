@@ -174,3 +174,195 @@ class TestTheToolHandsItOver:
         shell_tool._pending_approvals.clear()
         task.cancel()
         await asyncio.gather(task, return_exceptions=True)
+
+
+class TestTheNameAnUnknownAgentGets:
+    """`getattr(agent, "display_name", "Agent")` reached production twice —
+    the shell dialog on 2026-08-14 and the schedule card on 2026-08-16 — as
+    «Agent wants …». "We do not know who is asking" must not read as a name."""
+
+    def test_a_named_agent_reads_as_its_name(self, tmp_path):
+        from dpc_client_core.dpc_agent.tools.registry import agent_display_name
+
+        ctx = types.SimpleNamespace(
+            agent_root=tmp_path / "agent_johnny_f309700d",
+            _agent=types.SimpleNamespace(display_name="Johnny"),
+        )
+        assert agent_display_name(ctx) == "Johnny"
+
+    def test_an_unnamed_agent_reads_as_its_directory_not_as_the_word_agent(self, tmp_path):
+        from dpc_client_core.dpc_agent.tools.registry import agent_display_name
+
+        ctx = types.SimpleNamespace(agent_root=tmp_path / "agent_johnny_f309700d", _agent=None)
+        assert agent_display_name(ctx) == "agent_johnny_f309700d"
+
+    def test_with_nothing_at_all_it_says_so(self):
+        from dpc_client_core.dpc_agent.tools.registry import agent_display_name
+
+        assert agent_display_name(types.SimpleNamespace()) == "Unknown agent"
+
+
+class TestTheSharedOriginHelper:
+    def test_a_title_the_caller_knew_is_used_as_is(self, tmp_path):
+        from dpc_client_core.dpc_agent.tools.registry import conversation_origin
+
+        ctx = types.SimpleNamespace(
+            conversation_id="group-x", conversation_title="DPC project",
+        )
+        assert conversation_origin(ctx) == ("group-x", "DPC project")
+
+    def test_an_unnamed_conversation_is_named_by_the_service(self):
+        from dpc_client_core.dpc_agent.tools.registry import conversation_origin
+
+        service = types.SimpleNamespace(
+            _conversation_display_name=lambda cid: "DPC project",
+        )
+        ctx = types.SimpleNamespace(conversation_id="group-x", dpc_service=service)
+        assert conversation_origin(ctx) == ("group-x", "DPC project")
+
+    def test_a_run_with_no_chat_stays_empty(self):
+        from dpc_client_core.dpc_agent.tools.registry import conversation_origin
+
+        assert conversation_origin(types.SimpleNamespace()) == ("", "")
+
+    def test_a_name_is_never_worth_failing_a_gate_over(self):
+        from dpc_client_core.dpc_agent.tools.registry import conversation_origin
+
+        def _boom(cid):
+            raise RuntimeError("group store is gone")
+
+        ctx = types.SimpleNamespace(
+            conversation_id="group-x",
+            dpc_service=types.SimpleNamespace(_conversation_display_name=_boom),
+        )
+        assert conversation_origin(ctx) == ("group-x", "")
+
+
+class TestTheScheduleCard:
+    """The second of the three surfaces. Its payload did carry a
+    `conversation_id` — `ctx.current_task_id`, the id of the task being
+    scheduled — so the one field shaped like an answer held the wrong quantity,
+    and the card rendered it nowhere."""
+
+    def _run_gate(self, ctx, broadcast):
+        import threading
+        from dpc_client_core.dpc_agent.tools import core as tools_core
+
+        out = {}
+
+        def _call():
+            out["result"] = tools_core._await_schedule_approval(
+                ctx, task_type="check_back", when="in 1200s", about="re-read the log",
+            )
+
+        worker = threading.Thread(target=_call)
+        worker.start()
+        for _ in range(200):
+            if broadcast:
+                break
+            import time
+            time.sleep(0.01)
+        for rid in list(tools_core._pending_schedule_approvals):
+            tools_core.resolve_schedule_approval(rid, True)
+        worker.join(timeout=5)
+        return out.get("result")
+
+    @pytest.mark.asyncio
+    async def test_the_payload_names_the_chat_and_keeps_the_task_id_apart(self, tmp_path):
+        broadcast = []
+
+        class FakeApi:
+            has_clients = True
+
+            async def broadcast_event(self, name, payload):
+                broadcast.append((name, payload))
+
+        ctx = types.SimpleNamespace(
+            agent_root=tmp_path / "agent_johnny_f309700d",
+            _agent=types.SimpleNamespace(display_name="Johnny"),
+            dpc_service=types.SimpleNamespace(local_api=FakeApi()),
+            _event_loop=asyncio.get_running_loop(),
+            current_task_id="task-42",
+            conversation_id="group-b88b65076b85",
+            conversation_title="DPC project",
+        )
+
+        result = await asyncio.to_thread(self._run_gate, ctx, broadcast)
+
+        assert result == (True, "")
+        name, payload = broadcast[0]
+        assert name == "schedule_approval_request"
+        assert payload["conversation_id"] == "group-b88b65076b85"
+        assert payload["conversation_title"] == "DPC project"
+        assert payload["task_id"] == "task-42", "the task id is kept, under its own name"
+        assert payload["agent_name"] == "Johnny"
+
+    @pytest.mark.asyncio
+    async def test_an_unnamed_agent_is_not_signed_as_agent(self, tmp_path):
+        broadcast = []
+
+        class FakeApi:
+            has_clients = True
+
+            async def broadcast_event(self, name, payload):
+                broadcast.append((name, payload))
+
+        ctx = types.SimpleNamespace(
+            agent_root=tmp_path / "agent_johnny_f309700d",
+            _agent=None,
+            dpc_service=types.SimpleNamespace(local_api=FakeApi()),
+            _event_loop=asyncio.get_running_loop(),
+        )
+
+        await asyncio.to_thread(self._run_gate, ctx, broadcast)
+
+        _, payload = broadcast[0]
+        assert payload["agent_name"] != "Agent"
+        assert payload["agent_name"] == "agent_johnny_f309700d"
+        assert payload["conversation_id"] == ""
+
+
+class TestTheHeadlessLoginGate:
+    """The third surface, and the one that asked the least: its payload was
+    `{request_id, agent_id, domain, url}` — no chat, and not even a name, so a
+    person was asked to let something use their logged-in account without
+    being told who or from where.
+
+    The call sits inside `browse_page` behind a real browser, so this reads the
+    payload the module builds rather than driving Camoufox for it.
+    """
+
+    def _payload_keys(self):
+        import ast
+        import pathlib
+
+        src = (
+            pathlib.Path(__file__).resolve().parents[1]
+            / "dpc_client_core" / "dpc_agent" / "tools" / "browser.py"
+        ).read_text(encoding="utf-8")
+        for node in ast.walk(ast.parse(src)):
+            if not isinstance(node, ast.Call):
+                continue
+            fn = node.func
+            if not (isinstance(fn, ast.Attribute) and fn.attr == "broadcast_event"):
+                continue
+            if not node.args:
+                continue
+            first = node.args[0]
+            if not (isinstance(first, ast.Constant) and first.value == "web_auth_headless_approval_request"):
+                continue
+            payload = node.args[1]
+            assert isinstance(payload, ast.Dict), "payload is no longer a literal — read it another way"
+            return {k.value for k in payload.keys if isinstance(k, ast.Constant)}
+        return None
+
+    def test_the_broadcast_is_where_this_test_thinks_it_is(self):
+        """A source check that finds nothing passes for every program."""
+        keys = self._payload_keys()
+        assert keys is not None, "the web-auth approval broadcast was not found"
+        assert {"request_id", "domain", "url"} <= keys
+
+    def test_it_names_the_agent_and_the_chat(self):
+        keys = self._payload_keys()
+        assert "agent_name" in keys, "the card could only show a raw agent id"
+        assert {"conversation_id", "conversation_title"} <= keys

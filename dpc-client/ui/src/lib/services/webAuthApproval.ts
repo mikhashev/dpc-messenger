@@ -16,8 +16,14 @@ import { writable } from "svelte/store";
 export interface WebAuthApprovalRequest {
   request_id: string;
   agent_id: string;
+  /** The agent under the name it uses in chat; falls back to its id. */
+  agent_name?: string;
   domain: string;
   url: string;
+  /** The chat the agent was working in; empty for a run with none behind it. */
+  conversation_id?: string;
+  /** That chat under a name a person recognises. */
+  conversation_title?: string;
 }
 
 export const pendingWebAuthApprovals = writable<WebAuthApprovalRequest[]>([]);

@@ -18,7 +18,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from .registry import ToolEntry, ToolContext
+from .registry import ToolEntry, ToolContext, agent_display_name, conversation_origin
 from ..memory import _BACKFILL_SKIP
 from ..utils import auto_commit_agent_change
 
@@ -1101,14 +1101,21 @@ def _await_schedule_approval(ctx, *, task_type: str, when: str, about: str) -> t
     event = threading.Event()
     _pending_schedule_approvals[request_id] = {"event": event, "approved": False}
 
-    agent_obj = getattr(ctx, "_agent", None)
+    # `conversation_id` used to be `ctx.current_task_id` — on this path that is
+    # the id of the task being scheduled, not the chat the request came from, so
+    # the one field shaped like an answer held the wrong quantity and the card
+    # rendered it nowhere. The task id is kept under its own name; the chat is
+    # now the chat, resolved to something a person recognises.
+    _origin_id, _origin_title = conversation_origin(ctx)
     payload = {
         "request_id": request_id,
         "task_type": task_type,
         "when": when,
         "about": about,
-        "conversation_id": getattr(ctx, "current_task_id", None),
-        "agent_name": getattr(agent_obj, "display_name", "Agent"),
+        "task_id": getattr(ctx, "current_task_id", None),
+        "conversation_id": _origin_id,
+        "conversation_title": _origin_title,
+        "agent_name": agent_display_name(ctx),
     }
     try:
         import asyncio

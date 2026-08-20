@@ -31,7 +31,7 @@ from io import StringIO
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from .registry import ToolEntry, ToolContext
+from .registry import ToolEntry, ToolContext, agent_display_name, conversation_origin
 
 log = logging.getLogger(__name__)
 
@@ -2588,13 +2588,20 @@ async def browse_page(
                     "url": url,
                     "approved": False,
                 }
+                # This gate asked the least of the three: an agent id and no
+                # chat at all, so the person was told neither who was using
+                # their logged-in account nor from where.
+                _origin_id, _origin_title = conversation_origin(ctx)
                 await local_api.broadcast_event(
                     "web_auth_headless_approval_request",
                     {
                         "request_id": approval_id,
                         "agent_id": agent_id,
+                        "agent_name": agent_display_name(ctx),
                         "domain": use_auth,
                         "url": url,
+                        "conversation_id": _origin_id,
+                        "conversation_title": _origin_title,
                     },
                 )
                 try:

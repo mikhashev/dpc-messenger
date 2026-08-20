@@ -8,7 +8,14 @@ export type ScheduleApprovalRequest = {
   when: string;
   /** What the agent intends to do when it wakes up. */
   about: string;
+  /** The task being scheduled — an id, not a chat. It used to arrive under
+   *  `conversation_id`, which is why the card could never name the chat. */
+  task_id?: string | null;
+  /** The chat the agent was working in; empty for a run with none behind it. */
   conversation_id: string | null;
+  /** That chat under a name a person recognises — a group name, "Johnny (1:1)",
+   *  a peer name, or the id itself when nothing could name it. */
+  conversation_title?: string;
   agent_name: string;
 };
 

@@ -39,7 +39,11 @@
                 <div class="approval-header">
                     <span class="approval-icon">🔑</span>
                     <span class="approval-title">Headless Login Access</span>
-                    <span class="approval-agent">{request.agent_id}</span>
+                    <span class="approval-agent">
+                        {request.agent_name || request.agent_id}{#if request.conversation_title || request.conversation_id}<span
+                            class="approval-origin"
+                        > @ {request.conversation_title || request.conversation_id}</span>{/if}
+                    </span>
                 </div>
                 <div class="approval-domain">
                     <code>{request.domain}</code>
@@ -109,6 +113,16 @@
         margin-left: auto;
         font-size: 0.85em;
         opacity: 0.7;
+        max-width: 55%;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+    }
+
+    /* Which chat asked. Approving a headless login without knowing where the
+       request came from is approving it blind. */
+    .approval-origin {
+        opacity: 0.8;
     }
 
     .approval-domain {

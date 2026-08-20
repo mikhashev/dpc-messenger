@@ -21,7 +21,7 @@ import subprocess
 import unicodedata
 from typing import List, Optional, Tuple
 
-from .registry import ToolEntry, ToolContext
+from .registry import ToolEntry, ToolContext, agent_display_name, conversation_origin
 
 log = logging.getLogger(__name__)
 
@@ -220,7 +220,11 @@ def _request_approval(ctx: ToolContext, command: str, reason: str, cwd: str, tim
 
     request_id = str(uuid.uuid4())[:8]
     agent_obj = getattr(ctx, "_agent", None)
-    agent_name = getattr(agent_obj, "display_name", "Agent")
+    # Never the bare word "Agent": an unknown agent has to look unknown, and the
+    # sandbox directory is its real id. The firewall profile inherits the same
+    # fallback, and that is an improvement — profiles are keyed by agent id, so
+    # the old default could only ever miss.
+    agent_name = agent_display_name(ctx)
     agent_profile = getattr(agent_obj, "_firewall_profile", None) or agent_name
     event = threading.Event()
 
@@ -241,6 +245,7 @@ def _request_approval(ctx: ToolContext, command: str, reason: str, cwd: str, tim
 
     dpc_service = getattr(ctx, "dpc_service", None)
     main_loop = getattr(ctx, "_event_loop", None)
+    _origin_id, _origin_title = conversation_origin(ctx)
 
     def _on_main_loop(coro) -> bool:
         """Hand a coroutine to the service loop from this executor thread."""
@@ -267,8 +272,8 @@ def _request_approval(ctx: ToolContext, command: str, reason: str, cwd: str, tim
                 # Which chat the agent was working in. The tool knows the id and
                 # sometimes the name; naming the conversation is the service's
                 # job, because it is the one holding groups and peers.
-                conversation_id=getattr(ctx, "conversation_id", "") or "",
-                conversation_title=getattr(ctx, "conversation_title", "") or "",
+                conversation_id=_origin_id,
+                conversation_title=_origin_title,
             ))
             if not offered:
                 log.warning("No main event loop available to announce shell_approval_request")
