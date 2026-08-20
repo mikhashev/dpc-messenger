@@ -1223,10 +1223,10 @@ def schedule_task(
 
             data["_check_back_depth"] = depth + 1
 
-            # Mike, 2026-08-04: the person approves before anything enters the
-            # queue — "чтобы человек явно видел что там запланировано и на
-            # когда". Fail-closed: an unanswered or undeliverable request is a
-            # refusal, never a silent schedule.
+            # Owner's rule, 2026-08-04: a person approves before anything
+            # enters the queue, so that what was scheduled — and for when — is
+            # visible to a human before it runs. Fail-closed: an unanswered or
+            # undeliverable request is a refusal, never a silent schedule.
             if _schedule_needs_approval(ctx):
                 when = f"in {delay_seconds}s" if delay_seconds else "immediately"
                 about = str(data.get("text") or data.get("message") or "")[:200]
