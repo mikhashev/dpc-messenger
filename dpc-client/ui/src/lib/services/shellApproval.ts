@@ -13,6 +13,12 @@ export interface ShellApprovalRequest {
   command: string;
   reason: string;
   agent_name: string;
+  /** The chat the agent was working in. Empty for runs with no chat behind
+   *  them (a schedule, a sleep) and for backends older than this field. */
+  conversation_id?: string;
+  /** That chat under a name a person recognises — a group name, "Johnny (1:1)",
+   *  a peer name, or the id itself when nothing could name it. */
+  conversation_title?: string;
 }
 
 export interface ShellExecutionResult {

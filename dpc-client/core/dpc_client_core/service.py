@@ -3955,6 +3955,32 @@ class CoreService:
             return {"status": "success", "request_id": request_id, "approved": bool(approved)}
         return {"status": "error", "message": f"Unknown or expired request_id: {request_id}"}
 
+    def _conversation_display_name(self, conversation_id: str) -> str:
+        """A name a person recognises for the chat a run came from.
+
+        Three shapes reach here: a group id, an agent id (a 1:1 with that
+        agent), and a peer node id. Anything unknown returns the id itself —
+        an id in front of the operator beats an empty line, because the id is
+        still enough to tell two simultaneous requests apart.
+        """
+        if not conversation_id:
+            return ""
+        try:
+            group = self.group_manager.get_group(conversation_id) if self.group_manager else None
+            if group is not None:
+                return getattr(group, "name", "") or conversation_id
+        except Exception:
+            pass
+        if conversation_id.startswith("agent_"):
+            try:
+                name = self._get_agent_display_name(conversation_id)
+                if name and name != conversation_id:
+                    return f"{name} (1:1)"
+            except Exception:
+                pass
+        meta = self.peer_metadata.get(conversation_id) or {}
+        return meta.get("name") or conversation_id
+
     async def announce_shell_approval_request(
         self,
         request_id: str,
@@ -3964,6 +3990,8 @@ class CoreService:
         agent_name: str,
         timeout_seconds: int = 0,
         telegram_chat_id: str = "",
+        conversation_id: str = "",
+        conversation_title: str = "",
     ) -> None:
         """Put a tier-1 approval request in front of every surface that can answer it.
 
@@ -3974,13 +4002,21 @@ class CoreService:
         come from Telegram at all. Telegram is offered the request only then and
         only there: the interface is always shown it, because the interface is
         where the operator who started a desktop run is sitting.
+
+        `conversation_id` is the chat the agent was working in, and the title is
+        whatever the caller could already name. A prompt that says only which
+        agent asks cannot be answered when four agents work in four chats, so
+        anything the caller left unnamed is resolved here.
         """
+        origin = conversation_title or self._conversation_display_name(conversation_id)
         if self.local_api:
             await self.local_api.broadcast_event("shell_approval_request", {
                 "request_id": request_id,
                 "command": command,
                 "reason": reason,
                 "agent_name": agent_name,
+                "conversation_id": conversation_id,
+                "conversation_title": origin,
             })
 
         bridge = self._get_agent_telegram_bridge(agent_id) if telegram_chat_id else None

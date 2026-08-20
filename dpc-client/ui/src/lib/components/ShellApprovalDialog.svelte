@@ -73,7 +73,11 @@
                 <div class="approval-header">
                     <span class="approval-icon">⚡</span>
                     <span class="approval-title">Shell Command Approval</span>
-                    <span class="approval-agent">{request.agent_name}</span>
+                    <span class="approval-agent">
+                        {request.agent_name}{#if request.conversation_title || request.conversation_id}<span
+                            class="approval-origin"
+                        > @ {request.conversation_title || request.conversation_id}</span>{/if}
+                    </span>
                 </div>
                 <div class="approval-command">
                     <code>{request.command}</code>
@@ -220,6 +224,16 @@
         margin-left: auto;
         font-size: 0.85em;
         opacity: 0.7;
+        max-width: 55%;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+    }
+
+    /* Which chat asked. Two agents can raise the same command in two chats at
+       the same moment, and then the agent name alone answers nothing. */
+    .approval-origin {
+        opacity: 0.8;
     }
 
     .approval-command {

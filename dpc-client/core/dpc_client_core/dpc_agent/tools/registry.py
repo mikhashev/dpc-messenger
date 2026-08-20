@@ -113,6 +113,14 @@ class ToolContext:
     # Skill store for execute_skill tool (set by DpcAgent.process())
     skill_store: Optional[Any] = None
 
+    # Which conversation this run belongs to, and what to call it in front of a
+    # person. Set by DpcAgent.process(); empty for runs with no chat behind them
+    # (a schedule, a sleep). The tier-1 approval prompt is what needs it: with
+    # four agents working in four chats, "Johnny wants to run rm -rf" is not an
+    # answerable question until it says where the request came from.
+    conversation_id: Optional[str] = None
+    conversation_title: Optional[str] = None
+
     # -----------------------------------------------------------------------
     # Path helpers (all sandboxed to agent_root)
     # -----------------------------------------------------------------------

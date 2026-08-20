@@ -264,6 +264,11 @@ def _request_approval(ctx: ToolContext, command: str, reason: str, cwd: str, tim
                 # approval is offered — otherwise the button appears in chats
                 # nobody is talking in, and anyone there can press it.
                 telegram_chat_id=getattr(ctx, "reply_telegram_chat_id", "") or "",
+                # Which chat the agent was working in. The tool knows the id and
+                # sometimes the name; naming the conversation is the service's
+                # job, because it is the one holding groups and peers.
+                conversation_id=getattr(ctx, "conversation_id", "") or "",
+                conversation_title=getattr(ctx, "conversation_title", "") or "",
             ))
             if not offered:
                 log.warning("No main event loop available to announce shell_approval_request")

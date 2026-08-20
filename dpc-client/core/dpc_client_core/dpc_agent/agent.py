@@ -419,6 +419,12 @@ class DpcAgent:
             firewall=self._firewall,  # For extended sandbox paths
             conversation_monitor=conversation_monitor,  # For knowledge extraction tool
             reply_telegram_chat_id=reply_telegram_chat_id,
+            # Where this run came from, for anything that has to ask a person
+            # something (tier-1 shell approval today). The title is whatever the
+            # caller already resolved — group chats carry it in chat_context;
+            # for the rest the service names the conversation from its id.
+            conversation_id=conversation_id,
+            conversation_title=(chat_context or {}).get("chat_name") or None,
             skill_store=self.skill_store,  # For execute_skill tool
             dpc_service=self._service,  # For firewall checks
         )
