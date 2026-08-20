@@ -43,6 +43,7 @@
     cache_type_k?: string;   // KV quant; unset = the auto ladder (q8_0 -> q4_0)
     cache_type_v?: string;
     n_parallel?: number;     // unset = the server's own slot choice
+    n_ubatch?: number;       // micro-batch; unset = the build's 512
     // Local Whisper specific (v0.13.1+)
     device?: string;         // 'cuda', 'cpu', or 'auto'
     compile_model?: boolean; // torch.compile optimization
@@ -948,6 +949,31 @@
                           The vision projector file passed to llama-server as --mmproj. With it
                           the server serves images (and video) at full context; without it the
                           alias is text-only. Needs KV headroom — q4_0 leaves it, q8_0 does not.
+                        </p>
+                      </div>
+
+                      <div class="form-group">
+                        <label for="ubatch-{i}">Micro-batch size (optional)</label>
+                        <input
+                          id="ubatch-{i}"
+                          type="number"
+                          min="64"
+                          step="64"
+                          value={editedConfig.providers[i].n_ubatch ?? ''}
+                          placeholder="512 (build default)"
+                          on:input={(e) => {
+                            if (!editedConfig) return;
+                            const raw = (e.currentTarget as HTMLInputElement).value;
+                            const n = parseInt(raw, 10);
+                            editedConfig.providers[i].n_ubatch = raw === '' || isNaN(n) ? undefined : n;
+                          }}
+                        />
+                        <p class="help-text">
+                          How many tokens the server reads at once inside a prompt (-ub). Measured
+                          2026-08-20 on this pin: at a 60 000-token prefill 1024 is worth +5.6 %
+                          over the default 512 and 2048 a further +2.8 %, while below ~8 000 tokens
+                          it changes nothing — the gain needs depth. It costs VRAM: 512 to 1024 was
+                          +683 MiB on the production child, so raise it only with headroom to spare.
                         </p>
                       </div>
 

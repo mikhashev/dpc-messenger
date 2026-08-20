@@ -61,7 +61,8 @@ _ACTIVE_SUPERVISORS: Dict[str, LlamaServerSupervisor] = {}
 _FLAG_KEYS = (
     "gguf_path", "binary_path", "n_ctx", "cache_type_k", "cache_type_v",
     "n_gpu_layers", "flash_attn", "mmproj", "spec_type", "spec_draft_n_max",
-    "n_parallel", "kv_unified", "cache_ram_mib", "slot_save_path", "jinja",
+    "n_batch", "n_ubatch", "n_parallel", "kv_unified", "cache_ram_mib",
+    "slot_save_path", "jinja",
     "extra_args",
 )
 

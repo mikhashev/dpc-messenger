@@ -225,6 +225,21 @@ class TestTheKvLadder:
         solo = _sup().build_command(BINARY, 1)
         assert "-np" not in solo and "--kv-unified" not in solo
 
+    def test_the_micro_batch_is_sent_only_when_the_alias_names_one(self):
+        """Measured 2026-08-20 on this pin: at a 60 000-token prefill ub 1024 is
+        worth +5.6 % over the build default of 512 and 2048 a further +2.8 %,
+        while at 512-8192 tokens the same flag moves nothing. Silence here means
+        the build's own default, which is what every install had before."""
+        cmd = _sup(n_ubatch=1024).build_command(BINARY, 1)
+        assert cmd[cmd.index("-ub") + 1] == "1024"
+        assert "-ub" not in _sup().build_command(BINARY, 1)
+
+    def test_the_logical_batch_rides_beside_it(self):
+        cmd = _sup(n_batch=4096, n_ubatch=2048).build_command(BINARY, 1)
+        assert cmd[cmd.index("-b") + 1] == "4096"
+        assert cmd[cmd.index("-ub") + 1] == "2048"
+        assert "-b" not in _sup().build_command(BINARY, 1)
+
     def test_cache_ram_and_slot_save_path(self):
         cmd = _sup(cache_ram_mib=24576, slot_save_path="D:/kv").build_command(BINARY, 1)
         assert cmd[cmd.index("--cache-ram") + 1] == "24576"

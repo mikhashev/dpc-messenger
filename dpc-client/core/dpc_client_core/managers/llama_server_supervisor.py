@@ -64,6 +64,16 @@ DEFAULTS: Dict[str, Any] = {
     # value is ALWAYS sent, so -np 1 is expressible — the old guard ate it and
     # the config said 1 while the server ran 4.
     "n_parallel": None,
+    # Micro-batch. None = the build's own 512. Measured 2026-08-20 on this pin
+    # and card (llama-bench, logs in ~/.dpc/logs/bench-2026-08-20-prefill): at a
+    # 60 000-token prefill 1024 is worth +5.6 % over 512 and 2048 a further
+    # +2.8 %, while at 512-8192 tokens the same flag moves nothing (-0.6 % …
+    # +0.5 %). The effect needs depth, which is where this fleet lives, and it
+    # costs VRAM: 512 -> 1024 measured +683 MiB on the production child. n_batch
+    # is exposed beside it because the two are read together; the build's
+    # default is 2048 and micro-batches are cut from it.
+    "n_batch": None,
+    "n_ubatch": None,
     "kv_unified": True,
     "cache_ram_mib": None,
     "slot_save_path": None,
@@ -293,6 +303,10 @@ class LlamaServerSupervisor:
         # the old `> 1` guard ate it and the server fell back to its own 4.
         # --kv-unified only means something above one slot; at one slot
         # unified and split are the same pool.
+        if c["n_batch"]:
+            cmd += ["-b", str(c["n_batch"])]
+        if c["n_ubatch"]:
+            cmd += ["-ub", str(c["n_ubatch"])]
         if c["n_parallel"]:
             cmd += ["-np", str(c["n_parallel"])]
             if c["n_parallel"] > 1 and c["kv_unified"]:
