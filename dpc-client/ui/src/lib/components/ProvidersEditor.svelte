@@ -44,6 +44,7 @@
     cache_type_v?: string;
     n_parallel?: number;     // unset = the server's own slot choice
     n_ubatch?: number;       // micro-batch; unset = the build's 512
+    n_batch?: number;        // logical batch, the micro-batch's ceiling
     // Local Whisper specific (v0.13.1+)
     device?: string;         // 'cuda', 'cpu', or 'auto'
     compile_model?: boolean; // torch.compile optimization
@@ -969,11 +970,36 @@
                           }}
                         />
                         <p class="help-text">
-                          How many tokens the server reads at once inside a prompt (-ub). Measured
-                          2026-08-20 on this pin: at a 60 000-token prefill 1024 is worth +5.6 %
-                          over the default 512 and 2048 a further +2.8 %, while below ~8 000 tokens
-                          it changes nothing — the gain needs depth. It costs VRAM: 512 to 1024 was
-                          +683 MiB on the production child, so raise it only with headroom to spare.
+                          How many tokens the server reads at once inside a prompt (-ub). The gain
+                          needs depth: on one card and one build (RTX PRO 4500, b10472, a 27B at
+                          Q4_K_M) 1024 beat the default 512 by 5.6 % at a 60 000-token prefill and
+                          2048 added 2.8 %, while below ~8 000 tokens it changed nothing. Those are
+                          our numbers, not yours — and it costs VRAM (683 MiB for that step here),
+                          so measure on your own install before raising it.
+                        </p>
+                      </div>
+
+                      <div class="form-group">
+                        <label for="batch-{i}">Batch size (optional)</label>
+                        <input
+                          id="batch-{i}"
+                          type="number"
+                          min="64"
+                          step="64"
+                          value={editedConfig.providers[i].n_batch ?? ''}
+                          placeholder="2048 (build default)"
+                          on:input={(e) => {
+                            if (!editedConfig) return;
+                            const raw = (e.currentTarget as HTMLInputElement).value;
+                            const n = parseInt(raw, 10);
+                            editedConfig.providers[i].n_batch = raw === '' || isNaN(n) ? undefined : n;
+                          }}
+                        />
+                        <p class="help-text">
+                          The logical batch (-b) the micro-batch is cut from, so it is the ceiling
+                          on the field above: a micro-batch larger than this is silently clamped.
+                          We measured no effect from changing it on its own — it is here so that
+                          raising the micro-batch past 2048 is possible rather than quietly ignored.
                         </p>
                       </div>
 
