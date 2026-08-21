@@ -29,7 +29,7 @@ import json
 import logging
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, Dict, Optional, List, Union
+from typing import Any, Dict, Iterable, Optional, List, Union
 
 from openai import AsyncOpenAI
 
@@ -839,3 +839,46 @@ class LlamaServerProvider(DeepSeekProvider):
         """The server serves exactly one -m model and ignores this field, but
         the SDK requires a string; the GGUF's stem says more than an alias."""
         return self.model or Path(self.config["gguf_path"]).stem
+
+
+def retire_absent(known_aliases: Iterable[str]) -> List[str]:
+    """Stop children whose alias is gone from the configuration — a rename or a delete.
+
+    The registry is keyed by alias, so a reload that keeps the alias re-registers over
+    the same key and a reload that drops it leaves the child reachable from nowhere.
+    """
+    known = set(known_aliases or ())
+    retired = []
+    for alias in list(_ACTIVE_SUPERVISORS):
+        if alias in known:
+            continue
+        supervisor = _ACTIVE_SUPERVISORS.pop(alias)
+        if supervisor.props is None:
+            continue
+        logger.info(
+            "llamacpp_server: alias '%s' is no longer configured; stopping its child",
+            alias,
+        )
+        LlamaServerProvider._retire(supervisor)
+        retired.append(alias)
+    return retired
+
+
+async def stop_all_supervisors() -> List[str]:
+    """Stop every live child, whatever provider object happens to hold it.
+
+    Shutdown walks `llm_manager.providers`, and a child can outlive the provider that
+    started it, so the registry is the only place that still knows it is running.
+    """
+    stopped = []
+    for alias in list(_ACTIVE_SUPERVISORS):
+        supervisor = _ACTIVE_SUPERVISORS.pop(alias)
+        try:
+            await supervisor.stop()
+            stopped.append(alias)
+        except Exception as exc:
+            logger.warning(
+                "llamacpp_server: could not stop the child of '%s' at shutdown: %s",
+                alias, exc,
+            )
+    return stopped

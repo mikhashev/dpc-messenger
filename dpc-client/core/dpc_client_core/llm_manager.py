@@ -407,6 +407,11 @@ class LLMManager:
             self.providers.clear()
             self._load_providers_from_config()
 
+            # A dropped alias takes its provider object with it; the child it started
+            # is only reachable through the supervisor registry after that.
+            from .providers.llamacpp_server_provider import retire_absent
+            retire_absent(self.providers.keys())
+
             for alias, managers in preserved_managers.items():
                 new_provider = self.providers.get(alias)
                 if new_provider is not None and hasattr(new_provider, "_managers"):
@@ -697,6 +702,17 @@ class LLMManager:
                     await provider.shutdown()
                 except Exception as e:
                     logger.warning(f"Error shutting down provider '{alias}': {e}")
+
+        # A llama-server child can outlive the provider that started it — a config
+        # reload drops provider objects without closing them — so the last word on
+        # what is still running belongs to the supervisor registry, not to this dict.
+        from .providers.llamacpp_server_provider import stop_all_supervisors
+        orphaned = await stop_all_supervisors()
+        if orphaned:
+            logger.warning(
+                "Stopped %d llama-server child(ren) no provider was holding any more: %s",
+                len(orphaned), ", ".join(orphaned),
+            )
         logger.info("LLMManager shutdown complete")
 
 # --- Self-testing block ---
