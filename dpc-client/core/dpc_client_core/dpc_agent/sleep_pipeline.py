@@ -151,6 +151,27 @@ SYNTHESIS_OUTPUT_RESERVE_MAX = 16384
 # also the ones whose alias already carries a 65 536-token ceiling.
 SYNTHESIS_THINKING_SHARE = 0.25
 
+# The word, not only the budget. A clamp keeps the think block inside the output
+# window; it cannot stop a model from ending its answer early, and on 2026-08-21
+# one did exactly that — a well-formed brief cut mid-string at `finish=stop`
+# with 11 217 tokens of its ceiling unused. Nothing but an effort word reaches
+# that mode. Until then every sleep call carried no effort at all and ran on the
+# chat template's own default, which on the local model is its deepest rung.
+#
+# Synthesis reasons across a hundred sessions and keeps a middle rung. A
+# per-session summary into a fixed schema is not a reasoning task and takes the
+# lowest one.
+SYNTHESIS_EFFORT = "medium"
+ANALYSIS_EFFORT = "low"
+
+# The same quarter-share the synthesis gives its think block, against the ceiling
+# the analysis call actually has. That call asked for nothing at all, so it ran on
+# the provider default of 8 192 and, on 2026-08-21, spent 4 010 of them thinking
+# and had its JSON cut at the ceiling. Absolute rather than a share because this
+# call site does not know the window; a provider with less room clamps it down
+# itself before the request is built.
+ANALYSIS_THINKING_BUDGET_TOKENS = 2048
+
 # How long a sleep may hold its own lock before a later trigger calls it stuck
 # and starts over the top of it.
 SLEEP_TIMEOUT_MINUTES = 30
@@ -182,12 +203,22 @@ def _synthesis_output_reserve(context_window: int) -> int:
     )
 
 
-def _synthesis_request_limits(context_window: int) -> Dict[str, int]:
+def _synthesis_request_limits(context_window: int) -> Dict[str, Any]:
     """What the synthesis call asks the provider for, on this window."""
     reserve = _synthesis_output_reserve(context_window)
     return {
         "max_tokens": reserve,
         "reasoning_budget_tokens": max(1, int(reserve * SYNTHESIS_THINKING_SHARE)),
+        "reasoning_effort": SYNTHESIS_EFFORT,
+    }
+
+
+def _analysis_request_limits() -> Dict[str, Any]:
+    """What one session's analysis asks for. No ceiling: the provider's own is
+    the ceiling, and this call's failure was the think block inside it."""
+    return {
+        "reasoning_budget_tokens": ANALYSIS_THINKING_BUDGET_TOKENS,
+        "reasoning_effort": ANALYSIS_EFFORT,
     }
 
 
@@ -677,7 +708,9 @@ async def _analyze_single_session(
         messages=messages_text,
     )
 
-    response = await llm_manager.query(prompt, provider_alias=provider_alias)
+    response = await llm_manager.query(
+        prompt, provider_alias=provider_alias, **_analysis_request_limits()
+    )
     if not response or not response.strip():
         raise ValueError(
             "LLM returned empty response (extended thinking may have consumed all output tokens)"
