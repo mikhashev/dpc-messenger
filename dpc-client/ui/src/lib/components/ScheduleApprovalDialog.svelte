@@ -56,6 +56,12 @@
     box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
     color: var(--text-primary, #cdd6f4);
     font-size: 0.9em;
+    /* Bottom-anchored like the shell card, so the card grows upward and
+       anything past the ceiling leaves through the top of the window rather
+       than being clipped. `.about` is already bounded; this bounds the rest —
+       a long chat title in the head, a `when` an agent phrases at length. */
+    max-height: calc(100vh - 100px);
+    overflow-y: auto;
   }
   .head { margin-bottom: 0.6rem; }
   /* Which chat the request came from — the card named the agent and nothing
@@ -78,7 +84,7 @@
     gap: 0.25rem 0.6rem;
   }
   dt { opacity: 0.8; font-size: 0.8rem; }
-  dd { margin: 0; }
+  dd { margin: 0; word-break: break-word; }
   .about {
     max-height: 5.5rem;
     overflow-y: auto;
