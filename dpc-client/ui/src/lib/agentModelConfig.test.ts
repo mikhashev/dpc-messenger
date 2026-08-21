@@ -20,7 +20,6 @@ const base: AgentModelConfigState = {
   compactionEnabled: true,
   compactionProvider: 'qwen3.8:latest',
   compactionThreshold: 0.3,
-  knowledgeProvider: '',
   retrievalVector: 'native',
   retrievalText: 'native',
 };
@@ -75,20 +74,5 @@ describe('agent model config payload', () => {
     expect(payload.compaction_enabled).toBe(false);
     expect(payload.retrieval_vector).toBe('grafeo');
     expect(payload.retrieval_text).toBe('grafeo');
-  });
-});
-
-describe('the knowledge extraction field', () => {
-  it('sends an empty choice as an empty string — «walk the chain», not «global default»', () => {
-    const payload = buildAgentModelConfigPayload({ ...base, knowledgeProvider: '' });
-
-    expect(payload.knowledge_provider).toBe('');
-    expect(payload.knowledge_provider).not.toBeNull();
-  });
-
-  it('passes an explicit choice through unchanged', () => {
-    const payload = buildAgentModelConfigPayload({ ...base, knowledgeProvider: 'llama.cpp' });
-
-    expect(payload.knowledge_provider).toBe('llama.cpp');
   });
 });

@@ -292,18 +292,6 @@ class ConversationMonitor:
         finally:
             self._extracting = False
 
-    def _agent_config(self) -> Optional[Dict[str, Any]]:
-        """This agent's own config, when the conversation is an agent's own."""
-        if not self.conversation_id.startswith("agent_"):
-            return None
-        try:
-            from .dpc_agent.utils import load_agent_config
-            return load_agent_config(self.conversation_id) or None
-        except Exception as e:
-            logger.debug("Monitor %s: could not read agent config: %s",
-                         self.conversation_id, e)
-            return None
-
     def _cold_fallback_alias(self) -> Optional[str]:
         """The alias a retry may use here, or None when there is none."""
         configured = ""
@@ -327,12 +315,13 @@ class ConversationMonitor:
         Returns:
             (compute_host, model, provider) tuple
         """
-        explicit = knowledge_routing.explicit_provider(
-            self.conversation_id, self._agent_config())
-        if explicit:
-            logger.info("Monitor %s: extracting with '%s' — the agent's own choice",
-                        self.conversation_id, explicit)
-            return (None, None, explicit)
+        chosen = knowledge_routing.chosen_provider(
+            getattr(self.llm_manager, "knowledge_provider", None),
+            getattr(self.llm_manager, "providers", None) or {})
+        if chosen:
+            logger.info("Monitor %s: extracting with '%s' — the configured extraction provider",
+                        self.conversation_id, chosen)
+            return (None, None, chosen)
 
         # The conversation's own provenance: whoever has been answering in it.
         # Read from all three fields, not from the host alone — a locally

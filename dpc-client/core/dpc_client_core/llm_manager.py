@@ -137,6 +137,7 @@ class LLMManager:
         self.default_provider: str | None = None
         self.vision_provider: str | None = None  # Vision-specific provider for auto-selection
         self.voice_provider: str | None = None  # v0.13.0+: Voice transcription provider for auto-selection
+        self.knowledge_provider: str | None = None  # Extracts knowledge; unset means the conversation's own model
 
         # Callback for re-injecting CoreService after providers reload (v0.18.0+)
         self._on_providers_reload_callback: Optional[Callable[[], None]] = None
@@ -339,6 +340,9 @@ class LLMManager:
             self.vision_provider = config.get("vision_provider")  # Load vision provider for auto-selection
             self.voice_provider = config.get("voice_provider")  # v0.13.0+: Load voice provider for auto-selection
             self.agent_provider = config.get("agent_provider")  # v0.18.0+: Load agent provider for AI agent
+            # Absent means «walk the chain», not «use the text default» —
+            # the extraction prompt carries the whole conversation.
+            self.knowledge_provider = config.get("knowledge_provider")
 
             for provider_config in config.get("providers", []):
                 alias = provider_config.get("alias")
@@ -365,6 +369,10 @@ class LLMManager:
             if self.agent_provider and self.agent_provider not in self.providers:
                 logger.warning("Agent provider '%s' not found in loaded providers", self.agent_provider)
                 self.agent_provider = None
+
+            if self.knowledge_provider and self.knowledge_provider not in self.providers:
+                logger.warning("Knowledge provider '%s' not found in loaded providers", self.knowledge_provider)
+                self.knowledge_provider = None
 
         except Exception as e:
             logger.error("Error parsing provider config file: %s", e, exc_info=True)

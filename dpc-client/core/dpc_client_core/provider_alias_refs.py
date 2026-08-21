@@ -12,7 +12,6 @@ AGENT_CONFIG_KEYS = (
     "sleep_provider_alias",
     "snapshot_summarize_provider",
     "compaction_provider",
-    "knowledge_provider",
 )
 
 PROVIDERS_ROLE_KEYS = (
@@ -20,6 +19,7 @@ PROVIDERS_ROLE_KEYS = (
     "vision_provider",
     "voice_provider",
     "agent_provider",
+    "knowledge_provider",
 )
 
 _VOICE_SECTION = "voice_transcription"

@@ -820,18 +820,6 @@ class AgentService:
                     entry["is_remote"] = True
                     entry["peer_id"] = peer_id
                     providers_list.append(entry)
-            # What "Auto" would actually use for a conversation nobody has
-            # answered in — named, so the form shows the model rather than a word.
-            cold_fallback, cold_error = "", ""
-            try:
-                from dpc_client_core import knowledge_routing
-                configured = (settings.get_knowledge_cold_fallback_provider()
-                              if settings is not None else "")
-                cold_fallback = knowledge_routing.cold_fallback(
-                    self.llm_manager.providers if self.llm_manager else {}, configured)
-            except Exception as e:
-                cold_error = str(e)
-
             return {
                 "status": "ok",
                 "agent_id": agent_id,
@@ -842,9 +830,6 @@ class AgentService:
                 "compaction_enabled": config.get("compaction_enabled", False),
                 "compaction_provider": config.get("compaction_provider"),
                 "compaction_threshold": config.get("compaction_threshold", 0.8),
-                "knowledge_provider": config.get("knowledge_provider"),
-                "knowledge_cold_fallback": cold_fallback,
-                "knowledge_cold_fallback_error": cold_error,
                 "retrieval_vector": config.get("retrieval_vector", "native"),
                 "retrieval_text": config.get("retrieval_text", "native"),
                 "providers": providers_list,
@@ -877,7 +862,6 @@ class AgentService:
         compaction_enabled: bool = None,
         compaction_provider: str = None,
         compaction_threshold: float = None,
-        knowledge_provider: str = None,
         retrieval_vector: str = None,
         retrieval_text: str = None,
         providers_getter=None,
@@ -920,10 +904,6 @@ class AgentService:
                 config["compaction_provider"] = compaction_provider
             if compaction_threshold is not None:
                 config["compaction_threshold"] = float(compaction_threshold)
-            if knowledge_provider is not None:
-                # "" is a real answer here — it means «walk the chain», which is
-                # not the same as «the global default». Stored, not dropped.
-                config["knowledge_provider"] = knowledge_provider
             if retrieval_vector is not None:
                 config["retrieval_vector"] = retrieval_vector
             if retrieval_text is not None:
@@ -941,7 +921,6 @@ class AgentService:
                 "compaction_enabled": config.get("compaction_enabled", False),
                 "compaction_provider": config.get("compaction_provider"),
                 "compaction_threshold": config.get("compaction_threshold", 0.8),
-                "knowledge_provider": config.get("knowledge_provider"),
                 "retrieval_vector": config.get("retrieval_vector", "native"),
                 "retrieval_text": config.get("retrieval_text", "native"),
                 "context_window": context_window,

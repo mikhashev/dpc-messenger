@@ -5,6 +5,10 @@ The prompt carries the conversation itself, so «no field set» must not mean
 the machine. Order: the agent's own choice, then the conversation's provenance,
 then the cold fallback; and no step may be reached by guessing from the
 conversation's name.
+
+Step 1 is a global role on the providers screen, not a field on an agent:
+extraction is a human's button producing a user-level artefact, and in an
+agent's chat the agent's own model is what step 2 resolves to anyway.
 """
 
 from __future__ import annotations
@@ -21,8 +25,9 @@ def _provider(kind):
     return SimpleNamespace(config={"type": kind}, model="m")
 
 
-def _llm(default="deepseek_flash", **providers):
-    return SimpleNamespace(providers=dict(providers), default_provider=default)
+def _llm(default="deepseek_flash", knowledge=None, **providers):
+    return SimpleNamespace(providers=dict(providers), default_provider=default,
+                           knowledge_provider=knowledge)
 
 
 def _settings(cold=""):
@@ -38,22 +43,39 @@ def _monitor(conversation_id, llm=None, settings=None):
     )
 
 
-# --- step 1: the agent's own choice ----------------------------------------
+# --- step 1: the role chosen on the providers screen ------------------------
 
 
-def test_an_agents_own_choice_wins(monkeypatch):
-    m = _monitor("agent_forge_7244b181")
-    monkeypatch.setattr(m, "_agent_config", lambda: {"knowledge_provider": "llama.cpp"})
+def test_the_chosen_extraction_provider_wins_over_provenance():
+    llm = _llm(knowledge="llama.cpp", **{"llama.cpp": _provider("llamacpp_server")})
+    m = _monitor("agent_forge_7244b181", llm=llm)
     m.set_inference_settings(compute_host=None, model="x", provider="deepseek_flash")
 
     assert m._infer_inference_settings() == (None, None, "llama.cpp")
 
 
-def test_a_group_has_no_agent_to_ask():
-    assert KR.explicit_provider("group-b88b", {"knowledge_provider": "llama.cpp"}) is None
-    assert KR.explicit_provider("agent_x", {"knowledge_provider": "llama.cpp"}) == "llama.cpp"
-    assert KR.explicit_provider("agent_x", {"knowledge_provider": "  "}) is None
-    assert KR.explicit_provider("agent_x", None) is None
+def test_the_same_role_applies_to_a_group_because_it_is_not_an_agents_field():
+    llm = _llm(knowledge="llama.cpp", **{"llama.cpp": _provider("llamacpp_server")})
+
+    assert _monitor("group-b88b", llm=llm)._infer_inference_settings() == (
+        None, None, "llama.cpp")
+
+
+def test_a_role_pointing_at_a_deleted_alias_walks_on_instead_of_failing():
+    providers = {"local_qwen": _provider("ollama")}
+    assert KR.chosen_provider("gone", providers) is None
+    assert KR.chosen_provider("", providers) is None
+    assert KR.chosen_provider("   ", providers) is None
+    assert KR.chosen_provider(None, providers) is None
+    assert KR.chosen_provider("local_qwen", providers) == "local_qwen"
+
+
+def test_a_role_pointing_at_a_deleted_alias_falls_to_provenance_not_the_default():
+    llm = _llm(knowledge="gone", local_qwen=_provider("ollama"))
+    m = _monitor("group-b88b", llm=llm)
+    m.set_inference_settings(compute_host=None, model="qwen3.8", provider="llama.cpp")
+
+    assert m._infer_inference_settings() == (None, "qwen3.8", "llama.cpp")
 
 
 # --- step 2: the conversation's provenance ----------------------------------

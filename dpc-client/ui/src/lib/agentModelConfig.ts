@@ -20,7 +20,6 @@ export type AgentModelConfigState = {
   compactionEnabled: boolean;
   compactionProvider: string;
   compactionThreshold: number | string;
-  knowledgeProvider: string;
   retrievalVector: 'native' | 'grafeo';
   retrievalText: 'native' | 'grafeo';
 };
@@ -33,7 +32,6 @@ export type AgentModelConfigPayload = {
   compaction_enabled: boolean;
   compaction_provider: string;
   compaction_threshold: number | null;
-  knowledge_provider: string;
   retrieval_vector: 'native' | 'grafeo';
   retrieval_text: 'native' | 'grafeo';
 };
@@ -54,9 +52,6 @@ export function buildAgentModelConfigPayload(
     compaction_provider: state.compactionProvider,
     compaction_threshold:
       Number(state.compactionThreshold) > 0 ? Number(state.compactionThreshold) : null,
-    // '' here does not mean the global provider: it means «walk the chain» —
-    // the model that answered in the conversation, then the cold fallback.
-    knowledge_provider: state.knowledgeProvider,
     retrieval_vector: state.retrievalVector,
     retrieval_text: state.retrievalText,
   };

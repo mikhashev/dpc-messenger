@@ -34,9 +34,6 @@
   let modelConfigCompactionEnabled = $state<boolean>(false);
   let modelConfigCompactionProvider = $state('');
   let modelConfigCompactionThreshold = $state<number>(0.8);
-  let modelConfigKnowledgeProvider = $state('');
-  let modelConfigKnowledgeColdFallback = $state('');
-  let modelConfigKnowledgeColdError = $state('');
   let modelConfigProvidersList = $state<{alias: string, model: string, type: string, is_remote?: boolean, peer_id?: string}[]>([]);
   let modelConfigSaving = $state(false);
   let modelConfigRetrievalVector = $state<'native' | 'grafeo'>('native');
@@ -177,19 +174,6 @@
     linkErrorMessage = '';
     linkingAgentId = '';
   }
-  // Says what Auto will actually do, naming the model rather than the word
-  // "default" — the cold fallback is the half the operator cannot guess.
-  function knowledgeAutoLabel(): string {
-    if (modelConfigKnowledgeColdError) {
-      return 'Auto — the conversation’s own model (no cold fallback: extraction will refuse)';
-    }
-    if (modelConfigKnowledgeColdFallback) {
-      return `Auto — the conversation’s own model, else ${modelConfigKnowledgeColdFallback}`;
-    }
-    return 'Auto — the conversation’s own model';
-  }
-
-
   function providerOptionLabel(p: {alias: string, model: string, is_remote?: boolean, peer_id?: string}): string {
     if (!p.is_remote) return `${p.alias} (${p.model})`;
     const peerName = nodeStatus?.peer_info?.find(pi => pi.node_id === p.peer_id)?.name || p.peer_id?.slice(0, 20) || 'peer';
@@ -213,9 +197,6 @@
       modelConfigCompactionThreshold = Number(result.compaction_threshold) > 0
         ? Number(result.compaction_threshold)
         : 0.8;
-      modelConfigKnowledgeProvider = result.knowledge_provider || '';
-      modelConfigKnowledgeColdFallback = result.knowledge_cold_fallback || '';
-      modelConfigKnowledgeColdError = result.knowledge_cold_fallback_error || '';
       modelConfigProvidersList = result.providers || [];
       modelConfigRetrievalVector = (result.retrieval_vector === 'grafeo') ? 'grafeo' : 'native';
       modelConfigRetrievalText = (result.retrieval_text === 'grafeo') ? 'grafeo' : 'native';
@@ -236,7 +217,6 @@
         compactionEnabled: modelConfigCompactionEnabled,
         compactionProvider: modelConfigCompactionProvider,
         compactionThreshold: modelConfigCompactionThreshold,
-        knowledgeProvider: modelConfigKnowledgeProvider,
         retrievalVector: modelConfigRetrievalVector,
         retrievalText: modelConfigRetrievalText,
       }));
@@ -380,7 +360,7 @@
     }) => Promise<void>;
     onUnlinkAgentTelegram?: (agentId: string) => Promise<void>;
     onGetAgentModelConfig: (agentId: string) => Promise<any>;
-    onSaveAgentModelConfig: (agentId: string, config: { provider_alias: string; sleep_provider_alias: string | null; snapshot_summarize_provider?: string | null; snapshot_summarize_threshold?: number | null; compaction_enabled?: boolean; compaction_provider?: string | null; compaction_threshold?: number | null; knowledge_provider?: string | null; retrieval_vector?: 'native' | 'grafeo'; retrieval_text?: 'native' | 'grafeo' }) => Promise<void>;
+    onSaveAgentModelConfig: (agentId: string, config: { provider_alias: string; sleep_provider_alias: string | null; snapshot_summarize_provider?: string | null; snapshot_summarize_threshold?: number | null; compaction_enabled?: boolean; compaction_provider?: string | null; compaction_threshold?: number | null; retrieval_vector?: 'native' | 'grafeo'; retrieval_text?: 'native' | 'grafeo' }) => Promise<void>;
   } = $props();
 </script>
 
@@ -939,20 +919,6 @@
           Enable tool-history compaction
         </label>
         <p class="dialog-hint">Off by default: the agent uses the current round-based truncation. When on, old tool results are summarized by the model below as the context window fills — one point of failure, no silent model switch.</p>
-
-        <label for="knowledge-llm" class="dialog-label">Knowledge extraction LLM:</label>
-        <select id="knowledge-llm" class="dialog-input" bind:value={modelConfigKnowledgeProvider}>
-          <option value="">{knowledgeAutoLabel()}</option>
-          {#each modelConfigProvidersList as p}
-            <option value={p.alias} disabled={p.is_remote && p.peer_id !== mainConfigPeerId}>{providerOptionLabel(p)}</option>
-          {/each}
-        </select>
-        <p class="dialog-hint">
-          The extraction prompt carries the whole conversation, so this is not
-          «Default (global)»: leaving it on Auto uses the model that has been
-          answering in the conversation, and only falls to the model named above
-          when nobody has answered there yet — after a restart, for instance.
-        </p>
 
         {#if modelConfigCompactionEnabled}
           <label for="compaction-llm" class="dialog-label">Compaction LLM:</label>

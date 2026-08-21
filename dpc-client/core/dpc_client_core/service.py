@@ -2031,7 +2031,8 @@ class CoreService:
             "default_provider": self.llm_manager.default_provider or "",
             "vision_provider": self.llm_manager.vision_provider or "",
             "voice_provider": self.llm_manager.voice_provider or "",  # v0.13.0+
-            "agent_provider": getattr(self.llm_manager, 'agent_provider', None) or ""  # v0.18.0+
+            "agent_provider": getattr(self.llm_manager, 'agent_provider', None) or "",  # v0.18.0+
+            "knowledge_provider": getattr(self.llm_manager, 'knowledge_provider', None) or ""
         }
 
     async def get_providers_list(self) -> Dict[str, Any]:
@@ -8058,7 +8059,6 @@ class CoreService:
         compaction_enabled: bool = None,
         compaction_provider: str = None,
         compaction_threshold: float = None,
-        knowledge_provider: str = None,
         retrieval_vector: str = None,
         retrieval_text: str = None,
     ) -> Dict[str, Any]:
@@ -8076,7 +8076,6 @@ class CoreService:
             compaction_enabled=compaction_enabled,
             compaction_provider=compaction_provider,
             compaction_threshold=compaction_threshold,
-            knowledge_provider=knowledge_provider,
             retrieval_vector=retrieval_vector,
             retrieval_text=retrieval_text,
             providers_getter=self.get_providers_list,

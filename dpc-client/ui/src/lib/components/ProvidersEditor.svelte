@@ -79,6 +79,7 @@
     vision_provider?: string;  // Optional vision provider for image queries
     voice_provider?: string;   // v0.13.0+: Optional voice provider for transcription
     agent_provider?: string;   // v0.18.0+: Optional agent provider for AI agent
+    knowledge_provider?: string;  // Provider that extracts knowledge from a conversation
     providers: Provider[];
   };
 
@@ -371,6 +372,12 @@
       if (editedConfig.agent_provider === provider.alias) {
         editedConfig.agent_provider = editedConfig.providers[0]?.alias || '';
       }
+      // Knowledge extraction clears rather than moving to another provider:
+      // unset means «use the model that answered in the conversation», which is
+      // a safe answer, and the first provider in the list may be a paid API.
+      if (editedConfig.knowledge_provider === provider.alias) {
+        editedConfig.knowledge_provider = '';
+      }
       editedConfig = editedConfig; // Trigger reactivity
     }
   }
@@ -400,6 +407,15 @@
   function setAgentDefault(alias: string) {
     if (!editedConfig) return;
     editedConfig.agent_provider = alias;
+    editedConfig = editedConfig; // Trigger reactivity
+  }
+
+  // The provider that extracts knowledge. Clicking the active one clears it,
+  // because «not set» is a real choice here: it means the model that answered
+  // in the conversation does the extracting.
+  function setKnowledgeDefault(alias: string) {
+    if (!editedConfig) return;
+    editedConfig.knowledge_provider = editedConfig.knowledge_provider === alias ? '' : alias;
     editedConfig = editedConfig; // Trigger reactivity
   }
 
@@ -442,6 +458,11 @@
     // v0.18.0+: Auto-update agent_provider if this was the agent default
     if (editedConfig.agent_provider === oldAlias) {
       editedConfig.agent_provider = newAlias;
+    }
+
+    // The extraction provider follows a rename like every other role.
+    if (editedConfig.knowledge_provider === oldAlias) {
+      editedConfig.knowledge_provider = newAlias;
     }
 
     // Update the tracked alias
@@ -776,6 +797,7 @@
                     {#if provider.alias === displayConfig.vision_provider}<span class="default-badge vision-badge">👁️ Vision Default</span>{/if}
                     {#if provider.alias === displayConfig.voice_provider}<span class="default-badge voice-badge">🎤 Voice Default</span>{/if}
                     {#if provider.alias === displayConfig.agent_provider}<span class="default-badge agent-badge">🤖 Agent Default</span>{/if}
+                    {#if provider.alias === displayConfig.knowledge_provider}<span class="default-badge">🧠 Knowledge Extraction</span>{/if}
                   </h3>
                   {#if editMode}
                     <button class="btn-delete" on:click={() => deleteProvider(i)}>Delete</button>
@@ -1615,6 +1637,14 @@
                         on:click={() => setAgentDefault(provider.alias)}
                       >
                         {provider.alias === displayConfig.agent_provider ? '✓ Agent Default' : 'Set as Agent Default'}
+                      </button>
+                      <button
+                        class="btn-set-default"
+                        class:active={provider.alias === displayConfig.knowledge_provider}
+                        title="Extracts knowledge from a conversation. Unset means the model that answered in that conversation does it."
+                        on:click={() => setKnowledgeDefault(provider.alias)}
+                      >
+                        {provider.alias === displayConfig.knowledge_provider ? '✓ Knowledge Extraction' : 'Set knowledge extraction default'}
                       </button>
                     </div>
                   </div>

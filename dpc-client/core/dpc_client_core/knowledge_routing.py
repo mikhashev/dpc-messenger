@@ -5,9 +5,15 @@ configured text provider means sending the transcript wherever that provider
 lives, and today that is a paid API. So the route is a chain, and silence walks
 the chain rather than falling to the global default:
 
-    1. the alias the agent names for its own extraction
+    1. the alias chosen for extraction on the providers screen
     2. the provenance of the conversation — whoever has been answering in it
     3. the cold fallback, for a conversation nobody has answered in yet
+
+Step 1 is a global role beside default / vision / voice / agent, not a field on
+an agent. Extraction is not an agent's action: the tool was removed (ADR-009),
+the triggers are a human's button and /endsession, and the result lands in the
+user's own knowledge base. In an agent's chat the agent's own model is already
+what step 2 resolves to, so a per-agent field said the same thing twice.
 
 Step 2 is what makes this different from `sleep_provider_alias` and its two
 siblings, which resolve `agent_config.get(...) or None` straight into
@@ -27,9 +33,9 @@ logger = logging.getLogger(__name__)
 # side of the world, and this list decides what may see a whole conversation.
 LOCAL_PROVIDER_TYPES = frozenset({"ollama", "llamacpp_server"})
 
-# The per-agent key, alongside provider_alias / sleep_provider_alias /
-# snapshot_summarize_provider / compaction_provider in an agent's config.json.
-AGENT_CONFIG_KEY = "knowledge_provider"
+# The role's key in providers.json, beside default_provider / vision_provider /
+# voice_provider / agent_provider.
+ROLE_KEY = "knowledge_provider"
 
 
 class NoKnowledgeProvider(RuntimeError):
@@ -40,17 +46,17 @@ class NoKnowledgeProvider(RuntimeError):
     """
 
 
-def explicit_provider(conversation_id: str, agent_config: Optional[Mapping[str, Any]]) -> Optional[str]:
-    """The alias an agent names for extracting its own conversations.
+def chosen_provider(alias: Optional[str], providers: Mapping[str, Any]) -> Optional[str]:
+    """The alias chosen for extraction, when one is chosen and still exists.
 
-    Only an agent chat has this step: there the agent *is* the conversation.
-    A group has several agents and the monitor is per conversation, so «whose
-    field» has no answer and the chain moves on.
+    An alias that has been deleted or renamed away resolves to nothing rather
+    than to an error: the chain simply moves on to the conversation's own
+    provenance, which is what silence means anyway.
     """
-    if not conversation_id.startswith("agent_") or not agent_config:
+    alias = (alias or "").strip()
+    if not alias or alias not in providers:
         return None
-    alias = (agent_config.get(AGENT_CONFIG_KEY) or "").strip()
-    return alias or None
+    return alias
 
 
 def first_local_provider(providers: Mapping[str, Any]) -> Optional[str]:
