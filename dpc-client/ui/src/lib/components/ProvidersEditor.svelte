@@ -788,6 +788,13 @@
 
           <!-- Provider Cards -->
           <div class="providers-list">
+            {#if editMode}
+              <p class="role-hint">
+                🧠 <strong>Knowledge extraction</strong> — unset means the model
+                that answered in a conversation extracts that conversation; the
+                extraction prompt carries the whole transcript.
+              </p>
+            {/if}
             {#each displayConfig.providers as provider, i (i)}
               <div class="provider-card" class:default={provider.alias === displayConfig.default_provider}>
                 <div class="provider-header">
@@ -2067,6 +2074,16 @@
 {/if}
 
 <style>
+  .role-hint {
+    margin: 0 0 12px;
+    padding: 8px 12px;
+    border-left: 3px solid #4a9eff;
+    background: rgba(74, 158, 255, 0.08);
+    font-size: 0.85em;
+    line-height: 1.45;
+    opacity: 0.9;
+  }
+
   /* Account balance card (Phase 2b) — dark theme, matches .provider-card */
   .balance-card {
     margin: 0 0 1rem;

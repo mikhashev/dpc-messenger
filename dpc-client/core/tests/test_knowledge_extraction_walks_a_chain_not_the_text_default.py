@@ -2,9 +2,9 @@
 
 The prompt carries the conversation itself, so «no field set» must not mean
 `default_provider` — that is a paid API, and it is how whole transcripts left
-the machine. Order: the agent's own choice, then the conversation's provenance,
-then the cold fallback; and no step may be reached by guessing from the
-conversation's name.
+the machine. Order: the role chosen on the providers screen, then the
+conversation's provenance, then the cold fallback; and no step may be reached
+by guessing from the conversation's name.
 
 Step 1 is a global role on the providers screen, not a field on an agent:
 extraction is a human's button producing a user-level artefact, and in an

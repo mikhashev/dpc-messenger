@@ -81,16 +81,17 @@ def cold_fallback(providers: Mapping[str, Any], configured: str = "") -> str:
         if configured not in providers:
             raise NoKnowledgeProvider(
                 f"[knowledge] cold_fallback_provider names '{configured}', "
-                f"which is not a configured provider"
+                f"which is not a configured provider."
             )
         return configured
 
     alias = first_local_provider(providers)
     if alias is None:
+        # The instruction comes first because the caller shows `str(e)[:100]`
+        # in the proposal summary, and the tail is what gets cut.
         raise NoKnowledgeProvider(
-            "no local provider is configured, and knowledge extraction will not "
-            "fall back to the global text provider: the prompt carries the whole "
-            "conversation. Name one in [knowledge] cold_fallback_provider to "
-            "choose deliberately."
+            "set [knowledge] cold_fallback_provider: no local provider to extract "
+            "with, and the global text provider is not a substitute — the prompt "
+            "carries the whole conversation."
         )
     return alias
