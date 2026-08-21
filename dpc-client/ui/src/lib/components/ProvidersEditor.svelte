@@ -41,6 +41,7 @@
     gguf_path?: string;
     reasoning_budget_tokens?: number;
     mmproj?: string;         // vision projector; absent = text-only child
+    n_ctx?: number;          // KV cells the child allocates (-c); unset = 262144
     cache_type_k?: string;   // KV quant; unset = the auto ladder (q8_0 -> q4_0)
     cache_type_v?: string;
     n_parallel?: number;     // unset = the server's own slot choice
@@ -999,6 +1000,33 @@
                           The vision projector file passed to llama-server as --mmproj. With it
                           the server serves images (and video) at full context; without it the
                           alias is text-only. Needs KV headroom — q4_0 leaves it, q8_0 does not.
+                        </p>
+                      </div>
+
+                      <div class="form-group">
+                        <label for="nctx-{i}">KV pool size, n_ctx (optional)</label>
+                        <input
+                          id="nctx-{i}"
+                          type="number"
+                          min="4096"
+                          step="4096"
+                          value={editedConfig.providers[i].n_ctx ?? ''}
+                          placeholder="262144 (default)"
+                          on:input={(e) => {
+                            if (!editedConfig) return;
+                            const raw = (e.currentTarget as HTMLInputElement).value;
+                            const n = parseInt(raw, 10);
+                            editedConfig.providers[i].n_ctx = raw === '' || isNaN(n) ? undefined : n;
+                          }}
+                        />
+                        <p class="help-text">
+                          How many KV cells llama-server allocates (-c). Unset = 262 144. This is
+                          <strong>one pool shared by every slot</strong>, not a per-conversation
+                          limit — «Context Window» below is what a single conversation may occupy,
+                          and nothing derives one from the other. Two agents of one group carried
+                          137 616 + 139 819 tokens here and did not fit the default pool: the
+                          parked conversation could not be laid back down and was re-read from
+                          zero. Costs VRAM — measured ≈18 KiB per cell with q4_0 KV on this card.
                         </p>
                       </div>
 
