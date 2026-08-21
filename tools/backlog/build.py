@@ -1223,6 +1223,44 @@ def chip(pri):
     return f'<span class="chip {PRI_CLASS.get(pri, "none")}">{esc(pri)}</span>'
 
 
+# The archive, parsed separately and deliberately kept out of `entries`: every
+# count on this page — the priority chips, OPEN, the shelf — means "in the
+# working file", and folding the closed entries into them would change all of
+# them. It is rendered as its own folded section instead, so that the page's
+# search stops answering a confident zero for everything ever closed.
+archived = []
+if ARCHIVE.exists():
+    _arc_lines = ARCHIVE.read_text(encoding="utf-8-sig").split("\n")
+    for _i, _l in enumerate(_arc_lines):
+        _m = re.match(r"^### (.+)", _l)
+        if not _m:
+            continue
+        _head = _m.group(1).replace("~~", "").replace("**", "")
+        _name = re.split(r"[:—]", _head)[0].strip()
+        _rest = _head[len(_name):].lstrip(" :—").strip()
+        _sp = env_span(_head)
+        _env = _head.rstrip()[_sp[0] + 1:_sp[1] - 1] if _sp else ""
+        _pm = re.match(r"\s*[*_`]*\s*(CRIT|CRITICAL|HIGH|MEDIUM|LOW|RESEARCH|NORMAL)\b", _env)
+        _pri = {"CRIT": "CRITICAL", "NORMAL": "MEDIUM"}.get(
+            _pm.group(1), _pm.group(1)) if _pm else "—"
+        _dm = re.search(r"(20\d\d-\d\d-\d\d)", _head)
+        _desc = _rest
+        if _env and _desc.rstrip().endswith("(" + _env + ")"):
+            _desc = _desc.rstrip()[: -len(_env) - 2]
+        _desc = re.sub(r"\s+", " ", _desc).strip()
+        # The closure line is the one thing an archived entry has that an open
+        # one does not, and it is the reason to read it: why the entry left.
+        _closed = ""
+        for _j in range(_i + 1, len(_arc_lines)):
+            if re.match(r"^#{2,3} ", _arc_lines[_j]):
+                break
+            _cm = re.match(r"\s*\*\*Closed:\*\*(.+)", _arc_lines[_j])
+            if _cm:
+                _closed = re.sub(r"\s+", " ", _cm.group(1)).strip()
+                break
+        archived.append({"name": _name, "desc": _desc, "pri": _pri,
+                         "when": _dm.group(1) if _dm else "", "closed": _closed})
+
 rows = []
 for s in sections:
     items = [e for e in entries if e["section"] == s]
@@ -1258,6 +1296,30 @@ for s in sections:
             f'data-q="{esc((e["name"] + " " + e["desc"]).lower())}">'
             f'<div class="hd">{chip(e["pri"])}<code>{esc(e["name"])}</code>{mark}{when}</div>'
             f'{desc}{first}</li>'
+        )
+    rows.append("</ul></details></section>")
+
+body = "\n".join(rows)
+if archived:
+    archived.sort(key=lambda e: e["when"] or "0000", reverse=True)
+    rows.append('<section class="sec arc" data-sec="CLOSED">')
+    rows.append('<details class="fold">')
+    rows.append('<summary><h2>CLOSED — ARCHIVE '
+                f'<span class="cnt">{len(archived)}</span></h2></summary>')
+    rows.append('<p class="legend">Observed in production and closed. Folded by '
+                'default; the search box and the priority filters reach inside it.</p>')
+    rows.append('<ul class="list">')
+    for e in archived:
+        _when = f'<time>{esc(e["when"])}</time>' if e["when"] else ""
+        _desc = f'<p class="d">{md(e["desc"])}</p>' if e["desc"] else ""
+        _closed = f'<p class="f">{md(e["closed"])}</p>' if e["closed"] else ""
+        rows.append(
+            f'<li class="item" data-pri="{esc(e["pri"])}" '
+            f'data-when="{esc(e["when"] or "")}" '
+            f'data-q="{esc((e["name"] + " " + e["desc"]).lower())}">'
+            f'<div class="hd">{chip(e["pri"])}<code>{esc(e["name"])}</code>'
+            f'<span class="mark done">closed</span>{_when}</div>'
+            f'{_desc}{_closed}</li>'
         )
     rows.append("</ul></details></section>")
 
