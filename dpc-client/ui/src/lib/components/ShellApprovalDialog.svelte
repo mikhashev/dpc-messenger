@@ -202,6 +202,12 @@
         flex-direction: column;
         gap: 8px;
         max-width: 420px;
+        /* Anchored to the bottom, so anything past the ceiling leaves through
+           the top of the window — where no scrollbar reaches it. Three cards
+           stack here (MAX_VISIBLE_CARDS), which gets there without any one of
+           them being tall. */
+        max-height: calc(100vh - 100px);
+        overflow-y: auto;
     }
 
     .shell-approval-card {
@@ -260,6 +266,12 @@
         border-radius: 4px;
         margin-bottom: 8px;
         overflow-x: auto;
+        /* A wrapped command grows down, and the card grows up: a docker exec
+           carrying a heredoc took the title and the who-asked line off the
+           screen. The command scrolls in its own box, as the result card's
+           output already does. */
+        max-height: 200px;
+        overflow-y: auto;
     }
 
     .approval-command code {
