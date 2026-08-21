@@ -5,6 +5,7 @@
   import { createEventDispatcher } from 'svelte';
   import { sendCommand, peerProviders, providerBalance, getProviderBalance } from '$lib/coreService';
   import { confirmAsync } from '$lib/utils/dialog';
+  import { trackRename } from '$lib/utils/aliasRenames';
 
   export let open: boolean = false;
 
@@ -229,6 +230,7 @@
   function cancelEditing() {
     editMode = false;
     editedConfig = null;
+    pendingRenames = {};
     selectedTab = 'list';
     saveMessage = '';
     saveMessageType = '';
@@ -245,12 +247,18 @@
 
     try {
       const result = await sendCommand('save_providers_config', {
-        config_dict: editedConfig
+        config_dict: editedConfig,
+        alias_renames: pendingRenames
       });
 
       if (result.status === 'success') {
         saveMessage = result.message;
-        saveMessageType = 'success';
+        if (result.warnings && result.warnings.length > 0) {
+          saveMessage += '\nStill naming a provider that no longer exists:\n' + result.warnings.join('\n');
+          saveMessageType = 'error';
+        } else {
+          saveMessageType = 'success';
+        }
 
         // Update the displayed config
         config = JSON.parse(JSON.stringify(editedConfig));
@@ -258,13 +266,16 @@
         // Exit edit mode
         editMode = false;
         editedConfig = null;
+        pendingRenames = {};
         selectedTab = 'list';
 
-        // Clear success message after short delay
-        setTimeout(() => {
-          saveMessage = '';
-          saveMessageType = '';
-        }, 2000);
+        // Clear success message after short delay — a warning stays until it is read
+        if (saveMessageType === 'success') {
+          setTimeout(() => {
+            saveMessage = '';
+            saveMessageType = '';
+          }, 2000);
+        }
       } else {
         saveMessage = result.message;
         if (result.errors && result.errors.length > 0) {
@@ -288,6 +299,7 @@
     }
     editMode = false;
     editedConfig = null;
+    pendingRenames = {};
     config = null;
     selectedTab = 'list';
     resetNewProviderForm();
@@ -394,6 +406,10 @@
   // Track original aliases to detect changes on blur
   let originalAliases = new Map<number, string>();
 
+  // Renames to carry into everything else that names the alias — agent configs,
+  // the registry, the firewall's serving alias, the voice priority list.
+  let pendingRenames: Record<string, string> = {};
+
   // Handle alias change with auto-update of defaults (triggered on blur)
   function handleAliasBlur(index: number) {
     if (!editedConfig) return;
@@ -405,6 +421,8 @@
       originalAliases.set(index, newAlias);
       return;
     }
+
+    pendingRenames = trackRename(pendingRenames, oldAlias, newAlias);
 
     // Auto-update default_provider if this was the default
     if (editedConfig.default_provider === oldAlias) {
@@ -439,6 +457,7 @@
     editedConfig = JSON.parse(JSON.stringify(config));
     if (!editedConfig) return; // Guard against null
     // Track original aliases
+    pendingRenames = {};
     originalAliases.clear();
     editedConfig.providers.forEach((p, i) => {
       originalAliases.set(i, p.alias);

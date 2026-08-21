@@ -35,6 +35,7 @@ from .firewall import ContextFirewall
 from .hub_client import HubClient
 from .p2p_manager import P2PManager
 from .llm_manager import LLMManager, PROVIDER_MAP
+from . import provider_alias_refs
 from .providers.base import REASONING_EFFORTS, REASONING_OFF
 from .local_api import LocalApiServer, sends_own_response, slow_command
 from .file_server import FileServer
@@ -2102,17 +2103,12 @@ class CoreService:
             return {"status": "error", "message": "Agent service not available"}
         return await self.agent_service.prepare_agent()
 
-    async def save_providers_config(self, config_dict: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        Save and validate providers configuration.
-
-        Args:
-            config_dict: Full providers configuration dictionary
-
-        Returns:
-            Dictionary with status and message/errors
-        """
-        # Validate structure
+    async def save_providers_config(
+        self,
+        config_dict: Dict[str, Any],
+        alias_renames: Optional[Dict[str, str]] = None,
+    ) -> Dict[str, Any]:
+        """Save providers, carry any alias rename into everything that names it, and report what no longer resolves."""
         errors = self._validate_providers_config(config_dict)
         if errors:
             return {
@@ -2121,23 +2117,96 @@ class CoreService:
             }
 
         try:
-            # Save to JSON and reload providers
             self.llm_manager.save_config(config_dict)
 
-            # Broadcast event
+            renamed = await self._follow_alias_renames(config_dict, alias_renames)
+
             await self.local_api.broadcast_event("providers_updated", {
                 "message": "AI providers configuration updated"
             })
 
-            return {
+            message = "Providers saved successfully"
+            if renamed:
+                message += " — " + "; ".join(renamed)
+
+            home = self.llm_manager.config_path.parent
+            known = [p.get("alias") for p in config_dict.get("providers", [])]
+            dangling = provider_alias_refs.unresolved_references(known, home)
+            if dangling:
+                logger.warning(
+                    "Provider aliases named by configuration but not present in providers.json: %s",
+                    "; ".join(dangling),
+                )
+
+            result = {
                 "status": "success",
-                "message": "Providers saved successfully"
+                "message": message
             }
+            if dangling:
+                result["warnings"] = dangling
+            return result
         except Exception as e:
             return {
                 "status": "error",
                 "message": str(e)
             }
+
+    async def _follow_alias_renames(
+        self,
+        config_dict: Dict[str, Any],
+        alias_renames: Optional[Dict[str, str]],
+    ) -> List[str]:
+        """Rewrite agent configs, the registry, the firewall and the voice list for each rename, then refresh live agents."""
+        if not alias_renames:
+            return []
+
+        home = self.llm_manager.config_path.parent
+        known = {p.get("alias") for p in config_dict.get("providers", [])}
+        summary: List[str] = []
+
+        for old, new in alias_renames.items():
+            if not old or not new or old == new:
+                continue
+            if old in known or new not in known:
+                continue
+
+            counts = provider_alias_refs.rename_references(old, new, home)
+            touched = (counts["agent_configs"] + counts["registry"]
+                       + counts["firewall"] + counts["voice_priority"])
+            if not touched:
+                continue
+
+            logger.info(
+                "Provider alias '%s' renamed to '%s': %d agent field(s), %d registry entr(ies), "
+                "%d firewall field(s), %d voice entr(ies)",
+                old, new, counts["agent_configs"], counts["registry"],
+                counts["firewall"], counts["voice_priority"],
+            )
+            summary.append(
+                f"'{old}' → '{new}' followed in {touched} place(s) "
+                f"across {len(counts['agent_ids'])} agent(s)"
+            )
+
+            if counts["firewall"]:
+                try:
+                    self.firewall.reload()
+                except Exception as exc:
+                    logger.warning("Firewall reload after an alias rename failed: %s", exc)
+
+            if self.agent_service:
+                from .dpc_agent.utils import load_agent_config
+                for agent_id in counts["agent_ids"]:
+                    try:
+                        await self.agent_service._refresh_live_agent_manager(
+                            agent_id, load_agent_config(agent_id)
+                        )
+                    except Exception as exc:
+                        logger.warning(
+                            "Live refresh of agent %s after an alias rename failed: %s",
+                            agent_id, exc,
+                        )
+
+        return summary
 
     async def query_ollama_model_info(self, provider_alias: str) -> Dict[str, Any]:
         """
