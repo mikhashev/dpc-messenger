@@ -16,6 +16,8 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 
 from dpc_protocol.pcm_core import PersonalContext, KnowledgeEntry, KnowledgeSource
+
+from . import knowledge_routing
 from dpc_protocol.knowledge_commit import KnowledgeCommitProposal
 from dpc_protocol.message_signing import PREIMAGE_VERSION, message_content_hash
 
@@ -290,38 +292,69 @@ class ConversationMonitor:
         finally:
             self._extracting = False
 
-    def _infer_inference_settings(self) -> tuple[str | None, str | None, str | None]:
-        """Infer inference settings when not explicitly tracked.
+    def _agent_config(self) -> Optional[Dict[str, Any]]:
+        """This agent's own config, when the conversation is an agent's own."""
+        if not self.conversation_id.startswith("agent_"):
+            return None
+        try:
+            from .dpc_agent.utils import load_agent_config
+            return load_agent_config(self.conversation_id) or None
+        except Exception as e:
+            logger.debug("Monitor %s: could not read agent config: %s",
+                         self.conversation_id, e)
+            return None
 
-        Priority order:
-        1. Local inference (if default provider configured)
-        2. Remote inference (fallback for peer conversations)
+    def _cold_fallback_alias(self) -> Optional[str]:
+        """The alias a retry may use here, or None when there is none."""
+        configured = ""
+        if self.settings is not None:
+            getter = getattr(self.settings, "get_knowledge_cold_fallback_provider", None)
+            if getter is not None:
+                configured = getter()
+        try:
+            return knowledge_routing.cold_fallback(
+                getattr(self.llm_manager, "providers", None) or {}, configured)
+        except knowledge_routing.NoKnowledgeProvider:
+            return None
+
+    def _infer_inference_settings(self) -> tuple[str | None, str | None, str | None]:
+        """Who extracts this conversation, as a chain — see `knowledge_routing`.
+
+        Silence walks the chain; it does not mean the global text default, which
+        is what sent whole transcripts to a paid API. Raises NoKnowledgeProvider
+        when no step names anything, rather than reaching for that default.
 
         Returns:
             (compute_host, model, provider) tuple
         """
-        # PRIORITY 1: Check if local inference is available (default provider configured)
-        if self.llm_manager and self.llm_manager.default_provider:
-            logger.info("Monitor %s: Using local inference for knowledge extraction (default provider available)",
-                       self.conversation_id)
-            return (None, None, None)  # Local inference with default provider
+        explicit = knowledge_routing.explicit_provider(
+            self.conversation_id, self._agent_config())
+        if explicit:
+            logger.info("Monitor %s: extracting with '%s' — the agent's own choice",
+                        self.conversation_id, explicit)
+            return (None, None, explicit)
 
-        # PRIORITY 2: For peer conversations, try using peer compute as fallback
-        if self.conversation_id.startswith("dpc-node-"):
-            logger.info("Monitor %s: Will attempt peer compute for knowledge extraction (no local provider, compute_host=%s)",
-                       self.conversation_id, self.conversation_id)
-            return (self.conversation_id, self.last_model, None)  # Peer compute fallback
-
-        # PRIORITY 2b: Use last known compute host (works for group and P2P conversations)
-        if self.last_compute_host:
-            logger.info("Monitor %s: Using last_compute_host %s for knowledge extraction",
-                       self.conversation_id, self.last_compute_host)
+        # The conversation's own provenance: whoever has been answering in it.
+        # Read from all three fields, not from the host alone — a locally
+        # answered conversation has no host and still knows its provider.
+        if self.last_provider or self.last_compute_host:
+            logger.info(
+                "Monitor %s: extracting with the conversation's provenance "
+                "(host=%s, model=%s, provider=%s)",
+                self.conversation_id, self.last_compute_host or "local",
+                self.last_model, self.last_provider)
             return (self.last_compute_host, self.last_model, self.last_provider)
 
-        # PRIORITY 3: Final fallback - try local anyway (will fail gracefully if no providers)
-        logger.warning("Monitor %s: No inference provider available for knowledge extraction",
-                      self.conversation_id)
-        return (None, None, None)
+        configured = ""
+        if self.settings is not None:
+            getter = getattr(self.settings, "get_knowledge_cold_fallback_provider", None)
+            if getter is not None:
+                configured = getter()
+        providers = getattr(self.llm_manager, "providers", None) or {}
+        alias = knowledge_routing.cold_fallback(providers, configured)
+        logger.info("Monitor %s: nobody has answered here yet — extracting with '%s'",
+                    self.conversation_id, alias)
+        return (None, None, alias)
 
     def _detect_conversation_type(self) -> str:
         """Detect conversation type from message content and participant context.
@@ -768,16 +801,19 @@ DO NOT include any text before or after the JSON. DO NOT use markdown code block
                     # Try fallback: if primary was remote, try local; if primary was local, try remote
                     fallback_attempted = False
 
-                    # Case 1: Remote failed, try local as fallback
-                    if compute_host and self.llm_manager and self.llm_manager.default_provider:
-                        logger.warning("Remote inference failed, trying local inference as fallback: %s", primary_error)
+                    # Case 1: Remote failed, retry here — on the cold fallback,
+                    # never on the global text default: the retry carries the
+                    # same transcript as the call that failed.
+                    local_retry = self._cold_fallback_alias() if compute_host else None
+                    if local_retry:
+                        logger.warning("Remote inference failed, retrying on '%s': %s", local_retry, primary_error)
                         fallback_attempted = True
                         try:
                             result = await self.ai_query_func(
                                 prompt=prompt,
                                 compute_host=None,  # Force local inference
                                 model=None,
-                                provider=None
+                                provider=local_retry
                             )
                             response = result["response"]
                             primary_error = None  # Success! Clear error
@@ -1098,16 +1134,19 @@ PARTICIPANTS' CULTURAL CONTEXTS:
                     # Try fallback: if primary was remote, try local; if primary was local, try remote
                     fallback_attempted = False
 
-                    # Case 1: Remote failed, try local as fallback
-                    if compute_host and self.llm_manager and self.llm_manager.default_provider:
-                        logger.warning("Remote inference failed, trying local inference as fallback: %s", primary_error)
+                    # Case 1: Remote failed, retry here — on the cold fallback,
+                    # never on the global text default: the retry carries the
+                    # same transcript as the call that failed.
+                    local_retry = self._cold_fallback_alias() if compute_host else None
+                    if local_retry:
+                        logger.warning("Remote inference failed, retrying on '%s': %s", local_retry, primary_error)
                         fallback_attempted = True
                         try:
                             inference_result = await self.ai_query_func(
                                 prompt=prompt,
                                 compute_host=None,  # Force local inference
                                 model=None,
-                                provider=None
+                                provider=local_retry
                             )
                             response = inference_result["response"]
                             primary_error = None  # Success! Clear error

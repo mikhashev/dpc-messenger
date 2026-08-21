@@ -8046,7 +8046,8 @@ class CoreService:
             return {"status": "error", "message": "Agent service not available"}
         if agent_id is None:
             agent_id = self._get_default_agent_id()
-        return await self.agent_service.get_agent_model_config(agent_id, self.get_providers_list)
+        return await self.agent_service.get_agent_model_config(
+            agent_id, self.get_providers_list, self.settings)
 
     async def save_agent_model_config(
         self, agent_id: str = None,
@@ -8057,6 +8058,7 @@ class CoreService:
         compaction_enabled: bool = None,
         compaction_provider: str = None,
         compaction_threshold: float = None,
+        knowledge_provider: str = None,
         retrieval_vector: str = None,
         retrieval_text: str = None,
     ) -> Dict[str, Any]:
@@ -8074,6 +8076,7 @@ class CoreService:
             compaction_enabled=compaction_enabled,
             compaction_provider=compaction_provider,
             compaction_threshold=compaction_threshold,
+            knowledge_provider=knowledge_provider,
             retrieval_vector=retrieval_vector,
             retrieval_text=retrieval_text,
             providers_getter=self.get_providers_list,

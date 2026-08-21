@@ -12,6 +12,7 @@ AGENT_CONFIG_KEYS = (
     "sleep_provider_alias",
     "snapshot_summarize_provider",
     "compaction_provider",
+    "knowledge_provider",
 )
 
 PROVIDERS_ROLE_KEYS = (

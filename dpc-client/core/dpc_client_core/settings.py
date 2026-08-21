@@ -185,7 +185,12 @@ class Settings:
         self._config['knowledge'] = {
             'token_warning_threshold': '0.8',  # Warn when context window reaches 80%
             'auto_extraction_enabled': 'true',  # Automatically suggest knowledge extraction
-            'cultural_perspectives_enabled': 'false'  # Include cultural perspective analysis in knowledge extraction
+            'cultural_perspectives_enabled': 'false',  # Include cultural perspective analysis in knowledge extraction
+            # Which provider extracts a conversation nobody has answered in yet.
+            # Empty means the first local provider in the registry; extraction
+            # refuses rather than reaching for the text default, which is a paid
+            # API and would send the transcript off the machine unasked.
+            'cold_fallback_provider': ''
         }
 
         self._config['file_transfer'] = {
@@ -451,6 +456,10 @@ class Settings:
         """Check if cultural perspective analysis is enabled in knowledge extraction."""
         value = self.get('knowledge', 'cultural_perspectives_enabled', 'false')
         return value.lower() in ('true', '1', 'yes')
+
+    def get_knowledge_cold_fallback_provider(self) -> str:
+        """Alias that extracts a conversation with no provenance, or '' for auto."""
+        return self.get('knowledge', 'cold_fallback_provider', '').strip()
 
     def get_hf_offline_mode(self) -> bool:
         """Check if HuggingFace Hub offline mode is enabled (S144).

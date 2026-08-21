@@ -859,26 +859,11 @@ Respond in JSON format:
                 monitor.knowledge_score,
             )
 
-            # For group conversations with no local AI: inject a compute peer so extraction works
-            if conversation_id.startswith("group-"):
-                host, _, _ = monitor._infer_inference_settings()
-                if host is None:
-                    group = self.group_manager.get_group(conversation_id)
-                    if group:
-                        for member_id in group.members:
-                            if member_id == self.p2p_manager.node_id:
-                                continue
-                            if member_id in self.p2p_manager.peers:
-                                monitor.set_inference_settings(
-                                    compute_host=member_id,
-                                    model=None,
-                                    provider=None,
-                                )
-                                logger.info(
-                                    "Group knowledge extraction: using compute from peer %s",
-                                    member_id[:20]
-                                )
-                                break
+            # A peer is not pre-injected here. It used to be, because the
+            # resolver returned no host for a group; now the group resolves
+            # through its own chain, and writing a peer in first would hand it
+            # the primary route — and wipe the provenance while doing it. The
+            # peer remains where it belongs: the `except` retry in the monitor.
 
             monitor.full_conversation = []
             monitor.message_buffer = []
