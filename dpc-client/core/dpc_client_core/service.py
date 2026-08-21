@@ -955,7 +955,11 @@ class CoreService:
 
         # The firewall was built before logging existed, so anything it said
         # about compute sharing at construction was thrown away (ADR-040 D4-0).
-        self.firewall.log_compute_sharing_state()
+        # The registry is handed over so the serving alias can be checked against
+        # it: the firewall owns the rule, not the list of providers.
+        self.firewall.log_compute_sharing_state(
+            self.llm_manager.providers.keys() if self.llm_manager else None
+        )
 
         # Start hub connection monitor (only if initially connected)
         if hub_connected:

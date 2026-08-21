@@ -4,7 +4,7 @@ import json
 import logging
 import os
 from pathlib import Path
-from typing import List, Dict, Tuple, Any, Optional, Set
+from typing import List, Dict, Tuple, Any, Iterable, Optional, Set
 import fnmatch
 from copy import deepcopy
 
@@ -149,7 +149,7 @@ class ContextFirewall:
                 "should serve peers from in privacy_rules.json under compute.serving_alias."
             )
 
-    def log_compute_sharing_state(self):
+    def log_compute_sharing_state(self, known_aliases: Optional[Iterable[str]] = None):
         """Say the compute-sharing posture once, where the log can hear it.
 
         `_parse_compute_settings` warns when sharing is on with no serving
@@ -169,6 +169,19 @@ class ContextFirewall:
                 "Compute sharing is enabled but no compute.serving_alias is set — "
                 "peer inference requests will be refused. Name the alias this node "
                 "should serve peers from in privacy_rules.json under compute.serving_alias."
+            )
+        elif known_aliases is not None and self.compute_serving_alias not in set(known_aliases):
+            # A name that resolves to nothing used to read like a name that
+            # works: the line below would announce it, the peer-facing provider
+            # list would filter to it and come out empty, and the failure would
+            # arrive only when a peer asked. Observed 2026-08-21 with
+            # `serving_alias` still naming an Ollama alias deleted hours before.
+            logger.warning(
+                "Compute sharing is enabled and compute.serving_alias names '%s', which is "
+                "not a configured provider — peers are told this node offers nothing, and a "
+                "request that does arrive is refused on the missing alias. Point it at a "
+                "live alias in privacy_rules.json, or turn compute.enabled off.",
+                self.compute_serving_alias,
             )
         else:
             logger.info(

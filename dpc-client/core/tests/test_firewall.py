@@ -943,3 +943,54 @@ class TestComputeSharingIsAnnouncedWhereTheLogCanHearIt:
             fw.log_compute_sharing_state()
         assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
         assert any("disabled" in r.getMessage() for r in caplog.records)
+
+    def test_an_alias_that_names_nothing_is_not_announced_as_if_it_worked(self, tmp_path, caplog):
+        """Observed 2026-08-21: `serving_alias` still named an Ollama alias
+        deleted hours earlier, and the state line announced it. The peer-facing
+        provider list filters to exactly this alias, so a dead one advertises
+        nothing while the log says the node serves from it."""
+        import logging
+        fw = self._firewall(tmp_path, {"enabled": True, "serving_alias": "qwen3.8:latest"})
+        caplog.clear()
+        with caplog.at_level(logging.INFO):
+            fw.log_compute_sharing_state(["deepseek_flash", "qwen3.8 27b Mythos"])
+
+        warnings = [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
+        assert len(warnings) == 1
+        assert "qwen3.8:latest" in warnings[0]
+        assert not any("serving peers from" in r.getMessage() for r in caplog.records)
+
+    def test_a_live_alias_passes_the_same_check(self, tmp_path, caplog):
+        import logging
+        fw = self._firewall(tmp_path, {"enabled": True, "serving_alias": "qwen3.8 27b Mythos"})
+        caplog.clear()
+        with caplog.at_level(logging.INFO):
+            fw.log_compute_sharing_state(["deepseek_flash", "qwen3.8 27b Mythos"])
+
+        assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
+        assert any("serving peers from 'qwen3.8 27b Mythos'" in r.getMessage()
+                   for r in caplog.records)
+
+    def test_without_a_registry_the_line_behaves_as_it_always_did(self, tmp_path, caplog):
+        """The check is optional on purpose — the firewall owns the rule, not
+        the provider list, and a caller with no registry to offer must not be
+        turned into a false alarm."""
+        import logging
+        fw = self._firewall(tmp_path, {"enabled": True, "serving_alias": "anything_at_all"})
+        caplog.clear()
+        with caplog.at_level(logging.INFO):
+            fw.log_compute_sharing_state()
+
+        assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
+        assert any("anything_at_all" in r.getMessage() for r in caplog.records)
+
+    def test_an_empty_registry_is_still_a_registry(self, tmp_path, caplog):
+        """`[]` means «nothing is configured», which is exactly when the alias
+        cannot resolve — it must not be read as «no registry offered»."""
+        import logging
+        fw = self._firewall(tmp_path, {"enabled": True, "serving_alias": "gone"})
+        caplog.clear()
+        with caplog.at_level(logging.INFO):
+            fw.log_compute_sharing_state([])
+
+        assert [r for r in caplog.records if r.levelno >= logging.WARNING]
