@@ -120,6 +120,17 @@ def _fmt_knob(value: Any) -> str:
     return "build default" if value is None else str(value)
 
 
+def window_outgrows_pool(window: Any, n_ctx: int) -> bool:
+    """Whether one conversation is allowed to outgrow the pool every slot shares.
+
+    `n_ctx` is one pool for all slots (the engine reports `kv_unified = true`);
+    `context_window` is what a single conversation may occupy. Nothing derives
+    one from the other, so they can disagree — and only this direction is
+    silent, because the other merely wastes cells nobody fills.
+    """
+    return bool(window) and window > n_ctx
+
+
 def _free_port() -> int:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         s.bind(("127.0.0.1", 0))
@@ -516,6 +527,44 @@ class LlamaServerSupervisor:
             return props
         raise LlamaServerError(f"llama-server[{self.alias}] unreachable ladder state")
 
+    def log_start(self, cache_type: Optional[str], env: Dict[str, str]) -> None:
+        """What the child was actually given, in one line, plus the one
+        disagreement between two of those numbers that fails silently.
+
+        The prompt cache is why the line exists at all: its size can arrive as
+        LLAMA_ARG_CACHE_RAM from the environment, where it is invisible in the
+        command line, in the config and in the child's own captured log — three
+        readers of that log reached three different answers about it in one
+        afternoon (2026-08-20).
+        """
+        _cache = c_ram if (c_ram := self.config.get("cache_ram_mib")) else (
+            f"{env.get('LLAMA_ARG_CACHE_RAM')} (from environment)"
+            if env.get("LLAMA_ARG_CACHE_RAM") else "build default"
+        )
+        n_ctx = self.config["n_ctx"]
+        window = self.config.get("context_window")
+        logger.info(
+            "llama-server[%s] starting on :%s (n_ctx=%s, context_window=%s, kv=%s, "
+            "cache_ram=%s, ctx_checkpoints=%s, checkpoint_min_step=%s, n_ubatch=%s, "
+            "cache_reuse=%s)",
+            self.alias, self.port, n_ctx, _fmt_knob(window),
+            cache_type or "configured", _cache,
+            _fmt_knob(self.config.get("ctx_checkpoints")),
+            _fmt_knob(self.config.get("checkpoint_min_step")),
+            _fmt_knob(self.config.get("n_ubatch")),
+            _fmt_knob(self.config.get("cache_reuse")),
+        )
+        if window_outgrows_pool(window, n_ctx):
+            # The direction that fails without a word: the agent fills to a
+            # limit the engine never allocated, and the guard meant to refuse
+            # before the model dies is calibrated on the larger number.
+            logger.warning(
+                "llama-server[%s]: context_window %s is larger than the KV pool "
+                "n_ctx %s — one conversation may grow past everything the child "
+                "allocated for all of its slots together",
+                self.alias, window, n_ctx,
+            )
+
     async def _launch(self, binary: Path, cache_type: Optional[str] = None) -> Dict[str, Any]:
         cmd = self.build_command(binary, self.port, cache_type=cache_type)
         env = self.build_env(binary)
@@ -524,19 +573,7 @@ class LlamaServerSupervisor:
         # environment, where it is invisible in the command line, in the config
         # and in the child's own captured log — three readers of that log reached
         # three different answers about it in one afternoon (2026-08-20).
-        _cache = c_ram if (c_ram := self.config.get("cache_ram_mib")) else (
-            f"{env.get('LLAMA_ARG_CACHE_RAM')} (from environment)"
-            if env.get("LLAMA_ARG_CACHE_RAM") else "build default"
-        )
-        logger.info(
-            "llama-server[%s] starting on :%d (kv=%s, cache_ram=%s, ctx_checkpoints=%s, "
-            "checkpoint_min_step=%s, n_ubatch=%s, cache_reuse=%s)",
-            self.alias, self.port, cache_type or "configured", _cache,
-            _fmt_knob(self.config.get("ctx_checkpoints")),
-            _fmt_knob(self.config.get("checkpoint_min_step")),
-            _fmt_knob(self.config.get("n_ubatch")),
-            _fmt_knob(self.config.get("cache_reuse")),
-        )
+        self.log_start(cache_type, env)
         self._log_path.parent.mkdir(parents=True, exist_ok=True)
         self._log_fh = open(self._log_path, "ab")
         self._proc = await self._spawn(cmd, env)
