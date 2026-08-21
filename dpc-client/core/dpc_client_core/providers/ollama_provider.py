@@ -3,11 +3,13 @@
 import asyncio
 import json
 import logging
+import time
 import uuid
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
 from typing import Dict, Any, Optional, List, Union
 
+import httpx
 import ollama
 
 from .base import AIProvider, REASONING_OFF, normalize_reasoning_effort
@@ -50,6 +52,15 @@ OLLAMA_THINKING_MODELS = [
 # from a second call would double a question the daemon has already answered.
 _MODEL_INFO: Dict[str, Any] = {}
 
+# A silent host is one fact, not one per model: without this window eleven
+# aliases each buy the same timeout (23.5 s measured with the daemon down).
+# Short, because a daemon that came back is not asked until it expires.
+_HOST_SILENT_SECONDS = 5.0
+
+# When each host was last found silent. Not a cached answer — it only says
+# "do not ask yet", and is dropped as soon as the daemon answers anything.
+_HOST_SILENT_SINCE: Dict[str, float] = {}
+
 # The question is asked from paths that run on the event loop. Against a
 # local daemon it costs milliseconds, but `host` may be another machine, and
 # a black-hole address with no timeout hangs on the SYN for as long as the OS
@@ -85,19 +96,47 @@ def _reported_capabilities(model: str, host: Optional[str]) -> Optional[frozense
     return None if reported is None else frozenset(reported)
 
 
+def _host_key(host: Optional[str]) -> str:
+    """One key per daemon; None and "" both mean the SDK's default host."""
+    return host or ""
+
+
+def _host_is_silent(key: str) -> bool:
+    """Whether asking this daemon again now would only buy the same timeout."""
+    since = _HOST_SILENT_SINCE.get(key)
+    if since is None:
+        return False
+    if time.monotonic() - since < _HOST_SILENT_SECONDS:
+        return True
+    del _HOST_SILENT_SINCE[key]
+    return False
+
+
 def _describe(model: str, host: Optional[str]) -> Optional[Any]:
     """The daemon's whole answer about a model, or None if it could not be
-    asked. One call per model per process."""
+    asked. One call per model per process — and while a host is silent, one
+    call per host rather than one per model."""
     if model in _MODEL_INFO:
         return _MODEL_INFO[model]
+    key = _host_key(host)
+    if _host_is_silent(key):
+        return None
     try:
         info = ollama.Client(
             host=host, timeout=_CAPABILITY_TIMEOUT_SECONDS
         ).show(model)
+    except httpx.RequestError as e:
+        # No response at all: a fact about the host, not about this model.
+        _HOST_SILENT_SINCE[key] = time.monotonic()
+        logger.debug("Ollama at %s did not answer about %s (%s); skipping it for %.0fs",
+                     key or "default host", model, e, _HOST_SILENT_SECONDS)
+        return None
     except Exception as e:
-        # Not cached: a daemon that is down now may be up on the next call.
+        # The daemon answered, with an error about this model — the host is up.
+        _HOST_SILENT_SINCE.pop(key, None)
         logger.debug("Ollama could not describe %s: %s", model, e)
         return None
+    _HOST_SILENT_SINCE.pop(key, None)
     _MODEL_INFO[model] = info
     return info
 

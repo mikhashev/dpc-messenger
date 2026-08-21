@@ -2046,8 +2046,25 @@ class CoreService:
             - voice_provider: Default voice transcription provider alias v0.13.0+
             - agent_provider: AI agent provider alias v0.18.0+
         """
+        # Snapshot on the loop, ask off it: supports_vision() reaches the
+        # Ollama daemon, and a host that is not answering costs seconds that
+        # every other command would otherwise wait through.
+        snapshot = list(self.llm_manager.providers.items())
+        providers_info = await asyncio.to_thread(self._provider_rows, snapshot)
+
+        return {
+            "providers": providers_info,
+            "default_provider": self.llm_manager.default_provider or "",
+            "vision_provider": self.llm_manager.vision_provider or "",
+            "voice_provider": self.llm_manager.voice_provider or "",  # v0.13.0+
+            "agent_provider": getattr(self.llm_manager, 'agent_provider', None) or ""  # v0.18.0+
+        }
+
+    def _provider_rows(self, snapshot: List[Any]) -> List[Dict[str, Any]]:
+        """The provider rows the UI reads. Synchronous, and called off the
+        event loop — supports_vision() may reach a daemon over the network."""
         providers_info = []
-        for alias, provider in self.llm_manager.providers.items():
+        for alias, provider in snapshot:
             provider_dict = {
                 "alias": alias,
                 "model": provider.model,
@@ -2065,14 +2082,7 @@ class CoreService:
                 provider_dict["remote_provider"] = getattr(provider, 'remote_provider', None)
 
             providers_info.append(provider_dict)
-
-        return {
-            "providers": providers_info,
-            "default_provider": self.llm_manager.default_provider or "",
-            "vision_provider": self.llm_manager.vision_provider or "",
-            "voice_provider": self.llm_manager.voice_provider or "",  # v0.13.0+
-            "agent_provider": getattr(self.llm_manager, 'agent_provider', None) or ""  # v0.18.0+
-        }
+        return providers_info
 
     def _provider_supports_voice(self, provider: Any) -> bool:
         """Delegated to VoiceService."""
