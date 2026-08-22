@@ -1236,12 +1236,15 @@
                             }
                             editedConfig = editedConfig;
                           }}
-                          placeholder="server default"
+                          placeholder="auto — 4 slots here"
                         />
                         <p class="help-text">
-                          Empty = the server's own choice (4 unified slots on the pinned build).
-                          An explicit value is always sent — set 1 to serialize every request
-                          through one slot.
+                          Empty sends nothing, and the build's own default for <code>-np</code>
+                          is <code>-1</code>, meaning auto — not a fixed number. On this fleet
+                          auto has resolved to <strong>4</strong> unified slots; the child prints
+                          <code>n_slots = 4</code> in its startup line, so the figure is one you
+                          can check rather than one this form promises. An explicit value is
+                          always sent — set 1 to serialize every request through one slot.
                         </p>
                       </div>
 
@@ -2180,14 +2183,22 @@
 {/if}
 
 <style>
+  /* The colour was inherited and then dimmed by opacity, which fades the text,
+     the tint and the rule together — grey on dark navy, unreadable at 0.85em.
+     An explicit foreground and a slightly stronger tint instead: opacity is the
+     wrong instrument when only one of the three layers should be quiet. */
   .role-hint {
     margin: 0 0 12px;
     padding: 8px 12px;
     border-left: 3px solid #4a9eff;
-    background: rgba(74, 158, 255, 0.08);
+    background: rgba(74, 158, 255, 0.12);
+    color: #d6e4f5;
     font-size: 0.85em;
     line-height: 1.45;
-    opacity: 0.9;
+  }
+
+  .role-hint strong {
+    color: #fff;
   }
 
   /* Account balance card (Phase 2b) — dark theme, matches .provider-card */
@@ -2556,6 +2567,20 @@
 
   .help-text.warn {
     color: #ffc107;
+  }
+
+  /* Same treatment inline code and emphasis already get in .info-text, so a
+     flag name reads as a flag name wherever it appears in this form. */
+  .help-text code {
+    background: rgba(255, 255, 255, 0.1);
+    padding: 1px 5px;
+    border-radius: 3px;
+    font-family: 'Courier New', monospace;
+    color: #90caf9;
+  }
+
+  .help-text strong {
+    color: #fff;
   }
 
   .help-text.success {
