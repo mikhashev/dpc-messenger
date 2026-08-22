@@ -211,19 +211,64 @@ class TestTheKvLadder:
     def test_gpu_layers_and_flash_attn_and_mmproj(self):
         cmd = _sup(n_gpu_layers=999, flash_attn=True, mmproj="mm.gguf").build_command(BINARY, 1)
         assert cmd[cmd.index("-ngl") + 1] == "999"
-        assert "--flash-attn" in cmd
+        assert cmd[cmd.index("--flash-attn") + 1] == "on"
         assert cmd[cmd.index("--mmproj") + 1] == "mm.gguf"
+
+    def test_the_flash_attention_flag_is_never_sent_bare(self):
+        """The pin refuses it bare and dies on argv, before a backend loads:
+
+            error while handling argument "--flash-attn":
+            unknown value for --flash-attn: '--spec-type'
+
+        Reproduced against the pin 2026-08-22. `in cmd` was the whole of the
+        old assertion, and it passes on the broken line — the test certified
+        the defect. Assert the value, and assert the neighbour is not one.
+        """
+        for value, expected in (("on", "on"), ("off", "off"), (True, "on"), (False, "off")):
+            cmd = _sup(flash_attn=value).build_command(BINARY, 1)
+            i = cmd.index("--flash-attn")
+            assert cmd[i + 1] == expected, value
+            assert not cmd[i + 1].startswith("-"), value
+
+    def test_off_is_reachable_because_absence_stopped_meaning_off(self):
+        """The form writes `false` for its "off" option, and DEFAULTS held
+        `False` too — so an alias nobody had touched and an alias whose owner
+        chose "off" arrived as the same value, and either mapping was wrong for
+        one of them. The default is None now, so False can be the choice the
+        form always displayed it as."""
+        from dpc_client_core.managers.llama_server_supervisor import DEFAULTS
+        assert DEFAULTS["flash_attn"] is None, "absence must be distinguishable from off"
+        off = _sup(flash_attn=False).build_command(BINARY, 1)
+        assert off[off.index("--flash-attn") + 1] == "off"
+
+    def test_the_switch_nobody_touched_leaves_the_binary_at_its_own_auto(self):
+        """`--flash-attn [on|off|auto] ... default: 'auto'`, so silence is auto
+        and the form's old «default (off)» label was wrong about it."""
+        assert "--flash-attn" not in _sup().build_command(BINARY, 1)
+        assert "--flash-attn" not in _sup(flash_attn="auto").build_command(BINARY, 1)
+        assert "--flash-attn" not in _sup(flash_attn=None).build_command(BINARY, 1)
 
     def test_speculation_defaults_to_mtp_depth_three_the_measured_value(self):
         cmd = _sup().build_command(BINARY, 1)
         assert cmd[cmd.index("--spec-type") + 1] == "draft-mtp"
         assert cmd[cmd.index("--spec-draft-n-max") + 1] == "3"
 
-    def test_parallel_slots_come_with_unified_kv_and_one_slot_comes_alone(self):
+    def test_parallel_slots_are_named_and_the_pool_shape_is_said_out_loud(self):
+        """The binary's own default is conditional — «enabled if number of slots
+        is auto» — so silence means unified without `-np` and split with it. The
+        old guard emitted the flag only above two slots, which left an alias
+        asking for a unified pool beside an explicit `-np` running a split one.
+        """
         cmd = _sup(n_parallel=2).build_command(BINARY, 1)
         assert cmd[cmd.index("-np") + 1] == "2" and "--kv-unified" in cmd
         solo = _sup().build_command(BINARY, 1)
-        assert "-np" not in solo and "--kv-unified" not in solo
+        assert "-np" not in solo and "--kv-unified" in solo
+
+    def test_a_split_pool_is_asked_for_rather_than_left_to_the_default(self):
+        split = _sup(n_parallel=4, kv_unified=False).build_command(BINARY, 1)
+        assert "--no-kv-unified" in split and "--kv-unified" not in split
+        one = _sup(n_parallel=1, kv_unified=True).build_command(BINARY, 1)
+        assert one[one.index("-np") + 1] == "1" and "--kv-unified" in one
 
     def test_the_micro_batch_is_sent_only_when_the_alias_names_one(self):
         """Measured 2026-08-20 on this pin: at a 60 000-token prefill ub 1024 is
@@ -274,9 +319,30 @@ class TestTheKvLadder:
         assert cmd[cmd.index("--cache-ram") + 1] == "24576"
         assert cmd[cmd.index("--slot-save-path") + 1] == "D:/kv"
 
-    def test_jinja_is_on_by_default_and_can_be_refused(self):
+    def test_the_zero_each_of_these_fields_invites_reaches_the_child(self):
+        """One assertion per field the form offers with `min="0"` and a help
+        text promising that an explicit 0 and an absent key are different
+        instructions. It was true of three fields and false of these three:
+        `-ngl 0` is nothing on the card, `--spec-draft-n-max 0` is no draft
+        tokens, `--cache-ram 0` disables the host cache — and a truthiness
+        guard turned each of them into the build's own default instead.
+
+        The class was named in this very function twenty lines above, in the
+        `-np` comment, and then repeated below it."""
+        cmd = _sup(n_gpu_layers=0, spec_draft_n_max=0, cache_ram_mib=0).build_command(BINARY, 1)
+        assert cmd[cmd.index("-ngl") + 1] == "0"
+        assert cmd[cmd.index("--spec-draft-n-max") + 1] == "0"
+        assert cmd[cmd.index("--cache-ram") + 1] == "0"
+
+    def test_jinja_is_on_by_default_and_can_actually_be_refused(self):
+        """`--jinja, --no-jinja ... (default: enabled)` — so emitting nothing for
+        False left the engine with jinja on and the control unable to express
+        the one thing it was added for. The old test asserted the flag was
+        absent and called that «refused», which is a claim the assertion could
+        not check: absence is the default, and the default is on."""
         assert "--jinja" in _sup().build_command(BINARY, 1)
-        assert "--jinja" not in _sup(jinja=False).build_command(BINARY, 1)
+        off = _sup(jinja=False).build_command(BINARY, 1)
+        assert "--no-jinja" in off and "--jinja" not in off
 
     def test_extra_args_go_last_as_an_escape_hatch(self):
         cmd = _sup(extra_args=["--overarch", "x"]).build_command(BINARY, 1)
@@ -425,7 +491,12 @@ class TestTheAdmissionArithmetic:
         # ran its own 4 and nobody could see the difference.
         cmd = _sup(n_parallel=1).build_command(BINARY, 1)
         assert cmd[cmd.index("-np") + 1] == "1"
-        assert "--kv-unified" not in cmd  # unified == split at one slot
+        # At one slot unified and split are the same pool, so this flag changes
+        # nothing here — but it is sent anyway, because the binary's default is
+        # «enabled if number of slots is auto» and `-np` makes them not auto.
+        # Leaving it out let silence mean the opposite of the configured value
+        # the moment a second slot appeared.
+        assert "--kv-unified" in cmd
 
     def test_unset_slots_leave_the_server_its_own_choice(self):
         assert "-np" not in _sup().build_command(BINARY, 1)

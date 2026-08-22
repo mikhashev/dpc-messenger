@@ -56,7 +56,10 @@ DEFAULTS: Dict[str, Any] = {
     # (704.5 -> 784.4 tok/s) and the layer-0 warnings went 5 -> 0. An alias
     # can still override this for a card that cannot hold all layers.
     "n_gpu_layers": 999,
-    "flash_attn": False,
+    # None, not False: the binary's own default is `auto`, and False is what the
+    # form writes when its owner picks "off". Holding False here made those two
+    # the same value, so "off" could not be expressed at all.
+    "flash_attn": None,
     "mmproj": None,
     "spec_type": "draft-mtp",
     "spec_draft_n_max": 3,  # measured: acceptance 0.686 against 4's 0.578
@@ -109,6 +112,40 @@ class LlamaServerError(RuntimeError):
         tail = "".join(f"\n  | {line}" for line in (log_lines or [])[-12:])
         super().__init__(f"{message}{tail}")
         self.log_lines = log_lines or []
+
+
+def _flash_attn_value(value: Any) -> Optional[str]:
+    """`on`, `off`, or nothing at all, out of a field that used to be a bool.
+
+    The binary takes `--flash-attn on|off|auto` and refuses it bare:
+
+        error while handling argument "--flash-attn": unknown value ...
+
+    `build_command` emitted it bare until 2026-08-22, so any alias that turned
+    the switch on could not start — the child died on argv, before a backend
+    was even loaded. Nothing short of handing the line to the binary shows it
+    (Fable 5, 2026-08-22 unpushed-dev-batch review 1a).
+
+    `False` means `off` and `None` means silence, which is why DEFAULTS holds
+    None here rather than the False it held until 2026-08-22. With False as the
+    default the two were indistinguishable: an alias nobody had touched and an
+    alias whose owner had chosen "off" in the form arrived here as the same
+    value, and mapping it either way was wrong for one of them. None is the
+    absence, so False can now be the choice it was always displayed as.
+    """
+    if value is None:
+        return None
+    if value is True or value is False:
+        return "on" if value else "off"
+    text = str(value).strip().lower()
+    if text in ("on", "off"):
+        return text
+    if text != "auto":
+        logger.warning(
+            "llama-server: flash_attn=%r is not on/off/auto; leaving the "
+            "binary at its own default", value,
+        )
+    return None
 
 
 def _fmt_knob(value: Any) -> str:
@@ -333,15 +370,20 @@ class LlamaServerSupervisor:
             cmd += ["-ctk", str(ctk)]
         if ctv:
             cmd += ["-ctv", str(ctv)]
-        if c["n_gpu_layers"]:
+        # `is not None` and not truthiness, on all three of these: 0 is a
+        # sentence in each — no layers on the card, no draft tokens, no host
+        # cache — and the guard twenty lines below records this same class
+        # being found and fixed for `-np` before it was repeated here.
+        if c["n_gpu_layers"] is not None:
             cmd += ["-ngl", str(c["n_gpu_layers"])]
-        if c["flash_attn"]:
-            cmd += ["--flash-attn"]
+        flash_attn = _flash_attn_value(c["flash_attn"])
+        if flash_attn is not None:
+            cmd += ["--flash-attn", flash_attn]
         if c["mmproj"]:
             cmd += ["--mmproj", str(c["mmproj"])]
         if c["spec_type"] and c["spec_type"] != "none":
             cmd += ["--spec-type", str(c["spec_type"])]
-            if c["spec_draft_n_max"]:
+            if c["spec_draft_n_max"] is not None:
                 cmd += ["--spec-draft-n-max", str(c["spec_draft_n_max"])]
         # -np is sent whenever it is set, so an explicit 1 reaches the child —
         # the old `> 1` guard ate it and the server fell back to its own 4.
@@ -357,16 +399,24 @@ class LlamaServerSupervisor:
             cmd += ["-ub", str(c["n_ubatch"])]
         if c["n_parallel"]:
             cmd += ["-np", str(c["n_parallel"])]
-            if c["n_parallel"] > 1 and c["kv_unified"]:
-                cmd += ["--kv-unified"]
+        # Said out loud in both directions, because the binary's own default is
+        # conditional — "enabled if number of slots is auto" — so silence means
+        # one thing with `-np` set and the opposite without it. The old guard
+        # emitted nothing below two slots, which left an alias that asked for a
+        # unified pool alongside an explicit `-np` running a split one.
+        if c["kv_unified"] is not None:
+            cmd += ["--kv-unified" if c["kv_unified"] else "--no-kv-unified"]
         if c["cache_reuse"] is not None:
             cmd += ["--cache-reuse", str(c["cache_reuse"])]
-        if c["cache_ram_mib"]:
+        if c["cache_ram_mib"] is not None:
             cmd += ["--cache-ram", str(c["cache_ram_mib"])]
         if c["slot_save_path"]:
             cmd += ["--slot-save-path", str(c["slot_save_path"])]
-        if c["jinja"]:
-            cmd += ["--jinja"]
+        # `--jinja` is the binary's default, so emitting nothing for False left
+        # the engine with jinja on and the control unable to express the only
+        # thing it was added for. The negative form exists; use it.
+        if c["jinja"] is not None:
+            cmd += ["--jinja" if c["jinja"] else "--no-jinja"]
         cmd += ["--host", "127.0.0.1", "--port", str(port)]
         cmd += [str(a) for a in c["extra_args"]]
         return cmd
@@ -533,7 +583,12 @@ class LlamaServerSupervisor:
             return props
         raise LlamaServerError(f"llama-server[{self.alias}] unreachable ladder state")
 
-    def log_start(self, cache_type: Optional[str], env: Dict[str, str]) -> None:
+    def log_start(
+        self,
+        cache_type: Optional[str],
+        env: Dict[str, str],
+        binary: Optional[Path] = None,
+    ) -> None:
         """What the child was actually given, in one line, plus the one
         disagreement between two of those numbers that fails silently.
 
@@ -542,6 +597,15 @@ class LlamaServerSupervisor:
         command line, in the config and in the child's own captured log — three
         readers of that log reached three different answers about it in one
         afternoon (2026-08-20).
+
+        `binary` is here for the same reason, one reader later. The child log is
+        one file per alias and carries no line naming the executable that wrote
+        it, so two builds' starts are indistinguishable in it — and on
+        2026-08-22 a reviewer who did the right thing and read the whole file
+        still drew the opposite conclusion from the right lines, because the
+        failures were the pin and the successes a hand-built binary. Since
+        `binary_path` reached the provider form, two builds side by side is an
+        ordinary state rather than a laboratory one.
         """
         _cache = c_ram if (c_ram := self.config.get("cache_ram_mib")) else (
             f"{env.get('LLAMA_ARG_CACHE_RAM')} (from environment)"
@@ -550,10 +614,11 @@ class LlamaServerSupervisor:
         n_ctx = self.config["n_ctx"]
         window = self.config.get("context_window")
         logger.info(
-            "llama-server[%s] starting on :%s (n_ctx=%s, context_window=%s, kv=%s, "
-            "cache_ram=%s, ctx_checkpoints=%s, checkpoint_min_step=%s, n_ubatch=%s, "
-            "cache_reuse=%s)",
-            self.alias, self.port, n_ctx, _fmt_knob(window),
+            "llama-server[%s] starting on :%s (binary=%s, n_ctx=%s, context_window=%s, "
+            "kv=%s, cache_ram=%s, ctx_checkpoints=%s, checkpoint_min_step=%s, "
+            "n_ubatch=%s, cache_reuse=%s)",
+            self.alias, self.port, binary if binary is not None else "unknown",
+            n_ctx, _fmt_knob(window),
             cache_type or "configured", _cache,
             _fmt_knob(self.config.get("ctx_checkpoints")),
             _fmt_knob(self.config.get("checkpoint_min_step")),
@@ -579,7 +644,7 @@ class LlamaServerSupervisor:
         # environment, where it is invisible in the command line, in the config
         # and in the child's own captured log — three readers of that log reached
         # three different answers about it in one afternoon (2026-08-20).
-        self.log_start(cache_type, env)
+        self.log_start(cache_type, env, binary)
         self._log_path.parent.mkdir(parents=True, exist_ok=True)
         self._log_fh = open(self._log_path, "ab")
         self._proc = await self._spawn(cmd, env)

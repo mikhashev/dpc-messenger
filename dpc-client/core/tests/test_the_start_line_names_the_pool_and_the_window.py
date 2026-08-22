@@ -101,3 +101,35 @@ def test_the_cache_size_still_reaches_the_line_from_the_environment(caplog):
         _sup().log_start(None, {"LLAMA_ARG_CACHE_RAM": "24576"})
 
     assert "cache_ram=24576 (from environment)" in "\n".join(_line(caplog, logging.INFO))
+
+
+# --- which executable wrote the line ----------------------------------------
+
+
+def test_the_start_line_names_the_binary_it_is_starting(caplog):
+    """One file per alias, no line naming the executable — so two builds' starts
+    are indistinguishable in the child log, and on 2026-08-22 a reviewer who
+    read the whole file (the thing the brief asked for) drew the opposite
+    conclusion from the right lines: the failures were the pin and the
+    successes a build from an open PR. The instrument failed, not the reader.
+
+    Ours is the cheaper half to fix — the start line is our own file — and it
+    matters more since `binary_path` reached the provider form, which makes two
+    builds side by side an ordinary state.
+    """
+    from pathlib import Path
+
+    with caplog.at_level(logging.INFO):
+        _sup(n_ctx=262144).log_start(None, {}, Path("D:/build/llama.cpp-pr27342/llama-server.exe"))
+
+    line = "\n".join(_line(caplog, logging.INFO))
+    assert "llama.cpp-pr27342" in line
+    assert "binary=" in line
+
+
+def test_a_start_line_with_no_binary_says_so_rather_than_implying_the_pin(caplog):
+    with caplog.at_level(logging.INFO):
+        _sup(n_ctx=262144).log_start(None, {})
+
+    line = "\n".join(_line(caplog, logging.INFO))
+    assert "binary=unknown" in line

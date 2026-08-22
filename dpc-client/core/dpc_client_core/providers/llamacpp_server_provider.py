@@ -190,8 +190,9 @@ class LlamaServerProvider(DeepSeekProvider):
             return asyncio.get_running_loop().create_task(supervisor.drain(timeout=None))
         except RuntimeError:
             logger.warning(
-                "llamacpp_server '%s': no running loop to stop the superseded "
-                "child; it was signalled below if possible",
+                "llamacpp_server '%s': no running loop to drain the superseded "
+                "child; nothing here signals it and the OS reaps it at process "
+                "exit",
                 supervisor.alias,
             )
             return None
