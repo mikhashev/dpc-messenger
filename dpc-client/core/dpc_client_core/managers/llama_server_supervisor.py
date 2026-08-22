@@ -725,22 +725,39 @@ class LlamaServerSupervisor:
         Without this, draining the old child only trades one failure for
         another: the old one keeps its ~25 GB while a call that arrives during
         the drain starts a second child on a card that cannot hold both.
+
+        The wait re-checks itself, because the world moves while it waits. Two
+        saves inside one turn make this supervisor a predecessor in its turn:
+        it is retired and set draining while it is still queued behind the child
+        it was replacing. Reading `_draining` once before the wait — which is
+        what `ensure_running` does — cannot see that, and the supervisor would
+        wake up and start a child nobody wants, on a card that by then holds
+        another. A second predecessor arriving during the wait is the same
+        story from the other side, and the loop covers both.
         """
-        task, self._predecessor = self._predecessor, None
-        if task is None or task.done():
-            return
-        logger.info(
-            "llama-server[%s]: waiting for the superseded child to finish its "
-            "in-flight work and release the card before starting",
-            self.alias,
-        )
-        try:
-            await task
-        except Exception as exc:      # a failed drain must not block the successor
-            logger.warning(
-                "llama-server[%s]: the superseded child's drain ended badly (%s); "
-                "starting anyway", self.alias, exc,
+        while True:
+            task, self._predecessor = self._predecessor, None
+            if task is None or task.done():
+                break
+            logger.info(
+                "llama-server[%s]: waiting for the superseded child to finish its "
+                "in-flight work and release the card before starting",
+                self.alias,
             )
+            try:
+                await task
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # a failed drain must not block the successor
+                logger.warning(
+                    "llama-server[%s]: the superseded child's drain ended badly (%s); "
+                    "starting anyway", self.alias, exc,
+                )
+            if self._draining:
+                raise LlamaServerError(
+                    f"llama-server[{self.alias}] was itself superseded while waiting "
+                    "for its predecessor; refusing to start a child nobody holds"
+                )
 
     def call_slot(self):
         """Claim one in-flight call; refuses while draining, so drain can wait.

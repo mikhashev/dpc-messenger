@@ -140,6 +140,25 @@ class LlamaServerProvider(DeepSeekProvider):
                 # finished its in-flight work and released the card — this card
                 # cannot hold two copies of the model.
                 self.supervisor.supersedes(self._retire(previous))
+            elif _RETIRING:
+                # A rename crosses the key. The old alias is gone from the
+                # registry and the new one has never been in it, so the lookup
+                # above misses and the successor used to start at once — beside
+                # a predecessor that is still draining a generation and still
+                # holding the card. The wait belongs to the card, not to the
+                # name: whatever is retiring is what has to let go first.
+                pending = [task for _s, task in _RETIRING.values() if not task.done()]
+                if pending:
+                    logger.info(
+                        "llamacpp_server '%s': %d retired child(ren) still draining; "
+                        "waiting for the card before starting",
+                        alias, len(pending),
+                    )
+                    self.supervisor.supersedes(
+                        asyncio.ensure_future(
+                            asyncio.gather(*pending, return_exceptions=True)
+                        )
+                    )
         _ACTIVE_SUPERVISORS[alias] = self.supervisor
 
         self._openai: Optional[AsyncOpenAI] = None

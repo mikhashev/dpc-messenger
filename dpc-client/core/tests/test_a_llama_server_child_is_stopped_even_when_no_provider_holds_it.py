@@ -246,3 +246,71 @@ class TestTheWindowBetweenTheRenameAndTheEndOfTheDrain:
         assert lsp.retire_absent(["some-other-alias"]) == []
         assert dead.stopped is False
         assert "finished" not in lsp._ACTIVE_SUPERVISORS
+
+
+class TestTheSuccessorWaitsForTheCardAndNotForTheName:
+    """The wait was keyed by alias, and a rename crosses the key.
+
+    `_ACTIVE_SUPERVISORS.get(alias)` misses on a name that has never been in the
+    registry, so `supersedes()` was never called and the successor started at
+    once — beside a predecessor still draining a generation and still holding a
+    card that fits one copy of the model. Both reviews reached this by reading;
+    neither started two processes.
+    """
+
+    @pytest.mark.asyncio
+    async def test_a_renamed_alias_still_waits_for_the_draining_child(self, tmp_path: Path):
+        import types
+
+        old = FakeSupervisor("before-the-rename", slow_drain=True)
+        lsp._ACTIVE_SUPERVISORS["before-the-rename"] = old
+        lsp.retire_absent(["after-the-rename"])
+        await asyncio.sleep(0.05)
+        assert "before-the-rename" in lsp._RETIRING, "the window must be open for this test"
+
+        gguf = tmp_path / "m.gguf"
+        gguf.write_bytes(b"GGUF")
+        successor = lsp.LlamaServerProvider("after-the-rename", {"gguf_path": str(gguf)})
+
+        assert successor.supervisor._predecessor is not None, (
+            "the successor of a renamed alias must wait for the card"
+        )
+        assert not successor.supervisor._predecessor.done()
+
+        successor.supervisor._predecessor.cancel()
+        old._proc.returncode = 0
+
+    @pytest.mark.asyncio
+    async def test_nothing_retiring_means_nothing_to_wait_for(self, tmp_path: Path):
+        gguf = tmp_path / "m.gguf"
+        gguf.write_bytes(b"GGUF")
+        fresh = lsp.LlamaServerProvider("first-alias-ever", {"gguf_path": str(gguf)})
+        assert fresh.supervisor._predecessor is None
+
+
+class TestAWaitThatIsItselfOvertaken:
+    @pytest.mark.asyncio
+    async def test_a_supervisor_superseded_while_waiting_refuses_to_start(self):
+        """Two saves inside one turn. The second retires the supervisor the first
+        one created, while that supervisor is still queued behind its own
+        predecessor. `ensure_running` reads `_draining` once, before the wait, so
+        without a re-check the loser wakes up and starts a child nobody holds."""
+        from dpc_client_core.managers.llama_server_supervisor import (
+            LlamaServerError, LlamaServerSupervisor,
+        )
+
+        sup = LlamaServerSupervisor("queued", {"gguf_path": "x.gguf"})
+
+        async def slow():
+            await asyncio.sleep(0.05)
+
+        sup.supersedes(asyncio.ensure_future(slow()))
+
+        async def retire_it_midway():
+            await asyncio.sleep(0.01)
+            sup._draining = True     # what `drain()` sets when this one is retired
+
+        asyncio.ensure_future(retire_it_midway())
+
+        with pytest.raises(LlamaServerError, match="itself superseded"):
+            await sup._await_predecessor()
