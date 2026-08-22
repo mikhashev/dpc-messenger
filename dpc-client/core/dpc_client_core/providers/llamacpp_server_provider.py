@@ -110,6 +110,18 @@ class LlamaServerProvider(DeepSeekProvider):
             and _flags_of(previous.config) == _flags_of(config)
         ):
             self.supervisor = previous
+            # Adoption keeps the running child, and used to keep the whole old
+            # config with it — so a key that never reaches the command line was
+            # typed, saved, and silently discarded. `start_timeout_s` is the only
+            # such key today, and the provider form now offers a control for it,
+            # which is what made the drop visible. The flag-bearing subset is
+            # equal by the branch condition above, so re-merging here cannot
+            # change what the live child was started with; it only lets the
+            # non-flag values move without paying for a model re-load.
+            previous.config = {
+                **SUPERVISOR_DEFAULTS,
+                **{k: v for k, v in config.items() if v is not None},
+            }
             logger.info(
                 "llamacpp_server '%s': adopting the already-running llama-server "
                 "(flags unchanged by the config reload)",

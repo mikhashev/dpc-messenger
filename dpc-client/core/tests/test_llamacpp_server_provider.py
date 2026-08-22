@@ -17,7 +17,7 @@ import pytest
 
 from dpc_client_core.llm_manager import PROVIDER_MAP
 from dpc_client_core.providers import LlamaServerProvider
-from dpc_client_core.providers.llamacpp_server_provider import _ACTIVE_SUPERVISORS
+from dpc_client_core.providers.llamacpp_server_provider import _ACTIVE_SUPERVISORS, _flags_of
 
 GGUF = "D:/models/qwen3.8-27b-Q4_K_M.gguf"
 
@@ -116,6 +116,23 @@ class TestConstruction:
         first.supervisor.props = {"total_slots": 1}
         second = _provider(n_ctx=131072)
         assert second.supervisor is first.supervisor
+
+    def test_adoption_carries_the_new_non_flag_values_onto_the_kept_child(self):
+        # `start_timeout_s` never reaches the command line, so a change to it
+        # alone leaves the flag tuple equal and the child adopted — which used
+        # to mean the typed value went nowhere, because adoption kept the old
+        # supervisor object and its old config with it.
+        first = _provider(start_timeout_s=300.0)
+        first.supervisor.props = {"total_slots": 1}
+        flags_before = _flags_of(first.supervisor.config)
+
+        second = _provider(start_timeout_s=900.0)
+
+        assert second.supervisor is first.supervisor, "a non-flag change must not re-load the model"
+        assert second.supervisor.config["start_timeout_s"] == 900.0
+        assert _flags_of(second.supervisor.config) == flags_before, (
+            "re-merging the config must not move anything the child was started with"
+        )
 
     def test_a_reload_with_changed_flags_does_not_adopt(self):
         first = _provider(n_ctx=131072)
