@@ -175,6 +175,13 @@ def main():
         check("close marks the archived heading closed",
               "ALPHA-ENTRY-WAS-RENAMED: the verb fixture needs one entry to move around (LOW, closed," in arc)
         check("close carries the body across", "- **Observed.** Referenced by" in arc)
+        # The day header was the one write the commit that made actors mandatory did not
+        # reach: it stamped "closed with build.py" while `_by` sat one line away and the
+        # ANNOUNCE line already used it. Five actors share this account, so a header that
+        # names the tool answers "who closed today's entries" with the tool's name.
+        check("the archive day header names the actor and not the tool",
+              f"## {TODAY} — closed by CC" in arc and "closed with build.py" not in arc,
+              arc[:200])
 
         code, out = run(work, "close", "BETA-ENTRY-POINTS-AT-ALPHA", "--session=S1",
                         "--resolution=solvedish", "--evidence=x", "--by=CC")

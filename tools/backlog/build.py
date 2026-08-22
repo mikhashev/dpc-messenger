@@ -2,11 +2,16 @@
 
     uv run python tools/backlog/build.py                 # rebuild board + graph
     uv run python tools/backlog/build.py --check         # validate, write nothing
-    uv run python tools/backlog/build.py add NAME    --desc=… --priority=… --origin=…
-    uv run python tools/backlog/build.py move NAME   --to='IN PROGRESS' [--by=CC]
-    uv run python tools/backlog/build.py rename OLD NEW
+    uv run python tools/backlog/build.py add NAME    --desc=… --priority=… --origin=… --by=CC
+    uv run python tools/backlog/build.py move NAME   --to='IN PROGRESS' --by=CC
+    uv run python tools/backlog/build.py rename OLD NEW --by=CC
     uv run python tools/backlog/build.py close NAME  --session=S72 --resolution=fixed \\
-                                                     --evidence='…' [--by=CC]
+                                                     --evidence='…' --by=CC
+
+`--by` is mandatory on all four write verbs and never falls back to the OS user: five
+actors share one account on this box, so a derived name would stamp one label on all of
+them and look authoritative doing it. It stood in brackets here — optional — for a day
+after the code stopped accepting it that way.
 
 The board and the graph are written in one pass, so the two artefacts can never disagree
 about how fresh they are.
@@ -745,7 +750,10 @@ if VERB == "close":
         top = 0
         while top < len(arc) and not arc[top].startswith("## "):
             top += 1
-        arc[top:top] = [f"## {_when} — closed with build.py", ""]
+        # The actor, not the tool: five actors share one account on this box,
+        # which is the reason --by is mandatory at all. This header was the one
+        # write the commit that made actors mandatory did not reach.
+        arc[top:top] = [f"## {_when} — closed by {_by}", ""]
         idx = top
     j = idx + 1
     while j < len(arc) and not arc[j].strip():

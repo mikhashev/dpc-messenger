@@ -365,14 +365,14 @@ no script can be the only way in. The four verbs exist so that the common path i
 construction, and so that a rename cannot leave its inbound references behind (ADR-039).
 
 ```bash
-uv run python tools/backlog/build.py add NAME-IS-A-CLAIM \
+uv run python tools/backlog/build.py add NAME-IS-A-CLAIM --by=CC \
     --desc='what happens, when'  --priority=HIGH  --origin="Mike: '…'" \
     --observed='file:line or a measurement'  [--first-step='…']  [--section=OPEN]
 
-uv run python tools/backlog/build.py move NAME --to='IN PROGRESS' [--by=CC]
-uv run python tools/backlog/build.py rename OLD-NAME NEW-NAME
-uv run python tools/backlog/build.py close NAME --session=S72 --resolution=fixed \
-    --evidence='commit abc1234, observed in the 2026-08-11 startup log' [--by=CC]
+uv run python tools/backlog/build.py move NAME --to='IN PROGRESS' --by=CC
+uv run python tools/backlog/build.py rename OLD-NAME NEW-NAME --by=CC
+uv run python tools/backlog/build.py close NAME --session=S72 --resolution=fixed --by=CC \
+    --evidence='commit abc1234, observed in the 2026-08-11 startup log'
 ```
 
 What each one guarantees, beyond typing less:
@@ -388,6 +388,11 @@ What each one guarantees, beyond typing less:
   agent the heading without either.
 - **`move` rewrites the heading status to match the destination section**, so the §2
   drift check cannot fire on a move that was meant to be correct.
+- **`--by` is mandatory on every write verb, and falls back to `DPC_BACKLOG_BY` rather
+  than to the OS user.** Five actors share one account here, so a derived name would stamp
+  one label on all of them and look authoritative doing it. Both usage blocks that teach
+  these verbs showed it in brackets for a day after the code stopped accepting it that way;
+  the guard was right and the documents were wrong.
 - **`move --by` appends `- **taken:** who · date` and never replaces it.** People are
   recorded as events, not as a field: the current assignee is the last such line, derived
   and not editable, which is the property that keeps it from rotting the way `Updated:`
