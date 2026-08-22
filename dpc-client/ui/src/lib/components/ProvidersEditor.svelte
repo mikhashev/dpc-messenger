@@ -1274,21 +1274,29 @@
                           }}
                         >
                           <!-- The nine types `llama-server --help` accepts for -ctk/-ctv, in
-                               cost order. Only four were offered before, which hid the three
-                               rungs between q4_0 and q8_0 — and hid iq4_nl, which is free.
-                               Bits per element rather than GiB: the GiB figure depends on the
-                               model's attention layers and head width, so a number baked into
-                               this label would be wrong for every model but one. -->
+                               cost order. Bits per element rather than GiB: the GiB figure
+                               depends on the model's attention layers and head width, so a
+                               number baked into a label would be right for one model only.
+
+                               What the argument parser accepts is NOT what the attention
+                               kernels implement. Measured 2026-08-22 on b10472 + this card:
+                               iq4_nl parsed fine and dropped prefill from ~1200-2500 tok/s to
+                               66 and falling, GPU at 2 % and CPU at 50 % — the CUDA build
+                               carries set_rows/get_rows/dequantize for it while every one of
+                               its 301 attention instantiations is flash_attn_ext_f16<…>.
+                               Only q4_0 is measured good here, because it is what the fleet
+                               runs. The rest are unverified on this build, and this menu no
+                               longer guesses on the user's behalf. -->
                           <option value="">Auto (q8_0 → q4_0 by free VRAM)</option>
-                          <option value="f32">f32 — 32 bit, reference precision</option>
+                          <option value="f32">f32 — 32 bit, reference precision (unverified here)</option>
                           <option value="f16">f16 — 16 bit (needs headroom, check the card)</option>
-                          <option value="bf16">bf16 — 16 bit, same size as f16</option>
-                          <option value="q8_0">q8_0 — 8.5 bit, near-lossless</option>
-                          <option value="q5_1">q5_1 — 6 bit</option>
-                          <option value="q5_0">q5_0 — 5.5 bit</option>
-                          <option value="q4_1">q4_1 — 5 bit</option>
-                          <option value="iq4_nl">iq4_nl — 4.5 bit, same size as q4_0, non-linear</option>
-                          <option value="q4_0">q4_0 — 4.5 bit</option>
+                          <option value="bf16">bf16 — 16 bit, same size as f16 (unverified here)</option>
+                          <option value="q8_0">q8_0 — 8.5 bit, near-lossless (unverified here)</option>
+                          <option value="q5_1">q5_1 — 6 bit (unverified here)</option>
+                          <option value="q5_0">q5_0 — 5.5 bit (unverified here)</option>
+                          <option value="q4_1">q4_1 — 5 bit (unverified here)</option>
+                          <option value="iq4_nl">iq4_nl — 4.5 bit — NO CUDA ATTENTION KERNEL, falls back to CPU</option>
+                          <option value="q4_0">q4_0 — 4.5 bit — what this fleet runs</option>
                         </select>
                         <p class="help-text">
                           Auto never picks f16: on a full card Windows pages it into system RAM
@@ -1297,10 +1305,17 @@
                           does not fit.
                           <br />
                           Cost scales with bits per element, so q8_0 is roughly twice q4_0 and
-                          f16 roughly four times. <strong>iq4_nl occupies exactly as much as
-                          q4_0</strong> — same 4.5 bits, non-linear spacing — so it is the one
-                          change here with no memory cost. Whether that buys anything at your
-                          context depth is unmeasured; it cannot cost you VRAM to find out.
+                          f16 roughly four times. <strong>Memory is not the only cost.</strong>
+                          The argument parser accepts all nine; the CUDA attention kernels do
+                          not implement all nine, and a type they do not cover moves attention
+                          onto the CPU — the model still answers, and prefill collapses by more
+                          than an order of magnitude, worsening with depth. Measured here on
+                          2026-08-22: <code>iq4_nl</code> costs exactly what <code>q4_0</code>
+                          costs in VRAM and took prefill from ~1200–2500 tok/s to 66 and
+                          falling. <strong>Only q4_0 is measured on this build and card</strong>
+                          — it is what this fleet runs. Treat the others as untested: change one,
+                          send a long prompt, and read the child's
+                          <code>prompt processing</code> rate before trusting it.
                         </p>
                       </div>
 
