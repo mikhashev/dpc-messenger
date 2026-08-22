@@ -48,6 +48,23 @@
     n_ubatch?: number;       // micro-batch; unset = the build's 512
     n_batch?: number;        // logical batch, the micro-batch's ceiling
     cache_reuse?: number;    // KV-shift reuse chunk; unset = the build's 0 (off)
+    // The rest of the supervisor's DEFAULTS. They were reachable only by hand-
+    // editing providers.json, which is how a measured MTP experiment came to be
+    // set on the wrong field: `spec_draft_n_max` had no control, so "n=4" landed
+    // on Parallel slots and the run measured nothing.
+    binary_path?: string;       // overrides the ADR-040 pin; missing file = a loud refusal
+    n_gpu_layers?: number;      // unset = 999, every context fully on the card
+    flash_attn?: boolean;       // unset = false
+    spec_type?: string;         // unset = draft-mtp
+    spec_draft_n_max?: number;  // unset = 3
+    ctx_checkpoints?: number;   // unset = the build's 32
+    checkpoint_min_step?: number; // unset = the build's 8192
+    kv_unified?: boolean;       // unset = true; only meaningful above one slot
+    cache_ram_mib?: number;     // host RAM prompt cache, not VRAM
+    slot_save_path?: string;    // where slot state is persisted
+    jinja?: boolean;            // unset = true
+    start_timeout_s?: number;   // unset = 300
+    extra_args?: string[];      // raw flags appended last, one token per entry
     // Local Whisper specific (v0.13.1+)
     device?: string;         // 'cuda', 'cpu', or 'auto'
     compile_model?: boolean; // torch.compile optimization
@@ -100,6 +117,76 @@
   $: canBrowse = open
     && typeof window !== 'undefined'
     && ((window as any).isTauri === true || !!(window as any).__TAURI__);
+
+  // Three setters shared by the supervisor-flag controls below. Written once
+  // rather than inlined twelve times: an empty control means "unset", and unset
+  // has to delete the key, not write 0 / "" / false — the supervisor fills its
+  // own DEFAULTS over whatever the alias omits, so a written falsy value is a
+  // different instruction from an absent one.
+  function setNum(i: number, key: keyof Provider, raw: string, float = false) {
+    if (!editedConfig) return;
+    const p = editedConfig.providers[i] as any;
+    const n = float ? parseFloat(raw) : parseInt(raw);
+    if (raw === '' || isNaN(n)) delete p[key];
+    else p[key] = n;
+    editedConfig = editedConfig;
+  }
+
+  function setStr(i: number, key: keyof Provider, raw: string) {
+    if (!editedConfig) return;
+    const p = editedConfig.providers[i] as any;
+    if (raw === '') delete p[key];
+    else p[key] = raw;
+    editedConfig = editedConfig;
+  }
+
+  /** Tri-state: '' leaves the key out, 'true'/'false' write the boolean.
+   *  A checkbox cannot express "unset", and for jinja and kv_unified the
+   *  default is true — so an unchecked box would silently mean "off". */
+  function setBool(i: number, key: keyof Provider, raw: string) {
+    if (!editedConfig) return;
+    const p = editedConfig.providers[i] as any;
+    if (raw === '') delete p[key];
+    else p[key] = raw === 'true';
+    editedConfig = editedConfig;
+  }
+
+  /** `extra_args` is a flag array; the textarea holds one token per line so a
+   *  path with spaces survives, which a space-split would tear in half. */
+  function setExtraArgs(i: number, raw: string) {
+    if (!editedConfig) return;
+    const p = editedConfig.providers[i];
+    const tokens = raw.split('\n').map((s) => s.trim()).filter((s) => s.length > 0);
+    if (tokens.length === 0) delete p.extra_args;
+    else p.extra_args = tokens;
+    editedConfig = editedConfig;
+  }
+
+  /** Same dialog for the server executable, which has its own extension. */
+  async function pickBinaryPath(i: number) {
+    if (!editedConfig || !canBrowse) return;
+    const provider = editedConfig.providers[i];
+    const current = provider.binary_path || '';
+    const startIn = current ? current.replace(/[\\/][^\\/]*$/, '') : undefined;
+    try {
+      const { open: openDialog } = await import('@tauri-apps/plugin-dialog');
+      const picked = await openDialog({
+        multiple: false,
+        directory: false,
+        defaultPath: startIn,
+        title: 'Select a llama-server executable',
+        filters: [
+          { name: 'Executable', extensions: ['exe'] },
+          { name: 'All files', extensions: ['*'] },
+        ],
+      });
+      if (typeof picked !== 'string' || !picked) return;
+      provider.binary_path = picked;
+      editedConfig = editedConfig;
+    } catch (err) {
+      console.error('[ProvidersEditor] binary dialog failed:', err);
+    }
+  }
 
   /** Fill a model path from a file dialog, starting where the current value points. */
   async function pickModelPath(i: number, field: 'gguf_path' | 'mmproj') {
@@ -1269,6 +1356,267 @@
                           window thinking and answer nothing.
                         </p>
                       </div>
+
+                      <details class="supervisor-flags">
+                        <summary>Supervisor flags — the rest of what the child is started with</summary>
+                        <p class="help-text">
+                          Every field here is optional and every one of them means the same
+                          thing when left empty: <strong>the supervisor's own default is
+                          used</strong>. Clearing a field removes it from the alias rather than
+                          writing a zero — an explicit 0 and an absent key are different
+                          instructions to the child.
+                        </p>
+
+                        <div class="form-group">
+                          <label for="spec-type-{i}">Speculative decoding</label>
+                          <select
+                            id="spec-type-{i}"
+                            value={editedConfig.providers[i].spec_type ?? ''}
+                            on:change={(e) => setStr(i, 'spec_type', (e.target as HTMLSelectElement).value)}
+                          >
+                            <option value="">default (draft-mtp)</option>
+                            <option value="none">none — plain decoding</option>
+                            <option value="draft-mtp">draft-mtp — the head inside the model file</option>
+                            <option value="draft-eagle3">draft-eagle3</option>
+                            <option value="draft-simple">draft-simple</option>
+                            <option value="draft-dflash">draft-dflash</option>
+                            <option value="draft-dspark">draft-dspark</option>
+                            <option value="ngram-simple">ngram-simple</option>
+                            <option value="ngram-cache">ngram-cache</option>
+                          </select>
+                          <p class="help-text">
+                            <code>draft-mtp</code> needs nothing else: the head ships inside the
+                            GGUF. Everything beginning <code>draft-</code> other than that needs
+                            a separate drafter file, named through <code>--spec-draft-model</code>
+                            in Extra flags below — and a drafter beside an mmproj kills every
+                            request carrying an image on this build.
+                          </p>
+                        </div>
+
+                        <div class="form-group">
+                          <label for="spec-n-max-{i}">Draft tokens per step (spec_draft_n_max)</label>
+                          <input
+                            id="spec-n-max-{i}"
+                            type="number"
+                            min="1"
+                            value={editedConfig.providers[i].spec_draft_n_max ?? ''}
+                            on:input={(e) => setNum(i, 'spec_draft_n_max', (e.target as HTMLInputElement).value)}
+                            placeholder="default 3"
+                          />
+                          <p class="help-text">
+                            How many tokens the drafter proposes before the model verifies.
+                            Higher is not automatically worse: acceptance <em>ratio</em> falls
+                            with it while accepted <em>length</em> — which is what throughput
+                            follows — can still rise. Judge it by the child's
+                            <code>mean len</code>, not by <code>draft acceptance</code>.
+                          </p>
+                        </div>
+
+                        <div class="form-group">
+                          <label for="ngl-{i}">GPU layers (n_gpu_layers)</label>
+                          <input
+                            id="ngl-{i}"
+                            type="number"
+                            value={editedConfig.providers[i].n_gpu_layers ?? ''}
+                            on:input={(e) => setNum(i, 'n_gpu_layers', (e.target as HTMLInputElement).value)}
+                            placeholder="default 999 (all)"
+                          />
+                          <p class="help-text">
+                            999 puts every context fully on the card, which was measured worth
+                            +11.3 % of prefill here. Lower it only for a card that cannot hold
+                            the whole model — a partial split disables fused kernels on the
+                            layers that land on the CPU side.
+                          </p>
+                        </div>
+
+                        <div class="form-group">
+                          <label for="flash-attn-{i}">Flash attention</label>
+                          <select
+                            id="flash-attn-{i}"
+                            value={editedConfig.providers[i].flash_attn === undefined ? '' : String(editedConfig.providers[i].flash_attn)}
+                            on:change={(e) => setBool(i, 'flash_attn', (e.target as HTMLSelectElement).value)}
+                          >
+                            <option value="">default (off)</option>
+                            <option value="true">on</option>
+                            <option value="false">off</option>
+                          </select>
+                          <p class="help-text">
+                            Passed as <code>--flash-attn</code>. Its kernels exist only for some
+                            KV types; with a type they do not cover, attention falls back to the
+                            CPU and prefill collapses. Change one thing at a time and read the
+                            child's <code>prompt processing</code> rate afterwards.
+                          </p>
+                        </div>
+
+                        <div class="form-group">
+                          <label for="kv-unified-{i}">Unified KV pool</label>
+                          <select
+                            id="kv-unified-{i}"
+                            value={editedConfig.providers[i].kv_unified === undefined ? '' : String(editedConfig.providers[i].kv_unified)}
+                            on:change={(e) => setBool(i, 'kv_unified', (e.target as HTMLSelectElement).value)}
+                          >
+                            <option value="">default (on)</option>
+                            <option value="true">on — one pool shared by all slots</option>
+                            <option value="false">off — the pool is split per slot</option>
+                          </select>
+                          <p class="help-text">
+                            Only means anything above one slot: at a single slot unified and
+                            split are the same pool. Sent as <code>--kv-unified</code> alongside
+                            <code>-np</code>.
+                          </p>
+                        </div>
+
+                        <div class="form-group">
+                          <label for="ctx-checkpoints-{i}">Context checkpoints per slot</label>
+                          <input
+                            id="ctx-checkpoints-{i}"
+                            type="number"
+                            min="0"
+                            value={editedConfig.providers[i].ctx_checkpoints ?? ''}
+                            on:input={(e) => setNum(i, 'ctx_checkpoints', (e.target as HTMLInputElement).value)}
+                            placeholder="default 32 (the build's)"
+                          />
+                          <p class="help-text">
+                            A checkpoint snapshots the recurrent state and costs ~585–700 MiB
+                            here, so the count decides how many parked conversations fit rather
+                            than whether resuming works at all. Four checkpoints put a 150K state
+                            near 5 GB.
+                          </p>
+                        </div>
+
+                        <div class="form-group">
+                          <label for="checkpoint-step-{i}">Minimum tokens between checkpoints</label>
+                          <input
+                            id="checkpoint-step-{i}"
+                            type="number"
+                            min="0"
+                            value={editedConfig.providers[i].checkpoint_min_step ?? ''}
+                            on:input={(e) => setNum(i, 'checkpoint_min_step', (e.target as HTMLInputElement).value)}
+                            placeholder="default 8192 (the build's)"
+                          />
+                          <p class="help-text">
+                            Read together with the count above: spacing times count is how far
+                            back the child can resume from.
+                          </p>
+                        </div>
+
+                        <div class="form-group">
+                          <label for="cache-ram-{i}">Host prompt cache, MiB (cache_ram_mib)</label>
+                          <input
+                            id="cache-ram-{i}"
+                            type="number"
+                            min="0"
+                            value={editedConfig.providers[i].cache_ram_mib ?? ''}
+                            on:input={(e) => setNum(i, 'cache_ram_mib', (e.target as HTMLInputElement).value)}
+                            placeholder="e.g. 24576"
+                          />
+                          <p class="help-text">
+                            System RAM, <strong>not</strong> VRAM — it holds whole conversations
+                            outside the card so a returning slot need not re-read its prompt.
+                            Raising it costs nothing on the GPU.
+                          </p>
+                        </div>
+
+                        <div class="form-group">
+                          <label for="slot-save-{i}">Slot save path</label>
+                          <input
+                            id="slot-save-{i}"
+                            type="text"
+                            value={editedConfig.providers[i].slot_save_path ?? ''}
+                            on:input={(e) => setStr(i, 'slot_save_path', (e.target as HTMLInputElement).value)}
+                            placeholder="empty = slot state is not persisted"
+                          />
+                          <p class="help-text">
+                            Directory the child writes slot state into
+                            (<code>--slot-save-path</code>). Empty means state lives only for as
+                            long as the process does.
+                          </p>
+                        </div>
+
+                        <div class="form-group">
+                          <label for="binary-path-{i}">llama-server binary (overrides the pin)</label>
+                          <div class="path-row">
+                            <input
+                              id="binary-path-{i}"
+                              type="text"
+                              value={editedConfig.providers[i].binary_path ?? ''}
+                              on:input={(e) => setStr(i, 'binary_path', (e.target as HTMLInputElement).value)}
+                              placeholder="empty = the ADR-040 pinned build"
+                            />
+                            {#if canBrowse}
+                              <button
+                                type="button"
+                                class="btn btn-browse"
+                                on:click={() => pickBinaryPath(i)}
+                                title="Pick a llama-server executable from disk"
+                              >Browse…</button>
+                            {/if}
+                          </div>
+                          <p class="help-text warn">
+                            Empty is the right answer almost always: the pin is fetched and
+                            hash-verified, a hand-picked build is neither. Set it only to test a
+                            build the pin does not contain, and set it back afterwards. A path
+                            that names no file is refused loudly rather than falling back.
+                          </p>
+                        </div>
+
+                        <div class="form-group">
+                          <label for="jinja-{i}">Jinja chat template</label>
+                          <select
+                            id="jinja-{i}"
+                            value={editedConfig.providers[i].jinja === undefined ? '' : String(editedConfig.providers[i].jinja)}
+                            on:change={(e) => setBool(i, 'jinja', (e.target as HTMLSelectElement).value)}
+                          >
+                            <option value="">default (on)</option>
+                            <option value="true">on</option>
+                            <option value="false">off</option>
+                          </select>
+                          <p class="help-text">
+                            Uses the template baked into the GGUF. Off falls back to the
+                            server's built-in formatting, which for most modern models is the
+                            wrong one — turn it off only if the model ships no template.
+                          </p>
+                        </div>
+
+                        <div class="form-group">
+                          <label for="start-timeout-{i}">Start timeout, seconds</label>
+                          <input
+                            id="start-timeout-{i}"
+                            type="number"
+                            min="1"
+                            value={editedConfig.providers[i].start_timeout_s ?? ''}
+                            on:input={(e) => setNum(i, 'start_timeout_s', (e.target as HTMLInputElement).value, true)}
+                            placeholder="default 300"
+                          />
+                          <p class="help-text">
+                            How long the supervisor waits for the child to answer /health before
+                            giving up with the child's last log lines attached. A very large
+                            model on a cold disk can need more than 300 s.
+                            <br />
+                            The one field here that does <strong>not</strong> restart the child
+                            when you change it: it is not part of the command line, so it takes
+                            effect the next time the child starts for some other reason.
+                          </p>
+                        </div>
+
+                        <div class="form-group">
+                          <label for="extra-args-{i}">Extra flags (one token per line)</label>
+                          <textarea
+                            id="extra-args-{i}"
+                            rows="4"
+                            value={(editedConfig.providers[i].extra_args ?? []).join('\n')}
+                            on:input={(e) => setExtraArgs(i, (e.target as HTMLTextAreaElement).value)}
+                            placeholder={'--spec-draft-model\nD:\\models\\drafter.gguf\n--spec-draft-ngl\n999'}
+                          ></textarea>
+                          <p class="help-text warn">
+                            Appended to the command line last, verbatim and unchecked. One token
+                            per line — a flag and its value are separate lines, which is what
+                            keeps a path containing spaces in one piece. Anything the child
+                            rejects makes it exit before becoming healthy, and the supervisor
+                            reports that with the child's own last lines.
+                          </p>
+                        </div>
+                      </details>
                     {/if}
 
                     {#if editedConfig.providers[i].type === 'openai_compatible'}
@@ -2543,6 +2891,54 @@
 
   .btn-browse:hover {
     background: #4a4a4a;
+    border-color: #007acc;
+  }
+
+  /* The twelve knobs that had no door. Folded away by default because most of
+     them are rarely touched, but present — the alternative was hand-editing
+     providers.json, and that is how a measured experiment came to be set on the
+     wrong field. */
+  .supervisor-flags {
+    border: 1px solid #333;
+    border-radius: 6px;
+    padding: 8px 12px;
+    background: #202020;
+  }
+
+  .supervisor-flags > summary {
+    cursor: pointer;
+    color: #cfcfcf;
+    font-size: 0.9rem;
+    padding: 2px 0;
+  }
+
+  .supervisor-flags > summary:hover {
+    color: #fff;
+  }
+
+  .supervisor-flags[open] > summary {
+    margin-bottom: 10px;
+    border-bottom: 1px solid #333;
+    padding-bottom: 8px;
+  }
+
+  .supervisor-flags .form-group {
+    margin-bottom: 14px;
+  }
+
+  .supervisor-flags textarea {
+    background: #2a2a2a;
+    border: 1px solid #444;
+    color: #fff;
+    padding: 8px;
+    border-radius: 4px;
+    font-size: 0.85rem;
+    font-family: 'Courier New', monospace;
+    resize: vertical;
+  }
+
+  .supervisor-flags textarea:focus {
+    outline: none;
     border-color: #007acc;
   }
 
