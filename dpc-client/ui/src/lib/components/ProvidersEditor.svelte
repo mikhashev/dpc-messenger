@@ -1284,19 +1284,30 @@
                                66 and falling, GPU at 2 % and CPU at 50 % — the CUDA build
                                carries set_rows/get_rows/dequantize for it while every one of
                                its 301 attention instantiations is flash_attn_ext_f16<…>.
-                               Only q4_0 is measured good here, because it is what the fleet
-                               runs. The rest are unverified on this build, and this menu no
-                               longer guesses on the user's behalf. -->
+                               «Unverified» was itself a guess, and it was wrong for four of
+                               the nine. Decided 2026-08-22 by decoding the 48
+                               flash_attn_ext_vec instantiations in ggml-cuda.dll: the template
+                               arguments are Itanium-mangled enum values (L9ggml_type<N>E), so
+                               the type names never appear as text and searching for them
+                               returns nothing for every type, compiled or not. Decoded, the
+                               compiled K/V pairs are exactly BF16, F16, Q4_0 and Q8_0, twelve
+                               each. F32, Q4_1, Q5_0, Q5_1 and IQ4_NL have none.
+
+                               The asymmetry is the point: absence of a kernel is decisive —
+                               that type WILL fall to the CPU — while presence says only that
+                               the path exists, not that it is fast here. So four options now
+                               carry the iq4_nl warning, and the ones that compile say what
+                               was and was not measured. -->
                           <option value="">Auto (q8_0 → q4_0 by free VRAM)</option>
-                          <option value="f32">f32 — 32 bit, reference precision (unverified here)</option>
-                          <option value="f16">f16 — 16 bit (needs headroom, check the card)</option>
-                          <option value="bf16">bf16 — 16 bit, same size as f16 (unverified here)</option>
-                          <option value="q8_0">q8_0 — 8.5 bit, near-lossless (unverified here)</option>
-                          <option value="q5_1">q5_1 — 6 bit (unverified here)</option>
-                          <option value="q5_0">q5_0 — 5.5 bit (unverified here)</option>
-                          <option value="q4_1">q4_1 — 5 bit (unverified here)</option>
+                          <option value="f32">f32 — 32 bit — NO CUDA ATTENTION KERNEL, falls back to CPU</option>
+                          <option value="f16">f16 — 16 bit, kernel present (needs headroom, check the card)</option>
+                          <option value="bf16">bf16 — 16 bit, kernel present (speed unmeasured here)</option>
+                          <option value="q8_0">q8_0 — 8.5 bit, kernel present (speed unmeasured here)</option>
+                          <option value="q5_1">q5_1 — 6 bit — NO CUDA ATTENTION KERNEL, falls back to CPU</option>
+                          <option value="q5_0">q5_0 — 5.5 bit — NO CUDA ATTENTION KERNEL, falls back to CPU</option>
+                          <option value="q4_1">q4_1 — 5 bit — NO CUDA ATTENTION KERNEL, falls back to CPU</option>
                           <option value="iq4_nl">iq4_nl — 4.5 bit — NO CUDA ATTENTION KERNEL, falls back to CPU</option>
-                          <option value="q4_0">q4_0 — 4.5 bit — what this fleet runs</option>
+                          <option value="q4_0">q4_0 — 4.5 bit — kernel present, and what this fleet runs</option>
                         </select>
                         <p class="help-text">
                           Auto never picks f16: on a full card Windows pages it into system RAM
@@ -1306,15 +1317,20 @@
                           <br />
                           Cost scales with bits per element, so q8_0 is roughly twice q4_0 and
                           f16 roughly four times. <strong>Memory is not the only cost.</strong>
-                          The argument parser accepts all nine; the CUDA attention kernels do
-                          not implement all nine, and a type they do not cover moves attention
-                          onto the CPU — the model still answers, and prefill collapses by more
-                          than an order of magnitude, worsening with depth. Measured here on
-                          2026-08-22: <code>iq4_nl</code> costs exactly what <code>q4_0</code>
-                          costs in VRAM and took prefill from ~1200–2500 tok/s to 66 and
-                          falling. <strong>Only q4_0 is measured on this build and card</strong>
-                          — it is what this fleet runs. Treat the others as untested: change one,
-                          send a long prompt, and read the child's
+                          The argument parser accepts all nine; this CUDA build implements
+                          attention for four. A type it does not cover moves attention onto the
+                          CPU — the model still answers, and prefill collapses by more than an
+                          order of magnitude, worsening with depth. Measured here on 2026-08-22:
+                          <code>iq4_nl</code> costs exactly what <code>q4_0</code> costs in VRAM
+                          and took prefill from ~1200–2500 tok/s to 66 and falling.
+                          <br />
+                          <strong>The four marked «no kernel» are not a guess.</strong> The
+                          compiled attention instantiations in <code>ggml-cuda.dll</code> were
+                          decoded on 2026-08-22 and cover exactly bf16, f16, q4_0 and q8_0.
+                          Choosing f32, q4_1, q5_0, q5_1 or iq4_nl buys the collapse above, on
+                          purpose. <strong>Presence of a kernel is not a measurement:</strong>
+                          only q4_0 has been run here — it is what this fleet uses. For any
+                          other, change one, send a long prompt, and read the child's
                           <code>prompt processing</code> rate before trusting it.
                         </p>
                       </div>
@@ -1389,22 +1405,44 @@
                             value={editedConfig.providers[i].spec_type ?? ''}
                             on:change={(e) => setStr(i, 'spec_type', (e.target as HTMLSelectElement).value)}
                           >
+                            <!-- The eleven values `--spec-type` accepts on the pin, with the
+                                 same honesty the KV menu above got. A name in the parser's
+                                 list is not a working implementation: draft-dflash is in this
+                                 list and cannot load on the pinned build at all. The list was
+                                 read off b10472's own --help on 2026-08-22; three values were
+                                 missing from this menu until then. -->
                             <option value="">default (draft-mtp)</option>
                             <option value="none">none — plain decoding</option>
-                            <option value="draft-mtp">draft-mtp — the head inside the model file</option>
-                            <option value="draft-eagle3">draft-eagle3</option>
-                            <option value="draft-simple">draft-simple</option>
-                            <option value="draft-dflash">draft-dflash</option>
-                            <option value="draft-dspark">draft-dspark</option>
-                            <option value="ngram-simple">ngram-simple</option>
-                            <option value="ngram-cache">ngram-cache</option>
+                            <option value="draft-mtp">draft-mtp — head inside the GGUF, measured here</option>
+                            <option value="draft-dflash">draft-dflash — DOES NOT LOAD ON THE PINNED BUILD</option>
+                            <option value="draft-eagle3">draft-eagle3 — needs a drafter file (unverified here)</option>
+                            <option value="draft-simple">draft-simple — needs a drafter file (unverified here)</option>
+                            <option value="draft-dspark">draft-dspark — needs a drafter file (unverified here)</option>
+                            <option value="ngram-simple">ngram-simple — no drafter file (unverified here)</option>
+                            <option value="ngram-cache">ngram-cache — no drafter file (unverified here)</option>
+                            <option value="ngram-map-k">ngram-map-k — no drafter file (unverified here)</option>
+                            <option value="ngram-map-k4v">ngram-map-k4v — no drafter file (unverified here)</option>
+                            <option value="ngram-mod">ngram-mod — no drafter file (unverified here)</option>
                           </select>
                           <p class="help-text">
                             <code>draft-mtp</code> needs nothing else: the head ships inside the
-                            GGUF. Everything beginning <code>draft-</code> other than that needs
-                            a separate drafter file, named through <code>--spec-draft-model</code>
-                            in Extra flags below — and a drafter beside an mmproj kills every
-                            request carrying an image on this build.
+                            GGUF, and it is the one value measured on this fleet — depth 3
+                            accepts 0.686 of its drafts against depth 4's 0.578. Everything
+                            beginning <code>draft-</code> other than that needs a separate
+                            drafter file, named through <code>--spec-draft-model</code> in Extra
+                            flags below — and a drafter beside an mmproj kills every request
+                            carrying an image on this build.
+                            <br />
+                            <strong><code>draft-dflash</code> cannot start on the pinned
+                            binary.</strong> The DFlash2 drafter declares 81 tensors and b10472
+                            builds 58 of them — the 20 convolution and 3 selector tensors are
+                            what PR&nbsp;27342 adds — so the child dies with
+                            <code>expected 81, got 58</code> before serving anything. It loads
+                            only under a <code>binary_path</code> pointing at a build carrying
+                            that PR. Everything else here is accepted by the parser and
+                            <strong>unverified on this build</strong>: the parser's list is not
+                            evidence that the path works, which is the same trap the KV menu
+                            above documents.
                           </p>
                         </div>
 
@@ -1451,15 +1489,21 @@
                             value={editedConfig.providers[i].flash_attn === undefined ? '' : String(editedConfig.providers[i].flash_attn)}
                             on:change={(e) => setBool(i, 'flash_attn', (e.target as HTMLSelectElement).value)}
                           >
-                            <option value="">default (off)</option>
+                            <option value="">default (auto — the binary decides)</option>
                             <option value="true">on</option>
                             <option value="false">off</option>
                           </select>
                           <p class="help-text">
-                            Passed as <code>--flash-attn</code>. Its kernels exist only for some
-                            KV types; with a type they do not cover, attention falls back to the
-                            CPU and prefill collapses. Change one thing at a time and read the
-                            child's <code>prompt processing</code> rate afterwards.
+                            Passed as <code>--flash-attn on|off</code>. The binary's own default
+                            is <code>auto</code>, not off, which is what leaving this empty
+                            gives you — the label said «off» until 2026-08-22 and was wrong.
+                            Until the same day the flag was also sent <em>bare</em>, and the pin
+                            refuses it that way: <code>unknown value for --flash-attn</code>,
+                            and the child died on argv before loading a backend. Its kernels
+                            exist only for some KV types; with a type they do not cover,
+                            attention falls back to the CPU and prefill collapses. Change one
+                            thing at a time and read the child's
+                            <code>prompt processing</code> rate afterwards.
                           </p>
                         </div>
 
@@ -1475,9 +1519,14 @@
                             <option value="false">off — the pool is split per slot</option>
                           </select>
                           <p class="help-text">
-                            Only means anything above one slot: at a single slot unified and
-                            split are the same pool. Sent as <code>--kv-unified</code> alongside
-                            <code>-np</code>.
+                            Only changes anything above one slot: at a single slot unified and
+                            split are the same pool. Sent as <code>--kv-unified</code> or
+                            <code>--no-kv-unified</code>, always — the binary's own default is
+                            conditional («enabled if number of slots is auto»), so saying
+                            nothing means one thing with <code>-np</code> set and the opposite
+                            without it. Until 2026-08-22 this was emitted only above two slots,
+                            which left an alias asking for a unified pool beside an explicit
+                            <code>-np</code> quietly running a split one.
                           </p>
                         </div>
 
@@ -1589,7 +1638,11 @@
                           <p class="help-text">
                             Uses the template baked into the GGUF. Off falls back to the
                             server's built-in formatting, which for most modern models is the
-                            wrong one — turn it off only if the model ships no template.
+                            wrong one — turn it off only if the model ships no template. Sent as
+                            <code>--jinja</code> or <code>--no-jinja</code>: the binary ships
+                            jinja <em>enabled</em>, so until 2026-08-22 «off» emitted nothing at
+                            all and left it on — the one thing this control existed to do was
+                            the one thing it could not do.
                           </p>
                         </div>
 
