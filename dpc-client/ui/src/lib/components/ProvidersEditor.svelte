@@ -1593,9 +1593,11 @@
                             giving up with the child's last log lines attached. A very large
                             model on a cold disk can need more than 300 s.
                             <br />
-                            The one field here that does <strong>not</strong> restart the child
-                            when you change it: it is not part of the command line, so it takes
-                            effect the next time the child starts for some other reason.
+                            The one field here that does <strong>not</strong> restart the child,
+                            and the only one whose new value is not picked up on its own: it is
+                            not part of the command line, so a save that changes nothing else
+                            leaves the running child adopted as it is — with the old timeout.
+                            It takes hold the next time some command-line field changes too.
                           </p>
                         </div>
 
