@@ -136,7 +136,10 @@ class LlamaServerProvider(DeepSeekProvider):
                 )
             self.supervisor = LlamaServerSupervisor(alias, config)
             if previous is not None:
-                self._retire(previous)
+                # The successor must not spend VRAM until the predecessor has
+                # finished its in-flight work and released the card — this card
+                # cannot hold two copies of the model.
+                self.supervisor.supersedes(self._retire(previous))
         _ACTIVE_SUPERVISORS[alias] = self.supervisor
 
         self._openai: Optional[AsyncOpenAI] = None
@@ -165,22 +168,33 @@ class LlamaServerProvider(DeepSeekProvider):
         self._sampling_default_logged = False
 
     @staticmethod
-    def _retire(supervisor: LlamaServerSupervisor) -> None:
-        """Stop a superseded child without blocking construction.
+    def _retire(supervisor: LlamaServerSupervisor) -> Optional["asyncio.Task"]:
+        """Drain a superseded child without blocking construction.
 
-        The signal alone makes the child exit and flush; the await in stop()
-        just reaps it. When no loop is running (manager built outside async
-        context) there is nothing to schedule the reap on, so the warning is
-        the honest output and the OS reaps the child at process exit.
+        Drain rather than stop, on Mike's rule of 2026-08-22: a settings save
+        is applied immediately, but the running child is only replaced once the
+        answer it is generating has finished. `stop()` here used to send the
+        signal at once, which killed an agent mid-generation — while `close()`
+        twenty lines below already drained, so the right behaviour was in the
+        file and simply not on this path.
+
+        No deadline: the wait is exactly as long as the work. Returned so the
+        successor can wait for the card to be free before it starts; process
+        shutdown does not come through here, so this cannot hang the exit.
+
+        When no loop is running (manager built outside an async context) there
+        is nothing to schedule on, so the warning is the honest output and the
+        OS reaps the child at process exit.
         """
         try:
-            asyncio.get_running_loop().create_task(supervisor.stop())
+            return asyncio.get_running_loop().create_task(supervisor.drain(timeout=None))
         except RuntimeError:
             logger.warning(
                 "llamacpp_server '%s': no running loop to stop the superseded "
                 "child; it was signalled below if possible",
                 supervisor.alias,
             )
+            return None
 
     # --- lifecycle -----------------------------------------------------------
 

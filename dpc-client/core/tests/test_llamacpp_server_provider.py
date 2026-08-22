@@ -10,16 +10,25 @@ lazy behind the supervisor, a reload adopts a live child with unchanged flags,
 and close() drains.
 """
 
+import asyncio
 import json
 from types import SimpleNamespace
 
 import pytest
 
 from dpc_client_core.llm_manager import PROVIDER_MAP
+from dpc_client_core.managers.llama_server_supervisor import (
+    LlamaServerError,
+    LlamaServerSupervisor,
+)
 from dpc_client_core.providers import LlamaServerProvider
 from dpc_client_core.providers.llamacpp_server_provider import _ACTIVE_SUPERVISORS, _flags_of
 
 GGUF = "D:/models/qwen3.8-27b-Q4_K_M.gguf"
+
+
+async def _noop_stop():
+    return None
 
 
 def _provider(**overrides):
@@ -140,6 +149,101 @@ class TestConstruction:
         second = _provider(n_ctx=262144)
         assert second.supervisor is not first.supervisor
         assert _ACTIVE_SUPERVISORS["local_qwen38"] is second.supervisor
+
+
+class TestDrainingBeforeReplacement:
+    """Mike's rule, 2026-08-22: a settings save applies at once, but the child
+    that is generating an answer is replaced only after that answer is done."""
+
+    @staticmethod
+    def _bare_supervisor(**cfg):
+        sup = LlamaServerSupervisor("local_qwen38", {"gguf_path": GGUF, **cfg})
+        sup.props = {"total_slots": 1}          # "it is serving"
+        return sup
+
+    @pytest.mark.asyncio
+    async def test_a_drain_does_not_stop_the_child_while_a_call_is_in_flight(self):
+        sup = self._bare_supervisor()
+        stopped = []
+
+        async def _fake_stop():
+            stopped.append(True)
+
+        sup.stop = _fake_stop
+
+        async with sup.call_slot():
+            task = asyncio.create_task(sup.drain(timeout=None))
+            await asyncio.sleep(0.6)
+            assert stopped == [], "the child was stopped under a running call"
+        await asyncio.wait_for(task, timeout=5)
+        assert stopped == [True], "the child must stop once the call has finished"
+
+    @pytest.mark.asyncio
+    async def test_a_config_reload_drains_the_live_child_instead_of_killing_it(self):
+        # The end-to-end shape of the rule, over the wiring rather than the
+        # mechanism: a save that changes a command-line flag must leave the
+        # answer in progress alone. Testing drain() alone would have passed
+        # while `_retire` still called stop().
+        first = _provider(n_ctx=131072)
+        first.supervisor.props = {"total_slots": 1}
+        stopped = []
+
+        async def _fake_stop():
+            stopped.append(True)
+
+        first.supervisor.stop = _fake_stop
+
+        async with first.supervisor.call_slot():
+            second = _provider(n_ctx=262144)          # a flag moved -> retire
+            assert second.supervisor is not first.supervisor
+            await asyncio.sleep(0.5)
+            assert stopped == [], "a settings save stopped the child mid-generation"
+            assert second.supervisor._predecessor is not None, (
+                "the successor was not told to wait for the card"
+            )
+
+        await asyncio.sleep(0.6)
+        assert stopped == [True], "the child must be replaced once the call has finished"
+
+    @pytest.mark.asyncio
+    async def test_a_drain_refuses_new_calls_so_the_wait_can_end(self):
+        # Without the refusal the wait could be starved forever by fresh work;
+        # new calls belong to the successor, which is already in the registry.
+        sup = self._bare_supervisor()
+        sup.stop = _noop_stop
+        await sup.drain(timeout=None)
+        with pytest.raises(LlamaServerError, match="draining"):
+            sup.call_slot()
+
+    @pytest.mark.asyncio
+    async def test_the_successor_does_not_start_until_the_predecessor_let_go(self):
+        # The card cannot hold two copies of the model, so "drain the old one"
+        # is only safe if the new one waits for the card.
+        released = asyncio.Event()
+
+        async def _slow_drain():
+            await released.wait()
+
+        successor = self._bare_supervisor()
+        successor.props = None                  # nothing running yet
+        successor.supersedes(asyncio.create_task(_slow_drain()))
+
+        started = []
+
+        async def _fake_launch(binary):
+            started.append(True)
+            return {"total_slots": 1}
+
+        successor._launch_auto_kv = _fake_launch
+        successor._launch = _fake_launch
+
+        task = asyncio.create_task(successor.ensure_running())
+        await asyncio.sleep(0.4)
+        assert started == [], "the successor started while the old child still held the card"
+
+        released.set()
+        await asyncio.wait_for(task, timeout=5)
+        assert started == [True]
 
 
 class TestTheTemplateDictionary:

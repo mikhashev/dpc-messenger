@@ -312,6 +312,11 @@ class LlamaServerSupervisor:
         self._log_path = DPC_HOME / "logs" / f"llama-server-{alias}.log"
         self._log_fh = None
         self._draining = False
+        # A superseded child holds the whole model until it has finished
+        # draining, and this card cannot hold two. Set by the provider when this
+        # supervisor replaces a live one; `ensure_running` waits on it before
+        # spending VRAM, so draining the old child cannot turn into two children.
+        self._predecessor: Optional["asyncio.Task"] = None
         self._in_flight = 0
         self._start_lock = asyncio.Lock()
 
@@ -386,6 +391,7 @@ class LlamaServerSupervisor:
                 raise LlamaServerError(f"llama-server[{self.alias}] is draining; new calls refused")
             if self._proc and self._proc.returncode is None and self.props:
                 return self.props
+            await self._await_predecessor()
             binary = ensure_binary(self.config)
             self.port = self.port or _free_port()
             if self.config.get("cache_type_k") is not None or self.config.get("cache_type_v") is not None:
@@ -644,6 +650,33 @@ class LlamaServerSupervisor:
         except OSError:
             return []
 
+    def supersedes(self, drain_task: Optional["asyncio.Task"]) -> None:
+        """Record the drain of the child this supervisor replaces."""
+        self._predecessor = drain_task
+
+    async def _await_predecessor(self) -> None:
+        """Do not start until the superseded child has actually let go.
+
+        Without this, draining the old child only trades one failure for
+        another: the old one keeps its ~25 GB while a call that arrives during
+        the drain starts a second child on a card that cannot hold both.
+        """
+        task, self._predecessor = self._predecessor, None
+        if task is None or task.done():
+            return
+        logger.info(
+            "llama-server[%s]: waiting for the superseded child to finish its "
+            "in-flight work and release the card before starting",
+            self.alias,
+        )
+        try:
+            await task
+        except Exception as exc:      # a failed drain must not block the successor
+            logger.warning(
+                "llama-server[%s]: the superseded child's drain ended badly (%s); "
+                "starting anyway", self.alias, exc,
+            )
+
     def call_slot(self):
         """Claim one in-flight call; refuses while draining, so drain can wait.
 
@@ -668,11 +701,21 @@ class LlamaServerSupervisor:
             self._supervisor._in_flight -= 1
             return False
 
-    async def drain(self, timeout: float = 120.0) -> None:
-        """Refuse new work, let in-flight calls finish, then stop."""
+    async def drain(self, timeout: Optional[float] = 120.0) -> None:
+        """Refuse new work, let in-flight calls finish, then stop.
+
+        `timeout=None` waits as long as the work takes. That is Mike's rule for
+        a configuration change, 2026-08-22: a save must never cut a generation
+        that is already running, and an agent turn on 40-170K context can run
+        for minutes. Shutdown does not come through here — it calls `stop`
+        directly — so an unbounded wait cannot hang the process exit.
+        """
         self._draining = True
         try:
-            await asyncio.wait_for(self._wait_idle(), timeout=timeout)
+            if timeout is None:
+                await self._wait_idle()
+            else:
+                await asyncio.wait_for(self._wait_idle(), timeout=timeout)
         except asyncio.TimeoutError:
             logger.warning(
                 "llama-server[%s]: drain timed out with %d call(s) still in flight",
@@ -682,8 +725,20 @@ class LlamaServerSupervisor:
         await self.stop()
 
     async def _wait_idle(self) -> None:
+        # A silent wait is the shape this project keeps rediscovering: the work
+        # is happening, nothing says so, and the operator concludes it hung. One
+        # line every 15 s costs nothing and answers "is it stuck or is it busy".
+        waited = 0.0
         while self._in_flight > 0:
             await asyncio.sleep(0.2)
+            waited += 0.2
+            if waited % 15 < 0.2:
+                logger.info(
+                    "llama-server[%s]: draining, %d call(s) still in flight after %.0fs",
+                    self.alias,
+                    self._in_flight,
+                    waited,
+                )
 
     async def stop(self) -> None:
         """Ask the child to stop with a signal that lets it flush, then wait.

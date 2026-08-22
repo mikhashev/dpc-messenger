@@ -16,11 +16,20 @@ class FakeSupervisor:
         self.props = {"vision": False} if started else None
         self.raises = raises
         self.stopped = False
+        self.drained = False
 
     async def stop(self):
         if self.raises:
             raise OSError("the child is already gone")
         self.stopped = True
+
+    async def drain(self, timeout=None):
+        # Faithful to the real one: refuse new work, let the in-flight calls
+        # finish, then stop. This double had only `stop`, which is why a change
+        # of the call site broke it — a stub shaped for yesterday's caller
+        # cannot notice that today's caller is different.
+        self.drained = True
+        await self.stop()
 
 
 @pytest.fixture(autouse=True)
@@ -37,9 +46,12 @@ class TestAnAliasThatLeftTheConfiguration:
         lsp._ACTIVE_SUPERVISORS["llama.cpp-abl"] = gone
 
         retired = lsp.retire_absent(["qwen3.8 27b Mythos", "deepseek_flash"])
-        await asyncio.sleep(0)
+        await asyncio.sleep(0.05)
 
         assert retired == ["llama.cpp-abl"]
+        # Drained, not killed: an alias can leave the configuration while an
+        # agent is still generating on its child.
+        assert gone.drained is True
         assert gone.stopped is True
         assert "llama.cpp-abl" not in lsp._ACTIVE_SUPERVISORS
 
@@ -78,6 +90,9 @@ class TestShutdownReachesAChildNoProviderHolds:
 
         assert sorted(stopped) == ["llama.cpp", "llama.cpp-abl"]
         assert one.stopped and two.stopped
+        # Shutdown stops rather than drains on purpose: waiting for an agent to
+        # finish is right for a settings change and would hang the process exit.
+        assert one.drained is False and two.drained is False
         assert lsp._ACTIVE_SUPERVISORS == {}
 
     @pytest.mark.asyncio
@@ -125,7 +140,8 @@ class TestShutdownReachesAChildNoProviderHolds:
         lsp._ACTIVE_SUPERVISORS["llama.cpp-abl"] = orphan
 
         manager.save_config({"default_provider": "", "providers": []})
-        await asyncio.sleep(0)
+        await asyncio.sleep(0.05)
 
+        assert orphan.drained is True
         assert orphan.stopped is True
         assert "llama.cpp-abl" not in lsp._ACTIVE_SUPERVISORS
