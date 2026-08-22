@@ -227,3 +227,58 @@ class TestRegistryIntegration:
 
         with pytest.raises(ValueError, match="guard boom"):
             await reg.fire(HookLifecycle.BETWEEN_ROUNDS, make_ctx())
+
+
+class TestContextLimitGuard:
+    """The sixth guard: nothing watched the one resource a long task exhausts.
+
+    Rounds, tools, research, repetition and money were all guarded; the context
+    window was watched by compaction alone, and compaction is a best effort — it
+    reaches only tool results outside the recent rounds and reduces each of them
+    once. Observed 2026-08-23: an agent six rounds in, threshold 0.3 so compaction
+    firing continuously, sitting at 81 % of its window with nothing to stop it.
+    """
+
+    @pytest.mark.asyncio
+    async def test_a_prompt_past_the_ceiling_stops_the_loop(self):
+        from dpc_client_core.dpc_agent.guards import ContextLimitGuard
+
+        guard = ContextLimitGuard(ratio=0.95)
+        ctx = make_ctx(round_idx=7, last_prompt_tokens=205_000, context_window=210_000)
+
+        assert await guard.between_rounds(ctx) is HookAction.STOP_LOOP
+        assert "CONTEXT_LIMIT" in guard.stop_message()
+        assert "98%" in guard.stop_message()
+
+    @pytest.mark.asyncio
+    async def test_a_run_compaction_can_still_rescue_is_not_interrupted(self):
+        """81 % is the case that prompted this guard and it must NOT fire there:
+        compaction still has rounds to work with, and a guard that stops a run
+        the mechanism would have saved is worse than no guard."""
+        from dpc_client_core.dpc_agent.guards import ContextLimitGuard
+
+        guard = ContextLimitGuard(ratio=0.95)
+        ctx = make_ctx(round_idx=6, last_prompt_tokens=174_005, context_window=215_040)
+
+        assert await guard.between_rounds(ctx) is None
+
+    @pytest.mark.asyncio
+    async def test_a_window_nobody_could_resolve_is_not_a_limit_to_enforce(self):
+        """Local models leave `context_window` null and the loop resolves it from
+        the provider. When that fails the honest answer is silence, not a guess
+        that stops every agent on the box."""
+        from dpc_client_core.dpc_agent.guards import ContextLimitGuard
+
+        guard = ContextLimitGuard(ratio=0.95)
+        assert await guard.between_rounds(
+            make_ctx(round_idx=3, last_prompt_tokens=900_000, context_window=0)
+        ) is None
+
+    @pytest.mark.asyncio
+    async def test_the_first_round_has_no_previous_size_to_judge(self):
+        from dpc_client_core.dpc_agent.guards import ContextLimitGuard
+
+        guard = ContextLimitGuard(ratio=0.95)
+        assert await guard.between_rounds(
+            make_ctx(round_idx=1, last_prompt_tokens=0, context_window=215_040)
+        ) is None

@@ -274,3 +274,85 @@ class TestTheWindowBelongsToTheAgentNotToTheGroup:
         mgr = _manager(_StubMonitor(token_limit=131072))
         mgr.service.llm_manager = None
         assert mgr.get_session_state("group-x")["tokens_limit"] == 131072
+
+
+class TestTheContextGuardIsActuallyFedByTheLoop:
+    """Registering a guard and feeding it are two different things.
+
+    Neutralising `ctx.state.last_prompt_tokens` in the loop left every unit test
+    green: the guard's own tests build their context by hand, so they cannot
+    notice that production never fills it. That is this repo's most frequent
+    defect shape — computed, correct, never delivered — and it was sitting inside
+    the fix for it. This test drives the real `run_llm_loop`.
+    """
+
+    class _ToolsThatRun:
+        _ctx = None
+
+        def schemas(self, core_only=False, include_restricted=False):
+            return [{"type": "function", "function": {"name": "noop", "parameters": {}}}]
+
+        def get_timeout(self, name):
+            return 5
+
+        def execute(self, name, args, ctx=None):
+            return "ok"
+
+    class _LlmTwoRounds:
+        """Round one asks for a tool, which is what buys a second round; the
+        second call is the finalizer the guard-stop path makes without tools."""
+
+        def __init__(self, prompt_tokens):
+            self._prompt_tokens = prompt_tokens
+            self.seen_final_messages = None
+            self.calls = 0
+
+        async def chat(self, messages, tools=None, on_stream_chunk=None,
+                       conversation_id=None, reasoning_effort=None):
+            self.calls += 1
+            if tools is None:
+                self.seen_final_messages = list(messages)
+                return {"content": "wrapped up", "tool_calls": []}, {}
+            return (
+                {"content": "", "tool_calls": [
+                    {"id": "c1", "type": "function",
+                     "function": {"name": "noop", "arguments": "{}"}}]},
+                {"prompt_tokens": self._prompt_tokens, "completion_tokens": 10,
+                 "total_tokens": self._prompt_tokens + 10},
+            )
+
+    def _drive(self, prompt_tokens, tmp_path, monkeypatch):
+        monkeypatch.setattr(
+            "dpc_client_core.dpc_agent.loop.load_agent_config", lambda _name: {},
+        )
+        llm = self._LlmTwoRounds(prompt_tokens)
+        response, _usage, _trace = asyncio.run(run_llm_loop(
+            messages=[{"role": "user", "content": "hi"}],
+            tools=self._ToolsThatRun(),
+            llm=llm,
+            agent_root=tmp_path,
+            emit_progress=_Recorder(),
+        ))
+        return response, llm
+
+    def test_a_run_past_the_ceiling_is_stopped_by_the_loop_itself(self, tmp_path, monkeypatch):
+        # 200 000 against CompactionState's 204 800 fallback window is 97.7 %.
+        _response, llm = self._drive(200_000, tmp_path, monkeypatch)
+
+        assert llm.seen_final_messages is not None, "the guard never stopped the loop"
+        injected = "\n".join(
+            m.get("content") or "" for m in llm.seen_final_messages
+            if m.get("role") == "system"
+        )
+        assert "[CONTEXT_LIMIT]" in injected
+
+    def test_a_run_with_room_is_not_stopped(self, tmp_path, monkeypatch):
+        """The same wiring, below the ceiling: the loop must run on. Without this
+        the test above would pass on a guard that stops everything."""
+        _response, llm = self._drive(1_000, tmp_path, monkeypatch)
+
+        injected = "\n".join(
+            m.get("content") or "" for m in (llm.seen_final_messages or [])
+            if m.get("role") == "system"
+        )
+        assert "[CONTEXT_LIMIT]" not in injected

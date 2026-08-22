@@ -31,6 +31,7 @@ from .context import CompactionState, apply_compaction
 from .llm_adapter import DpcLlmAdapter
 from .hooks import HookContext, HookLifecycle, HookRegistry, LoopState
 from .guards import (
+    ContextLimitGuard,
     BudgetLimitGuard,
     LoopGuard,
     ResearchLimitGuard,
@@ -619,6 +620,9 @@ async def run_llm_loop(
     hooks.register(ResearchLimitGuard())
     hooks.register(LoopGuard())
     hooks.register(BudgetLimitGuard(budget_remaining_usd=budget_remaining_usd))
+    # The sixth: the loop watched rounds, tools, research, repetition and money,
+    # and did not watch the one resource a long task actually exhausts.
+    hooks.register(ContextLimitGuard())
 
     ctx = HookContext(
         agent_id="",
@@ -668,7 +672,15 @@ async def run_llm_loop(
                 llm_trace["accumulated_tool_calls"] = list(_accumulated_tool_calls)
                 return f"⚠️ Stopped by user after {round_idx - 1} rounds.", accumulated_usage, llm_trace
 
-            # RoundLimitGuard + BudgetLimitGuard checkpoint.
+            # RoundLimitGuard + BudgetLimitGuard + ContextLimitGuard checkpoint.
+            # The context pair is written here rather than after the call, because
+            # this is the moment a guard can still refuse cheaply: the numbers are
+            # the previous round's real input size and the window it was measured
+            # against, which is exactly what compaction triggers on below.
+            ctx.state.last_prompt_tokens = accumulated_usage["last_prompt_tokens"]
+            ctx.state.context_window = int(
+                _compaction_state.window if _compaction_state.window else (context_window or 0)
+            )
             if await hooks.fire(HookLifecycle.BETWEEN_ROUNDS, ctx) is not None:
                 return await _finalize_after_guard_stop(
                     hooks, messages, llm, on_stream_chunk, conversation_id,

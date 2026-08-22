@@ -1167,6 +1167,13 @@ async def compact_tool_history_llm(
     return result
 
 
+# Above this share of the window a failed compaction stops being a data-integrity
+# problem and becomes a survival one: there is no room left to spend on keeping
+# more verbatim. Below it the opposite is true, which is why one number decides
+# the direction rather than a second mechanism.
+UNDER_PRESSURE = 0.85
+
+
 class CompactionState:
     """Per-run compaction settings + hysteresis/circuit-breaker state (ADR-033).
 
@@ -1249,7 +1256,21 @@ async def apply_compaction(
                     f"⚠️ Compaction failed ({state.fail_streak}/{state.max_fails}): "
                     f"{type(e).__name__}. Degrading to deterministic truncation."
                 )
-            keep = {1: 12, 2: 18}.get(state.fail_streak, state.keep_recent)
+            # The ladder runs in whichever direction the failure calls for, and
+            # until 2026-08-23 it only ran one way. Keeping MORE verbatim is the
+            # right answer when the model call failed and there is room: losing
+            # detail to a transient error is the worse trade. It is the wrong
+            # answer when the window itself is what is failing — that is the one
+            # moment the mechanism must shrink, and it was the moment it stopped.
+            if ratio >= UNDER_PRESSURE:
+                keep = {1: 4, 2: 2}.get(state.fail_streak, 2)
+                log.warning(
+                    "Compaction failed at %.1f%% of the window: keeping %d rounds "
+                    "verbatim, not more — the window is the thing failing",
+                    ratio * 100, keep,
+                )
+            else:
+                keep = {1: 12, 2: 18}.get(state.fail_streak, state.keep_recent)
             return compact_tool_history(messages, keep_recent=keep)
 
     # Circuit broken: stop calling the model; keep context bounded deterministically.

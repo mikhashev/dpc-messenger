@@ -258,3 +258,58 @@ __all__ = [
     "LoopGuard",
     "BudgetLimitGuard",
 ]
+
+
+class ContextLimitGuard(GuardMiddleware):
+    """Stop before a round the window cannot hold.
+
+    The sixth guard, and the loop ran without it until 2026-08-23: rounds, tools,
+    research, loop-detection and budget were all watched, and the one resource an
+    agent actually exhausts on a long task was watched by nothing. Compaction was
+    the only defence, and compaction is not a limit — it is a best effort that
+    reaches only tool results outside the recent rounds and reduces each of them
+    once.
+
+    A ceiling rather than a predictor, deliberately. It reads the previous
+    round's real input size, which is the same number compaction triggers on, and
+    fires only when that already sits above `ratio` of the window. By then
+    compaction has had every round to work and the size is still there, so what
+    is left is the part it cannot reach. Stopping here ends the turn with its work
+    intact and a named reason, instead of discovering the limit inside the engine
+    — where on this platform the likelier answer is not an error but the driver
+    paging and prefill collapsing, which reads as an agent that became slow.
+
+    Default 0.95: high enough that a run compaction can still rescue is never
+    interrupted, low enough to leave room for one more round's growth.
+    """
+
+    def __init__(self, ratio: float = 0.95) -> None:
+        self._ratio = ratio
+        self._seen_ratio: Optional[float] = None
+
+    async def between_rounds(self, ctx: HookContext) -> Optional[HookAction]:
+        window = ctx.context_window
+        used = ctx.last_prompt_tokens
+        # Round one has no previous size, and a window nobody could resolve is
+        # not a limit to enforce — silence there, not a guess.
+        if window <= 0 or used <= 0:
+            return None
+        ratio = used / window
+        if ratio < self._ratio:
+            return None
+        self._seen_ratio = ratio
+        log.warning(
+            "ContextLimitGuard: last prompt %d tokens is %.1f%% of the %d-token "
+            "window (limit %.0f%%) — stopping before the round that would not fit",
+            used, ratio * 100, window, self._ratio * 100,
+        )
+        return HookAction.STOP_LOOP
+
+    def stop_message(self) -> str:
+        seen = f"{self._seen_ratio * 100:.0f}%" if self._seen_ratio else "the limit"
+        return (
+            f"[CONTEXT_LIMIT] The conversation reached {seen} of the model's context "
+            "window and compaction could not reduce it further. Stopping with the work "
+            "so far rather than failing inside the engine. Start a new task, or raise "
+            "the agent's context_window if the model has room."
+        )

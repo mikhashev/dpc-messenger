@@ -67,6 +67,13 @@ class LoopState:
     #: LoopGuard tell a stuck poll (identical output) from a long-running one
     #: whose progress still advances (output changes each poll).
     recent_tool_results: list[dict] = field(default_factory=list)
+    #: The previous round's real input size, and the window it is measured
+    #: against. Both are already known to the loop — the first is what
+    #: compaction triggers on, the second is what the progress strip draws —
+    #: and neither reached a guard until 2026-08-23, which is why nothing
+    #: stopped a run that filled its window.
+    last_prompt_tokens: int = 0
+    context_window: int = 0
 
 
 @dataclass
@@ -114,6 +121,14 @@ class HookContext:
     @property
     def current_round(self) -> int:
         return self.state.current_round
+
+    @property
+    def last_prompt_tokens(self) -> int:
+        return self.state.last_prompt_tokens
+
+    @property
+    def context_window(self) -> int:
+        return self.state.context_window
 
 
 class BaseMiddleware:

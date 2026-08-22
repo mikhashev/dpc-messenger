@@ -162,3 +162,59 @@ def test_none_llm_manager_is_safe():
         st = CompactionState({"compaction_enabled": True, "context_window": 1000})
         await apply_compaction(_messages(12), state=st, last_prompt_tokens=850, llm_manager=None, round_idx=10)
     asyncio.run(run())
+
+
+# --- the fallback ladder runs in the direction the failure calls for ---------
+
+
+def _keeps_when_compaction_fails(last_prompt_tokens, window=1000, rounds=3):
+    """The keep_recent each failed round asks deterministic truncation for."""
+    from dpc_client_core.dpc_agent import context as ctx_mod
+
+    seen = []
+    original = ctx_mod.compact_tool_history
+
+    def spy(messages, keep_recent=6):
+        seen.append(keep_recent)
+        return original(messages, keep_recent=keep_recent)
+
+    async def run():
+        ctx_mod.compact_tool_history = spy
+        try:
+            st = CompactionState({"compaction_enabled": True, "context_window": window})
+            lmf = _FakeLLM(fail=True)
+            for i in range(1, rounds + 1):
+                await apply_compaction(_messages(30), state=st,
+                                       last_prompt_tokens=last_prompt_tokens,
+                                       llm_manager=lmf, round_idx=i)
+        finally:
+            ctx_mod.compact_tool_history = original
+        return seen
+
+    return asyncio.run(run())
+
+
+def test_a_failure_with_room_left_keeps_more_verbatim():
+    """The original direction, and it is right when the model call is what failed:
+    losing detail to a transient error is the worse trade while there is room."""
+    keeps = _keeps_when_compaction_fails(last_prompt_tokens=820)  # 82 % — over the
+    assert keeps[:2] == [12, 18]                                  # trigger, under pressure
+
+
+def test_a_failure_with_the_window_full_keeps_fewer_instead():
+    """The direction that was missing until 2026-08-23. At 85 % and above a failed
+    compaction is not a data-integrity problem any more — there is no room left to
+    spend on keeping more, and the old ladder grew the context at exactly the
+    moment the mechanism protecting it had stopped working."""
+    keeps = _keeps_when_compaction_fails(last_prompt_tokens=960)  # 96 %
+    assert keeps[:2] == [4, 2]
+    assert all(k <= 4 for k in keeps)
+
+
+def test_the_pressure_line_is_one_number_and_not_a_second_mechanism():
+    from dpc_client_core.dpc_agent.context import UNDER_PRESSURE
+
+    assert 0.0 < UNDER_PRESSURE < 1.0
+    below = _keeps_when_compaction_fails(last_prompt_tokens=int(1000 * UNDER_PRESSURE) - 10, rounds=1)
+    at = _keeps_when_compaction_fails(last_prompt_tokens=int(1000 * UNDER_PRESSURE) + 10, rounds=1)
+    assert below[0] > at[0], "the same failure must shrink above the line and grow below it"
