@@ -92,6 +92,46 @@
   let saveMessage: string = '';
   let saveMessageType: 'success' | 'error' | '' = '';
 
+  // Tauri only. The browser dev server has no file dialog, and a Browse button
+  // that silently does nothing is worse than no button — so the control is not
+  // rendered there at all. Re-checked whenever the modal opens rather than once
+  // at init: `window.isTauri` is set during the page's onMount, which can land
+  // after this component is constructed.
+  $: canBrowse = open
+    && typeof window !== 'undefined'
+    && ((window as any).isTauri === true || !!(window as any).__TAURI__);
+
+  /** Fill a model path from a file dialog, starting where the current value points. */
+  async function pickModelPath(i: number, field: 'gguf_path' | 'mmproj') {
+    if (!editedConfig || !canBrowse) return;
+    const provider = editedConfig.providers[i];
+    // For mmproj fall back to the GGUF's own folder: a projector almost always
+    // ships beside the weights it belongs to.
+    const current = provider[field] || provider.gguf_path || '';
+    const startIn = current ? current.replace(/[\\/][^\\/]*$/, '') : undefined;
+    try {
+      // Named to avoid shadowing this component's own `open` prop.
+      const { open: openDialog } = await import('@tauri-apps/plugin-dialog');
+      const picked = await openDialog({
+        multiple: false,
+        directory: false,
+        defaultPath: startIn,
+        title: field === 'mmproj'
+          ? 'Select the vision projector (mmproj)'
+          : 'Select the GGUF model file',
+        filters: [
+          { name: 'GGUF model', extensions: ['gguf'] },
+          { name: 'All files', extensions: ['*'] },
+        ],
+      });
+      if (typeof picked !== 'string' || !picked) return;   // cancelled
+      provider[field] = picked;
+      editedConfig = editedConfig;
+    } catch (err) {
+      console.error('[ProvidersEditor] file dialog failed:', err);
+    }
+  }
+
   // Model info query state
   let showModelInfo: boolean = false;
   let modelInfoData: any = null;
@@ -975,12 +1015,22 @@
                     {#if editedConfig.providers[i].type === 'llamacpp_server'}
                       <div class="form-group">
                         <label for="gguf-{i}">GGUF path</label>
-                        <input
-                          id="gguf-{i}"
-                          type="text"
-                          bind:value={editedConfig.providers[i].gguf_path}
-                          placeholder="C:\models\qwen3.8-27b-Q4_K_M.gguf"
-                        />
+                        <div class="path-row">
+                          <input
+                            id="gguf-{i}"
+                            type="text"
+                            bind:value={editedConfig.providers[i].gguf_path}
+                            placeholder="C:\models\qwen3.8-27b-Q4_K_M.gguf"
+                          />
+                          {#if canBrowse}
+                            <button
+                              type="button"
+                              class="btn btn-browse"
+                              on:click={() => pickModelPath(i, 'gguf_path')}
+                              title="Pick the model file from disk"
+                            >Browse…</button>
+                          {/if}
+                        </div>
                         <p class="help-text">
                           Absolute path to the model file. DPC starts its own llama-server on it
                           (ADR-040): first call fetch-verifies the pinned binary, then serves —
@@ -990,12 +1040,22 @@
 
                       <div class="form-group">
                         <label for="mmproj-{i}">mmproj (vision projector, optional)</label>
-                        <input
-                          id="mmproj-{i}"
-                          type="text"
-                          bind:value={editedConfig.providers[i].mmproj}
-                          placeholder="C:\models\qwen3.8-27b-mmproj.gguf"
-                        />
+                        <div class="path-row">
+                          <input
+                            id="mmproj-{i}"
+                            type="text"
+                            bind:value={editedConfig.providers[i].mmproj}
+                            placeholder="C:\models\qwen3.8-27b-mmproj.gguf"
+                          />
+                          {#if canBrowse}
+                            <button
+                              type="button"
+                              class="btn btn-browse"
+                              on:click={() => pickModelPath(i, 'mmproj')}
+                              title="Pick the projector file from disk"
+                            >Browse…</button>
+                          {/if}
+                        </div>
                         <p class="help-text">
                           The vision projector file passed to llama-server as --mmproj. With it
                           the server serves images (and video) at full context; without it the
@@ -1126,16 +1186,34 @@
                             editedConfig = editedConfig;
                           }}
                         >
+                          <!-- The nine types `llama-server --help` accepts for -ctk/-ctv, in
+                               cost order. Only four were offered before, which hid the three
+                               rungs between q4_0 and q8_0 — and hid iq4_nl, which is free.
+                               Bits per element rather than GiB: the GiB figure depends on the
+                               model's attention layers and head width, so a number baked into
+                               this label would be wrong for every model but one. -->
                           <option value="">Auto (q8_0 → q4_0 by free VRAM)</option>
-                          <option value="q8_0">q8_0</option>
-                          <option value="q4_0">q4_0</option>
-                          <option value="f16">f16 (needs headroom — check the card)</option>
+                          <option value="f32">f32 — 32 bit, reference precision</option>
+                          <option value="f16">f16 — 16 bit (needs headroom, check the card)</option>
+                          <option value="bf16">bf16 — 16 bit, same size as f16</option>
+                          <option value="q8_0">q8_0 — 8.5 bit, near-lossless</option>
+                          <option value="q5_1">q5_1 — 6 bit</option>
+                          <option value="q5_0">q5_0 — 5.5 bit</option>
+                          <option value="q4_1">q4_1 — 5 bit</option>
+                          <option value="iq4_nl">iq4_nl — 4.5 bit, same size as q4_0, non-linear</option>
+                          <option value="q4_0">q4_0 — 4.5 bit</option>
                         </select>
                         <p class="help-text">
                           Auto never picks f16: on a full card Windows pages it into system RAM
                           and prefill collapses instead of failing. An explicit choice is loaded
                           as configured, with a warning in the log when the arithmetic says it
                           does not fit.
+                          <br />
+                          Cost scales with bits per element, so q8_0 is roughly twice q4_0 and
+                          f16 roughly four times. <strong>iq4_nl occupies exactly as much as
+                          q4_0</strong> — same 4.5 bits, non-linear spacing — so it is the one
+                          change here with no memory cost. Whether that buys anything at your
+                          context depth is unmeasured; it cannot cost you VRAM to find out.
                         </p>
                       </div>
 
@@ -2427,6 +2505,33 @@
   .form-group input:focus,
   .form-group select:focus {
     outline: none;
+    border-color: #007acc;
+  }
+
+  /* A path field and its Browse button on one line. The input keeps the
+     .form-group styling above; only the layout changes, and min-width: 0 stops
+     a long absolute path from pushing the button off the card. */
+  .path-row {
+    display: flex;
+    gap: 6px;
+    align-items: stretch;
+  }
+
+  .path-row input {
+    flex: 1 1 auto;
+    min-width: 0;
+  }
+
+  .btn-browse {
+    flex: 0 0 auto;
+    background: #3a3a3a;
+    color: #fff;
+    border: 1px solid #555;
+    white-space: nowrap;
+  }
+
+  .btn-browse:hover {
+    background: #4a4a4a;
     border-color: #007acc;
   }
 
