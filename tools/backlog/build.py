@@ -21,6 +21,7 @@ is what actually holds the format. See docs/BACKLOG_FORMAT.md.
 import html
 import json
 import math
+import os
 import re
 import sys
 import time
@@ -680,7 +681,23 @@ _TODAY = date.today().isoformat()
 
 if VERB:
     _when = _flag("date", _TODAY)
-    _by = (_flag("by") or "").strip()
+    # Mike, 2026-08-22: every verb names its actor, and the name is written into the
+    # file rather than only into the ANNOUNCE line. `--by` existed and was optional,
+    # so nobody passed it, and "who wrote this entry" was answered by reading mtimes —
+    # which produced two false "somebody else is editing this" alarms in one hour, one
+    # of them about a write this script had just made itself.
+    #
+    # The fallback is an environment variable and deliberately NOT the OS user: on this
+    # box CC, Johnny, Ark, Mike and a second CC session all run as the same account, so
+    # `getpass.getuser()` would stamp one name on five actors and look authoritative
+    # doing it. A field that cannot distinguish is worse than a field that refuses.
+    _by = (_flag("by") or os.environ.get("DPC_BACKLOG_BY") or "").strip()
+    if not _by:
+        _die("--by is mandatory: name the actor writing this event.",
+             "  build.py " + VERB + " … --by=CC",
+             "  or export DPC_BACKLOG_BY=CC once per session.",
+             "The OS user is not used as a fallback on purpose — several actors share "
+             "one account here, so a derived name would be the same for all of them.")
     _smap = section_status_map(lines)
 
     def _status_for(sec_name):
@@ -692,7 +709,7 @@ if VERB:
 if VERB == "close":
     if not ARGS:
         _die("usage: build.py close NAME --session=S72 --resolution=fixed --evidence='…' "
-             "[--by=CC] [--date=YYYY-MM-DD] [--dry-run]")
+             "--by=CC [--date=YYYY-MM-DD] [--dry-run]")
     e = _find(ARGS[0])
     res = (_flag("resolution") or "").strip().lower()
     if res not in RESOLUTIONS:
@@ -711,7 +728,7 @@ if VERB == "close":
         _die("--session is mandatory: the closure line opens with it (§3).")
     ses = ses if ses.upper().startswith("S") else "S" + ses
     closure = (f"**Closed:** {ses.upper()} · {_when} · {res} · {ev}"
-               + (f" · closed by {_by}" if _by else ""))
+               + f" · closed by {_by}")
 
     start, end = _span(e)
     block = lines[start:end]
@@ -736,13 +753,12 @@ if VERB == "close":
     arc[j:j] = [head_closed, "", closure, ""] + _body_of(block) + [""]
 
     _commit("\n".join(new_lines), "\n".join(arc),
-            f"close {e['ref'] or e['name']} · {res} · {ev[:60]}"
-            + (f" · {_by}" if _by else ""))
+            f"close {e['ref'] or e['name']} · {res} · {ev[:60]} · {_by}")
     sys.exit(0)
 
 if VERB == "move":
     if not ARGS or not _flag("to"):
-        _die("usage: build.py move NAME --to='IN PROGRESS' [--by=CC] [--dry-run]")
+        _die("usage: build.py move NAME --to='IN PROGRESS' --by=CC [--dry-run]")
     e = _find(ARGS[0])
     start, end = _span(e)
     block = lines[start:end]
@@ -754,18 +770,17 @@ if VERB == "move":
     # Item 5: people are recorded as events. The line is appended and never replaced, so
     # what the file holds is a history of who picked it up rather than a field that goes
     # stale the way `Updated:` did. The current assignee is the last such line, derived.
-    if _by:
-        block = block + [f"- **taken:** {_by} · {_when}"]
+    block = block + [f"- **taken:** {_by} · {_when}"]
     rest = lines[:start] + lines[end:]
     _, at_idx = _section_at(rest, sec_name)
     rest[at_idx:at_idx] = block + [""]
     _commit("\n".join(rest), _ARC_TEXT,
-            f"move {e['ref'] or e['name']} · {status}" + (f" · {_by}" if _by else ""))
+            f"move {e['ref'] or e['name']} · {status} · {_by}")
     sys.exit(0)
 
 if VERB == "rename":
     if len(ARGS) < 2:
-        _die("usage: build.py rename OLD-NAME NEW-NAME [--dry-run]")
+        _die("usage: build.py rename OLD-NAME NEW-NAME --by=CC [--dry-run]")
     old, new = ARGS[0], ARGS[1]
     e = _find(old)
     if not re.fullmatch(r"[A-Z][A-Z0-9]*(?:-[A-Z0-9]+)+", new):
@@ -784,18 +799,17 @@ if VERB == "rename":
     # The trace quotes a name that no longer exists, which is precisely the shape this
     # tool reports as a dangling reference — so the line carries the standard's own
     # opt-out. Without it the rename verb manufactures one stale reference per rename.
-    new_lines.insert(end, f"- **Renamed** {_when}: was `{old}`. Inbound references were "
-                          f"rewritten in the same edit; a reference to the old name in a "
+    new_lines.insert(end, f"- **Renamed** {_when} by {_by}: was `{old}`. Inbound references "
+                          f"were rewritten in the same edit; a reference to the old name in a "
                           f"commit message or a chat log will not resolve. <!-- no-refs -->")
     _commit("\n".join(new_lines), tok.sub(new, _ARC_TEXT),
-            f"rename {old} → {new} · {hits} references rewritten"
-            + (f" · {_by}" if _by else ""))
+            f"rename {old} → {new} · {hits} references rewritten · {_by}")
     sys.exit(0)
 
 if VERB == "add":
     if not ARGS:
         _die("usage: build.py add NAME --desc='claim, not topic' --priority=HIGH "
-             "--origin=\"Mike: '…'\" [--section=OPEN] [--observed='…'] "
+             "--origin=\"Mike: '…'\" --by=CC [--section=OPEN] [--observed='…'] "
              "[--first-step='…'] [--dry-run]")
     name = ARGS[0]
     if not re.fullmatch(r"[A-Z][A-Z0-9]*(?:-[A-Z0-9]+)+", name):
@@ -831,13 +845,16 @@ if VERB == "add":
     if not body:
         _die("an entry with no body is a title. Give at least --observed: what was seen, "
              "with a file:line, a log line or a measurement.")
+    # The actor as an appended event, the same shape `move` uses for `taken:`. It is
+    # deliberately not part of the heading: `origin` says who *wanted* the entry, this
+    # says who *wrote* it, and the two are frequently different people.
+    body.append(f"- **filed:** {_by} · {_when}")
     head = f"### {name}: {desc} ({pri}, {status}, {_when} — {origin})"
     rest = list(lines)
     _, at_idx = _section_at(rest, sec_name)
     rest[at_idx:at_idx] = [head, ""] + body + [""]
     _commit("\n".join(rest), _ARC_TEXT,
-            f"add {name} · {pri.lower()} · {sec_name.lower()}"
-            + (f" · {_by}" if _by else ""))
+            f"add {name} · {pri.lower()} · {sec_name.lower()} · {_by}")
     sys.exit(0)
 
 if "--check" in sys.argv:

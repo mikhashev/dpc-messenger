@@ -9,6 +9,7 @@ run against it, and an assertion about what the file says afterwards.
 
 Stdlib only and no virtualenv, the same constraint build.py itself carries.
 """
+import os
 import re
 import shutil
 import subprocess
@@ -50,9 +51,16 @@ def check(label, condition, detail=""):
     print(f"  {'ok  ' if condition else 'FAIL'}  {label}" + (f"\n          {detail}" if not condition and detail else ""))
 
 
-def run(work, *args):
+def run(work, *args, env=None):
+    full = dict(os.environ)
+    # The fallback must not leak in from the developer's own shell: a fixture that
+    # inherits DPC_BACKLOG_BY would pass the "refuses without --by" case for the
+    # wrong reason and report a guard that never fired.
+    full.pop("DPC_BACKLOG_BY", None)
+    full.update(env or {})
     r = subprocess.run([sys.executable, str(BUILD), *args, str(work / "backlog.md")],
-                       capture_output=True, text=True, encoding="utf-8", errors="replace")
+                       capture_output=True, text=True, encoding="utf-8",
+                       errors="replace", env=full)
     return r.returncode, (r.stdout or "") + (r.stderr or "")
 
 
@@ -69,7 +77,7 @@ def main():
         code, out = run(work, "add", "GAMMA-ENTRY-WAS-ADDED",
                         "--desc=an entry written by the add verb",
                         "--priority=HIGH", "--origin=CC: verb fixture",
-                        "--observed=written by build.py add")
+                        "--observed=written by build.py add", "--by=CC")
         text = (work / "backlog.md").read_text(encoding="utf-8")
         check("add writes an entry that passes the checker", code == 0, out[-400:])
         # What the tool SAYS is acted on as surely as what it writes. The hint used to
@@ -83,17 +91,34 @@ def main():
         check("add puts the new entry at the top of its section",
               text.index("GAMMA-ENTRY-WAS-ADDED") < text.index("ALPHA-ENTRY-EXISTS"))
 
-        code, out = run(work, "add", "notaname", "--desc=x", "--priority=LOW",
+        check("add records the actor as an event",
+              f"- **filed:** CC · {TODAY}" in text)
+
+        # Mike, 2026-08-22: the actor is mandatory, and the fallback is an environment
+        # variable rather than the OS user — several actors share one account on this box.
+        code, out = run(work, "add", "ZETA-NO-ACTOR", "--desc=x", "--priority=LOW",
                         "--origin=y", "--observed=z")
+        text_after = (work / "backlog.md").read_text(encoding="utf-8")
+        check("add refuses when no actor is named",
+              code == 2 and "ZETA-NO-ACTOR" not in text_after, out[-300:])
+
+        code, out = run(work, "add", "ZETA-ACTOR-FROM-ENV", "--desc=x", "--priority=LOW",
+                        "--origin=y", "--observed=z", env={"DPC_BACKLOG_BY": "Johnny"})
+        text_after = (work / "backlog.md").read_text(encoding="utf-8")
+        check("the actor may come from DPC_BACKLOG_BY",
+              code == 0 and f"- **filed:** Johnny · {TODAY}" in text_after, out[-300:])
+
+        code, out = run(work, "add", "notaname", "--desc=x", "--priority=LOW",
+                        "--origin=y", "--observed=z", "--by=CC")
         check("add refuses a name that is not SCREAMING-KEBAB", code == 2)
 
         code, out = run(work, "add", "DELTA-NO-BODY", "--desc=x", "--priority=LOW",
-                        "--origin=y")
+                        "--origin=y", "--by=CC")
         check("add refuses an entry with no body", code == 2)
 
         code, out = run(work, "add", "EPSILON-CYRILLIC",
                         "--desc=описание",
-                        "--priority=LOW", "--origin=y", "--observed=z")
+                        "--priority=LOW", "--origin=y", "--observed=z", "--by=CC")
         text = (work / "backlog.md").read_text(encoding="utf-8")
         check("a write whose result would refuse is not written at all",
               code == 1 and "EPSILON-CYRILLIC" not in text, out[-400:])
@@ -114,12 +139,12 @@ def main():
         check("moving back rewrites the status again",
               "ALPHA-ENTRY-EXISTS: the verb fixture needs one entry to move around (LOW, open," in text)
 
-        code, out = run(work, "move", "ALPHA-ENTRY-EXISTS", "--to=NO SUCH SECTION")
+        code, out = run(work, "move", "ALPHA-ENTRY-EXISTS", "--to=NO SUCH SECTION", "--by=CC")
         check("move refuses an unknown section", code == 2)
 
         # --- rename ----------------------------------------------------------------
         before_stale = re.search(r"(\d+) stale references", run(work, "--check")[1])
-        code, out = run(work, "rename", "ALPHA-ENTRY-EXISTS", "ALPHA-ENTRY-WAS-RENAMED")
+        code, out = run(work, "rename", "ALPHA-ENTRY-EXISTS", "ALPHA-ENTRY-WAS-RENAMED", "--by=Ark")
         text = (work / "backlog.md").read_text(encoding="utf-8")
         check("rename rewrites the heading", code == 0 and "### ALPHA-ENTRY-WAS-RENAMED:" in text, out[-400:])
         check("rename rewrites the inbound reference in the same edit",
@@ -129,7 +154,7 @@ def main():
               before_stale and after_stale and before_stale.group(1) == after_stale.group(1),
               f"{before_stale and before_stale.group(1)} -> {after_stale and after_stale.group(1)}")
 
-        code, out = run(work, "rename", "BETA-ENTRY-POINTS-AT-ALPHA", "ALPHA-ENTRY-WAS-RENAMED")
+        code, out = run(work, "rename", "BETA-ENTRY-POINTS-AT-ALPHA", "ALPHA-ENTRY-WAS-RENAMED", "--by=CC")
         check("rename refuses a collision", code == 2)
 
         # --- close -----------------------------------------------------------------
@@ -152,15 +177,15 @@ def main():
         check("close carries the body across", "- **Observed.** Referenced by" in arc)
 
         code, out = run(work, "close", "BETA-ENTRY-POINTS-AT-ALPHA", "--session=S1",
-                        "--resolution=solvedish", "--evidence=x")
+                        "--resolution=solvedish", "--evidence=x", "--by=CC")
         check("close refuses a resolution outside the six", code == 2)
 
         code, out = run(work, "close", "BETA-ENTRY-POINTS-AT-ALPHA", "--session=S1",
-                        "--resolution=fixed")
+                        "--resolution=fixed", "--by=CC")
         check("close refuses a closure with no evidence", code == 2)
 
         code, out = run(work, "close", "NO-SUCH-ENTRY", "--session=S1",
-                        "--resolution=fixed", "--evidence=x")
+                        "--resolution=fixed", "--evidence=x", "--by=CC")
         check("close refuses a name that is not in the file", code == 2)
 
         code, out = run(work, "--check")
