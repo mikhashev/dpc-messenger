@@ -65,7 +65,11 @@ def home(tmp_path: Path) -> Path:
         "# the order transcription is attempted in\n"
         "[voice_transcription]\n"
         "provider_priority = whisper-large-v3-turbo," + OLD + ",openai\n"
-        "enabled = true\n",
+        "enabled = true\n"
+        "\n"
+        "# what knowledge extraction falls back to when nothing is warm\n"
+        "[knowledge]\n"
+        "cold_fallback_provider = " + OLD + "\n",
         encoding="utf-8",
     )
     return tmp_path
@@ -169,9 +173,16 @@ class TestReportingWhatNoLongerResolves:
 
 class TestTheServiceOnlyFollowsARealRename:
     def _service(self, home: Path):
+        # `settings` is a spy rather than absent: the reload call sits inside a
+        # try/except, so a double without it would let the test pass while the
+        # reload silently did not happen — the vacuous shape this file exists to
+        # avoid.
+        reloads = []
         return SimpleNamespace(
             llm_manager=SimpleNamespace(config_path=home / "providers.json"),
             firewall=SimpleNamespace(reload=lambda: (True, "ok")),
+            settings=SimpleNamespace(reload=lambda: reloads.append(True)),
+            settings_reloads=reloads,
             agent_service=None,
         )
 
@@ -214,3 +225,135 @@ class TestTheServiceOnlyFollowsARealRename:
 
         assert await CoreService._follow_alias_renames(service, self._config([NEW]), None) == []
         assert await CoreService._follow_alias_renames(service, self._config([NEW]), {}) == []
+
+
+class TestTheFixtureWalksTheInventoryInsteadOfMirroringIt:
+    """The property that stops this file certifying only what its author remembered.
+
+    Both reviews of 2026-08-22 made the same point: a fixture written from the
+    implementation lists exactly what the implementation lists, so a persisted key
+    the implementation forgot is a key the fixture also forgets. That is how
+    `[knowledge] cold_fallback_provider` stayed invisible while sixteen tests
+    passed — the rename killed the knowledge cold fallback and every check agreed
+    nothing was wrong.
+
+    These two walk `PLACES` rather than a list typed here. A new `Place` whose
+    shape this home does not carry fails the first; a `Place` the rename does not
+    follow fails the second. Neither can be satisfied by remembering.
+    """
+
+    def _writable(self):
+        return [p for p in provider_alias_refs.PLACES if p.writable]
+
+    def test_this_home_names_the_old_alias_in_every_writable_place(self, home: Path):
+        missing = [
+            place.key for place in self._writable()
+            if not any(value == OLD for _where, value in place.scan(home))
+        ]
+        assert not missing, (
+            "the fixture does not exercise these places, so nothing here can notice "
+            f"whether the rename reaches them: {missing}"
+        )
+
+    def test_after_the_rename_no_writable_place_still_names_the_old_alias(self, home: Path):
+        provider_alias_refs.rename_references(OLD, NEW, home)
+
+        left = [
+            (place.key, value) for place in self._writable()
+            for _where, value in place.scan(home) if value == OLD
+        ]
+        assert not left, f"the rename did not reach: {left}"
+
+    def test_the_result_counts_every_writable_place_by_name(self, home: Path):
+        counts = provider_alias_refs.rename_references(OLD, NEW, home)
+
+        assert set(counts["by_place"]) == {p.key for p in self._writable()}, (
+            "a place that renames without being counted is a place the caller's "
+            "«did anything change» sum cannot see"
+        )
+        assert counts["by_place"]["config.ini:[knowledge]cold_fallback_provider"] == 1
+
+
+class TestConfigIniIsRereadAfterTheRename:
+    """The rename lands on disk and the readers keep the old value until restart.
+
+    `Settings` is constructed once at startup, so rewriting `config.ini` moved the
+    voice priority and the knowledge cold fallback on disk while every caller went
+    on answering from the copy loaded at boot — for a setting whose commit message
+    said no restart was needed.
+    """
+
+    def _service(self, home: Path):
+        reloads = []
+        return SimpleNamespace(
+            llm_manager=SimpleNamespace(config_path=home / "providers.json"),
+            firewall=SimpleNamespace(reload=lambda: (True, "ok")),
+            settings=SimpleNamespace(reload=lambda: reloads.append(True)),
+            settings_reloads=reloads,
+            agent_service=None,
+        )
+
+    @pytest.mark.asyncio
+    async def test_a_rename_that_moved_a_config_ini_key_rereads_the_file(self, home: Path):
+        service = self._service(home)
+        config = {"providers": [{"alias": a} for a in ["deepseek_flash", NEW]]}
+
+        await CoreService._follow_alias_renames(service, config, {OLD: NEW})
+
+        assert service.settings_reloads, (
+            "config.ini was rewritten and nothing re-read it — every reader keeps "
+            "the old alias until the next restart"
+        )
+
+    @pytest.mark.asyncio
+    async def test_a_rename_that_touched_no_config_ini_key_does_not_reread(self, home: Path):
+        """Not reloading is the ordinary case and must stay cheap: a rename that
+        moved only JSON has no reason to re-read the ini."""
+        (home / "config.ini").write_text("[api]\nport = 9999\n", encoding="utf-8")
+        service = self._service(home)
+        config = {"providers": [{"alias": a} for a in ["deepseek_flash", NEW]]}
+
+        await CoreService._follow_alias_renames(service, config, {OLD: NEW})
+
+        assert service.settings_reloads == []
+
+
+class TestARenameThatMovedOnlyTheNewestKey:
+    """The case the caller's old sum could not see.
+
+    `touched` was the sum of four fields typed at the call site, so a rename that
+    moved only a place added later counted as zero — the service took the `continue`
+    branch, logged nothing and reported nothing, while the file on disk had changed.
+    Summing the inventory makes a new place visible without anyone remembering to
+    add a term.
+    """
+
+    @pytest.fixture
+    def home_naming_it_only_in_knowledge(self, tmp_path: Path) -> Path:
+        _write(tmp_path / "providers.json", {
+            "default_provider": "deepseek_flash",
+            "providers": [{"alias": "deepseek_flash"}, {"alias": NEW}],
+        })
+        (tmp_path / "config.ini").write_text(
+            "[knowledge]\ncold_fallback_provider = " + OLD + "\n",
+            encoding="utf-8",
+        )
+        return tmp_path
+
+    @pytest.mark.asyncio
+    async def test_it_is_followed_and_reported(self, home_naming_it_only_in_knowledge: Path):
+        home = home_naming_it_only_in_knowledge
+        reloads = []
+        service = SimpleNamespace(
+            llm_manager=SimpleNamespace(config_path=home / "providers.json"),
+            firewall=SimpleNamespace(reload=lambda: (True, "ok")),
+            settings=SimpleNamespace(reload=lambda: reloads.append(True)),
+            agent_service=None,
+        )
+        config = {"providers": [{"alias": a} for a in ["deepseek_flash", NEW]]}
+
+        summary = await CoreService._follow_alias_renames(service, config, {OLD: NEW})
+
+        assert summary, "a rename nobody counted is a rename nobody can audit"
+        assert NEW in (home / "config.ini").read_text(encoding="utf-8")
+        assert reloads

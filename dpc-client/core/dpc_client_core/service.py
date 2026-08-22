@@ -2186,16 +2186,19 @@ class CoreService:
                 continue
 
             counts = provider_alias_refs.rename_references(old, new, home)
-            touched = (counts["agent_configs"] + counts["registry"]
-                       + counts["firewall"] + counts["voice_priority"])
+            # Summed over the inventory rather than over four names typed here:
+            # a place added to `PLACES` used to be invisible to this line, so a
+            # rename that reached only the new place read as «nothing changed»
+            # and was neither logged nor reported.
+            by_place = counts["by_place"]
+            touched = sum(by_place.values())
             if not touched:
                 continue
 
             logger.info(
-                "Provider alias '%s' renamed to '%s': %d agent field(s), %d registry entr(ies), "
-                "%d firewall field(s), %d voice entr(ies)",
-                old, new, counts["agent_configs"], counts["registry"],
-                counts["firewall"], counts["voice_priority"],
+                "Provider alias '%s' renamed to '%s' in %d place(s): %s",
+                old, new, touched,
+                ", ".join(f"{key} ×{n}" for key, n in sorted(by_place.items()) if n),
             )
             summary.append(
                 f"'{old}' → '{new}' followed in {touched} place(s) "
@@ -2207,6 +2210,17 @@ class CoreService:
                     self.firewall.reload()
                 except Exception as exc:
                     logger.warning("Firewall reload after an alias rename failed: %s", exc)
+
+            # The settings object is built once at startup, so a rename that
+            # rewrote config.ini left the new name on disk and the old one in
+            # every reader until the next restart — for a change the commit
+            # message said needed none. Reload when a config.ini place moved.
+            if any(n for key, n in by_place.items() if key.startswith("config.ini:")):
+                try:
+                    self.settings.reload()
+                    logger.info("Settings reloaded after the alias rename touched config.ini")
+                except Exception as exc:
+                    logger.warning("Settings reload after an alias rename failed: %s", exc)
 
             if self.agent_service:
                 from .dpc_agent.utils import load_agent_config
