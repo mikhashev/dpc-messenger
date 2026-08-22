@@ -10,11 +10,30 @@ import pytest
 from dpc_client_core.providers import llamacpp_server_provider as lsp
 
 
+class FakeProc:
+    """Only the two attributes the sweep reads, with the real meanings.
+
+    `returncode is None` is a live process; a number is one that has exited.
+    """
+
+    def __init__(self, pid: int = 4242, returncode=None):
+        self.pid = pid
+        self.returncode = returncode
+
+
 class FakeSupervisor:
-    def __init__(self, alias: str, started: bool = True, raises: bool = False):
+    def __init__(self, alias: str, started: bool = True, raises: bool = False,
+                 loading: bool = False, slow_drain: bool = False):
         self.alias = alias
-        self.props = {"vision": False} if started else None
+        # Two independent facts, and conflating them is the defect this file
+        # grew a case for: `props` is the health payload, which arrives only
+        # after the child answers /props, while `_proc` is the process. A child
+        # still loading a 27 GB model has a live `_proc` and no `props` at all —
+        # `loading=True` is exactly that state, and the sweep must still reach it.
+        self.props = None if (loading or not started) else {"vision": False}
+        self._proc = FakeProc() if (started or loading) else None
         self.raises = raises
+        self.slow_drain = slow_drain
         self.stopped = False
         self.drained = False
 
@@ -29,14 +48,21 @@ class FakeSupervisor:
         # of the call site broke it — a stub shaped for yesterday's caller
         # cannot notice that today's caller is different.
         self.drained = True
+        if self.slow_drain:
+            # The real drain waits as long as the generation takes, which is the
+            # whole window this file is about: between the rename and the end of
+            # that wait the child is held by the drain task alone.
+            await asyncio.sleep(30)
         await self.stop()
 
 
 @pytest.fixture(autouse=True)
 def clean_registry():
     lsp._ACTIVE_SUPERVISORS.clear()
+    lsp._RETIRING.clear()
     yield
     lsp._ACTIVE_SUPERVISORS.clear()
+    lsp._RETIRING.clear()
 
 
 class TestAnAliasThatLeftTheConfiguration:
@@ -145,3 +171,78 @@ class TestShutdownReachesAChildNoProviderHolds:
         assert orphan.drained is True
         assert orphan.stopped is True
         assert "llama.cpp-abl" not in lsp._ACTIVE_SUPERVISORS
+
+
+class TestTheWindowBetweenTheRenameAndTheEndOfTheDrain:
+    """A retired child is in neither list the shutdown walks.
+
+    `retire_absent` takes it out of `_ACTIVE_SUPERVISORS`, and the only handle
+    left is the task `_retire` returns — which this module discarded, so between
+    the save that retired the alias and the end of its drain the process belonged
+    to nobody. Executed against a real child on 2026-08-23: it survived the sweep
+    and had to be killed by hand.
+
+    The negative control matters as much as the fix. Three earlier runs of that
+    probe reported "no orphan" and every one of them was blind — an idle child
+    whose drain had nothing to wait for, a request sent around the provider so
+    the supervisor never counted it, and a call shape that raised before the slot
+    was taken. `slow_drain` is what those runs were missing.
+    """
+
+    @pytest.mark.asyncio
+    async def test_a_child_still_draining_is_reached_by_the_shutdown(self):
+        busy = FakeSupervisor("renamed-away", slow_drain=True)
+        lsp._ACTIVE_SUPERVISORS["renamed-away"] = busy
+
+        assert lsp.retire_absent(["some-other-alias"]) == ["renamed-away"]
+        await asyncio.sleep(0.05)
+
+        # The window: out of the main registry, still running, drain unfinished.
+        assert "renamed-away" not in lsp._ACTIVE_SUPERVISORS
+        assert busy.drained is True and busy.stopped is False
+        assert "renamed-away" in lsp._RETIRING
+
+        stopped = await lsp.stop_all_supervisors()
+
+        assert stopped == ["renamed-away"]
+        assert busy.stopped is True
+        assert lsp._RETIRING == {}
+
+    @pytest.mark.asyncio
+    async def test_a_drain_that_finished_leaves_nothing_for_the_shutdown_to_do(self):
+        quick = FakeSupervisor("renamed-away")
+        lsp._ACTIVE_SUPERVISORS["renamed-away"] = quick
+
+        lsp.retire_absent(["some-other-alias"])
+        await asyncio.sleep(0.05)
+
+        assert quick.stopped is True
+        assert lsp._RETIRING == {}, "a finished drain must not leave a handle behind"
+        assert await lsp.stop_all_supervisors() == []
+
+    @pytest.mark.asyncio
+    async def test_a_child_still_loading_its_model_is_retired_and_not_dropped(self):
+        """`props` is the health payload and arrives only after /props answers, so
+        a child part-way through loading a 27 GB model reads as one that never
+        started. The old order popped it out of the registry and then skipped it,
+        which is the one state that leaves a process reachable from nowhere at
+        all — not even by the drain."""
+        loading = FakeSupervisor("slow-to-load", loading=True)
+        assert loading.props is None and loading._proc is not None
+        lsp._ACTIVE_SUPERVISORS["slow-to-load"] = loading
+
+        retired = lsp.retire_absent(["some-other-alias"])
+        await asyncio.sleep(0.05)
+
+        assert retired == ["slow-to-load"]
+        assert loading.stopped is True
+
+    @pytest.mark.asyncio
+    async def test_a_child_that_already_exited_is_not_reported_as_retired(self):
+        dead = FakeSupervisor("finished")
+        dead._proc.returncode = 0
+        lsp._ACTIVE_SUPERVISORS["finished"] = dead
+
+        assert lsp.retire_absent(["some-other-alias"]) == []
+        assert dead.stopped is False
+        assert "finished" not in lsp._ACTIVE_SUPERVISORS

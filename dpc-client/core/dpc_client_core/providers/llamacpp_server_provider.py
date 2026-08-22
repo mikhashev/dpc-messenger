@@ -29,7 +29,7 @@ import json
 import logging
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, Dict, Iterable, Optional, List, Union
+from typing import Any, Dict, Iterable, Optional, List, Tuple, Union
 
 from openai import AsyncOpenAI
 
@@ -868,6 +868,20 @@ class LlamaServerProvider(DeepSeekProvider):
         return self.model or Path(self.config["gguf_path"]).stem
 
 
+# A child that is draining is in neither list the shutdown used to walk. It leaves
+# `_ACTIVE_SUPERVISORS` the moment its alias goes, and the only handle left on it is
+# the task `_retire` returns — which `retire_absent` discarded. Between the save that
+# retired it and the end of its drain it belonged to nobody, and a shutdown inside
+# that window walked past a live twenty-seven-gigabyte process and reported nothing.
+# Executed 2026-08-23 against a real child: the process survived the sweep.
+#
+# Keyed by alias like the main registry, but a second dict rather than a flag on the
+# first: an alias can be retired and immediately re-registered by the save that
+# renamed it, and the retiring child must not be reachable under the name its
+# successor now owns.
+_RETIRING: Dict[str, Tuple[LlamaServerSupervisor, "asyncio.Task"]] = {}
+
+
 def retire_absent(known_aliases: Iterable[str]) -> List[str]:
     """Stop children whose alias is gone from the configuration — a rename or a delete.
 
@@ -879,14 +893,25 @@ def retire_absent(known_aliases: Iterable[str]) -> List[str]:
     for alias in list(_ACTIVE_SUPERVISORS):
         if alias in known:
             continue
-        supervisor = _ACTIVE_SUPERVISORS.pop(alias)
-        if supervisor.props is None:
+        supervisor = _ACTIVE_SUPERVISORS[alias]
+        # `_proc`, not `props`: `props` is the health payload, filled only once the
+        # child answers /props, so a child still loading its model reads as one that
+        # never started — and the old order popped it out of the registry before
+        # deciding, which left exactly that child unreachable by anything.
+        if supervisor._proc is None or supervisor._proc.returncode is not None:
+            _ACTIVE_SUPERVISORS.pop(alias, None)
             continue
+        _ACTIVE_SUPERVISORS.pop(alias, None)
         logger.info(
-            "llamacpp_server: alias '%s' is no longer configured; stopping its child",
+            "llamacpp_server: alias '%s' is no longer configured; draining its child",
             alias,
         )
-        LlamaServerProvider._retire(supervisor)
+        task = LlamaServerProvider._retire(supervisor)
+        if task is not None:
+            _RETIRING[alias] = (supervisor, task)
+            task.add_done_callback(
+                lambda _t, _a=alias: _RETIRING.pop(_a, None)
+            )
         retired.append(alias)
     return retired
 
@@ -895,7 +920,11 @@ async def stop_all_supervisors() -> List[str]:
     """Stop every live child, whatever provider object happens to hold it.
 
     Shutdown walks `llm_manager.providers`, and a child can outlive the provider that
-    started it, so the registry is the only place that still knows it is running.
+    started it, so the registry is the only place that still knows it is running —
+    with one exception this function used to walk past: a child whose alias has been
+    retired is held only by its drain task, and that task waits as long as the work
+    takes. Shutdown is not the moment to wait for it: the drain is cancelled and the
+    child stopped, which is the same choice `_retire` records for process exit.
     """
     stopped = []
     for alias in list(_ACTIVE_SUPERVISORS):
@@ -906,6 +935,24 @@ async def stop_all_supervisors() -> List[str]:
         except Exception as exc:
             logger.warning(
                 "llamacpp_server: could not stop the child of '%s' at shutdown: %s",
+                alias, exc,
+            )
+    for alias in list(_RETIRING):
+        supervisor, task = _RETIRING.pop(alias, (None, None))
+        if supervisor is None:
+            continue
+        task.cancel()
+        try:
+            await supervisor.stop()
+            stopped.append(alias)
+            logger.warning(
+                "llamacpp_server: stopped the still-draining child of retired alias "
+                "'%s' — shutdown does not wait for a generation to finish",
+                alias,
+            )
+        except Exception as exc:
+            logger.warning(
+                "llamacpp_server: could not stop the draining child of '%s': %s",
                 alias, exc,
             )
     return stopped
