@@ -74,6 +74,13 @@ async def main() -> int:
         "n_ctx": 4096,
         "spec_type": "none",          # a plain model has no MTP head
         "n_gpu_layers": 0,
+        # An explicit KV type on purpose: `ensure_running` sends a named type
+        # straight to `_launch`, while silence goes through `_launch_auto_kv`,
+        # which budgets against free VRAM and refuses — even for a model that
+        # asked for no GPU at all. With the fleet's 27B holding the card, the
+        # ladder turned down a 1.8 GiB CPU-only probe on VRAM grounds.
+        "cache_type_k": "q8_0",
+        "cache_type_v": "q8_0",
         "extra_args": ["--device", "none"],
         "start_timeout_s": 180.0,
     }
@@ -126,6 +133,43 @@ async def main() -> int:
     retired = prov.retire_absent({ALIAS_AFTER})
     print(f"   retire_absent returned {retired}")
     print(f"   registry now holds: {sorted(prov._ACTIVE_SUPERVISORS)}")
+
+    # The first version of this probe went straight from the rename to the
+    # shutdown, so the successor was never built and `elif _RETIRING:` in the
+    # constructor never ran live — the half that stops a second child starting on
+    # a card the first one still holds was covered by a unit test alone. Johnny
+    # named it and gave the falsifier: the log line below, or it did not happen.
+    print(f"\n2b. the successor: a call arrives for the NEW alias, drain still running")
+    import logging
+
+    caught: list = []
+
+    class Catch(logging.Handler):
+        def emit(self, record):
+            caught.append(record.getMessage())
+
+    handler = Catch()
+    logging.getLogger("dpc_client_core").addHandler(handler)
+    logging.getLogger("dpc_client_core").setLevel(logging.INFO)
+
+    successor = prov.LlamaServerProvider(ALIAS_AFTER, dict(config))
+    armed = successor.supervisor._predecessor is not None
+    print(f"   successor has a predecessor to wait for: {armed}")
+
+    waited = None
+    if armed:
+        start_task = asyncio.create_task(successor.supervisor.ensure_running())
+        await asyncio.sleep(4)
+        waited = any("release the card before starting" in m for m in caught)
+        print(f"   log carries the wait line: {waited}")
+        print(f"   successor started while the predecessor drains: "
+              f"{successor.supervisor._proc is not None}")
+        start_task.cancel()
+        try:
+            await start_task
+        except (asyncio.CancelledError, Exception):
+            pass
+    logging.getLogger("dpc_client_core").removeHandler(handler)
 
     print(f"\n3. the shutdown sweep, the half c9889eb0 added")
     stopped = await prov.stop_all_supervisors()

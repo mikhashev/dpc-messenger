@@ -314,3 +314,47 @@ class TestAWaitThatIsItselfOvertaken:
 
         with pytest.raises(LlamaServerError, match="itself superseded"):
             await sup._await_predecessor()
+
+
+class TestTheSuccessorWaitsWithoutOwning:
+    """Cancelling the successor's wait must not cancel the predecessor's drain.
+
+    `asyncio.gather` was the first shape and the wrong one: «if the outer Future
+    is cancelled, all children that have not completed yet are also cancelled».
+    The successor's wait is precisely what gets cancelled — a request times out,
+    a task is torn down — and the cancellation travelled into the drain, which
+    then never reached `stop()` while its `_RETIRING` entry was removed by the
+    done-callback anyway. A live child, held by nothing, invisible to the sweep:
+    this entry's own defect, reintroduced by its fix.
+
+    Found by the probe, not by reading: the retired child survived the shutdown
+    and `stop_all_supervisors` reported only the successor.
+    """
+
+    @pytest.mark.asyncio
+    async def test_cancelling_the_wait_leaves_the_drain_running(self):
+        drained = asyncio.Event()
+
+        async def slow_drain():
+            await asyncio.sleep(0.2)
+            drained.set()
+
+        drain_task = asyncio.ensure_future(slow_drain())
+        waiter = asyncio.ensure_future(lsp._watch_without_owning([drain_task]))
+        await asyncio.sleep(0.02)
+
+        waiter.cancel()
+        try:
+            await waiter
+        except asyncio.CancelledError:
+            pass
+
+        assert not drain_task.cancelled(), "the drain belongs to the predecessor"
+        await asyncio.sleep(0.3)
+        assert drained.is_set(), "and it must be allowed to finish"
+
+    @pytest.mark.asyncio
+    async def test_the_wait_ends_when_every_drain_has(self):
+        quick = [asyncio.ensure_future(asyncio.sleep(0.01)) for _ in range(3)]
+        await asyncio.wait_for(lsp._watch_without_owning(quick), timeout=2)
+        assert all(t.done() for t in quick)

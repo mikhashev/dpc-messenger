@@ -155,9 +155,7 @@ class LlamaServerProvider(DeepSeekProvider):
                         alias, len(pending),
                     )
                     self.supervisor.supersedes(
-                        asyncio.ensure_future(
-                            asyncio.gather(*pending, return_exceptions=True)
-                        )
+                        asyncio.ensure_future(_watch_without_owning(pending))
                     )
         _ACTIVE_SUPERVISORS[alias] = self.supervisor
 
@@ -899,6 +897,26 @@ class LlamaServerProvider(DeepSeekProvider):
 # renamed it, and the retiring child must not be reachable under the name its
 # successor now owns.
 _RETIRING: Dict[str, Tuple[LlamaServerSupervisor, "asyncio.Task"]] = {}
+
+
+async def _watch_without_owning(tasks: List["asyncio.Task"]) -> None:
+    """Wait for drains that belong to somebody else, and never cancel them.
+
+    `asyncio.gather` looks like the obvious way to wait for several and is the
+    wrong one here: «if the outer Future is cancelled, all children that have
+    not completed yet are also cancelled». The successor's wait is exactly the
+    thing that gets cancelled — a request times out, a task is torn down — and
+    with gather that cancellation travelled down into the predecessor's drain,
+    which then never reached `stop()`. Its `_RETIRING` entry was removed by the
+    done-callback all the same, so the shutdown sweep could not see it either.
+
+    That is this entry's own defect one layer up, introduced by its fix and
+    caught by the live probe on 2026-08-23: the retired child survived the
+    shutdown while the sweep reported only the successor. `asyncio.wait` waits
+    without owning — cancelling the waiter leaves the tasks alone.
+    """
+    if tasks:
+        await asyncio.wait(tasks)
 
 
 def retire_absent(known_aliases: Iterable[str]) -> List[str]:
