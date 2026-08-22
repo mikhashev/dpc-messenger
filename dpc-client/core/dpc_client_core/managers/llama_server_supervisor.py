@@ -598,6 +598,13 @@ class LlamaServerSupervisor:
         readers of that log reached three different answers about it in one
         afternoon (2026-08-20).
 
+        The speculation pair is here for the third time the same thing happened.
+        On 2026-08-23 the owner changed `spec_draft_n_max` from 4 to 3 to compare
+        the acceptance the two produce — and neither this line nor the child's own
+        log records which value a child ran with, so the comparison would have
+        rested on someone remembering what the config said at the time. A knob
+        worth changing is a knob worth reading back.
+
         `binary` is here for the same reason, one reader later. The child log is
         one file per alias and carries no line naming the executable that wrote
         it, so two builds' starts are indistinguishable in it — and on
@@ -616,7 +623,7 @@ class LlamaServerSupervisor:
         logger.info(
             "llama-server[%s] starting on :%s (binary=%s, n_ctx=%s, context_window=%s, "
             "kv=%s, cache_ram=%s, ctx_checkpoints=%s, checkpoint_min_step=%s, "
-            "n_ubatch=%s, cache_reuse=%s)",
+            "n_ubatch=%s, cache_reuse=%s, spec_type=%s, spec_draft_n_max=%s)",
             self.alias, self.port, binary if binary is not None else "unknown",
             n_ctx, _fmt_knob(window),
             cache_type or "configured", _cache,
@@ -624,6 +631,8 @@ class LlamaServerSupervisor:
             _fmt_knob(self.config.get("checkpoint_min_step")),
             _fmt_knob(self.config.get("n_ubatch")),
             _fmt_knob(self.config.get("cache_reuse")),
+            _fmt_knob(self.config.get("spec_type")),
+            _fmt_knob(self.config.get("spec_draft_n_max")),
         )
         if window_outgrows_pool(window, n_ctx):
             # The direction that fails without a word: the agent fills to a

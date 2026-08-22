@@ -1191,7 +1191,16 @@ class Settings:
             self._config.write(f)
 
     def reload(self):
-        """Reload configuration from file."""
+        """Reload configuration from file.
+
+        `read()` merges rather than replaces: a key **deleted** from the file on
+        disk keeps whatever this object already had for it. Every caller today
+        reloads after a value changed — the provider-alias cascade rewrites names
+        in place — so the merge is harmless. It stops being harmless the day
+        something removes a key and expects the reload to forget it; that needs a
+        fresh ConfigParser, not this call (Johnny, 2026-08-23 review of the alias
+        inventory).
+        """
         if self.config_file.exists():
             self._config.read(self.config_file)
 

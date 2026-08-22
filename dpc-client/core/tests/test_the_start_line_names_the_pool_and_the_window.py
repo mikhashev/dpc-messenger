@@ -133,3 +133,42 @@ def test_a_start_line_with_no_binary_says_so_rather_than_implying_the_pin(caplog
 
     line = "\n".join(_line(caplog, logging.INFO))
     assert "binary=unknown" in line
+
+
+# --- which speculation the child was started with -----------------------------
+
+
+def test_the_start_line_names_the_speculation_it_was_started_with(caplog):
+    """The knob the owner changes to compare acceptance has to be readable back.
+
+    On 2026-08-23 `spec_draft_n_max` went 4 → 3 to measure the difference, and
+    neither this line nor the child's own log said which value any child had run
+    with — so the before/after would have rested on someone remembering what the
+    config held at the time. That is the same failure as the binary path two days
+    earlier, on the next knob along.
+    """
+    with caplog.at_level(logging.INFO):
+        _sup(n_ctx=262144, spec_type="draft-mtp", spec_draft_n_max=3).log_start(None, {})
+
+    line = "\n".join(_line(caplog, logging.INFO))
+    assert "spec_type=draft-mtp" in line
+    assert "spec_draft_n_max=3" in line
+
+
+def test_a_speculation_nobody_configured_shows_the_supervisors_own_defaults(caplog):
+    """Unlike its neighbours on this line, this pair has no «build default» case.
+
+    `ctx_checkpoints` and friends are sent only when an alias names them, so
+    silence there means the build decides. Speculation is different: DEFAULTS
+    carries `draft-mtp` and depth 3 and the supervisor always sends them, so what
+    the line must show is the value the child actually got — never a blank that
+    invites the reader to assume the engine chose.
+    """
+    from dpc_client_core.managers.llama_server_supervisor import DEFAULTS
+
+    with caplog.at_level(logging.INFO):
+        _sup(n_ctx=262144).log_start(None, {})
+
+    line = "\n".join(_line(caplog, logging.INFO))
+    assert f"spec_type={DEFAULTS['spec_type']}" in line
+    assert f"spec_draft_n_max={DEFAULTS['spec_draft_n_max']}" in line
