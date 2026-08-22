@@ -12,7 +12,7 @@ are already counted inside completion_tokens, so the output rate covers them.
 
 from __future__ import annotations
 
-from datetime import datetime, time, timezone
+from datetime import datetime, time, timedelta, timezone
 from typing import Dict, Optional, Tuple
 
 
@@ -62,10 +62,53 @@ PEAK_WINDOWS_UTC: Tuple[Tuple[time, time], ...] = (
 )
 
 
+# The vendor's calendar, not ours. Beijing is UTC+8 and keeps no daylight time,
+# so a Beijing weekend runs from Friday 16:00 UTC to Sunday 16:00 UTC — a window
+# that belongs to three different UTC days and to no UTC weekend.
+BEIJING = timezone(timedelta(hours=8))
+
+# From this moment the peak windows stop applying on Beijing weekends: "all calls
+# made on weekends will be charged uniformly at the off-peak rate" (vendor notice
+# of 2026-08-22, quoted whole in the team channel).
+#
+# The notice dates itself "00:00 (Beijing Time) on Sunday, August 23" and that is
+# what is coded here, but it is internally inconsistent: 23 August 2026 is indeed
+# a Sunday, while the weekend it describes begins on the Saturday. Warren read it
+# 80/20 for the weekend window — Saturday 00:00 Beijing, i.e. 2026-08-21 16:00
+# UTC — and still argued for the literal date, which is what this is.
+#
+# The reason is direction, not confidence. If the vendor started a day earlier
+# than this constant, then during the gap we book peak where they charge off-peak
+# and our own costs read high: the burn median rises, the alerts fire sooner and
+# the runway looks shorter. Every one of those errs toward noticing. The opposite
+# mistake — a rule that starts too early — under-reports real spend, which is the
+# error nobody sees until the balance does.
+#
+# Settled by one call in the Saturday 16:00-24:00 UTC band checked against the
+# invoice; until then the constant carries the ambiguity rather than hiding it.
+WEEKEND_OFF_PEAK_FROM = datetime(2026, 8, 22, 16, 0, tzinfo=timezone.utc)
+
+
+def _is_weekend_in_beijing(moment: datetime) -> bool:
+    """Saturday or Sunday on the vendor's calendar, whatever weekday it is here."""
+    return moment.astimezone(BEIJING).weekday() >= 5
+
+
 def _is_peak(moment: datetime) -> bool:
-    """Whether a UTC moment falls inside DeepSeek's doubled hours."""
-    t = moment.astimezone(timezone.utc).time()
-    return any(start <= t < end for start, end in PEAK_WINDOWS_UTC)
+    """Whether a moment falls inside DeepSeek's doubled hours.
+
+    Two conditions, and the second one arrived late: the hour has to be inside a
+    peak window *and* the day has to be a Beijing weekday. Reading only the clock
+    was correct until 2026-08-23 and silently doubles every weekend peak-hour
+    call afterwards — in our own records only, since the vendor bills the real
+    rate either way. That asymmetry is what makes it worth fixing before the
+    weekend rather than after: a call is priced once, when it is made, and no
+    later repair reprices the line already written to events.jsonl.
+    """
+    when = moment.astimezone(timezone.utc)
+    if when >= WEEKEND_OFF_PEAK_FROM and _is_weekend_in_beijing(when):
+        return False
+    return any(start <= when.time() < end for start, end in PEAK_WINDOWS_UTC)
 
 
 def rates_at(model_key: str, moment: Optional[datetime] = None) -> Dict[str, float]:

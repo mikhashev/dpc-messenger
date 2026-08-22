@@ -234,3 +234,54 @@ def test_a_new_table_model_priced_before_the_new_table_existed_does_not_raise():
         assert cost == pytest.approx((1000 * 0.5 + 1000 * 1.5) / 1_000_000)
     finally:
         pricing.PAY_PER_USE_RATES_FROM_2026_08_16.pop("deepseek-v5-future", None)
+
+
+# --- the tariff has a calendar too (weekends off-peak, from 2026-08-22 16:00 UTC) ---
+
+from dpc_client_core.dpc_agent.pricing import WEEKEND_OFF_PEAK_FROM, _is_weekend_in_beijing
+
+# Beijing is UTC+8, so its weekend is Friday 16:00 UTC to Sunday 16:00 UTC and
+# belongs to three different UTC days. Every moment below is after the effective
+# constant unless it says otherwise.
+WEEKDAY_PEAK = datetime(2026, 8, 24, 2, 0, tzinfo=timezone.utc)      # Beijing Mon 10:00
+WEEKDAY_OFF_PEAK = datetime(2026, 8, 24, 5, 0, tzinfo=timezone.utc)  # Beijing Mon 13:00
+WEEKEND_IN_OLD_PEAK = datetime(2026, 8, 29, 2, 0, tzinfo=timezone.utc)  # Beijing Sat 10:00
+
+
+def test_a_weekday_peak_hour_still_costs_double():
+    off = rates_at("deepseek-v4-pro", WEEKDAY_OFF_PEAK)
+    peak = rates_at("deepseek-v4-pro", WEEKDAY_PEAK)
+    assert peak == {k: v * 2 for k, v in off.items()}
+
+
+def test_a_weekend_hour_inside_the_old_peak_window_is_charged_once():
+    """The case that is green on the clock alone and wrong from 23 August: the
+    vendor stops applying peak windows on Beijing weekends, so our own records
+    would book double where the invoice says single."""
+    assert _is_weekend_in_beijing(WEEKEND_IN_OLD_PEAK)
+    assert rates_at("deepseek-v4-pro", WEEKEND_IN_OLD_PEAK)["output"] == 1.98
+    assert rates_at("deepseek-v4-pro", WEEKEND_IN_OLD_PEAK) == rates_at(
+        "deepseek-v4-pro", WEEKDAY_OFF_PEAK
+    )
+
+
+def test_the_weekend_is_the_vendors_and_not_ours():
+    """Friday evening UTC is already Saturday in Beijing, and Sunday evening UTC
+    is already Monday. Reading the UTC weekday would get both ends wrong."""
+    friday_utc = datetime(2026, 8, 28, 17, 0, tzinfo=timezone.utc)   # Beijing Sat 01:00
+    sunday_utc = datetime(2026, 8, 30, 17, 0, tzinfo=timezone.utc)   # Beijing Mon 01:00
+    assert friday_utc.weekday() == 4 and _is_weekend_in_beijing(friday_utc)
+    assert sunday_utc.weekday() == 6 and not _is_weekend_in_beijing(sunday_utc)
+
+
+def test_a_weekend_call_made_before_the_change_still_bills_at_the_old_rule():
+    """A cost belongs to the moment of the call — the same reason the old rate
+    table is still in the file. Beijing Saturday, inside a peak window, but
+    before the vendor changed the rule: double, as it was charged then."""
+    earlier = datetime(2026, 8, 22, 2, 0, tzinfo=timezone.utc)  # Beijing Sat 10:00
+    assert earlier < WEEKEND_OFF_PEAK_FROM and _is_weekend_in_beijing(earlier)
+    assert rates_at("deepseek-v4-pro", earlier)["output"] == 3.96
+
+
+def test_the_weekend_rule_starts_at_the_stated_minute():
+    assert WEEKEND_OFF_PEAK_FROM == datetime(2026, 8, 22, 16, 0, tzinfo=timezone.utc)
