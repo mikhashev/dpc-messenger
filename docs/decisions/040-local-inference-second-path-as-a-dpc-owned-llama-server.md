@@ -226,6 +226,28 @@ Qwen3.8-27B as a GGUF chosen per node, not a format.
   three *downloads* of upstream builds, not three builds; a build only if a needed flag or patch is
   missing upstream (none identified). Never hard-code Ollama's install layout: `binary_path` in
   configuration with auto-discovery as a fallback.
+  *(**Amendment, 2026-08-23 — the pin moves to `b10566`, and stops being ours to guess.** Mike:
+  «Да, давай пересядем». On 2026-08-21 upstream began publishing `vX.Y.Z` releases beside the
+  `b[NUM]` ones and stated which is for whom: `vX.Y.Z` is «stable, slower release cadence,
+  recommended for downstream distribution», `b[NUM]` is «bleeding edge … recommended for developers».
+  We are downstream and had been sitting on a nightly tag chosen by hand.
+
+  The versioned release carries no binaries — its only asset is `nightly-tag.txt`, holding the build
+  tag it corresponds to; `v0.2.0` names **`b10566`**. So D3's mechanism is unchanged (fetch by tag +
+  sha256 into `~/.dpc/bin/llama.cpp/<tag>/<os-arch>/`) and only the choice of tag is now read rather
+  than picked: take `nightly-tag.txt` from the newest `vX.Y.Z`, then that tag's `digest` and `size`
+  from the release API. **Do not follow `releases/latest`** — it now returns the versioned release,
+  whose only asset is that text file.
+
+  What the move buys, from a full read of the 115 commits between the two (nothing sampled):
+  `--mmproj-device` (#23255), which can take the 884 MiB vision projector off the card, and mtmd
+  chunks stored as placeholders (#27278). What it does not buy, and this is the useful half: **zero
+  commits touching CUDA attention kernels** — `iq4_nl`, `q4_1`, `q5_0`, `q5_1` and `f32` still have
+  none, so the KV menu's labels stand — and **zero touching `cache_reuse`**. DFlash2 remains
+  unavailable: PR 27342 is still open, so `b10566` builds the same 58 of the 81 tensors `b10472` did.
+  Measurements in this document taken on `b10472` stay as they are: they are dated observations, not
+  claims about the current pin.)*
+
   *(Post-acceptance, 2026-08-19: the pin was fetched and verified, gates G1/G2 closed, steps 1–4
   of the implementation plan shipped, and the provider answered its first live calls. The
   chronicle of that day — every measurement, error and fix — lives in

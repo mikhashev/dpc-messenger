@@ -1,7 +1,7 @@
 """The pinned llama.cpp binary: resolved without a fetch, fetched only pinned.
 
 ADR-040 route (b2) runs a DPC-owned `llama-server`; its binary comes from the
-pinned `b10472` release, verified against sha256 digests taken from the
+pinned `b10566` release, verified against sha256 digests taken from the
 release API — never «latest». A configured `binary_path` always wins, so an
 operator-supplied build is never silently replaced, and a broken download
 must leave nothing behind that a later start would mistake for an install.

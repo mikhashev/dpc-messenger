@@ -1434,8 +1434,8 @@
                             carrying an image on this build.
                             <br />
                             <strong><code>draft-dflash</code> cannot start on the pinned
-                            binary.</strong> The DFlash2 drafter declares 81 tensors and b10472
-                            builds 58 of them — the 20 convolution and 3 selector tensors are
+                            binary.</strong> The DFlash2 drafter declares 81 tensors and the pin
+                            builds 58 of them — measured on b10472 and unchanged on b10566, because PR&nbsp;27342 is still unmerged — the 20 convolution and 3 selector tensors are
                             what PR&nbsp;27342 adds — so the child dies with
                             <code>expected 81, got 58</code> before serving anything. It loads
                             only under a <code>binary_path</code> pointing at a build carrying

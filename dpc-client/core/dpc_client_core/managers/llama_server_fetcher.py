@@ -31,19 +31,35 @@ from typing import Any, Callable, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
-LLAMA_CPP_TAG = "b10472"
+LLAMA_CPP_TAG = "b10566"
 LLAMA_CPP_RELEASE_BASE = "https://github.com/ggml-org/llama.cpp/releases/download"
 
 DPC_HOME = Path(os.environ.get("DPC_HOME", Path.home() / ".dpc"))
 
 # One row per asset of the pin. `sha256` comes from the release API `digest`
 # field; `size` is the byte length the progress report is computed against.
+#
+# The tag is chosen from upstream's stable channel rather than by hand. From
+# 2026-08-21 llama.cpp publishes `vX.Y.Z` releases beside the `b[NUM]` ones and
+# says which is which: `vX.Y.Z` is "stable, slower release cadence, recommended
+# for downstream distribution", `b[NUM]` is "bleeding edge ... recommended for
+# developers". We are downstream, and until now we sat on a nightly tag picked
+# by hand.
+#
+# The versioned release carries no binaries — its only asset is
+# `nightly-tag.txt`, holding the build tag it corresponds to. So the assets below
+# still come from a `b` tag; the tag is just no longer ours to guess. To move the
+# pin: read `nightly-tag.txt` from the newest `vX.Y.Z`, then take that tag's
+# `digest` and `size` from the release API.
+#
+# b10566 is what v0.2.0 named (2026-08-21). Do not follow `releases/latest`: it
+# now returns the versioned release, whose only asset is that text file.
 PLATFORM_ASSETS: Dict[str, List[Dict[str, Any]]] = {
     "win-cuda-13.3-x64": [
         {
-            "name": "llama-b10472-bin-win-cuda-13.3-x64.zip",
-            "sha256": "ce7ca842c1400a85457e6c7ce844f21e52f187e6f0364b7daf3d2fd1ccf6db3b",
-            "size": 146_707_438,
+            "name": "llama-b10566-bin-win-cuda-13.3-x64.zip",
+            "sha256": "c3e2336c1427e8bd7b5beb3c8618d2f7a268bc5fb6ec3f28c1e06cdb78d2e80a",
+            "size": 146_890_631,
         },
         {
             "name": "cudart-llama-bin-win-cuda-13.3-x64.zip",
@@ -53,16 +69,16 @@ PLATFORM_ASSETS: Dict[str, List[Dict[str, Any]]] = {
     ],
     "macos-arm64": [
         {
-            "name": "llama-b10472-bin-macos-arm64.tar.gz",
-            "sha256": "194a3e7008cc8c4e7a8d201012f4a32102333664c2eb7d0511d091589c48a13c",
-            "size": 11_080_030,
+            "name": "llama-b10566-bin-macos-arm64.tar.gz",
+            "sha256": "533f546dab2ce2f8e29ce3070f26acc55acc59528e177f2cd0d52b7f69b44f50",
+            "size": 11_095_544,
         },
     ],
     "ubuntu-x64": [
         {
-            "name": "llama-b10472-bin-ubuntu-x64.tar.gz",
-            "sha256": "8826da7085323c25180cb997ebb48c121c0a3698ec102ea3248843d3a7ed4166",
-            "size": 16_660_363,
+            "name": "llama-b10566-bin-ubuntu-x64.tar.gz",
+            "sha256": "0c34561d623299c113e46f9fdd97bff5b219b25554243a21a243aebc81253ea1",
+            "size": 16_677_356,
         },
     ],
 }
