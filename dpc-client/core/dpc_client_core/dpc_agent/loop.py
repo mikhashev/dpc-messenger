@@ -163,6 +163,16 @@ def _truncate_tool_result(result: Any) -> str:
     leading to decisions on partial data). The new marker is set off by
     blank lines and uses `[!]` to break attention. See S24 cleanup
     (2026-04-10).
+
+    This cap sees only the string a tool handed over, never what the tool
+    was asked for, so it may not call that string a total. Measured:
+    `git log --stat -n 120` produced 699 370 chars, `run_shell` capped it
+    at 50 000, and this marker announced "50,036 bytes total" — a number
+    14x below the truth, stated with confidence. It counted characters and
+    named them bytes as well (61 200 Cyrillic chars are 114 000 UTF-8
+    bytes). Each layer now names its own quantity: the tool owns the size
+    of what it produced and the way to read the rest, this marker owns how
+    much of what arrived is shown.
     """
     result_str = str(result)
     if len(result_str) <= 15000:
@@ -172,10 +182,12 @@ def _truncate_tool_result(result: Any) -> str:
     shown_lines = result_str[:15000].count("\n") + 1
     return (
         result_str[:15000]
-        + f"\n\n[!] OUTPUT TRUNCATED — showing {shown_lines:,}/{total_lines:,} lines"
-        f" ({len(result_str):,} bytes total)."
-        f"\n[!] This is a PARTIAL view. To see the rest, use `search_files`"
-        f" to locate the section you need, then re-read a narrower range."
+        + f"\n\n[!] OUTPUT TRUNCATED — showing {shown_lines:,} of {total_lines:,} lines"
+        f" ({len(result_str):,} chars) of what the tool returned."
+        f"\n[!] This is a PARTIAL view, and the number above is NOT the size"
+        f" of what you asked for — the tool may have capped its own output"
+        f" before this cut. Follow the continuation the tool itself named,"
+        f" if it named one."
     )
 
 

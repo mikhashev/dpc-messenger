@@ -247,9 +247,15 @@ def test_browse_page_audit_on_browser_error(vault_home):
     assert entries[0]["status"] == "browser_error"
 
 
-def test_browse_page_anonymous_path_no_audit(vault_home):
-    """Anonymous browse_page (no use_auth) does NOT touch audit log —
-    audit is auth-only."""
+def test_browse_page_anonymous_path_records_a_fetch_row(vault_home):
+    """Anonymous browse_page writes one audit row (Mike, 2026-08-23).
+
+    It wrote nothing until then, and the cost showed: on 2026-08-23 the
+    audit held 3 929 rows and every one came from the authenticated path,
+    so "how often does a transport cut a page" and "how often does JS add
+    content" had no history to answer from at all. The row carries the
+    completeness signals, not the content — the page itself is not logged.
+    """
     from dpc_client_core.dpc_agent.tools import browser as browser_mod
 
     agent_root = vault_home / "agents" / "agent_a"
@@ -260,14 +266,27 @@ def test_browse_page_anonymous_path_no_audit(vault_home):
     # without hitting the network.
     original = browser_mod._browse_sync
     browser_mod._browse_sync = lambda url: {
-        "success": True, "text": "hello", "needs_js": False
+        "success": True, "text": "hello", "needs_js": False,
+        "signals": browser_mod._page_signals(
+            "<html><body><p>hello</p></body></html>", "hello",
+        ),
     }
     try:
         asyncio.run(browser_mod.browse_page(ctx, url="https://example.com"))
     finally:
         browser_mod._browse_sync = original
 
-    assert _read_audit(vault_home, "agent_a") == []
+    rows = _read_audit(vault_home, "agent_a")
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["action"] == "fetch_anonymous"
+    assert row["url"] == "https://example.com"
+    assert row["renderer"] == "static"
+    assert row["document_closed"] is True
+    assert row["js_capable"] is False
+    assert row["text_chars"] == 5
+    # the page content itself never enters the audit
+    assert "hello" not in json.dumps(row)
 
 
 # ─────────────────────────────────────────────────────────────

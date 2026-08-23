@@ -171,6 +171,121 @@ _SIZE_PRESETS = {
 }
 
 
+_APP_SHELL_MARKERS = (
+    'id="root"', "id='root'", 'id="app"', "id='app'",
+    "__NEXT_DATA__", "data-reactroot", "ng-app",
+    "window.__NUXT__", "__remixContext", "data-svelte",
+)
+
+
+def _page_signals(html: str, text: str) -> Dict[str, Any]:
+    """What the fetched bytes themselves say about their own completeness.
+
+    Three questions the tool used to answer with silence, and what is
+    actually available to answer them without a second request:
+
+    * did the transport cut the document — a body that ends in `</html>`
+      was not cut short mid-stream. It does NOT establish that this is the
+      page that was asked for: a CDN error page and a login wall are also
+      complete documents.
+    * can content appear after the first frame — a page with no script tags
+      and no app-shell marker cannot render anything else, whatever its
+      length. One with them can, and then the absence of further content is
+      simply not established by a static fetch.
+    * how much of the fetched bytes became text.
+
+    Measured 2026-08-23: example.com is 559 chars of HTML, 0 script tags, no
+    marker — complete and inert. habr.com/ru/articles/1072656 is 240 140
+    chars with 14 script tags and `id="app"` — its article text arrives
+    server-rendered, but the page is a JS application, so "51 685 chars is
+    all of it" was never something the tool could know.
+    """
+    stripped = html.rstrip()
+    scripts = len(re.findall(r"<script\b", html, re.I)) if html else 0
+    markers = [m for m in _APP_SHELL_MARKERS if m in html] if html else []
+    return {
+        "html_chars": len(html),
+        "text_chars": len(text),
+        "document_closed": bool(stripped.endswith("</html>")),
+        "script_tags": scripts,
+        "app_shell_markers": markers,
+        "js_capable": bool(scripts or markers),
+    }
+
+
+def _completeness_header(
+    url: str,
+    sig: Dict[str, Any],
+    renderer: str,
+    rendered_chars: Optional[int],
+    shown: int,
+    total: int,
+    preset: str,
+) -> str:
+    """The line the entry was opened for: three separate statements about
+    completeness, never collapsed into one "truncated" or one silence.
+
+    (c) the preset cut what was fetched — always known.
+    (a) the transport cut the document — knowable from the body's own end.
+    (b) content can appear after the first frame — knowable as *possible*,
+        never as absent; a static fetch cannot prove a page has no more.
+
+    Deliberately not a percentage. A web page has no total length until it
+    is fully fetched, so any figure of "how much of the page" would be the
+    same invented number the agent guessed by hand before this existed.
+    """
+    parts = [f"[browse_page {url}"]
+    if sig.get("html_chars"):
+        parts.append(f"fetched {sig['html_chars']} chars of HTML → {total} chars of markdown")
+    else:
+        parts.append(f"{total} chars")
+
+    if renderer == "camoufox":
+        parts.append(
+            f"renderer: browser (JS executed, {rendered_chars} chars) — this is what was"
+            " visible at the moment of the snapshot; a page can still load more on scroll"
+        )
+    else:
+        if sig.get("js_capable"):
+            why = f"{sig.get('script_tags', 0)} script tags"
+            if sig.get("app_shell_markers"):
+                why += f", app-shell marker {sig['app_shell_markers'][0]}"
+            note = (
+                f"renderer: static fetch, JS NOT executed — this page runs JS ({why}),"
+                " so content rendered after the first frame is not included and its"
+                " absence is NOT established; pass verify=true to render and compare"
+            )
+            if rendered_chars is not None:
+                note += f" (verify ran: browser saw {rendered_chars} chars)"
+            parts.append(note)
+        else:
+            parts.append(
+                "renderer: static fetch — no script tags and no app-shell marker,"
+                " so nothing further can render into this page"
+            )
+
+    if sig.get("html_chars"):
+        if sig.get("document_closed"):
+            parts.append(
+                "transport: body ends with </html>, so the stream was not cut short"
+                " — this does not establish that it is the page you asked for, a CDN"
+                " error page or a login wall is also a complete document"
+            )
+        else:
+            parts.append(
+                "transport: body does NOT end with </html> — it may have been cut"
+                " before the end of the document"
+            )
+
+    if shown < total:
+        parts.append(
+            f"preset {preset} kept {shown} of {total} chars — use size='l' or 'f' for more"
+        )
+    else:
+        parts.append(f"preset {preset} did not cut this: all {total} chars are here")
+    return " | ".join(parts) + "]"
+
+
 def _browse_sync(url: str) -> Dict[str, Any]:
     result = _fetch_url(url)
     if not result["success"]:
@@ -210,7 +325,17 @@ def _browse_sync(url: str) -> Dict[str, Any]:
             text = _extract_text(content)
 
     result["text"] = text
-    result["needs_js"] = not is_clean_text and len(text or "") < 200
+    result["signals"] = _page_signals(content if not is_clean_text else "", text or "")
+    # Historically: `len(text) < 200` alone. Measured 2026-08-23 — that fires
+    # on example.com (113 chars of text, a complete document with ZERO script
+    # tags), buying a 7-10 s Camoufox launch for a page no browser could add
+    # anything to. The length still gates it, but a page has to be able to
+    # render for rendering to be worth trying.
+    result["needs_js"] = (
+        not is_clean_text
+        and len(text or "") < 200
+        and result["signals"]["js_capable"]
+    )
     return result
 
 
@@ -898,9 +1023,13 @@ def _truncate_snapshot(
         chars += len(line) + 1
     remaining = len(lines) - len(result)
     if remaining > 0:
+        # The old marker read "use browser_snapshot for full content" and was
+        # printed from inside browser_snapshot, so the advice pointed at the
+        # call that had just truncated. The handle that actually returns the
+        # whole tree is the raw flag.
         result.append(
-            f"\n[... {remaining} more lines truncated, "
-            "use browser_snapshot for full content]"
+            f"\n[... {remaining} of {len(lines)} lines truncated at"
+            f" {max_chars} chars | full tree: browser_snapshot(raw=True)]"
         )
     return "\n".join(result)
 
@@ -939,6 +1068,25 @@ def _split_actionable_lines(snapshot_text: str) -> tuple[list[str], str]:
     for line in snapshot_text.split("\n"):
         (actionable if _REF_LINE_RE.search(line) else prose).append(line)
     return actionable, "\n".join(prose)
+
+
+def _summary_notice(tree_chars: int, summary_chars: int, provider: str | None) -> str:
+    """Say that what follows is a rewrite, not the page.
+
+    The LLM path returned the auxiliary model's prose with no marker of any
+    kind, so an agent could not tell a summarised snapshot from a real one:
+    the only silent substitution in the tool set, and the one that is not
+    about length at all. Everything the caller needs to judge it — that a
+    model rewrote it, which model, how much was compressed, and the handle
+    that returns the tree itself — belongs in front of the text.
+    """
+    return (
+        f"[snapshot summarised by {provider or 'the configured summariser'}:"
+        f" {tree_chars} chars of accessibility tree rewritten as"
+        f" {summary_chars} chars of prose — this is a summary, not the tree."
+        f" Interactive elements below are verbatim."
+        f" Full tree: browser_snapshot(raw=True)]\n\n"
+    )
 
 
 def _rejoin_with_actionable(summary: str, actionable: list[str]) -> str:
@@ -1018,8 +1166,14 @@ async def _llm_summarize_snapshot(
             timeout=SNAPSHOT_SUMMARIZE_TIMEOUT_SEC,
         )
         extracted = (response or "").strip()
+        if extracted:
+            return _rejoin_with_actionable(
+                _summary_notice(len(snapshot_text), len(extracted), provider_alias)
+                + extracted,
+                actionable,
+            )
         return _rejoin_with_actionable(
-            extracted or _truncate_snapshot(prose, max_chars), actionable,
+            _truncate_snapshot(prose, max_chars), actionable,
         )
     except asyncio.TimeoutError:
         log.warning(
@@ -2036,6 +2190,11 @@ class AuthBrowser:
         max_consecutive_empty = 10
         url = self._page.url
 
+        # Three ways out of this loop and they mean opposite things: the list
+        # ended, the scroll budget ran out, or scrolling threw. Reporting only
+        # the item count made "collected everything" and "stopped early"
+        # print identically, and an agent could not tell which it had.
+        stop_reason = "scroll_budget_exhausted"
         for _ in range(max_scrolls + 1):
             result = self._page.evaluate(_COLLECT_ITEMS_JS, {
                 "containerSel": container,
@@ -2061,11 +2220,13 @@ class AuthBrowser:
             elif scrolls_done > 0:
                 consecutive_empty += 1
                 if consecutive_empty >= max_consecutive_empty:
+                    stop_reason = "list_exhausted"
                     break
 
             try:
                 self.scroll("down", 800)
-            except Exception:
+            except Exception as e:
+                stop_reason = f"scroll_failed: {type(e).__name__}"
                 break
 
             scrolls_done += 1
@@ -2080,6 +2241,8 @@ class AuthBrowser:
             "items": all_items,
             "total": len(all_items),
             "scrolls_done": scrolls_done,
+            "max_scrolls": max_scrolls,
+            "stop_reason": stop_reason,
         }
         if dupes_skipped > 0:
             result_dict["warning"] = f"{dupes_skipped} duplicates skipped, consider specifying unique attribute for dedup_by"
@@ -2510,12 +2673,22 @@ def _auth_browse(
     return _html_to_markdown(_auth_browse_html(agent_id, domain, url, headed))
 
 
+def _domain_of(url: str) -> str:
+    """Host part of a URL, for the audit row. Never raises."""
+    try:
+        from urllib.parse import urlparse
+        return urlparse(url).netloc or "?"
+    except Exception:
+        return "?"
+
+
 async def browse_page(
     ctx: ToolContext,
     url: str,
     size: str = "m",
     use_auth: Optional[str] = None,
     keep_open: bool = False,
+    verify: bool = False,
 ) -> str:
     """
     Fetch a web page and extract content as structured markdown.
@@ -2705,31 +2878,99 @@ async def browse_page(
         return f"⚠️ Failed to fetch page: {result['error']}"
 
     text = result.get("text", "")
+    sig = result.get("signals", {})
+    agent_id = getattr(getattr(ctx, "agent_root", None), "name", None)
+    renderer = "static"
+    rendered_chars: Optional[int] = None
 
-    if result.get("needs_js"):
-        js_text = await _fetch_js_text(
-            url, getattr(getattr(ctx, "agent_root", None), "name", None),
-        )
-        if js_text and len(js_text) > len(text or ""):
-            text = js_text
+    if result.get("needs_js") or verify:
+        js_text = await _fetch_js_text(url, agent_id)
+        if js_text is not None:
+            rendered_chars = len(js_text)
+            if len(js_text) > len(text or ""):
+                text = js_text
+                renderer = "camoufox"
     max_chars = _SIZE_PRESETS.get(size, _SIZE_PRESETS["m"])
     total = len(text)
+    shown = min(total, max_chars) if max_chars else total
     if max_chars and total > max_chars:
-        text = text[:max_chars] + f"\n\n... (truncated, {total} total chars, use size='l' or 'f' for more)"
+        text = text[:max_chars]
 
-    return f"Content from {url} (markdown, {total} chars):\n\n{text}"
+    header = _completeness_header(
+        url, sig, renderer, rendered_chars, shown, total, size,
+    )
+    # The anonymous path wrote no audit record at all, so the two questions
+    # this header now answers had no history behind them: 3 929 audit rows on
+    # 2026-08-23, every one of them from the authenticated path. One line per
+    # fetch turns "is a cut transport rare?" from an opinion into a count.
+    if agent_id:
+        try:
+            from dpc_client_core import web_auth as _wa
+            _wa.log_browser_action(
+                agent_id, _domain_of(url), "fetch_anonymous", url,
+                result="ok",
+                html_chars=sig.get("html_chars"),
+                text_chars=total,
+                document_closed=sig.get("document_closed"),
+                script_tags=sig.get("script_tags"),
+                app_shell=bool(sig.get("app_shell_markers")),
+                js_capable=sig.get("js_capable"),
+                needs_js=bool(result.get("needs_js")),
+                renderer=renderer,
+                rendered_chars=rendered_chars,
+                preset=size,
+                shown_chars=shown,
+            )
+        except Exception as e:  # auditing must never break a fetch
+            log.warning("anonymous fetch audit failed (%s): %s", url, e)
+
+    return f"{header}\n\n{text}"
 
 
-def fetch_json(ctx: ToolContext, url: str) -> str:
+FETCH_JSON_WINDOW = 10_000  # chars of pretty-printed JSON per call
+
+
+def _json_shape(data: Any) -> str:
+    """One line saying what the document is, from the already-parsed object.
+
+    The window below is a slice of pretty-printed text, so an agent that
+    sees only the first 10 000 characters cannot tell whether the part it
+    is missing is one more field or ten thousand records. `json.loads` has
+    already produced the whole object by this point — the shape is free,
+    and it answers "what else is in here" without asking the network
+    again, which the offset does not.
     """
-    Fetch JSON data from a URL.
+    if isinstance(data, dict):
+        keys = list(data.keys())
+        shown = ", ".join(str(k) for k in keys[:12])
+        more = f" +{len(keys) - 12} more" if len(keys) > 12 else ""
+        return f"object with {len(keys)} top-level keys [{shown}{more}]"
+    if isinstance(data, list):
+        if not data:
+            return "empty array"
+        return f"array of {len(data)} items, first is {type(data[0]).__name__}"
+    return f"scalar ({type(data).__name__})"
+
+
+def fetch_json(ctx: ToolContext, url: str, offset: int = 0, limit: int | None = None) -> str:
+    """
+    Fetch JSON data from a URL, one window of characters at a time.
+
+    The old form cut at 10 000 chars and appended a bare `... (truncated)`:
+    no size, no way to continue, and the cut lands mid-structure so what
+    came back was not parseable JSON either. The window below says how
+    large the document is, which slice of it this is, and how to ask for
+    the next one — and names the price, because there is no buffer here:
+    a second window is a second request to the server.
 
     Args:
         ctx: Tool context (unused)
         url: URL to fetch
+        offset: First character of the pretty-printed document to return
+        limit: How many characters to return (default FETCH_JSON_WINDOW)
 
     Returns:
-        JSON content formatted for reading
+        A window of the JSON document, prefixed with its bounds
     """
     import json
 
@@ -2741,14 +2982,33 @@ def fetch_json(ctx: ToolContext, url: str) -> str:
     try:
         data = json.loads(result["content"])
         formatted = json.dumps(data, indent=2, ensure_ascii=False)
-
-        if len(formatted) > 10000:
-            formatted = formatted[:10000] + f"\n\n... (truncated)"
-
-        return f"JSON from {url}:\n\n{formatted}"
-
     except json.JSONDecodeError as e:
         return f"⚠️ Invalid JSON: {e}"
+
+    total = len(formatted)
+    window = FETCH_JSON_WINDOW if limit is None else max(1, limit)
+    start = max(0, offset)
+    if start >= total and total:
+        return (
+            f"[json from {url}: {total} chars total, offset={start} is past the"
+            f" end — the last window starts at offset={max(0, total - window)}]"
+        )
+    chunk = formatted[start:start + window]
+    end = start + len(chunk)
+    if start == 0 and end >= total:
+        return f"JSON from {url}:\n\n{formatted}"
+    return (
+        f"[json from {url}: {_json_shape(data)}, {total} chars pretty-printed"
+        f" | this window is chars {start}-{end} — A SLICE, not parseable JSON,"
+        f" it is cut mid-structure"
+        + (
+            f" | next window: fetch_json(url, offset={end}) — this RE-FETCHES"
+            f" the document from the network]"
+            if end < total
+            else " | this is the final window]"
+        )
+        + f"\n\n{chunk}"
+    )
 
 
 
@@ -3193,6 +3453,19 @@ async def browser_collect(
     total = result.get("total", 0)
     scrolls = result.get("scrolls_done", 0)
     header = f"Collected {total} items ({scrolls} scrolls)"
+    # Say which of the three exits happened. "Collected 120 items (30 scrolls)"
+    # read the same whether the list had ended or the budget had, and only one
+    # of those means the collection is complete.
+    reason = result.get("stop_reason")
+    if reason == "list_exhausted":
+        header += " — list exhausted, this is the whole list"
+    elif reason == "scroll_budget_exhausted":
+        header += (
+            f" — INCOMPLETE: stopped at the max_scrolls={result.get('max_scrolls', scrolls)}"
+            " budget, not at the end of the list; raise max_scrolls to collect more"
+        )
+    elif reason:
+        header += f" — INCOMPLETE: scrolling stopped early ({reason})"
     if result.get("warning"):
         header += f"\n⚠️ {result['warning']}"
     items_json = _json.dumps(result.get("items", []), ensure_ascii=False, indent=2)
@@ -3248,6 +3521,11 @@ def get_tools() -> List[ToolEntry]:
                             "type": "boolean",
                             "description": "When true, leave the headed Camoufox window open after the fetch returns. Works on both the anonymous and use_auth paths: either way a headed Camoufox session is opened and reused on subsequent keep_open browse_page calls for the same agent, so opening one site and then another navigates the same window. Window stays open until DPC restart, an explicit close_browser call, or the next keep_open fetch that reuses it. Use for visual debugging or as the foundation for Task 002 interactive flows.",
                             "default": False
+                        },
+                        "verify": {
+                            "type": "boolean",
+                            "description": "When true, also render the page in a real browser and report how many characters JS produced against the static fetch. Costs a browser launch (~7-10s). Use when the response says the page runs JS and you need to know whether anything is missing — a static fetch cannot establish that a page has no more content.",
+                            "default": False
                         }
                     },
                     "required": ["url"]
@@ -3271,13 +3549,33 @@ def get_tools() -> List[ToolEntry]:
             name="fetch_json",
             schema={
                 "name": "fetch_json",
-                "description": "Fetch JSON data from a URL API endpoint",
+                "description": (
+                    "Fetch JSON data from a URL API endpoint. Documents larger"
+                    " than 10000 characters come back one window at a time; the"
+                    " response states the total size and the offset of the next"
+                    " window. Each window is a fresh request to the server."
+                ),
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "url": {
                             "type": "string",
                             "description": "URL to fetch JSON from"
+                        },
+                        "offset": {
+                            "type": "integer",
+                            "description": (
+                                "First character of the document to return"
+                                " (default 0). Use the offset the previous"
+                                " response named to read the next window."
+                            )
+                        },
+                        "limit": {
+                            "type": "integer",
+                            "description": (
+                                "Characters to return in this window"
+                                " (default 10000)."
+                            )
                         }
                     },
                     "required": ["url"]

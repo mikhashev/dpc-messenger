@@ -309,6 +309,37 @@ def _request_approval(ctx: ToolContext, command: str, reason: str, cwd: str, tim
     return _execute_shell_command(command, entry.get("cwd"), entry.get("timeout", 120))
 
 
+def _cap_stream(text: str, stream: str) -> str:
+    """Cap one output stream and say so *before* the content.
+
+    The notice used to sit after the content, and the second cap in
+    `loop.py:_truncate_tool_result` (15 000 chars) cut this string again,
+    taking the notice with it. The agent was then left with the harness
+    marker alone, which reports the size of what it received (50 036) as
+    if it were the size of the command's output (699 370): a confident
+    wrong number rather than silence. A prefix survives that second cut.
+
+    It also names the way to read the rest, because this tool has no
+    offset of its own, and the price of that way — the command runs
+    again, which for a slow or non-deterministic command is a real cost
+    the agent must see before paying it. The redirect form is one static
+    string on all three platforms: `>` and `2>` are valid in both
+    `cmd.exe` and `/bin/sh`, and a bare relative name lands in the agent
+    sandbox, which is exactly where `read_file` resolves relative paths.
+    """
+    if len(text) <= MAX_OUTPUT:
+        return text
+    return (
+        f"[{stream}: {len(text)} chars, kept first {MAX_OUTPUT} of them"
+        f" | to read the rest, re-run the command as"
+        f' `<command> > out.txt 2> err.txt`, then read_file("out.txt", offset=…)'
+        f' or read_file("err.txt") — the files land in the working directory of'
+        f" the run, which is the agent sandbox unless you passed cwd, and"
+        f" re-running EXECUTES THE COMMAND AGAIN]\n"
+        + text[:MAX_OUTPUT]
+    )
+
+
 def _execute_shell_command(command: str, working_dir: str | None, timeout: int) -> str:
     """Run a shell command, format stdout/stderr/exit. Executor-thread only."""
     is_windows = platform.system() == "Windows"
@@ -341,15 +372,9 @@ def _execute_shell_command(command: str, working_dir: str | None, timeout: int) 
 
         parts = []
         if result.stdout:
-            stdout = result.stdout
-            if len(stdout) > MAX_OUTPUT:
-                stdout = stdout[:MAX_OUTPUT] + f"\n... (truncated, {len(result.stdout)} total chars)"
-            parts.append(stdout)
+            parts.append(_cap_stream(result.stdout, "stdout"))
         if result.stderr:
-            stderr = result.stderr
-            if len(stderr) > MAX_OUTPUT:
-                stderr = stderr[:MAX_OUTPUT] + f"\n... (truncated, {len(result.stderr)} total chars)"
-            parts.append(f"[stderr]\n{stderr}")
+            parts.append(f"[stderr]\n{_cap_stream(result.stderr, 'stderr')}")
         if result.returncode != 0:
             parts.append(f"[exit code: {result.returncode}]")
 

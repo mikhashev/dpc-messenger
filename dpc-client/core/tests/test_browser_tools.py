@@ -326,7 +326,11 @@ async def test_summarize_without_task_keeps_refs_prompt():
     manager = _RecordingManager()
     oversized = "line\n" * 4000
     out = await browser._llm_summarize_snapshot(oversized, None, manager)
-    assert out == "SUMMARY"
+    # The rewrite reaches the agent labelled as a rewrite (2026-08-23): the
+    # summary itself is unchanged, it now travels behind a notice saying a
+    # model produced it and naming browser_snapshot(raw=True) for the tree.
+    assert out.endswith("SUMMARY")
+    assert out.startswith("[snapshot summarised by")
     assert "The user's task is" not in manager.prompts[0]
     assert "appended to your answer verbatim" in manager.prompts[0]
 
