@@ -9,6 +9,11 @@
   import { untrack } from 'svelte';
   import { mapBackendMessage, resolveSenderIdentity } from '$lib/utils/messageMapper';
   import { nextStrip, clearedStrip } from '$lib/utils/speedStripOwner';
+  import {
+    historyUpdateApplies,
+    mayDropLiveTextAfterHistoryUpdate,
+    mayDropLiveTextOnCompletion,
+  } from '$lib/utils/liveTextHandover';
   import { showNotificationIfBackground } from '$lib/notificationService';
   import {
     agentProgress,
@@ -382,9 +387,18 @@
         }
       }
       if (isActiveChatConv(conversation_id)) {
+        // The second way the answer used to disappear, and the one the backlog entry
+        // never named: completion fires at exactly the moment the user described —
+        // «когда ответ закончен» — and this used to wipe the live text without asking
+        // whether the reply had reached the history at all. If the history event is
+        // late, or was refused above, this discarded the only copy of the answer.
         const hist = get(chatHistories).get(conversation_id) || [];
         const hasPendingCommand = hist.some((m: any) => m.commandId);
-        if (!hasPendingCommand) {
+        const last: any = hist.length ? hist[hist.length - 1] : null;
+        if (mayDropLiveTextOnCompletion({
+          lastMessageSender: last?.sender ?? null,
+          hasPendingCommand,
+        })) {
           clearAgentStreaming();
         }
       }
@@ -430,16 +444,20 @@
       const { conversation_id, messages, tokens_used, token_limit, thinking, tokens_after_last_response, tokens_after_last_response_at, context_breakdown } = $agentHistoryUpdated;
 
       untrack(() => {
-        // Flush pending buffer and capture accumulated streaming text before overwriting history
+        // Flush the pending buffer and capture the accumulated streaming text — but do
+        // NOT clear it yet. The update below can decline (see the B1 guard), and clearing
+        // before knowing that is what made a finished reply vanish until the user left
+        // the chat: text wiped, replacement never applied, nothing left on screen.
+        // The clear now happens after, and only if the replacement landed.
         let capturedAgentStreaming = '';
-        if (isActiveChatConv(conversation_id)) {
+        const liveTextIsOurs = isActiveChatConv(conversation_id);
+        if (liveTextIsOurs) {
           if (streamingBuffer) {
             agentStreamingText += streamingBuffer;
             streamingBuffer = '';
             if (streamingFlushTimeout) { clearTimeout(streamingFlushTimeout); streamingFlushTimeout = null; }
           }
           capturedAgentStreaming = agentStreamingText;
-          if (capturedAgentStreaming) clearAgentStreaming();
         }
 
         // Notify parent to update token usage map (include tokensAfterLastResponse for Total counter)
@@ -454,15 +472,25 @@
           });
         }
 
+        let historyApplied = false;
         chatHistories.update(map => {
           const newMap = new Map(map);
           const existing = map.get(conversation_id) || [];
 
           // Defence-in-depth: never overwrite UI history with a shorter backend payload (B1 guard).
           const nonPendingExisting = existing.filter((m: any) => !m.commandId);
-          if ((messages || []).length < nonPendingExisting.length) {
+          if (!historyUpdateApplies((messages || []).length, nonPendingExisting.length)) {
+            // Logged because whether this fires at all was an open question on
+            // AGENT-REPLY-VANISHES-UNTIL-YOU-LEAVE-THE-CHAT for two weeks, and one
+            // line answers it the next time the symptom is reported.
+            console.warn(
+              `[Agents] history update refused for ${conversation_id}: backend sent ` +
+              `${(messages || []).length} messages, UI holds ${nonPendingExisting.length} — ` +
+              `live text kept`
+            );
             return map; // skip — backend has fewer messages than UI
           }
+          historyApplied = true;
 
           // Preserve any pending DPC execute_ai_query placeholders
           const pendingMsgs = existing.filter((m: any) => m.commandId);
@@ -498,6 +526,13 @@
           newMap.set(conversation_id, merged);
           return newMap;
         });
+
+        // The handover: the reply is durable now, so the live copy can go. On the
+        // refused path it stays on screen, which is the whole point.
+        if (liveTextIsOurs && capturedAgentStreaming
+            && mayDropLiveTextAfterHistoryUpdate(historyApplied)) {
+          clearAgentStreaming();
+        }
 
         // Scroll to bottom if this is the active chat (two rAF calls for layout accuracy)
         if (isActiveChatConv(conversation_id)) {
