@@ -69,7 +69,15 @@
 
   // Which agent the strip's speed and samples belong to. `null` is nobody;
   // `''` is the singleton agent, whose backend id really is the empty string.
+  //
+  // `speedOwnerSpeed` mirrors what was last shown, and it exists to keep the
+  // progress effect from reading `agentProgressSpeed`. That prop is $bindable
+  // and bound to page-level $state, so an effect that both reads and writes it
+  // is a loop — `effect_update_depth_exceeded`, which is exactly what the first
+  // version of this fix shipped. The effect writes the prop and reads only
+  // these two plain `let`s, which are not reactive and cannot re-trigger it.
   let speedOwnerAgentId: string | null = null;
+  let speedOwnerSpeed: Record<string, unknown> | null = null;
 
   // ---------------------------------------------------------------------------
   // Internal state (non-reactive — not exposed)
@@ -236,8 +244,9 @@
         // on a paid API was painted with the local engine's tokens per second,
         // name and window. `speedStripOwner` holds both rules in one place, with
         // the tests that keep them from being tidied apart.
-        const upd = nextStrip(speedOwnerAgentId, agentProgressSpeed, $agentProgress as any);
+        const upd = nextStrip(speedOwnerAgentId, speedOwnerSpeed, $agentProgress as any);
         speedOwnerAgentId = upd.ownerAgentId;
+        speedOwnerSpeed = upd.speed;
         agentProgressSpeed = upd.speed;
         if (upd.resetSamples) liveSpeedSamples.length = 0;
         // Per-round samples for the medians shown beside the finished round
@@ -290,6 +299,7 @@
       agentProgressAgentId = '';
       agentProgressSpeed = cleared.speed;
       speedOwnerAgentId = cleared.ownerAgentId;
+      speedOwnerSpeed = cleared.speed;
       liveSpeedSamples.length = 0;
       clearAgentStreaming();
       lastActiveChatId = activeChatId;
@@ -311,6 +321,7 @@
       // The run is over, so the strip describes nobody: the next agent's first
       // event must not read as a continuation of this one.
       speedOwnerAgentId = null;
+      speedOwnerSpeed = null;
       // Aggregate the turn's per-round speeds onto the last agent message so
       // the finished header (N rounds · M actions) carries medians. Client-side
       // only — history on disk keeps its shape.
