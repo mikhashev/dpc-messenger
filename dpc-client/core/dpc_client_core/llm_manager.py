@@ -669,7 +669,25 @@ class LLMManager:
                     logger.info("Parsed thinking tags from response (%d chars)", len(thinking_content))
 
             if thinking_content:
-                thinking_tokens = self.count_tokens(thinking_content, provider.model)
+                # Prefer the number the provider was given by the API over one we
+                # compute again from the text. DeepSeek reports
+                # `completion_tokens_details.reasoning_tokens` — the count it bills
+                # — and this used to ignore it and re-count with `count_tokens`,
+                # which for a model name carrying no `gpt`/`claude` and no colon
+                # falls through to `len(text) // 4`. On a measured call that read
+                # 190 on screen where the API had said 168: an estimate displayed
+                # beside a measurement we already held.
+                #
+                # `get_last_usage()` is on `AIProvider`, so this needs no guard and
+                # no knowledge of which provider answered. Providers that estimate
+                # the split themselves (llama-server, when the server reports none)
+                # put their estimate in the same field — still their own number over
+                # the same text, and better than a second opinion computed here.
+                reported = (provider.get_last_usage() or {}).get("reasoning_tokens")
+                if isinstance(reported, int) and reported > 0:
+                    thinking_tokens = reported
+                else:
+                    thinking_tokens = self.count_tokens(thinking_content, provider.model)
         else:
             logger.debug("Provider '%s' does not support thinking mode", provider.model)
 
