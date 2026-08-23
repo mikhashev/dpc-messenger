@@ -651,15 +651,21 @@ class LlamaServerProvider(DeepSeekProvider):
         on_chunk: Optional[callable] = None,
         conversation_id: Optional[str] = None,
         reasoning_budget_tokens: Optional[int] = None,
+        reasoning_effort: Optional[str] = None,
     ) -> str:
-        """Streaming text generation; on_chunk(text, conversation_id) per piece."""
+        """Streaming text generation; on_chunk(text, conversation_id) per piece.
+
+        The effort used to be a literal `None` in the body below while the plain
+        path two methods up already read the caller's — the same gap DeepSeek had,
+        inherited along with the shape."""
         self._last_thinking = None
         self._last_usage = None
 
         async def _call():
             client = await self._ensure()
             extra_body = self._build_extra_body(
-                None, reasoning_budget_tokens, effective_max_tokens=self.max_tokens
+                reasoning_effort, reasoning_budget_tokens,
+                effective_max_tokens=self.max_tokens,
             )
             params: Dict[str, Any] = {
                 "model": self._model_name(),
@@ -668,7 +674,9 @@ class LlamaServerProvider(DeepSeekProvider):
                 "extra_body": extra_body,
                 "stream": True,
                 "stream_options": {"include_usage": True},
-                **self._sampling_on_the_wire(extra_body, self._sampling_params()),
+                **self._sampling_on_the_wire(
+                    extra_body, self._sampling_params(reasoning_effort=reasoning_effort)
+                ),
             }
             import time as _time
             _t0: Optional[float] = None

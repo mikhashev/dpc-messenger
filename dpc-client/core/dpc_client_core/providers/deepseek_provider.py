@@ -373,13 +373,21 @@ class DeepSeekProvider(AIProvider):
         self._last_usage = None
 
         async def _call():
-            extra_body = self._build_extra_body()
+            # The caller's effort, not the alias ceiling. This read used to be
+            # missing: `_build_extra_body()` took no argument here while the tools
+            # path passed one, so sleep, knowledge extraction and Local AI Chat
+            # could only ever run at the alias default — max on both DeepSeek
+            # aliases at the time it was measured. The label at the bottom of this
+            # function always read the caller's wish correctly, which is why the
+            # gap survived: nothing lied, the wish simply never reached the wire.
+            effort = kwargs.get("reasoning_effort")
+            extra_body = self._build_extra_body(effort)
             params: Dict[str, Any] = {
                 "model": self.model,
                 "max_tokens": self.max_tokens,
                 "messages": [{"role": "user", "content": prompt}],
                 "extra_body": extra_body,
-                **self._sampling_params(kwargs.get("temperature")),
+                **self._sampling_params(kwargs.get("temperature"), reasoning_effort=effort),
             }
             resp = await self.client.chat.completions.create(**params)
             msg = resp.choices[0].message
@@ -406,13 +414,18 @@ class DeepSeekProvider(AIProvider):
         prompt: str,
         on_chunk: callable,
         conversation_id: str = None,
+        reasoning_effort: str = None,
     ) -> str:
-        """Streaming text generation. Calls on_chunk(text, conversation_id) per token."""
+        """Streaming text generation. Calls on_chunk(text, conversation_id) per token.
+
+        `reasoning_effort` had no parameter to arrive through until 2026-08-24, so a
+        caller could not have lowered it if it wanted to — the signature itself was
+        half of the defect."""
         self._last_thinking = None
         self._last_usage = None
 
         async def _call():
-            extra_body = self._build_extra_body()
+            extra_body = self._build_extra_body(reasoning_effort)
             params: Dict[str, Any] = {
                 "model": self.model,
                 "max_tokens": self.max_tokens,
@@ -423,7 +436,7 @@ class DeepSeekProvider(AIProvider):
                 # that carries no choices — which is why the skip below now
                 # reads the chunk before discarding it.
                 "stream_options": {"include_usage": True},
-                **self._sampling_params(),
+                **self._sampling_params(reasoning_effort=reasoning_effort),
             }
 
             full_text = ""

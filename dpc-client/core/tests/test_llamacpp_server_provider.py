@@ -1112,3 +1112,52 @@ class TestTheRetriedStream:
         assert out == "hello"
         assert seen == ["he", "llo"], "the full text must not follow the tokens"
 
+
+class TestTheStreamCarriesAnEffort:
+    """The plain path two methods up already read the caller's effort while the
+    stream passed a literal `None` — the same gap DeepSeek had, inherited with
+    the shape it was built from."""
+
+    @pytest.mark.asyncio
+    async def test_the_stream_sends_the_callers_effort(self):
+        p = _provider()
+        p.supervisor = _FakeSupervisor()
+
+        chunks = [
+            SimpleNamespace(
+                choices=[SimpleNamespace(
+                    delta=SimpleNamespace(reasoning_content=None, content="hi"),
+                    finish_reason=None)],
+                usage=None),
+            SimpleNamespace(
+                choices=[],
+                usage=SimpleNamespace(prompt_tokens=3, completion_tokens=1, total_tokens=4)),
+        ]
+
+        class _Stream:
+            def __aiter__(self):
+                async def gen():
+                    for c in chunks:
+                        yield c
+                return gen()
+
+        seen_params = {}
+
+        class _Completions:
+            async def create(self, **params):
+                seen_params.update(params)
+                return _Stream()
+
+        client = SimpleNamespace(chat=SimpleNamespace(completions=_Completions()))
+
+        async def _ensure():
+            return client
+        p._ensure = _ensure
+
+        await p.generate_response_stream("hi", None, "conv-1", reasoning_effort="low")
+
+        # llama-server takes the level through the chat template, not at the top
+        # level of extra_body — the assertion is written against the shape the
+        # provider actually builds rather than the one DeepSeek uses.
+        assert seen_params["extra_body"]["chat_template_kwargs"]["reasoning_effort"] == "low"
+

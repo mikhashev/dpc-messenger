@@ -72,7 +72,11 @@ class GeminiProvider(AIProvider):
         prompt: str,
         on_chunk: callable,
         conversation_id: str = None,
+        reasoning_effort: str = None,
     ) -> str:
+        # Accepted so every provider answers the same call, and not forwarded:
+        # whether this API has an equivalent has not been checked. Named rather
+        # than swallowed by **kwargs, so the next reader sees it is a decision.
         loop = asyncio.get_event_loop()
         try:
             chunks = await loop.run_in_executor(

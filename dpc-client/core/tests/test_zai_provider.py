@@ -416,3 +416,25 @@ def test_only_the_v_models_claim_vision(model, vision):
     alias would volunteer for image work and fail at the API."""
     assert _make({"model": model}).supports_vision() is vision
 
+
+# --- the one word of the effort vocabulary this API can hear ------------------
+
+def test_off_disables_glm_thinking_because_that_is_what_off_means_here():
+    """GLM has no `reasoning_effort` — thinking is a switch. `off` is the single
+    word of the shared scale that maps onto it, and mapping it is the difference
+    between «this provider ignores effort» and «this provider cannot be quietened»."""
+    p = _make()  # thinking enabled by default
+    assert p._build_extra_body() == {"thinking": {"type": "enabled"}}
+    assert p._build_extra_body("off") == {"thinking": {"type": "disabled"}}
+    assert p._build_extra_body("OFF ") == {"thinking": {"type": "disabled"}}
+
+
+def test_a_level_this_api_cannot_express_is_not_invented():
+    """The other four words have nowhere to go, and sending a `reasoning_effort`
+    GLM does not accept would be worse than dropping it."""
+    p = _make()
+    for level in ("low", "medium", "high", "max"):
+        body = p._build_extra_body(level)
+        assert body == {"thinking": {"type": "enabled"}}
+        assert "reasoning_effort" not in body
+

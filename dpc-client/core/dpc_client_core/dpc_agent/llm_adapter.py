@@ -237,7 +237,13 @@ class DpcLlmAdapter:
             tool_descriptions = self._format_tools_for_prompt(tools)
             prompt = f"{tool_descriptions}\n\n{prompt}"
 
-        # Call DPC provider - use streaming if available and callback provided
+        # Call DPC provider - use streaming if available and callback provided.
+        # The effort travels on both branches. It used to travel on neither: the
+        # native tools path built `gw_kwargs["reasoning_effort"]` and passed it,
+        # while these two dropped it silently — so an agent that fell back to text
+        # ran at whatever the alias carried, and so did every caller without tools.
+        # Every provider names the parameter now, including the ones that cannot
+        # act on it, so this call does not have to know which is which.
         try:
             if on_stream_chunk and hasattr(provider, 'generate_response_stream'):
                 # Use streaming
@@ -246,10 +252,13 @@ class DpcLlmAdapter:
                     prompt,
                     on_chunk=on_stream_chunk,
                     conversation_id=conversation_id,
+                    reasoning_effort=reasoning_effort,
                 )
             else:
                 # Non-streaming fallback
-                response = await provider.generate_response(prompt)
+                response = await provider.generate_response(
+                    prompt, reasoning_effort=reasoning_effort
+                )
 
             # Build response message in Ouroboros format
             response_msg: Dict[str, Any] = {

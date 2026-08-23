@@ -206,7 +206,14 @@ class ZaiProvider(AIProvider):
             f"({elapsed}s elapsed): {last_error}"
         ) from last_error
 
-    def _build_extra_body(self) -> Optional[Dict[str, Any]]:
+    def _build_extra_body(self, reasoning_effort: Optional[str] = None) -> Optional[Dict[str, Any]]:
+        """GLM's thinking is a switch, not a level — there is no `reasoning_effort`
+        on this API. One word of the caller's vocabulary still maps onto it: `off`
+        means «do not think», which is exactly what `{"type": "disabled"}` says.
+        Every other level is accepted and has nowhere to go, which is the truth
+        about this provider rather than a gap in the wiring."""
+        if (reasoning_effort or "").strip().lower() == "off":
+            return {"thinking": {"type": "disabled"}}
         if self.thinking_enabled:
             return {"thinking": {"type": "enabled"}}
         return None
@@ -265,7 +272,7 @@ class ZaiProvider(AIProvider):
             }
             if self.top_p is not None:
                 params["top_p"] = self.top_p
-            extra = self._build_extra_body()
+            extra = self._build_extra_body(kwargs.get("reasoning_effort"))
             if extra:
                 params["extra_body"] = extra
             resp = await self.client.chat.completions.create(**params)
@@ -289,6 +296,7 @@ class ZaiProvider(AIProvider):
         prompt: str,
         on_chunk: callable,
         conversation_id: str = None,
+        reasoning_effort: str = None,
     ) -> str:
         """Streaming text generation. Calls on_chunk(text, conversation_id) per token."""
         self._last_thinking = None
@@ -308,7 +316,7 @@ class ZaiProvider(AIProvider):
             }
             if self.top_p is not None:
                 params["top_p"] = self.top_p
-            extra = self._build_extra_body()
+            extra = self._build_extra_body(reasoning_effort)
             if extra:
                 params["extra_body"] = extra
 

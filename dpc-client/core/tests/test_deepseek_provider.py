@@ -668,3 +668,65 @@ async def test_a_retried_stream_delivers_each_token_exactly_once(monkeypatch):
     assert seen == ["he", "llo"], "the full text must not follow the tokens"
     assert "".join(seen) == out
 
+
+# --- an effort reaches the wire on the paths without tools --------------------
+
+@pytest.mark.asyncio
+async def test_the_plain_path_sends_the_callers_effort_and_not_the_alias_ceiling():
+    """`_build_extra_body()` was called with no argument here while the tools path
+    passed one, so sleep, knowledge extraction and Local AI Chat could only ever
+    run at the alias default — max on both live aliases when it was measured, over
+    118 plain calls. The label was read from the same body and was therefore
+    honest, which is why nothing looked wrong."""
+    p = _make({"reasoning_effort": "max"})  # the alias ceiling
+    fake_msg = SimpleNamespace(content="ok", reasoning_content=None)
+    fake_resp = SimpleNamespace(
+        choices=[SimpleNamespace(message=fake_msg)],
+        usage=SimpleNamespace(prompt_tokens=1, completion_tokens=1, total_tokens=2),
+    )
+    p.client = SimpleNamespace(chat=SimpleNamespace(
+        completions=SimpleNamespace(create=AsyncMock(return_value=fake_resp))))
+
+    await p.generate_response("hi", reasoning_effort="low")
+
+    _, kwargs = p.client.chat.completions.create.call_args
+    assert kwargs["extra_body"]["reasoning_effort"] == "low", "the caller's word, not the alias's"
+
+
+@pytest.mark.asyncio
+async def test_off_on_the_plain_path_turns_thinking_off_rather_than_lowering_it():
+    """`off` is not a level: it disables the thinking block, which is the only
+    thing the API listens to. A path that could not carry the word could not
+    express it either."""
+    p = _make({"reasoning_effort": "max"})
+    fake_resp = SimpleNamespace(
+        choices=[SimpleNamespace(message=SimpleNamespace(content="ok", reasoning_content=None))],
+        usage=SimpleNamespace(prompt_tokens=1, completion_tokens=1, total_tokens=2),
+    )
+    p.client = SimpleNamespace(chat=SimpleNamespace(
+        completions=SimpleNamespace(create=AsyncMock(return_value=fake_resp))))
+
+    await p.generate_response("hi", reasoning_effort="off")
+
+    _, kwargs = p.client.chat.completions.create.call_args
+    assert kwargs["extra_body"]["thinking"] == {"type": "disabled"}
+    assert "reasoning_effort" not in kwargs["extra_body"]
+
+
+@pytest.mark.asyncio
+async def test_the_stream_has_somewhere_to_put_an_effort_and_sends_it():
+    """Half of this defect was the signature: `generate_response_stream` had no
+    parameter for an effort, so a caller could not have lowered it if it wanted."""
+    p = _make({"reasoning_effort": "max"})
+    p.client = SimpleNamespace(chat=SimpleNamespace(
+        completions=SimpleNamespace(create=AsyncMock(return_value=_StreamOf(
+            [_token("hi"), _usage_chunk()])))))
+
+    async def on_chunk(text, conv_id):
+        pass
+
+    await p.generate_response_stream("hi", on_chunk, "conv-1", reasoning_effort="medium")
+
+    _, kwargs = p.client.chat.completions.create.call_args
+    assert kwargs["extra_body"]["reasoning_effort"] == "medium"
+
