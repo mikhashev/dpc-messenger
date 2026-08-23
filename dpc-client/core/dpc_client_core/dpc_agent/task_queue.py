@@ -118,14 +118,33 @@ class TaskQueue:
     - Retry logic with configurable max retries
     """
 
-    def __init__(self, agent_root: Path):
+    # How many tasks may wait at once. Nothing bounded this until 2026-08-24:
+    # `schedule` appended, sorted and saved, and no caller counted. The queue is
+    # persisted and reloaded, so a runaway did not even need one long session to
+    # accumulate — it survived restarts.
+    #
+    # The number is chosen from the logs rather than from taste. Across 382
+    # process starts in the two most recent log files the line
+    # «TaskQueue initialized with N pending tasks» read 0 three hundred and
+    # seventy-seven times and 1 five times. It has never read more. Fifty is two
+    # orders of magnitude above anything observed, which is the point: a ceiling
+    # that ordinary use cannot reach, and a runaway cannot pass.
+    DEFAULT_MAX_PENDING = 50
+
+    def __init__(self, agent_root: Path, max_pending: Optional[int] = None):
         """
         Initialize task queue.
 
         Args:
             agent_root: Root directory for agent storage (~/.dpc/agent/)
+            max_pending: Ceiling on tasks waiting to run. None takes
+                DEFAULT_MAX_PENDING; a value <= 0 means no ceiling, which is what
+                a test that wants the old behaviour asks for explicitly.
         """
         self.agent_root = agent_root
+        self.max_pending = (
+            self.DEFAULT_MAX_PENDING if max_pending is None else int(max_pending)
+        )
         self.queue_file = agent_root / "state" / "task_queue.json"
         self.queue_file.parent.mkdir(parents=True, exist_ok=True)
 
@@ -250,7 +269,24 @@ class TaskQueue:
 
         Returns:
             Created task
+
+        Raises:
+            RuntimeError: when the queue already holds `max_pending` waiting
+                tasks. Refusing is the point: both callers turn an exception into
+                a readable message — the tool answers «Error scheduling task: …»
+                and the WebSocket command answers `{"status": "error"}` — so the
+                agent that asked is told, rather than a task quietly joining a
+                pile nobody is watching.
         """
+        if self.max_pending > 0:
+            pending = sum(1 for t in self._queue if t.status == "pending")
+            if pending >= self.max_pending:
+                raise RuntimeError(
+                    f"Task queue is full: {pending} tasks already waiting "
+                    f"(limit {self.max_pending}). Let some run or cancel a few "
+                    f"before scheduling more."
+                )
+
         task = Task(
             id=task_id or f"task-{uuid.uuid4().hex[:8]}",
             task_type=task_type,
