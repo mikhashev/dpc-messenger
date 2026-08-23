@@ -230,14 +230,52 @@ class LlamaServerProvider(DeepSeekProvider):
         return self._openai
 
     async def close(self) -> None:
-        if _ACTIVE_SUPERVISORS.get(self.alias) is self.supervisor:
-            _ACTIVE_SUPERVISORS.pop(self.alias, None)
-        if self._openai is not None and hasattr(self._openai, "close"):
-            await self._openai.close()
-        # drain, not bare stop: in-flight calls get to finish before the child
-        # is asked to flush and exit.
-        await self.supervisor.drain(timeout=120.0)
-        self._openai = None
+        """Stop the child, then hand the registry back.
+
+        The order is the whole point. This used to pop the supervisor out of
+        `_ACTIVE_SUPERVISORS` on the first line and only then close the HTTP
+        client — so when the client raised, the drain two lines below never
+        ran and `stop_all_supervisors`, the sweep that exists precisely to
+        catch a child nobody holds any more, found an empty registry and
+        stopped nothing.
+
+        Measured 2026-08-23, 16:13:59: `Error closing provider 'qwen3.8 27b
+        Mythos': Event loop is closed`, then `LLMManager shutdown complete`
+        with no `llama-server ... stopped` line at all. The child from 15:43
+        on port 59649 outlived the service, the next start put a second
+        27B server on the same card, and the card looked like it was never
+        releasing anything. The safety net was removed by the same call that
+        then fell.
+
+        So: the client close can fail as loudly as it likes, the drain runs in
+        `finally`, and the registry entry is surrendered last — a child that
+        is still running stays reachable from the sweep until it is not.
+        """
+        try:
+            if self._openai is not None and hasattr(self._openai, "close"):
+                await self._openai.close()
+        except Exception as exc:
+            # A dead event loop is the known case (an async tool runs its
+            # handler on a throwaway loop, and the client cached here was
+            # built on it) but any failure here is survivable — the child is
+            # what matters, and it is stopped below either way.
+            logger.warning(
+                "llamacpp_server '%s': closing the HTTP client failed (%s); "
+                "stopping the child anyway",
+                self.alias, exc,
+            )
+        finally:
+            self._openai = None
+            # drain, not bare stop: in-flight calls get to finish before the
+            # child is asked to flush and exit.
+            await self.supervisor.drain(timeout=120.0)
+            # Only now, with the child actually stopped, is the registry entry
+            # surrendered. If the drain above raised, this line is skipped on
+            # purpose: the entry stays, `stop_all_supervisors` gets its turn,
+            # and a child that cannot be stopped is at least logged as one
+            # rather than leaving the process silently.
+            if _ACTIVE_SUPERVISORS.get(self.alias) is self.supervisor:
+                _ACTIVE_SUPERVISORS.pop(self.alias, None)
 
     # --- the thinking dialect -------------------------------------------------
 

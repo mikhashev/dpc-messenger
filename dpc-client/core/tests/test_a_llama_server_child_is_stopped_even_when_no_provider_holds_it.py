@@ -358,3 +358,93 @@ class TestTheSuccessorWaitsWithoutOwning:
         quick = [asyncio.ensure_future(asyncio.sleep(0.01)) for _ in range(3)]
         await asyncio.wait_for(lsp._watch_without_owning(quick), timeout=2)
         assert all(t.done() for t in quick)
+
+
+class TestCloseSurrendersTheRegistryLast:
+    """The provider's own close used to disarm the sweep before it jumped.
+
+    Measured 2026-08-23, 16:13:59 — `Error closing provider 'qwen3.8 27b
+    Mythos': Event loop is closed`, then `LLMManager shutdown complete` with no
+    `llama-server ... stopped` line anywhere. `close()` popped the registry on
+    its first line, the HTTP client raised on its second, and the drain on the
+    third never ran; `stop_all_supervisors` then swept an empty registry. The
+    child from 15:43 outlived the service and the next start put a second 27B
+    server on the same card.
+    """
+
+    def _provider(self, supervisor, client):
+        """A LlamaServerProvider without __init__ — the constructor starts a
+        child. Only the three attributes `close()` touches are bound."""
+        p = lsp.LlamaServerProvider.__new__(lsp.LlamaServerProvider)
+        p.alias = supervisor.alias
+        p.supervisor = supervisor
+        p._openai = client
+        return p
+
+    class _Client:
+        def __init__(self, raises=False):
+            self.raises = raises
+            self.closed = False
+
+        async def close(self):
+            if self.raises:
+                raise RuntimeError("Event loop is closed")
+            self.closed = True
+
+    @pytest.mark.asyncio
+    async def test_a_client_that_cannot_close_does_not_keep_the_child_alive(self):
+        sup = FakeSupervisor("qwen3.8 27b Mythos")
+        lsp._ACTIVE_SUPERVISORS[sup.alias] = sup
+        provider = self._provider(sup, self._Client(raises=True))
+
+        await provider.close()
+
+        assert sup.drained is True
+        assert sup.stopped is True
+        assert sup.alias not in lsp._ACTIVE_SUPERVISORS
+
+    @pytest.mark.asyncio
+    async def test_the_ordinary_path_still_closes_client_child_and_registry(self):
+        sup = FakeSupervisor("qwen3.8 27b Mythos")
+        lsp._ACTIVE_SUPERVISORS[sup.alias] = sup
+        client = self._Client()
+        provider = self._provider(sup, client)
+
+        await provider.close()
+
+        assert client.closed is True
+        assert sup.stopped is True
+        assert sup.alias not in lsp._ACTIVE_SUPERVISORS
+
+    @pytest.mark.asyncio
+    async def test_a_child_that_refuses_to_stop_stays_visible_to_the_sweep(self):
+        # If the drain itself fails there is a live child and nobody holding
+        # it. Popping the entry here is what produced the silent orphan, so
+        # the entry stays and `stop_all_supervisors` gets its turn — which at
+        # minimum logs the child instead of losing it.
+        sup = FakeSupervisor("qwen3.8 27b Mythos", raises=True)
+        lsp._ACTIVE_SUPERVISORS[sup.alias] = sup
+        provider = self._provider(sup, self._Client())
+
+        with pytest.raises(OSError):
+            await provider.close()
+
+        assert lsp._ACTIVE_SUPERVISORS.get(sup.alias) is sup
+
+    @pytest.mark.asyncio
+    async def test_the_sweep_finishes_what_a_failed_close_left(self):
+        """End to end over the shape of the 16:13:59 shutdown: the client
+        raises, and the child is stopped anyway — by close, or failing that by
+        the sweep. Either way nothing is left running."""
+        sup = FakeSupervisor("qwen3.8 27b Mythos")
+        lsp._ACTIVE_SUPERVISORS[sup.alias] = sup
+        provider = self._provider(sup, self._Client(raises=True))
+
+        try:
+            await provider.close()
+        except Exception:
+            pass
+        await lsp.stop_all_supervisors()
+
+        assert sup.stopped is True
+        assert lsp._ACTIVE_SUPERVISORS == {}
