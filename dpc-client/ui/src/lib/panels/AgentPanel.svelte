@@ -8,6 +8,7 @@
   import { type Writable, get } from 'svelte/store';
   import { untrack } from 'svelte';
   import { mapBackendMessage, resolveSenderIdentity } from '$lib/utils/messageMapper';
+  import { nextStrip, clearedStrip } from '$lib/utils/speedStripOwner';
   import { showNotificationIfBackground } from '$lib/notificationService';
   import {
     agentProgress,
@@ -65,6 +66,10 @@
     agentProgressAgentId?: string;
     agentStreamingText?: string;
   } = $props();
+
+  // Which agent the strip's speed and samples belong to. `null` is nobody;
+  // `''` is the singleton agent, whose backend id really is the empty string.
+  let speedOwnerAgentId: string | null = null;
 
   // ---------------------------------------------------------------------------
   // Internal state (non-reactive — not exposed)
@@ -222,15 +227,32 @@
         agentProgressRound = round || 0;
         // Per-round LLM speed (llama.cpp provider only): rides the narration
         // emits so the live counter beside Stop updates once per round.
-        // UPDATE-ONLY: the burst after a speed event carries tool-args and
-        // per-tool events WITHOUT speed — nulling on every event made the
-        // counter flash for milliseconds and die. The clear effect owns reset.
-        if ($agentProgress.speed) {
-            agentProgressSpeed = $agentProgress.speed as Record<string, unknown>;
-            // Per-round samples for the medians shown beside the finished
-            // round count. Median, not mean: one cold first round would drag
-            // a mean down and misreport the model's speed.
-            liveSpeedSamples.push($agentProgress.speed);
+        //
+        // UPDATE-ONLY, and keyed by agent. The burst after a speed event carries
+        // tool-args and per-tool events WITHOUT speed — nulling on every event
+        // made the counter flash for milliseconds and die. But "keep the last
+        // non-empty value" has no idea whose value it is holding, and only the
+        // llama.cpp provider ever sends one: two agents in a room meant the one
+        // on a paid API was painted with the local engine's tokens per second,
+        // name and window. `speedStripOwner` holds both rules in one place, with
+        // the tests that keep them from being tidied apart.
+        const upd = nextStrip(speedOwnerAgentId, agentProgressSpeed, $agentProgress as any);
+        speedOwnerAgentId = upd.ownerAgentId;
+        agentProgressSpeed = upd.speed;
+        if (upd.resetSamples) liveSpeedSamples.length = 0;
+        // Per-round samples for the medians shown beside the finished round
+        // count. Median, not mean: one cold first round would drag a mean down
+        // and misreport the model's speed.
+        if (upd.appendSample) liveSpeedSamples.push(upd.appendSample);
+        // The name belongs to the run, not to the room. It is update-only for
+        // the same reason the speed is, and `agent_name` can arrive empty
+        // (`_current_agent_display_name` defaults to ''), so without this a new
+        // agent's first events leave the previous agent's name standing over
+        // its answer. The id follows the owner for the same reason — the test
+        // below it skips '', which is the singleton's real id.
+        if (upd.resetSamples) {
+          agentProgressName = '';
+          agentProgressAgentId = upd.ownerAgentId ?? '';
         }
         if ($agentProgress.agent_name) agentProgressName = $agentProgress.agent_name;
         if ($agentProgress.agent_id) agentProgressAgentId = $agentProgress.agent_id;
@@ -251,6 +273,24 @@
       agentProgressMessage = null;
       agentProgressTool = null;
       agentProgressRound = 0;
+      // These four are page-level state bound in from `+page.svelte`, so one
+      // value paints every surface that renders it. This effect used to clear
+      // the round count and not them, while the completion effect below cleared
+      // all of them — two resets disagreeing about what a reset is, and the
+      // shorter list ran on every chat switch. On screen that was one room
+      // showing another room's agent name and `197,235 / 1,000,000`, two lines
+      // under its own header saying `53,960 / 1,000,000`.
+      //
+      // A run in progress that the user steps away from and back to loses the
+      // samples it had collected, and shows only what arrives after the return.
+      // That is the intended trade: a partial number about this agent beats a
+      // complete one about a different agent.
+      const cleared = clearedStrip();
+      agentProgressName = '';
+      agentProgressAgentId = '';
+      agentProgressSpeed = cleared.speed;
+      speedOwnerAgentId = cleared.ownerAgentId;
+      liveSpeedSamples.length = 0;
       clearAgentStreaming();
       lastActiveChatId = activeChatId;
     }
@@ -268,6 +308,9 @@
       agentProgressName = '';
       agentProgressAgentId = '';
       agentProgressSpeed = null;
+      // The run is over, so the strip describes nobody: the next agent's first
+      // event must not read as a continuation of this one.
+      speedOwnerAgentId = null;
       // Aggregate the turn's per-round speeds onto the last agent message so
       // the finished header (N rounds · M actions) carries medians. Client-side
       // only — history on disk keeps its shape.
