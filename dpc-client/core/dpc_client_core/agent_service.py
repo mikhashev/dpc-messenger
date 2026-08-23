@@ -352,6 +352,24 @@ class AgentService:
 
     # --- Agent Task Board Methods (v0.20.0) ---
 
+    @staticmethod
+    def _queued_text(task: Dict[str, Any]) -> str:
+        """The description a queued task carries, whichever field holds it.
+
+        `text` is the field the chat handler actually reads (`agent.py`
+        `_execute_task`), so a task an agent deferred for itself had no preview
+        at all and the board went blank on exactly the tasks it exists to show.
+        `message` stays first: that is what the UI scheduling form writes.
+        """
+        data = task.get("data") or {}
+        return (
+            data.get("message")
+            or data.get("text")
+            or data.get("task")
+            or data.get("prompt")
+            or ""
+        )
+
     async def get_agent_tasks(self, agent_id: str = None) -> Dict[str, Any]:
         """Get agent task history for the Task Board panel.
 
@@ -384,13 +402,15 @@ class AgentService:
                             # board went blank on exactly the tasks it exists to
                             # show. `message` stays first: that is what the UI
                             # scheduling form writes.
-                            "preview": (
-                                (t.get("data", {}) or {}).get("message") or
-                                (t.get("data", {}) or {}).get("text") or
-                                (t.get("data", {}) or {}).get("task") or
-                                (t.get("data", {}) or {}).get("prompt") or
-                                ""
-                            )[:200],
+                            "preview": self._queued_text(t)[:200],
+                            # The whole description, not only the first 200
+                            # characters of it. A queued task is the one human
+                            # audit point before the work runs, and the board
+                            # drew a single nowrap line cut by the pixel width of
+                            # the panel — half a sentence, with nothing to open.
+                            # Sent inline rather than fetched: there is no result
+                            # file to ask for yet, and a task description is small.
+                            "full_text": self._queued_text(t),
                             "status": t.get("status", "pending"),
                             "started_at": t.get("started_at"),
                             "completed_at": t.get("completed_at"),

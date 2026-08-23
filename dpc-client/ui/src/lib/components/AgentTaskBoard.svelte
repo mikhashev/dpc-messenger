@@ -25,6 +25,9 @@
     scheduled_at: string | null;
     result_preview: string | null;
     has_full_result?: boolean;
+    // The whole description of a task that has not run yet. A queued task has no
+    // result file to fetch, so its text travels with the row.
+    full_text?: string | null;
   };
 
   type TaskData = {
@@ -109,11 +112,26 @@
     if (pollInterval) clearInterval(pollInterval);
   });
 
+  /** Whether this row has anything more to show than its one clipped line. */
+  function canExpand(task: TaskEntry): boolean {
+    return !!task.has_full_result || !!task.full_text;
+  }
+
   async function toggleExpand(task: TaskEntry) {
-    if (!task.has_full_result) return;
+    if (!canExpand(task)) return;
     if (expandedTasks[task.id]) {
       const { [task.id]: _, ...rest } = expandedTasks;
       expandedTasks = rest;
+      return;
+    }
+    // A task that has not run has no result file to ask for; its description
+    // came with the row. Opening it must not go to the backend and must not
+    // show «Loading…» for something already in hand.
+    if (!task.has_full_result && task.full_text) {
+      expandedTasks = {
+        ...expandedTasks,
+        [task.id]: { loading: false, response: task.full_text },
+      };
       return;
     }
     expandedTasks = { ...expandedTasks, [task.id]: { loading: true, response: null } };
@@ -375,6 +393,11 @@
                           {#if task.started_at}
                             <span class="task-date">Started {formatDateTime(task.started_at)}</span>
                           {/if}
+                          {#if canExpand(task)}
+                            <button class="btn-expand" on:click={() => toggleExpand(task)} title={expandedTasks[task.id] ? 'Collapse' : 'Expand'}>
+                              {expandedTasks[task.id] ? '▲' : '▼'}
+                            </button>
+                          {/if}
                           <button class="btn-cancel-task" on:click={() => cancelTask(task)} disabled={cancellingTask === task.id} title="Cancel task">
                             {cancellingTask === task.id ? '…' : '✕'}
                           </button>
@@ -385,6 +408,11 @@
                       </div>
                       {#if task.preview}
                         <div class="task-preview">{task.preview}</div>
+                      {/if}
+                      {#if expandedTasks[task.id]}
+                        <div class="task-full-result">
+                          <pre class="result-text">{expandedTasks[task.id].response}</pre>
+                        </div>
                       {/if}
                     </div>
                   {/each}
@@ -408,6 +436,11 @@
                         <span class="task-type">{task.type}</span>
                         <div class="task-row-right">
                           <span class="task-date">{formatScheduledDate(task.scheduled_at)}</span>
+                          {#if canExpand(task)}
+                            <button class="btn-expand" on:click={() => toggleExpand(task)} title={expandedTasks[task.id] ? 'Collapse' : 'Expand'}>
+                              {expandedTasks[task.id] ? '▲' : '▼'}
+                            </button>
+                          {/if}
                           <button class="btn-cancel-task" on:click={() => cancelTask(task)} disabled={cancellingTask === task.id} title="Cancel task">
                             {cancellingTask === task.id ? '…' : '✕'}
                           </button>
@@ -418,6 +451,11 @@
                       </div>
                       {#if task.preview}
                         <div class="task-preview">{task.preview}</div>
+                      {/if}
+                      {#if expandedTasks[task.id]}
+                        <div class="task-full-result">
+                          <pre class="result-text">{expandedTasks[task.id].response}</pre>
+                        </div>
                       {/if}
                     </div>
                   {/each}
@@ -443,7 +481,7 @@
                           {#if task.completed_at}
                             <span class="task-date">{formatDateTime(task.completed_at)}</span>
                           {/if}
-                          {#if task.has_full_result}
+                          {#if canExpand(task)}
                             <button class="btn-expand" on:click={() => toggleExpand(task)} title={expandedTasks[task.id] ? 'Collapse' : 'Expand'}>
                               {expandedTasks[task.id] ? '▲' : '▼'}
                             </button>
