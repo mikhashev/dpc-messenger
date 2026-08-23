@@ -989,7 +989,7 @@
                         type="text"
                         class="path-input"
                         bind:value={editSettings.sandbox_extensions.read_only[i]}
-                        placeholder="C:\Users\you\Documents\notes"
+                        placeholder="Absolute path to a folder the agent may read"
                       />
                       <label class="index-toggle" title="Index this path for agent memory search">
                         <input
@@ -1061,7 +1061,7 @@
                         type="text"
                         class="path-input"
                         bind:value={editSettings.sandbox_extensions.read_write[i]}
-                        placeholder="C:\Users\you\projects\myapp"
+                        placeholder="Absolute path to a folder the agent may read and write"
                       />
                       <button
                         type="button"

@@ -1118,7 +1118,7 @@
                             id="gguf-{i}"
                             type="text"
                             bind:value={editedConfig.providers[i].gguf_path}
-                            placeholder="C:\models\qwen3.8-27b-Q4_K_M.gguf"
+                            placeholder="Absolute path to the .gguf model file"
                           />
                           {#if canBrowse}
                             <button
@@ -1143,7 +1143,7 @@
                             id="mmproj-{i}"
                             type="text"
                             bind:value={editedConfig.providers[i].mmproj}
-                            placeholder="C:\models\qwen3.8-27b-mmproj.gguf"
+                            placeholder="Absolute path to the mmproj .gguf (vision only)"
                           />
                           {#if canBrowse}
                             <button
@@ -2323,7 +2323,7 @@
                   bind:value={newProvider.model}
                   placeholder={
                     newProvider.type === 'ollama' ? 'llama3.1:8b' :
-                    newProvider.type === 'llamacpp_server' ? 'C:\\models\\qwen3.8-27b-Q4_K_M.gguf' :
+                    newProvider.type === 'llamacpp_server' ? 'Absolute path to the .gguf model file' :
                     newProvider.type === 'openai_compatible' ? 'gpt-4o' :
                     newProvider.type === 'local_whisper' ? 'openai/whisper-large-v3' :
                     newProvider.type === 'zai' ? 'glm-4.7' :
