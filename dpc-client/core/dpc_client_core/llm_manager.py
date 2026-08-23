@@ -11,7 +11,7 @@ from .providers import (
     AIProvider, ModelNotCachedError, parse_thinking_tags,
     OPENAI_THINKING_MODELS, ANTHROPIC_THINKING_MODELS,
     OllamaProvider, OLLAMA_VISION_MODELS, OLLAMA_THINKING_MODELS,
-    OpenAICompatibleProvider, AnthropicProvider, ZaiProvider, ZaiCodingProvider,
+    OpenAICompatibleProvider, AnthropicProvider, ZaiProvider,
     DeepSeekProvider,
     LlamaServerProvider,
     LocalWhisperProvider, RemotePeerProvider, DpcAgentProvider,
@@ -42,8 +42,13 @@ PROVIDER_MAP = {
     "ollama": OllamaProvider,
     "openai_compatible": OpenAICompatibleProvider,
     "anthropic": AnthropicProvider,
+    # One Z.AI type, on the prepaid platform API (api/paas/v4). The two it replaces
+    # both drew the GLM Coding Plan subscription — `zai` through api/anthropic and
+    # `zai_coding` through api/coding/paas/v4 — which the vendor licenses only to its
+    # own list of supported tools, and this product is not on it. A config still
+    # naming `zai_coding` fails to load loudly rather than silently falling back,
+    # which is the behaviour we want: the alias has to be repointed, not inherited.
     "zai": ZaiProvider,
-    "zai_coding": ZaiCodingProvider,  # Z.AI GLM Coding Plan (OpenAI-compatible coding/paas/v4)
     "deepseek": DeepSeekProvider,  # DeepSeek pay-per-token (OpenAI-compatible, V4 thinking)
     "llamacpp_server": LlamaServerProvider,  # DPC-owned llama-server child (ADR-040 route b2)
     "local_whisper": LocalWhisperProvider,  # v0.13.1+: Local Whisper transcription

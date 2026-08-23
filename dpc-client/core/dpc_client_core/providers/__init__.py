@@ -5,7 +5,6 @@ from .ollama_provider import OllamaProvider, OLLAMA_VISION_MODELS, OLLAMA_THINKI
 from .openai_provider import OpenAICompatibleProvider
 from .anthropic_provider import AnthropicProvider
 from .zai_provider import ZaiProvider
-from .zai_coding_provider import ZaiCodingProvider
 from .deepseek_provider import DeepSeekProvider
 from .llamacpp_server_provider import LlamaServerProvider
 from .whisper_provider import LocalWhisperProvider
@@ -27,7 +26,6 @@ __all__ = [
     "OpenAICompatibleProvider",
     "AnthropicProvider",
     "ZaiProvider",
-    "ZaiCodingProvider",
     "DeepSeekProvider",
     "LlamaServerProvider",
     "LocalWhisperProvider",

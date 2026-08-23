@@ -1347,8 +1347,7 @@ D-PC Messenger supports multiple AI providers for local and cloud-based inferenc
 - **OpenAI Compatible**: OpenAI and compatible APIs (OpenAI, LM Studio, etc.)
 - **Anthropic**: Claude models (Claude 3.5 Sonnet, Claude Opus, etc.)
 - **DeepSeek**: Pay-per-token V4 models (`deepseek-v4-flash` / `deepseek-v4-pro`) via OpenAI-compatible endpoint; native pay-per-token cost + account-balance tracking and per-call reasoning-effort control (`deepseek` provider type, `deepseek_provider.py`)
-- **Z.AI**: GLM models (GLM-4.7, GLM-4.6, GLM-4.5, etc.)
-- **Z.AI Coding Plan**: GLM Coding Plan (subscription) via the `zai_coding` provider type — separate from the pay-per-token **Z.AI** above
+- **Z.AI**: GLM models (GLM-4.7, GLM-4.6, GLM-5.3, etc.) over the prepaid pay-per-token platform API (`zai` provider type, `zai_provider.py`). One provider, one endpoint — the `zai_coding` type is gone, see below
 - **Gemini**: Google Gemini models via `gemini_provider.py`
 - **GigaChat**: Sber GigaChat models via `gigachat_provider.py`
 - **GitHub Models**: GitHub-hosted models via `github_models_provider.py`
@@ -1357,75 +1356,97 @@ D-PC Messenger supports multiple AI providers for local and cloud-based inferenc
 
 ### Z.AI Setup
 
-> ⚠️ **Not a recommended provider right now, and not named in the public docs.** The
-> account was banned for a month for reaching Z.AI through the Coding Plan subscription
-> rather than the official paid API. Rewriting the two Z.AI providers onto the paid API is
-> tracked as `ZAI-SUBSCRIPTION-AUTH-INSTEAD-OF-PAID-API`; until that lands, do not point a
-> user or an agent at this section as a way to get started. Tested providers are Ollama,
-> Anthropic and DeepSeek. The rest of this section describes how the code works today.
+> ⚠️ **Untested since the rewrite, and the balance is empty.** This section used to
+> contradict itself: a warning naming a month-long ban, and eight lines below it, praise
+> for the endpoint that caused the ban ("avoids prepaid balance requirements"). Both
+> halves are replaced. The code now speaks only to the prepaid platform API, but no live
+> call has been made through it — the platform balance read $0.00 on 2026-08-23 and
+> `ZAI_API_KEY` is unset — so the paths below are verified against the vendor's docs and
+> the test suite, not against a response. Tested providers remain Ollama, Anthropic and
+> DeepSeek.
 
-Z.AI provides access to the GLM series of language models, including both text and vision capabilities.
+**Which endpoint, and why it is not a preference.** Z.AI sells two things through one
+account: the **GLM Coding Plan**, a flat-fee subscription, and the **open platform API**,
+prepaid and billed per token. The Coding Plan reaches the models through three base URLs
+— `api/anthropic`, `api/coding/paas/v4` and `api/v1` — and the vendor limits it to a
+published list of tools:
 
-**Implementation Note:**
-D-PC Messenger uses Z.AI's **Anthropic-compatible endpoint** (`https://api.z.ai/api/anthropic`) via the `anthropic` Python SDK, not the PaaS endpoint. This avoids prepaid balance requirements and provides a more reliable billing experience.
+> "The GLM Coding Plan is limited to use within the following officially supported tools
+> and product environments; users may not use their subscription benefits for tools or
+> scenarios outside of this scope."
+> — [docs.z.ai/devpack/tool/others](https://docs.z.ai/devpack/tool/others), read 2026-08-23
+
+That list holds 19 products (16 coding agents plus OpenClaw, Hermes Agent and
+SillyTavern). D-PC Messenger is not one of them, and reaching the Coding Plan from here is
+what got this account banned for a month. The same account carries the owner's ZCode
+subscription, which *is* on the list — so his own use is legitimate and ours is what puts
+it at risk. The usage policy counts: "Accounts with more than three violations may be
+banned."
+
+`ZaiProvider` therefore **raises at construction** on any of the three subscription URLs
+rather than warning, and a 1313 Fair-Usage code — which should be unreachable on the paid
+API — is logged at ERROR as a canary rather than retried.
+
+**Implementation.** The `zai` provider type talks to
+`https://api.z.ai/api/paas/v4` with the **OpenAI** SDK (`AsyncOpenAI`), converting
+Anthropic message and tool shapes on both sides because the agent layer speaks Anthropic.
+All four call paths — plain, stream, tools, vision — record usage; the stream sends
+`stream_options: {include_usage: true}` and reads the usage-only chunk, which arrives with
+an empty `choices`.
 
 **Installation:**
 ```bash
 cd dpc-client/core
-uv sync  # anthropic package is already included
+uv sync  # the openai package is already included
 ```
 
 **Configuration:**
-1. Get API key from [docs.z.ai](https://docs.z.ai)
-2. Set environment variable:
+1. Top up the prepaid balance at [z.ai/manage-apikey/billing](https://z.ai/manage-apikey/billing)
+   — auto-recharge is off by default, and the service is suspended when the balance runs out
+2. Get an API key from [docs.z.ai](https://docs.z.ai)
+3. Set the environment variable:
    ```bash
    export ZAI_API_KEY="your_key_here"
    ```
-3. Add to `~/.dpc/providers.json`:
+4. Add to `~/.dpc/providers.json`:
    ```json
    {
      "alias": "zai_glm47",
      "type": "zai",
      "model": "glm-4.7",
      "api_key_env": "ZAI_API_KEY",
-     "base_url": "https://api.z.ai/api/anthropic",
+     "base_url": "https://api.z.ai/api/paas/v4",
      "context_window": 128000
    }
    ```
 
 **Available Models:**
-- **Text Models:** `glm-4.7`, `glm-4.6`, `glm-4.5`, `glm-4.5-air`, `glm-4.5-airx`, `glm-4.5-flash`, `glm-4-plus`, `glm-4-128-0414-128k`
-- **Vision Models:** `glm-4.6v-flash`, `glm-4.5v`, `glm-4.0v`
+- **Text:** `glm-5.3`, `glm-5.2`, `glm-5.1`, `glm-5`, `glm-5-turbo`, `glm-4.7`, `glm-4.7-flashx`, `glm-4.7-flash` (free), `glm-4.6`, `glm-4.5`, `glm-4.5-x`, `glm-4.5-air`, `glm-4.5-airx`, `glm-4.5-flash` (free), `glm-4-32b-0414-128k`
+- **Vision:** `glm-5v-turbo`, `glm-4.6v`, `glm-4.6v-flashx`, `glm-4.6v-flash` (free), `glm-4.5v`, `glm-ocr`
+
+**Pricing** (USD per 1M tokens, input / cached input / output, from
+[docs.z.ai/guides/overview/pricing](https://docs.z.ai/guides/overview/pricing), 2026-08-23):
+
+| Model | Input | Cached | Output |
+|---|---|---|---|
+| GLM-5.3 / 5.2 / 5.1 | $1.4 | $0.26 | $4.4 |
+| GLM-5 | $1.0 | $0.2 | $3.2 |
+| GLM-4.7 / 4.6 / 4.5 | $0.6 | $0.11 | $2.2 |
+| GLM-4.5-Air | $0.2 | $0.03 | $1.1 |
+| GLM-4.7-FlashX | $0.07 | $0.01 | $0.4 |
+| GLM-4.7-Flash, GLM-4.5-Flash | free | free | free |
+
+The full table lives in `dpc_agent/pricing.py` (`ZAI_RATES`), which is what the cost meter
+reads. DeepSeek's doubled peak hours do **not** apply to these rates — both vendors share
+one rate table and `_peak_applies` keeps the windows with the vendor that has them.
 
 **Rate Limits:**
-Z.AI uses concurrency-based rate limiting (not token-based):
-- GLM-4.7: 2 concurrent requests
-- GLM-4.6: 3 concurrent requests
-- GLM-4.5: 10 concurrent requests
-- GLM-4-Plus: 20 concurrent requests
-
-**Example Usage:**
-```json
-{
-  "default_provider": "zai_glm47",
-  "providers": [
-    {
-      "alias": "zai_glm47",
-      "type": "zai",
-      "model": "glm-4.7",
-      "api_key_env": "ZAI_API_KEY",
-      "base_url": "https://api.z.ai/api/anthropic"
-    },
-    {
-      "alias": "zai_vision",
-      "type": "zai",
-      "model": "glm-4.6v-flash",
-      "api_key_env": "ZAI_API_KEY",
-      "base_url": "https://api.z.ai/api/anthropic"
-    }
-  ]
-}
-```
+Concurrency-based, not token-based — GLM-4.7: 2, GLM-4.6: 3, GLM-4.5: 10 concurrent
+requests. Read from the docs during the Coding Plan era and **not re-verified**: the
+platform's live limits page (`z.ai/manage-apikey/rate-limits`) is behind a login. The
+numbers survive in `dpc_agent/budget.py` and are only reached by an agent explicitly
+configured `billing_model = subscription`; a z.ai agent belongs in `pay_per_use`, where
+dollars are tracked instead.
 
 **See also:** `dpc-client/providers.example.json` for complete configuration examples
 

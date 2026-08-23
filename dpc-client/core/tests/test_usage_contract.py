@@ -76,18 +76,24 @@ class TestTheProvidersThatBuiltItPrivatelyNowReportIt:
         assert usage["completion_tokens"] == 362
         assert usage["total_tokens"] == 111_598 + 362
 
-    def test_both_zai_providers_record_where_they_built(self):
-        """Read as source: both dicts are built deep inside an async tools call
-        that needs a live client, so what is checked here is that the recording
-        sits beside the construction — the same reason the adapter test reads
-        text rather than running the branch."""
+    def test_the_zai_provider_records_on_every_call_path(self):
+        """Read as source: the dicts are built deep inside async calls that need
+        a live client, so what is checked here is that the recording sits beside
+        the construction — the same reason the adapter test reads text.
+
+        There used to be two z.ai providers and this asserted one token in each,
+        which a provider can satisfy while three of its four call paths record
+        nothing. There is one provider now, and the assertion names the paths:
+        plain, stream, tools and vision each pass their own label to _log_usage,
+        so a path that stops recording takes its label with it."""
         import inspect
 
-        from dpc_client_core.providers import zai_coding_provider, zai_provider
+        from dpc_client_core.providers import zai_provider
 
-        for module in (zai_provider, zai_coding_provider):
-            source = inspect.getsource(module)
-            assert "_record_last_usage(usage)" in source, module.__name__
+        source = inspect.getsource(zai_provider)
+        assert "_record_last_usage(usage)" in source
+        for path in ("plain", "plain-stream", "tools", "vision"):
+            assert 'path="%s"' % path in source, path
 
     def test_deepseek_still_answers_after_the_move(self):
         """DeepSeek had the accessor first; the base must not shadow it."""

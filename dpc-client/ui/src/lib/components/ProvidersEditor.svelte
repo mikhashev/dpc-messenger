@@ -11,7 +11,7 @@
 
   const dispatch = createEventDispatcher();
 
-  type ProviderType = 'ollama' | 'openai_compatible' | 'anthropic' | 'zai' | 'zai_coding' | 'deepseek' | 'llamacpp_server' | 'local_whisper' | 'dpc_agent' | 'gemini' | 'github_models' | 'gigachat';
+  type ProviderType = 'ollama' | 'openai_compatible' | 'anthropic' | 'zai' | 'deepseek' | 'llamacpp_server' | 'local_whisper' | 'dpc_agent' | 'gemini' | 'github_models' | 'gigachat';
 
   type Provider = {
     alias: string;
@@ -274,11 +274,13 @@
   ];
 
   // Unset temperature means different things per provider type: ollama omits
-  // the key (modelfile default applies), deepseek/zai_coding fall back to 1.0,
-  // the rest send self.temperature = 0.7.
+  // the key (modelfile default applies), deepseek/zai/llama-server fall back to
+  // 1.0, the rest send self.temperature = 0.7. Z.AI joined that first group when
+  // it moved to the OpenAI-shaped platform API — same 1.0-while-thinking rule the
+  // coding endpoint had.
   function temperatureDefaultLabel(type: ProviderType): string {
     if (type === 'ollama') return 'Model default (not sent)';
-    if (type === 'deepseek' || type === 'zai_coding' || type === 'llamacpp_server') return 'Provider default (1.0)';
+    if (type === 'deepseek' || type === 'zai' || type === 'llamacpp_server') return 'Provider default (1.0)';
     return 'Default (0.7)';
   }
 
@@ -663,13 +665,13 @@
     } else if (newProvider.type === 'anthropic') {
       provider.api_key_env = 'ANTHROPIC_API_KEY';
     } else if (newProvider.type === 'zai') {
+      // The prepaid platform API. This used to fill in api/anthropic, which is a
+      // GLM Coding Plan endpoint: the subscription may only be used from the
+      // vendor's published list of tools, which does not include this one, and
+      // the backend now refuses to construct a provider pointed at it.
       provider.api_key_env = 'ZAI_API_KEY';
-      provider.model = newProvider.model || 'glm-5.2';
-      provider.base_url = 'https://api.z.ai/api/anthropic';
-    } else if (newProvider.type === 'zai_coding') {
-      provider.api_key_env = 'ZAI_API_KEY';
-      provider.model = newProvider.model || 'glm-5.2';
-      provider.base_url = 'https://api.z.ai/api/coding/paas/v4';
+      provider.model = newProvider.model || 'glm-4.7';
+      provider.base_url = 'https://api.z.ai/api/paas/v4';
       provider.context_window = 200000;
     } else if (newProvider.type === 'deepseek') {
       provider.api_key_env = 'DEEPSEEK_API_KEY';
@@ -963,7 +965,6 @@
                         <option value="openai_compatible">OpenAI Compatible</option>
                         <option value="anthropic">Anthropic</option>
                         <option value="zai">Z.AI</option>
-                        <option value="zai_coding">Z.AI Coding Plan</option>
                         <option value="deepseek">DeepSeek</option>
                         <option value="llamacpp_server">llama-server (local, DPC pin)</option>
                         <option value="local_whisper">Local Whisper</option>
@@ -1757,16 +1758,21 @@
                       </div>
                     {/if}
 
-                    {#if editedConfig.providers[i].type === 'zai_coding'}
+                    {#if editedConfig.providers[i].type === 'zai'}
                       <div class="form-group">
-                        <label for="base-url-{i}">Base URL (Coding Plan)</label>
+                        <label for="base-url-{i}">Base URL</label>
                         <input
                           id="base-url-{i}"
                           type="text"
                           bind:value={editedConfig.providers[i].base_url}
-                          placeholder="https://api.z.ai/api/coding/paas/v4"
+                          placeholder="https://api.z.ai/api/paas/v4"
                         />
-                        <p class="help-text">GLM Coding Plan endpoint (OpenAI-compatible)</p>
+                        <p class="help-text">
+                          Prepaid pay-per-token platform endpoint. A GLM Coding Plan URL
+                          (api/anthropic, api/coding/paas/v4, api/v1) is refused by the
+                          backend: the subscription is licensed only to the vendor's own
+                          list of supported tools, and this is not one of them.
+                        </p>
                       </div>
                     {/if}
 
@@ -1783,7 +1789,7 @@
                       </div>
                     {/if}
 
-                    {#if editedConfig.providers[i].type === 'zai' || editedConfig.providers[i].type === 'zai_coding' || editedConfig.providers[i].type === 'deepseek'}
+                    {#if editedConfig.providers[i].type === 'zai' || editedConfig.providers[i].type === 'deepseek'}
                       <div class="form-group">
                         <label for="api-key-env-{i}">API Key Environment Variable</label>
                         <input
@@ -2284,7 +2290,6 @@
                 <option value="openai_compatible">OpenAI Compatible</option>
                 <option value="anthropic">Anthropic</option>
                 <option value="zai">Z.AI</option>
-                <option value="zai_coding">Z.AI Coding Plan</option>
                 <option value="deepseek">DeepSeek</option>
                 <option value="llamacpp_server">llama-server (local, DPC pin)</option>
                 <option value="local_whisper">Local Whisper</option>
@@ -2308,7 +2313,6 @@
                     newProvider.type === 'openai_compatible' ? 'gpt-4o' :
                     newProvider.type === 'local_whisper' ? 'openai/whisper-large-v3' :
                     newProvider.type === 'zai' ? 'glm-4.7' :
-                    newProvider.type === 'zai_coding' ? 'glm-5.2' :
                     newProvider.type === 'deepseek' ? 'deepseek-v4-flash' :
                     newProvider.type === 'gemini' ? 'gemini-2.0-flash' :
                     newProvider.type === 'github_models' ? 'gpt-4o' :
@@ -2325,7 +2329,7 @@
               </div>
             {/if}
 
-            {#if newProvider.type === 'anthropic' || newProvider.type === 'zai' || newProvider.type === 'zai_coding' || newProvider.type === 'deepseek' || newProvider.type === 'gemini' || newProvider.type === 'github_models' || newProvider.type === 'gigachat'}
+            {#if newProvider.type === 'anthropic' || newProvider.type === 'zai' || newProvider.type === 'deepseek' || newProvider.type === 'gemini' || newProvider.type === 'github_models' || newProvider.type === 'gigachat'}
               <div class="form-group">
                 <label for="new-api-key-env">API Key Environment Variable</label>
                 <input
@@ -2333,7 +2337,7 @@
                   type="text"
                   bind:value={newProvider.api_key_env}
                   placeholder={
-                    newProvider.type === 'zai' || newProvider.type === 'zai_coding' ? 'ZAI_API_KEY' :
+                    newProvider.type === 'zai' ? 'ZAI_API_KEY' :
                     newProvider.type === 'deepseek' ? 'DEEPSEEK_API_KEY' :
                     newProvider.type === 'anthropic' ? 'ANTHROPIC_API_KEY' :
                     newProvider.type === 'gemini' ? 'GEMINI_API_KEY' :

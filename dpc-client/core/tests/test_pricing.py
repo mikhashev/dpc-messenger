@@ -22,14 +22,73 @@ from dpc_client_core.dpc_agent.pricing import (
 
 # --- subscription / unknown providers return 0.0 ---
 
-@pytest.mark.parametrize("alias", ["zai_coding_glm", "GLM-5.1", "glm-4.7", "", "mystery"])
+@pytest.mark.parametrize("alias", ["", "mystery", "ollama_local"])
 def test_subscription_and_unknown_cost_zero(alias):
+    """A provider we have no rate for bills nothing — the fail-safe end of the
+    meter. "GLM-5.1" and "glm-4.7" used to sit in this list, and their being
+    here was the defect: they are paid calls against a prepaid balance, and the
+    test asserted they were free."""
     assert compute_cost_usd(alias, 10_000, 5_000) == 0.0
 
 
 def test_billing_model_subscription():
-    assert get_billing_model("zai_coding_glm") == "subscription"
+    assert get_billing_model("ollama_local") == "subscription"
     assert get_billing_model("unknown_alias") == "subscription"
+
+
+# --- z.ai pay-per-use, since the provider moved to the prepaid platform API ---
+
+def test_a_glm_call_is_priced_and_not_free():
+    """The one that would have caught it. While z.ai was reached through the
+    Coding Plan a $0.00 cost was true; on the open platform every one of these
+    tokens is drawn from a prepaid balance, and a meter reporting zero would
+    have left the burn digest, the alert thresholds and the runway all reading
+    a spend that was really happening."""
+    assert get_billing_model("zai_glm47", "glm-4.7") == "pay_per_use"
+    cost = compute_cost_usd(
+        "zai_glm47", 1000, 1000,
+        model="glm-4.7", cache_hit_tokens=0, cache_miss_tokens=1000,
+        at=AT_OLD_TARIFF,
+    )
+    # https://docs.z.ai/guides/overview/pricing — input $0.6, output $2.2 per 1M
+    assert cost == pytest.approx((1000 * 0.6 + 1000 * 2.2) / 1_000_000)
+    assert cost > 0
+
+
+def test_a_glm_alias_with_no_model_string_still_resolves_to_its_own_rate():
+    """Aliases spell the same model four ways and differ only in punctuation.
+    The pair that matters is Air and AirX: they sit a factor of five apart, and
+    matching the shorter key first would price every AirX call as an Air call."""
+    air = compute_cost_usd("zai_glm45_air", 0, 1000, at=AT_OLD_TARIFF)
+    airx = compute_cost_usd("zai_glm45_airx", 0, 1000, at=AT_OLD_TARIFF)
+    assert air == pytest.approx(1000 * 1.1 / 1_000_000)
+    assert airx == pytest.approx(1000 * 4.5 / 1_000_000)
+
+
+def test_deepseeks_peak_hours_are_deepseeks_and_do_not_double_a_glm_call():
+    """Both vendors' models share one rate table, and the doubled hours belong
+    to only one of them. Without the vendor test a GLM call would be recorded at
+    twice its price for seven hours of every weekday — in our records only,
+    which is the error nobody sees until the invoice disagrees."""
+    from dpc_client_core.dpc_agent.pricing import rates_at
+
+    peak = datetime(2026, 8, 24, 2, 0, tzinfo=timezone.utc)      # Beijing Mon 10:00
+    off_peak = datetime(2026, 8, 24, 5, 0, tzinfo=timezone.utc)  # Beijing Mon 13:00
+
+    assert rates_at("glm-4.7", peak) == rates_at("glm-4.7", off_peak)
+    assert rates_at("deepseek-v4-pro", peak)["output"] == pytest.approx(
+        rates_at("deepseek-v4-pro", off_peak)["output"] * 2
+    ), "the DeepSeek rule this exemption must not have disabled"
+
+
+def test_a_free_glm_model_is_priced_as_free_and_not_as_unknown():
+    """Both read $0.00 and only one of them is knowledge. GLM-4.5-Flash is in
+    the table at zero, so it bills as pay-per-use at zero rather than falling
+    through to the subscription branch, where an unpriced paid model also lands."""
+    assert get_billing_model("zai_glm45_flash", "glm-4.5-flash") == "pay_per_use"
+    assert compute_cost_usd(
+        "zai_glm45_flash", 10_000, 5_000, model="glm-4.5-flash", at=AT_OLD_TARIFF
+    ) == 0.0
 
 
 # --- DeepSeek pay-per-use, resolved by model name ---
@@ -99,7 +158,9 @@ def test_resolve_by_alias_when_model_missing():
 # --- back-compat: legacy positional call (no model/cache kwargs) still works ---
 
 def test_legacy_positional_signature_subscription():
-    assert compute_cost_usd("zai_coding_glm", 1234, 567) == 0.0
+    """The alias here used to be "zai_coding_glm", a provider type that no longer
+    exists; any unknown alias makes the same point."""
+    assert compute_cost_usd("ollama_local", 1234, 567) == 0.0
 
 
 def test_never_raises_on_negative_or_none_like():
@@ -170,7 +231,7 @@ def test_a_naive_moment_is_read_as_utc():
 
 
 def test_subscription_providers_are_untouched_by_the_clock():
-    assert compute_cost_usd("zai_coding_glm", 10_000, 5_000, at=AFTER_PEAK) == 0.0
+    assert compute_cost_usd("ollama_local", 10_000, 5_000, at=AFTER_PEAK) == 0.0
 
 
 # --- the two traps GLM 5.3 found by moving the clock, 2026-08-16 ---

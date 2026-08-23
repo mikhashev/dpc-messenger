@@ -1,6 +1,6 @@
 """Tests for DeepSeekProvider — DeepSeek over the OpenAI-compatible endpoint.
 
-Focus: the DeepSeek-specific behaviours that differ from ZaiCodingProvider —
+Focus: the DeepSeek-specific behaviours that differ from ZaiProvider —
 (1) reasoning_content echo on assistant tool-call messages (the make-or-break for
 multi-round agent tool use), (2) explicit thinking enabled/disabled toggle,
 (3) reasoning_effort mapping, (4) no 1313 special-case. Plus the shared
@@ -311,7 +311,7 @@ def test_effective_temperature_resolution():
 @pytest.mark.asyncio
 async def test_generate_response_sends_thinking_disabled_when_off():
     """DeepSeek-specific: thinking off must send {type: disabled} (always send the
-    toggle), unlike ZaiCodingProvider which omits extra_body when disabled."""
+    toggle), unlike ZaiProvider which omits extra_body when disabled."""
     p = _make({"thinking": {"enabled": False}})
     fake_msg = SimpleNamespace(content="hello", reasoning_content=None)
     fake_resp = SimpleNamespace(choices=[SimpleNamespace(message=fake_msg)])

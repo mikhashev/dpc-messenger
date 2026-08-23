@@ -29,15 +29,17 @@ class DeepSeekProvider(AIProvider):
     DeepSeek provider over the **OpenAI-compatible** endpoint (https://api.deepseek.com).
 
     DeepSeek is pay-per-token with very high concurrency limits (V4-Flash 2500 /
-    V4-Pro 500), so it is the agents' fallback when Z.AI's GLM Coding Plan trips
-    Fair-Usage 1313. Models: deepseek-v4-flash (cheap default), deepseek-v4-pro.
+    V4-Pro 500). It was built as the agents' fallback when Z.AI's GLM Coding Plan
+    tripped Fair-Usage 1313; that plan is no longer a route this product may take
+    at all, and `ZaiProvider` now speaks to Z.AI's prepaid platform API instead.
+    Models: deepseek-v4-flash (cheap default), deepseek-v4-pro.
 
-    Architecture mirrors ZaiCodingProvider: the agent layer
+    Architecture mirrors ZaiProvider: the agent layer
     (llm_adapter._chat_native_tools) hands providers Anthropic-shaped
     messages/tools, so generate_with_tools converts Anthropic -> OpenAI on the way
     in and OpenAI tool_calls -> Anthropic-style tool_use objects on the way out.
 
-    DeepSeek-specific (vs ZaiCodingProvider):
+    DeepSeek-specific (vs ZaiProvider):
       - **reasoning_content echo (critical):** DeepSeek V4 thinking is default-on;
         once thinking is enabled, EVERY replayed assistant message carrying
         tool_calls must include `reasoning_content`, or round-2+ fails with HTTP
