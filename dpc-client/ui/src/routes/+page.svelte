@@ -3,6 +3,7 @@
 
 <script lang="ts">
   import { onMount, untrack } from "svelte";
+  import { providerToRemember } from '$lib/utils/rememberedProvider';
   import { writable } from "svelte/store";
   import { connectionStatus, nodeStatus, sendCommand, resetReconnection, connectToCoreService, knowledgeCommitProposal, personalContext, tokenWarning, extractionFailure, availableProviders, peerProviders, unreadMessageCounts, resetUnreadCount, setActiveChat, newSessionProposal, proposeNewSession, voteNewSession, defaultProviders, providersList, groupChats, listAgents, agentsList, sleepStateChanged, sleepProgress, sleepAgentStates, tokenUsageUpdated, setGroupReasoningEffort, updateAgentConfig } from "$lib/coreService";
   import { confirmAsync } from "$lib/utils/dialog";
@@ -536,17 +537,43 @@
     }
   });
 
+  // Remember which provider a person picked, for the chat they picked it in.
+  //
+  // The effect below restores a selection on every chat switch; it used to have
+  // nothing to restore for a chat nobody had written an entry for, and took the
+  // `else` branch — silently returning the user to `default_provider`, which on
+  // this machine is a paid alias at max effort. Reproduced from the log: three
+  // queries on a local free model, a detour into another chat, and the very next
+  // query back in Local AI Chat routed to `deepseek_flash` at `effort=max` for
+  // «какое сегодня число?». The reverse direction would be harmless; this one is
+  // billed.
+  //
+  // A handler rather than a second `$effect`, deliberately: an effect that read
+  // `selectedTextProvider` and wrote `chatProviders` would feed the one below,
+  // which reads `chatProviders` and writes `selectedTextProvider`. That shape has
+  // already cost this file one `effect_update_depth_exceeded`.
+  function rememberTextProvider(uniqueId: string) {
+    const chatId = activeChatId;
+    // The rule — which selections are worth storing and in what shape — lives in
+    // `providerToRemember` with its tests. Which chat it belongs to is the only
+    // part that needs this component.
+    const alias = providerToRemember(uniqueId, $chatProviders.get(chatId));
+    if (!alias) return;
+    chatProviders.update(m => new Map(m).set(chatId, alias));
+  }
+
   // Reactive: Sync provider dropdown with chat-specific provider when switching chats
   $effect(() => {
     const chatProvider = $chatProviders.get(activeChatId);
     if (chatProvider && chatProvider !== 'local_ai') {
       // Update dropdown to show chat-specific provider (e.g., dpc_agent)
       selectedTextProvider = `local:${chatProvider}`;
-    } else {
-      // Reset to default provider for chats without specific provider (local_ai, AI chats, etc.)
-      if ($availableProviders?.default_provider) {
-        selectedTextProvider = `local:${$availableProviders.default_provider}`;
-      }
+    } else if ($availableProviders?.default_provider) {
+      // The default now belongs to the one case it describes: a chat that has
+      // never been given a provider. `local_ai` is a sentinel rather than an
+      // alias, so it still falls here — until the person picks something, which
+      // `rememberTextProvider` writes above and this branch then stops seeing.
+      selectedTextProvider = `local:${$availableProviders.default_provider}`;
     }
   });
 
@@ -1129,6 +1156,7 @@
           <ProviderSelector
             bind:selectedComputeHost
             bind:selectedTextProvider
+            onTextProviderChange={rememberTextProvider}
             bind:selectedVisionProvider
             bind:selectedVoiceProvider
             showForChatId={activeChatId}
