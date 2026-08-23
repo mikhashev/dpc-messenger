@@ -6,6 +6,7 @@
   import ImageMessage from './ImageMessage.svelte';
   import VoicePlayer from './VoicePlayer.svelte';
   import ThinkingBlock from './ThinkingBlock.svelte';
+  import { showsThinkingBlock } from '$lib/utils/thinkingVisibility';
   import AgentProgressCollapsible from './AgentProgressCollapsible.svelte';
   import { agentLiveTools } from '$lib/coreService';
   import { agentsList } from '$lib/services/agents';
@@ -162,8 +163,12 @@
           </strong>
           <span class="timestamp">{#if msg.msg_index}<span class="msg-index">#{msg.msg_index}</span> {/if}{new Date(msg.timestamp).toLocaleTimeString()}</span>
         </div>
-        <!-- Thinking block hidden for all agent messages -->
-        {#if !isAiSender(msg.sender, msg) && msg.thinking}
+        <!-- Whose reasoning is shown is a property of the surface, not of the
+             sender: an agent chat renders rounds and tool calls of its own, and
+             the local AI chat has nothing else — while marking its own answers
+             `sender: 'ai'`, which is how it fell under a rule written for agents
+             and could never draw this block at all. -->
+        {#if msg.thinking && showsThinkingBlock(conversationId, isAiSender(msg.sender, msg))}
           <ThinkingBlock thinking={msg.thinking} tokenCount={msg.thinkingTokens} />
         {/if}
 
