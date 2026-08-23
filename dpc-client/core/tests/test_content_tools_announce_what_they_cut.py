@@ -345,3 +345,105 @@ class TestFetchJsonWindows:
             out = fetch_json(None, "https://example.test/api")
         assert out.startswith("JSON from ")
         assert json.loads(out.split("\n\n", 1)[1]) == {"ok": True}
+
+
+class TestCollectScrollsNoMoreThanItWasAsked:
+    """`for _ in range(max_scrolls + 1)` scrolled once past the budget and
+    reported it: Ark, live on Hacker News 2026-08-23, saw «6 scrolls» against
+    `max_scrolls=5`. The extra scroll also moved the page with nothing left to
+    read it — the loop collects, then decides whether another scroll is worth
+    making."""
+
+    def _run(self, max_scrolls, pages):
+        """`pages[i]` is what the collector JS returns on pass i."""
+        from dpc_client_core.dpc_agent.tools.browser import AuthBrowser
+
+        calls = {"scrolls": 0, "evaluates": 0}
+
+        class _Page:
+            url = "https://example.test/feed"
+
+            def evaluate(self, js, arg):
+                i = min(calls["evaluates"], len(pages) - 1)
+                calls["evaluates"] += 1
+                return pages[i]
+
+        class _Self:
+            _page = _Page()
+
+            def _require_open(self):
+                pass
+
+            def scroll(self, direction, amount):
+                calls["scrolls"] += 1
+
+            def _audit_action(self, *a, **kw):
+                pass
+
+        res = AuthBrowser.collect(
+            _Self(), "#feed", ".card", ["text"],
+            max_scrolls=max_scrolls, scroll_pause_ms=0, dedup_by="text",
+        )
+        return res, calls
+
+    def _items(self, *texts):
+        return {"items": [{"text": t} for t in texts]}
+
+    def test_it_never_scrolls_more_times_than_the_budget(self):
+        growing = [self._items(*[f"item{i}" for i in range(n)]) for n in range(1, 12)]
+        res, calls = self._run(5, growing)
+        assert calls["scrolls"] == 5
+        assert res["scrolls_done"] == 5
+        assert res["scrolls_done"] <= res["max_scrolls"]
+
+    def test_the_last_pass_collects_after_the_last_scroll(self):
+        growing = [self._items(*[f"item{i}" for i in range(n)]) for n in range(1, 12)]
+        res, calls = self._run(3, growing)
+        # one collect per pass, and the passes are budget + 1: collect, scroll,
+        # collect, scroll, collect, scroll, collect.
+        assert calls["evaluates"] == calls["scrolls"] + 1
+
+    def test_a_page_with_nothing_more_to_load_is_not_told_to_raise_the_budget(self):
+        static = [self._items("a", "b", "c")] * 12
+        res, _ = self._run(5, static)
+        assert res["stop_reason"] == "scroll_budget_exhausted"
+        assert res["consecutive_empty"] > 0
+
+    def test_a_growing_list_reports_no_idle_scrolls(self):
+        growing = [self._items(*[f"item{i}" for i in range(n)]) for n in range(1, 12)]
+        res, _ = self._run(5, growing)
+        assert res["consecutive_empty"] == 0
+
+
+class TestCollectHeaderSeparatesTwoWaysOfRunningOut:
+    def _header(self, **over):
+        import asyncio as _a
+        from unittest.mock import patch
+        from dpc_client_core.dpc_agent.tools import browser as b
+
+        result = {"items": [], "total": 30, "scrolls_done": 5, "max_scrolls": 5,
+                  "stop_reason": "scroll_budget_exhausted", "consecutive_empty": 0}
+        result.update(over)
+
+        async def _fake_run(session, verb, *args):
+            return result
+
+        class _Ctx:
+            class agent_root:
+                name = "agent_x"
+
+        with patch.object(b, "_get_session_or_error", lambda _id: object()), \
+             patch.object(b, "_get_session_lock", lambda _id: _a.Lock()), \
+             patch.object(b, "_run_in_session", _fake_run):
+            return _a.run(b.browser_collect(_Ctx(), container="#f", item_selector=".c"))
+
+    def test_a_still_growing_list_is_told_to_raise_the_budget(self):
+        h = self._header(consecutive_empty=0).split("\n")[0]
+        assert "still growing" in h
+        assert "raise max_scrolls to collect more" in h
+
+    def test_a_page_that_stopped_giving_is_not(self):
+        h = self._header(consecutive_empty=4).split("\n")[0]
+        assert "last 4 scroll(s) added nothing" in h
+        assert "raising max_scrolls changes nothing" in h
+        assert "raise max_scrolls to collect more" not in h

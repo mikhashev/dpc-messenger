@@ -2195,7 +2195,7 @@ class AuthBrowser:
         # the item count made "collected everything" and "stopped early"
         # print identically, and an agent could not tell which it had.
         stop_reason = "scroll_budget_exhausted"
-        for _ in range(max_scrolls + 1):
+        for _pass in range(max_scrolls + 1):
             result = self._page.evaluate(_COLLECT_ITEMS_JS, {
                 "containerSel": container,
                 "itemSelector": item_selector,
@@ -2223,6 +2223,14 @@ class AuthBrowser:
                     stop_reason = "list_exhausted"
                     break
 
+            # The last pass collects and stops: scrolling once more would move
+            # the page with nothing left to read it. Without this the loop
+            # scrolled `max_scrolls + 1` times and reported one more scroll
+            # than the caller asked for — Ark, 2026-08-23, live on Hacker News:
+            # «6 scrolls» against `max_scrolls=5`.
+            if _pass == max_scrolls:
+                break
+
             try:
                 self.scroll("down", 800)
             except Exception as e:
@@ -2243,6 +2251,14 @@ class AuthBrowser:
             "scrolls_done": scrolls_done,
             "max_scrolls": max_scrolls,
             "stop_reason": stop_reason,
+            # How many scrolls in a row added nothing when the loop ended.
+            # «The budget ran out» and «the budget ran out while the last four
+            # scrolls added nothing» are different claims: the first invites
+            # raising max_scrolls, the second says the page may simply have no
+            # more to give. Ark, 2026-08-23, on Hacker News: 30 fixed items,
+            # 150 duplicates, and advice to raise a budget that would change
+            # nothing.
+            "consecutive_empty": consecutive_empty,
         }
         if dupes_skipped > 0:
             result_dict["warning"] = f"{dupes_skipped} duplicates skipped, consider specifying unique attribute for dedup_by"
@@ -3460,10 +3476,18 @@ async def browser_collect(
     if reason == "list_exhausted":
         header += " — list exhausted, this is the whole list"
     elif reason == "scroll_budget_exhausted":
-        header += (
-            f" — INCOMPLETE: stopped at the max_scrolls={result.get('max_scrolls', scrolls)}"
-            " budget, not at the end of the list; raise max_scrolls to collect more"
-        )
+        idle = result.get("consecutive_empty") or 0
+        if idle:
+            header += (
+                f" — stopped at the max_scrolls={result.get('max_scrolls', scrolls)} budget,"
+                f" and the last {idle} scroll(s) added nothing: the page may have no more"
+                " to load, in which case raising max_scrolls changes nothing"
+            )
+        else:
+            header += (
+                f" — INCOMPLETE: stopped at the max_scrolls={result.get('max_scrolls', scrolls)}"
+                " budget while the list was still growing; raise max_scrolls to collect more"
+            )
     elif reason:
         header += f" — INCOMPLETE: scrolling stopped early ({reason})"
     if result.get("warning"):

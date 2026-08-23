@@ -49,6 +49,18 @@
   let canLoadHistory = $derived(!!selfNodeId || nodeStatusFallbackElapsed);
 
   // ---------------------------------------------------------------------------
+  // "Have we fetched this history yet" is its own fact, and it used to be read
+  // off the message map: a chat with an entry counted as loaded. One live
+  // message arriving over the websocket before the chat was opened created that
+  // entry, and the backfill then never ran — measured in ui.log on 2026-08-23,
+  // where group-abd874a671e3 sat at «historyLen=1 → Skipping load» call after
+  // call while sixty-odd messages waited on the backend. The empty-result
+  // branch wrote `[]` for the same purpose, which poisoned the chat the same
+  // way. The flag belongs here, not in the content.
+  // ---------------------------------------------------------------------------
+  const loadedHistory = new Set<string>();
+
+  // ---------------------------------------------------------------------------
   // Reactive: Sync chat history from backend when switching to peer chat with no messages (v0.11.2)
   // ---------------------------------------------------------------------------
   $effect(() => {
@@ -59,10 +71,11 @@
       const currentHistory = $chatHistories.get(reqChatId);
       console.log(`[ChatHistory] Reactive triggered: chatId=${reqChatId.slice(0,20)}, historyLen=${currentHistory?.length || 0}, loading=${loadingHistory.has(reqChatId)}`);
 
-      // Guard: Skip if already loading or already have messages
+      // Guard: skip if already loading, or if this history has been fetched
+      // once. Not "the map has an entry" — see loadedHistory above.
       if (loadingHistory.has(reqChatId)) {
         console.log(`[ChatHistory] Skipping - already loading history for ${reqChatId.slice(0,20)}`);
-      } else if (currentHistory === undefined) {
+      } else if (!loadedHistory.has(reqChatId)) {
         console.log(`[ChatHistory] Loading history from backend for ${reqChatId.slice(0,20)}...`);
 
         // Mark as loading to prevent re-triggers
@@ -114,10 +127,21 @@
                 loadedMessages.forEach((m: any) => {
                   if (m.id && !m.id.startsWith('backend-')) processedMessageIds.add(m.id);
                 });
-                newMap.set(reqChatId, loadedMessages);
-                console.log(`[ChatHistory] Updated chatHistories with ${loadedMessages.length} messages`);
+                // Anything already on screen that the backend snapshot does not
+                // carry is newer than the snapshot — a live message that landed
+                // while this fetch was in flight, or before the chat was opened.
+                // Replacing outright would drop it, which never happened before
+                // only because a chat with messages was never backfilled at all.
+                const loadedIds = new Set(loadedMessages.map((m: any) => m.id).filter(Boolean));
+                const live = (map.get(reqChatId) || []).filter(
+                  (m: any) => !m.id || !loadedIds.has(m.id)
+                );
+                newMap.set(reqChatId, live.length ? [...loadedMessages, ...live] : loadedMessages);
+                console.log(`[ChatHistory] Updated chatHistories with ${loadedMessages.length} messages` +
+                            (live.length ? ` + ${live.length} kept from the live stream` : ''));
                 return newMap;
               });
+              loadedHistory.add(reqChatId);
 
               // Update token counter with restored history token counts
               if (result.tokens_used !== undefined && result.token_limit !== undefined && result.token_limit > 0) {
@@ -144,13 +168,18 @@
             } else {
               console.log(`[ChatHistory] No messages: status=${result.status}, count=${result.messages?.length || 0}`);
 
-              // Initialize with empty array to mark as "loaded but empty"
-              // This prevents infinite re-loading when chatHistories updates trigger reactive statement
+              // "Loaded and empty" is recorded in loadedHistory, not by writing
+              // an empty array over whatever is on screen: that write used to be
+              // the flag, and it erased live messages as a side effect. The map
+              // is only seeded when the chat has no entry at all, so the list
+              // renders as empty rather than undefined.
               chatHistories.update(map => {
+                if (map.has(reqChatId)) return map;
                 const newMap = new Map(map);
                 newMap.set(reqChatId, []);
                 return newMap;
               });
+              loadedHistory.add(reqChatId);
 
               // Remove from loading AFTER chatHistories update completes
               loadingHistory.delete(reqChatId);
@@ -187,7 +216,7 @@
           }
         })();
       } else {
-        console.log(`[ChatHistory] Skipping load - already have ${currentHistory.length} messages`);
+        console.log(`[ChatHistory] Skipping load - already fetched once, have ${currentHistory?.length ?? 0} messages`);
       }
     }
   });

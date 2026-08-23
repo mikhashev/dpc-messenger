@@ -154,6 +154,11 @@ let reconnectAttempts = 0;
 let pollingInterval: ReturnType<typeof setInterval> | null = null;
 const MAX_RECONNECT_ATTEMPTS = 5;
 const RECONNECT_DELAY = 3000;
+// Auth rejections are retried only while the token file keeps changing under
+// us, and only a few times: a backend restarting in a loop must not turn into
+// a reconnect loop here.
+let authRetries = 0;
+const MAX_AUTH_RETRIES = 3;
 const API_URL = "ws://127.0.0.1:9999";
 
 // Map to track pending command responses
@@ -266,33 +271,51 @@ export async function connectToCoreService() {
             // See local_api.py:_authenticate.
             socket!.send(JSON.stringify({ command: 'auth', token: authToken, id: 'auth-init' }));
 
-            connectionStatus.set('connected');
-            reconnectAttempts = 0;
-
-            // Wire the frontend logger to relay messages to ui.log via the backend.
-            setLogSender((level, context, message) => {
-                sendCommand('ui_log', { level, context, message });
-            });
-
-            sendCommand("get_status");
-            sendCommand("list_providers");
-            sendCommand("get_default_providers");  // Fetch default text/vision providers
-            sendCommand("get_providers_list");     // Fetch full provider list with vision flags
-            sendCommand("get_telegram_status");    // Fetch Telegram status including conversation links
-            loadGroups();                             // Fetch group chats (v0.19.0)
-            startBalancePolling();                    // DeepSeek balance poll + low-balance alerts (Phase 2b)
-
-            // Stop polling
-            if (pollingInterval) {
-                clearInterval(pollingInterval);
-                pollingInterval = null;
-            }
+            // Nothing else goes out until the backend answers that auth. An open
+            // socket used to count as connected and the whole startup batch left
+            // immediately: on 2026-08-23 the backend rejected a stale token 0.4s
+            // after rewriting it, closed the socket, and get_groups,
+            // get_instructions and get_conversation_transcription sat in
+            // pendingCommands until their 60s timeouts — after which nobody
+            // re-sent them, so the UI stayed without groups and without history.
         });
 
         socket.addEventListener('message', async (event) => {
             try {
                 const message = JSON.parse(event.data);
                 coreMessages.set(message);
+
+                // The backend answers the auth frame before anything else
+                // (local_api.py:_authenticate). This — not the socket opening —
+                // is the moment the connection is usable, and the moment the
+                // startup batch may go out.
+                if (message.id === 'auth-init' && message.command === 'auth') {
+                    if (message.status === 'OK') {
+                        connectionStatus.set('connected');
+                        reconnectAttempts = 0;
+                        authRetries = 0;
+
+                        // Wire the frontend logger to relay messages to ui.log via the backend.
+                        setLogSender((level, context, message) => {
+                            sendCommand('ui_log', { level, context, message });
+                        });
+
+                        sendCommand("get_status");
+                        sendCommand("list_providers");
+                        sendCommand("get_default_providers");  // Fetch default text/vision providers
+                        sendCommand("get_providers_list");     // Fetch full provider list with vision flags
+                        sendCommand("get_telegram_status");    // Fetch Telegram status including conversation links
+                        loadGroups();                             // Fetch group chats (v0.19.0)
+                        startBalancePolling();                    // DeepSeek balance poll + low-balance alerts (Phase 2b)
+
+                        // Stop polling
+                        if (pollingInterval) {
+                            clearInterval(pollingInterval);
+                            pollingInterval = null;
+                        }
+                    }
+                    return;
+                }
 
                 // Check if this is a response to a pending command
                 if (message.id && pendingCommands.has(message.id)) {
@@ -1108,11 +1131,42 @@ export async function connectToCoreService() {
             socket = null;
 
             // Code 1008 = policy violation. The backend uses this exclusively for
-            // local API auth failures (missing/invalid token, timeout). The token
-            // won't change until the backend restarts, so retrying with the same
-            // stale token would just spin forever.
+            // local API auth failures (missing/invalid token, timeout).
+            //
+            // Giving up here was right for the case it was written for — the same
+            // token will keep being rejected — and wrong for the one that happens:
+            // the backend rewrites ~/.dpc/.ws_token on every start, and this
+            // client reads the file *before* opening the socket, so a restart in
+            // that window sends a token that was current when it was read and
+            // stale by the time it arrived. Measured 2026-08-23: token written at
+            // 16:14:10,388, rejected at 16:14:10,814, and the UI then sat in
+            // 'error' with no groups and no history. So: read the file again, and
+            // retry only if it now holds something different — if it does not,
+            // the original reasoning stands and we stop.
             if (event.code === 1008) {
                 console.error(`❌ Local API auth rejected: ${event.reason}`);
+                if (authRetries < MAX_AUTH_RETRIES) {
+                    import('@tauri-apps/api/core').then(({ invoke }) =>
+                        invoke<string>('get_ws_token')
+                    ).then((fresh) => {
+                        if (fresh && fresh !== authToken) {
+                            authRetries++;
+                            console.log(`[auth] token on disk changed since we read it — reconnecting (${authRetries}/${MAX_AUTH_RETRIES})`);
+                            connectionStatus.set('disconnected');
+                            reconnectAttempts = 0;
+                            reconnectTimeout = setTimeout(() => connectToCoreService(), 200);
+                        } else {
+                            console.error('[auth] token on disk is the one we sent — not retrying');
+                            connectionStatus.set('error');
+                            reconnectAttempts = MAX_RECONNECT_ATTEMPTS;
+                        }
+                    }).catch((e) => {
+                        console.error('[auth] could not re-read the token:', e);
+                        connectionStatus.set('error');
+                        reconnectAttempts = MAX_RECONNECT_ATTEMPTS;
+                    });
+                    return;
+                }
                 connectionStatus.set('error');
                 reconnectAttempts = MAX_RECONNECT_ATTEMPTS;
                 return;
