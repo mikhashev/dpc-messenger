@@ -120,6 +120,12 @@
 
   // Store provider selection per chat (chatId -> provider alias)
   const chatProviders = writable<Map<string, string>>(new Map());
+  // The reasoning level for a chat that has no agent to store one. An agent
+  // keeps its level in its own config and that path works; Local AI Chat is an
+  // entry in `aiChats` with no agent behind it, so its selector used to write to
+  // `updateAgentConfig("local_ai")` and be answered «Agent not found» inside an
+  // envelope that says OK. Same shape as `chatProviders` above, on purpose.
+  const chatEfforts = writable<Map<string, string>>(new Map());
 
   // Store AI chat metadata (chatId -> {name: string, provider: string, instruction_set_name?: string})
   const aiChats = writable<Map<string, {name: string, provider: string, instruction_set_name?: string, profile_name?: string, llm_provider?: string, compute_host?: string}>>(
@@ -1065,8 +1071,22 @@
               <select
                 class="group-effort-select"
                 title="How hard the model reasons before answering — the field is `reasoning_effort` in the code and in DeepSeek's own API, which is why the label says Reasoning rather than Thinking. One scale for a room whose agents sit on different models: each provider maps it onto what its own model can do, so the same word can mean different depths here. Max cannot be sent to a local Ollama model at all and arrives as High. A model that reports no thinking drops every level — Off is the one value all of them accept, and it is a switch rather than an amount."
-                value={$agentsList.find((a: any) => a.agent_id === activeChatId)?.reasoning_effort || ''}
-                onchange={async (e: Event) => { await updateAgentConfig(activeChatId, { reasoning_effort: (e.currentTarget as HTMLSelectElement).value }); await listAgents(); }}
+                value={$agentsList.find((a: any) => a.agent_id === activeChatId)?.reasoning_effort
+                       ?? ($chatEfforts.get(activeChatId) || '')}
+                onchange={async (e: Event) => {
+                  const level = (e.currentTarget as HTMLSelectElement).value;
+                  // The write mirrors the read one line above: a chat that answers to an
+                  // agent stores the level in that agent's config, and one that does not
+                  // keeps it here and sends it with the query. Deciding by the same
+                  // lookup both ways is what keeps the control from writing somewhere
+                  // the reader never looks.
+                  if ($agentsList.find((a: any) => a.agent_id === activeChatId)) {
+                    await updateAgentConfig(activeChatId, { reasoning_effort: level });
+                    await listAgents();
+                  } else {
+                    chatEfforts.update(m => new Map(m).set(activeChatId, level));
+                  }
+                }}
               >
                 <option value="">Config</option>
                 <option value="off">Off</option>
@@ -1180,6 +1200,7 @@
         {agentChatToAgentId}
         {aiChats}
         {chatProviders}
+        {chatEfforts}
         {selectedTextProvider}
         {selectedVisionProvider}
         {selectedVoiceProvider}

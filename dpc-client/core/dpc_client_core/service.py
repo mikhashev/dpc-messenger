@@ -6454,7 +6454,7 @@ class CoreService:
         """Delegated to P2PCoordinator."""
         return await self.p2p_coordinator.cancel_file_transfer(transfer_id, reason)
 
-    async def send_ai_query(self, prompt: str, compute_host: str = None, model: str = None, provider: str = None, conversation_id: str = None, agent_llm_provider: str = None):
+    async def send_ai_query(self, prompt: str, compute_host: str = None, model: str = None, provider: str = None, conversation_id: str = None, agent_llm_provider: str = None, reasoning_effort: str = None):
         """
         Send an AI query, either to local LLM or to a remote peer for inference.
 
@@ -6467,6 +6467,8 @@ class CoreService:
             provider: Optional provider alias to use
             conversation_id: Optional conversation ID for progress tracking (DPC Agent)
             agent_llm_provider: Optional underlying LLM provider for DPC Agent (Phase 3)
+            reasoning_effort: Optional level from the shared scale (off/low/medium/high/max);
+                None leaves the provider alias's own configuration deciding
 
         Returns:
             Dict with 'response', 'model', 'provider', and 'compute_host' keys
@@ -6481,7 +6483,8 @@ class CoreService:
             model=model,
             provider=provider,
             conversation_id=conversation_id,
-            agent_llm_provider=agent_llm_provider  # Phase 3: per-agent provider selection
+            agent_llm_provider=agent_llm_provider,  # Phase 3: per-agent provider selection
+            reasoning_effort=reasoning_effort,
         )
 
     # --- Context Request Methods ---
@@ -7276,7 +7279,7 @@ class CoreService:
             logger.error("Ark response to CC's @Ark mention failed: %s", e, exc_info=True)
 
     @sends_own_response
-    async def execute_ai_query(self, command_id: str, prompt: str, context_ids: list = None, compute_host: str = None, model: str = None, provider: str = None, include_context: bool = True, ai_scope: str = None, instruction_set_name: str = None, agent_llm_provider: str = None, **kwargs):
+    async def execute_ai_query(self, command_id: str, prompt: str, context_ids: list = None, compute_host: str = None, model: str = None, provider: str = None, include_context: bool = True, ai_scope: str = None, instruction_set_name: str = None, agent_llm_provider: str = None, reasoning_effort: str = None, **kwargs):
         """
         Orchestrates an AI query and sends the response back to the UI.
 
@@ -7502,7 +7505,12 @@ class CoreService:
                 model=model,
                 provider=provider,
                 conversation_id=conversation_id,
-                agent_llm_provider=agent_llm_provider  # Phase 3: per-agent provider selection
+                agent_llm_provider=agent_llm_provider,  # Phase 3: per-agent provider selection
+                # The header's Reasoning control on a chat that has no agent. It used
+                # to write to `updateAgentConfig("local_ai")`, which answers «Agent not
+                # found» inside an envelope that says OK — so the value was neither
+                # stored nor carried. It travels with the query instead.
+                reasoning_effort=reasoning_effort,
             )
             # result is a dict with 'response', 'model', 'provider', 'compute_host'
             # and potentially 'tokens_used', 'model_max_tokens' for local inference

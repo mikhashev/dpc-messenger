@@ -78,6 +78,7 @@
     agentChatToAgentId,
     aiChats,
     chatProviders,
+    chatEfforts,
     selectedTextProvider,
     selectedVisionProvider,
     selectedVoiceProvider,
@@ -107,6 +108,7 @@
     agentChatToAgentId: Map<string, string>;
     aiChats: Writable<Map<string, AIChatMeta>>;
     chatProviders: Writable<Map<string, string>>;
+    chatEfforts: Writable<Map<string, string>>;
     selectedTextProvider: string;
     selectedVisionProvider: string;
     selectedVoiceProvider: string;
@@ -645,6 +647,13 @@
       instruction_set_name: chatMeta?.instruction_set_name || 'general',
     };
     if (selectedPeerContexts.size > 0) payload.context_ids = Array.from(selectedPeerContexts);
+
+    // The header's Reasoning control for a chat with no agent behind it. An agent
+    // carries its own level in its config and the loop reads it there; this one has
+    // nowhere to be stored, so it rides the query. Empty means «Config» — the alias
+    // decides, which is what the selector's first option says.
+    const chatSpecificEffort = get(chatEfforts).get(activeChatId);
+    if (chatSpecificEffort) payload.reasoning_effort = chatSpecificEffort;
 
     const chatSpecificProvider = get(chatProviders).get(activeChatId);
     if (chatSpecificProvider) {

@@ -34,7 +34,8 @@ class InferenceOrchestrator:
         provider: Optional[str] = None,
         images: Optional[list] = None,
         conversation_id: Optional[str] = None,
-        agent_llm_provider: Optional[str] = None
+        agent_llm_provider: Optional[str] = None,
+        reasoning_effort: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Execute AI inference (local or remote).
@@ -73,7 +74,8 @@ class InferenceOrchestrator:
                 provider=provider,
                 images=images,
                 conversation_id=conversation_id,
-                agent_llm_provider=agent_llm_provider  # Phase 3: per-agent provider selection
+                agent_llm_provider=agent_llm_provider,  # Phase 3: per-agent provider selection
+                reasoning_effort=reasoning_effort,
             )
 
     async def _execute_local_inference(
@@ -82,7 +84,8 @@ class InferenceOrchestrator:
         provider: Optional[str] = None,
         images: Optional[list] = None,
         conversation_id: Optional[str] = None,
-        agent_llm_provider: Optional[str] = None
+        agent_llm_provider: Optional[str] = None,
+        reasoning_effort: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Execute local inference using llm_manager.
@@ -107,7 +110,12 @@ class InferenceOrchestrator:
                 images=images,
                 return_metadata=True,
                 conversation_id=conversation_id,
-                agent_llm_provider=agent_llm_provider  # Phase 3: per-agent provider selection
+                agent_llm_provider=agent_llm_provider,  # Phase 3: per-agent provider selection
+                # The level the caller asked for. `query` hands its extra kwargs to
+                # the provider, and since d8480074 every provider names the parameter
+                # — so a chat without an agent can finally set a depth. Absent stays
+                # absent: None leaves the alias configuration deciding, as before.
+                reasoning_effort=reasoning_effort,
             )
             result['compute_host'] = 'local'
             return result
