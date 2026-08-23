@@ -273,6 +273,16 @@
     { key: 'top_k', step: 1, min: 0, max: 200, isInt: true, hint: 'integer' },
   ];
 
+  // Every sampling parameter, each once. The two lists above overlap on `top_k`
+  // and `top_p` — they are the same knobs offered to two provider types — so a
+  // read-only card that concatenated them printed those two twice.
+  const ALL_SAMPLING_PARAMS = [
+    ...OLLAMA_SAMPLING_PARAMS,
+    ...LLAMA_SAMPLING_PARAMS.filter(
+      (p) => !OLLAMA_SAMPLING_PARAMS.some((o) => o.key === p.key)
+    ),
+  ];
+
   // Unset temperature means different things per provider type: ollama omits
   // the key (modelfile default applies), deepseek/zai/llama-server fall back to
   // 1.0, the rest send self.temperature = 0.7. Z.AI joined that first group when
@@ -2254,8 +2264,12 @@
                       <p><strong>Thinking:</strong> {provider.think ? 'always on' : 'always off'}</p>
                     {/if}
 
-                    {#if [...OLLAMA_SAMPLING_PARAMS, ...LLAMA_SAMPLING_PARAMS].some(p => (provider as any)[p.key] !== undefined)}
-                      <p><strong>Sampling:</strong> {[...OLLAMA_SAMPLING_PARAMS, ...LLAMA_SAMPLING_PARAMS].filter(p => (provider as any)[p.key] !== undefined).map(p => `${p.key}=${(provider as any)[p.key]}`).join(', ')}</p>
+                    <!-- One entry per parameter. The two lists overlap on `top_k`
+                         and `top_p`, so concatenating them printed those twice:
+                         a llama-server card read «top_k=20, top_p=0.95,
+                         top_p=0.95, top_k=20». -->
+                    {#if ALL_SAMPLING_PARAMS.some(p => (provider as any)[p.key] !== undefined)}
+                      <p><strong>Sampling:</strong> {ALL_SAMPLING_PARAMS.filter(p => (provider as any)[p.key] !== undefined).map(p => `${p.key}=${(provider as any)[p.key]}`).join(', ')}</p>
                     {/if}
 
                     {#if provider.type === 'ollama'}
