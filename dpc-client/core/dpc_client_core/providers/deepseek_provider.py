@@ -458,10 +458,20 @@ class DeepSeekProvider(AIProvider):
             return await _call()
         except Exception as e:
             if self._is_retryable(e):
-                result = await self._retry_with_backoff(_call, e)
-                if on_chunk and result:
-                    await on_chunk(result, conversation_id)
-                return result
+                # `_call` is the whole stream: the retry re-runs it, and it delivers
+                # every token through `on_chunk` on its way to returning `full_text`.
+                # Sending that return value to `on_chunk` as well put the answer on the
+                # wire a second time, after the reader already had it token by token.
+                #
+                # It does not double the bill — `on_chunk` reaches
+                # `agent_manager.emit_stream_chunk`, which only appends and broadcasts.
+                # It does something that lasts longer: `_raw` becomes the answer twice,
+                # so `_streaming_raw` stops matching `response` (`agent_manager.py:1168`)
+                # where it is normally None, and the doubled text is written to
+                # conversation history and read back as context by every later turn.
+                # (Found by Ark in `zai_provider.py`, 2026-08-23; these two were the
+                # rest of the class.)
+                return await self._retry_with_backoff(_call, e)
             logger.error("DeepSeek streaming failed: %s", e, exc_info=True)
             raise RuntimeError(
                 f"DeepSeek streaming provider '{self.alias}' failed: {type(e).__name__}: {e}"

@@ -1033,3 +1033,82 @@ class TestTheReasonTheModelStoppedReachesTheCaller:
         self._wire(p, client)
         await p.generate_response("hi")
         assert "finish_reason" not in p.get_last_usage()
+
+
+# --- the retried stream used to deliver the answer twice ----------------------
+
+class TestTheRetriedStream:
+    """The retry branch of `generate_response_stream`, which no test entered.
+
+    Inherited from DeepSeekProvider's shape and carrying the same defect: `_call`
+    streams every token through `on_chunk` and returns the accumulated text, and
+    the branch used to send that return value through `on_chunk` again. The
+    consumer saw the answer twice; `agent_manager` then wrote the doubled text
+    into conversation history, because `_raw` no longer matched `response`.
+    """
+
+    @staticmethod
+    def _chunks():
+        def token(text):
+            return SimpleNamespace(
+                choices=[SimpleNamespace(
+                    delta=SimpleNamespace(reasoning_content=None, content=text),
+                    finish_reason=None)],
+                usage=None)
+        return [
+            token("he"),
+            token("llo"),
+            SimpleNamespace(
+                choices=[],
+                usage=SimpleNamespace(prompt_tokens=9, completion_tokens=2, total_tokens=11)),
+        ]
+
+    @pytest.mark.asyncio
+    async def test_each_token_arrives_exactly_once_after_a_retry(self, monkeypatch):
+        from dpc_client_core.providers import deepseek_provider as retry_home
+
+        p = _provider()
+        p.supervisor = _FakeSupervisor()
+        # `_retry_with_backoff` is inherited from DeepSeekProvider and sleeps 3s
+        # before the first retry. The wait is not the behaviour under test.
+        async def _no_sleep(_seconds):
+            return None
+        monkeypatch.setattr(retry_home.asyncio, "sleep", _no_sleep)
+
+        chunks = self._chunks()
+
+        class _Stream:
+            def __aiter__(self):
+                async def gen():
+                    for c in chunks:
+                        yield c
+                return gen()
+
+        class _FlakyCompletions:
+            def __init__(self):
+                self.calls = 0
+
+            async def create(self, **params):
+                self.calls += 1
+                if self.calls == 1:
+                    raise RuntimeError("HTTP 503 service unavailable")
+                return _Stream()
+
+        completions = _FlakyCompletions()
+        client = SimpleNamespace(chat=SimpleNamespace(completions=completions))
+
+        async def _ensure():
+            return client
+        p._ensure = _ensure
+
+        seen = []
+
+        async def on_chunk(text, conv_id):
+            seen.append(text)
+
+        out = await p.generate_response_stream("hi", on_chunk, "conv-1")
+
+        assert completions.calls == 2, "the retry has to have happened"
+        assert out == "hello"
+        assert seen == ["he", "llo"], "the full text must not follow the tokens"
+

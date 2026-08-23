@@ -576,3 +576,95 @@ def test_an_alias_with_thinking_off_is_not_switched_on_by_a_level():
     effort, but it cannot manufacture a thinking mode the alias disabled."""
     p = _make({"thinking": {"enabled": False}})
     assert p._build_extra_body("high") == {"thinking": {"type": "disabled"}}
+
+async def _no_sleep(_seconds):
+    """`_retry_with_backoff` waits 3s before its first retry; the wait is not
+    the behaviour any test here is about."""
+    return None
+
+
+
+# --- the retried stream used to deliver the answer twice ----------------------
+
+class _StreamOf:
+    """An async iterator over prepared chunks — what the SDK hands back."""
+
+    def __init__(self, chunks):
+        self._chunks = chunks
+
+    def __aiter__(self):
+        async def gen():
+            for c in self._chunks:
+                yield c
+        return gen()
+
+
+class _FlakyCompletions:
+    """Retryable on the first call, a real stream on the second.
+
+    Counts its calls so the test can assert the retry actually happened rather
+    than inferring it from the output it is also asserting on.
+    """
+
+    def __init__(self, chunks):
+        self._chunks = chunks
+        self.calls = 0
+
+    async def create(self, **params):
+        self.calls += 1
+        if self.calls == 1:
+            raise RuntimeError("HTTP 429 rate limit")
+        return _StreamOf(self._chunks)
+
+
+def _token(text):
+    return SimpleNamespace(
+        choices=[SimpleNamespace(delta=SimpleNamespace(
+            content=text, reasoning_content=None), finish_reason=None)],
+        usage=None,
+    )
+
+
+def _usage_chunk():
+    return SimpleNamespace(
+        choices=[],
+        usage=SimpleNamespace(prompt_tokens=7, completion_tokens=2, total_tokens=9,
+                              prompt_tokens_details=None),
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_retried_stream_delivers_each_token_exactly_once(monkeypatch):
+    """`_call` is the whole stream: the retry re-runs it and it delivers every
+    token through `on_chunk` on its way to returning `full_text`. Sending that
+    return value to `on_chunk` as well put the answer on the wire a second time.
+
+    It is not a double bill — `on_chunk` reaches `agent_manager.emit_stream_chunk`,
+    which appends and broadcasts and touches no usage. It is worse in a slower
+    way: `_raw` becomes the answer twice, `_streaming_raw` stops matching
+    `response` (`agent_manager.py:1168`) where it is normally None, and the
+    doubled text is persisted to conversation history and read back as context by
+    every later turn.
+
+    Unreachable on a mock that never fails, which is why it survived — found by
+    Ark in `zai_provider.py` and by the Orbit graph in the other two, 2026-08-23.
+    """
+    from dpc_client_core.providers import deepseek_provider as mod
+
+    p = _make()
+    monkeypatch.setattr(mod.asyncio, "sleep", _no_sleep)  # 3s of backoff, not behaviour
+    completions = _FlakyCompletions([_token("he"), _token("llo"), _usage_chunk()])
+    p.client = SimpleNamespace(chat=SimpleNamespace(completions=completions))
+
+    seen = []
+
+    async def on_chunk(text, conv_id):
+        seen.append(text)
+
+    out = await p.generate_response_stream("hello", on_chunk, "conv-1")
+
+    assert completions.calls == 2, "the retry has to have happened for this to mean anything"
+    assert out == "hello"
+    assert seen == ["he", "llo"], "the full text must not follow the tokens"
+    assert "".join(seen) == out
+
