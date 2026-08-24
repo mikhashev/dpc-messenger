@@ -590,6 +590,118 @@ def _should_report_pending(pending: int, shutting_down: bool) -> bool:
     return pending > 0 and (shutting_down or pending > 1)
 
 
+# How long the drain is left alone before we hand it the packets it waits
+# for, and how long before we stop being careful about which. Both are
+# generous: a healthy close drains in milliseconds.
+_DRAIN_NUDGE_SECONDS = float(os.environ.get("DPC_SHUTDOWN_DRAIN_NUDGE", "5"))
+_DRAIN_GIVE_UP_SECONDS = float(os.environ.get("DPC_SHUTDOWN_DRAIN_GIVE_UP", "20"))
+
+
+def _post_missing_completions(proactor, done_only: bool) -> int:
+    """Hand `IocpProactor.close()` the completion packets it is waiting for.
+
+    Its drain is `while self._cache: self._poll(1)` (`windows_events.py:857`)
+    with no timeout at all — the comment above it says «don't exit with
+    running overlapped to prevent a crash». An entry leaves that cache only
+    when `_poll` dequeues a packet for its address, so one packet that never
+    arrives is a process that never exits.
+
+    Measured 2026-08-24: every component reported clean stop in 4.2 s, and
+    the loop then spun for the six minutes until Mike ended it by hand,
+    holding two entries whose futures read `finished result=548` and `549`
+    on already-closed sockets.
+
+    Those two are the shape `_register` documents at `:723-738` — an
+    operation that completes synchronously has its result set immediately
+    and is *still* cached, because «Even if GetOverlappedResult() was
+    called, we have to wait for the notification of the completion in
+    GetQueuedCompletionStatus()». Posting that notification ourselves is
+    not a trick played on the loop: `_poll` pops the entry and then skips
+    the callback, since its guard at `:801` is `elif not f.done()`. Nothing
+    is fabricated for a future still waiting on a real answer — that is what
+    `done_only` protects, and only the give-up pass drops it.
+
+    Returns the number of packets posted.
+    """
+    import _overlapped  # Windows-only C module; imported where it is used.
+
+    iocp = getattr(proactor, "_iocp", None)
+    cache = getattr(proactor, "_cache", None)
+    if iocp is None or not cache:
+        return 0
+
+    posted = 0
+    for address, entry in list(cache.items()):
+        fut = entry[0]
+        try:
+            settled = fut.done()
+        except Exception:  # a stub or a half-torn-down future
+            settled = False
+        if done_only and not settled:
+            continue
+        try:
+            # key=0 on purpose: _poll's KeyError branch closes a non-zero key
+            # as a pipe handle, and there is no handle here to close.
+            _overlapped.PostQueuedCompletionStatus(iocp, 0, 0, address)
+        except OSError as exc:
+            logger.debug("drain nudge failed for overlapped %s: %s", address, exc)
+        else:
+            posted += 1
+    return posted
+
+
+def _start_drain_watchdog(proactor):
+    """Let a loop close finish even when a completion packet never comes.
+
+    Runs beside `IocpProactor.close()`, which is blocking the calling thread
+    inside its own drain. `PostQueuedCompletionStatus` is a Win32 call on
+    the port handle and is safe to make from here; the packets are dequeued
+    by that same blocked `_poll`, so the close finishes through CPython's
+    own path rather than by force.
+    """
+    import threading
+    import time
+
+    def run():
+        started = time.monotonic()
+        nudge_at = started + _DRAIN_NUDGE_SECONDS
+        give_up_at = started + max(_DRAIN_GIVE_UP_SECONDS, _DRAIN_NUDGE_SECONDS)
+        nudged = False
+        while True:
+            if getattr(proactor, "_iocp", None) is None:
+                return  # close() returned on its own
+            cache = getattr(proactor, "_cache", None)
+            if not cache:
+                return
+            now = time.monotonic()
+            if not nudged and now >= nudge_at:
+                count = _post_missing_completions(proactor, done_only=True)
+                nudged = True
+                if count:
+                    logger.warning(
+                        "Shutdown: %d overlapped op(s) had already finished and "
+                        "their completion never arrived — posting it so the loop "
+                        "can close (waited %.0fs)", count, _DRAIN_NUDGE_SECONDS,
+                    )
+            elif now >= give_up_at:
+                count = _post_missing_completions(proactor, done_only=False)
+                if count:
+                    logger.warning(
+                        "Shutdown: %d overlapped op(s) still unfinished after "
+                        "%.0fs — abandoning the wait for them so the process can "
+                        "exit. Re-run with DPC_DEBUG_SHUTDOWN=1 to see where they "
+                        "were registered.", count, _DRAIN_GIVE_UP_SECONDS,
+                    )
+                return
+            time.sleep(0.25)
+
+    thread = threading.Thread(
+        target=run, name="shutdown-drain-watchdog", daemon=True,
+    )
+    thread.start()
+    return thread
+
+
 def _install_shutdown_diagnostics():
     """Name whatever still holds a Windows overlapped op when a loop closes.
 
@@ -619,6 +731,9 @@ def _install_shutdown_diagnostics():
     except ImportError:
         return
 
+    if getattr(IocpProactor.close, "_dpc_shutdown_diagnostics", False):
+        return
+
     capture_origins = os.environ.get("DPC_DEBUG_SHUTDOWN") == "1"
     origins: dict[int, list[str]] = {}
     original_close = IocpProactor.close
@@ -642,7 +757,10 @@ def _install_shutdown_diagnostics():
 
     def close_with_trace(self):
         cache = getattr(self, "_cache", None)
-        if cache and _should_report_pending(len(cache), _shutting_down):
+        worth_reporting = bool(cache) and _should_report_pending(
+            len(cache), _shutting_down
+        )
+        if worth_reporting:
             level = logging.WARNING if _shutting_down else logging.DEBUG
             logger.log(level, "%d overlapped op(s) still pending at loop close", len(cache))
             for address, entry in list(cache.items()):
@@ -664,8 +782,22 @@ def _install_shutdown_diagnostics():
                     "  (start with DPC_DEBUG_SHUTDOWN=1 to also record where "
                     "each op was registered)"
                 )
-        return original_close(self)
+        # The same predicate arms the watchdog: exactly the closes that can
+        # spin. A healthy one carries the self-pipe read alone and drains
+        # before the watchdog's first tick, so the thread costs one wakeup.
+        watchdog = _start_drain_watchdog(self) if worth_reporting else None
+        try:
+            return original_close(self)
+        finally:
+            if watchdog is not None:
+                # It exits on its own as soon as the cache empties; this only
+                # keeps a finished thread from outliving the call in the dump.
+                watchdog.join(timeout=0.5)
 
+    # Idempotent: a second install would wrap the wrapper, so every close
+    # would run the drain logic twice and a traceback would show the frame
+    # twice. Production calls this once; tests call it per case.
+    close_with_trace._dpc_shutdown_diagnostics = True
     IocpProactor.close = close_with_trace
 
 
