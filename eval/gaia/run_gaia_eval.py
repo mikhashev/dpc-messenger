@@ -148,7 +148,9 @@ def fetch_attachment(token: str, file_name: str, into: Path) -> Optional[Path]:
 
 
 def providers_file_for(alias: str, model: Optional[str], base_url: str,
-                       context_window: int, workdir: Path) -> tuple:
+                       context_window: int, workdir: Path,
+                       temperature: Optional[float] = None,
+                       reasoning_effort: Optional[str] = None) -> tuple:
     """Write the throwaway providers file the eval will run against.
 
     `--provider-alias` copies the named entry out of the operator's real
@@ -177,6 +179,16 @@ def providers_file_for(alias: str, model: Optional[str], base_url: str,
             "base_url": base_url,
             "context_window": context_window,
         }
+    # Both axes are pinned rather than inherited when asked for. Left alone,
+    # `reasoning_effort` is absent from the alias and the provider sends no
+    # word at all, which the model's own template answers with its default —
+    # `xhigh` for this one. An unrecorded default is not a setting, it is a
+    # guess that looks like a setting.
+    if temperature is not None:
+        entry["temperature"] = temperature
+    if reasoning_effort:
+        entry["reasoning_effort"] = reasoning_effort
+
     path = workdir / "providers.json"
     path.write_text(json.dumps({"providers": [entry], "default_provider": entry["alias"]}),
                     encoding="utf-8")
@@ -235,7 +247,8 @@ async def main_async(args) -> int:
     attachments_dir = agent_root / "gaia-files"
 
     providers_path, entry = providers_file_for(
-        args.provider_alias, args.model, args.base_url, args.context_window, workdir
+        args.provider_alias, args.model, args.base_url, args.context_window, workdir,
+        temperature=args.temperature, reasoning_effort=args.reasoning_effort,
     )
     print(f"provider: {entry['alias']!r} type={entry.get('type')} model={entry.get('model')}")
 
@@ -272,6 +285,8 @@ async def main_async(args) -> int:
         "benchmark": "GAIA L1 validation",
         "model": entry.get("model"),
         "provider_type": entry.get("type"),
+        "temperature": entry.get("temperature"),
+        "reasoning_effort": entry.get("reasoning_effort", "(template default: xhigh)"),
         "tasks": len(results),
         "correct": correct,
         "accuracy": round(correct / len(results), 3) if results else 0.0,
@@ -316,6 +331,10 @@ def main() -> int:
     ap.add_argument("--context-window", type=int, default=32768)
     ap.add_argument("--with-files", action="store_true",
                     help="include the 11 tasks that carry an attachment")
+    ap.add_argument("--temperature", type=float, default=None,
+                    help="pin the sampling temperature for this run")
+    ap.add_argument("--reasoning-effort", default=None,
+                    help="pin the reasoning effort word (low/medium/high/max/xhigh/off)")
     ap.add_argument("--auto-approve", action="store_true",
                     help="answer ADR-030 Tier 1 prompts automatically — eval only; "
                          "Tier 2 remains hard-blocked and never reaches the queue")
