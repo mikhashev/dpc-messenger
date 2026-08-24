@@ -42,6 +42,9 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+# The shared harness bits live one directory up.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
 REPO = "gaia-benchmark/GAIA"
 SPLIT = "2023/validation/metadata.level1.parquet"
 ATTACHMENT_DIR = "2023/validation"
@@ -239,6 +242,12 @@ async def main_async(args) -> int:
     llm = LLMManager(config_path=providers_path)
     agent = DpcAgent(llm_manager=llm, config=AgentConfig(), agent_root=agent_root)
 
+    approver = None
+    if args.auto_approve:
+        from _harness.auto_approve import Tier1AutoApprover
+        approver = Tier1AutoApprover().start()
+        print("Tier 1 auto-approval ON (Tier 2 still blocked)", flush=True)
+
     results = []
     started = time.time()
     for i, row in enumerate(rows, 1):
@@ -256,6 +265,8 @@ async def main_async(args) -> int:
               f"gold={outcome['gold'][:28]!r:32} got={outcome['answer'][-60:].strip()!r}",
               flush=True)
 
+    if approver is not None:
+        approver.stop()
     correct = sum(1 for r in results if r["correct"])
     report = {
         "benchmark": "GAIA L1 validation",
@@ -271,6 +282,7 @@ async def main_async(args) -> int:
             "context window, step budget and memory configuration all match."
         ),
         "results": results,
+        **({"approvals": approver.summary()} if approver is not None else {}),
     }
     print()
     print(f"{correct}/{len(results)} = {report['accuracy']:.1%} on {entry.get('model')} "
@@ -304,6 +316,9 @@ def main() -> int:
     ap.add_argument("--context-window", type=int, default=32768)
     ap.add_argument("--with-files", action="store_true",
                     help="include the 11 tasks that carry an attachment")
+    ap.add_argument("--auto-approve", action="store_true",
+                    help="answer ADR-030 Tier 1 prompts automatically — eval only; "
+                         "Tier 2 remains hard-blocked and never reaches the queue")
     ap.add_argument("--json", default=None)
     ap.add_argument("--keep", action="store_true")
     return asyncio.run(main_async(ap.parse_args()))
