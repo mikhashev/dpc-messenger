@@ -335,6 +335,60 @@ class KnowledgeService:
             },
         ]
 
+    def _announce_history_after_repair(self, group_id: str) -> None:
+        """Tell connected members that this node's copy of a group just changed.
+
+        Fires only when a consolidation actually recovered messages, so a node
+        with nothing to repair stays silent. The peers answer with their own
+        status, the existing author-digest comparison runs, and whatever either
+        side is missing is fetched — the same path a reconnect would take, just
+        without waiting for one.
+        """
+        monitor = self.conversation_monitors.get(group_id)
+        summary = getattr(monitor, "last_consolidation", None) or {}
+        if not summary.get("messages_added"):
+            return
+
+        group = self.group_manager.get_group(group_id)
+        members = [m for m in (group.members if group else []) if m != self.p2p_manager.node_id]
+        peers = [m for m in members if m in getattr(self.p2p_manager, "peers", {})]
+        if not peers:
+            logger.info(
+                "Group %s repaired (%d message(s) recovered); no member connected to tell yet",
+                group_id, summary["messages_added"],
+            )
+            return
+
+        payload = {
+            "group_id": group_id,
+            "history_hash": monitor.compute_history_hash(),
+            "message_count": len(monitor.message_history),
+            "history_digest": monitor.history_digest(),
+        }
+
+        async def _send():
+            for peer_id in peers:
+                try:
+                    await self.p2p_manager.send_message_to_peer(peer_id, {
+                        "command": "GROUP_HISTORY_STATUS",
+                        "payload": payload,
+                    })
+                except Exception as exc:
+                    logger.debug("Could not announce repaired history to %s: %s", peer_id[:20], exc)
+
+        try:
+            asyncio.get_running_loop().create_task(_send())
+            logger.info(
+                "Group %s repaired (%d message(s) recovered); announced to %d connected member(s)",
+                group_id, summary["messages_added"], len(peers),
+            )
+        except RuntimeError:
+            # No loop here — the reconnect exchange will carry it instead.
+            logger.info(
+                "Group %s repaired (%d message(s) recovered); no event loop to announce on",
+                group_id, summary["messages_added"],
+            )
+
     def _get_or_create_conversation_monitor(
         self,
         conversation_id: str,
@@ -397,6 +451,11 @@ class KnowledgeService:
                     conversation_id,
                     len(self.conversation_monitors[conversation_id].message_history),
                 )
+            # Loading may have folded a split store back together. Peers learn
+            # about it now rather than at the next reconnect, which on a pair
+            # that stays connected for days is the difference between "syncs
+            # automatically" and "syncs when something else happens".
+            self._announce_history_after_repair(conversation_id)
             # Set token_limit to max context window among agents in the group
             if group and self.llm_manager:
                 max_ctx = 0

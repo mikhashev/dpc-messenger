@@ -46,6 +46,7 @@ from .token_cache import TokenCache
 from .connection_status import ConnectionStatus, OperationMode
 from .consensus_manager import ConsensusManager
 from .conversation_monitor import ConversationMonitor, Message as ConvMessage
+from .conversation_monitor import digest_for as conversation_monitor_digest_for
 from . import conversation_paths
 from .stun_discovery import discover_external_ip
 from .inference_orchestrator import InferenceOrchestrator
@@ -1459,19 +1460,27 @@ class CoreService:
                 if monitor and hasattr(monitor, "compute_history_hash"):
                     local_hash = monitor.compute_history_hash()
                     local_count = len(monitor.message_history)
+                    local_digest = monitor.history_digest()
                 else:
-                    local_count, local_hash = ConversationMonitor.peek_group_history_stats(group.group_id)
+                    # Monitors are created lazily, so on connect the usual case
+                    # is that this group has none — and the digest used to be
+                    # omitted exactly then, dropping both sides onto the
+                    # chain-tip comparison that never matches between two
+                    # honest nodes. Reading the file costs one open.
+                    disk_messages = ConversationMonitor.peek_group_messages(group.group_id)
+                    local_count = len(disk_messages)
+                    local_hash = ConversationMonitor.history_hash_for(disk_messages)
+                    local_digest = conversation_monitor_digest_for(disk_messages)
 
                 status_payload = {
                     "group_id": group.group_id,
                     "history_hash": local_hash,
                     "message_count": local_count,
+                    # The order-independent comparison. history_hash stays for
+                    # peers that predate it, and is the reason two honest nodes
+                    # reported divergence on every connection.
+                    "history_digest": local_digest,
                 }
-                # The order-independent comparison. history_hash stays for
-                # peers that predate it, and is the reason two honest nodes
-                # reported divergence on every connection.
-                if monitor and hasattr(monitor, "history_digest"):
-                    status_payload["history_digest"] = monitor.history_digest()
 
                 try:
                     await self.p2p_manager.send_message_to_peer(peer_id, {

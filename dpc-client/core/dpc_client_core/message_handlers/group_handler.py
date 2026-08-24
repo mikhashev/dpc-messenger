@@ -6,7 +6,12 @@ from typing import Dict, Any, Optional
 from datetime import datetime, timezone
 from . import MessageHandler
 from dpc_protocol.message_signing import PREIMAGE_VERSION, message_content_hash
-from ..conversation_monitor import Message as ConvMessage, ConversationMonitor
+from ..conversation_monitor import (
+    Message as ConvMessage,
+    ConversationMonitor,
+    authors_that_differ_between,
+    digest_for,
+)
 
 
 class GroupCreateHandler(MessageHandler):
@@ -742,14 +747,21 @@ class GroupHistoryStatusHandler(MessageHandler):
         # Get local monitor
         monitor = self.service.conversation_monitors.get(group_id)
 
-        # Compute local hash (peek disk when the monitor is not loaded this session)
+        # Compute local hash and digest (peek disk when the monitor is not
+        # loaded this session — which, monitors being lazy, is the usual case).
+        # The digest used to be None whenever there was no monitor, and both
+        # sides then fell back to comparing chain tips: a comparison that never
+        # matches between two honest nodes, so every connection either reported
+        # divergence or shipped the whole history.
         if monitor and hasattr(monitor, "compute_history_hash"):
             local_hash = monitor.compute_history_hash()
             local_count = len(monitor.message_history)
+            local_digest = monitor.history_digest()
         else:
-            local_count, local_hash = ConversationMonitor.peek_group_history_stats(group_id)
-
-        local_digest = monitor.history_digest() if monitor and hasattr(monitor, "history_digest") else None
+            disk_messages = ConversationMonitor.peek_group_messages(group_id)
+            local_count = len(disk_messages)
+            local_hash = ConversationMonitor.history_hash_for(disk_messages)
+            local_digest = digest_for(disk_messages)
 
         # Reply only to the initiating STATUS (not to replies), to prevent infinite ping-pong.
         # A sends STATUS → B replies once with is_reply=True → A does NOT reply again.
@@ -773,7 +785,7 @@ class GroupHistoryStatusHandler(MessageHandler):
             # of a chain covering msg_index, prev_hash and role — the first two
             # follow arrival order and the third is per reader, so between two
             # honest nodes it never matched and the alarm never stopped.
-            differing = monitor.authors_that_differ(remote_digest)
+            differing = authors_that_differ_between(local_digest, remote_digest)
             if not differing:
                 self.logger.debug("Group %s: histories agree (%d messages)", group_id, local_count)
                 return None

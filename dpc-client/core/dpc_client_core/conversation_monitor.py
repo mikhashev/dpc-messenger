@@ -46,6 +46,59 @@ def rechain(messages: List[Dict[str, Any]]) -> None:
         prev_hash = m["chain_hash"]
 
 
+def digest_for(messages: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Per-author counts and digests over a message list.
+
+    A free function so a node can advertise what it holds without loading the
+    conversation into memory first: monitors are created lazily, so on connect
+    the common case is that no monitor exists yet, and a node that cannot
+    produce a digest falls back to comparing chain tips — a comparison that
+    never matches between two honest nodes, because the tip covers arrival
+    order and the per-reader `role`.
+    """
+    by_author: Dict[str, List[str]] = {}
+    for msg in messages:
+        author = msg.get("sender_node_id") or ""
+        key = msg.get("content_hash") or f"id:{msg.get('id', '')}"
+        by_author.setdefault(author, []).append(key)
+
+    authors = {}
+    for author, keys in by_author.items():
+        joined = "|".join(sorted(keys))
+        authors[author] = {
+            "count": len(keys),
+            "digest": "sha256:" + hashlib.sha256(joined.encode("utf-8")).hexdigest()[:16],
+        }
+
+    if not authors:
+        return {"authors": {}, "digest": "sha256:empty"}
+
+    overall = "|".join(
+        f"{author}:{authors[author]['count']}:{authors[author]['digest']}"
+        for author in sorted(authors)
+    )
+    return {
+        "authors": authors,
+        "digest": "sha256:" + hashlib.sha256(overall.encode("utf-8")).hexdigest()[:16],
+    }
+
+
+def authors_that_differ_between(
+    local_digest: Dict[str, Any], remote_digest: Dict[str, Any]
+) -> List[str]:
+    """Which authors two digests disagree about; empty means agreement.
+
+    Free-standing for the same reason as `digest_for`: the comparison must be
+    available on a node that has not loaded the conversation.
+    """
+    mine = (local_digest or {}).get("authors", {})
+    theirs = (remote_digest or {}).get("authors", {})
+    return sorted(
+        author for author in set(mine) | set(theirs)
+        if mine.get(author) != theirs.get(author)
+    )
+
+
 def _chronological_key(indexed_message):
     """Sort by timestamp, keeping unparseable ones last in their original order."""
     i, m = indexed_message
@@ -290,6 +343,8 @@ class ConversationMonitor:
         self._history_dirty: bool = False  # Track unsaved changes
         self._signer = None  # Lazy-loaded CommitSigner for message signing
         self._chain_rebuilt = False  # One-time local repair of a pre-local chain
+        # What the last folder consolidation did, for the caller to announce.
+        self.last_consolidation: Dict[str, Any] = {"merged": 0}
         self.peer_context_hashes: Dict[str, str] = {}  # {node_id: context_hash} for peer cache invalidation
 
         # Phase 7: Peer context caching (to avoid re-fetching unchanged contexts)
@@ -2462,11 +2517,18 @@ PARTICIPANTS' CULTURAL CONTEXTS:
         """
         base = Path.home() / ".dpc" / "conversations"
         try:
-            return consolidate_conversation_stores(base, self.conversation_id, self.display_name)
+            summary = consolidate_conversation_stores(
+                base, self.conversation_id, self.display_name
+            )
         except Exception as exc:
             # Never let a repair stop a conversation from loading.
             logger.error("Could not consolidate folders for %s: %s", self.conversation_id, exc)
-            return {"merged": 0, "error": str(exc)}
+            summary = {"merged": 0, "error": str(exc)}
+        # Kept so the caller can tell peers what changed here. Without an
+        # announcement a repaired node waits for the next reconnect before
+        # anyone learns it stopped being half a conversation.
+        self.last_consolidation = summary
+        return summary
 
     def _get_history_path(self) -> Path:
         """Get path to history file for this conversation
@@ -2610,40 +2672,11 @@ PARTICIPANTS' CULTURAL CONTEXTS:
         Records written before `content_hash` existed fall back to their id, so
         a legacy history is compared as best it can be rather than dropped.
         """
-        by_author: Dict[str, List[str]] = {}
-        for msg in self.message_history:
-            author = msg.get("sender_node_id") or ""
-            key = msg.get("content_hash") or f"id:{msg.get('id', '')}"
-            by_author.setdefault(author, []).append(key)
-
-        authors = {}
-        for author, keys in by_author.items():
-            joined = "|".join(sorted(keys))
-            authors[author] = {
-                "count": len(keys),
-                "digest": "sha256:" + hashlib.sha256(joined.encode("utf-8")).hexdigest()[:16],
-            }
-
-        if not authors:
-            return {"authors": {}, "digest": "sha256:empty"}
-
-        overall = "|".join(
-            f"{author}:{authors[author]['count']}:{authors[author]['digest']}"
-            for author in sorted(authors)
-        )
-        return {
-            "authors": authors,
-            "digest": "sha256:" + hashlib.sha256(overall.encode("utf-8")).hexdigest()[:16],
-        }
+        return digest_for(self.message_history)
 
     def authors_that_differ(self, remote_digest: Dict[str, Any]) -> List[str]:
         """Which authors the two sides disagree about; empty means agreement."""
-        mine = self.history_digest().get("authors", {})
-        theirs = (remote_digest or {}).get("authors", {})
-        return sorted(
-            author for author in set(mine) | set(theirs)
-            if mine.get(author) != theirs.get(author)
-        )
+        return authors_that_differ_between(self.history_digest(), remote_digest)
 
     def compute_history_hash(self) -> str:
         """Compute SHA256 hash of current message history.
@@ -2659,27 +2692,34 @@ PARTICIPANTS' CULTURAL CONTEXTS:
 
         Used by the on-connect GROUP_HISTORY_STATUS exchange so a node advertises
         its real history even when the group's monitor has not been loaded into
-        memory yet (chat not opened this session). Read-only: resolves the slugged
+        memory yet (chat not opened this session). Read-only: resolves the
         conversation dir without migrating or mutating state.
+
+        This was a fourth resolver with a fourth preference — the bare folder
+        first, then any prefixed one with a history in it — so while a group was
+        split it advertised whichever half it happened to land on rather than
+        the half the monitor was writing. It goes through `conversation_paths`
+        like everything else now.
         """
-        base = Path.home() / ".dpc" / "conversations"
-        target = base / conversation_id
-        if not (target / "history.json").exists() and base.exists():
-            prefix = conversation_id + "-"
-            for d in base.iterdir():
-                if d.is_dir() and d.name.startswith(prefix) and (d / "history.json").exists():
-                    target = d
-                    break
-        path = target / "history.json"
-        if not path.exists():
+        messages = ConversationMonitor.peek_group_messages(conversation_id)
+        if not messages:
             return (0, "sha256:empty")
+        return (len(messages), ConversationMonitor.history_hash_for(messages))
+
+    @staticmethod
+    def peek_group_messages(conversation_id: str) -> List[Dict[str, Any]]:
+        """A group's stored messages, straight from disk, without a monitor."""
+        base = Path.home() / ".dpc" / "conversations"
+        path = conversation_paths.resolve_store_dir(base, conversation_id) / "history.json"
+        if not path.exists():
+            return []
         try:
             with open(path, encoding="utf-8") as f:
                 data = json.load(f)
-            messages = data.get("messages", []) if isinstance(data, dict) else []
-            return (len(messages), ConversationMonitor.history_hash_for(messages))
         except (json.JSONDecodeError, OSError):
-            return (0, "sha256:empty")
+            return []
+        messages = data.get("messages", []) if isinstance(data, dict) else []
+        return messages if isinstance(messages, list) else []
 
     def save_history(self) -> bool:
         """Persist message history to disk
