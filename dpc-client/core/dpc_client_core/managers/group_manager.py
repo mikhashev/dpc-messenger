@@ -16,6 +16,8 @@ from typing import Optional, List, Dict, Any
 from datetime import datetime, timezone
 from dataclasses import dataclass, asdict, field
 
+from dpc_client_core import conversation_paths
+
 logger = logging.getLogger(__name__)
 
 
@@ -100,13 +102,12 @@ class GroupManager:
 
     @staticmethod
     def _slugify(name: str) -> str:
-        """Convert a display name to a filesystem-safe slug (matches conversation_monitor)."""
-        import re
-        slug = name.lower()
-        slug = re.sub(r'[^a-z0-9\s-]', '', slug)
-        slug = re.sub(r'\s+', '-', slug)
-        slug = re.sub(r'-+', '-', slug).strip('-')
-        return slug[:20]
+        """Convert a display name to a filesystem-safe slug.
+
+        Delegates to `conversation_paths`, which is now the only definition —
+        this used to be a second copy kept in step by a comment.
+        """
+        return conversation_paths.slugify(name)
 
     def _get_conversation_dir(self, group_id: str) -> Path:
         """Get the conversation folder path for a group.
@@ -119,13 +120,18 @@ class GroupManager:
 
         Returns:
             Path to ~/.dpc/conversations/{group_id}-{slug}/ or ~/.dpc/conversations/{group_id}/
+
+        The name only decides where a *new* store goes. An existing one wins,
+        whatever it is called — this method used to return the slugged path the
+        moment a name appeared, and `_save_group` then created that folder,
+        which is precisely how one group ended up with its history in a folder
+        nothing wrote to again.
         """
         group = self._groups.get(group_id)
-        if group and group.name:
-            slug = self._slugify(group.name)
-            if slug:
-                return self.conversations_dir / f"{group_id}-{slug}"
-        return self.conversations_dir / group_id
+        display_name = group.name if group else None
+        return conversation_paths.resolve_store_dir(
+            self.conversations_dir, group_id, display_name
+        )
 
     def _get_group_metadata_path(self, group_id: str) -> Path:
         """Get path to group metadata file.

@@ -46,6 +46,7 @@ from .token_cache import TokenCache
 from .connection_status import ConnectionStatus, OperationMode
 from .consensus_manager import ConsensusManager
 from .conversation_monitor import ConversationMonitor, Message as ConvMessage
+from . import conversation_paths
 from .stun_discovery import discover_external_ip
 from .inference_orchestrator import InferenceOrchestrator
 from .context_coordinator import ContextCoordinator
@@ -8322,15 +8323,15 @@ class CoreService:
 
     @staticmethod
     def _find_group_dir(group_id: str) -> Optional[Path]:
-        """Find group conversation directory by ID. Tries exact match first, then prefix."""
+        """Find a group's conversation directory by id, or None if it has none.
+
+        Preferring the bare id here while `GroupManager` preferred the slugged
+        one is how two code paths came to read two different histories of the
+        same group. Both now go through `conversation_paths`.
+        """
         conversations_dir = Path.home() / ".dpc" / "conversations"
-        exact = conversations_dir / group_id
-        if exact.is_dir():
-            return exact
-        for d in conversations_dir.iterdir():
-            if d.is_dir() and d.name.startswith(group_id + "-"):
-                return d
-        return None
+        dirs = conversation_paths.existing_store_dirs(conversations_dir, group_id)
+        return conversation_paths.canonical_store_dir(dirs)
 
     @staticmethod
     def _local_group_agents(metadata: Dict[str, Any], local_node_id: str) -> list:

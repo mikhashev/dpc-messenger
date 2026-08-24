@@ -18,6 +18,175 @@ from datetime import datetime, timezone
 from dpc_protocol.pcm_core import PersonalContext, KnowledgeEntry, KnowledgeSource
 
 from . import knowledge_routing
+from . import conversation_paths
+
+
+def chain_hash_for(message: Dict[str, Any], prev_hash: str) -> str:
+    """The local chain hash of a message, given its predecessor's.
+
+    One definition. The same expression was written out at three call sites —
+    the add path, the loader's verification and the loader's one-time rebuild —
+    and a chain formula that exists in several copies is a formula that will
+    eventually disagree with itself.
+    """
+    chain_input = (
+        f"{message.get('msg_index', '')}|{message.get('id', '')}|{message.get('role', '')}"
+        f"|{message.get('sender_name', '') or ''}|{message.get('content', '') or ''}"
+        f"|{message.get('timestamp', '') or ''}|{prev_hash}"
+    )
+    return hashlib.sha256(chain_input.encode("utf-8")).hexdigest()
+
+
+def rechain(messages: List[Dict[str, Any]]) -> None:
+    """Renumber and re-hash a whole history in place, from genesis."""
+    prev_hash = "genesis"
+    for i, m in enumerate(messages):
+        m["msg_index"] = i + 1
+        m["chain_hash"] = chain_hash_for(m, prev_hash)
+        prev_hash = m["chain_hash"]
+
+
+def _chronological_key(indexed_message):
+    """Sort by timestamp, keeping unparseable ones last in their original order."""
+    i, m = indexed_message
+    ts = m.get("timestamp")
+    if isinstance(ts, str) and ts:
+        try:
+            parsed = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=timezone.utc)
+            return (0, parsed, i)
+        except ValueError:
+            pass
+    return (1, None, i)
+
+
+def _read_messages(history_path: Path) -> List[Dict[str, Any]]:
+    try:
+        with open(history_path, encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, json.JSONDecodeError) as exc:
+        logger.warning("Could not read %s: %s", history_path, exc)
+        return []
+    messages = data.get("messages")
+    return messages if isinstance(messages, list) else []
+
+
+def _identity(message: Dict[str, Any]):
+    """What makes two stored messages the same message.
+
+    `id` is the real key — `export_history` carries it precisely so that
+    `merge_history` can deduplicate, and it was present and distinct on every
+    message of both halves of the split that prompted this. The fallback triple
+    only covers records written before ids existed; it can merge two genuinely
+    identical messages sent in the same second, which is the safer of the two
+    mistakes available here.
+    """
+    msg_id = message.get("id")
+    if msg_id:
+        return ("id", msg_id)
+    return (
+        "triple",
+        message.get("timestamp"),
+        message.get("sender_name"),
+        message.get("content"),
+    )
+
+
+def consolidate_conversation_stores(
+    base: Path, conversation_id: str, display_name: Optional[str] = None
+) -> Dict[str, Any]:
+    """Fold every stray folder of one conversation into a single store.
+
+    A conversation whose folder name changed used to leave its old history
+    behind, readable by half the code and written by none of it. The resolver
+    in `conversation_paths` stops new splits; this repairs the ones on disk.
+
+    Nothing is deleted. Messages are unioned by id, ordered by timestamp and
+    re-chained locally, payload files are moved only where the canonical store
+    has no file of that name, and the emptied folder is renamed rather than
+    removed — it held the only copy of 66 messages for thirteen days once.
+
+    Returns a summary; `{"merged": 0}` when there was nothing to do.
+    """
+    summary = {"merged": 0, "orphans": [], "messages_added": 0, "files_moved": 0}
+    canonical, orphans = conversation_paths.split_stores(base, conversation_id, display_name)
+    if canonical is None or not orphans:
+        return summary
+
+    canonical_history = canonical / "history.json"
+    messages = _read_messages(canonical_history)
+    seen = {_identity(m) for m in messages}
+    added = 0
+    files_moved = 0
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%d")
+
+    for orphan in orphans:
+        for m in _read_messages(orphan / "history.json"):
+            key = _identity(m)
+            if key in seen:
+                continue
+            seen.add(key)
+            messages.append(m)
+            added += 1
+        files_moved += conversation_paths.adopt_payload(
+            orphan, canonical, skip=("history.json", ".chain_meta.json")
+        )
+        summary["orphans"].append(orphan.name)
+
+    if added:
+        messages = [m for _, m in sorted(
+            list(enumerate(messages)), key=_chronological_key
+        )]
+        rechain(messages)
+        _write_history_messages(canonical_history, conversation_id, messages)
+
+    for orphan in orphans:
+        conversation_paths.retire_orphan(orphan, stamp)
+
+    summary["merged"] = len(orphans)
+    summary["messages_added"] = added
+    summary["files_moved"] = files_moved
+    logger.warning(
+        "Consolidated %d stray folder(s) of %s into %s: %d message(s) recovered, "
+        "%d file(s) moved; the emptied folder(s) were renamed, not deleted",
+        len(orphans), conversation_id, canonical.name, added, files_moved,
+    )
+    return summary
+
+
+def _write_history_messages(
+    path: Path, conversation_id: str, messages: List[Dict[str, Any]]
+) -> None:
+    """Rewrite a history file's message list, keeping the rest of its envelope."""
+    data = {}
+    if path.exists():
+        try:
+            with open(path, encoding="utf-8") as f:
+                loaded = json.load(f)
+            if isinstance(loaded, dict):
+                data = loaded
+        except (OSError, json.JSONDecodeError):
+            data = {}
+    data.setdefault("conversation_id", conversation_id)
+    data.setdefault("version", 1)
+    data["messages"] = messages
+    data["message_count"] = len(messages)
+    data["last_updated"] = datetime.now(timezone.utc).isoformat()
+    # Recomputed by the monitor on its next save; a stale digest here would
+    # claim a history that no longer exists.
+    data.pop("history_hash", None)
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2, ensure_ascii=False)
+
+    last_hash = messages[-1].get("chain_hash", "") if messages else ""
+    try:
+        with open(path.parent / ".chain_meta.json", "w", encoding="utf-8") as f:
+            json.dump({"msg_count": len(messages), "last_chain_hash": last_hash}, f)
+    except OSError as exc:
+        logger.warning("Could not update the chain anchor beside %s: %s", path, exc)
 from dpc_protocol.knowledge_commit import KnowledgeCommitProposal
 from dpc_protocol.message_signing import PREIMAGE_VERSION, message_content_hash
 
@@ -1575,8 +1744,7 @@ PARTICIPANTS' CULTURAL CONTEXTS:
         message_dict["msg_index"] = msg_index
 
         prev_hash = self.message_history[-1].get("chain_hash", "genesis") if self.message_history else "genesis"
-        chain_input = f"{msg_index}|{message_id}|{role}|{sender_name or ''}|{content}|{timestamp or ''}|{prev_hash}"
-        message_dict["chain_hash"] = hashlib.sha256(chain_input.encode("utf-8")).hexdigest()
+        message_dict["chain_hash"] = chain_hash_for(message_dict, prev_hash)
 
         if signature_fields:
             # The author already signed this; keep what was verified. Minting
@@ -2240,53 +2408,65 @@ PARTICIPANTS' CULTURAL CONTEXTS:
 
     @staticmethod
     def _slugify(name: str) -> str:
-        """Convert a display name to a filesystem-safe slug."""
-        import re
-        slug = name.lower()
-        slug = re.sub(r'[^a-z0-9\s-]', '', slug)
-        slug = re.sub(r'\s+', '-', slug)
-        slug = re.sub(r'-+', '-', slug).strip('-')
-        return slug[:20]
+        """Convert a display name to a filesystem-safe slug.
+
+        Delegates to `conversation_paths`, the single definition.
+        """
+        return conversation_paths.slugify(name)
 
     def _get_folder_name(self) -> str:
-        """Return the folder name for this conversation, with display_name suffix if set."""
-        if self.display_name:
-            slug = self._slugify(self.display_name)
-            if slug:
-                return f"{self.conversation_id}-{slug}"
-        return self.conversation_id
+        """The folder name a *new* store for this conversation would be given.
+
+        Not the folder in use: that is `_get_conversation_dir`, which prefers
+        whatever already exists.
+        """
+        return conversation_paths.preferred_folder_name(
+            self.conversation_id, self.display_name
+        )
 
     def _get_conversation_dir(self) -> Path:
         """Get the conversation folder path.
 
+        An existing store wins over the preferred name, so a display name that
+        arrives late — or changes — never moves a live conversation. The
+        migration this used to perform (rename the bare folder once a name
+        appeared) was gated on the target not existing, and `GroupManager`
+        creates that target when it saves `metadata.json`; whichever ran first
+        decided where the history went. Now neither can move it.
+
         Returns:
-            Path to ~/.dpc/conversations/{conversation_id}-{slug}/
-            Falls back to ~/.dpc/conversations/{conversation_id}/ if no display_name.
-            Auto-migrates old unnamed folder to new named folder on first access.
-            For groups: discovers existing slugged directory even if display_name wasn't
-            set at monitor creation time (fixes duplicate directory bug).
+            Path to ~/.dpc/conversations/{conversation_id}-{slug}/ or
+            ~/.dpc/conversations/{conversation_id}/ — created by the caller.
         """
         base = Path.home() / ".dpc" / "conversations"
-        folder = self._get_folder_name()
-        new_dir = base / folder
-        old_dir = base / self.conversation_id
-        # If no display_name for a group, check if a slugged dir already exists on disk
-        if folder == self.conversation_id and self.conversation_id.startswith("group-") and base.exists():
-            prefix = self.conversation_id + "-"
-            for d in base.iterdir():
-                if d.is_dir() and d.name.startswith(prefix):
-                    self.display_name = d.name[len(prefix):]
-                    logger.info("Discovered slugged dir for %s: %s", self.conversation_id, d.name)
-                    new_dir = d
-                    break
-        if folder != self.conversation_id and old_dir.exists() and not new_dir.exists():
-            try:
-                old_dir.rename(new_dir)
-                logger.info("Renamed conversation folder: %s → %s", old_dir.name, new_dir.name)
-            except Exception as e:
-                logger.warning("Could not rename conversation folder %s: %s", old_dir.name, e)
-                return old_dir
-        return new_dir
+        chosen = conversation_paths.resolve_store_dir(
+            base, self.conversation_id, self.display_name
+        )
+        # Adopting the on-disk name keeps `_get_folder_name` and the store in
+        # agreement for the rest of this monitor's life.
+        prefix = self.conversation_id + "-"
+        if not self.display_name and chosen.name.startswith(prefix):
+            self.display_name = chosen.name[len(prefix):]
+            logger.info(
+                "Discovered existing folder for %s: %s", self.conversation_id, chosen.name
+            )
+        return chosen
+
+    def consolidate_split_stores(self) -> Dict[str, Any]:
+        """Fold any stray folder of this conversation into its store.
+
+        Idempotent and cheap when there is nothing to do: one directory
+        listing. Runs before every load rather than once at startup, because a
+        split can also be created by a peer's node on a version that still has
+        the old resolver.
+        """
+        base = Path.home() / ".dpc" / "conversations"
+        try:
+            return consolidate_conversation_stores(base, self.conversation_id, self.display_name)
+        except Exception as exc:
+            # Never let a repair stop a conversation from loading.
+            logger.error("Could not consolidate folders for %s: %s", self.conversation_id, exc)
+            return {"merged": 0, "error": str(exc)}
 
     def _get_history_path(self) -> Path:
         """Get path to history file for this conversation
@@ -2565,6 +2745,12 @@ PARTICIPANTS' CULTURAL CONTEXTS:
         Returns:
             True if loaded successfully, False if file doesn't exist or on error
         """
+        # Before reading: if this conversation was left split across two
+        # folders by the old name-dependent path, fold them into one now, so
+        # what is read below is the whole history rather than the half that
+        # happened to be in the folder the current name points at.
+        self.consolidate_split_stores()
+
         path = self._get_history_path()
 
         # Check for legacy path (migration support)
@@ -2598,12 +2784,11 @@ PARTICIPANTS' CULTURAL CONTEXTS:
             for i, m in enumerate(messages):
                 if "msg_index" not in m:
                     m["msg_index"] = i + 1  # 1-based backfill
-                expected_input = (
-                    f"{m['msg_index']}|{m.get('id', '')}|{m.get('role', '')}"
-                    f"|{m.get('sender_name', '')}|{m.get('content', '')}"
-                    f"|{m.get('timestamp', '')}|{prev_hash}"
-                )
-                expected_hash = hashlib.sha256(expected_input.encode("utf-8")).hexdigest()
+                # Through the shared formula: this site used to render a stored
+                # `None` as the string "None" while the add path rendered it as
+                # "", so any message holding an explicit null in one of the
+                # covered fields verified as broken on every load, for ever.
+                expected_hash = chain_hash_for(m, prev_hash)
                 stored_hash = m.get("chain_hash")
                 if stored_hash and stored_hash != expected_hash:
                     logger.warning("Chain broken at message #%d (conversation %s)", m["msg_index"], self.conversation_id)
@@ -2641,16 +2826,7 @@ PARTICIPANTS' CULTURAL CONTEXTS:
                     "this also clears any earlier local tampering from view",
                     len(messages), self.conversation_id,
                 )
-                prev_hash = "genesis"
-                for i, m in enumerate(messages):
-                    m["msg_index"] = i + 1
-                    chain_input = (
-                        f"{m['msg_index']}|{m.get('id', '')}|{m.get('role', '')}"
-                        f"|{m.get('sender_name', '')}|{m.get('content', '')}"
-                        f"|{m.get('timestamp', '')}|{prev_hash}"
-                    )
-                    m["chain_hash"] = hashlib.sha256(chain_input.encode("utf-8")).hexdigest()
-                    prev_hash = m["chain_hash"]
+                rechain(messages)
                 self._chain_rebuilt = True
                 chain_ok = True
                 self._history_dirty = True
@@ -2770,12 +2946,7 @@ PARTICIPANTS' CULTURAL CONTEXTS:
         chained["msg_index"] = prev_index + 1 if self.message_history else 1
 
         prev_hash = self.message_history[-1].get("chain_hash", "genesis") if self.message_history else "genesis"
-        chain_input = (
-            f"{chained['msg_index']}|{chained.get('id', '')}|{chained.get('role', '')}"
-            f"|{chained.get('sender_name', '')}|{chained.get('content', '')}"
-            f"|{chained.get('timestamp', '')}|{prev_hash}"
-        )
-        chained["chain_hash"] = hashlib.sha256(chain_input.encode("utf-8")).hexdigest()
+        chained["chain_hash"] = chain_hash_for(chained, prev_hash)
         return chained
 
     def add_message_with_id(self, message: Dict[str, Any]) -> bool:
