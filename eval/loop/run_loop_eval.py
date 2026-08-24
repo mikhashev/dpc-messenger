@@ -35,6 +35,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 HERE = Path(__file__).resolve().parent
+sys.path.insert(0, str(HERE))
 PROVIDERS = HERE / "providers.eval.json"
 DEFAULT_ROUNDS = 8
 
@@ -131,6 +132,16 @@ def check(task: Dict[str, Any], answer: str) -> Dict[str, Any]:
             ok = False
             reasons.append(f"said {needle!r}")
 
+    want_order = task.get("expect_ordered")
+    if want_order:
+        positions = [lowered.find(name.lower()) for name in want_order]
+        if any(pos < 0 for pos in positions):
+            ok = False
+            reasons.append("not all names given")
+        elif positions != sorted(positions):
+            ok = False
+            reasons.append("wrong order")
+
     want_file = task.get("expect_file")
     if want_file:
         p = Path(want_file["path"])
@@ -142,6 +153,15 @@ def check(task: Dict[str, Any], answer: str) -> Dict[str, Any]:
             if want_file["contains"].lower() not in body.lower():
                 ok = False
                 reasons.append("file content wrong")
+            # An edit is only correct if it left the rest of the file alone.
+            for keep in want_file.get("still_contains", []):
+                if keep.lower() not in body.lower():
+                    ok = False
+                    reasons.append(f"lost {keep!r}")
+            for gone in want_file.get("must_not_contain", []):
+                if gone.lower() in body.lower():
+                    ok = False
+                    reasons.append(f"still has {gone!r}")
 
     return {"passed": ok, "why": reasons}
 
@@ -180,7 +200,11 @@ async def main_async(args) -> int:
     # attached in a headless run, and the harness measures the approval gate
     # instead of the loop. Measured: 0/2 with the fixture in the temp dir.
     fixture = agent_root / "world"
-    build_fixture(fixture)
+    if args.tier == "hard":
+        from tasks_hard import build_fixture as build, tasks_for as make_tasks
+    else:
+        build, make_tasks = build_fixture, tasks_for
+    build(fixture)
 
     providers = json.loads(PROVIDERS.read_text(encoding="utf-8"))
     if args.model:
@@ -195,7 +219,7 @@ async def main_async(args) -> int:
         agent_root=agent_root,
     )
 
-    todo = tasks_for(fixture)
+    todo = make_tasks(fixture)
     if args.tasks:
         todo = todo[: args.tasks]
 
@@ -210,6 +234,7 @@ async def main_async(args) -> int:
 
     passed = sum(1 for r in results if r["passed"])
     report = {
+        "tier": args.tier,
         "model": providers["providers"][0]["model"],
         "tasks": len(results),
         "passed": passed,
@@ -236,6 +261,8 @@ async def main_async(args) -> int:
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("--tier", choices=("easy", "hard"), default="easy",
+                    help="easy is the regression floor; hard is the set that asks for more than one hop")
     ap.add_argument("--tasks", type=int, default=None, help="run only the first N tasks")
     ap.add_argument("--model", default=None, help="override the local model")
     ap.add_argument("--rounds", type=int, default=DEFAULT_ROUNDS)
