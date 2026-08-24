@@ -1,0 +1,12 @@
+{
+  "providers": [
+    {
+      "alias": "eval_local",
+      "type": "ollama",
+      "model": "qwen3.8:latest",
+      "base_url": "http://127.0.0.1:11434",
+      "context_window": 32768
+    }
+  ],
+  "default_provider": "eval_local"
+}
