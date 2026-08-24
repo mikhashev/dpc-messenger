@@ -3099,10 +3099,43 @@ PARTICIPANTS' CULTURAL CONTEXTS:
         if rejected:
             logger.warning("Rejected %d messages with invalid signatures during merge", rejected)
         if added > 0:
+            self.restore_chronological_order()
             self.save_history()
             logger.info("Merged %d new messages into conversation history", added)
 
         return added
+
+    def restore_chronological_order(self) -> bool:
+        """Put the history back in time order, re-chaining if anything moved.
+
+        A merge appends: `add_message_with_id` puts each arrival at the end and
+        chains it there. That is correct for messages that really are newer, and
+        wrong for a history handed over after a gap — the recovered older block
+        lands *after* the recent one, and the file becomes two or three
+        chronological runs concatenated in arrival order.
+
+        Measured on the live pair: this node's copy was sorted by the folder
+        consolidation, the peer's copy was not, and the peer's broke order at
+        index 31 and again at 61 — which is what a reader sees as "it stops at
+        61". Same messages, same count, different order.
+
+        Returns True when something was actually reordered.
+        """
+        if len(self.message_history) < 2:
+            return False
+        ordered = [m for _, m in sorted(
+            list(enumerate(self.message_history)), key=_chronological_key
+        )]
+        if ordered == self.message_history:
+            return False
+        self.message_history = ordered
+        rechain(self.message_history)
+        self._history_dirty = True
+        logger.info(
+            "Reordered %d message(s) of %s into time order after a merge",
+            len(ordered), self.conversation_id,
+        )
+        return True
 
     def clear_history(self, preserve: bool = True, max_sessions: int = 0) -> int:
         """Clear all message history and delete persisted file.

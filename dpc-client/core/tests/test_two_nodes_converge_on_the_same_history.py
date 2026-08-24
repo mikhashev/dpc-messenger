@@ -24,6 +24,7 @@ from dpc_client_core import conversation_paths as cp
 from dpc_client_core.conversation_monitor import (
     ConversationMonitor,
     authors_that_differ_between,
+    chain_hash_for,
     digest_for,
 )
 
@@ -388,3 +389,74 @@ async def test_the_side_that_is_behind_ends_up_with_the_messages_it_lacked(tmp_p
         .read_text(encoding="utf-8")
     )["messages"]
     assert sorted(m["id"] for m in on_disk) == ["1", "2"], "and it survived the restart"
+
+
+# --- order, not just membership ---------------------------------------------
+
+def test_a_history_handed_over_after_a_gap_ends_up_in_time_order():
+    """A merge appends, so a recovered older block used to land after the recent
+    one and the file became two chronological runs stuck together. Measured on
+    the live pair: same messages, same count, order broken at index 31 and 61."""
+    from dpc_client_core.conversation_monitor import ConversationMonitor
+
+    monitor = ConversationMonitor.__new__(ConversationMonitor)
+    monitor.conversation_id = GROUP
+    monitor.message_history = [
+        _msg("new1", ALICE, "2026-08-23T10:00:00+00:00", "recent one"),
+        _msg("new2", ALICE, "2026-08-24T10:00:00+00:00", "recent two"),
+        _msg("old1", BOB, "2026-08-04T10:00:00+00:00", "ancient one"),
+        _msg("old2", BOB, "2026-08-11T10:00:00+00:00", "ancient two"),
+    ]
+
+    moved = monitor.restore_chronological_order()
+
+    assert moved is True
+    assert [m["id"] for m in monitor.message_history] == ["old1", "old2", "new1", "new2"]
+    prev = "genesis"
+    for i, m in enumerate(monitor.message_history):
+        assert m["msg_index"] == i + 1
+        assert m["chain_hash"] == chain_hash_for(m, prev)
+        prev = m["chain_hash"]
+
+
+def test_a_history_already_in_order_is_left_alone():
+    from dpc_client_core.conversation_monitor import ConversationMonitor
+
+    monitor = ConversationMonitor.__new__(ConversationMonitor)
+    monitor.conversation_id = GROUP
+    original = [
+        _msg("a", ALICE, "2026-08-01T10:00:00+00:00", "one"),
+        _msg("b", BOB, "2026-08-02T10:00:00+00:00", "two"),
+    ]
+    monitor.message_history = list(original)
+
+    assert monitor.restore_chronological_order() is False
+    assert monitor.message_history == original, "no rechain, no rewrite, no churn"
+
+
+@pytest.mark.asyncio
+async def test_the_merge_path_itself_restores_order(tmp_path, monkeypatch):
+    """Not the helper in isolation — `merge_history` has to call it. Without
+    this the helper can be correct and never reached, which is how a guard
+    passes vacuously."""
+    from dpc_client_core.message_handlers.group_handler import GroupHistoryResponseHandler
+
+    recent = _msg("recent", ALICE, "2026-08-24T10:00:00+00:00", "what B already had")
+    ancient = _msg("ancient", BOB, "2026-08-04T10:00:00+00:00", "handed over after a gap")
+
+    home = tmp_path / "b"
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    b = _Node(BOB, home, [recent])
+    b._get_or_create_conversation_monitor(GROUP)
+
+    await GroupHistoryResponseHandler(b).handle(
+        ALICE, {"group_id": GROUP, "history": [ancient]}
+    )
+
+    stored = json.loads(
+        (cp.resolve_store_dir(home / ".dpc" / "conversations", GROUP) / "history.json")
+        .read_text(encoding="utf-8")
+    )["messages"]
+    assert [m["id"] for m in stored] == ["ancient", "recent"], (
+        "the older message arrived second and must not stay at the end"
+    )
