@@ -206,7 +206,14 @@ def _page_signals(html: str, text: str) -> Dict[str, Any]:
     return {
         "html_chars": len(html),
         "text_chars": len(text),
-        "document_closed": bool(stripped.endswith("</html>")),
+        # No HTML means the question was not asked, not that the answer is no.
+        # Measured 2026-08-24 over the 41 audit rows the line had collected:
+        # 8 carried document_closed=false and 4 of those 8 had html_chars=0 —
+        # rows where the body was never read (a clean-text content type takes
+        # that route), so the detector was reporting "cut" for a reason that
+        # has nothing to do with truncation. Half of the only signal this
+        # instrument produces was its own artefact.
+        "document_closed": bool(stripped.endswith("</html>")) if html else None,
         "script_tags": scripts,
         "app_shell_markers": markers,
         "js_capable": bool(scripts or markers),
@@ -221,6 +228,7 @@ def _completeness_header(
     shown: int,
     total: int,
     preset: str,
+    session: Optional[str] = None,
 ) -> str:
     """The line the entry was opened for: three separate statements about
     completeness, never collapsed into one "truncated" or one silence.
@@ -239,6 +247,12 @@ def _completeness_header(
         parts.append(f"fetched {sig['html_chars']} chars of HTML → {total} chars of markdown")
     else:
         parts.append(f"{total} chars")
+
+    # Which browser served this, in the arguments the caller actually passed.
+    # Deliberately not a statement about cookies: the session may carry a login
+    # this call did not ask for, and naming one would be a claim nobody checked.
+    if session:
+        parts.append(f"session: {session}")
 
     if renderer == "camoufox":
         parts.append(
@@ -284,6 +298,38 @@ def _completeness_header(
     else:
         parts.append(f"preset {preset} did not cut this: all {total} chars are here")
     return " | ".join(parts) + "]"
+
+
+def _rendered_page_answer(
+    url: str, html: str, text: str, size: str, session: str,
+) -> str:
+    """The same header for the two `browse_page` paths a real browser serves.
+
+    Until 2026-08-24 `use_auth` and `keep_open` returned a one-line
+    `Content from … (markdown, auth=…/headed, N chars)`: no transport
+    statement, no renderer statement, no preset statement — and the cut notice
+    in the TAIL, which is where `_truncate_tool_result` removes it. The
+    anonymous path had carried all four since 2026-08-23, so the three
+    detectors were absent from exactly the two paths that reach a logged-in
+    site, where "is this the page or a login wall" is the whole question.
+    Observed in agent_001's own tool calls the same day:
+    `Content from https://tomsk.hh.ru/… (markdown, headed, 407 chars)` — 407
+    characters of a wall, announced as a page.
+
+    `renderer="camoufox"` is not a guess here: both callers get their HTML
+    from a live browser, so the honest sentence is the snapshot caveat rather
+    than the static fetch's "JS NOT executed".
+    """
+    sig = _page_signals(html, text)
+    max_chars = _SIZE_PRESETS.get(size, _SIZE_PRESETS["m"])
+    total = len(text)
+    shown = min(total, max_chars) if max_chars else total
+    if max_chars and total > max_chars:
+        text = text[:max_chars]
+    header = _completeness_header(
+        url, sig, "camoufox", total, shown, total, size, session=session,
+    )
+    return f"{header}\n\n{text}"
 
 
 def _browse_sync(url: str) -> Dict[str, Any]:
@@ -2867,11 +2913,13 @@ async def browse_page(
         _web_auth_mod.audit_append(
             agent_id, use_auth, url, status=200, bytes_size=len(text)
         )
-        max_chars = _SIZE_PRESETS.get(size, _SIZE_PRESETS["m"])
-        total = len(text)
-        if max_chars and total > max_chars:
-            text = text[:max_chars] + f"\n\n... (truncated, {total} total chars, use size='l' or 'f' for more)"
-        return f"Content from {url} (markdown, auth={use_auth}, {total} chars):\n\n{text}"
+        return _rendered_page_answer(
+            url, html, text, size,
+            session=(
+                f"{'headed' if keep_open else 'headless'} browser, "
+                f"auth domain {use_auth}"
+            ),
+        )
 
     if keep_open:
         agent_id = ctx.agent_root.name if hasattr(ctx, 'agent_root') else "anonymous"
@@ -2882,11 +2930,10 @@ async def browse_page(
         except Exception as e:
             return f"⚠️ Camoufox browser failed: {e}"
         text = _html_to_markdown(html)
-        max_chars = _SIZE_PRESETS.get(size, _SIZE_PRESETS["m"])
-        total = len(text)
-        if max_chars and total > max_chars:
-            text = text[:max_chars] + f"\n\n... (truncated, {total} total chars, use size='l' or 'f' for more)"
-        return f"Content from {url} (markdown, headed, {total} chars):\n\n{text}"
+        return _rendered_page_answer(
+            url, html, text, size,
+            session="headed browser, no auth domain named",
+        )
 
     result = await asyncio.to_thread(_browse_sync, url)
 

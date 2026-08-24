@@ -447,3 +447,145 @@ class TestCollectHeaderSeparatesTwoWaysOfRunningOut:
         assert "last 4 scroll(s) added nothing" in h
         assert "raising max_scrolls changes nothing" in h
         assert "raise max_scrolls to collect more" not in h
+
+
+class TestTheOtherTwoBrowsePagePathsAnnounceTheSameThings:
+    """The header closed BROWSE-PAGE-SILENTLY-TRUNCATES on one return path of
+    three. `use_auth` (:2874) and `keep_open` (:2889) kept the pre-08-23 shape:
+    `Content from … (markdown, auth=…/headed, N chars)` — no transport
+    statement, no renderer statement, no preset statement, and the cut notice
+    in the TAIL, which is exactly where `_truncate_tool_result` eats it.
+
+    Observed 2026-08-24 in agent_001's own stored tool calls:
+      `Content from https://tomsk.hh.ru/… (markdown, headed, 407 chars)`
+    — 407 characters of a login wall, on the one path where "is this the page
+    you asked for or a wall" is the whole question.
+    """
+
+    def _ctx(self):
+        class _Root:
+            name = "agent_x"
+
+        class _Ctx:
+            agent_root = _Root()
+
+        return _Ctx()
+
+    def _headed(self, monkeypatch, html, size="s"):
+        from dpc_client_core.dpc_agent.tools import browser as b
+
+        async def _sess(agent_id, domains, headed):
+            return object()
+
+        async def _nav(session, agent_id, url, domains):
+            return session
+
+        async def _run(session, verb, *args):
+            return html
+
+        monkeypatch.setattr(b, "_get_or_create_session_async", _sess)
+        monkeypatch.setattr(b, "_navigate_with_recovery", _nav)
+        monkeypatch.setattr(b, "_run_in_session", _run)
+        return asyncio.run(b.browse_page(
+            self._ctx(), url="https://example.test/a", size=size, keep_open=True,
+        ))
+
+    def _auth(self, monkeypatch, html, size="s"):
+        from dpc_client_core import web_auth as wa
+        from dpc_client_core.dpc_agent.tools import browser as b
+
+        monkeypatch.setattr(wa, "audit_append", lambda *a, **k: None)
+        monkeypatch.setattr(
+            b, "_auth_browse_html", lambda agent_id, domain, url, headed: html,
+        )
+        return asyncio.run(b.browse_page(
+            self._ctx(), url="https://example.test/a", size=size,
+            use_auth="example.test",
+        ))
+
+    # --- the header is there at all, and it is a prefix -------------------
+
+    def test_the_headed_path_leads_with_the_header(self, monkeypatch):
+        out = self._headed(monkeypatch, _APP_SHELL)
+        assert out.startswith("[browse_page https://example.test/a |")
+
+    def test_the_auth_path_leads_with_the_header(self, monkeypatch):
+        out = self._auth(monkeypatch, _APP_SHELL)
+        assert out.startswith("[browse_page https://example.test/a |")
+
+    # --- the three statements the entry was opened for --------------------
+
+    def test_the_headed_path_states_the_transport(self, monkeypatch):
+        head = self._headed(monkeypatch, _APP_SHELL).split("\n", 1)[0]
+        assert "transport: body ends with </html>" in head
+
+    def test_the_auth_path_flags_a_body_that_was_cut(self, monkeypatch):
+        cut = _APP_SHELL[: len(_APP_SHELL) // 2]
+        head = self._auth(monkeypatch, cut).split("\n", 1)[0]
+        assert "transport: body does NOT end with </html>" in head
+
+    def test_both_paths_say_a_real_browser_rendered_the_page(self, monkeypatch):
+        # Both are a live browser, so the honest sentence is the snapshot
+        # caveat, not "JS NOT executed" — that one belongs to a static fetch.
+        for out in (self._headed(monkeypatch, _APP_SHELL),
+                    self._auth(monkeypatch, _APP_SHELL)):
+            head = out.split("\n", 1)[0]
+            assert "JS executed" in head
+            assert "visible at the moment of the snapshot" in head
+
+    def test_both_paths_state_the_preset_in_the_head(self, monkeypatch):
+        long_html = _APP_SHELL.replace("</body>", "<p>" + "y" * 9000 + "</p></body>")
+        for out in (self._headed(monkeypatch, long_html),
+                    self._auth(monkeypatch, long_html)):
+            head = out.split("\n", 1)[0]
+            assert "preset s kept " in head
+
+    # --- and the cut notice is no longer in the tail ----------------------
+
+    def test_neither_path_leaves_the_cut_notice_where_the_harness_eats_it(
+        self, monkeypatch,
+    ):
+        long_html = _APP_SHELL.replace("</body>", "<p>" + "y" * 9000 + "</p></body>")
+        for out in (self._headed(monkeypatch, long_html),
+                    self._auth(monkeypatch, long_html)):
+            assert "... (truncated," not in out
+
+    # --- and what the old line did carry is not lost ----------------------
+
+    def test_the_session_that_served_the_page_is_still_named(self, monkeypatch):
+        assert "headed browser, no auth domain named" in self._headed(monkeypatch, _APP_SHELL)
+        assert "auth domain example.test" in self._auth(monkeypatch, _APP_SHELL)
+
+
+class TestTheTransportDetectorDoesNotReportOnBytesItNeverRead:
+    """Half the only signal this instrument produced was its own artefact.
+
+    Measured 2026-08-24 over the 41 `fetch_anonymous` audit rows collected
+    since the line landed: 8 carried `document_closed=false`, and 4 of those 8
+    had `html_chars=0` — rows where no HTML body was read at all. A body that
+    was never read cannot end in `</html>`, so the detector was answering
+    "cut" to a question nobody had asked, and the count that was supposed to
+    say how often a transport is cut was 50 % noise.
+    """
+
+    def test_no_body_means_unknown_rather_than_cut(self):
+        from dpc_client_core.dpc_agent.tools.browser import _page_signals
+        assert _page_signals("", "clean text arrived another way")[
+            "document_closed"
+        ] is None
+
+    def test_a_body_that_was_read_still_answers(self):
+        from dpc_client_core.dpc_agent.tools.browser import _page_signals
+        assert _page_signals(_INERT_PAGE, "t")["document_closed"] is True
+        half = _INERT_PAGE[: len(_INERT_PAGE) // 2]
+        assert _page_signals(half, "t")["document_closed"] is False
+
+    def test_the_header_says_nothing_about_a_transport_it_cannot_see(self):
+        from dpc_client_core.dpc_agent.tools.browser import (
+            _completeness_header, _page_signals,
+        )
+        head = _completeness_header(
+            "https://example.test/a", _page_signals("", "text"),
+            "static", None, 4, 4, "m",
+        )
+        assert "transport:" not in head
