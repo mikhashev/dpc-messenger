@@ -227,6 +227,10 @@ async def run_one(agent, row: Dict[str, Any], attachment: Optional[Path]) -> Dic
         )
     except Exception as exc:
         error = f"{type(exc).__name__}: {exc}"
+    # The loop accumulates usage and `process()` returns only text, so the
+    # counters live on the agent afterwards. Absent stays absent: a task whose
+    # provider reported nothing records `null`, not a confident zero.
+    usage = dict(getattr(agent, "_last_usage", None) or {})
     return {
         "task_id": row["task_id"],
         "gold": row["Final answer"],
@@ -235,6 +239,19 @@ async def run_one(agent, row: Dict[str, Any], attachment: Optional[Path]) -> Dic
         "error": error,
         "had_attachment": bool(row.get("file_name")),
         "seconds": round(time.time() - started, 1),
+        "usage": {
+            "prompt_tokens": usage.get("prompt_tokens"),
+            "completion_tokens": usage.get("completion_tokens"),
+            "total_tokens": usage.get("total_tokens"),
+            "rounds": usage.get("rounds"),
+            "cost_usd": usage.get("cost"),
+            # Reported by providers that have a prompt cache (DeepSeek does).
+            # The local llama.cpp path does not report it today — recorded as
+            # missing rather than as zero, because a zero here would read as
+            # "the cache never hit".
+            "prompt_cache_hit_tokens": usage.get("prompt_cache_hit_tokens"),
+            "prompt_cache_miss_tokens": usage.get("prompt_cache_miss_tokens"),
+        },
     }
 
 
@@ -291,6 +308,14 @@ async def main_async(args) -> int:
     if approver is not None:
         approver.stop()
     correct = sum(1 for r in results if r["correct"])
+
+    def _sum(field):
+        vals = [r["usage"].get(field) for r in results]
+        present = [v for v in vals if isinstance(v, (int, float))]
+        # Three numbers, never two: how many tasks reported it, how many did
+        # not, and the total over those that did.
+        return {"total": sum(present), "reported_by": len(present),
+                "not_reported_by": len(vals) - len(present)}
     report = {
         "benchmark": "GAIA L1 validation",
         "model": entry.get("model"),
@@ -306,6 +331,18 @@ async def main_async(args) -> int:
             "Not comparable with any published figure unless model, quantisation, "
             "context window, step budget and memory configuration all match."
         ),
+        "tokens": {
+            "prompt": _sum("prompt_tokens"),
+            "completion": _sum("completion_tokens"),
+            "total": _sum("total_tokens"),
+            "rounds": _sum("rounds"),
+            "cost_usd": _sum("cost_usd"),
+            "prompt_cache_hit": _sum("prompt_cache_hit_tokens"),
+            "prompt_cache_miss": _sum("prompt_cache_miss_tokens"),
+            "note": ("cache hit/miss is reported by providers that expose a prompt "
+                     "cache; the local llama.cpp path does not today, so those two "
+                     "read not_reported_by=<all tasks> rather than zero"),
+        },
         "results": results,
         **({"approvals": approver.summary()} if approver is not None else {}),
         "provenance": provenance.snapshot(
@@ -331,8 +368,10 @@ async def main_async(args) -> int:
         ),
     }
     print()
+    tok = report["tokens"]["total"]
     print(f"{correct}/{len(results)} = {report['accuracy']:.1%} on {entry.get('model')} "
-          f"in {report['seconds']}s")
+          f"in {report['seconds']}s | {tok['total']} tokens over {tok['reported_by']} task(s)",
+          flush=True)
     print("NOT comparable with atomic-agent's 69.8%: different model and setup.")
 
     if args.json:
