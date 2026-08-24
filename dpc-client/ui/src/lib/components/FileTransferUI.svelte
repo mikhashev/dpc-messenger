@@ -83,6 +83,131 @@
     fileOfferToastMessage?: string;
     onDismissToast: () => void;
   } = $props();
+
+  // ── Active-transfers panel: movable and foldable ──────────────────────
+  // It is fixed to the bottom-right corner and sits on top of whatever is
+  // there, for as long as the transfer lasts — on a large file that is
+  // minutes of covering the thing being worked on. Both the position and
+  // the folded state are remembered, so it does not jump back on the next
+  // transfer.
+  const PANEL_STATE_KEY = 'dpc.activeTransfersPanel';
+  const PANEL_MARGIN = 8;   // never let it be dragged fully off-screen
+  const NUDGE_PX = 16;      // arrow-key step when the header has focus
+
+  let panelCollapsed = $state(false);
+  let panelPos = $state<{ x: number; y: number } | null>(null);  // null = default corner
+  let panelEl = $state<HTMLDivElement | null>(null);
+  let dragGrab: { dx: number; dy: number } | null = null;
+
+  const panelSummary = $derived.by(() => {
+    const items = Array.from(activeFileTransfers.values()) as any[];
+    if (!items.length) return '';
+    const withProgress = items.filter((t) => typeof t.progress === 'number');
+    if (!withProgress.length) return `${items.length}`;
+    const avg = Math.round(
+      withProgress.reduce((sum, t) => sum + t.progress, 0) / withProgress.length
+    );
+    return `${items.length} · ${avg}%`;
+  });
+
+  const panelStyle = $derived(
+    panelPos
+      ? `left:${panelPos.x}px; top:${panelPos.y}px; right:auto; bottom:auto;`
+      : ''
+  );
+
+  function clampToViewport(x: number, y: number) {
+    const w = panelEl?.offsetWidth ?? 300;
+    const h = panelEl?.offsetHeight ?? 80;
+    return {
+      x: Math.min(Math.max(x, PANEL_MARGIN), Math.max(PANEL_MARGIN, window.innerWidth - w - PANEL_MARGIN)),
+      y: Math.min(Math.max(y, PANEL_MARGIN), Math.max(PANEL_MARGIN, window.innerHeight - h - PANEL_MARGIN)),
+    };
+  }
+
+  function savePanelState() {
+    try {
+      localStorage.setItem(
+        PANEL_STATE_KEY,
+        JSON.stringify({ collapsed: panelCollapsed, pos: panelPos })
+      );
+    } catch {
+      // Private windows and blocked site data throw here; a panel that
+      // forgets where it was is better than one that fails to draw.
+    }
+  }
+
+  function loadPanelState() {
+    try {
+      const raw = localStorage.getItem(PANEL_STATE_KEY);
+      if (!raw) return;
+      const saved = JSON.parse(raw);
+      if (typeof saved?.collapsed === 'boolean') panelCollapsed = saved.collapsed;
+      if (Number.isFinite(saved?.pos?.x) && Number.isFinite(saved?.pos?.y)) {
+        panelPos = { x: saved.pos.x, y: saved.pos.y };
+      }
+    } catch {
+      // Corrupt entry — start from the default corner rather than break.
+    }
+  }
+
+  function togglePanelCollapsed() {
+    panelCollapsed = !panelCollapsed;
+    savePanelState();
+  }
+
+  function onPanelPointerDown(event: PointerEvent) {
+    // The fold button lives in the same header; a click on it is not a drag.
+    if ((event.target as HTMLElement)?.closest('button')) return;
+    if (!panelEl) return;
+    const rect = panelEl.getBoundingClientRect();
+    dragGrab = { dx: event.clientX - rect.left, dy: event.clientY - rect.top };
+    (event.currentTarget as HTMLElement).setPointerCapture(event.pointerId);
+    event.preventDefault();
+  }
+
+  function onPanelPointerMove(event: PointerEvent) {
+    if (!dragGrab) return;
+    panelPos = clampToViewport(event.clientX - dragGrab.dx, event.clientY - dragGrab.dy);
+  }
+
+  function onPanelPointerUp(event: PointerEvent) {
+    if (!dragGrab) return;
+    dragGrab = null;
+    try {
+      (event.currentTarget as HTMLElement).releasePointerCapture(event.pointerId);
+    } catch {
+      // Capture may already be gone (pointercancel) — nothing to release.
+    }
+    savePanelState();
+  }
+
+  function onPanelKeydown(event: KeyboardEvent) {
+    const step: Record<string, [number, number]> = {
+      ArrowLeft: [-NUDGE_PX, 0], ArrowRight: [NUDGE_PX, 0],
+      ArrowUp: [0, -NUDGE_PX], ArrowDown: [0, NUDGE_PX],
+    };
+    const delta = step[event.key];
+    if (delta) {
+      const rect = panelEl?.getBoundingClientRect();
+      const base = panelPos ?? { x: rect?.left ?? 0, y: rect?.top ?? 0 };
+      panelPos = clampToViewport(base.x + delta[0], base.y + delta[1]);
+      savePanelState();
+      event.preventDefault();
+    } else if (event.key === 'Enter' || event.key === ' ') {
+      togglePanelCollapsed();
+      event.preventDefault();
+    }
+  }
+
+  $effect(() => {
+    loadPanelState();
+    const onResize = () => {
+      if (panelPos) panelPos = clampToViewport(panelPos.x, panelPos.y);
+    };
+    window.addEventListener('resize', onResize);
+    return () => window.removeEventListener('resize', onResize);
+  });
 </script>
 
 <!-- Image Preview Chip -->
@@ -234,9 +359,36 @@
 
 <!-- Active File Transfers Progress -->
 {#if activeFileTransfers.size > 0}
-  <div class="active-transfers-panel">
-    <h4>Active Transfers</h4>
-    {#each Array.from(activeFileTransfers.values()) as transfer}
+  <div
+    class="active-transfers-panel"
+    class:collapsed={panelCollapsed}
+    style={panelStyle}
+    bind:this={panelEl}
+  >
+    <!-- svelte-ignore a11y_no_noninteractive_element_to_interactive_role -->
+    <div
+      class="panel-header"
+      role="toolbar"
+      tabindex="0"
+      aria-label="Active transfers — drag to move, arrow keys to nudge"
+      onpointerdown={onPanelPointerDown}
+      onpointermove={onPanelPointerMove}
+      onpointerup={onPanelPointerUp}
+      onpointercancel={onPanelPointerUp}
+      onkeydown={onPanelKeydown}
+    >
+      <h4>Active Transfers{panelCollapsed && panelSummary ? ` · ${panelSummary}` : ''}</h4>
+      <button
+        class="panel-toggle"
+        onclick={togglePanelCollapsed}
+        title={panelCollapsed ? 'Expand' : 'Collapse'}
+        aria-label={panelCollapsed ? 'Expand active transfers' : 'Collapse active transfers'}
+        aria-expanded={!panelCollapsed}
+      >
+        {panelCollapsed ? '▲' : '▼'}
+      </button>
+    </div>
+    {#each panelCollapsed ? [] : Array.from(activeFileTransfers.values()) as transfer}
       <div class="transfer-item">
         <div class="transfer-info">
           <span class="transfer-filename">{transfer.filename}</span>
@@ -431,10 +583,54 @@
     z-index: 999;
   }
 
-  .active-transfers-panel h4 {
+  .active-transfers-panel.collapsed {
+    min-width: 0;
+    padding-bottom: 12px;
+  }
+
+  .panel-header {
+    display: flex;
+    align-items: center;
+    gap: 8px;
     margin: 0 0 12px 0;
+    cursor: move;
+    /* A drag that starts on the header must not select the title text. */
+    user-select: none;
+    touch-action: none;
+  }
+
+  .panel-header:focus-visible {
+    outline: 2px solid #6ea8fe;
+    outline-offset: 2px;
+    border-radius: 4px;
+  }
+
+  .active-transfers-panel.collapsed .panel-header {
+    margin-bottom: 0;
+  }
+
+  .active-transfers-panel h4 {
+    margin: 0;
     color: #e0e0e0;
     font-size: 14px;
+    flex: 1;
+    white-space: nowrap;
+  }
+
+  .panel-toggle {
+    background: transparent;
+    border: none;
+    color: #b0b0b0;
+    font-size: 12px;
+    line-height: 1;
+    padding: 4px 6px;
+    border-radius: 4px;
+    cursor: pointer;
+  }
+
+  .panel-toggle:hover {
+    background: #3a3a3a;
+    color: #e0e0e0;
   }
 
   .transfer-item {

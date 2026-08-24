@@ -52,7 +52,7 @@ from .context_coordinator import ContextCoordinator
 from .skill_coordinator import SkillCoordinator
 from .p2p_coordinator import P2PCoordinator
 from .coordinators.connection_orchestrator import ConnectionOrchestrator, ConnectionFailedError
-from .message_router import MessageRouter
+from .message_router import BULK_COMMANDS, MessageRouter
 from .managers.hole_punch_manager import HolePunchManager
 from .managers.relay_manager import RelayManager
 from .managers.gossip_manager import GossipManager
@@ -1504,7 +1504,11 @@ class CoreService:
         Routes messages to appropriate handlers via message router.
         """
         command = message.get("command")
-        logger.debug("Received message from %s: %s", sender_node_id, command)
+        # A bulk command says the same thing here and one layer down, and at
+        # 131 211 chunks in a single transfer that is two floods rather than
+        # one. The router keeps the heartbeat; this layer stays quiet.
+        if command not in BULK_COMMANDS:
+            logger.debug("Received message from %s: %s", sender_node_id, command)
 
         # Route message to registered handler
         await self.message_router.route_message(sender_node_id, message)
