@@ -43,7 +43,11 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 # The shared harness bits live one directory up.
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+HERE = Path(__file__).resolve().parent
+sys.path.insert(0, str(HERE.parent))
+from _harness import provenance  # noqa: E402
+
+_DATASET_STATE = {}
 
 REPO = "gaia-benchmark/GAIA"
 SPLIT = "2023/validation/metadata.level1.parquet"
@@ -124,6 +128,12 @@ def load_tasks(token: str, limit: Optional[int], with_files: bool) -> List[Dict[
     import pyarrow.parquet as pq
 
     path = hf_hub_download(REPO, SPLIT, repo_type="dataset", token=token)
+    _DATASET_STATE["local_path"] = str(path)
+    # .../snapshots/<revision>/2023/validation/... — the revision is the only
+    # thing that pins which version of a gated dataset was actually read.
+    parts = Path(path).parts
+    if "snapshots" in parts:
+        _DATASET_STATE["revision"] = parts[parts.index("snapshots") + 1]
     rows = pq.read_table(path).to_pylist()
     if not with_files:
         rows = [r for r in rows if not r.get("file_name")]
@@ -298,6 +308,27 @@ async def main_async(args) -> int:
         ),
         "results": results,
         **({"approvals": approver.summary()} if approver is not None else {}),
+        "provenance": provenance.snapshot(
+            repo_root=HERE.parent.parent,
+            provider_entry=entry,
+            dataset={
+                "repo": REPO,
+                "split_file": SPLIT,
+                "revision": _DATASET_STATE.get("revision", "[unresolved]"),
+                "local_path": _DATASET_STATE.get("local_path", "[unresolved]"),
+                "tasks_selected": len(rows),
+                "attachments_included": args.with_files,
+                "limit": args.limit,
+            },
+            harness_file=Path(__file__).resolve(),
+            argv=sys.argv[1:],
+            extra={
+                "scoring": "normalised exact match; numbers as numbers, "
+                           "comma lists elementwise, strings lowercased and "
+                           "de-articled; no model judges anything",
+                "tier1_auto_approved": bool(args.auto_approve),
+            },
+        ),
     }
     print()
     print(f"{correct}/{len(results)} = {report['accuracy']:.1%} on {entry.get('model')} "
@@ -308,7 +339,8 @@ async def main_async(args) -> int:
         out = Path(args.json)
         out.parent.mkdir(parents=True, exist_ok=True)
         out.write_text(json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8")
-        print(f"full report -> {out}")
+        provenance.write_beside(out, report["provenance"])
+        print(f"full report -> {out}", flush=True)
 
     if not args.keep:
         shutil.rmtree(workdir, ignore_errors=True)
