@@ -246,3 +246,26 @@ def test_rechain_is_deterministic_and_starts_at_genesis():
 
     assert [m["chain_hash"] for m in messages] == first
     assert messages[0]["chain_hash"] == chain_hash_for(messages[0], "genesis")
+
+
+# --- deleting a group means deleting all of it ------------------------------
+
+def test_deleting_a_group_removes_every_store_it_has(tmp_path):
+    """A split group must not leave half of itself behind for the next
+    GROUP_CREATE to adopt — and a retired backup must survive the sweep,
+    because that is the whole point of retiring rather than deleting."""
+    from dpc_client_core.managers.group_manager import GroupManager, GroupMetadata
+
+    home = tmp_path
+    conversations = home / "conversations"
+    _store(conversations, GROUP, [_msg("a", "2026-08-04T11:21:51+00:00", "old")])
+    _store(conversations, f"{GROUP}-work", [_msg("c", "2026-08-23T11:50:11+00:00", "new")])
+    backup = _store(conversations, f"{GROUP}-work{cp.RETIRED_MARKER}20260801", [])
+
+    manager = GroupManager(home, "dpc-node-me")
+    manager._groups[GROUP] = GroupMetadata(group_id=GROUP, name="work")
+    manager._delete_group_file(GROUP)
+
+    assert not (conversations / GROUP).exists()
+    assert not (conversations / f"{GROUP}-work").exists()
+    assert backup.exists(), "a retired backup is not a store and is kept"

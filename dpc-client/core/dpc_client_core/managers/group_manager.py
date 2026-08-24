@@ -258,11 +258,20 @@ class GroupManager:
         This removes metadata, history, and all files received in this group.
         """
         try:
-            # Delete entire conversation folder (v0.21.0)
-            conv_dir = self._get_conversation_dir(group_id)
-            if conv_dir.exists():
+            # Every store folder, not just the canonical one: a group split
+            # across two by the old name-dependent path would otherwise leave
+            # half of itself behind, and that half would become the store again
+            # the next time the group was re-created. Folders already retired by
+            # a consolidation (`…merged-<date>`) are deliberately left: they are
+            # named as backups, not as the group, and they exist to survive
+            # exactly this kind of sweep.
+            for conv_dir in conversation_paths.existing_store_dirs(
+                self.conversations_dir, group_id
+            ):
                 shutil.rmtree(conv_dir)
-                logger.info("Deleted conversation folder for group %s", group_id)
+                logger.info(
+                    "Deleted conversation folder %s for group %s", conv_dir.name, group_id
+                )
 
             # Also clean up legacy files if they still exist (shouldn't after migration)
             legacy_file = self._get_legacy_group_path(group_id)
