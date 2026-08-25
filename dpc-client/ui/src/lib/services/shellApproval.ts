@@ -30,5 +30,24 @@ export interface ShellExecutionResult {
   rejected?: boolean;
 }
 
+/** What actually happened to a request, from `shell_approval_resolved`.
+ *
+ *  Until 2026-08-25 the backend broadcast `shell_approval_expired` for all
+ *  four cases, so the UI — and therefore `ui.log` — called every closure a
+ *  timeout. Counted that day: 35 requests, 35 «expired» lines, 30 of them
+ *  approvals. */
+export type ShellApprovalResolution =
+  | "approved"
+  | "rejected"
+  | "expired"
+  | "superseded";
+
+export interface ShellApprovalResolved {
+  request_id: string;
+  resolution: ShellApprovalResolution;
+  /** The same thing for a person to read, e.g. "✅ Approved elsewhere." */
+  outcome: string;
+}
+
 export const pendingShellApprovals = writable<ShellApprovalRequest[]>([]);
 export const shellExecutionResults = writable<ShellExecutionResult[]>([]);

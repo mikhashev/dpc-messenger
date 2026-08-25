@@ -825,8 +825,25 @@ export async function connectToCoreService() {
                     );
                     shellExecutionResults.update((list: any[]) => [...list, message.payload]);
                 }
+                // The truthful one. Its predecessor below says «expired» for
+                // every closure — approved, rejected and timed out alike — so
+                // ui.log, the only surface a person opens, was wrong about 30
+                // of 35 events on 2026-08-25, always in the direction that
+                // makes the approval gate look like a wall. Log from here.
+                else if (message.event === "shell_approval_resolved") {
+                    const { resolution, outcome, request_id } = message.payload ?? {};
+                    console.log(`Shell approval ${resolution}: ${request_id} — ${outcome ?? ""}`);
+                    const { pendingShellApprovals } = await import("$lib/services/shellApproval");
+                    pendingShellApprovals.update((list: any[]) =>
+                        list.filter((r: any) => r.request_id !== message.payload.request_id)
+                    );
+                }
+                // Kept so a backend older than shell_approval_resolved still
+                // withdraws the card. It makes no claim about the outcome, so
+                // it no longer writes one into the log — the line it used to
+                // write is what sent an hour of reading in the wrong
+                // direction. Delete once no shipped backend sends it alone.
                 else if (message.event === "shell_approval_expired") {
-                    console.log("Shell approval expired:", message.payload);
                     const { pendingShellApprovals } = await import("$lib/services/shellApproval");
                     pendingShellApprovals.update((list: any[]) =>
                         list.filter((r: any) => r.request_id !== message.payload.request_id)

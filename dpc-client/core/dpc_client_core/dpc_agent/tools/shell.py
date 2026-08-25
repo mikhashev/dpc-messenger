@@ -345,6 +345,7 @@ def _request_approval(ctx: ToolContext, command: str, reason: str, cwd: str, tim
                     request_id=request_id,
                     agent_id=agent_id,
                     outcome="⌛ Expired — the agent stopped waiting for this one.",
+                    resolution="expired",
                 ))
             except Exception as e:
                 log.warning("Failed to announce shell_approval_closed: %s", e)

@@ -303,8 +303,19 @@ async def test_the_service_offers_the_request_to_both_surfaces():
 
     await service.announce_shell_approval_closed(
         request_id="r1", agent_id="agent_007", outcome="✅ Approved elsewhere.",
+        resolution="approved",
     )
-    assert events[1][0] == "shell_approval_expired"
+    # By name, not by index. This read `events[1][0]` and reddened on
+    # 2026-08-25 when a second, truthful event — `shell_approval_resolved` —
+    # was added ahead of the withdrawal. Nothing it checks had changed: the
+    # socket still gets the withdrawal and the bridge still gets the outcome.
+    # A test that watches the order of a call reports refactoring, not
+    # behaviour — the same lesson as `test_the_child_gets_no_stdin`.
+    names = [name for name, _ in events]
+    assert "shell_approval_expired" in names
+    assert "shell_approval_resolved" in names
+    resolved = next(p for name, p in events if name == "shell_approval_resolved")
+    assert resolved["resolution"] == "approved"
     assert withdrawn[0] == ("r1", "✅ Approved elsewhere.")
 
 
