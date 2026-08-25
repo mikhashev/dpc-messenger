@@ -18,6 +18,8 @@ import os
 import platform
 import re
 import subprocess
+import threading
+import time
 import unicodedata
 from typing import List, Optional, Tuple
 
@@ -386,6 +388,77 @@ def _cap_stream(text: str, stream: str) -> str:
     )
 
 
+# A command may run for its timeout; nothing said how much memory it may take
+# while doing so. On 2026-08-25 an agent wrote `step1.py`, ran it twice, and the
+# two copies took 84.4 and 80.9 GB of committed memory — the machine reached 0.0
+# GB free and a 118.6 GB page file. Every gate we had looked at the *verb*, and
+# the verb was `python step1.py`: ordinary, correctly ungated, and ruinous.
+#
+# The ceiling is deliberately generous. A guardrail that stops a real build is
+# switched off within a week, and the failure it exists for is two orders of
+# magnitude above ordinary work, not two times.
+_MEMORY_CEILING_MB = int(os.environ.get("DPC_SHELL_MEMORY_LIMIT_MB", "8192"))
+_MEMORY_POLL_SECONDS = 2.0
+_PSUTIL_MISSING_ANNOUNCED = False
+
+
+def _tree_memory_mb(process: "subprocess.Popen") -> float:
+    """Resident memory of the command and everything it started, in MB.
+
+    The whole tree, because the runaway was a grandchild: a parent that reads
+    only its own usage watches an innocent shell while the machine fills up.
+    """
+    try:
+        import psutil
+    except ImportError:
+        # A guard that is silently absent is worse than no guard: the operator
+        # believes there is a ceiling. Say it once, then behave as if switched off.
+        global _PSUTIL_MISSING_ANNOUNCED
+        if not _PSUTIL_MISSING_ANNOUNCED:
+            _PSUTIL_MISSING_ANNOUNCED = True
+            log.warning(
+                "psutil is not installed, so run_shell has NO memory ceiling; "
+                "only the timeout limits a command"
+            )
+        return 0.0
+    try:
+        root = psutil.Process(process.pid)
+        procs = [root] + root.children(recursive=True)
+    except Exception:
+        return 0.0
+    total = 0
+    for proc in procs:
+        try:
+            total += proc.memory_info().rss
+        except Exception:
+            continue  # it exited between listing and reading; not an error
+    return total / (1024 * 1024)
+
+
+def _watch_memory(process: "subprocess.Popen", ceiling_mb: int, verdict: dict) -> None:
+    """Kill the tree if it grows past the ceiling. Runs on a daemon thread.
+
+    Polling rather than an OS limit on purpose: a Windows Job Object and a
+    POSIX RLIMIT_AS are both better instruments and neither is the same
+    instrument, so a limit expressed that way would mean two behaviours to
+    reason about and one of them untested here. A poll is the same code and the
+    same number on all three platforms; its cost is granularity, and against a
+    process that spent nine and a half hours above the line, granularity of two
+    seconds is not the weak part.
+    """
+    while process.poll() is None:
+        used = _tree_memory_mb(process)
+        if ceiling_mb and used > ceiling_mb:
+            verdict["exceeded_mb"] = round(used)
+            log.warning(
+                "run_shell: the command tree reached %d MB, over the %d MB ceiling — killing it",
+                round(used), ceiling_mb,
+            )
+            _kill_process_tree(process)
+            return
+        time.sleep(_MEMORY_POLL_SECONDS)
+
+
 def _kill_process_tree(process: "subprocess.Popen") -> str:
     """Kill the command and everything it started. Returns what happened, for the agent.
 
@@ -487,9 +560,26 @@ def _execute_shell_command(command: str, working_dir: str | None, timeout: int) 
             **popen_kwargs,
         )
 
+        memory_verdict: dict = {}
+        if _MEMORY_CEILING_MB > 0:
+            watcher = threading.Thread(
+                target=_watch_memory,
+                args=(process, _MEMORY_CEILING_MB, memory_verdict),
+                name="dpc-shell-memory-watch",
+                daemon=True,
+            )
+            watcher.start()
+
         try:
             stdout, stderr = process.communicate(timeout=timeout)
             returncode = process.returncode
+            if memory_verdict.get("exceeded_mb"):
+                return (
+                    f"Error: the command and its children reached "
+                    f"{memory_verdict['exceeded_mb']} MB, over the "
+                    f"{_MEMORY_CEILING_MB} MB ceiling, and were killed. "
+                    f"Raise DPC_SHELL_MEMORY_LIMIT_MB if this work genuinely needs more."
+                )
         except subprocess.TimeoutExpired:
             # `subprocess.run` was here, and what it does on Windows is the
             # whole defect: on TimeoutExpired it calls `process.kill()` — which
