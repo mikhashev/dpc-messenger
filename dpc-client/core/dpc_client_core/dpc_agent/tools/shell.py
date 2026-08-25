@@ -386,6 +386,68 @@ def _cap_stream(text: str, stream: str) -> str:
     )
 
 
+def _kill_process_tree(process: "subprocess.Popen") -> str:
+    """Kill the command and everything it started. Returns what happened, for the agent.
+
+    Killing the direct child is not enough and never was: the child is a shell,
+    and what the agent actually launched is the shell's child. `taskkill /T`
+    walks the Windows tree; on POSIX the process got its own session at spawn,
+    so one `killpg` reaches every descendant that did not deliberately break
+    away.
+    """
+    import signal
+
+    pid = process.pid
+    if platform.system() == "Windows":
+        try:
+            subprocess.run(
+                ["taskkill", "/PID", str(pid), "/T", "/F"],
+                capture_output=True, timeout=10, stdin=subprocess.DEVNULL,
+            )
+            return "the command and its descendants were killed"
+        except Exception as exc:
+            log.warning("taskkill on pid %s failed: %s", pid, exc)
+    else:
+        try:
+            os.killpg(os.getpgid(pid), signal.SIGKILL)
+            return "the command and its process group were killed"
+        except Exception as exc:
+            log.warning("killpg on pid %s failed: %s", pid, exc)
+
+    # Last resort: at least the direct child, so we do not leave it running
+    # while telling the agent we cleaned up.
+    try:
+        process.kill()
+        return "only the command itself could be killed; a descendant may survive"
+    except Exception:
+        return "the command could not be killed"
+
+
+_DRAIN_AFTER_KILL_SECONDS = 5
+
+
+def _drain_after_kill(process: "subprocess.Popen") -> tuple:
+    """Collect whatever output exists, and never wait on it for ever.
+
+    After a successful tree kill every handle-holder is gone and EOF arrives at
+    once. After a partial one it does not, and this is the exact place the old
+    code waited for it with no bound. A few seconds is enough to pick up what a
+    dead process already wrote; past that the output is not worth a hung agent.
+    """
+    try:
+        return process.communicate(timeout=_DRAIN_AFTER_KILL_SECONDS)
+    except subprocess.TimeoutExpired:
+        log.warning(
+            "pipes still open %ss after killing pid %s — a descendant escaped the kill; "
+            "abandoning the output rather than waiting",
+            _DRAIN_AFTER_KILL_SECONDS, process.pid,
+        )
+        return ("", "")
+    except Exception as exc:
+        log.warning("draining pid %s after kill failed: %s", process.pid, exc)
+        return ("", "")
+
+
 def _execute_shell_command(command: str, working_dir: str | None, timeout: int) -> str:
     """Run a shell command, format stdout/stderr/exit. Executor-thread only."""
     is_windows = platform.system() == "Windows"
@@ -393,15 +455,23 @@ def _execute_shell_command(command: str, working_dir: str | None, timeout: int) 
     if is_windows:
         command = f"chcp 65001 >nul && {command}"
 
+    popen_kwargs: dict = {}
+    if not is_windows:
+        # A session of its own, so the whole descendant set can be signalled
+        # with one killpg. Without it only the shell dies and its children are
+        # reparented to init, still running and still holding the pipes.
+        popen_kwargs["start_new_session"] = True
+
+    process = None
     try:
-        result = subprocess.run(
+        process = subprocess.Popen(
             command,
             shell=True,
-            capture_output=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             text=True,
             encoding="utf-8",
             errors="replace",
-            timeout=timeout,
             cwd=working_dir,
             env={**os.environ, "PYTHONIOENCODING": "utf-8"},
             # Nobody is sitting at this process. Without it the child inherits
@@ -414,22 +484,50 @@ def _execute_shell_command(command: str, working_dir: str | None, timeout: int) 
             # confirmation is "no": the command fails in a second and says so,
             # instead of hanging for minutes on a question the agent cannot see.
             stdin=subprocess.DEVNULL,
+            **popen_kwargs,
         )
 
+        try:
+            stdout, stderr = process.communicate(timeout=timeout)
+            returncode = process.returncode
+        except subprocess.TimeoutExpired:
+            # `subprocess.run` was here, and what it does on Windows is the
+            # whole defect: on TimeoutExpired it calls `process.kill()` — which
+            # is TerminateProcess on the direct child only — and then calls
+            # `communicate()` **again with no timeout** to collect the reader
+            # threads. The grandchild survives holding the inherited pipe, EOF
+            # never arrives, and that second communicate waits for ever. The
+            # tool's worker is not a daemon thread, so the interpreter then
+            # joins it at exit and the whole process never terminates. Measured
+            # 2026-08-25: nine and a half hours, 28.8 GB of VRAM held by a
+            # server the hung parent could no longer reap.
+            killed = _kill_process_tree(process)
+            stdout, stderr = _drain_after_kill(process)
+            note = (
+                f"Error: command timed out after {timeout}s"
+                f" — {killed}."
+            )
+            tail = []
+            if stdout:
+                tail.append(_cap_stream(stdout, "stdout"))
+            if stderr:
+                tail.append(f"[stderr]\n{_cap_stream(stderr, 'stderr')}")
+            return "\n".join([note, *tail])
+
         parts = []
-        if result.stdout:
-            parts.append(_cap_stream(result.stdout, "stdout"))
-        if result.stderr:
-            parts.append(f"[stderr]\n{_cap_stream(result.stderr, 'stderr')}")
-        if result.returncode != 0:
-            parts.append(f"[exit code: {result.returncode}]")
+        if stdout:
+            parts.append(_cap_stream(stdout, "stdout"))
+        if stderr:
+            parts.append(f"[stderr]\n{_cap_stream(stderr, 'stderr')}")
+        if returncode != 0:
+            parts.append(f"[exit code: {returncode}]")
 
         return "\n".join(parts) if parts else "(no output)"
 
-    except subprocess.TimeoutExpired:
-        return f"Error: command timed out after {timeout}s."
     except Exception as e:
         log.error("run_shell failed: %s", e)
+        if process is not None and process.poll() is None:
+            _kill_process_tree(process)
         return f"Error: {e}"
 
 

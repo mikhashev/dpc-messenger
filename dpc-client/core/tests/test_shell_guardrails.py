@@ -353,17 +353,27 @@ class TestNobodyIsSittingAtThisProcess:
     """
 
     def test_the_child_gets_no_stdin(self, monkeypatch):
+        """Watches `Popen`, which is what the executor calls.
+
+        It watched `subprocess.run` and went red when the executor moved to
+        `Popen` for the process-tree kill — while the property it names, a
+        child with no stdin, never changed. A double shaped like one call site
+        reports the refactor, not the behaviour; the sibling test below checks
+        the same property by observation and stayed green throughout.
+        """
         import subprocess
 
         from dpc_client_core.dpc_agent.tools import shell as shell_tool
 
         seen = {}
+        real_popen = subprocess.Popen
 
-        def _fake_run(command, **kwargs):
-            seen.update(kwargs)
-            return subprocess.CompletedProcess(command, 0, "ok", "")
+        class _WatchedPopen(real_popen):
+            def __init__(self, *args, **kwargs):
+                seen.update(kwargs)
+                super().__init__(*args, **kwargs)
 
-        monkeypatch.setattr(subprocess, "run", _fake_run)
+        monkeypatch.setattr(subprocess, "Popen", _WatchedPopen)
         shell_tool._execute_shell_command("echo hi", None, 30)
 
         assert seen.get("stdin") is subprocess.DEVNULL, (
