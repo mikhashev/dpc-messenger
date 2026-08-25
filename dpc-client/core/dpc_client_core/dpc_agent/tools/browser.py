@@ -2785,38 +2785,16 @@ async def browse_page(
         # must move to a helper there — track via grep on `agent_root.name`.
         agent_id = ctx.agent_root.name
 
-        # ADR-028 T5: per-agent + per-domain auth gate. ADR-028:179 is
-        # explicit — «use_auth is validated against web_auth.allowed_domains
-        # for the calling agent. If domain not in whitelist → tool call
-        # rejected». firewall is None in pure-unit-test contexts (no
-        # dpc_service wired) — those tests bypass the gate by design.
+        # ADR-028 T5 (:179): reject a `use_auth` domain outside the agent's
+        # web_auth.allowed_domains, before Camoufox opens. `firewall is None`
+        # is the pure-unit-test context and skips the gate by design — so a
+        # wiring mistake that leaves `dpc_service` unset skips it too.
         #
-        # This block was specified and never written. What stood here was
-        # one line, `firewall = None`, and nothing else: the firewall was
-        # never taken off dpc_service, `get_agent_web_auth_domains` was
-        # never called, and there was no denial branch — across the whole
-        # function the word «firewall» appeared exactly twice, in the
-        # comment above and in that assignment. So the whitelist decided
-        # nothing. Measured 2026-08-25 with `allowed_domains: []`, deny
-        # everything: Camoufox opened, 311 238 characters of live HTML
-        # came back, and the answer told the agent «auth domain
-        # wikipedia.org». The correct three lines were forty lines away in
-        # web_auth_tools.py — in the tool that only *lists* which domains
-        # are allowed.
-        #
-        # ADR-028:179 names two tools, «`use_auth=domain` parameter in
-        # `browse_page`/`fetch_json`». `fetch_json` has no `use_auth` today —
-        # it is anonymous and touches neither the vault nor AuthBrowser — so
-        # there is no second hole, only an ADR one word wider than the code
-        # (Johnny, 2026-08-25). If `fetch_json` ever gains `use_auth`, this
-        # gate has to be hoisted into a helper both call, not copied: a
-        # second copy of an access check is how one of them ends up a
-        # version behind, which is the defect this block exists to undo.
-        #
-        # What this gate deliberately does NOT decide: whether `use_auth`
-        # with an empty vault should refuse or browse on. The ADR is silent
-        # and the suite contradicts itself about it — see the board entry
-        # THE-EMPTY-VAULT-CASE-HAS-TWO-TESTS-ASSERTING-OPPOSITE-THINGS.
+        # ADR-028:179 names `fetch_json` as well; it has no `use_auth` today.
+        # If it gains one, hoist this into a helper both call rather than
+        # copying it — a second copy of an access check is how one ends up a
+        # version behind. The empty-vault case is deliberately not decided
+        # here; see THE-EMPTY-VAULT-CASE-HAS-TWO-TESTS-ASSERTING-OPPOSITE-THINGS.
         firewall = None
         dpc_service = getattr(ctx, "dpc_service", None)
         if dpc_service is not None:

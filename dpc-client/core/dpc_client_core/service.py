@@ -4174,28 +4174,19 @@ class CoreService:
         outcome: str,
         resolution: str = "expired",
     ) -> None:
-        """Withdraw a request from the surfaces that are still showing it,
-        and say which of the three things happened to it.
+        """Withdraw a request from the surfaces still showing it, and say
+        which of the four things happened to it.
 
-        Two surfaces can now answer the same request, so whichever one did not
-        has to stop offering a button that resolves to nothing.
+        Two surfaces can answer the same request, so whichever one did not has
+        to stop offering a button that resolves to nothing. `resolution` is the
+        machine-readable half — `approved`, `rejected`, `expired`,
+        `superseded`; this used to broadcast `shell_approval_expired` for all
+        of them, so the UI log called every closure a timeout.
 
-        `resolution` is the machine-readable half — `approved`, `rejected`,
-        `expired` or `superseded` — and it exists because this method used to
-        broadcast `shell_approval_expired` for **all** of them. The Telegram
-        bridge could tell them apart from the `outcome` string; the UI could
-        not, so `ui.log` recorded «Shell approval expired» for every closure.
-        Measured 2026-08-25 while answering exactly this question from the
-        log: 35 requests, 35 «expired» lines, and **30 of them were
-        approvals**. The only surface a person opens was wrong about 30 of 35
-        events, always in the direction that makes the gate look like a wall —
-        it took a second log, in another process, to find out otherwise.
-
-        `shell_approval_expired` is still sent, unconditionally, so that a UI
-        older than this change still withdraws the card. It carries no claim
-        beyond «stop showing this»; the truth is in `shell_approval_resolved`,
-        and the UI logs from that one. Drop the old event once no shipped UI
-        reads it.
+        That event is still sent, unconditionally, so a UI older than this
+        change still withdraws the card. It claims nothing beyond «stop
+        showing this»; the truth is in `shell_approval_resolved`, and the UI
+        logs from that one. Drop it once no shipped UI reads it.
         """
         if self.local_api:
             await self.local_api.broadcast_event("shell_approval_resolved", {
