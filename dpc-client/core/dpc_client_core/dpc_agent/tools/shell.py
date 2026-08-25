@@ -99,8 +99,17 @@ def _normalize_command(command: str) -> str:
 
 
 def _split_segments(command: str) -> list[str]:
-    """Split command by pipe/chain operators to check each segment."""
-    return re.split(r"\s*[|;&]\s*|\s*&&\s*|\s*\|\|\s*", command)
+    """Split command by pipe/chain operators to check each segment.
+
+    A **newline separates too**. It did not, so a two-line command was a
+    single segment on every platform. That happened to be safer for the
+    patterns we have — an unanchored HARDLINE still matches inside the whole
+    blob — and it is safety by accident: any pattern anchored at the start of
+    a line, and any future check that assumes a segment is one command, was
+    blind to it.
+    """
+    parts = re.split(r"\s*(?:\|\||&&|[|;&\r\n])\s*", command)
+    return [part for part in parts if part and part.strip()]
 
 
 def _is_fork_bomb(command: str) -> bool:
@@ -153,20 +162,34 @@ def _validate_command(command: str, ctx: Optional["ToolContext"] = None) -> Opti
         if pattern.search(normalized):
             return ("tier2", f"Blocked by cross-segment pattern: {pattern.pattern}")
 
-    segments = _split_segments(normalized)
+    # Tier-major, not segment-major. This loop used to walk segments and
+    # return on the first pattern of any tier that matched, so a Tier-1 hit
+    # in an early segment ended the scan before a later segment was examined
+    # for a hard block at all: `sudo ls && rm -rf /` came back as "ask the
+    # human" because `sudo` matched first, and `rm -rf /` was never seen.
+    # Every segment is now checked for a hard block before any of them is
+    # checked for a soft one.
+    segments = [segment.strip() for segment in _split_segments(normalized)]
+
     for segment in segments:
-        segment = segment.strip()
-        if not segment:
-            continue
         for pattern in HARDLINE_PATTERNS:
             if pattern.search(segment):
                 return ("tier2", f"Blocked by HARDLINE pattern: {pattern.pattern}")
+
+    # Reasons accumulate rather than stopping at the first. The reason is
+    # what a person reads in the approval dialog, and naming only the first
+    # match primes them for the wrong thing — "Requires approval: sudo" for a
+    # command whose second half was the part that mattered.
+    dangerous: list[str] = []
+    for segment in segments:
         for pattern in DANGEROUS_PATTERNS:
-            if pattern.search(segment):
-                whitelist = _get_tier1_whitelist(ctx)
-                if _is_whitelisted(command, whitelist):
-                    return None
-                return ("tier1", f"Requires approval: {pattern.pattern}")
+            if pattern.search(segment) and pattern.pattern not in dangerous:
+                dangerous.append(pattern.pattern)
+    if dangerous:
+        whitelist = _get_tier1_whitelist(ctx)
+        if _is_whitelisted(command, whitelist):
+            return None
+        return ("tier1", "Requires approval: " + "; ".join(dangerous))
 
     if ctx:
         _PATH_PATTERNS = [
