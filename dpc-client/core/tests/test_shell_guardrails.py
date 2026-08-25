@@ -273,19 +273,32 @@ class TestAllowedCommands:
 
 
 class TestPipeSplitting:
-    """Commands with dangerous segments in pipe chains."""
+    """Commands with dangerous segments in pipe chains.
+
+    These asserted `result is not None` — that *something* came back — which is
+    weaker than the property the class is named for and could not distinguish a
+    block from a question. A tier downgrade passed every one of them, and one
+    shipped: `sudo ls && rm -rf /` classified as tier1 for months while this
+    file stayed green. The assertions now name the tier.
+    """
 
     def test_pipe_with_dangerous_tail(self):
         result = _validate_command("echo hello | rm -rf /")
-        assert result is not None
+        assert result is not None and result[0] == "tier2"
 
     def test_semicolon_with_dangerous(self):
         result = _validate_command("ls; shutdown -h now")
-        assert result is not None
+        assert result is not None and result[0] == "tier2"
 
     def test_and_chain_with_dangerous(self):
         result = _validate_command("echo ok && sudo rm -rf /")
-        assert result is not None
+        assert result is not None and result[0] == "tier2"
+
+    def test_a_soft_match_first_does_not_hide_a_hard_one(self):
+        """The case the class was named for and none of its tests reached: the
+        dangerous segment is not first, and something softer precedes it."""
+        result = _validate_command("sudo ls && rm -rf /")
+        assert result is not None and result[0] == "tier2"
 
     def test_safe_pipe(self):
         assert _validate_command("cat file.txt | grep pattern") is None
