@@ -40,16 +40,27 @@ from dpc_client_core.dpc_agent.tools.shell import (
 CORE = Path(__file__).resolve().parents[1]
 
 
-def _python_process_count() -> int:
+def _is_alive(pid: int) -> bool:
+    """Is this exact process still running?
+
+    An earlier version of the descendant test counted *every* python process on
+    the machine across a two-second window. Several agents live here, so any
+    unrelated python born in that window failed the test — a false red, on a
+    busy machine, for a reason having nothing to do with the code. Johnny
+    flagged it. One pid is not a statistic and cannot drift.
+    """
     if os.name != "nt":
-        out = subprocess.run(["pgrep", "-c", "python"], capture_output=True, text=True).stdout.strip()
-        return int(out or 0)
+        try:
+            os.kill(pid, 0)
+            return True
+        except (OSError, ProcessLookupError):
+            return False
     out = subprocess.run(
         ["powershell", "-NoProfile", "-Command",
-         "(Get-Process python -ErrorAction SilentlyContinue | Measure-Object).Count"],
+         f"(Get-Process -Id {pid} -ErrorAction SilentlyContinue | Measure-Object).Count"],
         capture_output=True, text=True,
     ).stdout.strip()
-    return int(out or 0)
+    return out not in ("", "0")
 
 
 # The grandchild inherits stdout on purpose: that is the case that hung, and a
@@ -73,16 +84,33 @@ def test_a_timed_out_command_returns_at_its_timeout_not_later():
     assert "timed out" in result
 
 
-def test_the_descendants_do_not_survive_the_timeout():
-    before = _python_process_count()
+def test_the_descendants_do_not_survive_the_timeout(tmp_path):
+    """The grandchild names itself, so the assertion is about that process and
+    not about how many pythons happen to be running on the machine."""
+    pidfile = tmp_path / "grandchild.pid"
+    command = (
+        'python -c "import subprocess, sys, time; '
+        f"child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(600)']); "
+        f"open(r'{pidfile}', 'w').write(str(child.pid)); "
+        'time.sleep(600)"'
+    )
 
-    _execute_shell_command(GRANDCHILD, None, 5)
-    time.sleep(2)
+    _execute_shell_command(command, None, 5)
+    for _ in range(20):
+        if pidfile.exists():
+            break
+        time.sleep(0.2)
+    assert pidfile.exists(), "the grandchild never started; the test proves nothing"
+    grandchild_pid = int(pidfile.read_text().strip())
 
-    after = _python_process_count()
-    assert after <= before, (
-        f"{after - before} python process(es) outlived the command; "
-        "killing the shell alone leaves the grandchild running"
+    for _ in range(25):
+        if not _is_alive(grandchild_pid):
+            break
+        time.sleep(0.2)
+
+    assert not _is_alive(grandchild_pid), (
+        f"pid {grandchild_pid} outlived the command; killing the shell alone "
+        "leaves the grandchild running"
     )
 
 
