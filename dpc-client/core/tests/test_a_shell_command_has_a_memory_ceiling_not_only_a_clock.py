@@ -18,7 +18,10 @@ import time
 import pytest
 
 from dpc_client_core.dpc_agent.tools import shell as shell_tool
-from dpc_client_core.dpc_agent.tools.shell import _execute_shell_command
+from dpc_client_core.dpc_agent.tools.shell import (
+    _execute_shell_command,
+    _process_memory_mb,
+)
 
 # A grandchild that grows steadily — the shape of the incident, and the shape a
 # parent-only watcher cannot see.
@@ -98,3 +101,45 @@ def test_the_ceiling_can_be_switched_off(monkeypatch):
 
     assert "ceiling" not in result
     assert "timed out" in result, "with no ceiling only the clock stops it"
+
+
+# --- which quantity the ceiling is a ceiling on ------------------------------
+
+class _FakeInfo:
+    def __init__(self, rss, private=None):
+        self.rss = rss
+        if private is not None:
+            self.private = private
+
+
+class _FakeProc:
+    def __init__(self, info):
+        self._info = info
+
+    def memory_info(self):
+        return self._info
+
+
+def test_the_ceiling_takes_the_larger_of_resident_and_committed():
+    """Johnny's review, 2026-08-25: the incident was reported in *committed*
+    memory (84.4 GB, a 118.6 GB page-file peak) and the first version of this
+    ceiling read RSS. They are different quantities and neither dominates —
+    RSS counts shared pages the process never committed, commit counts pages
+    it reserved and never touched. A ceiling on either alone has a blind side.
+    """
+    mib = 1024 * 1024
+
+    resident_heavy = _FakeProc(_FakeInfo(rss=800 * mib, private=100 * mib))
+    committed_heavy = _FakeProc(_FakeInfo(rss=100 * mib, private=900 * mib))
+
+    assert _process_memory_mb(resident_heavy) == pytest.approx(800, abs=1)
+    assert _process_memory_mb(committed_heavy) == pytest.approx(900, abs=1), (
+        "a process that committed 900 MB and touched 100 of it is the shape "
+        "of the incident; reading RSS alone would see 100"
+    )
+
+
+def test_a_platform_without_a_commit_counter_still_measures():
+    """`private` is Windows-only. On POSIX the attribute is absent and RSS
+    stands alone — which must not read as zero."""
+    assert _process_memory_mb(_FakeProc(_FakeInfo(rss=512 * 1024 * 1024))) == pytest.approx(512, abs=1)

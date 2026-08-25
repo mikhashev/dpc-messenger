@@ -402,8 +402,31 @@ _MEMORY_POLL_SECONDS = 2.0
 _PSUTIL_MISSING_ANNOUNCED = False
 
 
+def _process_memory_mb(proc) -> float:
+    """One process's footprint, by the larger of the two things that can hurt.
+
+    Johnny's review caught that the incident was reported in *committed*
+    memory — 84.4 and 80.9 GB, a 118.6 GB page-file peak — while a first
+    version of this ceiling read RSS. They are not the same quantity and
+    neither dominates: RSS counts shared pages this process did not commit,
+    and commit counts pages it reserved and never touched. On this box a
+    plain Python interpreter reads 17.3 MB RSS against 9.6 MB committed;
+    a runaway allocator reads the other way round.
+
+    So take whichever is larger. On Windows `private` is the commit charge —
+    the number Task Manager calls «Commit size» and the one the incident was
+    written in. On POSIX there is no cheap equivalent (`vms` counts every
+    reservation, including mappings never faulted in, so a ceiling on it
+    would fire on ordinary work), and RSS stands alone.
+    """
+    info = proc.memory_info()
+    used = info.rss
+    committed = getattr(info, "private", 0)  # Windows only
+    return max(used, committed) / (1024 * 1024)
+
+
 def _tree_memory_mb(process: "subprocess.Popen") -> float:
-    """Resident memory of the command and everything it started, in MB.
+    """Memory held by the command and everything it started, in MB.
 
     The whole tree, because the runaway was a grandchild: a parent that reads
     only its own usage watches an innocent shell while the machine fills up.
@@ -426,13 +449,13 @@ def _tree_memory_mb(process: "subprocess.Popen") -> float:
         procs = [root] + root.children(recursive=True)
     except Exception:
         return 0.0
-    total = 0
+    total = 0.0
     for proc in procs:
         try:
-            total += proc.memory_info().rss
+            total += _process_memory_mb(proc)
         except Exception:
             continue  # it exited between listing and reading; not an error
-    return total / (1024 * 1024)
+    return total
 
 
 def _watch_memory(process: "subprocess.Popen", ceiling_mb: int, verdict: dict) -> None:
