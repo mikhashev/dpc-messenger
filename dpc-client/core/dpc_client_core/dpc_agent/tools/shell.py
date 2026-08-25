@@ -35,13 +35,26 @@ MAX_OUTPUT = 50_000  # chars
 HARDLINE_PATTERNS: list[re.Pattern] = [
     # Mass delete (Linux)
     re.compile(r"\brm\b.*\s+-[a-zA-Z]*r[a-zA-Z]*f|rm\b.*\s+-[a-zA-Z]*f[a-zA-Z]*r", re.I),
+    # …and the same flags spelled apart. `rm -r -f dir` did exactly what
+    # `rm -rf dir` does and classified as tier0, because the pattern above
+    # wants both letters inside one token.
+    re.compile(r"\brm\b(?=.*\s-[a-zA-Z]*r\b)(?=.*\s-[a-zA-Z]*f\b)", re.I),
     re.compile(r"\brm\b\s+.*(/|~|\$HOME)", re.I),
-    # Mass delete (Windows)
-    re.compile(r"\b(rd|rmdir)\b.*\s+/s", re.I),
-    re.compile(r"\bdel\b\s+/s", re.I),
+    # Mass delete (Windows). `/s` is matched anywhere in the segment, not only
+    # immediately after the verb: `del foo.txt /s /q` deletes recursively and
+    # `\bdel\b\s+/s` never saw it.
+    re.compile(r"\b(rd|rmdir)\b.*\s/s\b", re.I),
+    re.compile(r"\bdel\b.*\s/s\b", re.I),
+    # Mass delete (PowerShell) — and PowerShell is not a Windows-only surface:
+    # `pwsh` has shipped on Linux and macOS for years, so a rule that names only
+    # `powershell` covers one platform of three. Recurse is the mass part; a
+    # single-file Remove-Item stays ordinary work.
+    re.compile(r"\bRemove-Item\b(?=.*\s-Recurse\b)", re.I),
+    re.compile(r"\bRemove-Item\b(?=.*\s-Force\b)(?=.*[\\/]\*)", re.I),
     # Disk format / erase
     re.compile(r"\bmkfs\b", re.I),
     re.compile(r"\bformat\s+[A-Za-z]:", re.I),
+    re.compile(r"\b(Format-Volume|Clear-Disk|Initialize-Disk|Remove-Partition)\b", re.I),
     re.compile(r"\bdiskutil\s+(eraseDisk|partitionDisk|secureErase)", re.I),
     # Raw device write
     re.compile(r"\bdd\b.*\bof=/dev/", re.I),
@@ -64,8 +77,18 @@ DANGEROUS_PATTERNS: list[re.Pattern] = [
     re.compile(r"\bcmd\s+/c\b", re.I),
     re.compile(r"\b(python|python3|py)\s+-c\b", re.I),
     re.compile(r"\bnode\s+-e\b", re.I),
-    # Encoded commands
-    re.compile(r"\bpowershell\b.*(-enc|-encodedcommand)", re.I),
+    # Encoded commands — both spellings of the shell, on every platform.
+    re.compile(r"\b(powershell|pwsh)\b.*(-enc|-encodedcommand)", re.I),
+    # Download-and-run through PowerShell, the shape `curl | sh` covers on POSIX.
+    re.compile(r"\b(iex|Invoke-Expression)\b", re.I),
+    # Irrecoverable overwrite. Not a hard block: shredding one file inside the
+    # sandbox is legitimate, and the catastrophic form is the path, which the
+    # `rm … /` rule above already covers.
+    re.compile(r"\bshred\b", re.I),
+    # Mass delete by search. `find / -name "*" -delete` is a whole-disk wipe
+    # that no `rm` pattern sees.
+    re.compile(r"\bfind\b.*\s-delete\b", re.I),
+    re.compile(r"\bfind\b.*-exec\s+rm\b", re.I),
     # Download + execute — checked in CROSS_SEGMENT_PATTERNS (spans pipe boundary)
     # Registry (Windows)
     re.compile(r"\breg\s+(delete|add)\b", re.I),
