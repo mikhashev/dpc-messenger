@@ -94,3 +94,58 @@ def test_a_two_line_command_is_still_blocked():
 def test_every_separator_still_splits_and_leaves_no_empty_pieces(command, expected):
     """`&&` used to split into empty fragments because `[|;&]` matched first."""
     assert _split_segments(command) == expected
+
+
+# --- what the fix changed beyond the ordering -------------------------------
+
+class _Firewall:
+    def __init__(self, whitelist):
+        self._whitelist = whitelist
+
+    def get_tool_setting(self, *args, **kwargs):
+        return self._whitelist
+
+
+class _Ctx:
+    def __init__(self, whitelist):
+        self.firewall = _Firewall(whitelist)
+
+    def validate_extended_path(self, path):
+        return True
+
+
+def test_a_config_whitelist_cannot_waive_a_hard_block():
+    """ADR-030's core invariant, which the old ordering broke without anyone saying so.
+
+    `tier1_whitelist` lives in `privacy_rules.json` — configuration. Under the
+    old segment-major scan, a whitelisted `sudo` matched in the first segment,
+    the whitelist returned None, and the command **ran** with `rm -rf /` in its
+    second half, never examined. Measured on `e069ac2a^`: ALLOWED.
+
+    ADR-030 says the hard level is overridable by neither config nor agent. It
+    was overridable by config.
+    """
+    ctx = _Ctx(["sudo"])
+
+    assert tier_of_with(ctx, "sudo ls") is None, "the whitelist still waives a soft one"
+    verdict = _validate_command("sudo ls && rm -rf /", ctx)
+    assert verdict is not None and verdict[0] == "tier2", (
+        "a whitelist must not reach past a hard block"
+    )
+
+
+def tier_of_with(ctx, command):
+    return _validate_command(command, ctx)
+
+
+def test_harmless_text_carrying_a_dangerous_string_was_always_blocked():
+    """Johnny's second caveat, measured rather than assumed.
+
+    A quoted newline now splits segments, so `echo "a\nrm -rf /"` is two
+    segments and the second blocks. That is not a regression: the pattern is
+    unanchored, so the same command was already tier2 when it was one segment.
+    Both `e069ac2a^` and HEAD return tier2 — the false positive is a property of
+    unanchored patterns, not of the split.
+    """
+    assert tier_of('echo "harmless text with rm -rf / inside"') == "tier2"
+    assert tier_of('echo "line1\nrm -rf /"') == "tier2"
