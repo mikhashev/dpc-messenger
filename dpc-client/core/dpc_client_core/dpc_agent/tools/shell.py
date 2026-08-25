@@ -46,7 +46,8 @@ HARDLINE_PATTERNS: list[re.Pattern] = [
     # immediately after the verb: `del foo.txt /s /q` deletes recursively and
     # `\bdel\b\s+/s` never saw it.
     re.compile(r"\b(rd|rmdir)\b.*\s/s\b", re.I),
-    re.compile(r"\bdel\b.*\s/s\b", re.I),
+    # `erase` is cmd.exe's own alias for `del`.
+    re.compile(r"\b(del|erase)\b.*\s/s\b", re.I),
     # Mass delete (PowerShell) — and PowerShell is not a Windows-only surface:
     # `pwsh` has shipped on Linux and macOS for years, so a rule that names only
     # `powershell` covers one platform of three. Recurse is the mass part; a
@@ -55,7 +56,10 @@ HARDLINE_PATTERNS: list[re.Pattern] = [
     re.compile(r"\bRemove-Item\b(?=.*\s-Force\b)(?=.*[\\/]\*)", re.I),
     # Disk format / erase
     re.compile(r"\bmkfs\b", re.I),
-    re.compile(r"\bformat\s+[A-Za-z]:", re.I),
+    # Switches may sit between the verb and the drive — `format /q C:`,
+    # `format /fs:ntfs D:`. Only switch tokens are allowed in between, so
+    # `format-json report C:\\out` stays ordinary work.
+    re.compile(r"\bformat\b(?:\s+/\S+)*\s+[A-Za-z]:", re.I),
     re.compile(r"\b(Format-Volume|Clear-Disk|Initialize-Disk|Remove-Partition)\b", re.I),
     re.compile(r"\bdiskutil\s+(eraseDisk|partitionDisk|secureErase)", re.I),
     # Raw device write
@@ -79,6 +83,11 @@ DANGEROUS_PATTERNS: list[re.Pattern] = [
     re.compile(r"\bcmd\s+/c\b", re.I),
     re.compile(r"\b(python|python3|py)\s+-c\b", re.I),
     re.compile(r"\bnode\s+-e\b", re.I),
+    # PowerShell's inline-code wrapper. Every other shell's had a rule and this
+    # one did not. The parameter is any unambiguous prefix of `-Command`,
+    # because PowerShell resolves them: `-c`, `-co`, `-comm` all run code.
+    # `-Confirm` does not match — its `n` breaks the chain before a boundary.
+    re.compile(r"\b(powershell|pwsh)\b.*\s-c(?:o(?:m(?:m(?:a(?:n(?:d)?)?)?)?)?)?\b", re.I),
     # Encoded commands — both spellings of the shell, on every platform.
     re.compile(r"\b(powershell|pwsh)\b.*(-enc|-encodedcommand)", re.I),
     # Download-and-run through PowerShell, the shape `curl | sh` covers on POSIX.
@@ -168,7 +177,12 @@ def _get_tier1_whitelist(ctx: Optional["ToolContext"] = None) -> list[str]:
 
 
 def _is_whitelisted(command: str, whitelist: list[str]) -> bool:
-    """Check if command prefix matches any whitelist entry."""
+    """Does this **one segment** start with a whitelisted entry?
+
+    Callers pass the segment that triggered the finding, never the whole line.
+    Passing the line is a prefix-auth bypass: an entry auto-approving `git`
+    also auto-approves whatever is chained after it.
+    """
     normalized = _normalize_command(command).strip().lower()
     for entry in whitelist:
         if normalized.startswith(entry.lower()):
@@ -206,13 +220,18 @@ def _validate_command(command: str, ctx: Optional["ToolContext"] = None) -> Opti
     # match primes them for the wrong thing — "Requires approval: sudo" for a
     # command whose second half was the part that mattered.
     dangerous: list[str] = []
+    flagged: list[str] = []
     for segment in segments:
         for pattern in DANGEROUS_PATTERNS:
-            if pattern.search(segment) and pattern.pattern not in dangerous:
-                dangerous.append(pattern.pattern)
+            if pattern.search(segment):
+                if pattern.pattern not in dangerous:
+                    dangerous.append(pattern.pattern)
+                if segment not in flagged:
+                    flagged.append(segment)
     if dangerous:
         whitelist = _get_tier1_whitelist(ctx)
-        if _is_whitelisted(command, whitelist):
+        # Every flagged segment must be whitelisted on its own.
+        if whitelist and all(_is_whitelisted(seg, whitelist) for seg in flagged):
             return None
         return ("tier1", "Requires approval: " + "; ".join(dangerous))
 
@@ -221,16 +240,19 @@ def _validate_command(command: str, ctx: Optional["ToolContext"] = None) -> Opti
             re.compile(r'\b([A-Z]:\\[^\s"\'<>|&;]+)'),
             re.compile(r'(?<!\w)(/[a-zA-Z][^\s"\'<>|&;]*)'),
         ]
-        for pat in _PATH_PATTERNS:
-            for match in pat.finditer(normalized):
-                extracted = match.group(1)
-                try:
-                    ctx.validate_extended_path(extracted)
-                except PermissionError:
-                    whitelist = _get_tier1_whitelist(ctx)
-                    if _is_whitelisted(command, whitelist):
-                        break
-                    return ("tier1", f"Command accesses path outside sandbox: {extracted}")
+        whitelist = _get_tier1_whitelist(ctx)
+        # Per segment, for the same reason: the path that leaves the sandbox is
+        # in one segment, and only that segment may be waived.
+        for segment in segments:
+            for pat in _PATH_PATTERNS:
+                for match in pat.finditer(segment):
+                    extracted = match.group(1)
+                    try:
+                        ctx.validate_extended_path(extracted)
+                    except PermissionError:
+                        if whitelist and _is_whitelisted(segment, whitelist):
+                            break
+                        return ("tier1", f"Command accesses path outside sandbox: {extracted}")
 
     return None
 
@@ -398,7 +420,24 @@ def _cap_stream(text: str, stream: str) -> str:
 # The ceiling is deliberately generous. A guardrail that stops a real build is
 # switched off within a week, and the failure it exists for is two orders of
 # magnitude above ordinary work, not two times.
-_MEMORY_CEILING_MB = int(os.environ.get("DPC_SHELL_MEMORY_LIMIT_MB", "8192"))
+def _read_memory_ceiling() -> int:
+    """Parse the ceiling, and never fail the import over it.
+
+    A bad value used to raise at module scope, which takes the whole tools
+    package — every agent tool — down for a misconfigured limit.
+    """
+    raw = os.environ.get("DPC_SHELL_MEMORY_LIMIT_MB", "8192")
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        log.warning(
+            "DPC_SHELL_MEMORY_LIMIT_MB is %r, which is not a number — "
+            "using the default 8192 MB", raw,
+        )
+        return 8192
+
+
+_MEMORY_CEILING_MB = _read_memory_ceiling()
 _MEMORY_POLL_SECONDS = 2.0
 _PSUTIL_MISSING_ANNOUNCED = False
 
@@ -489,11 +528,24 @@ def _kill_process_tree(process: "subprocess.Popen") -> str:
     pid = process.pid
     if platform.system() == "Windows":
         try:
-            subprocess.run(
+            done = subprocess.run(
                 ["taskkill", "/PID", str(pid), "/T", "/F"],
                 capture_output=True, timeout=10, stdin=subprocess.DEVNULL,
             )
-            return "the command and its descendants were killed"
+            # Read the exit code before claiming the tree died: taskkill is
+            # denied access to some children, and the sentence was asserted
+            # anyway — false in exactly the partial-kill case the bounded
+            # drain exists for.
+            if done.returncode == 0:
+                return "the command and its descendants were killed"
+            log.warning(
+                "taskkill on pid %s exited %s: %s", pid, done.returncode,
+                (done.stderr or b"").decode("utf-8", "replace").strip()[:200],
+            )
+            return (
+                "the kill did not reach the whole tree "
+                f"(taskkill exited {done.returncode}); a descendant may survive"
+            )
         except Exception as exc:
             log.warning("taskkill on pid %s failed: %s", pid, exc)
     else:
@@ -594,7 +646,8 @@ def _execute_shell_command(command: str, working_dir: str | None, timeout: int) 
                     f"Error: the command and its children reached "
                     f"{memory_verdict['exceeded_mb']} MB, over the "
                     f"{_MEMORY_CEILING_MB} MB ceiling, and were killed. "
-                    f"Raise DPC_SHELL_MEMORY_LIMIT_MB if this work genuinely needs more."
+                    f"Raise DPC_SHELL_MEMORY_LIMIT_MB (a restart applies it) "
+                    f"if this work genuinely needs more."
                 )
         except subprocess.TimeoutExpired:
             # `subprocess.run` was here, and what it does on Windows is the
@@ -609,10 +662,23 @@ def _execute_shell_command(command: str, working_dir: str | None, timeout: int) 
             # server the hung parent could no longer reap.
             killed = _kill_process_tree(process)
             stdout, stderr = _drain_after_kill(process)
-            note = (
-                f"Error: command timed out after {timeout}s"
-                f" — {killed}."
-            )
+            if memory_verdict.get("exceeded_mb"):
+                # The watcher already killed this tree; a descendant escaped and
+                # held the pipe until the clock ran out. Naming the clock here
+                # would tell the agent the wrong cause in exactly the case the
+                # bounded drain exists for.
+                note = (
+                    f"Error: the command and its children reached "
+                    f"{memory_verdict['exceeded_mb']} MB, over the "
+                    f"{_MEMORY_CEILING_MB} MB ceiling, and were killed"
+                    f" — {killed}. Raise DPC_SHELL_MEMORY_LIMIT_MB (a restart"
+                    f" applies it) if this work genuinely needs more."
+                )
+            else:
+                note = (
+                    f"Error: command timed out after {timeout}s"
+                    f" — {killed}."
+                )
             tail = []
             if stdout:
                 tail.append(_cap_stream(stdout, "stdout"))

@@ -2801,9 +2801,12 @@ async def browse_page(
             firewall = getattr(dpc_service, "firewall", None)
         from dpc_client_core import web_auth as _web_auth_mod
 
-        # eTLD+1 on both sides, because that is the vault's own key: a
-        # whitelist entry of `example.com` must cover `www.example.com`,
-        # and must not be dodged by asking for a subdomain spelling.
+        # Both sides go through `resolve_etld1`, which is the vault's own key —
+        # so no subdomain spelling reads another domain's cookies. What it is
+        # NOT is a public-suffix resolver: `ETLD1_MAP` holds 12 hardcoded test
+        # hostnames and passes everything else through unchanged, so for a real
+        # site `example.com` does not cover `www.example.com` and each spelling
+        # must be listed. The refusal below says so; the fix is a PSL.
         _requested_etld1 = _web_auth_mod.resolve_etld1(use_auth)
         if firewall is not None:
             _allowed = {
@@ -2817,9 +2820,11 @@ async def browse_page(
                 )
                 return (
                     f"⚠️ '{use_auth}' is not in this agent's authorised web-auth "
-                    f"domains. Add it to privacy_rules.json → agent_profiles."
-                    f"{agent_id}.web_auth.allowed_domains, then log in via the "
-                    f"web-auth UI."
+                    f"domains. Add **this exact hostname** to privacy_rules.json "
+                    f"→ agent_profiles.{agent_id}.web_auth.allowed_domains, then "
+                    f"log in via the web-auth UI. Subdomains are not covered by "
+                    f"their parent domain: 'www.{_requested_etld1 or use_auth}' "
+                    f"and '{_requested_etld1 or use_auth}' are separate entries."
                 )
 
         # ADR-029 Task 008: per-request approval for headless auth.
