@@ -2785,14 +2785,55 @@ async def browse_page(
         # must move to a helper there — track via grep on `agent_root.name`.
         agent_id = ctx.agent_root.name
 
-        # ADR-028 T5: per-agent + per-domain auth gate. Reject before
-        # opening Camoufox if the agent's web_auth.allowed_domains
-        # whitelist doesn't permit this domain, or if no cookies are in
-        # the vault. firewall is None in pure-unit-test contexts (no
+        # ADR-028 T5: per-agent + per-domain auth gate. ADR-028:179 is
+        # explicit — «use_auth is validated against web_auth.allowed_domains
+        # for the calling agent. If domain not in whitelist → tool call
+        # rejected». firewall is None in pure-unit-test contexts (no
         # dpc_service wired) — those tests bypass the gate by design.
+        #
+        # This block was specified and never written. What stood here was
+        # one line, `firewall = None`, and nothing else: the firewall was
+        # never taken off dpc_service, `get_agent_web_auth_domains` was
+        # never called, and there was no denial branch — across the whole
+        # function the word «firewall» appeared exactly twice, in the
+        # comment above and in that assignment. So the whitelist decided
+        # nothing. Measured 2026-08-25 with `allowed_domains: []`, deny
+        # everything: Camoufox opened, 311 238 characters of live HTML
+        # came back, and the answer told the agent «auth domain
+        # wikipedia.org». The correct three lines were forty lines away in
+        # web_auth_tools.py — in the tool that only *lists* which domains
+        # are allowed.
+        #
+        # What this gate deliberately does NOT decide: whether `use_auth`
+        # with an empty vault should refuse or browse on. The ADR is silent
+        # and the suite contradicts itself about it — see the board entry
+        # THE-EMPTY-VAULT-CASE-HAS-TWO-TESTS-ASSERTING-OPPOSITE-THINGS.
         firewall = None
         dpc_service = getattr(ctx, "dpc_service", None)
+        if dpc_service is not None:
+            firewall = getattr(dpc_service, "firewall", None)
         from dpc_client_core import web_auth as _web_auth_mod
+
+        # eTLD+1 on both sides, because that is the vault's own key: a
+        # whitelist entry of `example.com` must cover `www.example.com`,
+        # and must not be dodged by asking for a subdomain spelling.
+        _requested_etld1 = _web_auth_mod.resolve_etld1(use_auth)
+        if firewall is not None:
+            _allowed = {
+                _web_auth_mod.resolve_etld1(d)
+                for d in firewall.get_agent_web_auth_domains(agent_id)
+            }
+            if not _requested_etld1 or _requested_etld1 not in _allowed:
+                _web_auth_mod.audit_append(
+                    agent_id, use_auth, url,
+                    status="firewall_denied:not_in_whitelist",
+                )
+                return (
+                    f"⚠️ '{use_auth}' is not in this agent's authorised web-auth "
+                    f"domains. Add it to privacy_rules.json → agent_profiles."
+                    f"{agent_id}.web_auth.allowed_domains, then log in via the "
+                    f"web-auth UI."
+                )
 
         # ADR-029 Task 008: per-request approval for headless auth.
         # Headed (keep_open=True) needs no gate — human sees the browser.
