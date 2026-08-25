@@ -2804,6 +2804,15 @@ async def browse_page(
         # web_auth_tools.py — in the tool that only *lists* which domains
         # are allowed.
         #
+        # ADR-028:179 names two tools, «`use_auth=domain` parameter in
+        # `browse_page`/`fetch_json`». `fetch_json` has no `use_auth` today —
+        # it is anonymous and touches neither the vault nor AuthBrowser — so
+        # there is no second hole, only an ADR one word wider than the code
+        # (Johnny, 2026-08-25). If `fetch_json` ever gains `use_auth`, this
+        # gate has to be hoisted into a helper both call, not copied: a
+        # second copy of an access check is how one of them ends up a
+        # version behind, which is the defect this block exists to undo.
+        #
         # What this gate deliberately does NOT decide: whether `use_auth`
         # with an empty vault should refuse or browse on. The ADR is silent
         # and the suite contradicts itself about it — see the board entry
