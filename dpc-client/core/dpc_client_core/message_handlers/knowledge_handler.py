@@ -358,10 +358,25 @@ class ApplyKnowledgeCommitHandler(MessageHandler):
 
         try:
             commit = KnowledgeCommit.from_dict(payload)
-            await self.service.consensus_manager._apply_commit(commit)
-            self.logger.info(
-                "Applied commit %s via APPLY_KNOWLEDGE_COMMIT recovery path (sent by %s)",
-                commit_id[:12], sender_node_id[:20]
+            provenance = commit.verify_provenance()
+
+            if provenance.is_rejected:
+                self.logger.warning(
+                    "Refused APPLY_KNOWLEDGE_COMMIT %s from %s: %s",
+                    commit_id[:12], sender_node_id[:20], provenance.detail
+                )
+                return None
+
+            for signer in provenance.unverifiable_signers:
+                await self._ask_for_certificate(signer, sender_node_id)
+
+            await self.service.consensus_manager._apply_commit(
+                commit, origin=provenance.verdict
+            )
+            say = self.logger.info if provenance.verdict == "verified" else self.logger.warning
+            say(
+                "Applied commit %s from %s as %s — %s",
+                commit_id[:12], sender_node_id[:20], provenance.verdict, provenance.detail
             )
         except Exception as e:
             self.logger.error(

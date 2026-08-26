@@ -476,15 +476,14 @@ class ConsensusManager:
                 proposal.proposal_id, len(proposal.participants),
             )
 
-    async def _apply_commit(self, commit: KnowledgeCommit) -> bool:
-        """Apply approved commit to local PCM with cryptographic integrity
+    async def _apply_commit(self, commit: KnowledgeCommit, origin: str = "local") -> bool:
+        """Apply approved commit to local PCM; False on any error.
 
-        Args:
-            commit: KnowledgeCommit to apply
-
-        Returns:
-            True if commit was successfully written to disk, False on any error.
+        `origin` is "local" or the verdict `verify_provenance()` gave a received
+        commit: one from elsewhere keeps the hash it arrived with, and only a
+        hash we could check is signed with our key (ADR-036 §4).
         """
+        attested = origin in ("local", "verified")
         try:
             import hashlib
             from dpc_protocol.crypto import load_identity
@@ -496,26 +495,32 @@ class ConsensusManager:
             # 1. parent_commit_id is already set from the proposal (anchored by the proposer
             # at propose time so all nodes compute the same commit_hash). Only fall back to
             # local context.last_commit_id if the proposal pre-dates this fix.
-            if commit.parent_commit_id is None:
+            if commit.parent_commit_id is None and origin == "local":
                 commit.parent_commit_id = context.last_commit_id
 
             # 2. Compute hash-based commit ID
-            commit.compute_hash()  # Sets commit_hash and commit_id
-
-            logger.info("Created commit %s (hash: %s...)", commit.commit_id, commit.commit_hash[:16])
+            if origin == "local":
+                commit.compute_hash()  # Sets commit_hash and commit_id
+                logger.info("Created commit %s (hash: %s...)", commit.commit_id, commit.commit_hash[:16])
+            else:
+                logger.info(
+                    "Applying %s commit %s (hash: %s...) as received",
+                    origin, commit.commit_id, (commit.commit_hash or "")[:16],
+                )
 
             # 3. Sign commit with our private key
             node_id, key_path, cert_path = load_identity()
 
-            with open(key_path, 'rb') as f:
-                private_key = serialization.load_pem_private_key(
-                    f.read(),
-                    password=None
-                )
+            if attested:
+                with open(key_path, 'rb') as f:
+                    private_key = serialization.load_pem_private_key(
+                        f.read(),
+                        password=None
+                    )
 
-            commit.sign(node_id, private_key)
+                commit.sign(node_id, private_key)
 
-            logger.info("Signed commit with %s", node_id)
+                logger.info("Signed commit with %s", node_id)
 
             # 4. Add or update topic
             topic_name = commit.topic
@@ -553,7 +558,8 @@ class ConsensusManager:
                 'participants': commit.participants,
                 'consensus': commit.consensus_type,
                 'approved_by': commit.approved_by,
-                'signatures': commit.signatures
+                'signatures': commit.signatures,
+                'provenance': origin
             })
 
             # 7. Create versioned markdown file with frontmatter
@@ -588,7 +594,8 @@ class ConsensusManager:
                 'canonical_json': canonical_json_b64,
                 'timestamp': commit.timestamp,
                 'version': topic.version,
-                'author': node_id,
+                'author': node_id if origin == "local" else (commit.proposed_by or "peer"),
+                'provenance': origin,
                 'participants': commit.participants,
                 'approved_by': commit.approved_by,
                 'rejected_by': commit.rejected_by,
@@ -627,7 +634,7 @@ class ConsensusManager:
                 await self.on_commit_applied(commit)
 
             # 10. Let service sign our own copy and broadcast COMMIT_SIGNED to peers
-            if self.on_commit_signed:
+            if self.on_commit_signed and attested:
                 await self.on_commit_signed(commit)
 
             # 11. Broadcast COMMIT_ACK so peers know we successfully applied the commit

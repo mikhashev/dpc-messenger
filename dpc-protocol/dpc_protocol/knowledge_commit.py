@@ -7,8 +7,9 @@ Inspired by Personal Context Manager and cognitive bias research.
 
 import logging
 from dataclasses import dataclass, field, asdict, fields as dataclass_fields
-from typing import List, Dict, Any, Optional, Literal
+from typing import List, Dict, Any, Optional, Literal, Tuple
 from datetime import datetime, timezone
+from pathlib import Path
 import uuid
 
 from cryptography.hazmat.primitives.asymmetric import rsa
@@ -185,6 +186,26 @@ class CommitVote:
     is_required_dissent: bool = False
 
 
+@dataclass(frozen=True)
+class CommitProvenance:
+    """The verdict on a received commit, and the one line that says why.
+
+    verified   — content hashes to the hash it carries and a signature over it held.
+    unverified — hash holds, signatures present, not one certificate is cached here.
+    legacy     — hash holds, no signature at all (every commit older than signing).
+    rejected   — the content does not hash to its own hash, or a signature is wrong.
+                 This is the only verdict that means tampering; ADR-036 §6.
+    """
+
+    verdict: Literal["verified", "unverified", "legacy", "rejected"]
+    detail: str
+    unverifiable_signers: Tuple[str, ...] = ()
+
+    @property
+    def is_rejected(self) -> bool:
+        return self.verdict == "rejected"
+
+
 @dataclass
 class KnowledgeCommit:
     """Finalized knowledge commit (after consensus approval)
@@ -321,25 +342,57 @@ class KnowledgeCommit:
         signer = CommitSigner(node_id, private_key)
         self.signatures[node_id] = signer.sign_commit(self.commit_hash)
 
-    def verify_signatures(self) -> bool:
-        """
-        Verify all signatures in this commit.
+    def verify_provenance(self, peers_dir: Optional[Path] = None) -> 'CommitProvenance':
+        """What this commit proves about itself — the four values of ADR-036 §6.
 
-        Returns:
-            True if all signatures are valid, False otherwise
+        The hash is checked first because it needs no certificate: the canonical
+        JSON is recomputed from the content and must equal the hash the commit
+        carries. Only then are the signatures over that hash considered.
         """
-        from .commit_integrity import CommitSigner
+        from .commit_integrity import CommitSigner, compute_commit_hash
 
         if not self.commit_hash:
-            return False
+            return CommitProvenance("rejected", "commit carries no hash to verify")
 
+        recomputed = compute_commit_hash(self)
+        if recomputed != self.commit_hash:
+            return CommitProvenance(
+                "rejected",
+                f"content hashes to {recomputed[:16]}, commit claims {self.commit_hash[:16]}",
+            )
+
+        if not self.signatures:
+            return CommitProvenance("legacy", "hash holds; the commit carries no signature")
+
+        checked: List[str] = []
+        uncached: List[str] = []
         for node_id, signature in self.signatures.items():
-            result = CommitSigner.verify_signature(node_id, self.commit_hash, signature)
+            result = CommitSigner.verify_signature(node_id, self.commit_hash, signature, peers_dir)
             if result is False:
-                return False
-            # result is None: cert not cached, skip (cannot verify but not evidence of tampering)
+                return CommitProvenance(
+                    "rejected", f"signature of {node_id} does not hold over this hash"
+                )
+            (uncached if result is None else checked).append(node_id)
 
-        return True
+        total = len(self.signatures)
+        if checked:
+            return CommitProvenance(
+                "verified", f"hash holds; {len(checked)} of {total} signatures verified",
+                tuple(uncached),
+            )
+        return CommitProvenance(
+            "unverified", f"hash holds; no certificate cached for any of {total} signers",
+            tuple(uncached),
+        )
+
+    def verify_signatures(self, peers_dir: Optional[Path] = None) -> bool:
+        """True only when a signature was actually checked and held.
+
+        It used to return True for an empty signature dict and for a signer
+        whose certificate is not cached — a pass nothing had earned. Callers
+        that need to tell those apart from a real check use verify_provenance.
+        """
+        return self.verify_provenance(peers_dir).verdict == "verified"
 
     def verify_hash(self) -> bool:
         """
