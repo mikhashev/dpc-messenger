@@ -18,8 +18,10 @@ log = logging.getLogger(__name__)
 class HookAction(Enum):
     """Return value of a hook handler.
 
-    REDIRECT and RETRY are anticipated for Phase 2+ hooks and will need
-    different checkpoint semantics — deferred, not excluded.
+    Two hooks that disagree merge most-restrictive-first, `deny > ask > allow`
+    (ADR-007, amendment 2026-08-27). REDIRECT and RETRY are anticipated for
+    Phase 2+ and do not sit on that axis, so they owe a rule of their own
+    before either lands — deferred, not excluded.
     """
 
     CONTINUE = auto()
@@ -193,7 +195,12 @@ class HookRegistry:
     async def fire(
         self, lifecycle: HookLifecycle, ctx: HookContext
     ) -> Optional[HookAction]:
-        """Dispatch a lifecycle event. Returns the first STOP_LOOP or None."""
+        """Dispatch a lifecycle event. Returns the first STOP_LOOP or None.
+
+        Which is the merge rule short-circuited rather than a first-wins rule:
+        STOP_LOOP is the maximal value, so reaching one ends the poll early.
+        A third, lower value would have to poll the rest.
+        """
         self.last_triggered = None
         method_name = lifecycle.value
         for mw in self._middleware:
