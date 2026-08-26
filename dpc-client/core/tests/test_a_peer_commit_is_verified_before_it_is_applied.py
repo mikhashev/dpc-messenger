@@ -211,6 +211,12 @@ async def test_a_commit_we_could_not_check_is_not_signed_with_our_key(home, monk
     assert commit.commit_hash == arrived_as
     assert signed == []
 
+    # The verdict has to reach the file, not only the dict the writer is handed:
+    # the frontmatter renderer writes a fixed list of keys and drops the rest.
+    card = next((home / "knowledge").glob(f"*{commit.commit_id}.md"))
+    assert "provenance: unverified" in card.read_text(encoding="utf-8")
+    assert f"author: {commit.proposed_by}" in card.read_text(encoding="utf-8")
+
 
 @pytest.mark.asyncio
 async def test_a_received_commit_keeps_the_parent_it_arrived_with(home, monkeypatch):

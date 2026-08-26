@@ -499,6 +499,8 @@ class MarkdownKnowledgeManager:
             lines.append(f"version: {frontmatter['version']}")
         if 'author' in frontmatter:
             lines.append(f"author: {frontmatter['author']}")
+        if 'provenance' in frontmatter:
+            lines.append(f"provenance: {frontmatter['provenance']}")
         if 'created_at' in frontmatter:
             lines.append(f"created_at: {frontmatter['created_at']}")
         if 'last_modified' in frontmatter:
