@@ -139,6 +139,9 @@ class TestTheToolHandsItOver:
         announced = []
 
         class RecordingService:
+            # A watched desktop, which the gate now asks for by name.
+            local_api = types.SimpleNamespace(has_clients=True)
+
             async def announce_shell_approval_request(self, **kwargs):
                 announced.append(kwargs)
 

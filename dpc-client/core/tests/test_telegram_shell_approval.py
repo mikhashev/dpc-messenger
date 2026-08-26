@@ -350,6 +350,10 @@ async def test_the_tool_announces_through_the_service_not_the_socket(tmp_path):
     closed = []
 
     class RecordingService:
+        # The gate refuses before announcing when no surface could answer, so a
+        # service that stands in for a watched desktop has to say a client is on.
+        local_api = types.SimpleNamespace(has_clients=True)
+
         async def announce_shell_approval_request(self, **kwargs):
             announced.append(kwargs)
 

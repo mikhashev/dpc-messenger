@@ -296,6 +296,12 @@ def _request_approval(ctx: ToolContext, command: str, reason: str, cwd: str, tim
     Blocks the executor thread until user approves/rejects via UI.
     On approval, service.py executes the command and stores the result.
     Returns the actual command output to the agent — approval is transparent.
+
+    LIMITS: the check below establishes that no surface could carry the question,
+    not that no person is present. An interface left open all night looks exactly
+    like somebody sitting at it, and for that case the second line is still the
+    TTL: the card is shown, nobody presses it, and sixty seconds later the
+    command does not run.
     """
     import asyncio
     import time
@@ -303,6 +309,24 @@ def _request_approval(ctx: ToolContext, command: str, reason: str, cwd: str, tim
     import threading
 
     _cleanup_expired_approvals()
+
+    # Learned twice already — in the scheduler (tools/core.py:1097) and in the
+    # headless web-auth gate (browser.py:2835): broadcast_event drops the request
+    # when nobody is listening, so the wait below could only end in a timeout that
+    # reads like a person's refusal. Telegram is the other surface that can answer,
+    # and it answers with no interface client attached, so the refusal is for the
+    # case where neither can carry the question. Before the queue entry exists,
+    # not after: an unanswerable request should not be sitting anywhere.
+    dpc_service = getattr(ctx, "dpc_service", None)
+    local_api = getattr(dpc_service, "local_api", None) if dpc_service else None
+    telegram_chat_id = getattr(ctx, "reply_telegram_chat_id", "") or ""
+    ui_attached = bool(getattr(local_api, "has_clients", False)) if local_api else False
+    if not ui_attached and not telegram_chat_id:
+        log.warning("run_shell TIER1 not asked, no surface could answer: %r", command)
+        return (
+            f"🚫 Approval required and nobody could be asked: no interface client is "
+            f"connected and this run did not come from Telegram. Not run: `{command}`"
+        )
 
     request_id = str(uuid.uuid4())[:8]
     agent_obj = getattr(ctx, "_agent", None)
@@ -329,7 +353,6 @@ def _request_approval(ctx: ToolContext, command: str, reason: str, cwd: str, tim
         "result": None,
     }
 
-    dpc_service = getattr(ctx, "dpc_service", None)
     main_loop = getattr(ctx, "_event_loop", None)
     _origin_id, _origin_title = conversation_origin(ctx)
 
