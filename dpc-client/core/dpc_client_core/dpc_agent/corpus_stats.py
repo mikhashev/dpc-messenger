@@ -32,7 +32,7 @@ import logging
 import pathlib
 from typing import Dict, List, Optional
 
-from .active_recall import _build_access_counts
+from .active_recall import EvidenceReadFailed, _build_access_counts
 from .extended_paths_index import reconcile_indexed_paths
 from .index_keys import EXT_PREFIX, build_ext_roots, ext_key, l5_key, l6_key
 
@@ -92,7 +92,15 @@ def corpus_stats(agent_root: pathlib.Path, firewall, agent_id: str,
     except (json.JSONDecodeError, OSError):
         keys = set()
 
-    counts = _build_access_counts(agent_root)
+    try:
+        counts = _build_access_counts(agent_root)
+    except EvidenceReadFailed as exc:
+        # None, not zero: the counts were unreadable, which is not the same
+        # answer as "the agent showed and opened nothing".
+        log.warning("corpus stats for %s: %s", agent_id, exc)
+        return {"agent_id": agent_id, "corpora": [], "documents_total": len(keys),
+                "injections_counted": None, "injections_ignored_old_scheme": None,
+                "evidence_read_failed": str(exc)}
     roots = _indexed_roots(firewall, agent_id)
 
     documents: Dict[str, int] = {}

@@ -19,7 +19,7 @@ from typing import Dict, List, Optional
 
 from .hybrid_search import SearchResult
 from .index_keys import L5_PREFIX as L5_KEY_PREFIX, L6_PREFIX as L6_KEY_PREFIX
-from .tool_ledger import is_outcome
+from .tool_ledger import EvidenceReadFailed, is_outcome
 from .utils import utc_now_iso
 
 log = logging.getLogger(__name__)
@@ -382,8 +382,10 @@ def _read_log_paths(agent_root: pathlib.Path) -> List[pathlib.Path]:
 def _iter_jsonl(path: pathlib.Path):
     try:
         text = path.read_text(encoding="utf-8", errors="replace")
-    except OSError:
+    except FileNotFoundError:
         return
+    except OSError as exc:
+        raise EvidenceReadFailed(f"{path}: {exc}") from exc
     for line in text.splitlines():
         if not line.strip():
             continue
@@ -511,7 +513,11 @@ def _apply_decay(
     can affect the order — while a global maximum lets a file nobody is considering
     push the whole set onto the floor, which is what a project README did.
     """
-    counts = _build_access_counts(agent_root)
+    try:
+        counts = _build_access_counts(agent_root)
+    except EvidenceReadFailed as exc:
+        log.warning("Active Recall: ranking left undecayed, evidence unreadable — %s", exc)
+        return results
     if not counts:
         return results
 

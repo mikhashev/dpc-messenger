@@ -17,6 +17,15 @@ from .utils import append_jsonl, utc_now_iso
 
 log = logging.getLogger(__name__)
 
+class EvidenceReadFailed(OSError):
+    """A log that exists and could not be read.
+
+    Its lack of rows establishes nothing, so a count built over it is unknown
+    rather than zero — a distinction a missing file does not need, because
+    nothing could ever have been written to a file that was never created.
+    """
+
+
 PHASE_ATTEMPT = "attempt"
 PHASE_OUTCOME = "outcome"
 
@@ -66,8 +75,10 @@ def _ledger_paths(logs_dir: pathlib.Path) -> List[pathlib.Path]:
 def _iter_rows(path: pathlib.Path) -> Iterator[Dict[str, Any]]:
     try:
         text = path.read_text(encoding="utf-8", errors="replace")
-    except OSError:
+    except FileNotFoundError:
         return
+    except OSError as exc:
+        raise EvidenceReadFailed(f"{path}: {exc}") from exc
     for line in text.splitlines():
         if not line.strip():
             continue
@@ -129,14 +140,27 @@ def close_abandoned(logs_dir: pathlib.Path, row: Dict[str, Any]) -> None:
     })
 
 
-def sweep_unfinished(logs_dir: pathlib.Path) -> List[Dict[str, Any]]:
-    """Report and close the calls a dead process left open. Once per dir."""
+def sweep_unfinished(logs_dir: pathlib.Path) -> Optional[List[Dict[str, Any]]]:
+    """Report and close the calls a dead process left open. Once per dir.
+
+    An empty list is an established "none were left open". `None` is the other
+    answer: the log could not be read, so the question stands unanswered.
+    """
     key = str(logs_dir)
     if key in _swept_dirs:
         return []
     _swept_dirs.add(key)
     try:
         rows = unfinished_calls(logs_dir, exclude_pid=os.getpid())
+    except EvidenceReadFailed as exc:
+        log.warning("tool ledger: open calls unknown, not none — %s", exc)
+        append_jsonl(logs_dir / "events.jsonl", {
+            "ts": utc_now_iso(),
+            "type": "evidence_read_failed",
+            "evidence": "tools.jsonl",
+            "detail": str(exc),
+        })
+        return None
     except Exception:
         log.debug("tool ledger: sweep of %s failed", logs_dir, exc_info=True)
         return []
