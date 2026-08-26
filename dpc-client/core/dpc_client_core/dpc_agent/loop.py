@@ -19,7 +19,9 @@ import json
 import logging
 import pathlib
 import time
-from concurrent.futures import ThreadPoolExecutor
+import queue
+import threading
+from concurrent.futures import Future
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple
 
 from .utils import (
@@ -118,41 +120,124 @@ def round_progress_payload(
     payload["round"] = round_idx
     return payload
 
-# Shared ThreadPoolExecutor for tool execution (fixes memory leak from creating new executors)
-# Using max_workers=4 allows parallel tool execution while limiting resource usage
-_SHARED_EXECUTOR: Optional[ThreadPoolExecutor] = None
+# Tool execution runs on daemon threads of our own rather than on a
+# ThreadPoolExecutor, for the reason browser.py's _PinnedThread already
+# documents: a pool worker is registered in
+# concurrent.futures.thread._threads_queues, and _python_exit joins every
+# thread in that map with no timeout. That hook is installed through
+# threading._register_atexit, so it runs *before* the interpreter joins
+# non-daemon threads — which is why setting daemon=True on pool workers
+# changes nothing, and why the bounded wait in run_service cannot reach it:
+# the bound fires during shutdown, _python_exit fires after it.
+#
+# Four workers, as before, so tools still run in parallel.
+_TOOL_WORKERS = 4
+# Kept under run_service's own 5 s bound, so this returns and lets the caller
+# log rather than racing it.
+_TOOL_JOIN_GRACE_SEC = 4.0
+
+_SHARED_EXECUTOR: Optional["_DaemonToolPool"] = None
 
 
-def _get_shared_executor() -> ThreadPoolExecutor:
-    """Get or create the shared ThreadPoolExecutor for tool execution."""
+class _DaemonToolPool:
+    """A fixed set of daemon threads with ThreadPoolExecutor's `submit`.
+
+    Wears `submit` only because `loop.run_in_executor` asks for it. What it
+    deliberately does not wear is registration in `_threads_queues`: a tool
+    parked on a call nobody can interrupt then costs a leaked daemon thread
+    in a process that is exiting anyway, instead of the exit itself.
+
+    Abandoning a running tool is the point, not a regression. The tool has
+    already outlived its own timeout by the time this matters, and its result
+    was discarded when `execute_tool_with_timeout` gave up waiting.
+    """
+
+    def __init__(self, workers: int = _TOOL_WORKERS, name_prefix: str = "dpc_agent_tool"):
+        self._queue: "queue.Queue[Optional[tuple]]" = queue.Queue()
+        self._closed = False
+        self._threads: List[threading.Thread] = [
+            threading.Thread(target=self._run, name=f"{name_prefix}_{i}", daemon=True)
+            for i in range(workers)
+        ]
+        for t in self._threads:
+            t.start()
+
+    def _run(self) -> None:
+        while True:
+            item = self._queue.get()
+            if item is None:
+                return
+            fn, args, kwargs, future = item
+            if not future.set_running_or_notify_cancel():
+                continue  # the caller's wait_for timed out and cancelled it
+            try:
+                future.set_result(fn(*args, **kwargs))
+            except BaseException as exc:  # noqa: BLE001 - mirrors executor semantics
+                future.set_exception(exc)
+
+    def submit(self, fn: Callable, *args: Any, **kwargs: Any) -> "Future":
+        if self._closed:
+            raise RuntimeError("cannot schedule new futures after shutdown")
+        future: "Future" = Future()
+        self._queue.put((fn, args, kwargs, future))
+        return future
+
+    def shutdown(self, grace: float = _TOOL_JOIN_GRACE_SEC) -> List[str]:
+        """Stop the workers and return the names of any that would not stop.
+
+        The wait is bounded here as well as by the caller. An unbounded join
+        inside this call would be run through `asyncio.to_thread`, parking a
+        worker of asyncio's *default* pool — which is registered in
+        `_threads_queues` — and the hang would simply move house.
+        """
+        self._closed = True
+        # Queued calls are dropped rather than run during shutdown; only the
+        # ones already inside a worker can still delay us.
+        while True:
+            try:
+                item = self._queue.get_nowait()
+            except queue.Empty:
+                break
+            if item is not None:
+                item[3].cancel()
+        for _ in self._threads:
+            self._queue.put(None)
+        deadline = time.monotonic() + grace
+        for t in self._threads:
+            t.join(timeout=max(0.0, deadline - time.monotonic()))
+        return [t.name for t in self._threads if t.is_alive()]
+
+
+def _get_shared_executor() -> "_DaemonToolPool":
+    """Get or create the shared daemon pool for tool execution."""
     global _SHARED_EXECUTOR
     if _SHARED_EXECUTOR is None:
-        _SHARED_EXECUTOR = ThreadPoolExecutor(max_workers=4, thread_name_prefix="dpc_agent_tool")
-        log.debug("Created shared ThreadPoolExecutor for tool execution")
+        _SHARED_EXECUTOR = _DaemonToolPool()
+        log.debug("Created shared daemon tool pool (%d workers)", _TOOL_WORKERS)
     return _SHARED_EXECUTOR
 
 
 def shutdown_shared_executor() -> None:
     """Stop the tool pool, so that a stuck tool cannot hold the exit silently.
 
-    Nothing ever stopped this pool. Its workers are non-daemon, so the one
-    that stops it is the interpreter's own atexit hook, which joins every
-    worker with no timeout — and it runs after the last line of the log.
-    A tool still executing there parks the process where no diagnostic can
-    reach it, which is what every unexplained hang looked like from outside.
-
     `wait_for` in `execute_tool_with_timeout` cancels the *await*, never the
-    thread: a tool that outlives its timeout keeps running. So the wait here
-    has to be bounded by the caller (see run_service), and whatever is still
-    running when it expires is left for the thread dump to name.
+    thread: a tool that outlives its timeout keeps running. So this waits for
+    what is still inside a worker — but only for a bounded grace, and a worker
+    that ignores it is named in the log and then left behind. It can be left
+    behind because it is a daemon thread in no atexit map; that is the whole
+    difference from the ThreadPoolExecutor this replaced.
     """
     global _SHARED_EXECUTOR
     executor, _SHARED_EXECUTOR = _SHARED_EXECUTOR, None
     if executor is None:
         return
-    # Queued calls are dropped rather than run during shutdown; only the ones
-    # already inside a worker can still delay us.
-    executor.shutdown(wait=True, cancel_futures=True)
+    survivors = executor.shutdown()
+    if survivors:
+        log.warning(
+            "Tool pool abandoned %d worker(s) still running a tool: %s — "
+            "the process can still exit; the tool's result is discarded",
+            len(survivors), ", ".join(survivors),
+        )
 
 
 def _truncate_tool_result(result: Any) -> str:
