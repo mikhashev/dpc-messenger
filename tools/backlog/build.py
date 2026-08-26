@@ -100,7 +100,12 @@ OBSERVED_RE = re.compile(r"observed in production|confirmed in production|"
                          r"наблюдено в проде|наблюдалось в проде|подтверждено в проде|"
                          r"live-verif\w* passed", re.I)
 NOT_OBSERVED_RE = re.compile(r"not yet|never|pending|awaiting|ещё не|еще не|"
-                             r"нет наблюдени|ждёт наблюдени|ждет наблюдени", re.I)
+                             r"нет наблюдени|ждёт наблюдени|ждет наблюдени|"
+                             # The run-up ends exactly where the phrase begins, so this
+                             # alternative fires only on a bare "not" sitting against it —
+                             # "Not observed in production" negates as plainly as "not yet"
+                             # and read as a claim of the opposite until it was written here.
+                             r"\bnot\s+$", re.I)
 # §2: the section an entry sits under *is* its status, and the heading duplicates it. Both
 # the checker and the write verbs read this one map, so a `move` cannot write a status the
 # checker would then refuse.
