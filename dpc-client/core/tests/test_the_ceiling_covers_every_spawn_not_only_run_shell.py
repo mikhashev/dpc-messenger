@@ -31,6 +31,16 @@ ALLOCATOR = (
 )
 
 
+# The same allocator with no newlines in it. An escaped newline does not
+# survive the trip through a git alias into `python -c`, and the version
+# that does survive is the one the git test below has to use.
+ALLOCATOR_ONE_LINE = (
+    "import time, itertools; b = []; "
+    "[(b.append(bytearray(20 * 1024 * 1024)), time.sleep(0.2)) "
+    "for _ in itertools.count()]"
+)
+
+
 def test_an_allocator_outside_run_shell_is_killed_at_the_ceiling():
     run = run_supervised(
         [sys.executable, "-c", ALLOCATOR],
@@ -75,6 +85,33 @@ def test_the_spawn_names_its_launcher(caplog):
     spawn_lines = [r.message for r in caplog.records if "spawned pid" in r.message]
     assert spawn_lines, "no spawn was logged at all"
     assert any("test(named launcher)" in line for line in spawn_lines), spawn_lines
+
+
+def test_an_allocator_under_git_dies_at_the_ceiling(monkeypatch):
+    """Johnny's condition, and he was right to insist on it.
+
+    The two tests above prove the ceiling works when called directly, and that
+    git reaches the supervisor. Composing those is an argument. This measures
+    it: a git alias with `!` runs a shell command, so the allocator is a real
+    grandchild of a real git process, counted by the tree walker rather than by
+    a stub. Observed once by hand before it was written down: the tree reached
+    233 MB against a 200 MB ceiling and was killed.
+    """
+    from dpc_client_core.dpc_agent.tools import process as process_mod
+
+    monkeypatch.setattr(process_mod, "_MEMORY_CEILING_MB", 200)
+    escaped = ALLOCATOR_ONE_LINE.replace(chr(34), chr(92) + chr(34))
+    alias = f'!"{sys.executable}" -c "{escaped}"'
+
+    repo = pathlib.Path(__file__).resolve().parents[3]
+    result = git_tool._run_git_external(
+        str(repo), ["-c", f"alias.boom={alias}", "boom"], timeout=60
+    )
+
+    assert result["success"] is False
+    # The caller has to be told the tree was killed under it. A non-zero exit
+    # with an empty stderr is what this looked like before.
+    assert "over the ceiling" in (result["error"] or ""), result["error"]
 
 
 def test_the_git_tool_spawns_through_the_supervisor(monkeypatch):

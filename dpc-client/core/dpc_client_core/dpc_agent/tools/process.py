@@ -122,8 +122,8 @@ def _watch_memory(process: "subprocess.Popen", ceiling_mb: int, verdict: dict) -
         if ceiling_mb and used > ceiling_mb:
             verdict["exceeded_mb"] = round(used)
             log.warning(
-                "run_shell: the command tree reached %d MB, over the %d MB ceiling — killing it",
-                round(used), ceiling_mb,
+                "the command tree of pid %s reached %d MB, over the %d MB ceiling — killing it",
+                process.pid, round(used), ceiling_mb,
             )
             _kill_process_tree(process)
             return
