@@ -28,7 +28,16 @@ The queue waits for the GPU to be free before each run, so it can be started
 while something else is still finishing, and it refuses to start a run that
 cannot finish before the deadline.
 
-    HF_TOKEN=... uv run --with pyarrow python eval/gaia/campaign.py --hours 7.5
+Run it from `dpc-client/core` — there is no project at the repository root for
+`uv run` to resolve, and the runs it launches are started there anyway. The
+campaign itself imports nothing outside the standard library; `--with pyarrow`
+belongs to the child command and is already in it.
+
+    cd dpc-client/core
+    HF_TOKEN=... uv run python ../../eval/gaia/campaign.py --hours 7.5
+
+A run needs about 170 minutes, so 7.5 hours starts two of the four and says so
+for the rest. The queue's order is what makes a short night still worth having.
 """
 
 from __future__ import annotations
