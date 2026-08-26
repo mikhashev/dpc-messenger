@@ -303,8 +303,13 @@ class PersonalContext:
             entries_data = topic_content.get('entries', [])
             entries = []
             for entry_data in entries_data:
+                # Filtered rather than splatted: a stored context written by a
+                # newer build carries fields this one does not declare, and the
+                # splat raises on them instead of ignoring them.
                 source_data = entry_data.get('source')
-                source = KnowledgeSource(**source_data) if source_data else None
+                source = (KnowledgeSource(**{k: v for k, v in source_data.items()
+                                             if k in {f.name for f in fields(KnowledgeSource)}})
+                          if source_data else None)
                 entries.append(KnowledgeEntry(
                     content=entry_data.get('content', ''),
                     tags=entry_data.get('tags', []),

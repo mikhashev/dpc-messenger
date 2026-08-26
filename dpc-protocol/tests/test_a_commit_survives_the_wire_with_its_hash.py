@@ -104,3 +104,33 @@ def test_an_entry_without_a_source_does_not_raise():
 
     received = KnowledgeCommit.from_dict(payload)
     assert isinstance(received.entries[0].source, KnowledgeSource)
+
+
+def test_an_absent_source_type_still_reads_as_extraction():
+    """Provenance must not change quietly when the defaulting moves.
+
+    The hand-written code defaulted `source.type` to `ai_summary` for a commit
+    arriving over the wire. The dataclass default is `manual_edit`, and
+    `markdown_manager.py:195` prints that field into the document — so letting
+    the dataclass default through would have written "Manual Edit" under a
+    peer's extracted commit. Caught in review by Ark and Johnny, not by me.
+    """
+    payload = _commit().to_dict()
+    del payload["entries"][0]["source"]["type"]
+
+    received = KnowledgeCommit.from_dict(payload)
+    assert received.entries[0].source.type == "ai_summary"
+
+
+def test_the_proposal_path_also_tolerates_a_field_from_a_future_peer():
+    """The same splat lived two functions away and took peer input too."""
+    from dpc_protocol.knowledge_commit import KnowledgeCommitProposal
+
+    proposal = KnowledgeCommitProposal(topic="protocol", entries=[
+        KnowledgeEntry(content="x", source=KnowledgeSource(type="ai_summary")),
+    ])
+    payload = proposal.to_dict()
+    payload["entries"][0]["source"]["a_field_from_a_future_version"] = 1
+
+    rebuilt = KnowledgeCommitProposal.from_dict(payload)
+    assert rebuilt.entries[0].source.type == "ai_summary"

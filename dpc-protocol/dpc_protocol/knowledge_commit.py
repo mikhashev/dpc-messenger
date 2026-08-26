@@ -119,8 +119,10 @@ class KnowledgeCommitProposal:
         entries_data = data.get('entries', [])
         entries = []
         for entry_data in entries_data:
+            # `_rebuild` rather than `KnowledgeSource(**...)`: the splat raises on
+            # a field a newer peer added, and this path takes peer input too.
             source_data = entry_data.get('source')
-            source = KnowledgeSource(**source_data) if source_data else None
+            source = _rebuild(KnowledgeSource, source_data) if source_data else None
             entries.append(KnowledgeEntry(
                 content=entry_data.get('content', ''),
                 tags=entry_data.get('tags', []),
@@ -242,7 +244,14 @@ class KnowledgeCommit:
             entry = _rebuild(KnowledgeEntry, e)
             # `source` arrives as a nested dict and must not stay one; a None
             # source used to raise here rather than fall back to an empty one.
-            entry.source = _rebuild(KnowledgeSource, e.get('source'))
+            source_data = dict(e.get('source') or {})
+            # A commit reaching us over the wire came from extraction, so an
+            # absent type is `ai_summary` — the default this path has always
+            # used. The dataclass default is `manual_edit`, and letting it
+            # through would print "Manual Edit" as the provenance of a peer's
+            # commit in `markdown_manager.py:195`.
+            source_data.setdefault('type', 'ai_summary')
+            entry.source = _rebuild(KnowledgeSource, source_data)
             entries.append(entry)
         return cls(
             commit_id=data.get('commit_id', f"commit-{uuid.uuid4().hex[:8]}"),
