@@ -6,7 +6,7 @@ Inspired by Personal Context Manager and cognitive bias research.
 """
 
 import logging
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass, field, asdict, fields as dataclass_fields
 from typing import List, Dict, Any, Optional, Literal
 from datetime import datetime, timezone
 import uuid
@@ -16,6 +16,27 @@ from cryptography.hazmat.primitives.asymmetric import rsa
 logger = logging.getLogger(__name__)
 
 from .pcm_core import KnowledgeEntry, KnowledgeSource
+
+
+def _rebuild(cls, data: Optional[Dict[str, Any]]):
+    """Rebuild a dataclass from a dict, keeping every field it actually has.
+
+    The old code listed the fields by hand and got both halves wrong: it passed
+    `alternatives` and `flagged_assumptions`, which belong to the *proposal* and
+    not to `KnowledgeEntry`, so every commit carrying an entry raised TypeError;
+    and it named four of the thirteen fields, so the nine it did not name came
+    back as defaults. Two of those nine - `cultural_specific` and
+    `alternative_viewpoints` - are hash inputs (`commit_integrity.py:77-78`),
+    which means a commit that crossed the wire recomputed to a different hash
+    and would read as tampered.
+
+    Filtering on the declared fields is the idiom already used by
+    `Preferences.from_dict` in `pcm_core`, and it degrades the right way: a
+    field a peer sends that we do not know is dropped rather than fatal, and a
+    field we know that the peer omits keeps its default.
+    """
+    known = {f.name for f in dataclass_fields(cls)}
+    return cls(**{k: v for k, v in (data or {}).items() if k in known})
 
 
 @dataclass
@@ -218,24 +239,15 @@ class KnowledgeCommit:
         """Reconstruct a KnowledgeCommit from a serialized dict (e.g. received over DPTP)."""
         entries = []
         for e in data.get('entries', []):
-            source_data = e.get('source', {})
-            source = KnowledgeSource(
-                type=source_data.get('type', 'ai_summary'),
-                conversation_id=source_data.get('conversation_id'),
-                timestamp=source_data.get('timestamp', datetime.now(timezone.utc).isoformat()),
-                participants=source_data.get('participants', [])
-            )
-            entries.append(KnowledgeEntry(
-                content=e.get('content', ''),
-                confidence=e.get('confidence', 1.0),
-                source=source,
-                tags=e.get('tags', []),
-                alternatives=e.get('alternatives', []),
-                flagged_assumptions=e.get('flagged_assumptions', [])
-            ))
+            entry = _rebuild(KnowledgeEntry, e)
+            # `source` arrives as a nested dict and must not stay one; a None
+            # source used to raise here rather than fall back to an empty one.
+            entry.source = _rebuild(KnowledgeSource, e.get('source'))
+            entries.append(entry)
         return cls(
             commit_id=data.get('commit_id', f"commit-{uuid.uuid4().hex[:8]}"),
             parent_commit_id=data.get('parent_commit_id'),
+            proposal_id=data.get('proposal_id'),
             summary=data.get('summary', ''),
             description=data.get('description', ''),
             topic=data.get('topic', ''),
