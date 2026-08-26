@@ -2122,12 +2122,15 @@ PARTICIPANTS' CULTURAL CONTEXTS:
                         / self.conversation_id / "logs" / "tools.jsonl"
                     )
                     if tools_path.exists():
+                        from .dpc_agent.tool_ledger import is_outcome
                         first_ts = timestamps[0]
                         last_ts = timestamps[-1]
                         with open(tools_path, encoding="utf-8") as tf:
                             for line in tf:
                                 try:
                                     entry = json.loads(line.strip())
+                                    if not is_outcome(entry):
+                                        continue
                                     ts = entry.get("ts", "")
                                     if first_ts <= ts <= last_ts or entry.get("session_id") == self.conversation_id:
                                         name = entry.get("tool", "unknown")

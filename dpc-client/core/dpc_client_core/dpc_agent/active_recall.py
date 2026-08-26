@@ -19,6 +19,7 @@ from typing import Dict, List, Optional
 
 from .hybrid_search import SearchResult
 from .index_keys import L5_PREFIX as L5_KEY_PREFIX, L6_PREFIX as L6_KEY_PREFIX
+from .tool_ledger import is_outcome
 from .utils import utc_now_iso
 
 log = logging.getLogger(__name__)
@@ -429,7 +430,7 @@ def _build_access_counts(agent_root: pathlib.Path) -> AccessCounts:
     # Source 2: reads the agent actually performed (tools.jsonl), recorded by address.
     for path in _read_log_paths(agent_root):
         for entry in _iter_jsonl(path):
-            if entry.get("tool", "") != "read_file":
+            if entry.get("tool", "") != "read_file" or not is_outcome(entry):
                 continue
             ts = str(entry.get("ts", ""))
             if ts and (not oldest_read or ts < oldest_read):
@@ -616,7 +617,7 @@ def compact_access_log(agent_root: pathlib.Path) -> int:
     boundary = ""
     for path in _read_log_paths(agent_root):
         for entry in _iter_jsonl(path):
-            if entry.get("tool", "") != "read_file":
+            if entry.get("tool", "") != "read_file" or not is_outcome(entry):
                 continue
             ts = str(entry.get("ts", ""))
             if ts and (not boundary or ts < boundary):

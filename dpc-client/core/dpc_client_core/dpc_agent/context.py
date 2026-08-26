@@ -29,6 +29,7 @@ from .utils import (
     utc_now_iso, read_text, clip_text, estimate_tokens, get_agent_root
 )
 from .memory import Memory
+from .tool_ledger import is_outcome
 
 log = logging.getLogger(__name__)
 
@@ -280,7 +281,7 @@ def _build_recent_sections(memory: Memory, task_id: str = "") -> List[str]:
     if progress_summary:
         sections.append("## Recent progress\n\n" + progress_summary)
 
-    tools_entries = memory.read_jsonl_tail("tools.jsonl", 200)
+    tools_entries = [e for e in memory.read_jsonl_tail("tools.jsonl", 200) if is_outcome(e)]
     if task_id:
         tools_entries = [e for e in tools_entries if e.get("task_id") == task_id]
     tools_summary = memory.summarize_tools(tools_entries)

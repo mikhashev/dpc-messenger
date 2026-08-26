@@ -30,6 +30,7 @@ from .utils import (
     load_agent_config,
 )
 from .context import CompactionState, apply_compaction
+from .tool_ledger import record_attempt, sweep_unfinished
 from .llm_adapter import DpcLlmAdapter
 from .hooks import HookContext, HookLifecycle, HookRegistry, LoopState
 from .guards import (
@@ -459,6 +460,22 @@ def _execute_single_tool(
         args = json.loads(tc["function"]["arguments"] or "{}")
     except (json.JSONDecodeError, ValueError) as e:
         result = f"⚠️ TOOL_ARG_ERROR: Could not parse arguments for '{fn_name}': {e}"
+        arg_error_log = {
+            "ts": utc_now_iso(),
+            "phase": "outcome",
+            "tool": fn_name,
+            "tool_call_id": tool_call_id,
+            "task_id": task_id,
+            "args": {},
+            "result_preview": result,
+            "is_error": True,
+            "error_category": "tool_arg_error",
+            "duration_ms": 0,
+            "round": round_number,
+        }
+        if session_id:
+            arg_error_log["session_id"] = session_id
+        append_jsonl(logs_dir / "tools.jsonl", arg_error_log)
         return {
             "tool_call_id": tool_call_id,
             "fn_name": fn_name,
@@ -494,7 +511,9 @@ def _execute_single_tool(
     # Log tool execution
     tool_log_entry = {
         "ts": utc_now_iso(),
+        "phase": "outcome",
         "tool": fn_name,
+        "tool_call_id": tool_call_id,
         "task_id": task_id,
         "args": args_for_log,
         "result_preview": sanitize_tool_result_for_log(truncate_for_log(result, 2000)),
@@ -540,6 +559,25 @@ async def _execute_with_timeout(
     fn_name = tc["function"]["name"]
     tool_call_id = tc["id"]
 
+    try:
+        attempt_args = json.loads(tc["function"]["arguments"] or "{}")
+    except (json.JSONDecodeError, ValueError):
+        attempt_args = {}
+    attempt_args_for_log = sanitize_tool_args_for_log(
+        fn_name, attempt_args if isinstance(attempt_args, dict) else {}
+    )
+    # Before the call, and from the caller rather than the executor thread: a
+    # call that is queued and never starts is a call that never returned too.
+    record_attempt(
+        logs_dir,
+        tool=fn_name,
+        tool_call_id=tool_call_id,
+        args=attempt_args_for_log,
+        task_id=task_id,
+        round_number=round_number,
+        session_id=session_id,
+    )
+
     # Use shared executor to avoid memory leak from creating new executors
     executor = _get_shared_executor()
     loop = asyncio.get_running_loop()
@@ -571,17 +609,13 @@ async def _execute_with_timeout(
         })
         # The arguments are the whole point of a timeout record: without them
         # the log says a call hung but not what it was called on.
-        try:
-            timed_out_args = json.loads(tc["function"]["arguments"] or "{}")
-        except (json.JSONDecodeError, ValueError):
-            timed_out_args = {}
         timeout_log = {
             "ts": utc_now_iso(),
+            "phase": "outcome",
             "tool": fn_name,
+            "tool_call_id": tool_call_id,
             "task_id": task_id,
-            "args": sanitize_tool_args_for_log(
-                fn_name, timed_out_args if isinstance(timed_out_args, dict) else {}
-            ),
+            "args": attempt_args_for_log,
             "result_preview": result,
             "is_error": True,
             "error_category": "timeout",
@@ -683,6 +717,7 @@ async def run_llm_loop(
     """
     logs_dir = agent_root / "logs"
     logs_dir.mkdir(parents=True, exist_ok=True)
+    sweep_unfinished(logs_dir)
 
     # Snapshot the context at loop entry — prevents race when another process()
     # or another process() call swaps ToolRegistry._ctx mid-loop.
