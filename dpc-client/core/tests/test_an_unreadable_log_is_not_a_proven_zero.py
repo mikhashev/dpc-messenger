@@ -75,6 +75,31 @@ def test_the_sweep_says_unknown_rather_than_nothing_was_abandoned(tmp_path):
     assert events[0]["evidence"] == "tools.jsonl"
 
 
+def test_a_sweep_that_could_not_read_tries_again_instead_of_forgetting(tmp_path):
+    """The once-per-directory guard applies to runs that answered.
+
+    Marking the directory swept before the read meant an unreadable log was
+    never looked at again in that process, even once it became readable.
+    """
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    blocked = _unreadable(logs / "tools.jsonl")
+    tool_ledger._swept_dirs.discard(str(logs))
+
+    assert sweep_unfinished(logs) is None
+
+    blocked.rmdir()
+    record_attempt(logs, tool="run_shell", tool_call_id="c1", args={})
+    path = logs / "tools.jsonl"
+    path.write_text(
+        path.read_text(encoding="utf-8").replace(str(os.getpid()), "424242"),
+        encoding="utf-8",
+    )
+
+    reported = sweep_unfinished(logs)
+    assert [r["tool_call_id"] for r in reported] == ["c1"]
+
+
 def test_an_empty_sweep_and_an_unreadable_one_are_different_answers(tmp_path):
     readable = tmp_path / "a" / "logs"
     readable.mkdir(parents=True)

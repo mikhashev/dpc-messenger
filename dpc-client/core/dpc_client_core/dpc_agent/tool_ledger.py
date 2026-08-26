@@ -145,11 +145,17 @@ def sweep_unfinished(logs_dir: pathlib.Path) -> Optional[List[Dict[str, Any]]]:
 
     An empty list is an established "none were left open". `None` is the other
     answer: the log could not be read, so the question stands unanswered.
+
+    LIMITS: it answers about calls this process did not make, so a call hung
+    inside a live process is not its business — the timeout closes that pair
+    within `timeout_sec`, and only a wedged event loop escapes both. And the
+    directory is marked swept on the answering runs alone: a run that could not
+    read the log leaves the question open for the next one, at the price of a
+    warning per task while the log stays unreadable.
     """
     key = str(logs_dir)
     if key in _swept_dirs:
         return []
-    _swept_dirs.add(key)
     try:
         rows = unfinished_calls(logs_dir, exclude_pid=os.getpid())
     except EvidenceReadFailed as exc:
@@ -164,6 +170,7 @@ def sweep_unfinished(logs_dir: pathlib.Path) -> Optional[List[Dict[str, Any]]]:
     except Exception:
         log.debug("tool ledger: sweep of %s failed", logs_dir, exc_info=True)
         return []
+    _swept_dirs.add(key)
     for row in rows:
         log.warning(
             "Tool call never returned: %s (task=%s, pid=%s, attempted at %s)",
