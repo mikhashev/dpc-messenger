@@ -73,51 +73,61 @@ def _norm_string(text: str) -> str:
     return " ".join(w for w in text.split() if w not in _ARTICLES)
 
 
+# The line the prompt asks for, at the start of its own line — with or without
+# the colon, because a missing colon is a formatting slip and not a wrong
+# answer. The second form allows the marker mid-line only when a separator
+# makes the span unambiguous, so "the final answer is 42" stays unmatched
+# rather than answering "is 42".
+_FINAL_ANSWER_ANCHORED = re.compile(r"^\**\s*final\s*answer\s*\**\s*[:\-]?\s*(.*)$", re.IGNORECASE)
+_FINAL_ANSWER_WITH_SEP = re.compile(r"final\s*answer\s*\**\s*[:\-]\s*(.*)$", re.IGNORECASE)
+
+
+def extract_final_answer(answer: str) -> Optional[str]:
+    """The span the prompt asked for, or None. There is no second guess."""
+    for line in reversed([ln.strip() for ln in answer.splitlines() if ln.strip()]):
+        for pattern in (_FINAL_ANSWER_ANCHORED, _FINAL_ANSWER_WITH_SEP):
+            m = pattern.search(line)
+            if m:
+                span = m.group(1).strip().strip("*").strip()
+                if span:
+                    return span
+    return None
+
+
 def scores_as_correct(answer: str, gold: str) -> bool:
-    """Official-style normalised exact match. Deterministic, no judgement."""
+    """Normalised exact match against the FINAL ANSWER span. No scavenging.
+
+    Scoring anything but that span is what made the old version wrong in both
+    directions: with three candidates and a last-number-in-free-text fallback,
+    "the correct count is 3, not 2" scored as an answer of 2.
+    """
     if not answer:
         return False
-    answer = answer.strip()
+    span = extract_final_answer(answer)
+    if span is None:
+        return False
+    return _matches(span, gold)
 
-    # The loop is told to end with the answer on its own line; take the last
-    # non-empty line, then fall back to the whole text.
-    candidates = [answer]
-    lines = [ln.strip() for ln in answer.splitlines() if ln.strip()]
-    if lines:
-        candidates.insert(0, lines[-1])
-        # "FINAL ANSWER: x" is the phrasing GAIA prompts ask for.
-        for ln in reversed(lines):
-            m = re.search(r"final answer\s*[:\-]\s*(.+)$", ln, re.IGNORECASE)
-            if m:
-                candidates.insert(0, m.group(1).strip())
-                break
 
-    gold_parts = [p.strip() for p in gold.split(",")] if "," in gold else [gold.strip()]
-
-    for cand in candidates:
-        if len(gold_parts) > 1:
-            cand_parts = [p.strip() for p in cand.split(",")]
-            if len(cand_parts) != len(gold_parts):
-                continue
-            if all(_matches_one(c, g) for c, g in zip(cand_parts, gold_parts)):
-                return True
-        elif _matches_one(cand, gold):
-            return True
-    return False
+def _matches(candidate: str, gold: str) -> bool:
+    gold = gold.strip()
+    # A comma inside a number is a thousands separator, not a list delimiter —
+    # splitting `1,234` produced a two-element gold nothing could ever match.
+    if "," in gold and _norm_number(gold) is None:
+        gold_parts = [p.strip() for p in gold.split(",")]
+        cand_parts = [p.strip() for p in candidate.split(",")]
+        if len(cand_parts) != len(gold_parts):
+            return False
+        return all(_matches_one(c, g) for c, g in zip(cand_parts, gold_parts))
+    return _matches_one(candidate, gold)
 
 
 def _matches_one(candidate: str, gold: str) -> bool:
     gold_num = _norm_number(gold)
     if gold_num is not None:
+        # The candidate must BE the number, never merely contain one.
         cand_num = _norm_number(candidate)
-        if cand_num is not None:
-            return abs(cand_num - gold_num) < 1e-6
-        # A number may sit inside a sentence; take the last number offered.
-        found = re.findall(r"-?\d[\d,]*\.?\d*", candidate)
-        if found:
-            last = _norm_number(found[-1])
-            return last is not None and abs(last - gold_num) < 1e-6
-        return False
+        return cand_num is not None and abs(cand_num - gold_num) < 1e-6
     return _norm_string(candidate) == _norm_string(gold)
 
 
