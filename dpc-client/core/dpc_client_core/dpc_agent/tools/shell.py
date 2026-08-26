@@ -276,6 +276,21 @@ def _validate_command(command: str, ctx: Optional["ToolContext"] = None) -> Opti
 _pending_approvals: dict = {}
 APPROVAL_TTL_SECONDS = 60
 
+# Answerers that are not transports the service knows about. Nothing in
+# production registers one; the eval harness does, so a headless benchmark is
+# not told there is nobody to ask while its own approver watches the queue. A
+# registered watcher can only restore the wait — it approves nothing itself.
+_approval_watchers: set = set()
+
+
+def register_approval_watcher(name: str) -> None:
+    """Declare a non-transport answerer, so the gate asks instead of refusing."""
+    _approval_watchers.add(name)
+
+
+def unregister_approval_watcher(name: str) -> None:
+    _approval_watchers.discard(name)
+
 
 def _cleanup_expired_approvals() -> None:
     """Remove pending approvals older than TTL."""
@@ -314,14 +329,15 @@ def _request_approval(ctx: ToolContext, command: str, reason: str, cwd: str, tim
     # headless web-auth gate (browser.py:2835): broadcast_event drops the request
     # when nobody is listening, so the wait below could only end in a timeout that
     # reads like a person's refusal. Telegram is the other surface that can answer,
-    # and it answers with no interface client attached, so the refusal is for the
-    # case where neither can carry the question. Before the queue entry exists,
+    # and it answers with no interface client attached. A registered watcher is
+    # the third — the eval harness declares one — so the refusal is for the case
+    # where none of them can carry the question. Before the queue entry exists,
     # not after: an unanswerable request should not be sitting anywhere.
     dpc_service = getattr(ctx, "dpc_service", None)
     local_api = getattr(dpc_service, "local_api", None) if dpc_service else None
     telegram_chat_id = getattr(ctx, "reply_telegram_chat_id", "") or ""
     ui_attached = bool(getattr(local_api, "has_clients", False)) if local_api else False
-    if not ui_attached and not telegram_chat_id:
+    if not ui_attached and not telegram_chat_id and not _approval_watchers:
         log.warning("run_shell TIER1 not asked, no surface could answer: %r", command)
         return (
             f"🚫 Approval required and nobody could be asked: no interface client is "

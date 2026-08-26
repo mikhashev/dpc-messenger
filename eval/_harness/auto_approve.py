@@ -38,6 +38,8 @@ log = logging.getLogger(__name__)
 class Tier1AutoApprover:
     """Approves Tier 1 requests as they appear. Start it, run the eval, stop it."""
 
+    _WATCHER = "eval:tier1-auto-approver"
+
     def __init__(self, poll_seconds: float = 0.2):
         self.poll_seconds = poll_seconds
         self.approved: List[str] = []
@@ -49,6 +51,12 @@ class Tier1AutoApprover:
     def start(self) -> "Tier1AutoApprover":
         if self._thread is not None:
             return self
+        # Declare this approver as an answering surface. Without it the gate
+        # refuses every Tier 1 command before the queue entry exists, so the
+        # watcher below would have nothing to drain — the state this class was
+        # written to escape, reached from the other direction.
+        from dpc_client_core.dpc_agent.tools import shell
+        shell.register_approval_watcher(self._WATCHER)
         self._thread = threading.Thread(
             target=self._watch, name="tier1-auto-approver", daemon=True
         )
@@ -60,6 +68,8 @@ class Tier1AutoApprover:
         return self
 
     def stop(self) -> None:
+        from dpc_client_core.dpc_agent.tools import shell
+        shell.unregister_approval_watcher(self._WATCHER)
         self._stop.set()
         if self._thread is not None:
             self._thread.join(timeout=5)

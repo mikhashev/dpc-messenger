@@ -10,6 +10,7 @@ the boundary that makes that safe.
 import sys
 import threading
 import time
+import types
 from pathlib import Path
 
 import pytest
@@ -63,6 +64,61 @@ def test_an_already_decided_request_is_left_alone():
             assert approver.approved == []
     finally:
         shell._pending_approvals.pop("eval-test-2", None)
+
+
+# --- the gate has to let the approver be asked in the first place ---
+
+
+def _headless_ctx(tmp_path):
+    """What run_gaia_eval builds: an agent with no service and no Telegram."""
+    return types.SimpleNamespace(
+        agent_root=tmp_path, dpc_service=None, reply_telegram_chat_id="",
+        _event_loop=None, _agent=None,
+    )
+
+
+@pytest.fixture(autouse=True)
+def _clean_watchers():
+    shell._approval_watchers.clear()
+    yield
+    shell._approval_watchers.clear()
+
+
+def test_a_headless_eval_run_is_asked_rather_than_refused(tmp_path, monkeypatch):
+    """The gate refuses when nobody could answer, and the approver is somebody.
+
+    Without this the refusal lands before the queue entry exists, the watcher
+    has nothing to drain, and the benchmark goes back to measuring the gate —
+    the state this class was written to escape, reached from the other side.
+    """
+    monkeypatch.setattr(shell, "_execute_shell_command", lambda *a, **k: "RAN")
+
+    with Tier1AutoApprover(poll_seconds=0.01) as approver:
+        result = shell._request_approval(
+            _headless_ctx(tmp_path), "echo probe", "tier1", "", 10
+        )
+        assert result == "RAN"
+        assert approver.summary()["tier1_auto_approved"] == 1
+
+
+def test_the_same_run_without_the_approver_is_refused(tmp_path, monkeypatch):
+    monkeypatch.setattr(shell, "_execute_shell_command", lambda *a, **k: "RAN")
+
+    result = shell._request_approval(
+        _headless_ctx(tmp_path), "echo probe", "tier1", "", 10
+    )
+    assert "nobody could be asked" in result
+    assert shell._pending_approvals == {}
+
+
+def test_the_approver_declares_itself_and_takes_it_back():
+    """A watcher outliving its approver would leave the gate open for the run."""
+    approver = Tier1AutoApprover(poll_seconds=0.01)
+    assert shell._approval_watchers == set()
+    approver.start()
+    assert shell._approval_watchers == {"eval:tier1-auto-approver"}
+    approver.stop()
+    assert shell._approval_watchers == set()
 
 
 def test_the_approver_is_off_unless_the_run_asks_for_it():
