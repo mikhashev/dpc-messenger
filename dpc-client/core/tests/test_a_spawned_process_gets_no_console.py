@@ -58,13 +58,14 @@ class TestEverySpawnSiteClosesStdin:
         Three files spawn processes today; if a refactor moves them, this fails
         first and says so, instead of quietly guarding an empty set.
         """
-        sites = _spawn_sites()
-        assert len(sites) >= 3, sites
-        # git.py is deliberately absent: it spawns through process.py now. If it
-        # ever reappears here, someone reintroduced a direct spawn.
-        assert {name for name, _, _ in sites} >= {"shell.py", "comfyui.py", "process.py"}
-        assert "git.py" not in {name for name, _, _ in sites}, (
-            "git.py spawns directly again — it must go through run_supervised"
+        names = {name for name, _, _ in _spawn_sites()}
+        # Two spawn sites are left in the package, and which two is the claim:
+        # process.py (the supervisor itself) and comfyui.py (the other
+        # developer's file, not yet converted — see the memory-ceiling entry).
+        assert names == {"process.py", "comfyui.py"}, (
+            "the set of files that spawn a process directly has changed. "
+            f"Found {sorted(names)}. shell.py and git.py must go through "
+            "run_supervised; a new name here is a spawn nobody supervises."
         )
 
     def test_none_of_them_inherits_the_service_console(self):

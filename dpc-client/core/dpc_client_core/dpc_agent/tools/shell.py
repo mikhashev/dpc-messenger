@@ -443,103 +443,55 @@ def _execute_shell_command(command: str, working_dir: str | None, timeout: int) 
         # reparented to init, still running and still holding the pipes.
         popen_kwargs["start_new_session"] = True
 
-    process = None
     try:
-        process = subprocess.Popen(
+        # The spawn, the watcher, the tree kill and the bounded drain used to be
+        # written out here. They are the same four things `git.py` needs, and a
+        # process-kill routine kept in two copies is how one of them ends up a
+        # version behind - so they live in `process.py` now and this is one of
+        # its two callers.
+        run = run_supervised(
             command,
-            shell=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
+            launcher="run_shell",
+            timeout=timeout,
             cwd=working_dir,
+            shell=True,
             env={**os.environ, "PYTHONIOENCODING": "utf-8"},
-            # Nobody is sitting at this process. Without it the child inherits
-            # the service's own console, so anything that asks a question —
-            # PowerShell's "Do you want to continue? [Y] Yes [N] No" on
-            # Invoke-WebRequest without -UseBasicParsing, an npm prompt, a
-            # credential helper — prints into the operator's terminal and waits
-            # there for the full timeout while the agent waits for it. Closed
-            # stdin turns that into an immediate default answer, which for a
-            # confirmation is "no": the command fails in a second and says so,
-            # instead of hanging for minutes on a question the agent cannot see.
-            stdin=subprocess.DEVNULL,
-            **popen_kwargs,
+            ceiling_mb=_MEMORY_CEILING_MB,
+            popen_kwargs=popen_kwargs,
         )
 
-        memory_verdict: dict = {}
-        if _MEMORY_CEILING_MB > 0:
-            watcher = threading.Thread(
-                target=_watch_memory,
-                args=(process, _MEMORY_CEILING_MB, memory_verdict),
-                name="dpc-shell-memory-watch",
-                daemon=True,
+        note = ""
+        if run.exceeded_mb:
+            note = (
+                f"Error: the command and its children reached "
+                f"{run.exceeded_mb} MB, over the {_MEMORY_CEILING_MB} MB "
+                f"ceiling, and were killed"
             )
-            watcher.start()
-
-        try:
-            stdout, stderr = process.communicate(timeout=timeout)
-            returncode = process.returncode
-            if memory_verdict.get("exceeded_mb"):
-                return (
-                    f"Error: the command and its children reached "
-                    f"{memory_verdict['exceeded_mb']} MB, over the "
-                    f"{_MEMORY_CEILING_MB} MB ceiling, and were killed. "
-                    f"Raise DPC_SHELL_MEMORY_LIMIT_MB (a restart applies it) "
-                    f"if this work genuinely needs more."
-                )
-        except subprocess.TimeoutExpired:
-            # `subprocess.run` was here, and what it does on Windows is the
-            # whole defect: on TimeoutExpired it calls `process.kill()` — which
-            # is TerminateProcess on the direct child only — and then calls
-            # `communicate()` **again with no timeout** to collect the reader
-            # threads. The grandchild survives holding the inherited pipe, EOF
-            # never arrives, and that second communicate waits for ever. The
-            # tool's worker is not a daemon thread, so the interpreter then
-            # joins it at exit and the whole process never terminates. Measured
-            # 2026-08-25: nine and a half hours, 28.8 GB of VRAM held by a
-            # server the hung parent could no longer reap.
-            killed = _kill_process_tree(process)
-            stdout, stderr = _drain_after_kill(process)
-            if memory_verdict.get("exceeded_mb"):
-                # The watcher already killed this tree; a descendant escaped and
-                # held the pipe until the clock ran out. Naming the clock here
-                # would tell the agent the wrong cause in exactly the case the
-                # bounded drain exists for.
-                note = (
-                    f"Error: the command and its children reached "
-                    f"{memory_verdict['exceeded_mb']} MB, over the "
-                    f"{_MEMORY_CEILING_MB} MB ceiling, and were killed"
-                    f" — {killed}. Raise DPC_SHELL_MEMORY_LIMIT_MB (a restart"
-                    f" applies it) if this work genuinely needs more."
-                )
-            else:
-                note = (
-                    f"Error: command timed out after {timeout}s"
-                    f" — {killed}."
-                )
-            tail = []
-            if stdout:
-                tail.append(_cap_stream(stdout, "stdout"))
-            if stderr:
-                tail.append(f"[stderr]\n{_cap_stream(stderr, 'stderr')}")
-            return "\n".join([note, *tail])
+            # Naming the clock when the ceiling is what fired tells the agent
+            # the wrong cause, so the timeout adds only what it knows.
+            if run.killed:
+                note += f" - {run.killed}"
+            note += (
+                ". Raise DPC_SHELL_MEMORY_LIMIT_MB (a restart applies it) "
+                "if this work genuinely needs more."
+            )
+        elif run.timed_out:
+            note = f"Error: command timed out after {timeout}s - {run.killed}."
 
         parts = []
-        if stdout:
-            parts.append(_cap_stream(stdout, "stdout"))
-        if stderr:
-            parts.append(f"[stderr]\n{_cap_stream(stderr, 'stderr')}")
-        if returncode != 0:
-            parts.append(f"[exit code: {returncode}]")
+        if run.stdout:
+            parts.append(_cap_stream(run.stdout, "stdout"))
+        if run.stderr:
+            parts.append(f"[stderr]\n{_cap_stream(run.stderr, 'stderr')}")
+        if note:
+            return "\n".join([note, *parts])
+        if run.returncode != 0:
+            parts.append(f"[exit code: {run.returncode}]")
 
         return "\n".join(parts) if parts else "(no output)"
 
     except Exception as e:
         log.error("run_shell failed: %s", e)
-        if process is not None and process.poll() is None:
-            _kill_process_tree(process)
         return f"Error: {e}"
 
 
