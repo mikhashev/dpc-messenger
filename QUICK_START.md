@@ -365,7 +365,6 @@ create it once and it stays in the sidebar.
 
 1. In the **Chats** panel on the left, click **+ Agent**.
 2. In the dialog that opens:
-   - **Chat Type:** leave as *DPC Agent (Autonomous AI with tools)*.
    - **Agent Name:** anything you like (e.g. *Ark*, *Helper*).
    - **AI Model (LLM):** pick one of the providers you configured
      in the previous step.
@@ -376,6 +375,9 @@ create it once and it stays in the sidebar.
      Firewall Rules → Agent Permissions → tools.
      See [Agent reference](./docs/agent/DPC_AGENT_GUIDE.md)
      for per-tool control.
+   - **Retrieval Vector Backend** and **Retrieval Text Backend:**
+     leave both on *native*. Grafeo is opt-in, and switching either
+     one later needs a backend restart and a re-index.
 3. Click **Create Chat**.
 4. The new agent appears in the sidebar. Click it to open the chat
    and send a first message — you should get a reply within a few
