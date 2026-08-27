@@ -5,7 +5,7 @@ found on its own and misses the one it tried and failed to open. Both external
 reviewers asked for the same field independently; this is it.
 """
 import json
-import pathlib
+import os
 
 import pytest
 
@@ -65,7 +65,12 @@ def _read(agent_root, path, via_hint=None):
 def test_follows_are_counted_apart_from_reads(agent_root):
     """Every follow is a read; not every read is a follow. One column answering
     both is where the one-in-four figure came from."""
-    doc = str(pathlib.Path("C:/store/doc.md"))
+    # Absolute on the platform running the test, not on the one that wrote it.
+    # `C:/store/doc.md` is absolute on Windows and relative on Linux, and
+    # _build_access_counts branches on exactly that: the reads went into the
+    # by-key bucket on the runner and reads_for() looked in the by-path one.
+    doc = str(agent_root / "store" / "doc.md")
+    assert os.path.isabs(doc)
     _read(agent_root, doc, via_hint=True)
     _read(agent_root, doc, via_hint=False)
     _read(agent_root, doc)
