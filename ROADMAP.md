@@ -1,6 +1,6 @@
 # D-PC Messenger Development Roadmap
 
-> **Status:** Alpha | **Last Updated:** 2026-08-09 | **Current Version:** 0.28.0 | **Current Phase:** Phase 2 (Track 1 Agent Maturity mostly complete; Track 2 Team Collaboration in progress — three nodes, star topology)
+> **Status:** Alpha | **Last Updated:** 2026-08-09 | **Current Version:** 0.29.0 | **Current Phase:** Phase 2 (Track 1 Agent Maturity mostly complete; Track 2 Team Collaboration in progress — three nodes, star topology)
 
 ---
 
