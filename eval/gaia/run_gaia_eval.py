@@ -290,111 +290,128 @@ async def main_async(args) -> int:
     print(f"provider: {entry['alias']!r} type={entry.get('type')} model={entry.get('model')}")
 
     llm = LLMManager(config_path=providers_path)
-    agent = DpcAgent(llm_manager=llm, config=AgentConfig(), agent_root=agent_root)
+    try:
+        agent = DpcAgent(llm_manager=llm, config=AgentConfig(), agent_root=agent_root)
 
-    approver = None
-    if args.auto_approve:
-        from _harness.auto_approve import Tier1AutoApprover
-        approver = Tier1AutoApprover().start()
-        print("Tier 1 auto-approval ON (Tier 2 still blocked)", flush=True)
+        approver = None
+        if args.auto_approve:
+            from _harness.auto_approve import Tier1AutoApprover
+            approver = Tier1AutoApprover().start()
+            print("Tier 1 auto-approval ON (Tier 2 still blocked)", flush=True)
 
-    results = []
-    started = time.time()
-    for i, row in enumerate(rows, 1):
-        attachment = None
-        if row.get("file_name"):
-            attachment = fetch_attachment(token, row["file_name"], attachments_dir)
-        outcome = await run_one(agent, row, attachment)
-        results.append(outcome)
-        mark = "OK  " if outcome["correct"] else "MISS"
-        # flush: redirected stdout is block-buffered, so a run watched through
-        # a log file showed zero completed tasks for over an hour while the
-        # agent was demonstrably on its third. The progress line is the only
-        # window into a run that takes hours; it has to reach the file.
-        print(f"  [{i:2}/{len(rows)}] {mark} {outcome['seconds']:6.1f}s  "
-              f"gold={outcome['gold'][:28]!r:32} got={outcome['answer'][-60:].strip()!r}",
+        results = []
+        started = time.time()
+        for i, row in enumerate(rows, 1):
+            attachment = None
+            if row.get("file_name"):
+                attachment = fetch_attachment(token, row["file_name"], attachments_dir)
+            outcome = await run_one(agent, row, attachment)
+            results.append(outcome)
+            mark = "OK  " if outcome["correct"] else "MISS"
+            # flush: redirected stdout is block-buffered, so a run watched through
+            # a log file showed zero completed tasks for over an hour while the
+            # agent was demonstrably on its third. The progress line is the only
+            # window into a run that takes hours; it has to reach the file.
+            print(f"  [{i:2}/{len(rows)}] {mark} {outcome['seconds']:6.1f}s  "
+                  f"gold={outcome['gold'][:28]!r:32} got={outcome['answer'][-60:].strip()!r}",
+                  flush=True)
+
+        if approver is not None:
+            approver.stop()
+        correct = sum(1 for r in results if r["correct"])
+
+        def _sum(field):
+            vals = [r["usage"].get(field) for r in results]
+            present = [v for v in vals if isinstance(v, (int, float))]
+            # Three numbers, never two: how many tasks reported it, how many did
+            # not, and the total over those that did.
+            return {"total": sum(present), "reported_by": len(present),
+                    "not_reported_by": len(vals) - len(present)}
+        report = {
+            "benchmark": "GAIA L1 validation",
+            "model": entry.get("model"),
+            "provider_type": entry.get("type"),
+            "temperature": entry.get("temperature"),
+            "reasoning_effort": entry.get("reasoning_effort", "(template default: xhigh)"),
+            "tasks": len(results),
+            "correct": correct,
+            "accuracy": round(correct / len(results), 3) if results else 0.0,
+            "seconds": round(time.time() - started, 1),
+            "with_attachments": args.with_files,
+            "caveat": (
+                "Not comparable with any published figure unless model, quantisation, "
+                "context window, step budget and memory configuration all match."
+            ),
+            "tokens": {
+                "prompt": _sum("prompt_tokens"),
+                "completion": _sum("completion_tokens"),
+                "total": _sum("total_tokens"),
+                "rounds": _sum("rounds"),
+                "cost_usd": _sum("cost_usd"),
+                "prompt_cache_hit": _sum("prompt_cache_hit_tokens"),
+                "prompt_cache_miss": _sum("prompt_cache_miss_tokens"),
+                "note": ("cache hit/miss is reported only by providers that expose a "
+                         "prompt cache; reported_by / not_reported_by above say which "
+                         "of this run's tasks did, so absent never reads as zero"),
+            },
+            "results": results,
+            **({"approvals": approver.summary()} if approver is not None else {}),
+            "provenance": provenance.snapshot(
+                repo_root=HERE.parent.parent,
+                provider_entry=entry,
+                dataset={
+                    "repo": REPO,
+                    "split_file": SPLIT,
+                    "revision": _DATASET_STATE.get("revision", "[unresolved]"),
+                    "local_path": _DATASET_STATE.get("local_path", "[unresolved]"),
+                    "tasks_selected": len(rows),
+                    "attachments_included": args.with_files,
+                    "limit": args.limit,
+                },
+                harness_file=Path(__file__).resolve(),
+                argv=sys.argv[1:],
+                extra={
+                    "scoring": "normalised exact match; numbers as numbers, "
+                               "comma lists elementwise, strings lowercased and "
+                               "de-articled; no model judges anything",
+                    "tier1_auto_approved": bool(args.auto_approve),
+                },
+            ),
+        }
+        print()
+        tok = report["tokens"]["total"]
+        print(f"{correct}/{len(results)} = {report['accuracy']:.1%} on {entry.get('model')} "
+              f"in {report['seconds']}s | {tok['total']} tokens over {tok['reported_by']} task(s)",
               flush=True)
+        print("NOT comparable with atomic-agent's 69.8%: different model and setup.")
 
-    if approver is not None:
-        approver.stop()
-    correct = sum(1 for r in results if r["correct"])
+        if args.json:
+            out = Path(args.json)
+            out.parent.mkdir(parents=True, exist_ok=True)
+            out.write_text(json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8")
+            provenance.write_beside(out, report["provenance"])
+            print(f"full report -> {out}", flush=True)
+            # The tool ledger this run wrote is evidence, and the cleanup below
+            # deletes it with the workdir — so a night could score itself and never
+            # be an observation of anything. Copied beside the report instead.
+            logs_src = agent_root / "logs"
+            if logs_src.is_dir():
+                logs_dst = out.parent / f"{out.stem}.agent-logs"
+                shutil.rmtree(logs_dst, ignore_errors=True)
+                shutil.copytree(logs_src, logs_dst)
+                print(f"agent logs  -> {logs_dst}", flush=True)
 
-    def _sum(field):
-        vals = [r["usage"].get(field) for r in results]
-        present = [v for v in vals if isinstance(v, (int, float))]
-        # Three numbers, never two: how many tasks reported it, how many did
-        # not, and the total over those that did.
-        return {"total": sum(present), "reported_by": len(present),
-                "not_reported_by": len(vals) - len(present)}
-    report = {
-        "benchmark": "GAIA L1 validation",
-        "model": entry.get("model"),
-        "provider_type": entry.get("type"),
-        "temperature": entry.get("temperature"),
-        "reasoning_effort": entry.get("reasoning_effort", "(template default: xhigh)"),
-        "tasks": len(results),
-        "correct": correct,
-        "accuracy": round(correct / len(results), 3) if results else 0.0,
-        "seconds": round(time.time() - started, 1),
-        "with_attachments": args.with_files,
-        "caveat": (
-            "Not comparable with any published figure unless model, quantisation, "
-            "context window, step budget and memory configuration all match."
-        ),
-        "tokens": {
-            "prompt": _sum("prompt_tokens"),
-            "completion": _sum("completion_tokens"),
-            "total": _sum("total_tokens"),
-            "rounds": _sum("rounds"),
-            "cost_usd": _sum("cost_usd"),
-            "prompt_cache_hit": _sum("prompt_cache_hit_tokens"),
-            "prompt_cache_miss": _sum("prompt_cache_miss_tokens"),
-            "note": ("cache hit/miss is reported by providers that expose a prompt "
-                     "cache; the local llama.cpp path does not today, so those two "
-                     "read not_reported_by=<all tasks> rather than zero"),
-        },
-        "results": results,
-        **({"approvals": approver.summary()} if approver is not None else {}),
-        "provenance": provenance.snapshot(
-            repo_root=HERE.parent.parent,
-            provider_entry=entry,
-            dataset={
-                "repo": REPO,
-                "split_file": SPLIT,
-                "revision": _DATASET_STATE.get("revision", "[unresolved]"),
-                "local_path": _DATASET_STATE.get("local_path", "[unresolved]"),
-                "tasks_selected": len(rows),
-                "attachments_included": args.with_files,
-                "limit": args.limit,
-            },
-            harness_file=Path(__file__).resolve(),
-            argv=sys.argv[1:],
-            extra={
-                "scoring": "normalised exact match; numbers as numbers, "
-                           "comma lists elementwise, strings lowercased and "
-                           "de-articled; no model judges anything",
-                "tier1_auto_approved": bool(args.auto_approve),
-            },
-        ),
-    }
-    print()
-    tok = report["tokens"]["total"]
-    print(f"{correct}/{len(results)} = {report['accuracy']:.1%} on {entry.get('model')} "
-          f"in {report['seconds']}s | {tok['total']} tokens over {tok['reported_by']} task(s)",
-          flush=True)
-    print("NOT comparable with atomic-agent's 69.8%: different model and setup.")
-
-    if args.json:
-        out = Path(args.json)
-        out.parent.mkdir(parents=True, exist_ok=True)
-        out.write_text(json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8")
-        provenance.write_beside(out, report["provenance"])
-        print(f"full report -> {out}", flush=True)
-
-    if not args.keep:
-        shutil.rmtree(workdir, ignore_errors=True)
-    return 0
-
+        if not args.keep:
+            shutil.rmtree(workdir, ignore_errors=True)
+        return 0
+    finally:
+        # Without this the llama-server the provider spawned outlives the run,
+        # and the campaign's own GPU gate then waits for a child of the run
+        # before it: 0 of 4 runs started on 2026-08-25, 1 of 4 on 2026-08-27.
+        try:
+            await llm.shutdown()
+        except Exception as exc:
+            print(f"warning: provider shutdown failed: {exc}", flush=True)
 
 def main() -> int:
     # Model answers carry arrows, dashes and non-Latin text; a Windows console
