@@ -40,9 +40,21 @@ class Tier1AutoApprover:
 
     _WATCHER = "eval:tier1-auto-approver"
 
+    # The one reason it answers. Everything else — the sandbox boundary above
+    # all — is a question it is not entitled to answer.
+    _APPROVABLE = "Requires approval:"
+    # Tier 1 commands that are destructive on their own terms, listed because
+    # "Tier 2 stays blocked" is true and undersells what an unattended yes
+    # would otherwise wave through.
+    _NEVER = (
+        "reset --hard", "clean -f", "clean -d", "reg add", "reg delete",
+        "net user", "systemctl stop", "shutdown", "diskpart", "format ",
+    )
+
     def __init__(self, poll_seconds: float = 0.2):
         self.poll_seconds = poll_seconds
         self.approved: List[str] = []
+        self.refused: List[tuple] = []
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
 
@@ -93,15 +105,51 @@ class Tier1AutoApprover:
                 log.warning("auto-approver hiccup: %s: %s", type(exc).__name__, exc)
             self._stop.wait(self.poll_seconds)
 
+    def verdict(self, entry: dict) -> tuple:
+        """(approve, why). A yes needs a reason it recognises; anything else is no.
+
+        Tier 1 is not one thing. `Requires approval: …` is the case this class
+        was written for — a command a person would have glanced at. **Leaving
+        the sandbox is also only Tier 1**, and answering that the same way
+        demotes the sandbox boundary to a prompt and then answers the prompt:
+        the overnight run of 2026-08-25 reached the operator's real interpreter,
+        `pip install` into it, the network, and Tesseract that way.
+
+        And some Tier 1 commands are destructive on their own terms. A yes with
+        nobody watching has no business reaching them.
+        """
+        reason = entry.get("reason")
+        if not reason:
+            # An approver that cannot see why cannot judge. Refusing is the
+            # only honest answer, and it is also what an old queue entry gets.
+            return False, "the queue entry carries no reason"
+        if not reason.startswith(self._APPROVABLE):
+            return False, reason
+        command = (entry.get("command") or "").lower()
+        for pattern in self._NEVER:
+            if pattern in command:
+                return False, f"destructive without a person: {pattern!r}"
+        return True, reason
+
     def _drain(self, shell) -> None:
         # A copy: the waiting thread pops entries out from under us.
         for request_id, entry in list(shell._pending_approvals.items()):
             if entry.get("decision"):
                 continue
-            entry["decision"] = "approved"
             command = entry.get("command", "")
-            self.approved.append(command)
-            log.info("auto-approved Tier 1 (%s): %r", request_id, command[:120])
+            approve, why = self.verdict(entry)
+            if approve:
+                entry["decision"] = "approved"
+                self.approved.append(command)
+                log.info("auto-approved Tier 1 (%s): %r", request_id, command[:120])
+            else:
+                entry["decision"] = "rejected"
+                entry["result"] = (
+                    f"❌ Refused by the eval approver: {why}. "
+                    "It answers «a person would have glanced at this» and nothing else."
+                )
+                self.refused.append((command, why))
+                log.warning("auto-REFUSED Tier 1 (%s): %s — %r", request_id, why, command[:120])
             event = entry.get("event")
             if event is not None:
                 event.set()
@@ -113,4 +161,8 @@ class Tier1AutoApprover:
             "tier1_auto_approved": len(self.approved),
             # Truncated: a full command can carry an entire inlined script.
             "tier1_commands": [c[:200] for c in self.approved],
+            # Three numbers, not one: what it said yes to, what it said no to,
+            # and why — a report with only the yes count cannot be audited.
+            "tier1_auto_refused": len(self.refused),
+            "tier1_refusals": [{"command": c[:200], "why": w} for c, w in self.refused],
         }

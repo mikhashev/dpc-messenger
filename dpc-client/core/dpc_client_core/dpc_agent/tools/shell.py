@@ -358,6 +358,10 @@ def _request_approval(ctx: ToolContext, command: str, reason: str, cwd: str, tim
 
     _pending_approvals[request_id] = {
         "command": command,
+        # Why this is Tier 1, kept where the queue can be read. Without it an
+        # approver cannot tell "needs a judgement" from "leaves the sandbox"
+        # and can only answer both the same way.
+        "reason": reason,
         "cwd": cwd or str(ctx.agent_root),
         "timeout": timeout,
         "agent_name": agent_name,

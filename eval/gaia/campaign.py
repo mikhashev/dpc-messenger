@@ -68,29 +68,103 @@ QUEUE = [
      "why": "does less thinking cost accuracy, measured against the greedy reference"},
 ]
 
-GPU_FREE_MIB = 6000
+# What one run actually occupies: the 16 GB model plus its KV cache. The gate
+# used to ask whether the card was *idle* (`used < 6000`), which is a different
+# question and one the resident server can never answer yes to — so a run could
+# deadlock the queue behind itself even when it leaked nothing.
+GPU_NEEDED_MIB = 26000
 POLL_SECONDS = 60
+REPORT_EVERY = 5            # polls; one line a minute for eight hours is not a report
+DEFAULT_WAIT_BUDGET_MIN = 30
+# Names worth naming when the card is held. Windows does not attribute VRAM per
+# process under WDDM — `nvidia-smi --query-compute-apps` returns `[N/A]` for
+# every used_memory here — so these are candidates, never proof.
+_COMPUTE_NAMES = ("llama-server", "python", "ollama", "camoufox")
 
 
-def gpu_used_mib() -> int:
+def gpu_free_mib():
+    """Free VRAM in MiB, or None where there is no nvidia-smi to ask.
+
+    Three answers, not two. A number is a reading. `0` means the tool ran and
+    the reading did not come back, and unknown is not "plenty" — refusing to
+    start is the safe half. `None` means there is no NVIDIA card to contend
+    for at all (a Mac, an AMD box), where a gate on its VRAM guards nothing
+    and must not become a wall.
+    """
     try:
         out = subprocess.run(
-            ["nvidia-smi", "--query-gpu=memory.used", "--format=csv,noheader,nounits"],
+            ["nvidia-smi", "--query-gpu=memory.free", "--format=csv,noheader,nounits"],
             capture_output=True, text=True, timeout=30,
         )
-        return int(out.stdout.strip().splitlines()[0])
+    except FileNotFoundError:
+        return None
     except Exception:
+        return 0
+    try:
+        return int(out.stdout.strip().splitlines()[0])
+    except (ValueError, IndexError):
         return 0
 
 
-def wait_for_gpu(deadline: datetime) -> bool:
-    """True when the GPU looks free; False if the deadline arrived first."""
-    while datetime.now() < deadline:
-        used = gpu_used_mib()
-        if used < GPU_FREE_MIB:
+def gpu_holder_candidates() -> list:
+    """Compute processes on the card, by pid and name. Never a MiB per process."""
+    try:
+        out = subprocess.run(
+            ["nvidia-smi", "--query-compute-apps=pid,process_name",
+             "--format=csv,noheader,nounits"],
+            capture_output=True, text=True, timeout=30,
+        )
+    except Exception:
+        return []
+    holders = []
+    for line in out.stdout.strip().splitlines():
+        parts = [p.strip() for p in line.split(",", 1)]
+        if len(parts) != 2:
+            continue
+        pid, name = parts
+        if any(w in name.lower() for w in _COMPUTE_NAMES):
+            base = name.replace("\\", "/").rsplit("/", 1)[-1]
+            holders.append(f"{base} (pid {pid})")
+    return holders
+
+
+def wait_for_gpu(deadline: datetime, budget_minutes: float = DEFAULT_WAIT_BUDGET_MIN) -> bool:
+    """True when the card has room for a run.
+
+    Two things the previous version did not do. It says **what** is holding the
+    card rather than repeating the same number — the 2026-08-25 log carries 598
+    identical `waiting for the GPU (28 848 MiB in use)` lines and names nothing.
+    And it gives up after a budget instead of spending the night: a card that is
+    not free in half an hour is not going to give a clean measurement anyway.
+
+    It does not reclaim anything. Killing a process that might be a colleague's
+    is a decision for a person — the one orphan killed by hand on 2026-08-27
+    took three checks first (parent dead, nothing connected, sole instance).
+    """
+    started = datetime.now()
+    give_up_at = started + timedelta(minutes=budget_minutes)
+    polls = 0
+    while datetime.now() < deadline and datetime.now() < give_up_at:
+        free = gpu_free_mib()
+        if free is None:
+            print("  no nvidia-smi on this machine: the VRAM gate does not apply",
+                  flush=True)
             return True
-        print(f"  waiting for the GPU ({used} MiB in use)…", flush=True)
+        if free >= GPU_NEEDED_MIB:
+            return True
+        if polls % REPORT_EVERY == 0:
+            waited = (datetime.now() - started).total_seconds() / 60
+            holders = gpu_holder_candidates()
+            who = ", ".join(holders) if holders else "no compute process named it"
+            print(f"  waiting for the GPU: {free} MiB free, {GPU_NEEDED_MIB} needed, "
+                  f"{waited:.0f} min so far — held by: {who}", flush=True)
+        polls += 1
         time.sleep(POLL_SECONDS)
+    waited = (datetime.now() - started).total_seconds() / 60
+    if datetime.now() >= give_up_at:
+        print(f"  giving up on the GPU after {waited:.0f} min "
+              f"({gpu_free_mib()} MiB free, {GPU_NEEDED_MIB} needed)", flush=True)
+
     return False
 
 
@@ -138,6 +212,8 @@ def main() -> int:
                     help="stop starting new runs this long from now")
     ap.add_argument("--minutes-per-run", type=float, default=170,
                     help="a run is not started unless this much time is left")
+    ap.add_argument("--wait-budget-minutes", type=float, default=DEFAULT_WAIT_BUDGET_MIN,
+                    help="stop waiting for the card after this long and say so")
     args = ap.parse_args()
 
     RESULTS.mkdir(parents=True, exist_ok=True)
@@ -152,8 +228,9 @@ def main() -> int:
             print(f"skipping {cfg['name']}: {left:.0f} min left, "
                   f"a run needs about {args.minutes_per_run:.0f}", flush=True)
             continue
-        if not wait_for_gpu(deadline):
-            print("deadline reached while waiting for the GPU", flush=True)
+        if not wait_for_gpu(deadline, args.wait_budget_minutes):
+            print("not starting the rest of the queue: the card never came free",
+                  flush=True)
             break
         done.append(run_one(cfg, deadline, stamp))
         summary = RESULTS / f"{stamp}-campaign.json"
