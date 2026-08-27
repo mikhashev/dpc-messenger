@@ -326,7 +326,7 @@ An empty default means the key is written blank and the feature stays off until 
 
 | Key | Default | Notes |
 |---|---|---|
-| `reject_unsigned` | `false` | Refuse a synced record that carries no signature (it is stored labelled `unsigned` either way) |
+| `reject_unsigned` | `false` | Refuse a synced record whose signature this node cannot check (stored labelled `verification: legacy` either way) |
 
 #### `[hole_punch]`
 

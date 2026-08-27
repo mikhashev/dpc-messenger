@@ -3017,7 +3017,11 @@ PARTICIPANTS' CULTURAL CONTEXTS:
         return chained
 
     def _reject_unsigned(self) -> bool:
-        """Whether an unsigned record is refused rather than stored labelled."""
+        """Whether a record this node cannot check is refused rather than labelled.
+
+        Covers both classes the gate calls `legacy`: no signature fields, and a
+        preimage version this node cannot recompute.
+        """
         getter = getattr(self.settings, "get_reject_unsigned_history", None)
         if not callable(getter):
             return False
@@ -3190,7 +3194,7 @@ PARTICIPANTS' CULTURAL CONTEXTS:
             logger.warning("Merge refused %d of %d records", rejected, len(remote_messages))
         if legacy:
             logger.warning(
-                "Merged %d unsigned record(s) into %s: stored labelled, not checked",
+                "Merged %d unsigned record(s) into %s: stored `verification: legacy`, not checked",
                 legacy, self.conversation_id,
             )
         if added > 0:

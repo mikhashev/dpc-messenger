@@ -196,7 +196,7 @@ class Settings:
         self._config['history'] = {
             # Off while history written before ADR-036 is still in circulation:
             # it carries no signature, and a third of what is on disk is that old.
-            'reject_unsigned': 'false'  # Refuse a synced record that carries no signature (it is stored labelled `unsigned` either way)
+            'reject_unsigned': 'false'  # Refuse a synced record whose signature this node cannot check (stored labelled `verification: legacy` either way)
         }
 
         self._config['file_transfer'] = {
@@ -464,13 +464,17 @@ class Settings:
         return value.lower() in ('true', '1', 'yes')
 
     def get_reject_unsigned_history(self) -> bool:
-        """Whether a history record arriving without a signature is refused.
+        """Whether a history record this node cannot check is refused.
+
+        Two classes, not one — the key names the first and gates both: a record
+        carrying no signature fields, and one signed over a `PREIMAGE_VERSION`
+        this node cannot recompute.
 
         Off by default: records written before ADR-036 carry no signature, and
         export_history ships none for them, so refusing would strand history
-        that already exists. Turn it on once those have aged out — with it off,
-        such a record is still stored labelled `verification: unsigned`, never
-        as a checked one.
+        that already exists. Turn it on once those have aged out — with it off
+        such a record is stored labelled `verification: legacy`, the live
+        path's word for the same absence, never as a checked one.
         """
         value = self.get('history', 'reject_unsigned', 'false')
         return value.lower() in ('true', '1', 'yes')
