@@ -106,6 +106,53 @@ the whole point of the table: `—` in the hash position is correct for four of 
 Never backfill closure lines onto old entries. Inventing a date or a hash for something
 nobody recorded is manufacturing data, and the archive's own rule already forbids it.
 
+### The session identifier
+
+`S<YYYY-MM-DD>.<N>` — the UTC date the session was opened, then its position among the
+sessions opened on that date. Current example: `S2026-08-27.1`.
+
+Decided by Mike on 2026-08-27 (UTC), after three numbering families had accumulated and
+one identifier already named two different sessions —
+`THE-SAME-SESSION-IDENTIFIER-NAMES-TWO-DIFFERENT-SESSIONS` in the backlog carries the
+measurements. **UTC, not the machine clock**, because the store the number is derived from
+already stamps UTC: `2026-08-27T12-07-16_reset_session.json` has a local mtime of
+`2026-08-27 19:07:16` on the box that wrote it. At the hours this team works those two
+clocks are a day apart, so an unnamed clock is a second collision waiting.
+
+**Derivation, mechanical and re-runnable** — the archive of the DPC Project group is the
+source, one file per reset, and a reset is what opens the next session:
+
+```bash
+A=~/.dpc/conversations/group-b88b65076b85-dpc-project/archive
+find "$A" -name '*_reset_session.json' -printf '%f\n' | sort | tail -1   # opened the live session
+find "$A" -name "2026-08-27*_reset_session.json" | wc -l                  # how many opened that UTC day
+```
+
+The last filename gives the date; the count of that day's files gives `N` (the live session
+is the last of them). Nobody carries the number in their head, and nobody derives it from a
+scratchpad.
+
+**The three families it replaces are historical and are not renumbered.** Renaming would
+break `origin`, which is the field this board is worth reading for.
+
+| family | example | why it is retired |
+|---|---|---|
+| plain ordinal | `S21`, `S72`, up to at least `S223` | carries no date and is not unique — `S24` names both an April and an August session |
+| archive count | `S123`, written into closure lines on 2026-08-26/27 | reproducible, but its first number collided at once: `S123` already named the May Grafeo session |
+| pre-repository | `S47`–`S206` as cited in ROADMAP | the observations they stand for were never written into this repository, so the tokens resolve to nothing |
+
+A closure line carrying one of these stays as written. Only the date beside it tells the
+eras apart, which is why the date field is not optional.
+
+**Not enforced by the tool.** `build.py close` requires `--session` to be present and does
+not look at its shape, so this section is the only place the scheme exists. A format check
+there is a reasonable follow-up and is deliberately not being added in the same edit that
+writes the rule.
+
+**Scope.** This governs the session identifier only. Dates elsewhere on the board — an
+entry's envelope, a dated amendment — keep the convention they already had, which is the
+writer's local day. Unifying those is a separate question and is not settled here.
+
 ## 4. Fields we deliberately do **not** have
 
 Both reviews agreed with the maintainer's list, and the reasons are worth keeping because
