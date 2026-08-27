@@ -149,9 +149,11 @@ not look at its shape, so this section is the only place the scheme exists. A fo
 there is a reasonable follow-up and is deliberately not being added in the same edit that
 writes the rule.
 
-**Scope.** This governs the session identifier only. Dates elsewhere on the board — an
-entry's envelope, a dated amendment — keep the convention they already had, which is the
-writer's local day. Unifying those is a separate question and is not settled here.
+**Scope.** The closure line is UTC in both of its first two fields: the session id and the
+date beside it. They sit together and a reader compares them, so a UTC id next to a local
+date would rebuild the ambiguity this section exists to remove. Dates elsewhere on the
+board — an entry's envelope, a dated amendment — keep the convention they already had,
+which is the writer's local day. Unifying those is a separate question, not settled here.
 
 ## 4. Fields we deliberately do **not** have
 
