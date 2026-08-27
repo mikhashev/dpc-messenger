@@ -333,23 +333,30 @@ handshake. Both reviewers converged on flag-not-reject independently.
 
 ## Implementation Status
 
-**Nothing is signed on the wire yet.** The two Done rows are plumbing that
-changes no behaviour on its own: a certificate store that can now answer, and a
-preimage nobody computes at send time. Read the table as "the parts exist", not
-as "signatures are travelling".
+**Signatures travel.** This preface read "nothing is signed on the wire yet"
+for three weeks after `1f2c10cd` made it untrue: the table was written before
+that commit and never revisited. Measured on this box 2026-08-28 — 360 of 535
+stored records carry `preimage_version: dptp-msg-v1` with a signature and a
+signer beside it. The rows below were re-checked against the code that day.
 
 | Task | Status | Commit |
 |------|--------|--------|
 | Persist the peer certificate the handshake proved | Done | `73a48a20` |
 | Canonical preimage + spec §4.1 | Done | `634e13e1` |
 | Roster gate — precondition for enforcement | Done | `4d3b7442` |
-| Normalise `sender_name` / `agent_owner` (before signing) | Pending | — |
-| Sign at send; fields into `GROUP_TEXT` | Pending | — |
-| Verify on receive; stop re-signing on store | Pending | — |
-| Author from the signed payload (relay) | Pending | — |
-| `export_history` + `merge_history` | Pending | — |
+| Normalise `sender_name` / `agent_owner` (before signing) | Done | `1f2c10cd` |
+| Sign at send; fields into `GROUP_TEXT` | Done | `1f2c10cd` |
+| Verify on receive; stop re-signing on store | Done | `1f2c10cd` |
+| Author from the signed payload (relay) | Done | `1f2c10cd` |
+| Re-check a parked `unverified` once the certificate arrives | Done | `reverify_author` |
+| `export_history` + `merge_history` | Done | `1f2c10cd`, `3f233e75` |
 | Capability flag and staged enforcement | Pending | — |
 | Verification states in the UI | Pending | — |
+
+The last row stays Pending on the evidence: `group_handler` broadcasts a
+`verification` field with every group message and nothing under
+`dpc-client/ui/src` reads it. A verdict computed and never shown is the shape
+this codebase produces most often.
 
 ## Open Questions
 
@@ -363,10 +370,16 @@ as "signatures are travelling".
   The reasoning from code was right; this is no longer inference.
 - **Q2:** ~~Per-author feeds (Option D) — own ADR, or folded in later?~~ Answered:
   [ADR-037](037-author-attribution-chains.md), phased, and not called feeds.
-- **Q3:** `import_history` still replaces a conversation wholesale, though a
+- **Q3:** ~~`import_history` still replaces a conversation wholesale, though a
   reply is now only accepted against a request we made (`4d3b7442`). Delete the
-  path or bring it under the same verification rules? Owned by ADR-037 phase β,
-  where the rest of history sync lives. — @CC
+  path or bring it under the same verification rules?~~ **Brought under them,
+  `3f233e75`.** It was the wider of the two doors: no check at all, while
+  replacing an entire conversation. The request registry proves we asked the
+  question, never that the answer is honest. Both paths now pass one gate
+  (`_verify_incoming`, spec §4.2), every record leaves it with a verdict, and an
+  import that survives nothing is refused whole rather than emptying the
+  conversation. It still replaces rather than merges — that half stays with
+  ADR-037 phase β. — @CC
 - **Q6:** ~~Where does an advertised capability live?~~ **Decided 2026-08-06
   (Mike): a `capabilities` field in HELLO.** Implementation with @Ark. Two
   details still belong to whoever builds it: the observed capability has to
