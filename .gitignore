@@ -167,4 +167,10 @@ cc-out*.md
 # of filenames that has to be maintained every time a view is added.
 tools/backlog/*.html
 tools/backlog/*.json
+
+# GAIA run output. Every results JSON stores each task's `gold` in plaintext, so
+# committing one publishes the benchmark's answer key — and the logs beside it
+# print the same values. Nothing here has ever been tracked; this keeps a
+# `git add -A` from being the first time.
+eval/gaia/results/
 dpc-client/core/config.ini
