@@ -130,6 +130,68 @@ def _watch_memory(process: "subprocess.Popen", ceiling_mb: int, verdict: dict) -
         time.sleep(_MEMORY_POLL_SECONDS)
 
 
+def _parent_map_from_proc() -> dict:
+    """child pids by parent pid, read from /proc. Empty where there is none."""
+    proc = os.path.join(os.sep, "proc")
+    if not os.path.isdir(proc):
+        return {}
+    children: dict = {}
+    for name in os.listdir(proc):
+        if not name.isdigit():
+            continue
+        try:
+            with open(os.path.join(proc, name, "status"), encoding="utf-8") as fh:
+                for line in fh:
+                    if line.startswith("PPid:"):
+                        children.setdefault(int(line.split()[1]), []).append(int(name))
+                        break
+        except (OSError, ValueError):
+            continue  # the process ended while we were reading it
+    return children
+
+
+def _parent_map_from_ps(pid: int) -> dict:
+    try:
+        out = subprocess.run(
+            ["ps", "-Ao", "pid=,ppid="],
+            capture_output=True, text=True, timeout=10, stdin=subprocess.DEVNULL,
+        )
+    except Exception as exc:
+        log.warning("could not list processes to find the children of %s: %s", pid, exc)
+        return {}
+    children: dict = {}
+    for line in out.stdout.splitlines():
+        parts = line.split()
+        if len(parts) == 2 and parts[0].isdigit() and parts[1].isdigit():
+            children.setdefault(int(parts[1]), []).append(int(parts[0]))
+    return children
+
+
+def _descendants(pid: int) -> list:
+    """Every descendant of `pid`, by parent link, collected before any kill.
+
+    `setsid` changes a process's session and group and leaves its parent link
+    alone, so this walk finds exactly what `killpg` cannot reach. It has to run
+    **first**: once the parent dies the survivors are reparented to init and
+    there is nothing left to walk from.
+
+    `/proc` before `ps`, and the order is not a preference. A slim container is
+    where an agent's work actually runs and `python:3.12-slim` carries no `ps`
+    at all — measured 2026-08-27, where the first version of this walk degraded
+    to a warning and the escaped grandchild lived. `/proc` is part of Linux;
+    `ps` is the fallback for macOS, which has no `/proc` and always has `ps`.
+    """
+    children = _parent_map_from_proc() or _parent_map_from_ps(pid)
+    if not children:
+        return []
+    found, stack = [], [pid]
+    while stack:
+        for child in children.get(stack.pop(), ()):
+            found.append(child)
+            stack.append(child)
+    return found
+
+
 def _kill_process_tree(process: "subprocess.Popen") -> str:
     """Kill the command and everything it started. Returns what happened, for the agent.
 
@@ -165,11 +227,37 @@ def _kill_process_tree(process: "subprocess.Popen") -> str:
         except Exception as exc:
             log.warning("taskkill on pid %s failed: %s", pid, exc)
     else:
+        # Measured 2026-08-27 against this very function in a Linux container:
+        # a grandchild started with `start_new_session=True` outlived the killpg
+        # and held the pipes for the whole bounded drain, which is why the list
+        # is taken before anything dies rather than after.
+        strays = _descendants(pid)
+        killed_group = False
         try:
             os.killpg(os.getpgid(pid), signal.SIGKILL)
-            return "the command and its process group were killed"
+            killed_group = True
         except Exception as exc:
             log.warning("killpg on pid %s failed: %s", pid, exc)
+        signalled = []
+        for stray in strays:
+            try:
+                os.kill(stray, signal.SIGKILL)
+                signalled.append(stray)
+            except ProcessLookupError:
+                pass  # the group kill already reached it
+            except Exception as exc:
+                log.warning("could not kill descendant %s of %s: %s", stray, pid, exc)
+        if killed_group:
+            if signalled:
+                # Counted, not characterised. A signal reaches a process the
+                # group kill has already killed but not yet reaped, so «this one
+                # had left the group» is not establishable from here and the
+                # sentence the agent reads must not claim it.
+                log.info(
+                    "signalled %d descendant(s) of %s directly after the group kill: %s",
+                    len(signalled), pid, signalled,
+                )
+            return "the command and its process group were killed"
 
     # Last resort: at least the direct child, so we do not leave it running
     # while telling the agent we cleaned up.
