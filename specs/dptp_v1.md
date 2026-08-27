@@ -1,8 +1,8 @@
-# DPTP Specification: D-PC Transfer Protocol v1.5
+# DPTP Specification: D-PC Transfer Protocol v1.6
 
-**Version:** 1.5
+**Version:** 1.6
 **Status:** Draft / PoC
-**Date:** February 2026
+**Date:** August 2026
 **License:** CC0 1.0 Universal (Public Domain)
 
 ## 1. Overview
@@ -1820,6 +1820,49 @@ be read against a field set other than the one it was made over.
 
 **Implementation:** `dpc-protocol/dpc_protocol/message_signing.py`
 
+### 4.2 Verdicts on receipt
+
+§4.1 fixes what a signature is made over. This fixes what a receiver may
+conclude, because the format alone does not stop an implementation from
+treating "no signature" as "nothing to object to".
+
+Every arriving record leaves verification carrying exactly one verdict:
+
+| Verdict | Meaning |
+|---|---|
+| `verified` | recomputed hash matches, `signer_node_id == sender_node_id`, signature checks against a cached certificate |
+| `unverified` | all of the above except that no certificate for the author is cached yet; kept and re-checked when one arrives |
+| `legacy` | no signature this receiver can recompute — fields absent, or a `PREIMAGE_VERSION` it does not implement |
+| `rejected` | a signature is present and wrong: hash mismatch, signer ≠ sender, or a failed check |
+
+**Rules that follow, and none of them is optional:**
+
+1. **The verdict is the receiver's.** A `verification` field arriving on the
+   wire is ignored and overwritten. A sender that can label its own record
+   `verified` has defeated the check by filling it in.
+2. **Absence is never acceptance.** A record with no signature is `legacy`, not
+   `verified`. An implementation MAY refuse `legacy` outright; it MUST NOT
+   store one indistinguishably from a checked record.
+3. **A `legacy` record's claimed author is not established.** On a live message
+   a receiver SHOULD attribute it to the transport peer instead. On a
+   history transfer there is no such fallback — the peer handing over a history
+   did not write it — so the claimed author stands with nothing behind it, and
+   that is the reason to be able to refuse `legacy` at all.
+4. **An unimplementable `PREIMAGE_VERSION` is `legacy`, not `rejected`.** That
+   is what a node one version ahead looks like; refusing it is an outage, not a
+   security decision.
+5. **`conversation_id` is recomputed from the receiver's own state**, never
+   read from the message — otherwise a record signed for one room verifies in
+   another. In a 1:1 conversation the two sides do not agree on the name: each
+   keys the conversation by the *other* node, so a verifier recomputes against
+   both its own conversation id and its own node id, both of which are its own.
+6. **A transfer that replaces a whole conversation and survives nothing is
+   refused whole.** Otherwise a peer empties a conversation by answering a
+   history request with records that fail.
+
+**Implementation:** `conversation_monitor._verify_incoming`,
+`message_handlers/group_handler._authenticate_author`
+
 ## 5. Connection Flow
 
 ### Direct TLS Connection
@@ -2040,6 +2083,16 @@ DPTP is designed to be extensible. New commands can be added by:
 - **Privacy Rules Format**: Firewall configuration - See `~/.dpc/privacy_rules.json`
 
 ## 9. Changelog
+
+### v1.6 (August 2026)
+- **§4.1 Message Signing** — the canonical preimage (`dptp-msg-v1`), added with
+  the implementation in `634e13e1` and listed here only now
+- **§4.2 Verdicts on receipt (new)** — the four verdicts and the rules that
+  follow: the verdict belongs to the receiver, absence of a signature is
+  `legacy` rather than acceptance, an unimplementable preimage version is
+  `legacy` rather than a forgery, `conversation_id` is recomputed from the
+  receiver's own state (and a 1:1 has two such names), and a whole-conversation
+  replace that survives nothing is refused whole
 
 ### v1.5 (March 2026)
 - **New message types: P2P Skill Sharing (v0.21.0 Phase 5a Memento-Skills)**

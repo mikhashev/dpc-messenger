@@ -193,6 +193,12 @@ class Settings:
             'cold_fallback_provider': ''
         }
 
+        self._config['history'] = {
+            # Off while history written before ADR-036 is still in circulation:
+            # it carries no signature, and a third of what is on disk is that old.
+            'reject_unsigned': 'false'  # Refuse a synced record that carries no signature (it is stored labelled `unsigned` either way)
+        }
+
         self._config['file_transfer'] = {
             'chunk_size': '65536',  # Chunk size in bytes (64KB)
             'background_threshold_mb': '50',  # Background transfer threshold in MB
@@ -455,6 +461,18 @@ class Settings:
     def get_cultural_perspectives_enabled(self) -> bool:
         """Check if cultural perspective analysis is enabled in knowledge extraction."""
         value = self.get('knowledge', 'cultural_perspectives_enabled', 'false')
+        return value.lower() in ('true', '1', 'yes')
+
+    def get_reject_unsigned_history(self) -> bool:
+        """Whether a history record arriving without a signature is refused.
+
+        Off by default: records written before ADR-036 carry no signature, and
+        export_history ships none for them, so refusing would strand history
+        that already exists. Turn it on once those have aged out — with it off,
+        such a record is still stored labelled `verification: unsigned`, never
+        as a checked one.
+        """
+        value = self.get('history', 'reject_unsigned', 'false')
         return value.lower() in ('true', '1', 'yes')
 
     def get_knowledge_cold_fallback_provider(self) -> str:

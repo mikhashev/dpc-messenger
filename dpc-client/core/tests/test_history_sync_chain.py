@@ -31,6 +31,16 @@ PARTICIPANTS = [{"node_id": "n1", "name": "User", "context": "local"}]
 
 
 @pytest.fixture(autouse=True)
+def _sign_with_a_test_key(signing_identity):
+    """Every test here is about signed history, so all of them need a key.
+
+    Without it the suite was machine-dependent: green on a box with
+    ~/.dpc/node.key, and on a runner without one it asserted nothing, because
+    an unsigned record used to skip verification entirely.
+    """
+
+
+@pytest.fixture(autouse=True)
 def _always_persist(monkeypatch):
     """persist_history is a property backed by an on-disk settings file.
 
@@ -54,8 +64,7 @@ def _sender(tmp_path, cid="group-src"):
     a test for that elsewhere.
     """
     m = _monitor(tmp_path, cid)
-    signer = m._get_signer()
-    author = signer.node_id if signer else "n1"
+    author = m._get_signer().node_id
     for text in ("first", "second", "third"):
         m.add_message(role="user", content=text, sender_node_id=author, sender_name="Mike")
     return m
@@ -81,9 +90,11 @@ def test_export_carries_what_does_travel(tmp_path):
 
 
 def test_import_builds_its_own_chain(tmp_path):
+    """Receiver in the sender's room: a history sync is same-room on both sides,
+    and the content hash is bound to it."""
     exported = _sender(tmp_path).export_history()
 
-    receiver = _monitor(tmp_path, "group-dst")
+    receiver = _monitor(tmp_path, "group-src")
     receiver.import_history(exported)
 
     assert [m["msg_index"] for m in receiver.message_history] == [1, 2, 3]
@@ -94,12 +105,12 @@ def test_an_imported_history_loads_without_a_broken_chain(tmp_path, caplog):
     """The symptom this change exists to remove."""
     exported = _sender(tmp_path).export_history()
 
-    receiver = _monitor(tmp_path, "group-dst")
+    receiver = _monitor(tmp_path, "group-src")
     receiver.import_history(exported)
     receiver.save_history()
 
     with caplog.at_level(logging.INFO):
-        _monitor(tmp_path, "group-dst").load_history()
+        _monitor(tmp_path, "group-src").load_history()
 
     assert "Chain broken" not in caplog.text
 
@@ -127,7 +138,7 @@ def test_loader_does_not_report_a_minted_hash_as_verified(tmp_path, caplog):
         for m in sender.export_history()
     ]
 
-    receiver = _monitor(tmp_path, "group-legacy")
+    receiver = _monitor(tmp_path, "group-src")
     receiver.import_history(stripped)
     # Written straight to disk without the local chain, as an older build left it.
     for m in receiver.message_history:
@@ -135,7 +146,7 @@ def test_loader_does_not_report_a_minted_hash_as_verified(tmp_path, caplog):
     receiver.save_history()
 
     with caplog.at_level(logging.INFO):
-        _monitor(tmp_path, "group-legacy").load_history()
+        _monitor(tmp_path, "group-src").load_history()
 
     text = caplog.text
     assert "minted a hash" in text, "silently inventing a hash is what hid the defect"

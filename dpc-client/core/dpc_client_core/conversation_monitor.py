@@ -2360,6 +2360,30 @@ PARTICIPANTS' CULTURAL CONTEXTS:
             logger.info("No messages to import")
             return
 
+        # This path replaces the whole local history, so every record is
+        # checked before anything is thrown away. It had no check at all: the
+        # request registry above proves we asked the question, never that the
+        # answer is honest. An import that survives nothing is refused, so a
+        # peer cannot empty a conversation by answering with records that fail.
+        accepted = []
+        refused = 0
+        for msg in messages:
+            checked, verdict = self._verify_incoming(msg)
+            if checked is None:
+                logger.warning("Rejected imported message %s: %s", msg.get("id", "?"), verdict)
+                refused += 1
+                continue
+            accepted.append(checked)
+
+        if not accepted:
+            logger.error(
+                "Refused the whole import into %s: %d record(s) arrived, none passed",
+                self.conversation_id, len(messages),
+            )
+            return
+        if refused:
+            logger.warning("Import refused %d of %d records", refused, len(messages))
+
         # Replace all three message stores (v0.14.0 fix)
         self.message_history = []
         self.message_buffer = []
@@ -2367,7 +2391,7 @@ PARTICIPANTS' CULTURAL CONTEXTS:
 
         import uuid
 
-        for msg in messages:
+        for msg in accepted:
             # 1. Add to message_history preserving all sender metadata
             imported_msg = {
                 "role": msg.get("role", "user"),
@@ -2411,7 +2435,7 @@ PARTICIPANTS' CULTURAL CONTEXTS:
             self.message_buffer.append(message_obj)
             self.full_conversation.append(message_obj)
 
-        logger.info(f"Imported {len(messages)} messages into all conversation buffers")
+        logger.info(f"Imported {len(accepted)} messages into all conversation buffers")
 
     # Phase 7: Peer context cache management methods
     def cache_peer_context(self, node_id: str, context: Any, device_context: dict = None):
@@ -2992,6 +3016,114 @@ PARTICIPANTS' CULTURAL CONTEXTS:
         chained["chain_hash"] = chain_hash_for(chained, prev_hash)
         return chained
 
+    def _reject_unsigned(self) -> bool:
+        """Whether an unsigned record is refused rather than stored labelled."""
+        getter = getattr(self.settings, "get_reject_unsigned_history", None)
+        if not callable(getter):
+            return False
+        try:
+            return bool(getter())
+        except Exception:  # noqa: BLE001
+            return False
+
+    def _room_candidates(self) -> tuple:
+        """The names this conversation can go by, for recomputing a hash.
+
+        A group is named the same on every node. A 1:1 is not: each side keys
+        the monitor by the *other* node, so the author signed under our node id
+        and we hold theirs. Both are ours to derive — neither is read off the
+        message — so the hash stays bound to a room either way.
+        """
+        local = self.participants[0].get("node_id") if self.participants else None
+        if local and local != self.conversation_id:
+            return (self.conversation_id, local)
+        return (self.conversation_id,)
+
+    def _verify_incoming(self, message: Dict[str, Any]) -> tuple[Optional[Dict[str, Any]], str]:
+        """Decide what an arriving record is before it can enter history.
+
+        Returns the record to store and its verdict, or `(None, reason)` to
+        refuse it. Every path returns a verdict, so a record cannot enter
+        unlabelled — the hole this closes was not a forgeable signature but an
+        absent one, which used to skip the whole block and store as if checked.
+
+        The `verification` field is always written here and never read off the
+        wire: a peer that can label its own forgery "verified" has defeated the
+        check by filling it in.
+
+        Verdicts are the live path's (`group_handler._authenticate_author`):
+        "verified", "unverified" (signed, certificate not here yet), "legacy"
+        (no signature this node can recompute). That path can demote a legacy
+        message to its transport author; here there is no equivalent, because
+        the peer handing over a history did not write it — so a legacy record
+        keeps a claimed author with nothing behind it, and `reject_unsigned`
+        is what closes that.
+        """
+        sig = message.get("signature")
+        content_hash = message.get("content_hash")
+        signer = message.get("signer_node_id")
+        present = sum(1 for v in (sig, content_hash, signer) if v)
+
+        if present < 3:
+            # Predates ADR-036, or was written by a node holding no key — which
+            # also produces a hash with nothing signing it. Refusing outright
+            # strands what is already on disk, because export_history ships the
+            # signature fields only for the current preimage; so it is stored
+            # labelled, and `reject_unsigned` turns the label into a refusal
+            # once the legacy records are gone.
+            if self._reject_unsigned():
+                return None, "unsigned, and reject_unsigned is on"
+            return dict(message, verification="legacy"), "legacy"
+
+        if message.get("preimage_version") != PREIMAGE_VERSION:
+            # Signed over a preimage we cannot recompute — a node one version
+            # ahead or behind. Refusing that is not a security decision, it is
+            # an outage, so it is treated as legacy exactly as the live path
+            # treats it.
+            if self._reject_unsigned():
+                return None, "preimage %s cannot be recomputed" % message.get("preimage_version")
+            return dict(message, verification="legacy"), "legacy"
+
+        # The hash is recomputed rather than read: a hash taken from the
+        # message it describes attests nothing, and the signature over it
+        # inherits that. The room name comes from us, never from the message —
+        # otherwise a signed message from another room verifies happily here.
+        if not any(
+            content_hash == message_content_hash(
+                conversation_id=room,
+                message_id=message.get("id"),
+                sender_node_id=message.get("sender_node_id"),
+                sender_name=message.get("sender_name"),
+                sender_type=message.get("sender_type"),
+                agent_owner=message.get("agent_owner"),
+                timestamp=message.get("timestamp"),
+                content=message.get("content") or "",
+                tool_calls=message.get("tool_calls"),
+            )
+            for room in self._room_candidates()
+        ):
+            return None, "content does not match its hash"
+        if signer != message.get("sender_node_id"):
+            return None, f"signed by {str(signer)[:20]} but attributed to {str(message.get('sender_node_id'))[:20]}"
+
+        try:
+            from dpc_protocol.commit_integrity import CommitSigner
+            result = CommitSigner.verify_signature(signer, content_hash, sig)
+        except Exception as e:  # noqa: BLE001
+            # Was DEBUG-and-accept, which turned a failed check into a silent
+            # pass — the opposite of what verify_signature does with the same
+            # exceptions.
+            return None, f"signature check failed: {e}"
+
+        if result is False:
+            return None, f"invalid signature from {str(signer)[:20]}"
+        if result is None:
+            # Cannot check yet — the peer's certificate is not cached. Kept and
+            # flagged rather than rejected: on first contact rejecting would be
+            # a denial of service against ourselves. reverify_author() revisits.
+            return dict(message, verification="unverified"), "unverified"
+        return dict(message, verification="verified"), "verified"
+
     def add_message_with_id(self, message: Dict[str, Any]) -> bool:
         """Add a message to history with duplicate detection
 
@@ -3042,65 +3174,25 @@ PARTICIPANTS' CULTURAL CONTEXTS:
         """
         added = 0
         rejected = 0
+        legacy = 0
         for msg in remote_messages:
-            sig = msg.get("signature")
-            content_hash = msg.get("content_hash")
-            signer = msg.get("signer_node_id")
-            if sig and content_hash and signer:
-                # The hash is recomputed rather than read: a hash taken from
-                # the message it describes attests nothing, and the signature
-                # over it inherits that. conversation_id comes from *this*
-                # monitor, never from the message — otherwise a signed message
-                # from another room verifies happily inside this one.
-                expected = message_content_hash(
-                    conversation_id=self.conversation_id,
-                    message_id=msg.get("id"),
-                    sender_node_id=msg.get("sender_node_id"),
-                    sender_name=msg.get("sender_name"),
-                    sender_type=msg.get("sender_type"),
-                    agent_owner=msg.get("agent_owner"),
-                    timestamp=msg.get("timestamp"),
-                    content=msg.get("content") or "",
-                    tool_calls=msg.get("tool_calls"),
-                )
-                if expected != content_hash:
-                    logger.warning("Rejected message %s: content does not match its hash",
-                                   msg.get("id", "?"))
-                    rejected += 1
-                    continue
-                if signer != msg.get("sender_node_id"):
-                    logger.warning("Rejected message %s: signed by %s but attributed to %s",
-                                   msg.get("id", "?"), signer, msg.get("sender_node_id"))
-                    rejected += 1
-                    continue
-                try:
-                    from dpc_protocol.commit_integrity import CommitSigner
-                    result = CommitSigner.verify_signature(signer, content_hash, sig)
-                except Exception as e:
-                    # Was DEBUG-and-accept, which turned a failed check into a
-                    # silent pass — the opposite of what verify_signature
-                    # itself does with the same exceptions.
-                    logger.warning("Rejected message %s: signature check failed: %s",
-                                   msg.get("id", "?"), e)
-                    rejected += 1
-                    continue
-                if result is False:
-                    logger.warning("Rejected message %s: invalid signature from %s",
-                                   msg.get("id", "?"), signer)
-                    rejected += 1
-                    continue
-                if result is None:
-                    # Cannot check yet — the peer's certificate is not cached.
-                    # Kept and flagged rather than rejected: on first contact
-                    # rejecting would be a denial of service against ourselves.
-                    logger.info("Storing message %s unverified: no cached certificate for %s",
-                                msg.get("id", "?"), signer)
-                    msg = dict(msg, verification="unverified")
-            if self.add_message_with_id(msg):
+            checked, verdict = self._verify_incoming(msg)
+            if checked is None:
+                logger.warning("Rejected message %s: %s", msg.get("id", "?"), verdict)
+                rejected += 1
+                continue
+            if self.add_message_with_id(checked):
                 added += 1
+                if verdict == "legacy":
+                    legacy += 1
 
         if rejected:
-            logger.warning("Rejected %d messages with invalid signatures during merge", rejected)
+            logger.warning("Merge refused %d of %d records", rejected, len(remote_messages))
+        if legacy:
+            logger.warning(
+                "Merged %d unsigned record(s) into %s: stored labelled, not checked",
+                legacy, self.conversation_id,
+            )
         if added > 0:
             self.restore_chronological_order()
             self.save_history()

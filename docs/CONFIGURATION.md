@@ -227,7 +227,7 @@ As of schema version **1.1**, device context includes a `special_instructions` b
 
 <!-- BEGIN GENERATED CONFIG REFERENCE -->
 
-Every section and key `_create_default_config` writes into a fresh `~/.dpc/config.ini`: **24 sections, 147 keys**. Generated from `settings.py` by `tools/config_reference.py` — edit the code, then re-run it; do not hand-edit between the markers.
+Every section and key `_create_default_config` writes into a fresh `~/.dpc/config.ini`: **25 sections, 150 keys**. Generated from `settings.py` by `tools/config_reference.py` — edit the code, then re-run it; do not hand-edit between the markers.
 
 An empty default means the key is written blank and the feature stays off until you fill it in. Every key also accepts an environment variable named `DPC_<SECTION>_<KEY>` in upper case.
 
@@ -262,6 +262,7 @@ An empty default means the key is written blank and the feature stays off until 
 | `hole_punch_timeout` | `15` |  |
 | `relay_timeout` | `20` |  |
 | `gossip_timeout` | `5` | How long to wait before falling back to gossip |
+| `remote_inference_timeout` | `1200` |  |
 
 #### `[conversations]`
 
@@ -321,6 +322,12 @@ An empty default means the key is written blank and the feature stays off until 
 | `cleanup_interval` | `600` | Expired message cleanup interval (10 minutes) |
 | `priority` | `normal` | Default message priority: low, normal, high |
 
+#### `[history]`
+
+| Key | Default | Notes |
+|---|---|---|
+| `reject_unsigned` | `false` | Refuse a synced record that carries no signature (it is stored labelled `unsigned` either way) |
+
 #### `[hole_punch]`
 
 | Key | Default | Notes |
@@ -347,6 +354,7 @@ An empty default means the key is written blank and the feature stays off until 
 | `token_warning_threshold` | `0.8` | Warn when context window reaches 80% |
 | `auto_extraction_enabled` | `true` | Automatically suggest knowledge extraction |
 | `cultural_perspectives_enabled` | `false` | Include cultural perspective analysis in knowledge extraction |
+| `cold_fallback_provider` | *(empty)* |  |
 
 #### `[local_transcription]`
 
