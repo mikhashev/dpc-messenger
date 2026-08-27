@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import sqlite3
 import threading
 from datetime import datetime, timezone
@@ -1162,6 +1163,21 @@ def _agent_gliner_device_override(agent_root: Path) -> Optional[str]:
     return value.strip().lower()
 
 
+def _dpc_home_for(agent_root: Path) -> Path:
+    """The DPC home an agent root sits in — or the real one, when it does not.
+
+    An agent root is `~/.dpc/agents/<id>`, so the home is its grandparent. The
+    grandparent of anything else belongs to somebody else: handed a temp dir
+    this resolved to `/`, and Settings wrote its default config there —
+    PermissionError on Linux, a stray config.ini in the repo on Windows
+    (SETTINGS-CAN-WRITE-ITS-DEFAULT-CONFIG-INTO-THE-WORKING-DIRECTORY).
+    """
+    root = Path(agent_root).resolve()
+    if root.parent.name == "agents":
+        return root.parent.parent
+    return Path(os.environ.get("DPC_HOME", Path.home() / ".dpc"))
+
+
 class KnowledgeGraph:
     """High-level API for the agent knowledge graph."""
 
@@ -1180,11 +1196,7 @@ class KnowledgeGraph:
             backend = _agent_kg_backend_override(agent_root)
         if backend is None:
             from dpc_client_core.settings import Settings
-            # Settings takes the DPC home directory; the agent root lives
-            # inside it (~/.dpc/agents/<id>/), so the home is the agent
-            # root's grandparent (parent of `agents/`).
-            dpc_home = agent_root.parent.parent
-            backend = Settings(dpc_home).get_kg_backend()
+            backend = Settings(_dpc_home_for(agent_root)).get_kg_backend()
         backend = backend.strip().lower()
 
         # Where GLiNER runs, resolved the same three levels down as the backend
@@ -1194,7 +1206,7 @@ class KnowledgeGraph:
         self._gliner_device = _agent_gliner_device_override(agent_root)
         if self._gliner_device is None:
             from dpc_client_core.settings import Settings
-            self._gliner_device = Settings(agent_root.parent.parent).get_gliner_device()
+            self._gliner_device = Settings(_dpc_home_for(agent_root)).get_gliner_device()
 
         if backend == "grafeo":
             db_path = agent_root / "knowledge_graph.grafeo"
