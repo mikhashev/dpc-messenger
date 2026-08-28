@@ -13,7 +13,7 @@ work with:
 
 - the UI invents a time for an undated record — `Date.now()` minus a second per
   row — so it sorts below every real message, at a position that changes on
-  every reload. `4f5e19ac` made the list reload on every sync, which turned a
+  every reload. `cb5dee81` made the list reload on every sync, which turned a
   hidden defect into a visible, repeating one;
 - with no `sender_node_id` the same mapper renders the row as "You", so a file
   *received* from a peer was shown as the reader's own on all three nodes;

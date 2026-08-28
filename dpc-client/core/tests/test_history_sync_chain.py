@@ -1,6 +1,6 @@
 """The chain describes this node's copy, so it does not travel.
 
-This supersedes the decision in `d40eea6d`, which made `msg_index` and
+This supersedes the decision in `05d646de`, which made `msg_index` and
 `chain_hash` cross the wire so tampering in transit could be caught. Two things
 have changed since, and both are measured rather than argued:
 

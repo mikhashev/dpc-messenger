@@ -135,7 +135,7 @@ it is switched on for any group. They are gates, not wishes.
 - **The roster must be trustworthy, or enforcement is defeated by it.** With an
   ungated roster, any connected peer adds a phantom member; the phantom never
   advertises support; the group is pinned in the soft phase indefinitely, and
-  the soft phase is where unsigned injection lives. Closed by `4d3b7442`
+  the soft phase is where unsigned injection lives. Closed by `3e49b044`
   (GROUP_SYNC accepted only from a current member) — recorded here because
   enforcement depends on it, not because it belongs to this ADR.
 - ~~**Q1 must be measured, not reasoned.**~~ Measured 2026-08-06 on a live
@@ -334,22 +334,22 @@ handshake. Both reviewers converged on flag-not-reject independently.
 ## Implementation Status
 
 **Signatures travel.** This preface read "nothing is signed on the wire yet"
-for three weeks after `1f2c10cd` made it untrue: the table was written before
+for three weeks after `50b8b6b6` made it untrue: the table was written before
 that commit and never revisited. Measured on this box 2026-08-28 — 360 of 535
 stored records carry `preimage_version: dptp-msg-v1` with a signature and a
 signer beside it. The rows below were re-checked against the code that day.
 
 | Task | Status | Commit |
 |------|--------|--------|
-| Persist the peer certificate the handshake proved | Done | `73a48a20` |
-| Canonical preimage + spec §4.1 | Done | `634e13e1` |
-| Roster gate — precondition for enforcement | Done | `4d3b7442` |
-| Normalise `sender_name` / `agent_owner` (before signing) | Done | `1f2c10cd` |
-| Sign at send; fields into `GROUP_TEXT` | Done | `1f2c10cd` |
-| Verify on receive; stop re-signing on store | Done | `1f2c10cd` |
-| Author from the signed payload (relay) | Done | `1f2c10cd` |
+| Persist the peer certificate the handshake proved | Done | `bc2fbeb1` |
+| Canonical preimage + spec §4.1 | Done | `d92f5012` |
+| Roster gate — precondition for enforcement | Done | `3e49b044` |
+| Normalise `sender_name` / `agent_owner` (before signing) | Done | `50b8b6b6` |
+| Sign at send; fields into `GROUP_TEXT` | Done | `50b8b6b6` |
+| Verify on receive; stop re-signing on store | Done | `50b8b6b6` |
+| Author from the signed payload (relay) | Done | `50b8b6b6` |
 | Re-check a parked `unverified` once the certificate arrives | Done | `reverify_author` |
-| `export_history` + `merge_history` | Done | `1f2c10cd`, `3f233e75` |
+| `export_history` + `merge_history` | Done | `50b8b6b6`, `f9b9b3dd` |
 | Capability flag and staged enforcement | Pending | — |
 | Verification states in the UI | Pending | — |
 
@@ -371,9 +371,9 @@ this codebase produces most often.
 - **Q2:** ~~Per-author feeds (Option D) — own ADR, or folded in later?~~ Answered:
   [ADR-037](037-author-attribution-chains.md), phased, and not called feeds.
 - **Q3:** ~~`import_history` still replaces a conversation wholesale, though a
-  reply is now only accepted against a request we made (`4d3b7442`). Delete the
+  reply is now only accepted against a request we made (`3e49b044`). Delete the
   path or bring it under the same verification rules?~~ **Brought under them,
-  `3f233e75`.** It was the wider of the two doors: no check at all, while
+  `f9b9b3dd`.** It was the wider of the two doors: no check at all, while
   replacing an entire conversation. The request registry proves we asked the
   question, never that the answer is honest. Both paths now pass one gate
   (`_verify_incoming`, spec §4.2), every record leaves it with a verdict, and an
@@ -411,7 +411,7 @@ this codebase produces most often.
   `ideas/dpc-research/adr-036-037-review-fable5.md` — reviews of this ADR
 - `ideas/dpc-research/group-auth-review-response-fable5.md` — Fable 5 review
 - `REVIEW-GLM-5.2-group-authenticity.md` — GLM 5.2 review
-- `73a48a20`, `634e13e1` — implemented steps
+- `bc2fbeb1`, `d92f5012` — implemented steps
 - Backlog: `MSG-SIGNATURE-IS-MINTED-BY-THE-RECEIVER`,
   `MSG-SIGNATURE-DOES-NOT-BIND-CONTENT`, `GROUP-RELAY-REATTRIBUTES-THE-AUTHOR`,
   `CERT-STORE-VALIDATES-BUT-READER-TRUSTS`, `MSG-CHAIN-NEVER-REACHES-THE-UI`

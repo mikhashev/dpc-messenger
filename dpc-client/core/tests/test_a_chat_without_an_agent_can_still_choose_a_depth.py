@@ -4,7 +4,7 @@ Two independent halves, measured through the running service on 2026-08-15:
 the value was written to `updateAgentConfig("local_ai")`, which answers «Agent
 not found» inside an envelope that says OK — and even a stored value would not
 have travelled, because the query path a chat without an agent takes carried no
-effort at all. `d8480074` taught every provider to receive one; this covers the
+effort at all. `a266259c` taught every provider to receive one; this covers the
 path from the command to them.
 
 Real fakes rather than mocks: what has to be observed is the keyword the next

@@ -20,8 +20,8 @@ measurement and the change that stopped producing it:
                                         store as of 2026-05-17 — id `kf:<stem>`,
                                         `source_layer` "L5" whatever the real layer,
                                         properties exactly {path, size_bytes,
-                                        file_mtime}. Superseded by f3c5d903 (key as id)
-                                        and a4ee1813 (layer as a parameter).
+                                        file_mtime}. Superseded by 238fb34c (key as id)
+                                        and 59d2e211 (layer as a parameter).
     F2  access-log line, pre-address    7161 of 7170 lines in agent_001's
                                         knowledge_access.jsonl on 2026-08-01: no
                                         `addresses`, no `task_id`, and `files` holding
@@ -73,7 +73,7 @@ def legacy_graph_node(stem: str, *, size_bytes: int = 4868,
     Three properties and no `source_path`, addressed by stem, and labelled L5 whether
     or not the document lived in the agent's own layer. All three are load-bearing: the
     missing field is what a hint needs for an address, the stem is what a seed lookup
-    used to be cut down to match, and the label is what the guard in 3841d66d believed.
+    used to be cut down to match, and the label is what the guard in eb03078c believed.
     """
     return GraphNode(
         node_id=f"kf:{stem}",

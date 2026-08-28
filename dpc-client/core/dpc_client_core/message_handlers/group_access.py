@@ -1,7 +1,7 @@
 """Who may ask us about a group's history.
 
 `GroupSyncHandler` has refused an unknown group and a sender outside its roster
-since `4d3b7442`, with a comment saying why: a sync is not a way into a group we
+since `3e49b044`, with a comment saying why: a sync is not a way into a group we
 have never heard of. The three handlers that carry the *messages* — status,
 request, response — and the 1:1 request handler's group branch were written for
 the v0.20.0 hash-based sync and never got the same check. Measured 2026-08-28:

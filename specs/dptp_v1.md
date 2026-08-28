@@ -2086,7 +2086,7 @@ DPTP is designed to be extensible. New commands can be added by:
 
 ### v1.6 (August 2026)
 - **§4.1 Message Signing** — the canonical preimage (`dptp-msg-v1`), added with
-  the implementation in `634e13e1` and listed here only now
+  the implementation in `d92f5012` and listed here only now
 - **§4.2 Verdicts on receipt (new)** — the four verdicts and the rules that
   follow: the verdict belongs to the receiver, absence of a signature is
   `legacy` rather than acceptance, an unimplementable preimage version is

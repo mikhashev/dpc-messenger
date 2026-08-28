@@ -84,7 +84,7 @@ async def test_a_word_that_is_not_a_position_is_still_refused(tmp_path):
 async def test_every_position_the_header_offers_is_accepted(tmp_path):
     """The five positions the header draws today, all accepted.
 
-    Honest about what this does *not* do (Johnny, review of `f6e48ba9`): the
+    Honest about what this does *not* do (Johnny, review of `1e44df6a`): the
     list below is a third copy of the vocabulary, not the control itself. The
     header's own copy is five hardcoded `<option>` tags in `+page.svelte`, so
     a sixth position added there would be refused by the validator, reported

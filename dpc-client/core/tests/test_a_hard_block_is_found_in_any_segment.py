@@ -120,7 +120,7 @@ def test_a_config_whitelist_cannot_waive_a_hard_block():
     `tier1_whitelist` lives in `privacy_rules.json` — configuration. Under the
     old segment-major scan, a whitelisted `sudo` matched in the first segment,
     the whitelist returned None, and the command **ran** with `rm -rf /` in its
-    second half, never examined. Measured on `e069ac2a^`: ALLOWED.
+    second half, never examined. Measured on `9f88f23e^`: ALLOWED.
 
     ADR-030 says the hard level is overridable by neither config nor agent. It
     was overridable by config.
@@ -144,7 +144,7 @@ def test_harmless_text_carrying_a_dangerous_string_was_always_blocked():
     A quoted newline now splits segments, so `echo "a\nrm -rf /"` is two
     segments and the second blocks. That is not a regression: the pattern is
     unanchored, so the same command was already tier2 when it was one segment.
-    Both `e069ac2a^` and HEAD return tier2 — the false positive is a property of
+    Both `9f88f23e^` and HEAD return tier2 — the false positive is a property of
     unanchored patterns, not of the split.
     """
     assert tier_of('echo "harmless text with rm -rf / inside"') == "tier2"

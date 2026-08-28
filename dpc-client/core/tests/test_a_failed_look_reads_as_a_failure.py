@@ -1,7 +1,7 @@
 """An image the vision model could not read must not arrive as an analysis.
 
 The provider stopped handing reasoning back in the answer's place
-(`d421b819`); this is the same substitution one layer up — an empty
+(`5a192a4f`); this is the same substitution one layer up — an empty
 description announced as "here is the visual analysis" tells the agent it has
 seen something it has not.
 """

@@ -6,7 +6,7 @@
  * bottom, and to a different place on every reload. Two file notes written
  * without a timestamp (2026-08-07) therefore appeared as "sent a moment ago"
  * days after the fact, and jumped again on every sync once the list started
- * reloading (`4f5e19ac`).
+ * reloading (`cb5dee81`).
  *
  * The backend no longer writes such records. These cover the ones already on
  * disk, which cannot be dated from anything but their neighbours: a record

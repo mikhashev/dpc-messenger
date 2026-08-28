@@ -406,7 +406,7 @@ Per the discipline adopted for ADR-034: the numbers below are **decision evidenc
 dated, carry the instrument that produced them, and are never edited in place — corrections go
 beside them. Live metrics belong in `backlog.md`, not here.
 
-**Measured 2026-08-03, branch `dev` @ `b42c4751`, working tree clean under `dpc-client/ui`.**
+**Measured 2026-08-03, branch `dev` @ `940ea6b9`, working tree clean under `dpc-client/ui`.**
 Instrument: `grep -rE` over `dpc-client/ui/src` restricted to `*.svelte`, `*.css`, `*.html`,
 excluding `node_modules`, `build`, `.svelte-kit`, `target`.
 

@@ -3001,7 +3001,7 @@ PARTICIPANTS' CULTURAL CONTEXTS:
         cannot be shared between nodes: measured across three holding an
         identical nine messages, all three tips differed.
 
-        It was carried across the wire (d40eea6d) to catch tampering in
+        It was carried across the wire (05d646de) to catch tampering in
         transit. The author's signature does that now, keyed to the author and
         computed over fields every reader agrees on — so the chain goes back to
         the one job it can do: detecting a local file edited underneath us.

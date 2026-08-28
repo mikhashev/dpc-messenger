@@ -282,7 +282,7 @@ def test_importing_over_a_stem_node_produces_a_document_that_can_be_addressed(kg
 
 
 def test_the_shared_layer_imports_over_a_node_that_calls_itself_L5(kg, tmp_path):
-    """The production regression of 3841d66d, as a test.
+    """The production regression of eb03078c, as a test.
 
     Every legacy node says L5, including the 303 documents of the shared layer. A guard
     that decided by the label refused all of them — `Bulk imported 0 L6` on six agents,

@@ -161,7 +161,7 @@ lever's falsifier gives a false negative):
   index pass, the heaviest of the six. And the field could not live only there: the agent builds the
   per-process singleton in its own constructor (`agent.py:164`), which runs before the manager reads
   `MemoryConfig` at all, so the device travels on `AgentConfig` too or it applies to nothing on the live
-  path. Shipped in `bbdcf877`. Banks ~1.6–1.7 GiB; CPU cost measured at 55 ms per sentence, 537 ms per ~800-token chunk
+  path. Shipped in `6c021771`. Banks ~1.6–1.7 GiB; CPU cost measured at 55 ms per sentence, 537 ms per ~800-token chunk
   (`Observed`, Fable 5 §1.10). Also expected to give Step-3 the headroom a second slot needs.
 - **0e** — the host prompt cache above its 8 192 MiB default, via `LLAMA_ARG_CACHE_RAM` in the Ollama
   service environment. **`Round 2, 2026-08-18`: no longer a hypothesis, and it is the lever of the
@@ -637,7 +637,7 @@ Compliance, not progress — each item is a measurement with a stated failing re
 - `dpc-client/core/dpc_client_core/llm_manager.py` — auto-selection prefers the agent's own
   vision-capable resident provider (0b); `PROVIDER_MAP` entry (Stage 2).
 - `dpc-client/core/dpc_client_core/dpc_agent/memory_config.py`, `dpc_agent/memory.py`, `dpc_agent/agent.py`
-  and the six `get_embedding_provider` call sites — `embedding_device` (0d, shipped `bbdcf877`).
+  and the six `get_embedding_provider` call sites — `embedding_device` (0d, shipped `6c021771`).
 - `~/.dpc/providers.json` (this box) — `vision_provider`, `keep_alive` on the 27B alias (0a/0b).
 - `dpc-client/core/dpc_client_core/providers/base.py` — usage contract (Stage 2 precondition).
 - `dpc-client/core/dpc_client_core/providers/llamacpp_server_provider.py` — new (Stage 2).
@@ -669,9 +669,9 @@ Compliance, not progress — each item is a measurement with a stated failing re
 
 | Task | Status | Commit |
 |------|--------|--------|
-| D4-0: provider in the gate, host-designated `compute.serving_alias` (the peer's `provider` ignored), only the serving alias advertised, peer-request log line, orphan-drop log, three ceilings → 1200, semaphore, `serving_alias` field in the firewall UI | Shipped 2026-08-18 — awaiting prod observation | `c1642362` |
-| D4-T: the tokens/s row on `_log_usage` (one line; the other three series are not in scope) | **Observed in production 2026-08-18 19:48** — see below | `c1642362` |
-| Stage 0 bundle: 0a `keep_alive` on plain and tools + `keep_alive: -1` on the 27B alias; 0b `vision_provider` → `qwen3.8:latest`; 0d shipped `bbdcf877` | Shipped 2026-08-18 — awaiting the restart that loads it | `4c03b012` |
+| D4-0: provider in the gate, host-designated `compute.serving_alias` (the peer's `provider` ignored), only the serving alias advertised, peer-request log line, orphan-drop log, three ceilings → 1200, semaphore, `serving_alias` field in the firewall UI | Shipped 2026-08-18 — awaiting prod observation | `2d540eae` |
+| D4-T: the tokens/s row on `_log_usage` (one line; the other three series are not in scope) | **Observed in production 2026-08-18 19:48** — see below | `2d540eae` |
+| Stage 0 bundle: 0a `keep_alive` on plain and tools + `keep_alive: -1` on the 27B alias; 0b `vision_provider` → `qwen3.8:latest`; 0d shipped `6c021771` | Shipped 2026-08-18 — awaiting the restart that loads it | `6901f184` |
 | Stage 0 bundle 0a+0b+0d, one commit; **0e** is Mike's environment variable on the box (24 GiB) | Pending — after D4-0 + D4-T | — |
 | Stage 1 NVFP4-GGUF via `ollama create`, measured vs Q4_K_M/IQ4_XS at 262K | Pending — production window (27B out) | — |
 | Step-3: route (b) on the card at 262K, 2 unified slots (after 0d) | Pending — production window (27B in), read second load | — |

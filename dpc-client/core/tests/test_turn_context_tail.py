@@ -131,7 +131,7 @@ class TestWhatTheModelIsShown:
         assert "## Runtime context" in cap["turn_context"]
 
     def test_body_comes_from_the_record_that_becomes_history(self, agent_root, clocks):
-        """Johnny's repro on b43c44ec: the group dispatcher sends "[sender]: text",
+        """Johnny's repro on d0e20e90: the group dispatcher sends "[sender]: text",
         the history keeps "text" — the marker matched, the body did not, and the
         prefix broke a few bytes before the tail every turn."""
         rec = {"id": "m14", "msg_index": 14, "timestamp": "2026-08-19T18:14:33+00:00",

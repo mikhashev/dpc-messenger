@@ -161,7 +161,7 @@ class DeepSeekProvider(AIProvider):
         choice there is: `off` never travels as an effort — it turns the
         thinking block off — so a body with no `reasoning_effort` key was
         reported as `server-default`, i.e. as nobody having expressed a
-        preference. Found by the live acceptance of `dd6b709f` on 2026-08-16,
+        preference. Found by the live acceptance of `34b3933d` on 2026-08-16,
         where the room was switched to `off` at 20:37:13 and the four calls
         that followed all logged `server-default`; a colleague read those lines
         as evidence the room was on `high`.

@@ -26,7 +26,7 @@ the rest is not expressible.
 | set this node's agents | own node only, correct by construction | `service.py:4463` |
 | accept a peer's roster | higher version wins, **whole record replaced** | `group_manager.py:507` |
 
-The only gate that exists is the one added by `4d3b7442`: `GROUP_SYNC` is
+The only gate that exists is the one added by `3e49b044`: `GROUP_SYNC` is
 accepted only from a node already on the local roster. That answers *is this a
 stranger*, never *was this node allowed to make this change*.
 
@@ -225,7 +225,7 @@ asking anyone, and the creator retains a veto by being entitled to remove.
 - `dpc-client/core/dpc_client_core/managers/group_manager.py` — pin
   `created_by`; per-field diff and authority in `apply_sync`; sign on mutation.
 - `dpc-client/core/dpc_client_core/message_handlers/group_handler.py` —
-  verification before apply; keep the existing membership gate from `4d3b7442`.
+  verification before apply; keep the existing membership gate from `3e49b044`.
 - `dpc-client/core/dpc_client_core/service.py` — `add_group_member` /
   `remove_group_member` refuse when this node is not the creator.
 - `dpc-protocol/dpc_protocol/message_signing.py` — preimage for a roster change.
@@ -241,7 +241,7 @@ asking anyone, and the creator retains a veto by being entitled to remove.
 
 | Task | Status | Commit |
 |------|--------|--------|
-| ADR drafted | Done | `b166634b` |
+| ADR drafted | Done | `a583d42e` |
 | Q1–Q4 answered, status accepted | Done | — |
 | `created_by` pinned | Pending | — |
 | Per-field authority in `apply_sync` | Pending | — |
@@ -327,5 +327,5 @@ asking anyone, and the creator retains a veto by being entitled to remove.
   assumed friendly.
 - [ADR-022](022-multi-agent-safety-governance.md) — Layer 2, "governance in the
   wire, not in the model"; a roster change fits as another signed action
-- `4d3b7442` — the existing gate: `GROUP_SYNC` only from an existing member
+- `3e49b044` — the existing gate: `GROUP_SYNC` only from an existing member
 - `backlog.md` — `GROUP-ROSTER-HAS-NO-OWNER`, with the measurement above

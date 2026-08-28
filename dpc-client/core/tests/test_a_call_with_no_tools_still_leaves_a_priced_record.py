@@ -235,7 +235,7 @@ def test_a_provider_with_nothing_to_report_still_gets_an_estimate():
 
 # --- the effort the line reports must be the one the call asked for ---
 #
-# Found by the live acceptance of dd6b709f (2026-08-16, 20:37 local): the room
+# Found by the live acceptance of 34b3933d (2026-08-16, 20:37 local): the room
 # was switched to `off` at 20:37:13 and the four calls that followed logged
 # `effort=server-default`. `off` never reaches the wire as an effort — it turns
 # the thinking block off — so a label read out of the request body reports the

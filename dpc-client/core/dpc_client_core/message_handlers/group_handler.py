@@ -628,7 +628,7 @@ class GroupHistoryRequestHandler(MessageHandler):
             sender_node_id: Node ID of requester
             payload: Contains group_id, and optionally `authors` — the node ids
                 the requester found divergent. β has been sending that list
-                since `5b160a93`; this handler used to ignore it and answer with
+                since `8878a2da`; this handler used to ignore it and answer with
                 the whole history, so every sync cost the full file no matter
                 how little differed. A peer that predates the field sends none,
                 and still gets everything.
@@ -720,7 +720,7 @@ class GroupHistoryResponseHandler(MessageHandler):
 
         # A GROUP_HISTORY_RESPONSE merges into a conversation, so an unclaimed
         # one is an assertion rather than a reply. The 1:1 twin has refused
-        # unclaimed answers since `4d3b7442`; the group path was added by the
+        # unclaimed answers since `3e49b044`; the group path was added by the
         # v0.20.0 hash sync and never got it, so any connected member could push
         # a history nobody asked for. `claim_any` tolerates a peer on the older
         # build that answers without echoing the id.

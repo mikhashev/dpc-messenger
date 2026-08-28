@@ -4,7 +4,7 @@ The defect was observed on 2026-08-14: an agent's shell command printed
 PowerShell's "Do you want to continue? [Y] Yes [A] Yes to All [N] No" into the
 terminal running the service and waited there for its whole timeout, while the
 agent waited for output that would never come. `tools/shell.py` was closed the
-same day (`c2c83f7c`); the class was not — `tools/git.py` spawned git twice and
+same day (`adeb6a4d`); the class was not — `tools/git.py` spawned git twice and
 `tools/comfyui.py` spawns ffmpeg once, all three with an inherited stdin.
 
 git is the live half of that: `git_push` runs on a real repository, and an

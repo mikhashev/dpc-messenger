@@ -39,7 +39,7 @@ session: S49
 >   quantity measured through a broken counter and a fixed one is two different numbers — which
 >   is exactly what happened to the "166" below.
 >
-> **D0 = 2026-08-01 17:05:25 local (10:05:25 UTC)** — the restart after `20a035bc`, the first
+> **D0 = 2026-08-01 17:05:25 local (10:05:25 UTC)** — the restart after `ca80a78e`, the first
 > run in which the address works, the injection credit is bounded, and the grace period
 > exists. It is the epoch of every follow-rate measurement: numbers from before it describe a
 > different system, and this ADR's own "0 of 28" belongs to that one. D0 was not declared at
@@ -272,20 +272,20 @@ layer records and how it is ranked).
       after D0: 27 slots, 0 without an address, the shared layer among them.
 - [x] The access counter distinguishes injection from read; N consecutive injections with no
       read do not raise a file's decay multiplier, one real read does. — `7e14b6a4`; the bound
-      that makes "does not raise" true in the ranking, not only in the counter, is `20a035bc`.
+      that makes "does not raise" true in the ranking, not only in the counter, is `ca80a78e`.
 - [x] Counter keys are layer-relative paths: two files sharing a basename across layers have
       independent counts (regression test with two `README.md`). — `adaaaa45`.
 - [x] `read_file` on a knowledge file increments `_meta.json.access_count`; a written-once,
       read-many file is not proposed for archive. — `5ee3625a`; the historical counts moved to
       a write column rather than being discarded, since every one of them was a write.
-- [x] A new entry is not pinned to `DECAY_FLOOR` during its grace period. — `20a035bc`. Grace
+- [x] A new entry is not pinned to `DECAY_FLOOR` during its grace period. — `ca80a78e`. Grace
       returns 1.0, which is *level with* the busiest candidate in the set and not above it: it
       removes a penalty, it does not hand out a promotion. **The parenthetical "(requires
       `created` in `FileMeta`)" was dropped** — see T0e above.
 - [ ] ~~`knowledge_access.jsonl` is bounded by the same rotation policy as other agent logs.~~
       **Criterion withdrawn — that policy deletes.** Replaced by: the log is bounded without
       losing a line, and the counter compares injections and reads over one window.
-      — [x] `9fcc20c8`, with the archive and the line-count conservation test.
+      — [x] `f9620ec0`, with the archive and the line-count conservation test.
 - [x] No code path archives, deletes, or merges a knowledge entry without explicit human
       approval. `useful` and decay affect **ranking only**. — still true; re-checked while
       touching consolidation's neighbours. `tier2_propose` still has no production caller.
@@ -335,16 +335,16 @@ this ADR specified, the difference is named in the row and expanded under the ta
 | T0a hint followability | **Done** | `819cb52d`, `c51cf81b` — key per document, then an address the agent can open |
 | T0a (prod) store keeps the address | **Done** | `a2ddcdae` — the Grafeo backend dropped `source_path`, so T0a was dead in production while green in tests |
 | T0b counter keying | **Done** | `adaaaa45` |
-| T0c injection ≠ access | **Done** | `7e14b6a4`, credit bound corrected in `20a035bc` |
+| T0c injection ≠ access | **Done** | `7e14b6a4`, credit bound corrected in `ca80a78e` |
 | T0d read → update_access | **Done** | `5ee3625a` |
-| T0e grace period | **Done, differently** | `20a035bc` — measured in days from file mtime; **no `created` field was added** |
-| T0f retention | **Done, differently** | `9fcc20c8` — not rotation: one window derived from the reads, plus an archive |
+| T0e grace period | **Done, differently** | `ca80a78e` — measured in days from file mtime; **no `created` field was added** |
+| T0f retention | **Done, differently** | `f9620ec0` — not rotation: one window derived from the reads, plus an archive |
 | T0g slot dedup | **Verified — not present** | no code, no config, no procedure: the measurement that was to justify the fix found no duplication to fix |
 | T0h telemetry | **Done** | `8a599d93` |
 | Measurability (`task_id`, printed addresses) | **Done** | `514d77eb` — added so T0 could be verified from the log at all |
-| Graph channel addressing | **Done** | `3841d66d`, `a4ee1813`, `f3c5d903`, `05036984` — a second, independent copy of the same defect |
-| Shared-layer gate at hint time | **Done** | `1940b6ed` |
-| Legacy-state test fixture | **Done** | `d85c9c83` |
+| Graph channel addressing | **Done** | `eb03078c`, `59d2e211`, `238fb34c`, `86daefb9` — a second, independent copy of the same defect |
+| Shared-layer gate at hint time | **Done** | `325b1f88` |
+| Legacy-state test fixture | **Done** | `54b7a0ba` |
 | T1 merge + transfer | Pending — gated on Q1, Q2, Q5; **API cost to be measured before implementation, not after** | — |
 | T2–T4 | Pending | — |
 
@@ -420,7 +420,7 @@ this ADR already applies to its own claims: measured before ordered.
   > So the corpus has to be settled *before* the window closes, not after. Q4's answer sharpens
   > this rather than relieving it: there is plenty of read signal, and much of it is an agent
   > reading the project it works on. Tracked as `AR-CORPUS-MISALIGNMENT` in `backlog.md`, ahead
-  > of the follow-rate item. *(Raised by Warren and Ark on review of `e9194ae1`; both were
+  > of the follow-rate item. *(Raised by Warren and Ark on review of `12dcd94a`; both were
   > right that this was filed as a question when it is a blocker.)*
 
 ## Authors
@@ -464,7 +464,7 @@ the same as "carried by every layer in between".
 *Every defect was green in the suite and red on the first restart.* Four times, ending with a
 guard that passed 1145 tests and then refused to import the shared layer on six agents. The
 common shape: the tests built clean state, production is made of rows written by code that no
-longer exists. `d85c9c83` gives the suite five measured forms of legacy state; the guard
+longer exists. `54b7a0ba` gives the suite five measured forms of legacy state; the guard
 regression now fails in it.
 
 *Two of our own measurements were wrong in our favour, and both were caught by re-deriving

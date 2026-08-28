@@ -112,7 +112,7 @@ class InferenceOrchestrator:
                 conversation_id=conversation_id,
                 agent_llm_provider=agent_llm_provider,  # Phase 3: per-agent provider selection
                 # The level the caller asked for. `query` hands its extra kwargs to
-                # the provider, and since d8480074 every provider names the parameter
+                # the provider, and since a266259c every provider names the parameter
                 # — so a chat without an agent can finally set a depth. Absent stays
                 # absent: None leaves the alias configuration deciding, as before.
                 reasoning_effort=reasoning_effort,

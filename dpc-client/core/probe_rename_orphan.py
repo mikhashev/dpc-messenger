@@ -171,7 +171,7 @@ async def main() -> int:
             pass
     logging.getLogger("dpc_client_core").removeHandler(handler)
 
-    print(f"\n3. the shutdown sweep, the half c9889eb0 added")
+    print(f"\n3. the shutdown sweep, the half ea34d047 added")
     stopped = await prov.stop_all_supervisors()
     print(f"   stop_all_supervisors returned {stopped}")
 

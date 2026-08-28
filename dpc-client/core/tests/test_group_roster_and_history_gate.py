@@ -230,7 +230,7 @@ async def test_a_request_is_answered_once(group_manager):
 #
 # The three GROUP_HISTORY_* handlers and the group branch of the 1:1 request
 # handler were written for the v0.20.0 hash-based sync and never got the check
-# GROUP_SYNC has had since `4d3b7442`. Measured live on 2026-08-28: the node
+# GROUP_SYNC has had since `3e49b044`. Measured live on 2026-08-28: the node
 # that had removed us from a group still answered our status with its 28
 # messages, and we handed back our 21.
 
@@ -446,7 +446,7 @@ def test_a_removed_node_stops_advertising_the_group(tmp_path):
 
 # --- door 4: an answer is only an answer if we asked ----------------------
 #
-# `4d3b7442` gave CHAT_HISTORY_RESPONSE a claim against a recorded question:
+# `3e49b044` gave CHAT_HISTORY_RESPONSE a claim against a recorded question:
 # «Unclaimed, it lets any connected peer overwrite a conversation it was never
 # part of». The group twin arrived with the v0.20.0 hash sync and got none, so a
 # member could push a history nobody asked for — and a member is exactly who is
