@@ -49,6 +49,7 @@ from _harness import provenance  # noqa: E402
 
 _DATASET_STATE = {}
 
+RESULTS_DIR = HERE / "results"
 REPO = "gaia-benchmark/GAIA"
 SPLIT = "2023/validation/metadata.level1.parquet"
 ATTACHMENT_DIR = "2023/validation"
@@ -132,6 +133,63 @@ def _matches_one(candidate: str, gold: str) -> bool:
 
 
 # --- dataset ---------------------------------------------------------------
+
+def hub_caches_in_effect() -> List[Path]:
+    """Where huggingface_hub puts and finds things, as configured right now.
+
+    Read before this run redirects anything: this is the cache the machine
+    really uses, and the one an agent walks when it goes looking.
+    """
+    out: List[Path] = []
+    for var in ("HF_HUB_CACHE", "HUGGINGFACE_HUB_CACHE"):
+        if os.environ.get(var):
+            out.append(Path(os.environ[var]))
+    if os.environ.get("HF_HOME"):
+        out.append(Path(os.environ["HF_HOME"]) / "hub")
+    out.append(Path.home() / ".cache" / "huggingface" / "hub")
+    seen, uniq = set(), []
+    for c in out:
+        key = str(c).lower()
+        if key not in seen:
+            seen.add(key)
+            uniq.append(c)
+    return uniq
+
+
+def reachable_gold(caches: List[Path], results_dir: Optional[Path] = None) -> List[Path]:
+    """Copies of the answers an agent on this machine could open and read.
+
+    Two kinds, and the second is the one that surprises people: the dataset in
+    the hub cache, and every earlier report, because a report carries `gold`
+    per task so it can be re-scored.
+    """
+    marker = "datasets--" + REPO.replace("/", "--")
+    found = [c / marker for c in caches if (c / marker).is_dir()]
+    if results_dir and results_dir.is_dir():
+        for f in sorted(results_dir.glob("*.json")):
+            try:
+                text = f.read_text(encoding="utf-8")
+            except Exception:
+                continue
+            if '"gold"' in text:
+                found.append(f)
+    return found
+
+
+def redirect_hub_into(workdir: Path) -> Path:
+    """Point huggingface_hub at a directory this run owns, so it can delete it.
+
+    Set before the first `huggingface_hub` import — the library reads these at
+    import time and a later change moves nothing.
+    """
+    private = workdir / "hf"
+    (private / "hub").mkdir(parents=True, exist_ok=True)
+    os.environ["HF_HOME"] = str(private)
+    os.environ["HF_HUB_CACHE"] = str(private / "hub")
+    os.environ["HUGGINGFACE_HUB_CACHE"] = str(private / "hub")
+    os.environ["HF_DATASETS_CACHE"] = str(private / "datasets")
+    return private
+
 
 def load_tasks(token: str, limit: Optional[int], with_files: bool) -> List[Dict[str, Any]]:
     from huggingface_hub import hf_hub_download
@@ -273,8 +331,26 @@ async def main_async(args) -> int:
     from dpc_client_core.llm_manager import LLMManager
     from dpc_client_core.dpc_agent.agent import DpcAgent, AgentConfig
 
-    rows = load_tasks(token, args.limit, args.with_files)
-    print(f"{len(rows)} task(s) from GAIA L1 validation", flush=True)
+    # Measured 2026-08-28: an agent wrote a script into its own sandbox and ran
+    # it, and the script read the gold parquet out of the hub cache — two Tier-0
+    # steps that no path gate sees, because the path lives inside the file. So
+    # the answer is not a better gate, it is not leaving the answers where a
+    # process can open them.
+    visible = reachable_gold(hub_caches_in_effect(), RESULTS_DIR)
+    _DATASET_STATE["gold_reachable_at_start"] = [str(v) for v in visible]
+    _DATASET_STATE["gold_reachable_allowed"] = bool(args.allow_reachable_gold)
+    if visible and not args.allow_reachable_gold:
+        listing = "\n  ".join(str(v) for v in visible[:8])
+        more = f"\n  … and {len(visible) - 8} more" if len(visible) > 8 else ""
+        raise SystemExit(
+            "the answers are readable from this machine, so a score would not be "
+            f"worth reading:\n  {listing}{more}\n"
+            "move or delete them, or pass --allow-reachable-gold to run anyway "
+            "(the run then records that it was contaminable)."
+        )
+    if visible:
+        print(f"WARNING: {len(visible)} readable copy(ies) of the answers left in place "
+              "on purpose — this score is contaminable", flush=True)
 
     workdir = Path(tempfile.mkdtemp(prefix="dpc-gaia-"))
     agent_root = workdir / "agent"
@@ -282,6 +358,24 @@ async def main_async(args) -> int:
     # Attachments live inside the agent root: outside it, ADR-030 Tier 1 stops
     # every read as off-sandbox and a headless run has no approver to ask.
     attachments_dir = agent_root / "gaia-files"
+
+    private_hub = redirect_hub_into(workdir)
+    rows = load_tasks(token, args.limit, args.with_files)
+    print(f"{len(rows)} task(s) from GAIA L1 validation", flush=True)
+
+    # Every attachment is fetched now, while the cache still exists, and copied
+    # into the sandbox. After this the run needs the hub for nothing, so the
+    # cache goes and the gold survives only in `rows` — in memory.
+    prefetched: Dict[str, Optional[Path]] = {}
+    for row in rows:
+        if row.get("file_name"):
+            prefetched[row["task_id"]] = fetch_attachment(
+                token, row["file_name"], attachments_dir
+            )
+    shutil.rmtree(private_hub, ignore_errors=True)
+    _DATASET_STATE["private_cache_removed"] = not private_hub.exists()
+    print(f"attachments prefetched: {len(prefetched)}; hub cache removed: "
+          f"{_DATASET_STATE['private_cache_removed']}", flush=True)
 
     providers_path, entry = providers_file_for(
         args.provider_alias, args.model, args.base_url, args.context_window, workdir,
@@ -302,9 +396,7 @@ async def main_async(args) -> int:
         results = []
         started = time.time()
         for i, row in enumerate(rows, 1):
-            attachment = None
-            if row.get("file_name"):
-                attachment = fetch_attachment(token, row["file_name"], attachments_dir)
+            attachment = prefetched.get(row["task_id"])
             outcome = await run_one(agent, row, attachment)
             results.append(outcome)
             mark = "OK  " if outcome["correct"] else "MISS"
@@ -438,6 +530,9 @@ def main() -> int:
                          "Tier 2 remains hard-blocked and never reaches the queue")
     ap.add_argument("--json", default=None)
     ap.add_argument("--keep", action="store_true")
+    ap.add_argument("--allow-reachable-gold", action="store_true",
+                    help="run even though the answers are readable on this machine; "
+                         "the report records that the score is contaminable")
     return asyncio.run(main_async(ap.parse_args()))
 
 

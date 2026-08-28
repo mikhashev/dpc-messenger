@@ -49,6 +49,7 @@ def _args(**over):
         limit=1, with_files=False, provider_alias=None, model="fake-model",
         base_url="http://127.0.0.1:1", context_window=4096, temperature=0.0,
         reasoning_effort="high", auto_approve=False, json=None, keep=False,
+        allow_reachable_gold=False,
     )
     base.update(over)
     return types.SimpleNamespace(**base)
@@ -82,6 +83,9 @@ def harness(monkeypatch):
     monkeypatch.setattr(agent_mod, "DpcAgent", _FakeAgent)
     monkeypatch.setattr(agent_mod, "AgentConfig", lambda *a, **k: None)
     monkeypatch.setattr(gaia, "load_tasks", lambda *a, **k: [{"task_id": "t1"}])
+    # This machine really does hold readable answers, and the run refuses to
+    # start while it does. That gate has its own tests; these are about shutdown.
+    monkeypatch.setattr(gaia, "reachable_gold", lambda *a, **k: [])
     monkeypatch.setattr(gaia.provenance, "snapshot", lambda **k: {})
     return made
 
