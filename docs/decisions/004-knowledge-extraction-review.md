@@ -1,5 +1,7 @@
 # Knowledge Extraction Mechanism — External Review Brief
 
+**Status:** not a decision record. This is the brief that was sent out for external review; it occupies an ADR number because ADR-009 cites it, but it decides nothing and therefore has no lifecycle status.
+
 ## Context
 D-PC Messenger is a P2P messaging platform with embedded AI agents. During conversations between humans and AI agents, valuable knowledge emerges (decisions, facts, insights). The system extracts and persists this knowledge for future reference.
 

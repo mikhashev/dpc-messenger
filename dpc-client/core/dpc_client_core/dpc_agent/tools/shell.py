@@ -18,10 +18,28 @@ import os
 import platform
 import re
 import subprocess
+import threading
+import time
 import unicodedata
 from typing import List, Optional, Tuple
 
-from .registry import ToolEntry, ToolContext
+from .registry import ToolEntry, ToolContext, agent_display_name, conversation_origin
+# Moved to `process.py` on 2026-08-26 so they cover every spawn this service
+# makes, not only this file's. Imported under their old names on purpose: the
+# tests monkeypatch `shell._MEMORY_CEILING_MB`, and a module global is what they
+# have to be able to reach.
+from .process import (  # noqa: F401  (re-exported for the tests that patch them here)
+    _DRAIN_AFTER_KILL_SECONDS,
+    _MEMORY_CEILING_MB,
+    _MEMORY_POLL_SECONDS,
+    _drain_after_kill,
+    _kill_process_tree,
+    _process_memory_mb,
+    _read_memory_ceiling,
+    _tree_memory_mb,
+    _watch_memory,
+    run_supervised,
+)
 
 log = logging.getLogger(__name__)
 
@@ -35,13 +53,30 @@ MAX_OUTPUT = 50_000  # chars
 HARDLINE_PATTERNS: list[re.Pattern] = [
     # Mass delete (Linux)
     re.compile(r"\brm\b.*\s+-[a-zA-Z]*r[a-zA-Z]*f|rm\b.*\s+-[a-zA-Z]*f[a-zA-Z]*r", re.I),
+    # …and the same flags spelled apart. `rm -r -f dir` did exactly what
+    # `rm -rf dir` does and classified as tier0, because the pattern above
+    # wants both letters inside one token.
+    re.compile(r"\brm\b(?=.*\s-[a-zA-Z]*r\b)(?=.*\s-[a-zA-Z]*f\b)", re.I),
     re.compile(r"\brm\b\s+.*(/|~|\$HOME)", re.I),
-    # Mass delete (Windows)
-    re.compile(r"\b(rd|rmdir)\b.*\s+/s", re.I),
-    re.compile(r"\bdel\b\s+/s", re.I),
+    # Mass delete (Windows). `/s` is matched anywhere in the segment, not only
+    # immediately after the verb: `del foo.txt /s /q` deletes recursively and
+    # `\bdel\b\s+/s` never saw it.
+    re.compile(r"\b(rd|rmdir)\b.*\s/s\b", re.I),
+    # `erase` is cmd.exe's own alias for `del`.
+    re.compile(r"\b(del|erase)\b.*\s/s\b", re.I),
+    # Mass delete (PowerShell) — and PowerShell is not a Windows-only surface:
+    # `pwsh` has shipped on Linux and macOS for years, so a rule that names only
+    # `powershell` covers one platform of three. Recurse is the mass part; a
+    # single-file Remove-Item stays ordinary work.
+    re.compile(r"\bRemove-Item\b(?=.*\s-Recurse\b)", re.I),
+    re.compile(r"\bRemove-Item\b(?=.*\s-Force\b)(?=.*[\\/]\*)", re.I),
     # Disk format / erase
     re.compile(r"\bmkfs\b", re.I),
-    re.compile(r"\bformat\s+[A-Za-z]:", re.I),
+    # Switches may sit between the verb and the drive — `format /q C:`,
+    # `format /fs:ntfs D:`. Only switch tokens are allowed in between, so
+    # `format-json report C:\\out` stays ordinary work.
+    re.compile(r"\bformat\b(?:\s+/\S+)*\s+[A-Za-z]:", re.I),
+    re.compile(r"\b(Format-Volume|Clear-Disk|Initialize-Disk|Remove-Partition)\b", re.I),
     re.compile(r"\bdiskutil\s+(eraseDisk|partitionDisk|secureErase)", re.I),
     # Raw device write
     re.compile(r"\bdd\b.*\bof=/dev/", re.I),
@@ -64,8 +99,23 @@ DANGEROUS_PATTERNS: list[re.Pattern] = [
     re.compile(r"\bcmd\s+/c\b", re.I),
     re.compile(r"\b(python|python3|py)\s+-c\b", re.I),
     re.compile(r"\bnode\s+-e\b", re.I),
-    # Encoded commands
-    re.compile(r"\bpowershell\b.*(-enc|-encodedcommand)", re.I),
+    # PowerShell's inline-code wrapper. Every other shell's had a rule and this
+    # one did not. The parameter is any unambiguous prefix of `-Command`,
+    # because PowerShell resolves them: `-c`, `-co`, `-comm` all run code.
+    # `-Confirm` does not match — its `n` breaks the chain before a boundary.
+    re.compile(r"\b(powershell|pwsh)\b.*\s-c(?:o(?:m(?:m(?:a(?:n(?:d)?)?)?)?)?)?\b", re.I),
+    # Encoded commands — both spellings of the shell, on every platform.
+    re.compile(r"\b(powershell|pwsh)\b.*(-enc|-encodedcommand)", re.I),
+    # Download-and-run through PowerShell, the shape `curl | sh` covers on POSIX.
+    re.compile(r"\b(iex|Invoke-Expression)\b", re.I),
+    # Irrecoverable overwrite. Not a hard block: shredding one file inside the
+    # sandbox is legitimate, and the catastrophic form is the path, which the
+    # `rm … /` rule above already covers.
+    re.compile(r"\bshred\b", re.I),
+    # Mass delete by search. `find / -name "*" -delete` is a whole-disk wipe
+    # that no `rm` pattern sees.
+    re.compile(r"\bfind\b.*\s-delete\b", re.I),
+    re.compile(r"\bfind\b.*-exec\s+rm\b", re.I),
     # Download + execute — checked in CROSS_SEGMENT_PATTERNS (spans pipe boundary)
     # Registry (Windows)
     re.compile(r"\breg\s+(delete|add)\b", re.I),
@@ -99,8 +149,17 @@ def _normalize_command(command: str) -> str:
 
 
 def _split_segments(command: str) -> list[str]:
-    """Split command by pipe/chain operators to check each segment."""
-    return re.split(r"\s*[|;&]\s*|\s*&&\s*|\s*\|\|\s*", command)
+    """Split command by pipe/chain operators to check each segment.
+
+    A **newline separates too**. It did not, so a two-line command was a
+    single segment on every platform. That happened to be safer for the
+    patterns we have — an unanchored HARDLINE still matches inside the whole
+    blob — and it is safety by accident: any pattern anchored at the start of
+    a line, and any future check that assumes a segment is one command, was
+    blind to it.
+    """
+    parts = re.split(r"\s*(?:\|\||&&|[|;&\r\n])\s*", command)
+    return [part for part in parts if part and part.strip()]
 
 
 def _is_fork_bomb(command: str) -> bool:
@@ -121,11 +180,9 @@ def _get_tier1_whitelist(ctx: Optional["ToolContext"] = None) -> list[str]:
     try:
         _profile = getattr(getattr(ctx, "_agent", None), "_firewall_profile", None)
         profile_name = _profile or "default"
-        rules = ctx.firewall.rules
-        profiles = rules.get("agent_profiles", {})
-        profile = profiles.get(profile_name, {})
-        tools_block = profile.get("tools", {})
-        wl = tools_block.get("run_shell_tier1_whitelist", [])
+        wl = ctx.firewall.get_tool_setting(
+            "run_shell", "tier1_whitelist", profile_name=profile_name, default=[]
+        )
         if isinstance(wl, list):
             log.debug("tier1_whitelist[%s]: %s", profile_name, wl)
             return wl
@@ -136,7 +193,12 @@ def _get_tier1_whitelist(ctx: Optional["ToolContext"] = None) -> list[str]:
 
 
 def _is_whitelisted(command: str, whitelist: list[str]) -> bool:
-    """Check if command prefix matches any whitelist entry."""
+    """Does this **one segment** start with a whitelisted entry?
+
+    Callers pass the segment that triggered the finding, never the whole line.
+    Passing the line is a prefix-auth bypass: an entry auto-approving `git`
+    also auto-approves whatever is chained after it.
+    """
     normalized = _normalize_command(command).strip().lower()
     for entry in whitelist:
         if normalized.startswith(entry.lower()):
@@ -155,42 +217,79 @@ def _validate_command(command: str, ctx: Optional["ToolContext"] = None) -> Opti
         if pattern.search(normalized):
             return ("tier2", f"Blocked by cross-segment pattern: {pattern.pattern}")
 
-    segments = _split_segments(normalized)
+    # Tier-major, not segment-major. This loop used to walk segments and
+    # return on the first pattern of any tier that matched, so a Tier-1 hit
+    # in an early segment ended the scan before a later segment was examined
+    # for a hard block at all: `sudo ls && rm -rf /` came back as "ask the
+    # human" because `sudo` matched first, and `rm -rf /` was never seen.
+    # Every segment is now checked for a hard block before any of them is
+    # checked for a soft one.
+    segments = [segment.strip() for segment in _split_segments(normalized)]
+
     for segment in segments:
-        segment = segment.strip()
-        if not segment:
-            continue
         for pattern in HARDLINE_PATTERNS:
             if pattern.search(segment):
                 return ("tier2", f"Blocked by HARDLINE pattern: {pattern.pattern}")
+
+    # Reasons accumulate rather than stopping at the first. The reason is
+    # what a person reads in the approval dialog, and naming only the first
+    # match primes them for the wrong thing — "Requires approval: sudo" for a
+    # command whose second half was the part that mattered.
+    dangerous: list[str] = []
+    flagged: list[str] = []
+    for segment in segments:
         for pattern in DANGEROUS_PATTERNS:
             if pattern.search(segment):
-                whitelist = _get_tier1_whitelist(ctx)
-                if _is_whitelisted(command, whitelist):
-                    return None
-                return ("tier1", f"Requires approval: {pattern.pattern}")
+                if pattern.pattern not in dangerous:
+                    dangerous.append(pattern.pattern)
+                if segment not in flagged:
+                    flagged.append(segment)
+    if dangerous:
+        whitelist = _get_tier1_whitelist(ctx)
+        # Every flagged segment must be whitelisted on its own.
+        if whitelist and all(_is_whitelisted(seg, whitelist) for seg in flagged):
+            return None
+        return ("tier1", "Requires approval: " + "; ".join(dangerous))
 
     if ctx:
         _PATH_PATTERNS = [
             re.compile(r'\b([A-Z]:\\[^\s"\'<>|&;]+)'),
             re.compile(r'(?<!\w)(/[a-zA-Z][^\s"\'<>|&;]*)'),
         ]
-        for pat in _PATH_PATTERNS:
-            for match in pat.finditer(normalized):
-                extracted = match.group(1)
-                try:
-                    ctx.validate_extended_path(extracted)
-                except PermissionError:
-                    whitelist = _get_tier1_whitelist(ctx)
-                    if _is_whitelisted(command, whitelist):
-                        break
-                    return ("tier1", f"Command accesses path outside sandbox: {extracted}")
+        whitelist = _get_tier1_whitelist(ctx)
+        # Per segment, for the same reason: the path that leaves the sandbox is
+        # in one segment, and only that segment may be waived.
+        for segment in segments:
+            for pat in _PATH_PATTERNS:
+                for match in pat.finditer(segment):
+                    extracted = match.group(1)
+                    try:
+                        ctx.validate_extended_path(extracted)
+                    except PermissionError:
+                        if whitelist and _is_whitelisted(segment, whitelist):
+                            break
+                        return ("tier1", f"Command accesses path outside sandbox: {extracted}")
 
     return None
 
 
 _pending_approvals: dict = {}
 APPROVAL_TTL_SECONDS = 60
+
+# Answerers that are not transports the service knows about. Nothing in
+# production registers one; the eval harness does, so a headless benchmark is
+# not told there is nobody to ask while its own approver watches the queue. A
+# registered watcher can only restore the wait — it approves nothing itself.
+_approval_watchers: set = set()
+
+
+def register_approval_watcher(name: str) -> None:
+    """Declare a non-transport answerer, so the gate asks instead of refusing."""
+    _approval_watchers.add(name)
+
+
+def unregister_approval_watcher(name: str) -> None:
+    _approval_watchers.discard(name)
 
 
 def _cleanup_expired_approvals() -> None:
@@ -212,51 +311,105 @@ def _request_approval(ctx: ToolContext, command: str, reason: str, cwd: str, tim
     Blocks the executor thread until user approves/rejects via UI.
     On approval, service.py executes the command and stores the result.
     Returns the actual command output to the agent — approval is transparent.
+
+    LIMITS: the check below establishes that no surface could carry the question,
+    not that no person is present. An interface left open all night looks exactly
+    like somebody sitting at it, and for that case the second line is still the
+    TTL: the card is shown, nobody presses it, and sixty seconds later the
+    command does not run.
     """
+    import asyncio
     import time
     import uuid
     import threading
 
     _cleanup_expired_approvals()
 
+    # Learned twice already — in the scheduler (tools/core.py:1097) and in the
+    # headless web-auth gate (browser.py:2835): broadcast_event drops the request
+    # when nobody is listening, so the wait below could only end in a timeout that
+    # reads like a person's refusal. Telegram is the other surface that can answer,
+    # and it answers with no interface client attached. A registered watcher is
+    # the third — the eval harness declares one — so the refusal is for the case
+    # where none of them can carry the question. Before the queue entry exists,
+    # not after: an unanswerable request should not be sitting anywhere.
+    dpc_service = getattr(ctx, "dpc_service", None)
+    local_api = getattr(dpc_service, "local_api", None) if dpc_service else None
+    telegram_chat_id = getattr(ctx, "reply_telegram_chat_id", "") or ""
+    ui_attached = bool(getattr(local_api, "has_clients", False)) if local_api else False
+    if not ui_attached and not telegram_chat_id and not _approval_watchers:
+        log.warning("run_shell TIER1 not asked, no surface could answer: %r", command)
+        return (
+            f"🚫 Approval required and nobody could be asked: no interface client is "
+            f"connected and this run did not come from Telegram. Not run: `{command}`"
+        )
+
     request_id = str(uuid.uuid4())[:8]
     agent_obj = getattr(ctx, "_agent", None)
-    agent_name = getattr(agent_obj, "display_name", "Agent")
+    # Never the bare word "Agent": an unknown agent has to look unknown, and the
+    # sandbox directory is its real id. The firewall profile inherits the same
+    # fallback, and that is an improvement — profiles are keyed by agent id, so
+    # the old default could only ever miss.
+    agent_name = agent_display_name(ctx)
     agent_profile = getattr(agent_obj, "_firewall_profile", None) or agent_name
     event = threading.Event()
 
+    agent_id = getattr(getattr(ctx, "agent_root", None), "name", "") or ""
+
     _pending_approvals[request_id] = {
         "command": command,
+        # Why this is Tier 1, kept where the queue can be read. Without it an
+        # approver cannot tell "needs a judgement" from "leaves the sandbox"
+        # and can only answer both the same way.
+        "reason": reason,
         "cwd": cwd or str(ctx.agent_root),
         "timeout": timeout,
         "agent_name": agent_name,
         "agent_profile": agent_profile,
+        "agent_id": agent_id,
         "ctx": ctx,
         "created_at": time.time(),
         "event": event,
         "result": None,
     }
 
-    dpc_service = getattr(ctx, "dpc_service", None)
-    local_api = getattr(dpc_service, "local_api", None) if dpc_service else None
-    if local_api:
-        import asyncio
+    main_loop = getattr(ctx, "_event_loop", None)
+    _origin_id, _origin_title = conversation_origin(ctx)
+
+    def _on_main_loop(coro) -> bool:
+        """Hand a coroutine to the service loop from this executor thread."""
+        if main_loop is None or not main_loop.is_running():
+            coro.close()
+            return False
+        asyncio.run_coroutine_threadsafe(coro, main_loop)
+        return True
+
+    if dpc_service is not None:
         try:
-            coro = local_api.broadcast_event("shell_approval_request", {
-                "request_id": request_id,
-                "command": command,
-                "reason": reason,
-                "agent_name": agent_name,
-            })
-            main_loop = getattr(ctx, "_event_loop", None)
-            if main_loop and main_loop.is_running():
-                asyncio.run_coroutine_threadsafe(coro, main_loop)
-            else:
-                log.warning("No main event loop available for shell_approval_request broadcast")
+            offered = _on_main_loop(dpc_service.announce_shell_approval_request(
+                request_id=request_id,
+                command=command,
+                reason=reason,
+                agent_id=agent_id,
+                agent_name=agent_name,
+                timeout_seconds=APPROVAL_TTL_SECONDS,
+                # Empty unless this run came from Telegram. The same field that
+                # decides where the agent's answer goes decides where the
+                # approval is offered — otherwise the button appears in chats
+                # nobody is talking in, and anyone there can press it.
+                telegram_chat_id=getattr(ctx, "reply_telegram_chat_id", "") or "",
+                # Which chat the agent was working in. The tool knows the id and
+                # sometimes the name; naming the conversation is the service's
+                # job, because it is the one holding groups and peers.
+                conversation_id=_origin_id,
+                conversation_title=_origin_title,
+            ))
+            if not offered:
+                log.warning("No main event loop available to announce shell_approval_request")
         except Exception as e:
-            log.warning("Failed to broadcast shell_approval_request: %s", e)
+            log.warning("Failed to announce shell_approval_request: %s", e)
     else:
-        log.warning("No local_api available for shell_approval_request broadcast")
+        log.warning("No service available to announce shell_approval_request")
 
     log.info("run_shell TIER1 approval requested: %r (id=%s), blocking executor thread", command, request_id)
 
@@ -267,15 +420,16 @@ def _request_approval(ctx: ToolContext, command: str, reason: str, cwd: str, tim
 
     if not signaled or entry is None:
         log.info("Shell approval timed out (%ds): %s — %r", APPROVAL_TTL_SECONDS, request_id, command)
-        if local_api:
+        if dpc_service is not None:
             try:
-                coro = local_api.broadcast_event("shell_approval_expired", {
-                    "request_id": request_id,
-                })
-                if main_loop and main_loop.is_running():
-                    asyncio.run_coroutine_threadsafe(coro, main_loop)
+                _on_main_loop(dpc_service.announce_shell_approval_closed(
+                    request_id=request_id,
+                    agent_id=agent_id,
+                    outcome="⌛ Expired — the agent stopped waiting for this one.",
+                    resolution="expired",
+                ))
             except Exception as e:
-                log.warning("Failed to broadcast shell_approval_expired: %s", e)
+                log.warning("Failed to announce shell_approval_closed: %s", e)
         return f"⏳ Command approval timed out after {APPROVAL_TTL_SECONDS}s: `{command}`"
 
     if entry.get("decision") == "rejected":
@@ -285,6 +439,39 @@ def _request_approval(ctx: ToolContext, command: str, reason: str, cwd: str, tim
     return _execute_shell_command(command, entry.get("cwd"), entry.get("timeout", 120))
 
 
+def _cap_stream(text: str, stream: str) -> str:
+    """Cap one output stream and say so *before* the content.
+
+    The notice used to sit after the content, and the second cap in
+    `loop.py:_truncate_tool_result` (15 000 chars) cut this string again,
+    taking the notice with it. The agent was then left with the harness
+    marker alone, which reports the size of what it received (50 036) as
+    if it were the size of the command's output (699 370): a confident
+    wrong number rather than silence. A prefix survives that second cut.
+
+    It also names the way to read the rest, because this tool has no
+    offset of its own, and the price of that way — the command runs
+    again, which for a slow or non-deterministic command is a real cost
+    the agent must see before paying it. The redirect form is one static
+    string on all three platforms: `>` and `2>` are valid in both
+    `cmd.exe` and `/bin/sh`, and a bare relative name lands in the agent
+    sandbox, which is exactly where `read_file` resolves relative paths.
+    """
+    if len(text) <= MAX_OUTPUT:
+        return text
+    return (
+        f"[{stream}: {len(text)} chars, kept first {MAX_OUTPUT} of them"
+        f" | to read the rest, re-run the command as"
+        f' `<command> > out.txt 2> err.txt`, then read_file("out.txt", offset=…)'
+        f' or read_file("err.txt") — the files land in the working directory of'
+        f" the run, which is the agent sandbox unless you passed cwd, and"
+        f" re-running EXECUTES THE COMMAND AGAIN]\n"
+        + text[:MAX_OUTPUT]
+    )
+
+
+
+
 def _execute_shell_command(command: str, working_dir: str | None, timeout: int) -> str:
     """Run a shell command, format stdout/stderr/exit. Executor-thread only."""
     is_windows = platform.system() == "Windows"
@@ -292,37 +479,60 @@ def _execute_shell_command(command: str, working_dir: str | None, timeout: int) 
     if is_windows:
         command = f"chcp 65001 >nul && {command}"
 
+    popen_kwargs: dict = {}
+    if not is_windows:
+        # A session of its own, so the whole descendant set can be signalled
+        # with one killpg. Without it only the shell dies and its children are
+        # reparented to init, still running and still holding the pipes.
+        popen_kwargs["start_new_session"] = True
+
     try:
-        result = subprocess.run(
+        # The spawn, the watcher, the tree kill and the bounded drain used to be
+        # written out here. They are the same four things `git.py` needs, and a
+        # process-kill routine kept in two copies is how one of them ends up a
+        # version behind - so they live in `process.py` now and this is one of
+        # its two callers.
+        run = run_supervised(
             command,
-            shell=True,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
+            launcher="run_shell",
             timeout=timeout,
             cwd=working_dir,
+            shell=True,
             env={**os.environ, "PYTHONIOENCODING": "utf-8"},
+            ceiling_mb=_MEMORY_CEILING_MB,
+            popen_kwargs=popen_kwargs,
         )
 
+        note = ""
+        if run.exceeded_mb:
+            note = (
+                f"Error: the command and its children reached "
+                f"{run.exceeded_mb} MB, over the {_MEMORY_CEILING_MB} MB "
+                f"ceiling, and were killed"
+            )
+            # Naming the clock when the ceiling is what fired tells the agent
+            # the wrong cause, so the timeout adds only what it knows.
+            if run.killed:
+                note += f" - {run.killed}"
+            note += (
+                ". Raise DPC_SHELL_MEMORY_LIMIT_MB (a restart applies it) "
+                "if this work genuinely needs more."
+            )
+        elif run.timed_out:
+            note = f"Error: command timed out after {timeout}s - {run.killed}."
+
         parts = []
-        if result.stdout:
-            stdout = result.stdout
-            if len(stdout) > MAX_OUTPUT:
-                stdout = stdout[:MAX_OUTPUT] + f"\n... (truncated, {len(result.stdout)} total chars)"
-            parts.append(stdout)
-        if result.stderr:
-            stderr = result.stderr
-            if len(stderr) > MAX_OUTPUT:
-                stderr = stderr[:MAX_OUTPUT] + f"\n... (truncated, {len(result.stderr)} total chars)"
-            parts.append(f"[stderr]\n{stderr}")
-        if result.returncode != 0:
-            parts.append(f"[exit code: {result.returncode}]")
+        if run.stdout:
+            parts.append(_cap_stream(run.stdout, "stdout"))
+        if run.stderr:
+            parts.append(f"[stderr]\n{_cap_stream(run.stderr, 'stderr')}")
+        if note:
+            return "\n".join([note, *parts])
+        if run.returncode != 0:
+            parts.append(f"[exit code: {run.returncode}]")
 
         return "\n".join(parts) if parts else "(no output)"
 
-    except subprocess.TimeoutExpired:
-        return f"Error: command timed out after {timeout}s."
     except Exception as e:
         log.error("run_shell failed: %s", e)
         return f"Error: {e}"

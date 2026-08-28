@@ -24,6 +24,11 @@
   // gap from S145 backlog (Mike picked Option 2 in S147 chat).
   let allRegisteredTools: Array<{name: string; description: string; default_enabled: boolean; is_restricted: boolean}> = [];
 
+  // Tool modules the backend could not import. Their tools are absent from the
+  // list above and from every agent, and until now the only trace was a line in
+  // the log — so the panel showed a shorter list and called it complete.
+  let toolLoadFailures: Array<{module: string; error: string}> = [];
+
   // Tool definitions by category
   const toolCategories = [
     {
@@ -175,6 +180,30 @@
   // Derived: tools known to the backend registry but not in any hardcoded category.
   // Reactive — repopulates when allRegisteredTools arrives from list_all_tools.
   $: unmanagedTools = allRegisteredTools.filter(t => !hardcodedToolKeys.has(t.name));
+
+  // Which configured roots are reachable right now. The webview cannot stat the
+  // filesystem, so a folder on an external drive looks exactly like one that was
+  // deleted — and they are not the same thing. Removing stays the user's action;
+  // this only says which are unavailable at the moment.
+  let pathExists: Record<string, boolean> = {};
+
+  async function refreshPathExistence(settings: any) {
+    const paths = [
+      ...(settings?.sandbox_extensions?.read_only || []),
+      ...(settings?.sandbox_extensions?.read_write || []),
+    ].filter((p: string) => typeof p === 'string' && p.trim());
+    if (!paths.length) { pathExists = {}; return; }
+    try {
+      const result = await sendCommand('check_paths_exist', { paths });
+      pathExists = result?.exists || {};
+    } catch {
+      pathExists = {};  // unknown is not the same as missing: mark nothing
+    }
+  }
+
+  // Re-checked whenever the shown settings change; `pathExists` is written here and
+  // not read above, so this does not re-trigger itself.
+  $: refreshPathExistence(displaySettings);
 
   // Helper to get sandbox extensions safely
   function getSandboxExtensions(settings: any, type: 'read_only' | 'read_write'): string[] {
@@ -329,6 +358,34 @@
     : 0;
   $: archiveUnlimited = archiveInfo ? archiveInfo.max_sessions === 0 : false;
 
+  // Per-tool settings (`group_allowed`, `tier1_whitelist`) live in
+  // `tool_settings.<tool>.<setting>`, beside `tools` rather than inside it —
+  // `tools` is a map of tool name -> allowed and nothing else. The backend
+  // migrates the old compound keys (`tools.run_shell_group_allowed`) on load;
+  // reading falls back to them so an un-migrated file still displays right.
+  function toolSetting(settings: any, tool: string, key: string, fallback: any): any {
+    const moved = settings?.tool_settings?.[tool]?.[key];
+    if (moved !== undefined) return moved;
+    const legacy = settings?.tools?.[`${tool}_${key}`];
+    return legacy !== undefined ? legacy : fallback;
+  }
+
+  function setToolSetting(settings: any, tool: string, key: string, value: any): void {
+    if (!settings) return;
+    if (!settings.tool_settings) settings.tool_settings = {};
+    if (!settings.tool_settings[tool]) settings.tool_settings[tool] = {};
+    settings.tool_settings[tool][key] = value;
+    // Drop the pre-migration copy so the two cannot disagree after a save.
+    if (settings.tools) delete settings.tools[`${tool}_${key}`];
+    editSettings = editSettings;  // trigger Svelte reactivity after nested mutation
+  }
+
+  // run_shell is the only tool with settings today; these keep the call sites short.
+  const shellSetting = (settings: any, key: string, fallback: any) =>
+    toolSetting(settings, 'run_shell', key, fallback);
+  const setShellSetting = (settings: any, key: string, value: any) =>
+    setToolSetting(settings, 'run_shell', key, value);
+
   onMount(() => {
     (async () => {
       try {
@@ -337,6 +394,7 @@
         const resp = await (result as Promise<any>);
         if (resp?.status === 'success' && Array.isArray(resp.tools)) {
           allRegisteredTools = resp.tools;
+          toolLoadFailures = Array.isArray(resp.load_failures) ? resp.load_failures : [];
         }
       } catch (e) {
         console.warn('[AgentPermissionsPanel] list_all_tools failed:', e);
@@ -684,6 +742,21 @@
         <h4>Tool Permissions</h4>
         <p class="help-text-small">Control which tools the agent can use (enable/disable individually)</p>
 
+        {#if toolLoadFailures.length > 0}
+          <div class="tool-load-failure">
+            <strong>⚠️ {toolLoadFailures.length} tool module(s) failed to load</strong>
+            <p class="help-text-small">
+              Their tools are missing from this list and unavailable to every agent.
+              Restart the backend after fixing the import; check the log for the traceback.
+            </p>
+            <ul>
+              {#each toolLoadFailures as failure}
+                <li><code>{failure.module}</code> — {failure.error}</li>
+              {/each}
+            </ul>
+          </div>
+        {/if}
+
         {#each toolCategories as category}
           <h5 style="margin-top: 1rem; margin-bottom: 0.5rem; color: {category.isDanger ? 'var(--danger)' : 'var(--text-secondary)'};">
             {category.name}
@@ -709,7 +782,8 @@
                       <input
                         type="checkbox"
                         id="agent-tool-run_shell_group_allowed"
-                        bind:checked={editSettings.tools.run_shell_group_allowed}
+                        checked={shellSetting(editSettings, 'group_allowed', false)}
+                        on:change={(e) => setShellSetting(editSettings, 'group_allowed', (e.currentTarget as HTMLInputElement).checked)}
                       />
                       <div>
                         <span class="event-name">Allow in group chats</span>
@@ -720,12 +794,12 @@
                     <div class="whitelist-section">
                       <span class="event-name" style="font-size: 0.85em;">Command Whitelist (auto-approved)</span>
                       <div class="whitelist-entries">
-                        {#each (editSettings.tools.run_shell_tier1_whitelist || []) as entry, i}
+                        {#each shellSetting(editSettings, 'tier1_whitelist', []) as entry, i}
                           <div class="whitelist-entry">
                             <code>{entry}</code>
                             <button class="btn-remove-wl" on:click={() => {
-                              const wl: string[] = editSettings.tools.run_shell_tier1_whitelist || [];
-                              editSettings.tools.run_shell_tier1_whitelist = wl.filter((_entry: string, idx: number) => idx !== i);
+                              const wl: string[] = shellSetting(editSettings, 'tier1_whitelist', []);
+                              setShellSetting(editSettings, 'tier1_whitelist', wl.filter((_entry: string, idx: number) => idx !== i));
                             }}>×</button>
                           </div>
                         {/each}
@@ -743,9 +817,9 @@
                               if (tier2warn.some(t => val.toLowerCase().startsWith(t))) {
                                 alert(`Warning: "${val}" matches a Tier 2 (blocked) command. Adding to whitelist will NOT override Tier 2 blocks.`);
                               }
-                              const wl: string[] = editSettings.tools.run_shell_tier1_whitelist || [];
+                              const wl: string[] = shellSetting(editSettings, 'tier1_whitelist', []);
                               if (!wl.includes(val)) {
-                                editSettings.tools.run_shell_tier1_whitelist = [...wl, val];
+                                setShellSetting(editSettings, 'tier1_whitelist', [...wl, val]);
                               }
                               target.value = '';
                             }
@@ -773,7 +847,7 @@
                       <input
                         type="checkbox"
                         id="agent-tool-run_shell_group_allowed-ro"
-                        checked={displaySettings.tools?.run_shell_group_allowed}
+                        checked={shellSetting(displaySettings, 'group_allowed', false)}
                         disabled
                       />
                       <div>
@@ -781,11 +855,11 @@
                         <p class="help-text-small" style="margin: 0;">By default run_shell is restricted to 1:1 chats only</p>
                       </div>
                     </label>
-                    {#if (displaySettings.tools?.run_shell_tier1_whitelist || []).length > 0}
+                    {#if shellSetting(displaySettings, 'tier1_whitelist', []).length > 0}
                       <div class="whitelist-section" style="opacity: 0.7;">
                         <span class="event-name" style="font-size: 0.85em;">Whitelisted commands:</span>
                         <div class="whitelist-entries">
-                          {#each displaySettings.tools.run_shell_tier1_whitelist as entry}
+                          {#each shellSetting(displaySettings, 'tier1_whitelist', []) as entry}
                             <div class="whitelist-entry"><code>{entry}</code></div>
                           {/each}
                         </div>
@@ -863,10 +937,16 @@
           </div>
         {/if}
 
-        {#if !isGlobal}
-          <!-- Sandbox Path Configuration (per-agent) -->
+          <!-- Shown for the global view too. The value lives in `dpc_agent`, and every agent
+               without a profile of its own inherits it — hiding the section here made those
+               paths inheritable but neither visible nor removable except through some
+               individual agent. -->
           <h5 style="margin-top: 1rem; margin-bottom: 0.5rem; color: var(--text-secondary);">Configure Extended Paths</h5>
-          <p class="help-text-small" style="margin-bottom: 0.5rem;">Add directories outside the default sandbox that the agent can access</p>
+          <p class="help-text-small" style="margin-bottom: 0.5rem;">
+            {isGlobal
+              ? 'Directories every agent without its own profile inherits'
+              : 'Add directories outside the default sandbox that the agent can access'}
+          </p>
 
           <!-- Extended path access gates (S31) -->
           <div class="extended-access-gates" style="display: flex; gap: 1.5rem; margin-bottom: 0.75rem;">
@@ -909,7 +989,7 @@
                         type="text"
                         class="path-input"
                         bind:value={editSettings.sandbox_extensions.read_only[i]}
-                        placeholder="C:\Users\you\Documents\notes"
+                        placeholder="Absolute path to a folder the agent may read"
                       />
                       <label class="index-toggle" title="Index this path for agent memory search">
                         <input
@@ -981,7 +1061,7 @@
                         type="text"
                         class="path-input"
                         bind:value={editSettings.sandbox_extensions.read_write[i]}
-                        placeholder="C:\Users\you\projects\myapp"
+                        placeholder="Absolute path to a folder the agent may read and write"
                       />
                       <button
                         type="button"
@@ -1003,7 +1083,7 @@
                   <span class="path-label">📖 Read-Only Paths</span>
                   <ul class="path-list">
                     {#each displaySettings.sandbox_extensions.read_only || [] as path}
-                      <li>{path} {#if (displaySettings.sandbox_extensions.indexed_paths || []).includes(path)}<span class="indexed-badge">📇 Indexed</span>{/if}</li>
+                      <li>{path} {#if (displaySettings.sandbox_extensions.indexed_paths || []).includes(path)}<span class="indexed-badge">📇 Indexed</span>{/if}{#if pathExists[path] === false}<span class="unavailable-badge" title="Configured, but not reachable right now — an external or network drive looks like this too. Remove it here if it is gone for good.">⚠️ not available now</span>{/if}</li>
                     {/each}
                   </ul>
                 </div>
@@ -1023,7 +1103,7 @@
                   <span class="path-label">✏️ Read-Write Paths</span>
                   <ul class="path-list">
                     {#each displaySettings.sandbox_extensions.read_write || [] as path}
-                      <li>{path}</li>
+                      <li>{path}{#if pathExists[path] === false}<span class="unavailable-badge" title="Configured, but not reachable right now — an external or network drive looks like this too. Remove it here if it is gone for good.">⚠️ not available now</span>{/if}</li>
                     {/each}
                   </ul>
                 </div>
@@ -1035,8 +1115,6 @@
           {:else}
             <p class="help-text-small" style="font-style: italic;">No extended paths configured</p>
           {/if}
-
-        {/if}
       </div>
     {/if}
   </div>
@@ -1337,6 +1415,36 @@
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
+  }
+
+  /* Configured but not reachable right now. Deliberately not styled as an error:
+     an external drive that is currently unplugged looks exactly like this, and the
+     path is still a valid setting. */
+  .tool-load-failure {
+    margin: 0.75rem 0;
+    padding: 0.75rem;
+    border-radius: 8px;
+    border-left: 4px solid var(--danger, #c0392b);
+    background: var(--warning-bg, #fff4e5);
+    color: var(--warning-text, #8a5300);
+    font-size: 0.9rem;
+  }
+
+  .tool-load-failure ul {
+    margin: 0.5rem 0 0;
+    padding-left: 1.2rem;
+    word-break: break-word;
+  }
+
+  .unavailable-badge {
+    font-family: inherit;
+    font-size: 0.75rem;
+    margin-left: 0.5rem;
+    padding: 0 0.35rem;
+    border-radius: 3px;
+    background: var(--warning-bg, #fff4e5);
+    color: var(--warning-text, #8a5300);
+    white-space: nowrap;
   }
 
   /* Session History archive status */

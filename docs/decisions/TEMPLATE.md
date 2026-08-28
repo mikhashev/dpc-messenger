@@ -20,7 +20,7 @@ Always present, even for lightweight ADRs. Machine-readable metadata for tooling
 ---
 adr: NNN
 title: "Title in imperative mood"
-status: proposed | rejected | accepted | deprecated | superseded-by-NNN
+status: proposed | rejected | accepted | implemented | deprecated | superseded-by-NNN
 date: YYYY-MM-DD
 deciders: [Mike]                    # Who makes the final call
 consulted: [Ark, CC]                # SMEs who provided input (two-way)
@@ -36,9 +36,17 @@ session: SNN                         # Traceback to source session
 ### Status Lifecycle
 
 ```
-proposed → accepted → deprecated → superseded-by-NNN
+proposed → accepted → implemented → deprecated → superseded-by-NNN
 proposed → rejected
 ```
+
+`implemented` says what `accepted` cannot: the decision is not only agreed but built. It was
+already in use in two ADRs before it was written down here, and `build.py --check` validates
+against these five words plus `superseded-by-NNN` (2026-08-10).
+
+**Keep the field to one token.** A qualification — "implemented (opt-in per agent, default
+off)" — belongs in the body or in Implementation Status; the front-matter field is the
+machine-readable one, and the checker warns when it carries more than the word.
 
 ---
 
@@ -174,3 +182,36 @@ that's stakeholder communication, this is who did what in the process.
 | **Medium** | required | recommended | required | recommended | — | recommended | — | — | — |
 | **Heavy** | required | required | required | required | required | required | required | recommended | recommended |
 | **Security/Critical** | required | required | required | required | required | required | **REQUIRED** | required | required |
+
+---
+
+## Validation
+
+```bash
+uv run python tools/backlog/build.py --check
+```
+
+The same pass that checks the backlog reads `docs/decisions/` (ADR-039 item 6: one
+validator, two formats). It is stdlib-only and structural — not markdownlint, and there is
+no pre-commit hook; the maintainer running it is the enforcement point.
+
+What it refuses:
+
+- a filename that is not `NNN-kebab-title.md`, or two files claiming one number;
+- front matter absent, **from ADR-027 on** — 001–026 predate this template and only warn,
+  the same migration policy the backlog format uses for its own cutoff;
+- `adr:` disagreeing with the number in the filename — that one refuses at any number,
+  because a citation then lands on neither file;
+- a missing `adr` / `title` / `status` / `date`, a `status` outside the five words above,
+  a `date` that is not `YYYY-MM-DD`;
+- no `## Decision` section — Context + Decision is the Crocker minimum.
+
+What it warns about: `depends_on` / `related` / `supersedes` pointing at a decision that is
+not a file, and a `status` carrying a qualifier.
+
+Rules are watched to fire against `tools/backlog/adr_fixture/` — one deliberate violation
+per rule plus one clean decision that must produce nothing:
+
+```bash
+uv run python tools/backlog/build.py --check tools/backlog/adr_fixture/fixture-backlog.md
+```

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import sqlite3
 import threading
 from datetime import datetime, timezone
@@ -18,7 +19,66 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field, asdict
 from enum import Enum
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Iterator, List, Optional
+
+from .index_keys import l5_key, l6_key
+
+
+#: The `properties.source` markers every writer stamps its edges with. Counting by
+#: them separates what an indexing pass rebuilds for free (structural), what a sleep
+#: rebuilds from the cached findings (gliner_ner), and what has no source outside the
+#: graph at all (llm_relation) — which is the only class where a missing edge is gone.
+_SOURCE_MARKERS = ("structural", "gliner_ner", "llm_relation")
+
+#: Version tag in every dump's header line. Bump it when a record shape changes in a
+#: way an older reader would misread — a dump outlives the code that wrote it, and
+#: this is the only thing that will tell the reader so.
+DUMP_FORMAT = "dpc-kg-dump/1"
+
+
+def _snapshot_dict(store_path, backend: str, nodes_by_type: dict, edges_by_type: dict,
+                   kf_edges_by_type: dict, kf_structural: int,
+                   kf_nodes_keyed: int, kf_nodes_legacy_stem: int,
+                   edges_by_source: dict | None = None) -> dict:
+    """One shape for both backends, so a reader compares numbers and not formats.
+
+    `kf_edges_non_structural` is the number the whole key-as-id migration rested on:
+    structural edges are cleared and rebuilt on every indexing pass, so they survive a
+    change of node identity by being written again — anything else attached to a
+    knowledge-file node does not, and would be left pointing at a node no query
+    reaches. Note that an orphaned edge is still an edge: the total count does not move
+    when one is orphaned, which is why the count alone proves nothing and this
+    breakdown exists.
+    """
+    kf_edges_total = sum(kf_edges_by_type.values())
+    return {
+        "store_path": str(store_path),
+        "backend": backend,
+        "nodes_total": sum(nodes_by_type.values()),
+        "edges_total": sum(edges_by_type.values()),
+        "nodes_by_type": dict(sorted(nodes_by_type.items())),
+        "edges_by_type": dict(sorted(edges_by_type.items())),
+        "kf_edges_total": kf_edges_total,
+        "kf_edges_by_type": dict(sorted(kf_edges_by_type.items())),
+        "kf_edges_structural": kf_structural,
+        "kf_edges_non_structural": kf_edges_total - kf_structural,
+        "kf_nodes_keyed": kf_nodes_keyed,
+        "kf_nodes_legacy_stem": kf_nodes_legacy_stem,
+        "edges_by_source": dict(sorted((edges_by_source or {}).items())),
+    }
+
+
+def node_id_for(index_key: str) -> str:
+    """A knowledge file's node id: its index key, which is already its identity.
+
+    The graph used to address documents by stem, which is a name rather than an
+    identity — two layers could hold one stem, a seed key had to be cut down to match,
+    and neither the fuser nor the decay counter could line a graph result up with the
+    same document from another channel. Keying on the index key makes those questions
+    disappear instead of guarding them: the key is what the index, the fuser, the
+    counter and read_file all already mean by "this document".
+    """
+    return f"kf:{index_key}"
 
 log = logging.getLogger(__name__)
 
@@ -62,9 +122,12 @@ GLINER_MAX_TEXT_LEN = 5000
 # a pure attribute read (safe under the GIL).
 _GLINER_MODEL: Any = None
 _GLINER_LOAD_LOCK = threading.Lock()
+#: What the loaded singleton was put on, so a later caller asking for something
+#: else is answered honestly rather than silently ignored.
+_GLINER_DEVICE: Optional[str] = None
 
 
-def _get_gliner_model():
+def _get_gliner_model(device: Optional[str] = None):
     """Return the process-wide GLiNER model, loading lazily on first call.
 
     Returns None if `gliner` is not installed — callers should treat the
@@ -72,11 +135,13 @@ def _get_gliner_model():
     extract_entities_gliner. Safe to call from any thread (including
     asyncio worker threads via to_thread()).
     """
-    global _GLINER_MODEL
+    global _GLINER_MODEL, _GLINER_DEVICE
     if _GLINER_MODEL is not None:
+        _warn_if_device_differs(device)
         return _GLINER_MODEL
     with _GLINER_LOAD_LOCK:
         if _GLINER_MODEL is not None:
+            _warn_if_device_differs(device)
             return _GLINER_MODEL
         try:
             from gliner import GLiNER
@@ -84,11 +149,37 @@ def _get_gliner_model():
         except ImportError:
             log.debug("GLiNER not installed — skip entity extraction (install with: uv sync --extra graph-ner)")
             return None
-        device = "cuda" if torch.cuda.is_available() else "cpu"
-        log.info("Loading GLiNER model %s on %s (first use, process-wide singleton)...", GLINER_MODEL_NAME, device)
-        _GLINER_MODEL = GLiNER.from_pretrained(GLINER_MODEL_NAME).to(device)
-        log.info("GLiNER model loaded on %s", device)
+        if device in (None, "auto"):
+            resolved = "cuda" if torch.cuda.is_available() else "cpu"
+            reason = "auto"
+        else:
+            resolved = device
+            reason = "configured"
+        log.info(
+            "Loading GLiNER model %s on %s (%s; first use, process-wide singleton)...",
+            GLINER_MODEL_NAME, resolved, reason,
+        )
+        _GLINER_MODEL = GLiNER.from_pretrained(GLINER_MODEL_NAME).to(resolved)
+        _GLINER_DEVICE = resolved
+        log.info("GLiNER model loaded on %s", resolved)
         return _GLINER_MODEL
+
+
+def _warn_if_device_differs(device: Optional[str]) -> None:
+    """Say it when a later caller wanted another device than the one in memory.
+
+    The same rule the embedding singleton states: one model per process, the
+    first caller decides, and moving loaded weights is not what a caller asking
+    for a model expects to trigger. Silence here would read as if the second
+    agent's setting had been obeyed.
+    """
+    if device in (None, "auto") or _GLINER_DEVICE is None or device == _GLINER_DEVICE:
+        return
+    log.warning(
+        "GLiNER already loaded on %s; request for %s ignored "
+        "(one model per process, first caller decides)",
+        _GLINER_DEVICE, device,
+    )
 
 
 @dataclass
@@ -150,6 +241,57 @@ class GraphBackend(ABC):
         regardless of t_invalidated. Active-only filtering can be added later as
         a separate method or include_invalidated parameter."""
         ...
+
+    @abstractmethod
+    def snapshot(self) -> dict:
+        """Counts of what is actually in this store, for someone auditing a claim.
+
+        Exists because the store cannot be read from outside: the file is held with
+        an exclusive lock, and on Windows it cannot even be copied while the backend
+        runs. Three analyses in a row therefore measured a SQLite file last written in
+        May and reported it as the live graph — not for want of care, but because it
+        was the only thing openable. The answer has to come from the process holding
+        the database, and nothing else will do.
+
+        Keys are stable and dumb on purpose: this output is meant to be handed to
+        someone who did not write the code and asked to check a number.
+        """
+        ...
+
+    @abstractmethod
+    def iter_nodes(self) -> Iterator[GraphNode]:
+        """Every node in the store, once each; order is not part of the contract.
+
+        SQLite sorts by primary key and Grafeo returns whatever its MATCH yields, so
+        two dumps of the same graph agree as sets and need not agree line by line —
+        which is what any comparison of them has to be written against.
+
+        The one thing this interface could not do until 2026-08-14, and the reason a
+        graph could not be moved, backed up or read from outside the process holding
+        it. Both backends had the primitive one level down the whole time — two
+        SELECTs, or one MATCH — it was simply never lifted to where callers live.
+        Generators, not lists: the dump streams, and nothing needs the graph twice
+        over in memory.
+        """
+        ...
+
+    @abstractmethod
+    def iter_edges(self) -> Iterator[GraphEdge]:
+        """Every edge in the store, endpoints named by node_id rather than by
+        whatever internal identifier the backend uses — that is what makes a dump
+        portable between the two."""
+        ...
+
+    def wal_info(self) -> dict:
+        """What the store's write-ahead log looks like right now, or {} if it has none.
+
+        Not abstract: a backend that commits synchronously has nothing to report and
+        should not be forced to say so. Exists because the counts at open have
+        repeatedly disagreed with the counts a pass left behind, and every explanation
+        offered for that so far has been an inference about WAL behaviour that nobody
+        could see. This is the line that turns the next restart into a measurement.
+        """
+        return {}
 
     @abstractmethod
     def clear_structural_edges(self) -> int:
@@ -311,6 +453,57 @@ class SQLiteGraphBackend(GraphBackend):
         ).fetchone()
         return row is not None
 
+    def iter_nodes(self) -> Iterator[GraphNode]:
+        for row in self._conn.execute(
+            "SELECT node_id, node_type, label, source_layer, exempt, properties "
+            "FROM nodes ORDER BY node_id"
+        ):
+            yield GraphNode(
+                node_id=row[0], node_type=NodeType(row[1]), label=row[2],
+                source_layer=row[3], exempt=bool(row[4]),
+                properties=json.loads(row[5]) if row[5] else {},
+            )
+
+    def iter_edges(self) -> Iterator[GraphEdge]:
+        for row in self._conn.execute(
+            "SELECT source_id, target_id, edge_type, t_created, t_invalidated, "
+            "confidence, justification, edge_weight, properties FROM edges ORDER BY rowid"
+        ):
+            yield self._row_to_edge(row)
+
+    def snapshot(self) -> dict:
+        c = self._conn
+        nodes_by_type = {r[0]: r[1] for r in c.execute(
+            "SELECT node_type, count(*) FROM nodes GROUP BY node_type")}
+        edges_by_type = {r[0]: r[1] for r in c.execute(
+            "SELECT edge_type, count(*) FROM edges GROUP BY edge_type")}
+        kf = "kf:%"
+        kf_edges_by_type = {r[0]: r[1] for r in c.execute(
+            "SELECT edge_type, count(*) FROM edges "
+            "WHERE source_id LIKE ? OR target_id LIKE ? GROUP BY edge_type", (kf, kf))}
+        structural = c.execute(
+            "SELECT count(*) FROM edges WHERE (source_id LIKE ? OR target_id LIKE ?) "
+            "AND (properties LIKE '%\"source\": \"structural\"%' "
+            "OR properties LIKE '%\"source\":\"structural\"%')", (kf, kf)).fetchone()[0]
+        keyed = c.execute(
+            "SELECT count(*) FROM nodes WHERE node_id LIKE ? AND node_id LIKE '%/%'",
+            (kf,)).fetchone()[0]
+        legacy = c.execute(
+            "SELECT count(*) FROM nodes WHERE node_id LIKE ? AND node_id NOT LIKE '%/%'",
+            (kf,)).fetchone()[0]
+        edges_by_source = {}
+        for src in _SOURCE_MARKERS:
+            n = c.execute(
+                "SELECT count(*) FROM edges WHERE properties LIKE ? OR properties LIKE ?",
+                (f'%"source": "{src}"%', f'%"source":"{src}"%')).fetchone()[0]
+            if n:
+                edges_by_source[src] = n
+        unmarked = sum(edges_by_type.values()) - sum(edges_by_source.values())
+        if unmarked:
+            edges_by_source["(unmarked)"] = unmarked
+        return _snapshot_dict(self._db_path, "sqlite", nodes_by_type, edges_by_type,
+                              kf_edges_by_type, structural, keyed, legacy, edges_by_source)
+
     def clear_structural_edges(self) -> int:
         # Canonical marker is source=structural. Legacy edges (pre-KG-LLM-MARKER
         # fix) carry only auto=true with no source field — matched here so they
@@ -450,9 +643,10 @@ _grafeo_instance_cache: "Dict[str, Any]" = {}
 class GrafeoGraphBackend(GraphBackend):
     """Grafeo-based graph storage (ADR-024 migration).
 
-    Phase 2: implements init_schema, add_node, get_node, node_count with
-    parity tests against SQLiteGraphBackend. Remaining 9 ABC methods still
-    raise NotImplementedError (Phase 2.5+ scope).
+    Implements the whole interface, with parity tests against SQLiteGraphBackend.
+    (This paragraph said "remaining 9 ABC methods still raise NotImplementedError"
+    long after they stopped doing so — a comment is a claim, and it outlives the
+    session that wrote it.)
 
     Mapping (D1=A, D2=a per S123 design review):
     - Grafeo node label = NodeType.value (5 labels: KnowledgeFile, Entity,
@@ -659,6 +853,80 @@ class GrafeoGraphBackend(GraphBackend):
     def edge_count(self) -> int:
         return self._db.edge_count
 
+    def iter_nodes(self) -> Iterator[GraphNode]:
+        for r in self._db.execute_cypher(
+            "MATCH (n) RETURN n.node_id AS nid, labels(n)[0] AS lbl, n.label AS l, "
+            "n.source_layer AS sl, n.exempt AS ex, n.properties AS props"
+        ):
+            yield GraphNode(
+                node_id=r["nid"], node_type=NodeType(r["lbl"]), label=r["l"],
+                source_layer=r["sl"], exempt=bool(r["ex"]),
+                properties=json.loads(r["props"]) if r["props"] else {},
+            )
+
+    def iter_edges(self) -> Iterator[GraphEdge]:
+        # Endpoints come back as node_id, not as Grafeo's internal int id, so the
+        # dump means the same thing on the other backend.
+        for r in self._db.execute_cypher(
+            "MATCH (a)-[r]->(b) RETURN a.node_id AS src, b.node_id AS tgt, "
+            "type(r) AS et, r.t_created AS tc, r.t_invalidated AS ti, "
+            "r.confidence AS conf, r.justification AS j, r.edge_weight AS ew, "
+            "r.properties AS p"
+        ):
+            yield self._cypher_row_to_edge(r)
+
+    def snapshot(self) -> dict:
+        def rows(query, params=None):
+            try:
+                return list(self._db.execute_cypher(query, params or {}))
+            except Exception as e:
+                log.debug("snapshot query failed: %s", e)
+                return []
+
+        nodes_by_type = {r["t"]: r["c"] for r in rows(
+            "MATCH (n) RETURN labels(n)[0] AS t, count(n) AS c")}
+        edges_by_type = {r["t"]: r["c"] for r in rows(
+            "MATCH ()-[r]->() RETURN type(r) AS t, count(r) AS c")}
+        # A node id is the index key with a `kf:` prefix, so "touches a knowledge
+        # file" is a prefix test on either end of the edge.
+        kf_edges_by_type = {r["t"]: r["c"] for r in rows(
+            "MATCH (a)-[r]->(b) WHERE a.node_id STARTS WITH 'kf:' "
+            "OR b.node_id STARTS WITH 'kf:' RETURN type(r) AS t, count(r) AS c")}
+        structural_rows = rows(
+            "MATCH (a)-[r]->(b) WHERE (a.node_id STARTS WITH 'kf:' "
+            "OR b.node_id STARTS WITH 'kf:') AND (r.properties CONTAINS $sa "
+            "OR r.properties CONTAINS $sb) RETURN count(r) AS c",
+            {"sa": '"source": "structural"', "sb": '"source":"structural"'})
+        keyed_rows = rows(
+            "MATCH (n) WHERE n.node_id STARTS WITH 'kf:' AND n.node_id CONTAINS '/' "
+            "RETURN count(n) AS c")
+        all_kf_rows = rows(
+            "MATCH (n) WHERE n.node_id STARTS WITH 'kf:' RETURN count(n) AS c")
+        structural = structural_rows[0]["c"] if structural_rows else 0
+        keyed = keyed_rows[0]["c"] if keyed_rows else 0
+        all_kf = all_kf_rows[0]["c"] if all_kf_rows else 0
+        edges_by_source = {}
+        for src in _SOURCE_MARKERS:
+            r = rows("MATCH ()-[r]->() WHERE r.properties CONTAINS $a "
+                     "OR r.properties CONTAINS $b RETURN count(r) AS c",
+                     {"a": f'"source": "{src}"', "b": f'"source":"{src}"'})
+            n = r[0]["c"] if r else 0
+            if n:
+                edges_by_source[src] = n
+        unmarked = sum(edges_by_type.values()) - sum(edges_by_source.values())
+        if unmarked:
+            edges_by_source["(unmarked)"] = unmarked
+        return _snapshot_dict(self._db_path, "grafeo", nodes_by_type, edges_by_type,
+                              kf_edges_by_type, structural, keyed, all_kf - keyed,
+                              edges_by_source)
+
+    def wal_info(self) -> dict:
+        try:
+            return dict(self._db.wal_status())
+        except Exception as e:  # binding surface differs by version
+            log.debug("wal_status unavailable: %s", e)
+            return {}
+
     def close(self) -> None:
         # Drop from the singleton cache so a subsequent
         # GrafeoGraphBackend(same_path) gets a fresh handle instead of
@@ -834,22 +1102,111 @@ class GrafeoGraphBackend(GraphBackend):
         return len(new_edges), orphan_sources
 
 
+#: What an agent may say about its own graph backend, in `<agent_root>/config.json`.
+_KG_BACKEND_KEY = "kg_backend"
+_GLINER_DEVICE_KEY = "gliner_device"
+
+
+def _agent_kg_backend_override(agent_root: Path) -> Optional[str]:
+    """This agent's own choice of backend, or None to fall through to the global one.
+
+    A value the code does not recognise is ignored with a warning rather than obeyed:
+    a typo in one agent's config must not decide which file its graph lives in, and
+    silently opening the wrong store is exactly the failure the migration is trying
+    not to repeat.
+    """
+    config_path = agent_root / "config.json"
+    if not config_path.is_file():
+        return None
+    try:
+        value = json.loads(config_path.read_text(encoding="utf-8")).get(_KG_BACKEND_KEY)
+    except (OSError, json.JSONDecodeError) as e:
+        log.warning("Could not read %s for a backend override: %s", config_path, e)
+        return None
+    if value is None:
+        return None
+    if not isinstance(value, str) or value.strip().lower() not in ("sqlite", "grafeo"):
+        log.warning(
+            "%s sets %s=%r, which is not a backend this build knows — using the global setting",
+            config_path, _KG_BACKEND_KEY, value,
+        )
+        return None
+    chosen = value.strip().lower()
+    log.info("KnowledgeGraph: %s selects backend %r for itself", agent_root.name, chosen)
+    return chosen
+
+
+def _agent_gliner_device_override(agent_root: Path) -> Optional[str]:
+    """This agent's own choice of GLiNER device, or None for the global one.
+
+    Read exactly like the backend override next door, and for the same reason:
+    the setting is fleet-global, and one agent moving first is the only
+    migration a fleet-global switch cannot express. An unrecognised value is
+    ignored with a warning — a typo must not decide what holds VRAM.
+    """
+    config_path = agent_root / "config.json"
+    if not config_path.is_file():
+        return None
+    try:
+        value = json.loads(config_path.read_text(encoding="utf-8")).get(_GLINER_DEVICE_KEY)
+    except (OSError, json.JSONDecodeError) as e:
+        log.warning("Could not read %s for a gliner_device override: %s", config_path, e)
+        return None
+    if value is None:
+        return None
+    if not isinstance(value, str) or value.strip().lower() not in ("auto", "cpu", "cuda"):
+        log.warning(
+            "%s sets %s=%r, which is not a device this build knows — using the global setting",
+            config_path, _GLINER_DEVICE_KEY, value,
+        )
+        return None
+    return value.strip().lower()
+
+
+def _dpc_home_for(agent_root: Path) -> Path:
+    """The DPC home an agent root sits in — or the real one, when it does not.
+
+    An agent root is `~/.dpc/agents/<id>`, so the home is its grandparent. The
+    grandparent of anything else belongs to somebody else: handed a temp dir
+    this resolved to `/`, and Settings wrote its default config there —
+    PermissionError on Linux, a stray config.ini in the repo on Windows
+    (SETTINGS-CAN-WRITE-ITS-DEFAULT-CONFIG-INTO-THE-WORKING-DIRECTORY).
+    """
+    root = Path(agent_root).resolve()
+    if root.parent.name == "agents":
+        return root.parent.parent
+    return Path(os.environ.get("DPC_HOME", Path.home() / ".dpc"))
+
+
 class KnowledgeGraph:
     """High-level API for the agent knowledge graph."""
 
     def __init__(self, agent_root: Path, backend: Optional[str] = None):
-        # Backend selection (ADR-024 Phase 1.5): explicit `backend` arg
-        # wins (used by tests + integration scripts); otherwise read
-        # [knowledge_graph] backend from settings, defaulting to "sqlite"
-        # until Grafeo migration Level 2 + Level 3 verification close.
+        # Backend selection, three levels, most specific first: the explicit argument
+        # (tests and integration scripts), then this agent's own config.json, then the
+        # global [knowledge_graph] setting.
+        #
+        # The middle one exists because the setting is fleet-global, and a fleet-global
+        # switch is the only migration it can express: all eight agents at once, on a
+        # store format nobody has moved before. Everyone who looked at that plan asked
+        # for the same thing — one agent, then a day of watching, then the rest — and
+        # nothing in the code could say it. The precedent is `sleep_provider_alias`,
+        # read the same way from the same file.
+        if backend is None:
+            backend = _agent_kg_backend_override(agent_root)
         if backend is None:
             from dpc_client_core.settings import Settings
-            # Settings takes the DPC home directory; the agent root lives
-            # inside it (~/.dpc/agents/<id>/), so the home is the agent
-            # root's grandparent (parent of `agents/`).
-            dpc_home = agent_root.parent.parent
-            backend = Settings(dpc_home).get_kg_backend()
+            backend = Settings(_dpc_home_for(agent_root)).get_kg_backend()
         backend = backend.strip().lower()
+
+        # Where GLiNER runs, resolved the same three levels down as the backend
+        # above: this agent's config.json, then the fleet setting, then auto.
+        # Held here rather than read per call — extract_entities_gliner runs in a
+        # worker thread and a config read per batch would be a file read per batch.
+        self._gliner_device = _agent_gliner_device_override(agent_root)
+        if self._gliner_device is None:
+            from dpc_client_core.settings import Settings
+            self._gliner_device = Settings(_dpc_home_for(agent_root)).get_gliner_device()
 
         if backend == "grafeo":
             db_path = agent_root / "knowledge_graph.grafeo"
@@ -861,31 +1218,235 @@ class KnowledgeGraph:
             "KnowledgeGraph initialized at %s [backend=%s] (%d nodes, %d edges)",
             db_path, backend, self._backend.node_count(), self._backend.edge_count(),
         )
+        # What the store held before anything in this process touched it, broken down
+        # by writer. The count on the line above has repeatedly opened lower than the
+        # count the previous session's pass reported, and with only a total there is no
+        # way to tell a rebuildable class going missing from the one class that cannot
+        # come back. This line answers that on the next restart instead of the next
+        # theory. Kept cheap: a handful of counting queries, once per open.
+        try:
+            log.info(
+                "KnowledgeGraph at open: edges_by_source=%s wal=%s",
+                self._backend.snapshot().get("edges_by_source"), self._backend.wal_info(),
+            )
+        except Exception as e:
+            log.debug("open-time graph breakdown unavailable: %s", e)
 
     @property
     def backend(self) -> GraphBackend:
         return self._backend
 
-    def bulk_import_knowledge_files(self, knowledge_dir: Path) -> int:
-        """Create KnowledgeFile nodes from existing .md files."""
+    def snapshot(self) -> dict:
+        """What this graph contains right now — see GraphBackend.snapshot."""
+        return self._backend.snapshot()
+
+    def export_to(self, path: Path) -> dict:
+        """Write the whole graph to a JSONL dump. Returns what went out.
+
+        One line per record, header first, then every node, then every edge — nodes
+        before edges because both backends refuse an edge whose endpoints are not
+        there yet, SQLite by foreign key and Grafeo by raising. The format is
+        deliberately dull: a reader with no code from this project can open it, and
+        the header carries the same `snapshot()` dict the team already reads.
+
+        This is the only way a graph leaves its store. Until it existed the live file
+        was the single copy — unreadable from outside, uncopyable on Windows while the
+        service holds it, and impossible to move to the other backend. A dump is
+        therefore three things at once: the migration carrier, the first backup this
+        graph has ever had, and the measurement, since counting a dump beats
+        extrapolating from totals.
+
+        Written to a `.part` file and renamed, so an interrupted export leaves the
+        previous dump intact rather than a half-written one wearing its name.
+        """
+        path = Path(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        partial = path.with_name(path.name + ".part")
+        nodes = edges = 0
+        with partial.open("w", encoding="utf-8", newline="\n") as fh:
+            fh.write(json.dumps({
+                "kind": "header",
+                "format": DUMP_FORMAT,
+                "exported_at": _utc_now(),
+                "snapshot": self.snapshot(),
+            }, ensure_ascii=False) + "\n")
+            for node in self._backend.iter_nodes():
+                fh.write(json.dumps({
+                    "kind": "node",
+                    "node_id": node.node_id,
+                    "node_type": node.node_type.value,
+                    "label": node.label,
+                    "source_layer": node.source_layer,
+                    "exempt": bool(node.exempt),
+                    "properties": node.properties,
+                }, ensure_ascii=False) + "\n")
+                nodes += 1
+            for edge in self._backend.iter_edges():
+                fh.write(json.dumps({
+                    "kind": "edge",
+                    "source_id": edge.source_id,
+                    "target_id": edge.target_id,
+                    "edge_type": edge.edge_type.value,
+                    "t_created": edge.t_created,
+                    "t_invalidated": edge.t_invalidated,
+                    "confidence": edge.confidence,
+                    "justification": edge.justification,
+                    "edge_weight": edge.edge_weight,
+                    "properties": edge.properties,
+                }, ensure_ascii=False) + "\n")
+                edges += 1
+        partial.replace(path)
+        log.info("Knowledge graph exported: %d nodes, %d edges → %s", nodes, edges, path)
+        return {"nodes": nodes, "edges": edges, "path": str(path)}
+
+    def import_from(self, path: Path, merge: bool = False) -> dict:
+        """Read a dump back in, and refuse one that cannot prove it is whole.
+
+        Two refusals, and the second is the one that earns its keep. Importing over a
+        live graph silently mixes two histories, so a non-empty target is refused
+        unless the caller says `merge=True`. And a dump whose record count disagrees
+        with its own header is refused outright: a backup that cannot tell you it
+        arrived short is worse than no backup, because it hands back a smaller graph
+        with no sign that anything is missing. Both reviewers caught that the first
+        version checked only the format, and only if a header happened to appear —
+        lose the header and nothing was checked at all.
+
+        Unknown record *kinds* are counted and skipped, so a dump from a later version
+        still loads what this version understands. An unknown node or edge *type* is
+        treated the same way rather than raising, and any edge touching a node that
+        was skipped goes with it — otherwise the import dies on a missing endpoint
+        halfway through and leaves a half-built graph behind.
+
+        `merge=True` is not idempotent for edges: both backends upsert a node by id,
+        but `add_edge` inserts unconditionally, so importing the same dump twice
+        doubles them. Fine for a migration, where the target is always empty; not yet
+        fine for restoring into a graph that is still being written to.
+        """
+        path = Path(path)
+        if not merge:
+            existing = self._backend.node_count() + self._backend.edge_count()
+            if existing:
+                raise ValueError(
+                    f"refusing to import into a graph that already holds {existing} "
+                    f"records — pass merge=True to add to it on purpose"
+                )
+        header = None
+        nodes = edges = skipped = 0
+        seen_nodes = seen_edges = 0
+        skipped_node_ids: set[str] = set()
+        with path.open("r", encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                record = json.loads(line)
+                kind = record.get("kind")
+                if header is None:
+                    if kind != "header":
+                        raise ValueError(
+                            f"{path} does not begin with a dump header — it is truncated, "
+                            f"concatenated, or not a dump at all (first record: {kind!r})"
+                        )
+                    if record.get("format") != DUMP_FORMAT:
+                        raise ValueError(
+                            f"{path} is not a {DUMP_FORMAT} dump (format={record.get('format')!r})"
+                        )
+                    header = record
+                elif kind == "node":
+                    seen_nodes += 1
+                    try:
+                        node_type = NodeType(record["node_type"])
+                    except ValueError:
+                        skipped += 1
+                        skipped_node_ids.add(record["node_id"])
+                        continue
+                    self._backend.add_node(GraphNode(
+                        node_id=record["node_id"],
+                        node_type=node_type,
+                        label=record["label"],
+                        source_layer=record.get("source_layer", "L7"),
+                        exempt=bool(record.get("exempt", False)),
+                        properties=record.get("properties") or {},
+                    ))
+                    nodes += 1
+                elif kind == "edge":
+                    seen_edges += 1
+                    if (record["source_id"] in skipped_node_ids
+                            or record["target_id"] in skipped_node_ids):
+                        skipped += 1
+                        continue
+                    try:
+                        edge_type = EdgeType(record["edge_type"])
+                    except ValueError:
+                        skipped += 1
+                        continue
+                    self._backend.add_edge(GraphEdge(
+                        source_id=record["source_id"],
+                        target_id=record["target_id"],
+                        edge_type=edge_type,
+                        t_created=record.get("t_created", ""),
+                        t_invalidated=record.get("t_invalidated"),
+                        confidence=record.get("confidence", 1.0),
+                        justification=record.get("justification", ""),
+                        edge_weight=record.get("edge_weight", "medium"),
+                        properties=record.get("properties") or {},
+                    ))
+                    edges += 1
+                else:
+                    skipped += 1
+
+        expected = (header or {}).get("snapshot") or {}
+        want_nodes = expected.get("nodes_total")
+        want_edges = expected.get("edges_total")
+        if (want_nodes, want_edges) != (None, None) and (
+            seen_nodes != want_nodes or seen_edges != want_edges
+        ):
+            raise ValueError(
+                f"{path} is incomplete: its header promises {want_nodes} nodes and "
+                f"{want_edges} edges, the file carries {seen_nodes} and {seen_edges}"
+            )
+
+        log.info("Knowledge graph imported: %d nodes, %d edges from %s (%d records skipped)",
+                 nodes, edges, path, skipped)
+        return {"nodes": nodes, "edges": edges, "skipped": skipped}
+
+    def bulk_import_knowledge_files(self, knowledge_dir: Path, source_layer: str = "L5") -> int:
+        """Create KnowledgeFile nodes from existing .md files.
+
+        `path` holds the index key, not the bare filename, because the key is what the
+        rest of the system means by "this document": the fuser dedups on it, the decay
+        counter buckets on it, and an address is built from it. A node that names its
+        document differently from everyone else cannot be matched to anything.
+
+        The layer is a parameter because this is called once per layer and the two
+        cannot be told apart from the directory alone — the shared layer used to be
+        imported as L5, and a node that lies about its layer cannot say where it lives.
+        """
         count = 0
         if not knowledge_dir.exists():
             return count
         for md_file in sorted(knowledge_dir.glob("*.md")):
             if md_file.name.startswith("_"):
                 continue
-            node_id = f"kf:{md_file.stem}"
+            key = (l5_key(md_file, knowledge_dir) if source_layer == "L5"
+                   else l6_key(md_file, knowledge_dir))
+            # No collision guard: two layers holding one stem now produce two ids,
+            # because the key carries the layer. The guard this replaces was written
+            # for a danger the scheme removes — and, reading the layer label to detect
+            # it, refused to import the shared layer at all on its first run.
+            node_id = node_id_for(key)
             mtime = datetime.fromtimestamp(md_file.stat().st_mtime, tz=timezone.utc).isoformat()
             node = GraphNode(
                 node_id=node_id,
                 node_type=NodeType.KNOWLEDGE_FILE,
                 label=md_file.stem.replace("_", " ").title(),
-                source_layer="L5",
-                properties={"path": str(md_file.name), "size_bytes": md_file.stat().st_size, "file_mtime": mtime},
+                source_layer=source_layer,
+                properties={"path": key, "source_path": str(md_file),
+                            "size_bytes": md_file.stat().st_size, "file_mtime": mtime},
             )
             self._backend.add_node(node)
             count += 1
-        log.info("Bulk imported %d knowledge files as graph nodes", count)
+        log.info("Bulk imported %d %s knowledge files as graph nodes", count, source_layer)
         return count
 
     def graph_expand(self, filenames: List[str], max_hops: int = 1) -> List[tuple]:
@@ -897,8 +1458,10 @@ class KnowledgeGraph:
         results = []
         seen: set = set()
         for fname in filenames:
-            stem = Path(fname).stem
-            src_id = f"kf:{stem}"
+            # The seed arrives as an index key and the node is addressed by one, so the
+            # lookup is exact. Nothing to cut down and nothing to verify afterwards: a
+            # namesake in another root is a different key, therefore a different node.
+            src_id = node_id_for(fname)
             if self._backend.get_node(src_id) is None:
                 continue
             neighbors = self._backend.get_neighbors(src_id, hops=max_hops)
@@ -910,30 +1473,14 @@ class KnowledgeGraph:
                 if path and path not in filenames:
                     results.append(({
                         "source_file": path,
+                        "source_path": neighbor.properties.get("source_path", ""),
+                        # The channel, not the document's layer: LAYER_WEIGHTS prices
+                        # L7 at 0.6, and re-labelling here would silently re-weight
+                        # fusion under cover of an addressing fix.
                         "source_layer": "L7",
                         "heading": neighbor.label,
                         "graph_node_id": neighbor.node_id,
                     }, 1.0))
-        return results
-
-    def get_graph_results_for_query(self, seed_node_ids: List[str], hops: int = 2) -> List[dict]:
-        """Traverse graph from seed nodes, return results compatible with RRF fusion."""
-        results = []
-        seen: set = set()
-        for seed_id in seed_node_ids:
-            neighbors = self._backend.get_neighbors(seed_id, hops=hops)
-            for neighbor in neighbors:
-                if neighbor.node_id in seen:
-                    continue
-                seen.add(neighbor.node_id)
-                path_prop = neighbor.properties.get("path", "")
-                results.append({
-                    "source_file": path_prop,
-                    "source_layer": neighbor.source_layer,
-                    "heading": neighbor.label,
-                    "graph_node_id": neighbor.node_id,
-                    "graph_node_type": neighbor.node_type.value,
-                })
         return results
 
     def extract_structural_edges(self, knowledge_dir: Path, archive_dir: Optional[Path] = None) -> int:
@@ -952,25 +1499,28 @@ class KnowledgeGraph:
         file_ref_re = re.compile(r'\b([\w_-]+\.md)\b')
         now = _utc_now()
 
-        known_files = {f.stem: f.name for f in knowledge_dir.glob("*.md") if not f.name.startswith("_")}
+        # Links inside a document name a file; nodes are addressed by index key. The map
+        # is the translation, and it is the only place a stem is allowed to stand for a
+        # document — inside one directory, where a stem is unambiguous by definition.
+        known_files = {f.stem: (f.name, node_id_for(l5_key(f, knowledge_dir)))
+                       for f in knowledge_dir.glob("*.md") if not f.name.startswith("_")}
 
-        for stem, fname in known_files.items():
-            src_id = f"kf:{stem}"
+        for stem, (fname, src_id) in known_files.items():
             text = (knowledge_dir / fname).read_text(encoding="utf-8", errors="replace")
 
             for match in md_link_re.finditer(text):
-                target_path = match.group(2)
-                target_stem = Path(target_path).stem
+                target_stem = Path(match.group(2)).stem
                 if target_stem in known_files and target_stem != stem:
-                    self._add_edge_safe(src_id, f"kf:{target_stem}", EdgeType.DEPENDS_ON,
+                    self._add_edge_safe(src_id, known_files[target_stem][1], EdgeType.DEPENDS_ON,
                                         f"markdown link [{match.group(1)}]", now)
                     count += 1
 
             for match in file_ref_re.finditer(text):
                 ref_stem = Path(match.group(1)).stem
                 if ref_stem in known_files and ref_stem != stem:
-                    if not self._edge_exists(src_id, f"kf:{ref_stem}", EdgeType.DEPENDS_ON):
-                        self._add_edge_safe(src_id, f"kf:{ref_stem}", EdgeType.DEPENDS_ON,
+                    ref_id = known_files[ref_stem][1]
+                    if not self._edge_exists(src_id, ref_id, EdgeType.DEPENDS_ON):
+                        self._add_edge_safe(src_id, ref_id, EdgeType.DEPENDS_ON,
                                             f"file reference {match.group(1)}", now)
                         count += 1
 
@@ -983,8 +1533,10 @@ class KnowledgeGraph:
                 count += 1
 
         for fname, file_meta in meta.items():
-            stem = Path(fname).stem
-            src_id = f"kf:{stem}"
+            entry = known_files.get(Path(fname).stem)
+            if entry is None:
+                continue
+            src_id = entry[1]
             if self._backend.get_node(src_id) is None:
                 continue
             for tag in file_meta.get("tags", []):
@@ -1019,13 +1571,22 @@ class KnowledgeGraph:
         if self._backend.get_node(node_id) is None:
             self._backend.add_node(GraphNode(node_id=node_id, node_type=node_type, label=label))
 
-    def _add_edge_safe(self, src: str, tgt: str, etype: EdgeType, justification: str, t_created: str, properties: dict | None = None) -> None:
-        if not self._edge_exists(src, tgt, etype):
-            self._backend.add_edge(GraphEdge(
-                source_id=src, target_id=tgt, edge_type=etype,
-                t_created=t_created, justification=justification,
-                properties=properties if properties is not None else {"source": "structural"},
-            ))
+    def _add_edge_safe(self, src: str, tgt: str, etype: EdgeType, justification: str, t_created: str, properties: dict | None = None) -> bool:
+        """Add the edge unless it is already there. True iff this call wrote one.
+
+        The return value exists because a caller that counts its own attempts cannot
+        tell an insertion from a duplicate, and the nightly relation counter did
+        exactly that — reporting "N relations (from N candidates)" every single night,
+        which it could not help doing.
+        """
+        if self._edge_exists(src, tgt, etype):
+            return False
+        self._backend.add_edge(GraphEdge(
+            source_id=src, target_id=tgt, edge_type=etype,
+            t_created=t_created, justification=justification,
+            properties=properties if properties is not None else {"source": "structural"},
+        ))
+        return True
 
     def _edge_exists(self, src: str, tgt: str, etype: EdgeType) -> bool:
         return self._backend.edge_exists(src, tgt, etype)
@@ -1073,7 +1634,7 @@ class KnowledgeGraph:
         if not texts:
             return []
 
-        model = _get_gliner_model()
+        model = _get_gliner_model(getattr(self, "_gliner_device", None))
         if model is None:
             return []
 
@@ -1141,7 +1702,7 @@ class KnowledgeGraph:
             log.info("Invalidated %d edges for node %s", count, node_id)
         return count
 
-    def backfill_edge_timestamps(self, knowledge_dir: Path) -> int:
+    def backfill_edge_timestamps(self, knowledge_dir: Path, source_layer: str = "L5") -> int:
         """Backfill t_created on edges from source file mtime.
 
         Atomicity note: each file's UPDATE is its own backend transaction (one
@@ -1156,9 +1717,10 @@ class KnowledgeGraph:
         for md_file in sorted(knowledge_dir.glob("*.md")):
             if md_file.name.startswith("_"):
                 continue
-            node_id = f"kf:{md_file.stem}"
+            key = (l5_key(md_file, knowledge_dir) if source_layer == "L5"
+                   else l6_key(md_file, knowledge_dir))
             mtime = datetime.fromtimestamp(md_file.stat().st_mtime, tz=timezone.utc).isoformat()
-            count += self._backend.update_edge_timestamp_for_node(node_id, "t_created", mtime)
+            count += self._backend.update_edge_timestamp_for_node(node_id_for(key), "t_created", mtime)
         if count:
             log.info("Backfilled t_created on %d edges from file timestamps", count)
         return count

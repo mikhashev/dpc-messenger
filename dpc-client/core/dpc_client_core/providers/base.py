@@ -16,6 +16,58 @@ class ModelNotCachedError(Exception):
         self.download_size_gb = download_size_gb
         super().__init__(f"Model '{model_name}' not found in cache: {cache_path}")
 
+# --- Shared reasoning-effort vocabulary ---
+
+# The words the chat header offers, in ascending order of intent. They are an
+# ordinal, not a calibration: each provider maps them onto whatever its own API
+# and model actually do, and the same word buys different depths in different
+# places. Ollama takes these four and never sees `max`: the Python SDK types
+# the field `Literal['low','medium','high']`, so we send `high` in its place.
+# Whether that loses anything is per model — on qwen3.8 a fixed seed made the
+# two byte-identical (2026-08-15), on muse-glimmer two independent sweeps
+# separated them. This comment said "the daemon treats max as high" until
+# 2026-08-16, which was one model's result written as the daemon's rule.
+# DeepSeek accepts
+# seven words and runs three efforts, aliasing `medium` and `xhigh` onto `high`
+# — that one is the vendor's published table, not our measurement; ours was too
+# weak to separate them and only agrees with it. A shared *spelling* is the most
+# that can be shared: a shared mapping would have to be wrong somewhere.
+REASONING_EFFORTS = ("low", "medium", "high", "max")
+
+# The foot of the same scale, and deliberately not a member of it: `off` is not
+# an amount of thinking, and code that iterates the levels must not offer it as
+# one. It sits here so the header can carry a single ordered control — off, low,
+# medium, high — in which the contradictory state (an effort chosen while
+# thinking is off) cannot be expressed at all. Each provider translates it into
+# its own way of saying no: Ollama `think=False`, the one value every model
+# accepts; DeepSeek `thinking: {type: disabled}`, because its own `none` effort
+# does not disable anything while the request still asks to think.
+REASONING_OFF = "off"
+
+
+def normalize_reasoning_effort(value: Optional[str]) -> Optional[str]:
+    """The requested effort as one of `REASONING_EFFORTS`, or `REASONING_OFF`,
+    or None if it is neither.
+
+    `xhigh` is folded into `high` because that is what the one vendor who
+    publishes a table says it means (api-docs.deepseek.com/guides/thinking_mode:
+    `xhigh -> high`), and because Ollama's daemon refuses the word outright.
+    Rewriting it to `max` — which this codebase did until 2026-08-15 — sent a
+    caller asking for one notch above high to the most expensive effort the API
+    has, which is an escalation wearing the clothes of a translation.
+
+    Returning None for anything else is deliberate: an unknown word must not be
+    guessed at. What the caller's provider does with None is the provider's
+    decision, and it should say so in the log rather than substitute silently.
+    """
+    word = (value or "").strip().lower()
+    if word == "xhigh":
+        word = "high"
+    if word == REASONING_OFF:
+        return REASONING_OFF
+    return word if word in REASONING_EFFORTS else None
+
+
 # --- Shared thinking model constants ---
 
 OPENAI_THINKING_MODELS = [
@@ -139,6 +191,32 @@ class AIProvider:
             Dict with thinking parameters, empty by default
         """
         return {}
+
+    def get_last_usage(self) -> Optional[Dict[str, Any]]:
+        """What the vendor said the last call cost in tokens, or None.
+
+        The contract lives here rather than on one provider because of what its
+        absence did: `DeepSeekProvider` was the only class carrying it, three
+        others built a `usage` dict inside their tools path and returned it
+        inline, and the single reader reached for the method through `hasattr`
+        (`dpc_agent/llm_adapter.py`). So one provider was priced by what it
+        reported and every other one by an estimate the loop computed for
+        itself. A fourth private copy is not the risk; a second unread one is.
+
+        `None` means «this provider has not reported anything for the last
+        call», which is not the same as «the call was free» — a caller that
+        needs a number when there is none must say so, rather than read a zero.
+        """
+        stored = getattr(self, "_last_usage", None)
+        return dict(stored) if stored else None
+
+    def _record_last_usage(self, usage: Optional[Dict[str, Any]]) -> None:
+        """Store what the vendor reported for the call that just finished.
+
+        Copied on the way in and on the way out, so a caller that edits the dict
+        it was handed does not edit the provider's record of the call.
+        """
+        self._last_usage = dict(usage) if usage else None
 
     def supports_balance(self) -> bool:
         """Returns True if this provider can report account balance (pay-per-use APIs)."""

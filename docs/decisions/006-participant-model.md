@@ -1,7 +1,7 @@
 # ADR 006: Participant Identity Model
 
 **Date:** 2026-04-09
-**Status:** Accepted (Full Implementation Deferred — see addendum below)
+**Status:** Accepted — the deferral was lifted and the work completed under ADR-031 (per-reader role derivation)
 **Decided by:** Mike (approve), Ark (review), CC (propose + implement)
 **Deferred:** 2026-04-10 (S24)
 

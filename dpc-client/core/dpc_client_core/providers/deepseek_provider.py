@@ -10,15 +10,18 @@ from typing import Dict, Any, Optional, List, Union
 
 from openai import AsyncOpenAI
 
-from .base import AIProvider
+from .base import AIProvider, REASONING_OFF, normalize_reasoning_effort
 
 logger = logging.getLogger(__name__)
 
 DEEPSEEK_DEFAULT_BASE_URL = "https://api.deepseek.com"
 
-# DeepSeek reasoning effort levels accepted on the wire. "xhigh" is mapped to
-# "max" (matches hermes/pi). Anything else → omit (server default, currently high).
-_VALID_REASONING_EFFORT = {"low", "medium", "high", "max"}
+# The wire accepts more words than we offer: `none, minimal, low, medium, high,
+# xhigh, max` (the server names them itself when it refuses one), running three
+# actual efforts — `medium` and `xhigh` both resolve to *high*, per the vendor's
+# published table. We speak the shared four from `base.REASONING_EFFORTS` and
+# keep no local copy of that list: the copy we used to keep is what let
+# `xhigh -> max` survive as an escalation nobody had checked against the vendor.
 
 
 class DeepSeekProvider(AIProvider):
@@ -26,15 +29,17 @@ class DeepSeekProvider(AIProvider):
     DeepSeek provider over the **OpenAI-compatible** endpoint (https://api.deepseek.com).
 
     DeepSeek is pay-per-token with very high concurrency limits (V4-Flash 2500 /
-    V4-Pro 500), so it is the agents' fallback when Z.AI's GLM Coding Plan trips
-    Fair-Usage 1313. Models: deepseek-v4-flash (cheap default), deepseek-v4-pro.
+    V4-Pro 500). It was built as the agents' fallback when Z.AI's GLM Coding Plan
+    tripped Fair-Usage 1313; that plan is no longer a route this product may take
+    at all, and `ZaiProvider` now speaks to Z.AI's prepaid platform API instead.
+    Models: deepseek-v4-flash (cheap default), deepseek-v4-pro.
 
-    Architecture mirrors ZaiCodingProvider: the agent layer
+    Architecture mirrors ZaiProvider: the agent layer
     (llm_adapter._chat_native_tools) hands providers Anthropic-shaped
     messages/tools, so generate_with_tools converts Anthropic -> OpenAI on the way
     in and OpenAI tool_calls -> Anthropic-style tool_use objects on the way out.
 
-    DeepSeek-specific (vs ZaiCodingProvider):
+    DeepSeek-specific (vs ZaiProvider):
       - **reasoning_content echo (critical):** DeepSeek V4 thinking is default-on;
         once thinking is enabled, EVERY replayed assistant message carrying
         tool_calls must include `reasoning_content`, or round-2+ fails with HTTP
@@ -72,7 +77,7 @@ class DeepSeekProvider(AIProvider):
         # override DeepSeek's default-on behaviour.
         self.thinking_enabled = config.get("thinking", {}).get("enabled", True)
 
-        # Optional reasoning effort (top-of-body via extra_body). xhigh -> max.
+        # Optional reasoning effort (top-of-body via extra_body).
         self._reasoning_effort = self._normalize_effort(config.get("reasoning_effort"))
 
         self.top_p = config.get("top_p")  # None => API default
@@ -82,6 +87,14 @@ class DeepSeekProvider(AIProvider):
         self.max_retry_seconds = config.get("max_retry_seconds", 600)
 
         self._last_thinking: Optional[str] = None
+        # The token accounting of the last call, whichever entry point made it.
+        # Cleared at the start of every call so a failure cannot be priced with
+        # the numbers of the success before it.
+        self._last_usage: Optional[Dict[str, Any]] = None
+
+        # Said once per provider: the reason is a property of the alias, not of
+        # the call, so repeating it per request would bury the log.
+        self._sampling_inert_logged = False
 
         # CoT replay cache (Phase 3): reasoning_content keyed by tool_call id so a
         # later round can resend the real chain-of-thought instead of a placeholder.
@@ -101,6 +114,93 @@ class DeepSeekProvider(AIProvider):
 
     def get_last_thinking(self) -> Optional[str]:
         return self._last_thinking
+
+    def get_last_usage(self) -> Optional[Dict[str, Any]]:
+        """What the vendor said the last call cost in tokens, or None.
+
+        The caller that most needs this is the one that used to guess: the
+        agent's text path counts tokens locally and prices the guess, which on
+        this provider is wrong in both directions at once — the cache split is
+        invisible, so every prompt token bills as a miss (dearer), and
+        reasoning tokens do not appear in the answer text (cheaper)."""
+        return self._last_usage
+
+    @staticmethod
+    def _usage_from_response(u: Any) -> Dict[str, Any]:
+        """The vendor's token accounting, in this project's shape.
+
+        DeepSeek reports the cache split natively (prompt_tokens = hit + miss)
+        and leaves the OpenAI-compat `prompt_tokens_details.cached_tokens` at
+        0, so the native fields win and the compat one is only a fallback."""
+        prompt_tokens = getattr(u, "prompt_tokens", 0) or 0
+        _hit = getattr(u, "prompt_cache_hit_tokens", None)
+        _miss = getattr(u, "prompt_cache_miss_tokens", None)
+        if _hit is None:
+            _details = getattr(u, "prompt_tokens_details", None)
+            _hit = getattr(_details, "cached_tokens", 0) if _details else 0
+        if _miss is None:
+            _miss = max(0, prompt_tokens - (_hit or 0))
+        _completion = getattr(u, "completion_tokens", 0) or 0
+        _ctd = getattr(u, "completion_tokens_details", None)
+        _reasoning = (getattr(_ctd, "reasoning_tokens", 0) or 0) if _ctd else 0
+        return {
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": _completion,
+            "reasoning_tokens": _reasoning,
+            "content_tokens": max(0, _completion - _reasoning),
+            "total_tokens": getattr(u, "total_tokens", 0) or 0,
+            "cache_read_input_tokens": _hit or 0,
+            "prompt_cache_hit_tokens": _hit or 0,
+            "prompt_cache_miss_tokens": _miss or 0,
+        }
+
+    def _effort_label(self, requested: Optional[str], extra_body: Dict[str, Any]) -> str:
+        """What the usage line should say this call asked for.
+
+        Read out of the request body it lies, and it lies about the loudest
+        choice there is: `off` never travels as an effort — it turns the
+        thinking block off — so a body with no `reasoning_effort` key was
+        reported as `server-default`, i.e. as nobody having expressed a
+        preference. Found by the live acceptance of `34b3933d` on 2026-08-16,
+        where the room was switched to `off` at 20:37:13 and the four calls
+        that followed all logged `server-default`; a colleague read those lines
+        as evidence the room was on `high`.
+
+        Four words, and the two silences are kept apart on purpose: `off` (this
+        call asked for it), `alias-off` (this alias is configured never to
+        think), a level, or `server-default` (nobody said anything)."""
+        if extra_body.get("thinking", {}).get("type") == "disabled":
+            return REASONING_OFF if self._normalize_effort(requested) == REASONING_OFF else "alias-off"
+        return extra_body.get("reasoning_effort", "server-default")
+
+    def _record_usage(
+        self,
+        raw_usage: Any,
+        *,
+        path: str,
+        conversation_id: Optional[str] = None,
+        tool_calls: int = 0,
+        effort: Any = "server-default",
+    ) -> Dict[str, Any]:
+        """Keep the accounting and write the one line the burn history is made of.
+
+        `path` is new and it is not decoration: until 2026-08-16 this line was
+        written by the tool path alone, so the 5,406 lines the burn rate was
+        measured from are all `tools`. Plain calls joining that series unmarked
+        would change what the file means with nothing in the file to say so."""
+        usage = self._usage_from_response(raw_usage) if raw_usage is not None else None
+        if usage is None:
+            return {}
+        self._last_usage = usage
+        logger.info(
+            "DeepSeek usage: alias=%s conv=%s prompt=%d (hit=%d/miss=%d), "
+            "completion=%d (reasoning=%d/content=%d), tool_calls=%d, effort=%s, path=%s",
+            self.alias, conversation_id or "-", usage["prompt_tokens"],
+            usage["prompt_cache_hit_tokens"], usage["prompt_cache_miss_tokens"],
+            usage["completion_tokens"], usage["reasoning_tokens"],
+            usage["content_tokens"], tool_calls, effort, path,
+        )
+        return usage
 
     def supports_balance(self) -> bool:
         return True
@@ -166,26 +266,92 @@ class DeepSeekProvider(AIProvider):
 
     @staticmethod
     def _normalize_effort(value: Optional[str]) -> Optional[str]:
-        """Strip/lowercase, map xhigh -> max, validate against the accepted set.
-        Returns None for empty/invalid (-> server default)."""
-        raw = (value or "").strip().lower()
-        if raw == "xhigh":
-            raw = "max"
-        return raw if raw in _VALID_REASONING_EFFORT else None
+        """The shared vocabulary, so this provider and Ollama read one word the
+        same way. Returns None for empty or unrecognised (-> the caller's
+        fallback).
+
+        This used to map `xhigh -> max` to match another tool's spelling. The
+        vendor's own table says `xhigh` means *high*
+        (api-docs.deepseek.com/guides/thinking_mode), and `max` is a different,
+        dearer effort — so the rewrite was quietly upgrading whoever asked for
+        `xhigh`, not translating them."""
+        return normalize_reasoning_effort(value)
+
+    def _thinking_for_call(self, reasoning_effort: Optional[str] = None) -> bool:
+        """Whether this one call reasons: the header's `off` beats the alias.
+
+        Until now the only switch was `thinking.enabled` in providers.json —
+        per alias, therefore shared by every conversation that alias serves.
+        The header could raise the effort and never lower it past the floor,
+        because the vendor's own `none` effort does **not** disable anything
+        while the request still carries `thinking: {type: enabled}`; the off
+        switch is the thinking block itself, which no per-call path reached."""
+        return self.thinking_enabled and self._normalize_effort(reasoning_effort) != REASONING_OFF
 
     def _build_extra_body(self, reasoning_effort: Optional[str] = None) -> Dict[str, Any]:
         """DeepSeek thinking toggle. Always sent — {type: disabled} is required to
         override the default-on thinking. A per-call reasoning_effort (e.g. a UI
         toggle) wins over the provider-config default; a None/invalid override falls
         back to the config value, so callers that pass nothing keep the configured
-        effort (no silent downgrade). Either is only sent when thinking is enabled."""
+        effort (no silent downgrade). Either is only sent when thinking is enabled.
+
+        `off` is not an effort and never reaches the wire as one: it turns the
+        thinking block to disabled, which is the only thing DeepSeek listens to."""
+        thinking = self._thinking_for_call(reasoning_effort)
         body: Dict[str, Any] = {
-            "thinking": {"type": "enabled" if self.thinking_enabled else "disabled"}
+            "thinking": {"type": "enabled" if thinking else "disabled"}
         }
+        # No second filter for `off` here, though one looks natural: `off` is
+        # the one word that makes `thinking` false above, so the branch below is
+        # already unreachable for it. Written as a guard it would never fire —
+        # and a test can pass over a guard that cannot fire without exercising
+        # anything, which is how a defence becomes decoration.
         effort = self._normalize_effort(reasoning_effort) or self._reasoning_effort
-        if self.thinking_enabled and effort:
+        if thinking and effort:
             body["reasoning_effort"] = effort
         return body
+
+    def _sampling_params(
+        self,
+        temperature_override: Optional[float] = None,
+        reasoning_effort: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """`temperature` and `top_p` — or neither, while thinking is on.
+
+        The vendor documents both (with the two penalties) as accepted and
+        ignored in thinking mode. We had never checked that, and a change that
+        stops sending a field must not rest on somebody's sentence, so it was
+        measured on `deepseek-v4-flash`, 5 replies per cell to "name one
+        animal": thinking **off**, temperature 0.0 returned the same word 5/5
+        and 2.0 returned 5 different ones — the probe can see the field. With
+        thinking **on**, temperature 0.0 returned 4 different words out of 5.
+        A temperature that is honoured collapses that cell; this one did not.
+
+        So the number changes no answer, and sending it changes only what the
+        operator believes: both live aliases configure 0.6 and think on every
+        call, which makes the field in the editor a dial wired to nothing.
+        Withholding it says so in the log instead. If DeepSeek ever begins
+        honouring it, this is one condition to delete.
+
+        The condition is the *call's* thinking state, not the alias's: a header
+        set to Off turns the field back into a live control for that call, and
+        withholding it there would take away sampling exactly where it works."""
+        if not self._thinking_for_call(reasoning_effort):
+            params: Dict[str, Any] = {"temperature": self._effective_temperature(temperature_override)}
+            if self.top_p is not None:
+                params["top_p"] = self.top_p
+            return params
+        if not self._sampling_inert_logged:
+            self._sampling_inert_logged = True
+            logger.info(
+                "DeepSeekProvider '%s': temperature=%s and top_p=%s not sent — the "
+                "API ignores them while thinking is enabled (measured 2026-08-15). "
+                "Turn thinking off for this alias if you need to steer sampling.",
+                self.alias,
+                self._effective_temperature(temperature_override),
+                self.top_p,
+            )
+        return {}
 
     def _effective_temperature(self, override: Optional[float] = None) -> float:
         if override is not None:
@@ -197,22 +363,41 @@ class DeepSeekProvider(AIProvider):
     # --- plain text generation ---
 
     async def generate_response(self, prompt: str, **kwargs) -> str:
-        """Non-streaming text generation."""
+        """Non-streaming text generation.
+
+        Returns the text, and leaves the accounting on `get_last_usage()` —
+        sleep synthesis, the AI chat and everything else without tools comes
+        through here, and until 2026-08-16 every one of those calls was priced
+        by a guess with no record of its own."""
         self._last_thinking = None
+        self._last_usage = None
 
         async def _call():
+            # The caller's effort, not the alias ceiling. This read used to be
+            # missing: `_build_extra_body()` took no argument here while the tools
+            # path passed one, so sleep, knowledge extraction and Local AI Chat
+            # could only ever run at the alias default — max on both DeepSeek
+            # aliases at the time it was measured. The label at the bottom of this
+            # function always read the caller's wish correctly, which is why the
+            # gap survived: nothing lied, the wish simply never reached the wire.
+            effort = kwargs.get("reasoning_effort")
+            extra_body = self._build_extra_body(effort)
             params: Dict[str, Any] = {
                 "model": self.model,
                 "max_tokens": self.max_tokens,
                 "messages": [{"role": "user", "content": prompt}],
-                "temperature": self._effective_temperature(kwargs.get("temperature")),
-                "extra_body": self._build_extra_body(),
+                "extra_body": extra_body,
+                **self._sampling_params(kwargs.get("temperature"), reasoning_effort=effort),
             }
-            if self.top_p is not None:
-                params["top_p"] = self.top_p
             resp = await self.client.chat.completions.create(**params)
             msg = resp.choices[0].message
             self._last_thinking = getattr(msg, "reasoning_content", None)
+            self._record_usage(
+                getattr(resp, "usage", None),
+                path="plain",
+                conversation_id=kwargs.get("conversation_id"),
+                effort=self._effort_label(kwargs.get("reasoning_effort"), extra_body),
+            )
             return msg.content or ""
 
         try:
@@ -229,26 +414,43 @@ class DeepSeekProvider(AIProvider):
         prompt: str,
         on_chunk: callable,
         conversation_id: str = None,
+        reasoning_effort: str = None,
     ) -> str:
-        """Streaming text generation. Calls on_chunk(text, conversation_id) per token."""
+        """Streaming text generation. Calls on_chunk(text, conversation_id) per token.
+
+        `reasoning_effort` had no parameter to arrive through until 2026-08-24, so a
+        caller could not have lowered it if it wanted to — the signature itself was
+        half of the defect."""
         self._last_thinking = None
+        self._last_usage = None
 
         async def _call():
+            extra_body = self._build_extra_body(reasoning_effort)
             params: Dict[str, Any] = {
                 "model": self.model,
                 "max_tokens": self.max_tokens,
                 "messages": [{"role": "user", "content": prompt}],
-                "temperature": self._effective_temperature(),
-                "extra_body": self._build_extra_body(),
+                "extra_body": extra_body,
                 "stream": True,
+                # A stream reports its usage only if asked, in a final chunk
+                # that carries no choices — which is why the skip below now
+                # reads the chunk before discarding it.
+                "stream_options": {"include_usage": True},
+                **self._sampling_params(reasoning_effort=reasoning_effort),
             }
-            if self.top_p is not None:
-                params["top_p"] = self.top_p
 
             full_text = ""
             thinking_text = ""
             stream = await self.client.chat.completions.create(**params)
             async for chunk in stream:
+                chunk_usage = getattr(chunk, "usage", None)
+                if chunk_usage is not None:
+                    self._record_usage(
+                        chunk_usage,
+                        path="plain-stream",
+                        conversation_id=conversation_id,
+                        effort=self._effort_label(None, extra_body),
+                    )
                 if not chunk.choices:
                     continue
                 delta = chunk.choices[0].delta
@@ -269,10 +471,20 @@ class DeepSeekProvider(AIProvider):
             return await _call()
         except Exception as e:
             if self._is_retryable(e):
-                result = await self._retry_with_backoff(_call, e)
-                if on_chunk and result:
-                    await on_chunk(result, conversation_id)
-                return result
+                # `_call` is the whole stream: the retry re-runs it, and it delivers
+                # every token through `on_chunk` on its way to returning `full_text`.
+                # Sending that return value to `on_chunk` as well put the answer on the
+                # wire a second time, after the reader already had it token by token.
+                #
+                # It does not double the bill — `on_chunk` reaches
+                # `agent_manager.emit_stream_chunk`, which only appends and broadcasts.
+                # It does something that lasts longer: `_raw` becomes the answer twice,
+                # so `_streaming_raw` stops matching `response` (`agent_manager.py:1168`)
+                # where it is normally None, and the doubled text is written to
+                # conversation history and read back as context by every later turn.
+                # (Found by Ark in `zai_provider.py`, 2026-08-23; these two were the
+                # rest of the class.)
+                return await self._retry_with_backoff(_call, e)
             logger.error("DeepSeek streaming failed: %s", e, exc_info=True)
             raise RuntimeError(
                 f"DeepSeek streaming provider '{self.alias}' failed: {type(e).__name__}: {e}"
@@ -404,6 +616,7 @@ class DeepSeekProvider(AIProvider):
         as consumed by llm_adapter._chat_native_tools.
         """
         self._last_thinking = None
+        self._last_usage = None
         openai_messages = self._anthropic_to_openai_messages(
             system, messages, reasoning_echo=self.thinking_enabled
         )
@@ -431,11 +644,9 @@ class DeepSeekProvider(AIProvider):
                 "messages": openai_messages,
                 "tools": openai_tools,
                 "tool_choice": "auto",
-                "temperature": self._effective_temperature(),
                 "extra_body": extra_body,
+                **self._sampling_params(reasoning_effort=reasoning_effort),
             }
-            if self.top_p is not None:
-                params["top_p"] = self.top_p
 
             resp = await self.client.chat.completions.create(**params)
             msg = resp.choices[0].message
@@ -466,39 +677,12 @@ class DeepSeekProvider(AIProvider):
             if on_chunk and content:
                 await on_chunk(content, conversation_id)
 
-            u = resp.usage
-            prompt_tokens = getattr(u, "prompt_tokens", 0) or 0
-            # DeepSeek reports the cache split natively (prompt_tokens = hit + miss)
-            # and leaves the OpenAI-compat prompt_tokens_details.cached_tokens at 0,
-            # so prefer the native fields and fall back only if they are absent.
-            _hit = getattr(u, "prompt_cache_hit_tokens", None)
-            _miss = getattr(u, "prompt_cache_miss_tokens", None)
-            if _hit is None:
-                _details = getattr(u, "prompt_tokens_details", None)
-                _hit = getattr(_details, "cached_tokens", 0) if _details else 0
-            if _miss is None:
-                _miss = max(0, prompt_tokens - (_hit or 0))
-            _completion = getattr(u, "completion_tokens", 0) or 0
-            _ctd = getattr(u, "completion_tokens_details", None)
-            _reasoning = (getattr(_ctd, "reasoning_tokens", 0) or 0) if _ctd else 0
-            usage = {
-                "prompt_tokens": prompt_tokens,
-                "completion_tokens": _completion,
-                "reasoning_tokens": _reasoning,
-                "content_tokens": max(0, _completion - _reasoning),
-                "total_tokens": getattr(u, "total_tokens", 0) or 0,
-                "cache_read_input_tokens": _hit or 0,
-                "prompt_cache_hit_tokens": _hit or 0,
-                "prompt_cache_miss_tokens": _miss or 0,
-            }
-            logger.info(
-                "DeepSeek usage: alias=%s conv=%s prompt=%d (hit=%d/miss=%d), "
-                "completion=%d (reasoning=%d/content=%d), tool_calls=%d, effort=%s",
-                self.alias, conversation_id or "-", usage["prompt_tokens"],
-                usage["prompt_cache_hit_tokens"], usage["prompt_cache_miss_tokens"],
-                usage["completion_tokens"], usage["reasoning_tokens"],
-                usage["content_tokens"], len(tool_calls_raw),
-                extra_body.get("reasoning_effort", "server-default"),
+            usage = self._record_usage(
+                resp.usage,
+                path="tools",
+                conversation_id=conversation_id,
+                tool_calls=len(tool_calls_raw),
+                effort=self._effort_label(reasoning_effort, extra_body),
             )
             return {
                 "content": content,

@@ -6,6 +6,7 @@
 **Scope:** Phase 0 — Agent Maturity Track enabler
 **External Review:** Hope, J.A.R.V.I.S. (2026-04-10)
 **Implementation status:** Step 1 (`hooks.py`) implemented in `bdaeb03` + `df1e2ba`; Steps 2–4 pending.
+**Amended:** 2026-08-27 — hook-conflict merge rule (`deny > ask > allow`), see the amendment below.
 
 ---
 
@@ -47,13 +48,13 @@ We will implement a **per-process middleware chain** with two tiers:
 | Decision | Choice | Reason | Source |
 |----------|--------|--------|--------|
 | Ordering | Registration order, no priority field | Convergence of 3+ projects | Framework + DeerFlow |
-| Chaining | First guard returning STOP_LOOP wins | Simple, deterministic | DeerFlow (implicit) |
+| Chaining | Most restrictive action wins (`deny > ask > allow`); short-circuit only on the maximal value | Order-independent verdict, and the two-value enum already behaves this way | DeerFlow (implicit); merge rule from prime-agent `hook-protocol`, amendment 2026-08-27 |
 | Error handling | Mixed: observer=silent catch, guard=re-raise | Different severity levels | Framework + DPC analysis |
 | HookContext | Immutable identity + typed state dataclass | Prevents generic dict from becoming unreadable global bag | Framework + DeerFlow + Hope/J.A.R.V.I.S. review |
 | Lifecycle | Per-process (new registry per `agent.process()`) | All 5 guards are per-task scope | DPC analysis |
 | Hard stop mechanism | Explicit `HookAction.STOP_LOOP` signal, not message mutation | Signal visible at code-review, mutation isn't | Ark decision, S24 |
 | Lifecycle type safety | `HookLifecycle` enum, not raw strings | Prevents silent no-op on typos | CC review S1 |
-| Extension points | REDIRECT/RETRY = Phase 2 concern, not "never needed" | Current 2-value enum sufficient, but checkpoint semantics will differ in Phase 1+ | Hope review |
+| Extension points | REDIRECT/RETRY = Phase 2 concern, not "never needed" — and their resolution rule is owed **before** the first one lands | They are not comparable on the restrictiveness axis, so the lattice above does not cover them | Hope review; amendment 2026-08-27 |
 
 ---
 
@@ -294,6 +295,51 @@ Note: DeerFlow's analogous refactoring resulted in ~1400 lines including extensi
 2. **HookContext state enrichment** — which additional loop internals to expose in `LoopState`. Start minimal (`last_response_has_text`, `tool_calls_this_turn`, `consecutive_tool_only_rounds`, `accumulated_cost_usd`, `recent_tool_args`), expand per Phase 1-5 needs.
 3. **HookAbort semantics per checkpoint** — for current 5 guards, all checkpoints are pre-execution (revert is trivial). Phase 1+ hooks like `on_message_send` will need different error semantics (revert impossible after send). This is a Phase 1+ design decision.
 4. **Finally/cleanup semantics** — current guards have no side effects (no DB connections, no locks). When Phase 1+ introduces hooks with resources, explicit cleanup mechanism needed (try/finally in handler, or cleanup hook). Deferred.
+
+---
+
+## Amendment 2026-08-27 — how two hooks that disagree are merged
+
+`fire()` returns the first `STOP_LOOP` and calls that the answer. With a two-value
+enum that is not a merge rule, it is an accident shaped like one: `STOP_LOOP` is the
+only non-neutral value, so whichever hook returns it wins regardless of order, and no
+two hooks can actually disagree.
+
+That stops being true at the third value. Of the five agent harnesses read in August
+(`ideas/dpc-research/ouroboros-ods-buzz-component-map-2026-08-26.md`), prime-agent's
+`hook-protocol` is the only one that answers the question at all, and it answers with a
+lattice rather than with an order: **the most restrictive action wins.**
+
+**The rule, adopted now rather than when it is first needed:**
+
+```
+deny  >  ask  >  allow
+```
+
+- `deny` — the action does not happen. Today's `HookAction.STOP_LOOP`.
+- `ask` — the action happens only if a person says so. No hook returns this yet; the
+  shell gate implements the same idea outside the hook chain (ADR-030 Tier 1).
+- `allow` — no objection. Today's `HookAction.CONTINUE`, and a handler returning `None`.
+
+Three properties follow, and they are the reason to write the rule down before the enum
+grows rather than after:
+
+1. **Registration order stops deciding the verdict.** It decides which guard is
+   reported as `last_triggered`, and nothing else.
+2. **Short-circuiting is an optimisation, not the rule.** `fire()` may return early
+   only on the maximal value still reachable — `deny`. Any lower value must poll the
+   remaining hooks, because a later `deny` outranks it.
+3. **Unknown is fail-closed.** The merge treats `None` and `allow` alike, since neither
+   expresses an objection — so a hook that means *"I could not decide"* must return
+   `deny` and not abstain.
+
+**REDIRECT and RETRY** remain Phase 2, with one condition now attached: they do not sit
+on this axis. Neither forbids nor permits — one replaces the action, the other repeats
+it — so two hooks redirecting to different places is a conflict, not a lattice. Their
+resolution rule is owed before the first of them is implemented.
+
+Nothing in `hooks.py` changes today: with `CONTINUE` and `STOP_LOOP` the existing code
+already computes exactly these verdicts. The amendment is what the next value has to obey.
 
 ---
 

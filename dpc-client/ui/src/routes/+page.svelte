@@ -2,7 +2,8 @@
 <!-- FIXED VERSION - Proper URI detection for Direct TLS vs WebRTC -->
 
 <script lang="ts">
-  import { onMount } from "svelte";
+  import { onMount, untrack } from "svelte";
+  import { providerToRemember } from '$lib/utils/rememberedProvider';
   import { writable } from "svelte/store";
   import { connectionStatus, nodeStatus, sendCommand, resetReconnection, connectToCoreService, knowledgeCommitProposal, personalContext, tokenWarning, extractionFailure, availableProviders, peerProviders, unreadMessageCounts, resetUnreadCount, setActiveChat, newSessionProposal, proposeNewSession, voteNewSession, defaultProviders, providersList, groupChats, listAgents, agentsList, sleepStateChanged, sleepProgress, sleepAgentStates, tokenUsageUpdated, setGroupReasoningEffort, updateAgentConfig } from "$lib/coreService";
   import { confirmAsync } from "$lib/utils/dialog";
@@ -15,6 +16,7 @@
   import InstructionsEditor from "$lib/components/InstructionsEditor.svelte";
   import FirewallEditor from "$lib/components/FirewallEditor.svelte";
   import ProvidersEditor from "$lib/components/ProvidersEditor.svelte";
+  import ScheduleApprovalDialog from "$lib/components/ScheduleApprovalDialog.svelte";
   import ProviderSelector from "$lib/components/ProviderSelector.svelte";
   import Toast from "$lib/components/Toast.svelte";
   import ChatMessageList from "$lib/components/ChatMessageList.svelte";
@@ -24,6 +26,7 @@
   import NewGroupDialog from "$lib/components/NewGroupDialog.svelte";
   import GroupSettingsDialog from "$lib/components/GroupSettingsDialog.svelte";
   import ShellApprovalDialog from "$lib/components/ShellApprovalDialog.svelte";
+  import WebAuthApprovalDialog from "$lib/components/WebAuthApprovalDialog.svelte";
   import ChatPanel from "$lib/panels/ChatPanel.svelte";
   import AgentPanel from "$lib/panels/AgentPanel.svelte";
   import VoicePanel from "$lib/panels/VoicePanel.svelte";
@@ -90,6 +93,8 @@
   let agentProgressRound = $state<number>(0);
   let agentProgressName = $state<string>('');
   let agentProgressAgentId = $state<string>('');
+  // Per-round LLM speed from the llama.cpp provider (live counter beside Stop)
+  let agentProgressSpeed = $state<Record<string, unknown> | null>(null);
   let agentStreamingText = $state<string>('');
   // Component ref — used to call flushAndCapture() in the AI response handler
   let agentPanelComp: AgentPanel | null = $state(null);
@@ -116,6 +121,12 @@
 
   // Store provider selection per chat (chatId -> provider alias)
   const chatProviders = writable<Map<string, string>>(new Map());
+  // The reasoning level for a chat that has no agent to store one. An agent
+  // keeps its level in its own config and that path works; Local AI Chat is an
+  // entry in `aiChats` with no agent behind it, so its selector used to write to
+  // `updateAgentConfig("local_ai")` and be answered «Agent not found» inside an
+  // envelope that says OK. Same shape as `chatProviders` above, on purpose.
+  const chatEfforts = writable<Map<string, string>>(new Map());
 
   // Store AI chat metadata (chatId -> {name: string, provider: string, instruction_set_name?: string})
   const aiChats = writable<Map<string, {name: string, provider: string, instruction_set_name?: string, profile_name?: string, llm_provider?: string, compute_host?: string}>>(
@@ -155,7 +166,8 @@
   let showProvidersEditor = $state(false);
   let showAgentBoard = $state(false);
   let showCommitDialog = $state(false);
-  let isExtractingKnowledge = $state(false);
+  let commitVoteError = $state("");
+  let extractingChats = $state(new Set<string>());
   let showNewSessionDialog = $state(false);  // v0.11.3: mutual session approval
   let showNewGroupDialog = $state(false);  // v0.19.0: group chat creation
   // showGroupInviteDialog + pendingGroupInvite moved to GroupPanel.svelte (Step 7)
@@ -271,12 +283,17 @@
             chatHistories.update(map => {
               const newMap = new Map(map);
               const agentName = $agentsList?.find((a: any) => a.agent_id === state.agent_id)?.name || state.agent_id;
-              const msgs = result.messages.map((msg: any, index: number) =>
-                mapBackendMessage(msg, {
+              let previousTimestamp: number | undefined;
+              const msgs = result.messages.map((msg: any, index: number) => {
+                const mapped = mapBackendMessage(msg, {
                   index,
                   totalCount: result.messages.length,
                   identity: { agentSelfId: state.agent_id, agentSelfName: agentName, selfNodeId: $nodeStatus?.node_id || '' },
-                }));
+                  previousTimestamp,
+                });
+                previousTimestamp = mapped.timestamp;
+                return mapped;
+              });
               newMap.set(state.agent_id, msgs);
               return newMap;
             });
@@ -499,14 +516,18 @@
             const newMap = new Map(map);
             const localHistory: any[] = newMap.get(activeChatId) || [];
             const localById = new Map(localHistory.map((m: any) => [m.id, m]));
+            let previousTimestamp: number | undefined;
             const msgs = result.messages.map((msg: any, index: number) => {
               const local = localById.get(msg.id);
-              return mapBackendMessage(msg, {
+              const mapped = mapBackendMessage(msg, {
                 index,
                 totalCount: result.messages.length,
                 identity: { agentSelfId: activeChatId, agentSelfName: agentName, selfNodeId: $nodeStatus?.node_id || '' },
                 local: local ? { thinking: local.thinking, streamingRaw: local.streamingRaw, tool_calls: local.tool_calls } : undefined,
+                previousTimestamp,
               });
+              previousTimestamp = mapped.timestamp;
+              return mapped;
             });
             newMap.set(activeChatId, msgs);
             return newMap;
@@ -516,17 +537,43 @@
     }
   });
 
+  // Remember which provider a person picked, for the chat they picked it in.
+  //
+  // The effect below restores a selection on every chat switch; it used to have
+  // nothing to restore for a chat nobody had written an entry for, and took the
+  // `else` branch — silently returning the user to `default_provider`, which on
+  // this machine is a paid alias at max effort. Reproduced from the log: three
+  // queries on a local free model, a detour into another chat, and the very next
+  // query back in Local AI Chat routed to `deepseek_flash` at `effort=max` for
+  // «какое сегодня число?». The reverse direction would be harmless; this one is
+  // billed.
+  //
+  // A handler rather than a second `$effect`, deliberately: an effect that read
+  // `selectedTextProvider` and wrote `chatProviders` would feed the one below,
+  // which reads `chatProviders` and writes `selectedTextProvider`. That shape has
+  // already cost this file one `effect_update_depth_exceeded`.
+  function rememberTextProvider(uniqueId: string) {
+    const chatId = activeChatId;
+    // The rule — which selections are worth storing and in what shape — lives in
+    // `providerToRemember` with its tests. Which chat it belongs to is the only
+    // part that needs this component.
+    const alias = providerToRemember(uniqueId, $chatProviders.get(chatId));
+    if (!alias) return;
+    chatProviders.update(m => new Map(m).set(chatId, alias));
+  }
+
   // Reactive: Sync provider dropdown with chat-specific provider when switching chats
   $effect(() => {
     const chatProvider = $chatProviders.get(activeChatId);
     if (chatProvider && chatProvider !== 'local_ai') {
       // Update dropdown to show chat-specific provider (e.g., dpc_agent)
       selectedTextProvider = `local:${chatProvider}`;
-    } else {
-      // Reset to default provider for chats without specific provider (local_ai, AI chats, etc.)
-      if ($availableProviders?.default_provider) {
-        selectedTextProvider = `local:${$availableProviders.default_provider}`;
-      }
+    } else if ($availableProviders?.default_provider) {
+      // The default now belongs to the one case it describes: a chat that has
+      // never been given a provider. `local_ai` is a sentinel rather than an
+      // alias, so it still falls here — until the person picks something, which
+      // `rememberTextProvider` writes above and this branch then stops seeing.
+      selectedTextProvider = `local:${$availableProviders.default_provider}`;
     }
   });
 
@@ -788,19 +835,40 @@
     showProvidersEditor = true;
   }
 
-  function handleCommitVote(event: CustomEvent) {
+  async function handleCommitVote(event: CustomEvent) {
     const { proposal_id, vote, comment, entries, summary } = event.detail;
-    sendCommand("vote_knowledge_commit", {
-      proposal_id,
-      vote,
-      comment,
-      entries,
-      summary
-    });
+    // The dialog used to close on click, before the backend answered. When a
+    // vote is refused — another node's vote closed the session first — the
+    // refusal went nowhere and the click looked accepted.
+    if (!proposal_id) {
+      commitVoteError = "";
+      showCommitDialog = false;
+      knowledgeCommitProposal.set(null);
+      return;
+    }
+    let result: any;
+    try {
+      result = await sendCommand("vote_knowledge_commit", {
+        proposal_id,
+        vote,
+        comment,
+        entries,
+        summary
+      });
+    } catch (err: any) {
+      commitVoteError = err?.message || "Vote could not be cast";
+      return;
+    }
+    if (result === false) {
+      commitVoteError = "Not connected to the backend — vote was not sent";
+      return;
+    }
+    commitVoteError = "";
     showCommitDialog = false;
   }
 
   function closeCommitDialog() {
+    commitVoteError = "";
     showCommitDialog = false;
     knowledgeCommitProposal.set(null);
   }
@@ -826,10 +894,38 @@
 
   async function handleEndSession(conversationId: string) {
     // No confirm dialog — user can Reject the proposal if extraction was accidental.
-    isExtractingKnowledge = true;
+    extractingChats = new Set(extractingChats).add(conversationId);
     sendCommand("end_conversation_session", {
       conversation_id: conversationId
     });
+  }
+
+  // untrack is load-bearing: this is called from an $effect and reads
+  // extractingChats, so a tracked read makes the effect its own trigger.
+  function stopExtracting(conversationId: string | null) {
+    untrack(() => {
+      if (!conversationId) {
+        if (extractingChats.size === 0) return;
+        extractingChats = new Set();
+        return;
+      }
+      if (!extractingChats.has(conversationId)) return;
+      const remaining = new Set(extractingChats);
+      remaining.delete(conversationId);
+      extractingChats = remaining;
+    });
+  }
+
+  function chatLabel(chatId: string): string {
+    if (!chatId) return '';
+    if (chatId.startsWith('group-')) {
+      return $groupChats?.get(chatId)?.name || 'group chat';
+    }
+    const agent = $agentsList?.find((a: any) => a.agent_id === chatId);
+    if (agent) return agent.name || chatId;
+    const aiChat = $aiChats?.get(chatId);
+    if (aiChat) return aiChat.name || chatId;
+    return getPeerDisplayName(chatId);
   }
 
   function handleNewChat(chatId: string) {
@@ -979,13 +1075,15 @@
 
           {#if !chatHeaderCollapsed && isGroupChat}
             <div class="group-effort">
-              <span class="group-effort-label">Thinking effort:</span>
+              <span class="group-effort-label">Reasoning:</span>
               <select
                 class="group-effort-select"
+                title="How hard the model reasons before answering — the field is `reasoning_effort` in the code and in DeepSeek's own API, which is why the label says Reasoning rather than Thinking. One scale for a room whose agents sit on different models: each provider maps it onto what its own model can do, so the same word can mean different depths here. Max cannot be sent to a local Ollama model at all and arrives as High. A model that reports no thinking drops every level — Off is the one value all of them accept, and it is a switch rather than an amount."
                 value={$groupChats.get(activeChatId)?.reasoning_effort || ''}
                 onchange={(e: Event) => setGroupReasoningEffort(activeChatId, (e.currentTarget as HTMLSelectElement).value)}
               >
                 <option value="">Config</option>
+                <option value="off">Off</option>
                 <option value="low">Low</option>
                 <option value="medium">Medium</option>
                 <option value="high">High</option>
@@ -996,13 +1094,29 @@
 
           {#if !chatHeaderCollapsed && isActuallyAIChat}
             <div class="group-effort">
-              <span class="group-effort-label">Thinking effort:</span>
+              <span class="group-effort-label">Reasoning:</span>
               <select
                 class="group-effort-select"
-                value={$agentsList.find((a: any) => a.agent_id === activeChatId)?.reasoning_effort || ''}
-                onchange={async (e: Event) => { await updateAgentConfig(activeChatId, { reasoning_effort: (e.currentTarget as HTMLSelectElement).value }); await listAgents(); }}
+                title="How hard the model reasons before answering — the field is `reasoning_effort` in the code and in DeepSeek's own API, which is why the label says Reasoning rather than Thinking. One scale for a room whose agents sit on different models: each provider maps it onto what its own model can do, so the same word can mean different depths here. Max cannot be sent to a local Ollama model at all and arrives as High. A model that reports no thinking drops every level — Off is the one value all of them accept, and it is a switch rather than an amount."
+                value={$agentsList.find((a: any) => a.agent_id === activeChatId)?.reasoning_effort
+                       ?? ($chatEfforts.get(activeChatId) || '')}
+                onchange={async (e: Event) => {
+                  const level = (e.currentTarget as HTMLSelectElement).value;
+                  // The write mirrors the read one line above: a chat that answers to an
+                  // agent stores the level in that agent's config, and one that does not
+                  // keeps it here and sends it with the query. Deciding by the same
+                  // lookup both ways is what keeps the control from writing somewhere
+                  // the reader never looks.
+                  if ($agentsList.find((a: any) => a.agent_id === activeChatId)) {
+                    await updateAgentConfig(activeChatId, { reasoning_effort: level });
+                    await listAgents();
+                  } else {
+                    chatEfforts.update(m => new Map(m).set(activeChatId, level));
+                  }
+                }}
               >
                 <option value="">Config</option>
+                <option value="off">Off</option>
                 <option value="low">Low</option>
                 <option value="medium">Medium</option>
                 <option value="high">High</option>
@@ -1042,6 +1156,7 @@
           <ProviderSelector
             bind:selectedComputeHost
             bind:selectedTextProvider
+            onTextProviderChange={rememberTextProvider}
             bind:selectedVisionProvider
             bind:selectedVoiceProvider
             showForChatId={activeChatId}
@@ -1072,7 +1187,7 @@
             contextAgents={effectiveTokenUsage.contextAgents ?? null}
             messageCount={$chatHistories.get(activeChatId)?.length ?? 0}
             bind:enableMarkdown
-            isExtracting={isExtractingKnowledge}
+            isExtracting={extractingChats.has(activeChatId)}
             {isSleeping}
             sleepCurrent={activeAgentSleep?.current ?? 0}
             sleepTotal={activeAgentSleep?.total ?? 0}
@@ -1097,6 +1212,7 @@
         agentProgressRound={agentProgressRound}
         agentProgressName={agentProgressName}
         agentProgressAgentId={agentProgressAgentId}
+        agentProgressSpeed={agentProgressSpeed}
         agentStreamingText={agentStreamingText}
         peerDisplayNames={peerDisplayNames}
         selfNodeId={$nodeStatus?.node_id || ''}
@@ -1112,6 +1228,7 @@
         {agentChatToAgentId}
         {aiChats}
         {chatProviders}
+        {chatEfforts}
         {selectedTextProvider}
         {selectedVisionProvider}
         {selectedVoiceProvider}
@@ -1171,6 +1288,7 @@
   bind:agentProgressRound
   bind:agentProgressName
   bind:agentProgressAgentId
+  bind:agentProgressSpeed
   bind:agentStreamingText
 />
 
@@ -1229,6 +1347,12 @@
      coreService.ts shell_approval_request WS handler. -->
 <ShellApprovalDialog />
 
+<!-- WebAuthApprovalDialog: ADR-029 Task 008 — the same shape for an agent
+     asking to use saved cookies in a browser the human cannot see. The
+     backend has broadcast this request since June with nothing mounted to
+     answer it. -->
+<WebAuthApprovalDialog />
+
 <!-- ChatHistorySyncPanel: loads history from backend when switching to peer/agent/group chat (Step 8) -->
 <ChatHistorySyncPanel
   {activeChatId}
@@ -1262,9 +1386,13 @@
 />
 
 <!-- Knowledge Architecture UI Components -->
+<ScheduleApprovalDialog />
+
 <KnowledgeCommitDialog
   bind:open={showCommitDialog}
   proposal={$knowledgeCommitProposal}
+  sourceChat={chatLabel($knowledgeCommitProposal?.conversation_id ?? '')}
+  voteError={commitVoteError}
   on:vote={handleCommitVote}
   on:close={closeCommitDialog}
 />
@@ -1480,7 +1608,7 @@
 
 <!-- KnowledgeEventsPanel: commit/token/extraction/context hash events -->
 <KnowledgeEventsPanel
-  onOpenCommitDialog={() => { showCommitDialog = true; isExtractingKnowledge = false; }}
+  onOpenCommitDialog={(conversationId) => { showCommitDialog = true; stopExtracting(conversationId); }}
   onUpdateTokenUsage={(convId, usage) => {
     tokenUsageMap = new Map(tokenUsageMap);
     tokenUsageMap.set(convId, usage);
@@ -1489,10 +1617,10 @@
     showTokenWarning = true;
     tokenWarningMessage = message;
   }}
-  onShowExtractionFailure={(message) => {
+  onShowExtractionFailure={(message, conversationId) => {
     showExtractionFailure = true;
     extractionFailureMessage = message;
-    isExtractingKnowledge = false;
+    stopExtracting(conversationId);
   }}
   onShowCommitResult={(message, type, result) => {
     commitResultMessage = message;

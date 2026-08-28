@@ -8,6 +8,10 @@
   // Props
   export let proposal: KnowledgeCommitProposal | null = null;
   export let open: boolean = false;
+  export let sourceChat: string = '';
+  // A refused vote — the session closed before this click reached it — used to
+  // vanish: the dialog closed on click and the backend's refusal went nowhere.
+  export let voteError: string = '';
 
   const dispatch = createEventDispatcher();
 
@@ -99,7 +103,15 @@
   <div class="modal-overlay" on:keydown={handleKeydown} role="presentation">
     <div class="modal" role="dialog" aria-labelledby="dialog-title" tabindex="-1">
       <div class="modal-header">
-        <h2 id="dialog-title">Knowledge Commit Proposal</h2>
+        <div class="title-block">
+          <h2 id="dialog-title">Knowledge Commit Proposal</h2>
+          {#if sourceChat}
+            <div class="source-chat">
+              <span class="source-chat-label">chat</span>
+              <span class="source-chat-name">{sourceChat}</span>
+            </div>
+          {/if}
+        </div>
         <div class="header-actions">
           {#if !editMode}
             <button class="btn-edit" on:click={startEditing}>Edit</button>
@@ -260,6 +272,10 @@
         </div>
       </div>
 
+      {#if voteError}
+        <div class="vote-error" role="alert">{voteError}</div>
+      {/if}
+
       <div class="modal-footer">
         <button class="btn btn-approve" on:click={() => handleVote('approve')}>
           Approve
@@ -276,6 +292,16 @@
 {/if}
 
 <style>
+  .vote-error {
+    margin: 0 1.5rem 0.75rem;
+    padding: 0.6rem 0.8rem;
+    border-radius: 6px;
+    background: rgba(220, 53, 69, 0.12);
+    border: 1px solid rgba(220, 53, 69, 0.45);
+    color: #dc3545;
+    font-size: 0.9rem;
+  }
+
   .modal-overlay {
     position: fixed;
     top: 0;
@@ -312,6 +338,38 @@
     margin: 0;
     font-size: 1.5rem;
     color: #333;
+  }
+
+  .title-block {
+    display: flex;
+    flex-direction: column;
+    gap: 0.2rem;
+    min-width: 0;
+  }
+
+  .source-chat {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.45rem;
+    align-self: flex-start;
+    padding: 0.25rem 0.7rem;
+    border-radius: 999px;
+    background: #e3f2fd;
+    border: 1px solid #64b5f6;
+    color: #0d47a1;
+  }
+
+  .source-chat-label {
+    font-size: 0.7rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: #1976d2;
+  }
+
+  .source-chat-name {
+    font-size: 1rem;
+    font-weight: 700;
   }
 
   .close-btn {

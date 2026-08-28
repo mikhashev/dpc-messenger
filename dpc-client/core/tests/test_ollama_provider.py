@@ -5,6 +5,7 @@ conversion, (2) the tool_calls_raw .id/.name/.input contract consumed by
 llm_adapter._chat_native_tools, (3) the thinking-surface fallback for
 reasoning models that leave content empty on the final turn. No network."""
 
+import asyncio
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -27,7 +28,27 @@ def _make(config=None):
     return OllamaProvider("ollama_test", cfg)
 
 
+@pytest.fixture(autouse=True)
+def _no_daemon(monkeypatch):
+    """This file promises no network, and capability detection now asks the
+    daemon whenever it can reach one. So here it deliberately cannot: the
+    two detection tests below are about the fallback name lists, and the
+    daemon path is covered in test_ollama_asks_the_daemon.py."""
+    from dpc_client_core.providers import ollama_provider as op
+    op._MODEL_INFO.clear()
+
+    def _refuse(*a, **k):
+        raise RuntimeError("no daemon in this file")
+
+    monkeypatch.setattr(op.ollama, "Client", _refuse)
+    yield
+    op._MODEL_INFO.clear()
+
+
 def test_supports_thinking_detection():
+    """The fallback list, not the truth. Measured 2026-08-13: the daemon
+    says lfm2.5 *can* think, so with a daemon reachable this same model
+    answers True — which is the defect the list was hiding."""
     assert _make({"model": "deepseek-r1:8b"}).supports_thinking() is True
     assert _make({"model": "lfm2.5:latest"}).supports_thinking() is False
 
@@ -75,6 +96,82 @@ def test_build_options_stays_plain_dict():
     plain-dict serialization path preserves it."""
     p = _make({"min_p": 0.1})
     assert type(p._build_options()) is dict
+
+
+async def _slow_chat(*_a, **_k):
+    """A daemon that answers, but not quickly enough for a short budget."""
+    await asyncio.sleep(0.05)
+    return _Resp(SimpleNamespace(content="ok", thinking=None, tool_calls=[]),
+                 prompt_eval_count=1, eval_count=1)
+
+
+@pytest.mark.asyncio
+async def test_an_alias_naming_no_timeout_gets_the_module_default(monkeypatch):
+    """The number nobody chose is the one most calls run under, so it is asserted
+    rather than left to a literal three call sites apart. Captured at the deadline
+    itself instead of waited out — the point is which value was handed to
+    `wait_for`, not that a quarter of an hour passes."""
+    from dpc_client_core.providers import ollama_provider as op
+
+    seen = {}
+    real_wait_for = asyncio.wait_for
+
+    async def _capture(awaitable, timeout):
+        seen["timeout"] = timeout
+        return await real_wait_for(awaitable, timeout)
+
+    class _Msg(dict):
+        """Item access and attribute access both, because the plain path reads
+        `response['message']['content']` and the tools path uses getattr."""
+
+        def __init__(self, content):
+            super().__init__(content=content)
+            self.content = content
+            self.thinking = None
+            self.tool_calls = []
+
+    monkeypatch.setattr(op.asyncio, "wait_for", _capture)
+    provider = _make()  # no "timeout" key in this config
+    provider.client.chat = AsyncMock(return_value=_Resp(_Msg("ok")))
+
+    await provider.generate_response("x")
+
+    assert seen["timeout"] == op.DEFAULT_TIMEOUT_SECONDS
+    assert op.DEFAULT_TIMEOUT_SECONDS == 900.0
+
+
+@pytest.mark.asyncio
+async def test_a_callers_timeout_is_used_instead_of_the_alias_config():
+    """Sleep runs one synthesis over the whole archive under a number chosen as
+    headroom for a first VRAM load. Until this, no caller could say otherwise:
+    the plain path read the config alone, while the vision path already took the
+    caller's. With the config's five seconds in force this call would succeed."""
+    p = _make({"timeout": 5.0})
+    p.client.chat = _slow_chat
+
+    with pytest.raises(RuntimeError, match="0.01"):
+        await p.generate_response("x", timeout=0.01)
+
+
+@pytest.mark.asyncio
+async def test_the_alias_config_still_governs_a_caller_that_says_nothing():
+    p = _make({"timeout": 0.01})
+    p.client.chat = _slow_chat
+
+    with pytest.raises(RuntimeError, match="0.01"):
+        await p.generate_response("x")
+
+
+@pytest.mark.asyncio
+async def test_the_tools_path_takes_the_callers_timeout_too():
+    """Same defect, second site: an agent loop calling tools has the same claim
+    on its own budget as a plain call does."""
+    p = _make({"timeout": 5.0})
+    p.client.chat = _slow_chat
+
+    with pytest.raises(RuntimeError, match="0.01"):
+        await p.generate_with_tools(messages=[{"role": "user", "content": "x"}],
+                                    tools=[], timeout=0.01)
 
 
 @pytest.mark.asyncio
@@ -208,49 +305,113 @@ class _Msg(dict):
 
 class TestLoopAwareClient:
     """Agent tools run each async call in a fresh event loop that is closed
-    afterward (tools/registry.py); a client cached across calls ends up bound to
-    a dead loop → 'Event loop is closed'. _client_for_loop() rebuilds on loop
-    change but keeps the client (incl. an injected mock) within one loop."""
+    afterward (tools/registry.py), and an httpx pool belongs to the loop that
+    opened it.
 
-    def test_same_loop_adopts_and_reuses_client(self):
-        p = _make()
-        injected = p.client
+    The earlier answer — replace the cached client whenever the loop changed —
+    left the old one unclosed, because its loop was already dead. Each such
+    call leaked a client holding an open socket to Ollama with a read
+    outstanding, and one of those sockets parked the process inside
+    IocpProactor.close() at shutdown, where the wait is unbounded.
 
+    So: the shared client is used only on its own loop; any other loop gets
+    one of its own and closes it before returning."""
+
+    def _use(self, provider, loop):
         async def call():
-            return p._client_for_loop()
+            async with provider._client() as client:
+                return client
+
+        return loop.run_until_complete(call())
+
+    def test_same_loop_reuses_the_shared_client(self):
+        p = _make()
+        shared = p.client
 
         loop = asyncio.new_event_loop()
         try:
-            c1 = loop.run_until_complete(call())
-            c2 = loop.run_until_complete(call())
+            c1 = self._use(p, loop)
+            c2 = self._use(p, loop)
         finally:
             loop.close()
 
-        assert c1 is injected  # first use adopts the existing client
-        assert c2 is injected  # same loop → reused, not rebuilt
+        assert c1 is shared
+        assert c2 is shared
 
-    def test_new_loop_rebuilds_client(self):
+    def test_foreign_loop_gets_its_own_client(self):
         p = _make()
-        injected = p.client
-
-        async def call():
-            return p._client_for_loop()
+        shared = p.client
 
         loop_a = asyncio.new_event_loop()
         try:
-            c_a = loop_a.run_until_complete(call())
+            c_a = self._use(p, loop_a)  # first use adopts this loop
         finally:
-            loop_a.close()  # simulate the agent per-call loop being closed
+            loop_a.close()
 
         loop_b = asyncio.new_event_loop()
         try:
-            c_b = loop_b.run_until_complete(call())
+            c_b = self._use(p, loop_b)
         finally:
             loop_b.close()
 
-        assert c_a is injected      # loop A adopted the original client
-        assert c_b is not injected  # loop changed → rebuilt (no dead-loop reuse)
-        assert c_b is p.client
+        assert c_a is shared
+        assert c_b is not shared
+
+    def test_foreign_loop_client_is_closed_before_returning(self):
+        """The leak itself: what a per-call loop opens, it must also close —
+        afterwards nobody can, since the pool's loop is gone."""
+        p = _make()
+        closed = []
+        made = []
+
+        class _FakeClient:
+            def __init__(self, host=None):
+                made.append(self)
+
+            async def close(self):
+                closed.append(self)
+
+        loop_a = asyncio.new_event_loop()
+        try:
+            self._use(p, loop_a)  # adopt loop A
+        finally:
+            loop_a.close()
+
+        import dpc_client_core.providers.ollama_provider as mod
+
+        original = mod.ollama.AsyncClient
+        mod.ollama.AsyncClient = _FakeClient
+        try:
+            loop_b = asyncio.new_event_loop()
+            try:
+                c_b = self._use(p, loop_b)
+            finally:
+                loop_b.close()
+        finally:
+            mod.ollama.AsyncClient = original
+
+        assert made == [c_b]
+        assert closed == [c_b], "a per-call client left open is the leak"
+
+    def test_shared_client_is_never_replaced(self):
+        """Replacing it was how the old client became unreachable — and
+        unclosable, its loop already dead."""
+        p = _make()
+        shared = p.client
+
+        loop_a = asyncio.new_event_loop()
+        try:
+            self._use(p, loop_a)
+        finally:
+            loop_a.close()
+
+        loop_b = asyncio.new_event_loop()
+        try:
+            self._use(p, loop_b)
+        finally:
+            loop_b.close()
+
+        assert p.client is shared
 
 
 class TestVisionKeepAlive:
@@ -285,3 +446,49 @@ class TestVisionKeepAlive:
         await p.generate_with_vision("q", [{"base64": "x", "mime_type": "image/png"}])
 
         assert captured["keep_alive"] == 0
+
+
+class TestReasoningIsNotAnAnswer:
+    """A model that spends its whole output budget reasoning returns nothing.
+    Handing the reasoning back in the answer's place turns a failure anybody
+    could detect into a description that reads as real — and vision output is
+    read as what is in the image."""
+
+    @pytest.mark.asyncio
+    async def test_a_vision_call_with_no_answer_returns_nothing(self):
+        p = _make({"model": "qwen3-vl:8b"})
+
+        async def fake_chat(**kwargs):
+            return _Resp(_Msg("", thinking="Let me look at the top left corner…"))
+
+        p.client = SimpleNamespace(chat=fake_chat)
+        out = await p.generate_with_vision("transcribe", [{"base64": "abc", "mime_type": "image/png"}])
+
+        assert out == ""
+        assert "corner" not in out
+
+    @pytest.mark.asyncio
+    async def test_the_reasoning_is_still_available_to_a_caller_that_asks(self):
+        """Reporting empty must not throw the reasoning away — the log line and
+        `get_last_thinking` are how a failure gets explained."""
+        p = _make({"model": "qwen3-vl:8b"})
+
+        async def fake_chat(**kwargs):
+            return _Resp(_Msg("", thinking="…reasoning…"))
+
+        p.client = SimpleNamespace(chat=fake_chat)
+        await p.generate_with_vision("transcribe", [{"base64": "abc", "mime_type": "image/png"}])
+
+        assert p.get_last_thinking() == "…reasoning…"
+
+    @pytest.mark.asyncio
+    async def test_a_chat_answer_still_falls_back(self):
+        """The opposite trade, deliberately: a person reading a chat can see
+        that an answer is reasoning, and the alternative is a blank message."""
+        p = _make()
+
+        async def fake_chat(**kwargs):
+            return _Resp(_Msg("", thinking="thinking out loud"))
+
+        p.client = SimpleNamespace(chat=fake_chat)
+        assert await p.generate_response("hello") == "thinking out loud"

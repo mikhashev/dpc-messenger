@@ -79,6 +79,13 @@ class TokenCountManager:
         Sets up tokenizer cache for HuggingFace models.
         """
         self._tokenizer_cache: Dict[str, Any] = {}  # Cache HuggingFace tokenizers by model name
+        # Repos that could not be loaded. Only successes were remembered before,
+        # so a model with no tokenizer retried from_pretrained() and printed the
+        # same warning on every single count — three times in one millisecond in
+        # the log of 2026-08-14 01:46:12. With the fetch added, retrying would
+        # also mean re-attempting a download per call, which is worse than the
+        # noise: one attempt per repo per process is the whole intent.
+        self._tokenizer_failures: set = set()
 
     def count_tokens(self, text: str, model: str) -> int:
         """Count tokens in text for a given model.
@@ -206,6 +213,104 @@ class TokenCountManager:
             "message_count": message_count
         }
 
+    async def warm_tokenizers(self, models) -> None:
+        """Load the tokenizers these models need, off the event loop, once.
+
+        Everything that counts tokens does so while answering somebody, and
+        that is on the loop — where fetching is refused, correctly. Left at
+        that, a tokenizer that is missing stays missing for the life of the
+        process however long the network is up. Startup is the one moment
+        with nobody waiting, so the fetch belongs here: a worker thread, one
+        pass over the models this install actually has, and silence when they
+        are already cached.
+        """
+        import asyncio
+
+        # First match wins, exactly as the lookup does at count time. A set
+        # comprehension over every matching prefix looks equivalent and is not:
+        # "qwen3-vl" starts with both "qwen3" and "qwen", so it would fetch the
+        # Qwen2 tokenizer as well — a download for a repo no count will ever ask
+        # for. The test caught it; the two rules have to be the same rule.
+        repos = set()
+        for model in models:
+            family = str(model or "").split(":")[0].lower()
+            for prefix, repo in self.OLLAMA_TOKENIZER_MAP.items():
+                if family.startswith(prefix):
+                    repos.add(repo)
+                    break
+        if not repos:
+            return
+
+        def _load():
+            for repo in sorted(repos):
+                if repo in self._hf_tokenizer_cache or repo in self._tokenizer_failures:
+                    continue
+                try:
+                    from transformers import AutoTokenizer
+
+                    self._hf_tokenizer_cache[repo] = AutoTokenizer.from_pretrained(
+                        repo, local_files_only=True
+                    )
+                except Exception:
+                    tokenizer = self._fetch_tokenizer(repo, "startup")
+                    if tokenizer is None:
+                        self._tokenizer_failures.add(repo)
+                    else:
+                        self._hf_tokenizer_cache[repo] = tokenizer
+
+        await asyncio.get_running_loop().run_in_executor(None, _load)
+
+    def _fetch_tokenizer(self, hf_model: str, model: str):
+        """Download a tokenizer, but only where the wait harms nobody.
+
+        A tokenizer is metadata — a few megabytes, not the weights — so fetching
+        one that is missing beats counting characters forever. Two conditions,
+        both about who pays for the wait. There must be no event loop under us:
+        this is called from the loop as well as from worker threads, and a
+        synchronous download on the loop stops Telegram, the WebSocket and P2P
+        for its duration. And the process must not be in offline mode, which is
+        a decision somebody made deliberately — `[hf] offline_mode`, or the
+        startup check finding every declared model already cached — and not one
+        to quietly overrule.
+        """
+        import asyncio
+        import os
+
+        try:
+            asyncio.get_running_loop()
+            on_loop = True
+        except RuntimeError:
+            on_loop = False
+        offline = os.environ.get("HF_HUB_OFFLINE") == "1"
+
+        if on_loop or offline:
+            logger.warning(
+                "Tokenizer %s is not cached, so token counts for %s are estimated at "
+                "four characters each — about a fifth low on Russian. Not fetching it "
+                "here: %s.",
+                hf_model, model,
+                "this call is on the event loop" if on_loop
+                else "the process is in offline mode",
+            )
+            return None
+
+        try:
+            from transformers import AutoTokenizer
+
+            logger.info("Fetching tokenizer %s for %s (a few MB, once)", hf_model, model)
+            tokenizer = AutoTokenizer.from_pretrained(hf_model)
+            logger.info(
+                "Tokenizer %s cached — token counts for %s are exact from here on",
+                hf_model, model,
+            )
+            return tokenizer
+        except Exception as exc:
+            logger.warning(
+                "Tokenizer %s could not be fetched (%s) — counting characters for %s",
+                hf_model, exc, model,
+            )
+            return None
+
     def _get_tokenizer_for_ollama(self, model: str) -> Optional[Any]:
         """Get HuggingFace tokenizer for Ollama model.
 
@@ -230,29 +335,25 @@ class TokenCountManager:
             for family, hf_model in self.OLLAMA_TOKENIZER_MAP.items():
                 if model_family.startswith(family):
                     # Reuse already-loaded tokenizer for the same HF model
+                    if hf_model in self._tokenizer_failures:
+                        return None
                     if hf_model in self._hf_tokenizer_cache:
                         tokenizer = self._hf_tokenizer_cache[hf_model]
                         self._tokenizer_cache[model] = tokenizer
                         logger.info("Reusing cached tokenizer for %s: %s", model, hf_model)
                         return tokenizer
 
-                    # Try local cache only — never do a network download on
-                    # the event loop.  from_pretrained() is synchronous and
-                    # blocks the entire asyncio loop (Telegram, WebSocket,
-                    # P2P) until the HTTP request completes or times out.
+                    # The cache first, always: from_pretrained() is synchronous
+                    # and a download on the event loop would stop Telegram, the
+                    # WebSocket and P2P until the HTTP request finishes.
                     try:
                         logger.info("Loading tokenizer for %s: %s (local cache)", model, hf_model)
                         tokenizer = AutoTokenizer.from_pretrained(hf_model, local_files_only=True)
                     except Exception:
-                        logger.warning(
-                            "Tokenizer %s not in local cache — falling back to "
-                            "character estimation for %s. Run "
-                            "'python -c \"from transformers import AutoTokenizer; "
-                            "AutoTokenizer.from_pretrained(\\'%s\\')\"' "
-                            "to download it.",
-                            hf_model, model, hf_model,
-                        )
-                        return None
+                        tokenizer = self._fetch_tokenizer(hf_model, model)
+                        if tokenizer is None:
+                            self._tokenizer_failures.add(hf_model)
+                            return None
 
                     self._hf_tokenizer_cache[hf_model] = tokenizer
                     self._tokenizer_cache[model] = tokenizer

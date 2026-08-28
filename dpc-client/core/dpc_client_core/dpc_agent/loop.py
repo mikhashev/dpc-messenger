@@ -19,7 +19,9 @@ import json
 import logging
 import pathlib
 import time
-from concurrent.futures import ThreadPoolExecutor
+import queue
+import threading
+from concurrent.futures import Future
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple
 
 from .utils import (
@@ -28,9 +30,11 @@ from .utils import (
     load_agent_config,
 )
 from .context import CompactionState, apply_compaction
+from .tool_ledger import record_attempt, sweep_unfinished
 from .llm_adapter import DpcLlmAdapter
 from .hooks import HookContext, HookLifecycle, HookRegistry, LoopState
 from .guards import (
+    ContextLimitGuard,
     BudgetLimitGuard,
     LoopGuard,
     ResearchLimitGuard,
@@ -47,18 +51,194 @@ log = logging.getLogger(__name__)
 DEFAULT_MAX_ROUNDS = 200
 DEFAULT_TIMEOUT_SEC = 120
 
-# Shared ThreadPoolExecutor for tool execution (fixes memory leak from creating new executors)
-# Using max_workers=4 allows parallel tool execution while limiting resource usage
-_SHARED_EXECUTOR: Optional[ThreadPoolExecutor] = None
+# Usage counters only some providers report. DeepSeek splits its prompt into
+# cache hit and miss and names its reasoning tokens; nobody else does. They are
+# summed across the rounds of one task and left **absent** when no round
+# reported them — a present-and-empty field reads as "we looked and there was
+# nothing", which is exactly how `tokens: {}` sat in every task result for a
+# year with the numbers one key away.
+OPTIONAL_USAGE_FIELDS = (
+    "prompt_cache_hit_tokens",
+    "prompt_cache_miss_tokens",
+    "reasoning_tokens",
+)
+
+# What a finished task records about its own accounting: the summed counters
+# above plus the effort word, which is recorded once rather than added up.
+RECORDED_USAGE_FIELDS = OPTIONAL_USAGE_FIELDS + ("reasoning_effort",)
 
 
-def _get_shared_executor() -> ThreadPoolExecutor:
-    """Get or create the shared ThreadPoolExecutor for tool execution."""
+def merge_optional_usage(accumulated: Dict[str, Any], usage: Dict[str, Any]) -> None:
+    """Add one round's provider-shaped counters to the task's running total."""
+    for field in OPTIONAL_USAGE_FIELDS:
+        value = usage.get(field)
+        if value is None:
+            continue
+        accumulated[field] = accumulated.get(field, 0) + int(value)
+
+
+def round_progress_payload(
+    speed: Optional[Dict[str, Any]],
+    *,
+    round_idx: int,
+    prompt_tokens: int,
+    context_window: Optional[int],
+    context_reserve: Optional[int],
+) -> Optional[Dict[str, Any]]:
+    """One round's live strip: how fast it ran, and how full the window was.
+
+    The speed half arrives from the provider (llama.cpp fills it, the API
+    providers do not) and is passed through untouched. The occupancy half is
+    added here rather than in a provider because no provider knows the agent's
+    window or the reserve the round guard refuses on.
+
+    Two things the reader should not have to guess:
+
+    - *Which* round the pair describes. Both halves belong to the round that
+      just finished: the numerator is what that call actually sent, counted by
+      the provider, not the pre-turn estimate. Occupancy therefore reads as of
+      that call, and the round number travels beside it.
+    - The denominator is the raw window the caller measured against — this
+      agent's own model window, resolved from its config override or its
+      provider, never the largest window in a group it happens to sit in. Raw,
+      not window-minus-reserve: it should equal the number in the provider
+      config, so the strip and the configuration cannot disagree. What the guard
+      blocks on is the reserve, carried next to the pair instead of folded into
+      it: a full bar should be explained, not merely red.
+
+    Nothing is invented. With no window known the occupancy half is absent — a
+    missing field, not a zero — and a round with neither half returns None, so
+    no empty strip is emitted.
+    """
+    payload: Dict[str, Any] = dict(speed) if speed else {}
+    if context_window and context_window > 0 and prompt_tokens > 0:
+        payload["context_used"] = int(prompt_tokens)
+        payload["context_window"] = int(context_window)
+        if context_reserve:
+            payload["context_reserve"] = int(context_reserve)
+    if not payload:
+        return None
+    payload["round"] = round_idx
+    return payload
+
+# Tool execution runs on daemon threads of our own rather than on a
+# ThreadPoolExecutor, for the reason browser.py's _PinnedThread already
+# documents: a pool worker is registered in
+# concurrent.futures.thread._threads_queues, and _python_exit joins every
+# thread in that map with no timeout. That hook is installed through
+# threading._register_atexit, so it runs *before* the interpreter joins
+# non-daemon threads — which is why setting daemon=True on pool workers
+# changes nothing, and why the bounded wait in run_service cannot reach it:
+# the bound fires during shutdown, _python_exit fires after it.
+#
+# Four workers, as before, so tools still run in parallel.
+_TOOL_WORKERS = 4
+# Kept under run_service's own 5 s bound, so this returns and lets the caller
+# log rather than racing it.
+_TOOL_JOIN_GRACE_SEC = 4.0
+
+_SHARED_EXECUTOR: Optional["_DaemonToolPool"] = None
+
+
+class _DaemonToolPool:
+    """A fixed set of daemon threads with ThreadPoolExecutor's `submit`.
+
+    Wears `submit` only because `loop.run_in_executor` asks for it. What it
+    deliberately does not wear is registration in `_threads_queues`: a tool
+    parked on a call nobody can interrupt then costs a leaked daemon thread
+    in a process that is exiting anyway, instead of the exit itself.
+
+    Abandoning a running tool is the point, not a regression. The tool has
+    already outlived its own timeout by the time this matters, and its result
+    was discarded when `execute_tool_with_timeout` gave up waiting.
+    """
+
+    def __init__(self, workers: int = _TOOL_WORKERS, name_prefix: str = "dpc_agent_tool"):
+        self._queue: "queue.Queue[Optional[tuple]]" = queue.Queue()
+        self._closed = False
+        self._threads: List[threading.Thread] = [
+            threading.Thread(target=self._run, name=f"{name_prefix}_{i}", daemon=True)
+            for i in range(workers)
+        ]
+        for t in self._threads:
+            t.start()
+
+    def _run(self) -> None:
+        while True:
+            item = self._queue.get()
+            if item is None:
+                return
+            fn, args, kwargs, future = item
+            if not future.set_running_or_notify_cancel():
+                continue  # the caller's wait_for timed out and cancelled it
+            try:
+                future.set_result(fn(*args, **kwargs))
+            except BaseException as exc:  # noqa: BLE001 - mirrors executor semantics
+                future.set_exception(exc)
+
+    def submit(self, fn: Callable, *args: Any, **kwargs: Any) -> "Future":
+        if self._closed:
+            raise RuntimeError("cannot schedule new futures after shutdown")
+        future: "Future" = Future()
+        self._queue.put((fn, args, kwargs, future))
+        return future
+
+    def shutdown(self, grace: float = _TOOL_JOIN_GRACE_SEC) -> List[str]:
+        """Stop the workers and return the names of any that would not stop.
+
+        The wait is bounded here as well as by the caller. An unbounded join
+        inside this call would be run through `asyncio.to_thread`, parking a
+        worker of asyncio's *default* pool — which is registered in
+        `_threads_queues` — and the hang would simply move house.
+        """
+        self._closed = True
+        # Queued calls are dropped rather than run during shutdown; only the
+        # ones already inside a worker can still delay us.
+        while True:
+            try:
+                item = self._queue.get_nowait()
+            except queue.Empty:
+                break
+            if item is not None:
+                item[3].cancel()
+        for _ in self._threads:
+            self._queue.put(None)
+        deadline = time.monotonic() + grace
+        for t in self._threads:
+            t.join(timeout=max(0.0, deadline - time.monotonic()))
+        return [t.name for t in self._threads if t.is_alive()]
+
+
+def _get_shared_executor() -> "_DaemonToolPool":
+    """Get or create the shared daemon pool for tool execution."""
     global _SHARED_EXECUTOR
     if _SHARED_EXECUTOR is None:
-        _SHARED_EXECUTOR = ThreadPoolExecutor(max_workers=4, thread_name_prefix="dpc_agent_tool")
-        log.debug("Created shared ThreadPoolExecutor for tool execution")
+        _SHARED_EXECUTOR = _DaemonToolPool()
+        log.debug("Created shared daemon tool pool (%d workers)", _TOOL_WORKERS)
     return _SHARED_EXECUTOR
+
+
+def shutdown_shared_executor() -> None:
+    """Stop the tool pool, so that a stuck tool cannot hold the exit silently.
+
+    `wait_for` in `execute_tool_with_timeout` cancels the *await*, never the
+    thread: a tool that outlives its timeout keeps running. So this waits for
+    what is still inside a worker — but only for a bounded grace, and a worker
+    that ignores it is named in the log and then left behind. It can be left
+    behind because it is a daemon thread in no atexit map; that is the whole
+    difference from the ThreadPoolExecutor this replaced.
+    """
+    global _SHARED_EXECUTOR
+    executor, _SHARED_EXECUTOR = _SHARED_EXECUTOR, None
+    if executor is None:
+        return
+    survivors = executor.shutdown()
+    if survivors:
+        log.warning(
+            "Tool pool abandoned %d worker(s) still running a tool: %s — "
+            "the process can still exit; the tool's result is discarded",
+            len(survivors), ", ".join(survivors),
+        )
 
 
 def _truncate_tool_result(result: Any) -> str:
@@ -69,6 +249,16 @@ def _truncate_tool_result(result: Any) -> str:
     leading to decisions on partial data). The new marker is set off by
     blank lines and uses `[!]` to break attention. See S24 cleanup
     (2026-04-10).
+
+    This cap sees only the string a tool handed over, never what the tool
+    was asked for, so it may not call that string a total. Measured:
+    `git log --stat -n 120` produced 699 370 chars, `run_shell` capped it
+    at 50 000, and this marker announced "50,036 bytes total" — a number
+    14x below the truth, stated with confidence. It counted characters and
+    named them bytes as well (61 200 Cyrillic chars are 114 000 UTF-8
+    bytes). Each layer now names its own quantity: the tool owns the size
+    of what it produced and the way to read the rest, this marker owns how
+    much of what arrived is shown.
     """
     result_str = str(result)
     if len(result_str) <= 15000:
@@ -78,10 +268,12 @@ def _truncate_tool_result(result: Any) -> str:
     shown_lines = result_str[:15000].count("\n") + 1
     return (
         result_str[:15000]
-        + f"\n\n[!] OUTPUT TRUNCATED — showing {shown_lines:,}/{total_lines:,} lines"
-        f" ({len(result_str):,} bytes total)."
-        f"\n[!] This is a PARTIAL view. To see the rest, use `search_files`"
-        f" to locate the section you need, then re-read a narrower range."
+        + f"\n\n[!] OUTPUT TRUNCATED — showing {shown_lines:,} of {total_lines:,} lines"
+        f" ({len(result_str):,} chars) of what the tool returned."
+        f"\n[!] This is a PARTIAL view, and the number above is NOT the size"
+        f" of what you asked for — the tool may have capped its own output"
+        f" before this cut. Follow the continuation the tool itself named,"
+        f" if it named one."
     )
 
 
@@ -155,6 +347,11 @@ def _detect_reasoning_quality(thinking: str, tool_names: List[str]) -> Dict[str,
 
     # Check for reasoning indicators
     indicators = 0
+    # Needles, not prose: these are matched against the model's own thinking,
+    # which is written in whatever language the task came in. The non-English
+    # half is data and must survive a sweep that translates the product's text
+    # — deleting it would make the detector blind to every Russian-language
+    # round while still reporting a quality verdict.
     reasoning_signals = [
         "because", "since", "therefore", "need to", "should",
         "first", "then", "next", "plan", "step",
@@ -263,6 +460,22 @@ def _execute_single_tool(
         args = json.loads(tc["function"]["arguments"] or "{}")
     except (json.JSONDecodeError, ValueError) as e:
         result = f"⚠️ TOOL_ARG_ERROR: Could not parse arguments for '{fn_name}': {e}"
+        arg_error_log = {
+            "ts": utc_now_iso(),
+            "phase": "outcome",
+            "tool": fn_name,
+            "tool_call_id": tool_call_id,
+            "task_id": task_id,
+            "args": {},
+            "result_preview": result,
+            "is_error": True,
+            "error_category": "tool_arg_error",
+            "duration_ms": 0,
+            "round": round_number,
+        }
+        if session_id:
+            arg_error_log["session_id"] = session_id
+        append_jsonl(logs_dir / "tools.jsonl", arg_error_log)
         return {
             "tool_call_id": tool_call_id,
             "fn_name": fn_name,
@@ -298,7 +511,9 @@ def _execute_single_tool(
     # Log tool execution
     tool_log_entry = {
         "ts": utc_now_iso(),
+        "phase": "outcome",
         "tool": fn_name,
+        "tool_call_id": tool_call_id,
         "task_id": task_id,
         "args": args_for_log,
         "result_preview": sanitize_tool_result_for_log(truncate_for_log(result, 2000)),
@@ -310,6 +525,11 @@ def _execute_single_tool(
         tool_log_entry["session_id"] = session_id
     if error_category:
         tool_log_entry["error_category"] = error_category
+    if fn_name == "read_file":
+        from .active_recall import followed_a_hint
+        _via = followed_a_hint(task_id, str((args_for_log or {}).get("path", "")))
+        if _via is not None:
+            tool_log_entry["via_hint"] = _via
     append_jsonl(logs_dir / "tools.jsonl", tool_log_entry)
 
     return {
@@ -338,6 +558,25 @@ async def _execute_with_timeout(
     """
     fn_name = tc["function"]["name"]
     tool_call_id = tc["id"]
+
+    try:
+        attempt_args = json.loads(tc["function"]["arguments"] or "{}")
+    except (json.JSONDecodeError, ValueError):
+        attempt_args = {}
+    attempt_args_for_log = sanitize_tool_args_for_log(
+        fn_name, attempt_args if isinstance(attempt_args, dict) else {}
+    )
+    # Before the call, and from the caller rather than the executor thread: a
+    # call that is queued and never starts is a call that never returned too.
+    record_attempt(
+        logs_dir,
+        tool=fn_name,
+        tool_call_id=tool_call_id,
+        args=attempt_args_for_log,
+        task_id=task_id,
+        round_number=round_number,
+        session_id=session_id,
+    )
 
     # Use shared executor to avoid memory leak from creating new executors
     executor = _get_shared_executor()
@@ -368,11 +607,15 @@ async def _execute_with_timeout(
             "tool": fn_name,
             "timeout_sec": timeout_sec,
         })
+        # The arguments are the whole point of a timeout record: without them
+        # the log says a call hung but not what it was called on.
         timeout_log = {
             "ts": utc_now_iso(),
+            "phase": "outcome",
             "tool": fn_name,
+            "tool_call_id": tool_call_id,
             "task_id": task_id,
-            "args": sanitize_tool_args_for_log(fn_name, {}),
+            "args": attempt_args_for_log,
             "result_preview": result,
             "is_error": True,
             "error_category": "timeout",
@@ -387,7 +630,7 @@ async def _execute_with_timeout(
             "fn_name": fn_name,
             "result": result,
             "is_error": True,
-            "args_for_log": {},
+            "args_for_log": timeout_log["args"],
         }
     finally:
         # Don't shutdown the shared executor - it will be reused
@@ -445,6 +688,8 @@ async def run_llm_loop(
     conversation_id: Optional[str] = None,
     stop_event: Optional[asyncio.Event] = None,
     reasoning_effort: Optional[str] = None,
+    context_window: Optional[int] = None,
+    context_reserve: Optional[int] = None,
 ) -> Tuple[str, Dict[str, Any], Dict[str, Any]]:
     """
     Core LLM-with-tools loop.
@@ -462,12 +707,17 @@ async def run_llm_loop(
         max_rounds: Maximum LLM rounds before stopping
         on_stream_chunk: Optional async callback for streaming: await on_stream_chunk(chunk, conversation_id)
         conversation_id: Optional conversation ID for streaming callbacks
+        context_window: The model window the caller measured this turn against,
+            for the live occupancy strip. Absent -> the strip shows speed only.
+        context_reserve: The headroom the caller refuses a round below — shown
+            beside the pair, never subtracted from it.
 
     Returns:
         (final_text, accumulated_usage, llm_trace) tuple
     """
     logs_dir = agent_root / "logs"
     logs_dir.mkdir(parents=True, exist_ok=True)
+    sweep_unfinished(logs_dir)
 
     # Snapshot the context at loop entry — prevents race when another process()
     # or another process() call swaps ToolRegistry._ctx mid-loop.
@@ -502,6 +752,9 @@ async def run_llm_loop(
     hooks.register(ResearchLimitGuard())
     hooks.register(LoopGuard())
     hooks.register(BudgetLimitGuard(budget_remaining_usd=budget_remaining_usd))
+    # The sixth: the loop watched rounds, tools, research, repetition and money,
+    # and did not watch the one resource a long task actually exhausts.
+    hooks.register(ContextLimitGuard())
 
     ctx = HookContext(
         agent_id="",
@@ -551,7 +804,15 @@ async def run_llm_loop(
                 llm_trace["accumulated_tool_calls"] = list(_accumulated_tool_calls)
                 return f"⚠️ Stopped by user after {round_idx - 1} rounds.", accumulated_usage, llm_trace
 
-            # RoundLimitGuard + BudgetLimitGuard checkpoint.
+            # RoundLimitGuard + BudgetLimitGuard + ContextLimitGuard checkpoint.
+            # The context pair is written here rather than after the call, because
+            # this is the moment a guard can still refuse cheaply: the numbers are
+            # the previous round's real input size and the window it was measured
+            # against, which is exactly what compaction triggers on below.
+            ctx.state.last_prompt_tokens = accumulated_usage["last_prompt_tokens"]
+            ctx.state.context_window = int(
+                _compaction_state.window if _compaction_state.window else (context_window or 0)
+            )
             if await hooks.fire(HookLifecycle.BETWEEN_ROUNDS, ctx) is not None:
                 return await _finalize_after_guard_stop(
                     hooks, messages, llm, on_stream_chunk, conversation_id,
@@ -589,9 +850,27 @@ async def run_llm_loop(
                 accumulated_usage["total_tokens"] += usage.get("total_tokens", 0)
                 accumulated_usage["cost"] += usage.get("cost", 0)
                 accumulated_usage["rounds"] += 1
+                merge_optional_usage(accumulated_usage, usage)
+                if reasoning_effort:
+                    # Recorded, not summed: it is the word this task was run
+                    # with, and it is what joins a cost to a decision.
+                    accumulated_usage["reasoning_effort"] = reasoning_effort
                 # Carry forward thinking from each round (last non-empty thinking wins)
                 if msg.get("thinking"):
                     accumulated_usage["thinking"] = msg["thinking"]
+                # Per-round live strip for the UI counter: speed where the
+                # provider reports it (llama.cpp does, the API providers do
+                # not) plus this round's window occupancy, which every
+                # provider now carries because the caller supplies the window.
+                # Rides the next narration emit so no new event type is born
+                # for one line.
+                _round_speed = round_progress_payload(
+                    usage.get("speed"),
+                    round_idx=round_idx,
+                    prompt_tokens=round_prompt_tokens,
+                    context_window=context_window,
+                    context_reserve=context_reserve,
+                )
             except Exception as e:
                 log.error(f"LLM error: {e}", exc_info=True)
                 return f"⚠️ LLM error: {e}", accumulated_usage, llm_trace
@@ -653,6 +932,11 @@ async def run_llm_loop(
                     # Intermediate per-round text is shown per-round (round_text), not
                     # assembled into the final answer (Variant 2). Final = this last round.
                     llm_trace["assistant_notes"].append(clean_content.strip()[:320])
+                    # The final no-tool round never reaches the tool-branch narration
+                    # emits below, so a simple one-round answer carried no live speed —
+                    # the counter appeared only on tool-heavy runs. Emit it here too.
+                    if _round_speed:
+                        emit_progress(clean_content.strip()[:200] or "done", None, round_idx, None, _round_speed)
                     return clean_content, accumulated_usage, llm_trace
                 if ("prompt_tokens" in usage
                         and usage.get("prompt_tokens") == 0
@@ -662,9 +946,10 @@ async def run_llm_loop(
                         "dropped the request (likely context overflow). Skipping retries."
                     )
                     return (
-                        "⚠️ Провайдер отбросил запрос без обработки (zero token usage) — "
-                        "вероятно, контекст разговора превысил лимит модели. "
-                        "Начните новую сессию (New Session) или сократите историю.",
+                        "⚠️ The provider dropped the request without processing it "
+                        "(zero token usage) — the conversation has most likely "
+                        "outgrown the model's context window. End session to "
+                        "continue, or shorten the history.",
                         accumulated_usage,
                         llm_trace,
                     )
@@ -716,11 +1001,11 @@ async def run_llm_loop(
             )
 
             if round_reasoning:
-                emit_progress(round_reasoning, None, round_idx)
+                emit_progress(round_reasoning, None, round_idx, None, _round_speed)
             elif tool_calls:
                 # No reasoning at all — emit tool names so the UI shows activity.
                 names = ", ".join(tc["function"]["name"] for tc in tool_calls)
-                emit_progress(f"→ {names}", None, round_idx)
+                emit_progress(f"→ {names}", None, round_idx, None, _round_speed)
 
             # content-prefix is shown per-round via round_text (Variant 2), not folded into
             # the final answer — keep only the trace note here.

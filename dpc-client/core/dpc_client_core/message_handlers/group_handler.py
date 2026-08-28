@@ -2,10 +2,18 @@
 
 import hashlib
 import time
+import uuid
 from typing import Dict, Any, Optional
 from datetime import datetime, timezone
 from . import MessageHandler
-from ..conversation_monitor import Message as ConvMessage, ConversationMonitor
+from dpc_protocol.message_signing import PREIMAGE_VERSION, message_content_hash
+from ..conversation_monitor import (
+    Message as ConvMessage,
+    ConversationMonitor,
+    authors_that_differ_between,
+    digest_for,
+)
+from .group_access import may_share_group, refuse_group_access
 
 
 class GroupCreateHandler(MessageHandler):
@@ -51,11 +59,13 @@ class GroupCreateHandler(MessageHandler):
 
             # Request conversation history from the sender (group creator/admin)
             import uuid
+            request_id = str(uuid.uuid4())[:8]
+            self.service.history_requests.note(sender_node_id, group.group_id, request_id)
             await self.service.p2p_manager.send_message_to_peer(sender_node_id, {
                 "command": "REQUEST_CHAT_HISTORY",
                 "payload": {
                     "conversation_id": group.group_id,
-                    "request_id": str(uuid.uuid4())[:8],
+                    "request_id": request_id,
                 }
             })
             self.logger.info("Requested history for group %s from %s", group.group_id, sender_node_id[:16])
@@ -69,6 +79,93 @@ class GroupTextHandler(MessageHandler):
     @property
     def command_name(self) -> str:
         return "GROUP_TEXT"
+
+    def _authenticate_author(self, transport_node_id, payload):
+        """Decide who authored this, and how sure we are.
+
+        Returns (author_node_id, verification, signature_fields), where
+        verification is one of:
+          verified   — the signature checks out against the claimed author
+          unverified — cannot check yet (peer certificate not cached); kept,
+                       flagged, and re-checkable later. Rejecting here would be
+                       a denial of service against ourselves on first contact.
+          legacy     — no signature fields at all; a node that predates this.
+                       Author falls back to the transport, because a claimed
+                       sender_node_id with nothing behind it is worth less than
+                       the socket it came from.
+          rejected   — a signature that is present and wrong.
+        """
+        claimed = payload.get("sender_node_id")
+        content_hash = payload.get("content_hash")
+        signature = payload.get("signature")
+        signer = payload.get("signer_node_id")
+
+        if not (content_hash and signature and signer):
+            return transport_node_id, "legacy", None
+
+        if payload.get("preimage_version") != PREIMAGE_VERSION:
+            # Signed over a preimage we do not know how to recompute. Treated
+            # as legacy rather than rejected: this is what a node one version
+            # ahead or behind looks like, and cutting it off is not a security
+            # decision, it is an outage.
+            return transport_node_id, "legacy", None
+
+        if signer != claimed:
+            self.logger.warning(
+                "Rejecting group message %s: signed by %s but claims %s",
+                str(payload.get("message_id"))[:8], str(signer)[:20], str(claimed)[:20]
+            )
+            return transport_node_id, "rejected", None
+
+        expected = message_content_hash(
+            conversation_id=payload.get("group_id"),
+            message_id=payload.get("message_id"),
+            sender_node_id=claimed,
+            sender_name=payload.get("sender_name"),
+            sender_type=payload.get("sender_type"),
+            agent_owner=payload.get("agent_owner"),
+            timestamp=payload.get("timestamp"),
+            content=payload.get("text") or "",
+            tool_calls=payload.get("tool_calls"),
+        )
+        if expected != content_hash:
+            self.logger.warning(
+                "Rejecting group message %s from %s: content does not match its hash",
+                str(payload.get("message_id"))[:8], str(claimed)[:20]
+            )
+            return transport_node_id, "rejected", None
+
+        try:
+            from dpc_protocol.commit_integrity import CommitSigner
+            result = CommitSigner.verify_signature(signer, content_hash, signature)
+        except Exception as e:
+            self.logger.warning(
+                "Rejecting group message %s: signature check failed: %s",
+                str(payload.get("message_id"))[:8], e
+            )
+            return transport_node_id, "rejected", None
+
+        if result is False:
+            self.logger.warning(
+                "Rejecting group message %s: invalid signature from %s",
+                str(payload.get("message_id"))[:8], str(signer)[:20]
+            )
+            return transport_node_id, "rejected", None
+
+        fields = {
+            "content_hash": content_hash,
+            "signature": signature,
+            "signer_node_id": signer,
+            "preimage_version": PREIMAGE_VERSION,
+        }
+        if result is None:
+            self.logger.info(
+                "Storing group message %s from %s unverified: no cached certificate",
+                str(payload.get("message_id"))[:8], str(signer)[:20]
+            )
+            return claimed, "unverified", fields
+
+        return claimed, "verified", fields
 
     async def handle(self, sender_node_id: str, payload: Dict[str, Any]) -> Optional[Any]:
         """
@@ -84,6 +181,23 @@ class GroupTextHandler(MessageHandler):
         group_id = payload.get("group_id")
         text = payload.get("text")
         sender_name = payload.get("sender_name", sender_node_id)
+
+        # Who wrote this, as opposed to who handed it over. In a star the two
+        # differ: a relayed message arrives on the relay's socket, and taking
+        # the author from the transport recorded seven of nine messages under
+        # the wrong node on the edges (measured 2026-08-06). A signature the
+        # relay cannot forge is what tells them apart.
+        author_node_id, verification, signature_fields = self._authenticate_author(
+            sender_node_id, payload
+        )
+        if verification == "rejected":
+            return None
+        if verification == "unverified" and author_node_id != sender_node_id:
+            # Stored anyway — refusing on first contact would be a denial of
+            # service against ourselves — but ask, so "unverified" is a state
+            # this record passes through rather than one it retires in.
+            await self._ask_for_certificate(author_node_id, sender_node_id)
+        sender_node_id = author_node_id
 
         # v0.20.0: Use sender-provided message_id if available, else generate for backwards compat
         message_id = payload.get("message_id")
@@ -141,20 +255,12 @@ class GroupTextHandler(MessageHandler):
         # Use sender-provided timestamp if available (v0.20.0)
         timestamp = payload.get("timestamp", datetime.now(timezone.utc).isoformat())
 
-        # Broadcast to UI
-        await self.service.local_api.broadcast_event("group_text_received", {
-            "group_id": group_id,
-            "sender_node_id": sender_node_id,
-            "sender_name": sender_name,
-            "sender_type": payload.get("sender_type", "human"),
-            "agent_owner": payload.get("agent_owner"),
-            "text": text,
-            "message_id": message_id,
-            "timestamp": timestamp,
-            "mentions": payload.get("mentions", []),
-        })
-
-        # Feed to conversation monitor for knowledge extraction
+        # Store first, then tell the UI. The order is the whole fix for the
+        # missing numbers: msg_index is assigned when the monitor writes the
+        # record, so a broadcast sent beforehand had nothing to carry and every
+        # message from a peer arrived unnumbered. Both send paths in service.py
+        # already feed the monitor first for exactly this reason.
+        msg_index = None
         try:
             monitor = self.service._get_or_create_conversation_monitor(group_id)
 
@@ -167,13 +273,33 @@ class GroupTextHandler(MessageHandler):
                 timestamp=timestamp,  # v0.20.0: Use sender-provided timestamp
                 sender_type=payload.get("sender_type"),
                 agent_owner=payload.get("agent_owner"),
+                signature_fields=signature_fields,
             )
 
             # Buffer message for manual extraction
             await monitor.on_message(conv_message)
             monitor.save_history()
+
+            history = monitor.get_message_history()
+            if history and history[-1].get("id") == message_id:
+                msg_index = history[-1].get("msg_index")
         except Exception as e:
             self.logger.error("Error in group conversation monitoring: %s", e, exc_info=True)
+
+        # Broadcast to UI
+        await self.service.local_api.broadcast_event("group_text_received", {
+            "group_id": group_id,
+            "sender_node_id": sender_node_id,
+            "sender_name": sender_name,
+            "sender_type": payload.get("sender_type", "human"),
+            "agent_owner": payload.get("agent_owner"),
+            "text": text,
+            "message_id": message_id,
+            "timestamp": timestamp,
+            "mentions": payload.get("mentions", []),
+            "verification": verification,
+            "msg_index": msg_index,
+        })
 
         # Detect @Ark / @CC mentions and route to agents
         await self._handle_agent_mentions(group_id, payload, text, sender_name, sender_node_id)
@@ -347,6 +473,58 @@ class GroupSyncHandler(MessageHandler):
     def command_name(self) -> str:
         return "GROUP_SYNC"
 
+    async def _honour_session_marker(self, local, marker_before, applied) -> None:
+        """Clear what predates a newly learned session boundary.
+
+        This is the half of ADR-038 Q3 that pays for the field. A node that was
+        away when the group agreed to start over comes back holding the whole
+        history, and the next sync hands its copy to everyone else — the reset
+        undone with nobody noticing. Reading the boundary and dropping what is
+        older than it ends that, and it ends it symmetrically: whoever was away
+        does the clearing, not whoever was present.
+
+        The marker is only obeyed when its own evidence proves the quorum, so a
+        peer cannot erase a history by announcing a reset that never happened.
+        Unprovable evidence is left alone rather than trusted — the certificate
+        may simply not have arrived yet, and the marker will be honoured when it
+        does.
+        """
+        if applied is None:
+            return
+        marker = getattr(applied, "session_started_at", None)
+        if not marker or marker == marker_before:
+            return
+        if marker_before and marker <= marker_before:
+            return
+
+        evidence = getattr(applied, "session_reset_evidence", None) or {}
+        from dpc_client_core.signing import quorum_is_proven
+
+        if not quorum_is_proven(
+            proposal_id=evidence.get("proposal_id"),
+            conversation_id=evidence.get("conversation_id"),
+            participants=evidence.get("participants"),
+            votes=evidence.get("votes"),
+        ):
+            self.logger.warning(
+                "Session marker on %s is not backed by a provable quorum — history untouched",
+                applied.group_id,
+            )
+            return
+
+        monitor = self.service.conversation_monitors.get(applied.group_id)
+        if monitor is None:
+            return
+        dropped = monitor.clear_before(marker)
+        if dropped:
+            self.logger.info(
+                "Session marker on %s: dropped %d message(s) older than %s",
+                applied.group_id, dropped, marker,
+            )
+            await self.service.local_api.broadcast_event(
+                "conversation_reset", {"conversation_id": applied.group_id}
+            )
+
     async def handle(self, sender_node_id: str, payload: Dict[str, Any]) -> Optional[Any]:
         """
         Handle GROUP_SYNC message.
@@ -365,7 +543,32 @@ class GroupSyncHandler(MessageHandler):
             sender_node_id[:20], group_id, remote_version
         )
 
+        # apply_sync decides by "highest version wins" and never learns who
+        # sent it, so without this the roster belongs to whoever bids highest —
+        # any connected peer, member or not. An invitation is GROUP_CREATE;
+        # a sync is not a way into a group we have never heard of.
+        local = self.service.group_manager.get_group(group_id) if group_id else None
+        if not local:
+            self.logger.warning(
+                "Ignoring GROUP_SYNC from %s for unknown group %s",
+                sender_node_id[:20], group_id
+            )
+            return None
+        if sender_node_id not in local.members:
+            self.logger.warning(
+                "Ignoring GROUP_SYNC for %s: %s is not a member",
+                group_id, sender_node_id[:20]
+            )
+            return None
+
+        marker_before = local.session_started_at
+
         result = self.service.group_manager.apply_sync(payload)
+        await self._honour_session_marker(local, marker_before, result)
+        # Re-added by the same peer that refused us: the standing refusal is
+        # spent, and without this the group would stay unasked until a restart.
+        if result and self.service.p2p_manager.node_id in getattr(result, "members", ()):
+            self.service.clear_group_access_denied(sender_node_id, group_id)
         if result:
             # Notify UI of updated group
             await self.service.local_api.broadcast_event("group_updated", {
@@ -394,11 +597,13 @@ class GroupSyncHandler(MessageHandler):
 
             if needs_history:
                 import uuid
+                request_id = str(uuid.uuid4())[:8]
+                self.service.history_requests.note(sender_node_id, group_id, request_id)
                 await self.service.p2p_manager.send_message_to_peer(sender_node_id, {
                     "command": "REQUEST_CHAT_HISTORY",
                     "payload": {
                         "conversation_id": group_id,
-                        "request_id": str(uuid.uuid4())[:8],
+                        "request_id": request_id,
                     }
                 })
                 self.logger.info("Requested history for group %s from %s (local history empty)", group_id, sender_node_id[:16])
@@ -421,14 +626,28 @@ class GroupHistoryRequestHandler(MessageHandler):
 
         Args:
             sender_node_id: Node ID of requester
-            payload: Contains group_id
+            payload: Contains group_id, and optionally `authors` — the node ids
+                the requester found divergent. β has been sending that list
+                since `8878a2da`; this handler used to ignore it and answer with
+                the whole history, so every sync cost the full file no matter
+                how little differed. A peer that predates the field sends none,
+                and still gets everything.
         """
         group_id = payload.get("group_id")
+        authors = payload.get("authors")
 
         self.logger.info(
-            "Received GROUP_HISTORY_REQUEST from %s for group %s",
-            sender_node_id[:20], group_id
+            "Received GROUP_HISTORY_REQUEST from %s for group %s (%s)",
+            sender_node_id[:20], group_id,
+            "whole history" if authors is None else f"{len(authors)} author(s)",
         )
+
+        if not may_share_group(self.service.group_manager, group_id, sender_node_id):
+            await refuse_group_access(
+                self.service.p2p_manager, sender_node_id, group_id,
+                "GROUP_HISTORY_REQUEST", self.logger,
+            )
+            return None
 
         # Get conversation monitor for this group; load from disk if not in memory
         monitor = self.service.conversation_monitors.get(group_id)
@@ -439,13 +658,22 @@ class GroupHistoryRequestHandler(MessageHandler):
             return None
 
         # Export history and send back
-        history = monitor.export_history() if hasattr(monitor, "export_history") else []
+        history = monitor.export_history(authors=authors) if hasattr(monitor, "export_history") else []
+        response = {
+            "group_id": group_id,
+            "history": history,
+        }
+        # Echoed so the asker can tell this answer from an assertion.
+        request_id = payload.get("request_id")
+        if request_id:
+            response["request_id"] = request_id
+        # Say what the answer covers. Without it a filtered reply is
+        # indistinguishable from a complete one that happens to be short.
+        if authors is not None:
+            response["authors"] = authors
         await self.service.p2p_manager.send_message_to_peer(sender_node_id, {
             "command": "GROUP_HISTORY_RESPONSE",
-            "payload": {
-                "group_id": group_id,
-                "history": history,
-            }
+            "payload": response,
         })
 
         return None
@@ -470,11 +698,44 @@ class GroupHistoryResponseHandler(MessageHandler):
         """
         group_id = payload.get("group_id")
         history = payload.get("history", [])
+        # Present when the answer was limited to the authors we asked about, so
+        # a short reply can be told apart from a short history.
+        authors = payload.get("authors")
 
         self.logger.info(
-            "Received GROUP_HISTORY_RESPONSE from %s for group %s (%d messages)",
-            sender_node_id[:20], group_id, len(history)
+            "Received GROUP_HISTORY_RESPONSE from %s for group %s (%d messages, %s)",
+            sender_node_id[:20], group_id, len(history),
+            "whole history" if authors is None else f"limited to {len(authors)} author(s)",
         )
+
+        # An answer, not a request — so it is dropped rather than refused out
+        # loud. Sending a denial here would answer a message we never invited.
+        if not may_share_group(self.service.group_manager, group_id, sender_node_id):
+            self.logger.warning(
+                "Discarding GROUP_HISTORY_RESPONSE from %s for group %s: "
+                "unknown group or sender is not a member",
+                sender_node_id[:20], group_id,
+            )
+            return None
+
+        # A GROUP_HISTORY_RESPONSE merges into a conversation, so an unclaimed
+        # one is an assertion rather than a reply. The 1:1 twin has refused
+        # unclaimed answers since `3e49b044`; the group path was added by the
+        # v0.20.0 hash sync and never got it, so any connected member could push
+        # a history nobody asked for. `claim_any` tolerates a peer on the older
+        # build that answers without echoing the id.
+        request_id = payload.get("request_id")
+        claimed = (
+            self.service.history_requests.claim(sender_node_id, group_id, request_id)
+            if request_id
+            else self.service.history_requests.claim_any(sender_node_id, group_id)
+        )
+        if not claimed:
+            self.logger.warning(
+                "Discarding unsolicited group history from %s for %s (request_id %s)",
+                sender_node_id[:20], group_id, request_id,
+            )
+            return None
 
         if not history:
             return None
@@ -529,38 +790,85 @@ class GroupHistoryStatusHandler(MessageHandler):
             sender_node_id[:20], group_id, remote_hash[:16], remote_count
         )
 
+        # Before the reply, which would otherwise disclose our count and digest
+        # for a group this peer has no part in.
+        if not may_share_group(self.service.group_manager, group_id, sender_node_id):
+            await refuse_group_access(
+                self.service.p2p_manager, sender_node_id, group_id,
+                "GROUP_HISTORY_STATUS", self.logger,
+            )
+            return None
+
         # Get local monitor
         monitor = self.service.conversation_monitors.get(group_id)
 
-        # Compute local hash (peek disk when the monitor is not loaded this session)
+        # Compute local hash and digest (peek disk when the monitor is not
+        # loaded this session — which, monitors being lazy, is the usual case).
+        # The digest used to be None whenever there was no monitor, and both
+        # sides then fell back to comparing chain tips: a comparison that never
+        # matches between two honest nodes, so every connection either reported
+        # divergence or shipped the whole history.
         if monitor and hasattr(monitor, "compute_history_hash"):
             local_hash = monitor.compute_history_hash()
             local_count = len(monitor.message_history)
+            local_digest = monitor.history_digest()
         else:
-            local_count, local_hash = ConversationMonitor.peek_group_history_stats(group_id)
+            disk_messages = ConversationMonitor.peek_group_messages(group_id)
+            local_count = len(disk_messages)
+            local_hash = ConversationMonitor.history_hash_for(disk_messages)
+            local_digest = digest_for(disk_messages)
 
         # Reply only to the initiating STATUS (not to replies), to prevent infinite ping-pong.
         # A sends STATUS → B replies once with is_reply=True → A does NOT reply again.
         if not is_reply:
+            reply = {
+                "group_id": group_id,
+                "history_hash": local_hash,
+                "message_count": local_count,
+                "is_reply": True,
+            }
+            if local_digest:
+                reply["history_digest"] = local_digest
             await self.service.p2p_manager.send_message_to_peer(sender_node_id, {
                 "command": "GROUP_HISTORY_STATUS",
-                "payload": {
-                    "group_id": group_id,
-                    "history_hash": local_hash,
-                    "message_count": local_count,
-                    "is_reply": True,
-                }
+                "payload": reply,
             })
 
-        # Hash mismatch → request sync (bidirectional; covers equal-count divergence)
+        remote_digest = payload.get("history_digest")
+        if remote_digest and local_digest:
+            # The order-independent comparison. `history_hash` below is the tip
+            # of a chain covering msg_index, prev_hash and role — the first two
+            # follow arrival order and the third is per reader, so between two
+            # honest nodes it never matched and the alarm never stopped.
+            differing = authors_that_differ_between(local_digest, remote_digest)
+            if not differing:
+                self.logger.debug("Group %s: histories agree (%d messages)", group_id, local_count)
+                return None
+            self.logger.info(
+                "Requesting history sync for group %s: differs for %d author(s)",
+                group_id, len(differing)
+            )
+            request_id = uuid.uuid4().hex[:8]
+            self.service.history_requests.note(sender_node_id, group_id, request_id)
+            await self.service.p2p_manager.send_message_to_peer(sender_node_id, {
+                "command": "GROUP_HISTORY_REQUEST",
+                "payload": {"group_id": group_id, "authors": differing,
+                            "request_id": request_id},
+            })
+            return None
+
+        # Peer predates the digest: fall back to the old tip comparison, which
+        # over-reports but is all a legacy node can answer.
         if remote_hash != local_hash:
             self.logger.info(
                 "Requesting history sync for group %s (local: %d, remote: %d)",
                 group_id, local_count, remote_count
             )
+            request_id = uuid.uuid4().hex[:8]
+            self.service.history_requests.note(sender_node_id, group_id, request_id)
             await self.service.p2p_manager.send_message_to_peer(sender_node_id, {
                 "command": "GROUP_HISTORY_REQUEST",
-                "payload": {"group_id": group_id}
+                "payload": {"group_id": group_id, "request_id": request_id}
             })
 
         return None
@@ -627,4 +935,44 @@ class GroupDeletedStatusHandler(MessageHandler):
         if removed_count > 0:
             self.logger.info("Removed %d groups based on deleted status from %s", removed_count, sender_node_id[:20])
 
+        return None
+
+
+class GroupAccessDeniedHandler(MessageHandler):
+    """A peer answers that we are not in a group our own roster still lists.
+
+    Removal is never announced to the node being removed, so this refusal is
+    how it finds out — see THE-REMOVED-MEMBER-IS-THE-ONE-NODE-NOT-TOLD. What it
+    is *not* is authority over our roster: a peer cannot delete a group by
+    saying no, so nothing is erased here. It stops us asking this peer about
+    this group, and it tells the person — `group_access_denied` reaches the UI
+    through `services/groups.ts` and `HistorySyncPanel` raises a warning, which
+    is the whole of the user-facing half and was missing until Johnny and Ark
+    grepped for a listener and found none. Undone the moment that same peer
+    syncs a roster we are in again.
+    """
+
+    @property
+    def command_name(self) -> str:
+        return "GROUP_ACCESS_DENIED"
+
+    async def handle(self, sender_node_id: str, payload: Dict[str, Any]) -> Optional[Any]:
+        group_id = payload.get("group_id")
+        reason = payload.get("reason", "unspecified")
+        self.logger.warning(
+            "Access to group %s refused by %s (%s) — our roster still lists it",
+            group_id, sender_node_id[:20], reason,
+        )
+        if not group_id:
+            return None
+
+        self.service.note_group_access_denied(sender_node_id, group_id)
+
+        group = self.service.group_manager.get_group(group_id)
+        await self.service.local_api.broadcast_event("group_access_denied", {
+            "group_id": group_id,
+            "group_name": getattr(group, "name", None),
+            "peer_id": sender_node_id,
+            "reason": reason,
+        })
         return None

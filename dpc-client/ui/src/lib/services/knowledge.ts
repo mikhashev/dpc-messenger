@@ -21,6 +21,10 @@ export const peerContextUpdated = writable<ContextUpdatedEvent | null>(null);
 // Knowledge commit voting — full proposal payload from knowledge_commit_proposed event
 export const knowledgeCommitProposal = writable<KnowledgeCommitProposal | null>(null);
 export const knowledgeCommitResult = writable<KnowledgeCommitResultEvent | null>(null);
+// Conversation with a knowledge vote still open. Messages written now are
+// outside that commit's scope — the chat is deliberately not frozen, so the
+// only honest thing left is to say so where the person is typing.
+export const votingConversationId = writable<string | null>(null);
 
 // Knowledge extraction failure (Phase 4)
 export const extractionFailure = writable<ExtractionFailureEvent | null>(null);

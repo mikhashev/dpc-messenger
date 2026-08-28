@@ -15,7 +15,9 @@ or read the firewall config directly.
 """
 from __future__ import annotations
 
+import datetime as _dt
 import logging
+import time as _time
 from typing import List
 
 from .registry import ToolEntry, ToolContext
@@ -74,7 +76,27 @@ async def list_auth_domains(ctx: ToolContext) -> str:
             if expires is None:
                 tail = "session-only cookies"
             else:
-                tail = f"cookies expire at unix={expires}"
+                # Two things the raw epoch could not do, and the tool's own
+                # description promises both: say whether re-login is needed,
+                # and say it in something an agent can act on. Observed
+                # 2026-08-24: `cookies expire at unix=1785787087.833` for a
+                # jar whose earliest cookie had expired three weeks earlier,
+                # printed beside the word "authenticated".
+                when = _dt.datetime.fromtimestamp(
+                    expires, _dt.timezone.utc,
+                ).strftime("%Y-%m-%d %H:%M UTC")
+                days = abs(expires - _time.time()) / 86400
+                if expires < _time.time():
+                    # `expires` is the EARLIEST cookie in the jar, so a past
+                    # value means one cookie is stale — not that the session
+                    # is dead. Anything stronger would be a claim wider than
+                    # what get_auth_status measures.
+                    tail = (
+                        f"earliest cookie expired {days:.0f} day(s) ago "
+                        f"({when}) — re-login may be needed"
+                    )
+                else:
+                    tail = f"earliest cookie expires in {days:.0f} day(s) ({when})"
             lines.append(f"  - {domain}: authenticated, {tail}")
         else:
             lines.append(f"  - {domain}: not logged in (re-login required)")

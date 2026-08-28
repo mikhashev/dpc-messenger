@@ -218,22 +218,81 @@ uv pip install torch torchvision --index-url https://download.pytorch.org/whl/ro
 
 ## Optional features
 
-The default `uv sync` stays lean. Enable extras as needed — they can be
-added later without reinstalling, and combined
-(`uv sync --extra graph-grafeo --extra browser`):
+The default `uv sync` stays lean. Extras add optional capabilities and can be
+enabled at any time.
+
+**`uv sync` makes the environment match exactly what you ask for.** Any extra
+you leave out of the command is *uninstalled* if it was there before. So pass
+the full set you want in **one** command:
 
 ```bash
 cd dpc-client/core
-uv sync --extra graph-grafeo   # Grafeo retrieval backend for agent memory (opt-in; default is native FAISS)
-uv sync --extra browser        # camoufox — headless browser tool for agents
-uv sync --extra graph-ner      # gliner — named-entity extraction
-uv sync --extra mlx            # macOS Apple Silicon — GPU Whisper via MLX
+
+# Pick what you need and list it all on one line:
+uv sync --extra graph-grafeo --extra browser --extra graph-ner
 ```
+
+| Extra | What it adds |
+|---|---|
+| `graph-grafeo` | Grafeo retrieval backend for agent memory (opt-in; default is native FAISS) |
+| `browser` | camoufox — headless browser tool for agents |
+| `graph-ner` | gliner — named-entity extraction |
+| `mlx` | macOS Apple Silicon only — GPU Whisper via MLX |
+
+> **Do not run them as separate lines.** `uv sync --extra browser` followed by
+> `uv sync --extra graph-ner` leaves you with *only* `graph-ner` — the second
+> command removes what the first installed.
+>
+> The same applies to a plain `uv sync` later (after a `git pull`, say): it
+> removes **every** extra. Whenever you re-sync, repeat the full `--extra`
+> list you want to keep.
 
 > If an agent is configured for the Grafeo backend but the package is
 > missing, the log shows
 > `Background memory indexing failed: Grafeo retrieval requires the grafeo package`
-> — install `--extra graph-grafeo` to enable it.
+> — re-run the sync above with `--extra graph-grafeo` in the list (keeping your
+> other extras on the same line).
+
+---
+
+## If a command in `.venv` stops starting (Windows)
+
+```
+error: uv trampoline failed to canonicalize script path
+```
+
+Every console command in the environment — `pytest`, `coverage`, `openai`,
+`huggingface-cli` — is a small `.exe` with the **absolute path** of
+`.venv\Scripts\python.exe` baked into it at install time. Move or rename any
+folder above the checkout and those paths stop resolving. `python.exe` itself
+is a real binary and keeps working, so the environment looks healthy while
+every command in it fails.
+
+The usual cause on Windows is OneDrive: turning "Back up your Documents
+folder" on or off swaps `C:\Users\<you>\Documents` for
+`C:\Users\<you>\OneDrive\Documents` (localised — `Документы`, `Dokumente`, …)
+and back. Packages installed on one side of that switch point at a path that
+no longer exists. Only the commands installed *before* the switch break, which
+is why the failure looks arbitrary.
+
+**Immediate way through** — this never depends on a shim:
+
+```bash
+uv run python -m pytest        # instead of: uv run pytest
+```
+
+**Repair** the affected commands by reinstalling just those packages, pinned to
+the versions you already have, so nothing else in the environment moves:
+
+```bash
+cd dpc-client/core
+uv pip list                    # read the versions first
+uv pip install --force-reinstall --no-deps pytest==8.4.2 coverage==7.14.3
+```
+
+Use `uv pip install`, **not** `uv sync --reinstall`: a sync would drop every
+extra you did not name on the line (see above) and re-download PyTorch to fix
+a 45 KB launcher.
 
 ---
 
@@ -268,7 +327,7 @@ the next step will be empty.
      [Ollama](https://ollama.com) first, then pull a model
      (e.g. `ollama pull llama3`).
    - **Anthropic** — Claude models. Needs an Anthropic API key.
-   - **Z.AI** — GLM models. Needs a Z.AI API key.
+   - **DeepSeek** — pay-per-token V4 models. Needs a DeepSeek API key.
    - other cloud providers, each needs its own key.
 3. Fill the fields that appear (model name, API key, base URL as
    applicable) and save.
@@ -276,6 +335,23 @@ the next step will be empty.
    model choice when you create an agent.
 
 You can add several providers and pick between them per agent later.
+
+### If you chose Ollama: three settings that live outside DPC
+
+Ollama's own defaults are tuned for one chat at a time, not for a machine
+running several agents against long contexts. Three environment variables —
+belonging to the Ollama service, not to DPC, which can neither set nor read
+them — decide whether an agent's next turn starts immediately or re-reads its
+whole conversation first. On the reference box that difference is measured in
+minutes per turn.
+
+They are set once per machine and the mechanics differ per platform, so they
+live in one place rather than being repeated here:
+**[CONFIGURATION.md → The Ollama daemon's own environment](./docs/CONFIGURATION.md#the-ollama-daemons-own-environment-not-dpcs-and-dpc-cannot-set-it)**
+— what each does, the value to use for your amount of RAM, how to set it on
+Windows / macOS / Linux, and the log line that tells you it took effect.
+
+Skip this if you only use cloud providers.
 
 ---
 
@@ -289,15 +365,19 @@ create it once and it stays in the sidebar.
 
 1. In the **Chats** panel on the left, click **+ Agent**.
 2. In the dialog that opens:
-   - **Chat Type:** leave as *DPC Agent (Autonomous AI with tools)*.
    - **Agent Name:** anything you like (e.g. *Ark*, *Helper*).
    - **AI Model (LLM):** pick one of the providers you configured
      in the previous step.
    - **Permission Profile:** *default* is fine for a first run. The
-     agent can read files, search the web, and update its own
-     memory, but cannot write to your files or take destructive
-     actions. See [Agent reference](./docs/agent/DPC_AGENT_GUIDE.md)
+     agent can read files and update its own memory, but cannot write
+     to your files or take destructive actions. Web search and the
+     browser tools ship **off** — switch them on per agent in
+     Firewall Rules → Agent Permissions → tools.
+     See [Agent reference](./docs/agent/DPC_AGENT_GUIDE.md)
      for per-tool control.
+   - **Retrieval Vector Backend** and **Retrieval Text Backend:**
+     leave both on *native*. Grafeo is opt-in, and switching either
+     one later needs a backend restart and a re-index.
 3. Click **Create Chat**.
 4. The new agent appears in the sidebar. Click it to open the chat
    and send a first message — you should get a reply within a few

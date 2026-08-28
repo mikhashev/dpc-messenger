@@ -4,13 +4,82 @@ import json
 import logging
 import os
 from pathlib import Path
-from typing import List, Dict, Tuple, Any, Optional, Set
+from typing import List, Dict, Tuple, Any, Iterable, Optional, Set
 import fnmatch
 from copy import deepcopy
 
 from dpc_protocol.pcm_core import PersonalContext  # For wildcard matching
 
 logger = logging.getLogger(__name__)
+
+# Suffixes of keys that live inside a `tools` block but are NOT tools: they are
+# per-tool settings named `<tool>_<setting>`. `_group_allowed` is a convention
+# open to every tool (agent.py builds the key from the tool name), so matching a
+# fixed pair of names would silently mis-classify `browse_page_group_allowed`
+# and friends — and the prune below would then delete them as unknown tools.
+#
+# Every place that walks a tools dict has to skip these: before this lived in
+# one place the validator skipped two of them by name while the tools map
+# coerced them to booleans, so the same key was metadata in one reader and a
+# pseudo-tool in another.
+TOOL_SETTING_SUFFIXES = ('_group_allowed', '_tier1_whitelist')
+
+# Where those settings live once migrated out of `tools`:
+# tool_settings: {"run_shell": {"group_allowed": bool, "tier1_whitelist": [...]}}
+TOOL_SETTINGS_KEY = 'tool_settings'
+
+
+def _is_tool_key(name: str) -> bool:
+    """True for keys in a `tools` block that name an actual tool."""
+    return not name.startswith('_') and not name.endswith(TOOL_SETTING_SUFFIXES)
+
+
+# Tool names that are no longer registered but are still accepted in config:
+# older keys that the loader maps onto the tools that replaced them.
+LEGACY_TOOL_ALIASES = frozenset({
+    'repo_read', 'repo_write_commit', 'drive_read', 'drive_write',
+    'extended_path_read', 'extended_path_write',
+    'repo_list', 'drive_list', 'extended_path_list',
+})
+
+_known_tool_names_cache: Optional[Set[str]] = None
+
+
+def _known_tool_names() -> Optional[Set[str]]:
+    """Tool names the validator will recognise, straight from the registry.
+
+    This used to be a hand-maintained set in the validator — a third copy
+    of "which tools exist", after ToolEntry and the config itself. It fell
+    behind: on the live config it called 24 registered tools "unknown …
+    may be from older config" (every browser_*, every comfyui_*, the
+    session-archive readers), 244 warnings in one startup, advising the
+    reader to treat live permissions as leftovers.
+
+    Returns None when the registry cannot be trusted — unreadable, or a
+    module failed to import — because then "not in the registry" says
+    nothing about the name and the warning would be noise again.
+    """
+    global _known_tool_names_cache
+    if _known_tool_names_cache is not None:
+        return _known_tool_names_cache
+    try:
+        from .dpc_agent.tools.registry import ToolRegistry
+        registry = ToolRegistry()
+        if registry.load_failures:
+            return None
+        _known_tool_names_cache = set(registry._entries) | set(LEGACY_TOOL_ALIASES)
+        return _known_tool_names_cache
+    except Exception as e:
+        logger.error("Cannot read tool registry for validation: %s", e, exc_info=True)
+        return None
+
+
+def _split_tool_setting(name: str) -> Optional[Tuple[str, str]]:
+    """`run_shell_group_allowed` -> ('run_shell', 'group_allowed')."""
+    for suffix in TOOL_SETTING_SUFFIXES:
+        if name.endswith(suffix) and len(name) > len(suffix):
+            return name[: -len(suffix)], suffix.lstrip('_')
+    return None
 
 
 class ContextFirewall:
@@ -63,9 +132,63 @@ class ContextFirewall:
         self.compute_allowed_nodes: List[str] = compute.get('allow_nodes', [])
         self.compute_allowed_groups: List[str] = compute.get('allow_groups', [])
         self.compute_allowed_models: List[str] = compute.get('allowed_models', [])
-        logger.debug("Compute sharing settings updated: enabled=%s, allowed_nodes=%d, allowed_groups=%d, allowed_models=%d",
+        # The one alias this node serves peers from. The peer used to name the
+        # provider itself, which meant a peer could point us at a paid alias;
+        # the host designates it instead. Unset means we serve nobody — the
+        # opposite of `allowed_models`, where empty means all, so it is said out
+        # loud here rather than left to be discovered from behaviour.
+        self.compute_serving_alias: Optional[str] = compute.get('serving_alias') or None
+        logger.debug("Compute sharing settings updated: enabled=%s, allowed_nodes=%d, allowed_groups=%d, allowed_models=%d, serving_alias=%s",
                      self.compute_enabled, len(self.compute_allowed_nodes),
-                     len(self.compute_allowed_groups), len(self.compute_allowed_models))
+                     len(self.compute_allowed_groups), len(self.compute_allowed_models),
+                     self.compute_serving_alias)
+        if self.compute_enabled and not self.compute_serving_alias:
+            logger.warning(
+                "Compute sharing is enabled but no compute.serving_alias is set — "
+                "peer inference requests will be refused. Name the alias this node "
+                "should serve peers from in privacy_rules.json under compute.serving_alias."
+            )
+
+    def log_compute_sharing_state(self, known_aliases: Optional[Iterable[str]] = None):
+        """Say the compute-sharing posture once, where the log can hear it.
+
+        `_parse_compute_settings` warns when sharing is on with no serving
+        alias, and on first construction that warning goes nowhere: CoreService
+        builds the firewall (`service.py:165`) before `run_service.main`
+        configures logging (`run_service.py:431-434`), so every line written
+        while the rules are first parsed is discarded. Measured 2026-08-18 —
+        after a restart the log held no firewall line at all, and one appeared
+        the moment the rules were reloaded through the API. A warning that
+        cannot appear is not a warning, so the service repeats the state after
+        logging exists.
+        """
+        if not self.compute_enabled:
+            logger.info("Compute sharing: disabled")
+        elif not self.compute_serving_alias:
+            logger.warning(
+                "Compute sharing is enabled but no compute.serving_alias is set — "
+                "peer inference requests will be refused. Name the alias this node "
+                "should serve peers from in privacy_rules.json under compute.serving_alias."
+            )
+        elif known_aliases is not None and self.compute_serving_alias not in set(known_aliases):
+            # A name that resolves to nothing used to read like a name that
+            # works: the line below would announce it, the peer-facing provider
+            # list would filter to it and come out empty, and the failure would
+            # arrive only when a peer asked. Observed 2026-08-21 with
+            # `serving_alias` still naming an Ollama alias deleted hours before.
+            logger.warning(
+                "Compute sharing is enabled and compute.serving_alias names '%s', which is "
+                "not a configured provider — peers are told this node offers nothing, and a "
+                "request that does arrive is refused on the missing alias. Point it at a "
+                "live alias in privacy_rules.json, or turn compute.enabled off.",
+                self.compute_serving_alias,
+            )
+        else:
+            logger.info(
+                "Compute sharing: enabled, serving peers from '%s' (%d node(s), %d group(s) allowed)",
+                self.compute_serving_alias,
+                len(self.compute_allowed_nodes), len(self.compute_allowed_groups),
+            )
 
     def _parse_transcription_settings(self):
         """Parse transcription sharing settings from the config."""
@@ -96,7 +219,7 @@ class ContextFirewall:
         logger.debug("Notification settings updated: enabled=%s, events=%s",
                      self.notifications_enabled, self.notification_events)
 
-    def _get_registered_tool_defaults(self) -> Dict[str, bool]:
+    def _get_registered_tool_defaults(self) -> Tuple[Dict[str, bool], int]:
         """Read canonical tool defaults from the ToolEntry registry.
 
         Single source of truth for `default_enabled` per tool: each
@@ -104,19 +227,160 @@ class ContextFirewall:
         old hardcoded `all_tools_defaults` dict that used to drift from
         the actual registered tools (e.g. popup_* tools added without
         firewall defaults — see AGENT-TOOL-FIREWALL-DEFAULT-DRIFT).
+
+        Returns (defaults, load_failures) — the second value is the
+        number of tool modules that did not import. It travels with the
+        defaults rather than on `self` so the prune below cannot be
+        called without it: adding keys is safe while that number is
+        unknown-but-nonzero, removing them is not.
         """
         try:
             from .dpc_agent.tools.registry import ToolRegistry
             registry = ToolRegistry()
-            return {
+            defaults = {
                 entry.name: entry.default_enabled
                 for entry in registry._entries.values()
             }
+            return defaults, len(registry.load_failures)
         except Exception as e:
             logger.error("Failed to load ToolRegistry defaults: %s", e, exc_info=True)
-            return {}
+            # Registry unreadable: report a failure so nothing gets pruned.
+            return {}, 1
 
-    def _seed_missing_tools_into_rules(self) -> bool:
+    def _migrate_tool_settings_out_of_tools(self) -> bool:
+        """Move `<tool>_<setting>` keys from `tools` into `tool_settings`.
+
+        `tools` is a map of tool name -> allowed. Settings of a tool were
+        stored in the same dict under a compound name, so every reader had
+        to know which names were not tools — and they disagreed. After this
+        migration a `tools` block contains tool names and nothing else.
+
+        Existing values are moved, never rewritten; a value already present
+        at the destination wins and the stale copy is dropped. Returns True
+        iff self.rules was modified.
+        """
+        modified = False
+
+        def migrate_block(container: Dict[str, Any], where: str) -> None:
+            nonlocal modified
+            tools = container.get('tools')
+            if not isinstance(tools, dict):
+                return
+            for name in [k for k in tools if not k.startswith('_') and not _is_tool_key(k)]:
+                split = _split_tool_setting(name)
+                if split is None:
+                    continue
+                tool, setting = split
+                value = tools.pop(name)
+                settings = container.setdefault(TOOL_SETTINGS_KEY, {}).setdefault(tool, {})
+                if setting not in settings:
+                    settings[setting] = value
+                modified = True
+                logger.info("Moved %s.%s -> %s.%s.%s.%s",
+                            where, name, where, TOOL_SETTINGS_KEY, tool, setting)
+
+        dpc_agent = self.rules.get('dpc_agent')
+        if isinstance(dpc_agent, dict):
+            migrate_block(dpc_agent, 'dpc_agent')
+
+        for profile_name, profile in self.rules.get('agent_profiles', {}).items():
+            if isinstance(profile, dict):
+                migrate_block(profile, f'agent_profiles.{profile_name}')
+
+        return modified
+
+    def get_tool_setting(self, tool_name: str, setting: str,
+                         profile_name: Optional[str] = None, default=None,
+                         inherit_global: bool = False):
+        """Read a per-tool setting (`group_allowed`, `tier1_whitelist`).
+
+        `inherit_global` is **off** by default, and deliberately so: both
+        current readers (the group-chat gate on run_shell and the Tier 1
+        shell whitelist) have always looked at the agent's own profile and
+        nowhere else. Turning inheritance on here would hand every agent
+        without a profile the global `run_shell_group_allowed: true` — a
+        loosening of the shell gate, not a refactor. Whether these settings
+        *should* inherit is a decision, and it is not this migration's.
+
+        Falls back to the pre-migration location (`tools.<tool>_<setting>`)
+        so a hand-edited or externally restored file still answers correctly.
+        """
+        compound = f"{tool_name}_{setting}"
+
+        def read(container: Optional[Dict[str, Any]]):
+            if not isinstance(container, dict):
+                return None
+            settings = container.get(TOOL_SETTINGS_KEY, {})
+            if isinstance(settings, dict):
+                per_tool = settings.get(tool_name, {})
+                if isinstance(per_tool, dict) and setting in per_tool:
+                    return per_tool[setting]
+            tools = container.get('tools', {})
+            if isinstance(tools, dict) and compound in tools:
+                return tools[compound]
+            return None
+
+        if profile_name:
+            value = read(self.rules.get('agent_profiles', {}).get(profile_name))
+            if value is not None:
+                return value
+        if not inherit_global:
+            return default
+        value = read(self.rules.get('dpc_agent'))
+        return default if value is None else value
+
+    def _prune_dead_tool_keys(self, registry_defaults: Dict[str, bool],
+                              load_failures: int) -> bool:
+        """Drop keys from every `tools` block that name no registered tool.
+
+        Counterpart to seeding: that one only ever adds, so names that
+        left the code stayed in privacy_rules.json forever
+        (`claude_code_edit`, `repo_commit_push`, `extract_links`,
+        `transcribe_audio` — the last one a WebSocket command that was
+        never an agent tool at all).
+
+        Refuses to run when any tool module failed to import: in that
+        state "absent from the registry" means "we could not see it",
+        and pruning would silently delete the user's settings for real
+        tools. `load_failures` is a required argument rather than state
+        on `self` on purpose — a caller cannot reach the deleting branch
+        without saying how complete its picture is. Comments
+        (`_`-prefixed) and per-tool settings are kept.
+
+        Returns True iff self.rules was modified.
+        """
+        if not registry_defaults:
+            return False
+        if load_failures:
+            logger.warning(
+                "Skipping dead tool key prune: %d tool module(s) failed to load, "
+                "so the registry is not a complete list of existing tools",
+                load_failures,
+            )
+            return False
+
+        modified = False
+
+        def prune_block(tools: Dict[str, Any], where: str) -> None:
+            nonlocal modified
+            for name in [k for k in tools if _is_tool_key(k) and k not in registry_defaults]:
+                del tools[name]
+                modified = True
+                logger.info("Removed dead tool key from %s: %s", where, name)
+
+        dpc_agent = self.rules.get('dpc_agent', {})
+        if isinstance(dpc_agent.get('tools'), dict):
+            prune_block(dpc_agent['tools'], 'dpc_agent.tools')
+
+        for profile_name, profile in self.rules.get('agent_profiles', {}).items():
+            if isinstance(profile, dict) and isinstance(profile.get('tools'), dict):
+                prune_block(profile['tools'], f'agent_profiles.{profile_name}.tools')
+
+        return modified
+
+    def _seed_missing_tools_into_rules(
+        self, registry_defaults: Optional[Dict[str, bool]] = None
+    ) -> bool:
         """Auto-add tools from ToolRegistry that are absent from privacy_rules.
 
         Walks the global `dpc_agent.tools` block and every
@@ -134,7 +398,8 @@ class ContextFirewall:
         drift (old code maintained two dicts in this file that fell out
         of sync; now only the registry decides which keys exist).
         """
-        registry_defaults = self._get_registered_tool_defaults()
+        if registry_defaults is None:
+            registry_defaults, _ = self._get_registered_tool_defaults()
         if not registry_defaults:
             return False
         modified = False
@@ -169,15 +434,22 @@ class ContextFirewall:
 
     def _parse_dpc_agent_settings(self):
         """Parse DPC agent settings from the config."""
-        # First, auto-seed any tools that landed in ToolRegistry after this
-        # privacy_rules.json was created. Persists to disk on first run if
-        # anything was added. Single source of truth: ToolEntry.default_enabled.
-        if self._seed_missing_tools_into_rules():
+        # First, reconcile the stored tools blocks with the registry in both
+        # directions: seed tools that landed in ToolRegistry after this
+        # privacy_rules.json was created, and drop keys naming tools that no
+        # longer exist. Single source of truth: ToolEntry.default_enabled.
+        # One registry load feeds both, so the prune sees the same picture —
+        # including whether any module failed to import.
+        registry_defaults, load_failures = self._get_registered_tool_defaults()
+        changed = self._migrate_tool_settings_out_of_tools()
+        changed = self._seed_missing_tools_into_rules(registry_defaults) or changed
+        changed = self._prune_dead_tool_keys(registry_defaults, load_failures) or changed
+        if changed:
             try:
                 self.access_file_path.write_text(json.dumps(self.rules, indent=2))
-                logger.info("Persisted seeded tool defaults to %s", self.access_file_path)
+                logger.info("Persisted reconciled tool keys to %s", self.access_file_path)
             except Exception as e:
-                logger.error("Failed to persist seeded defaults: %s", e, exc_info=True)
+                logger.error("Failed to persist reconciled tool keys: %s", e, exc_info=True)
 
         dpc_agent = self.rules.get('dpc_agent', {})
         self.dpc_agent_enabled = dpc_agent.get('enabled', True)
@@ -193,7 +465,7 @@ class ContextFirewall:
             'write_file': ['repo_write_commit', 'extended_path_write', 'drive_write'],
             'list_dir': ['repo_list', 'extended_path_list', 'drive_list'],
         }
-        registry_defaults = self._get_registered_tool_defaults()
+        registry_defaults, _ = self._get_registered_tool_defaults()
         tools = dpc_agent.get('tools', {})
         self.dpc_agent_tools: Dict[str, bool] = {}
         for tool_name, default_enabled in registry_defaults.items():
@@ -358,7 +630,7 @@ class ContextFirewall:
             return merged
         profile_tools = profile.get('tools', {})
         for tool_name, enabled in profile_tools.items():
-            if not tool_name.startswith('_'):
+            if _is_tool_key(tool_name):
                 merged[tool_name] = bool(enabled)
         return merged
 
@@ -628,7 +900,7 @@ class ContextFirewall:
             if bool(profile_tools.get(tool_name, global_enabled)):
                 allowed.add(tool_name)
         for tool_name, enabled in profile_tools.items():
-            if not tool_name.startswith('_') and bool(enabled):
+            if _is_tool_key(tool_name) and bool(enabled):
                 allowed.add(tool_name)
 
         # Per-profile overrides mirroring get_allowed_agent_tools()
@@ -735,7 +1007,10 @@ class ContextFirewall:
                     "enabled": False,
                     "allow_groups": [],
                     "allow_nodes": [],
-                    "allowed_models": ["llama3.1:8b", "llama3:70b"]
+                    "_allowed_models": "Empty = every model. Since the host designates serving_alias, this list can only refuse a peer that names a model; it never chooses one. A non-empty list that does not contain the serving alias's own model makes this node advertise nothing and refuse everything.",
+                    "allowed_models": [],
+                    "_serving_alias": "The one provider alias peers are served from; a peer naming any other is refused. Empty = share nothing (the opposite of allowed_models, where empty = all).",
+                    "serving_alias": None
                 },
                 "transcription": {
                     "_comment": "Transcription sharing settings - Allow peers to use your Whisper model for voice transcription",
@@ -1196,19 +1471,36 @@ class ContextFirewall:
         # Start filtering from root level
         return filter_nested_dict(device_context, "")
 
-    def can_request_inference(self, requester_node_id: str, model: str = None) -> bool:
+    def can_request_inference(self, requester_node_id: str, model: str = None,
+                              provider: str = None) -> bool:
         """
         Checks if a peer can request remote inference on this node.
 
         Args:
             requester_node_id: The node_id of the requesting peer
             model: Optional model name to check if allowed
+            provider: Optional provider alias the peer named. Only the alias
+                this node designates in `compute.serving_alias` is accepted;
+                anything else is refused, including when no model is given.
 
         Returns:
             True if the peer can request inference (and use the specified model if provided)
         """
         # Check if compute sharing is enabled
         if not self.compute_enabled:
+            return False
+
+        # A peer may ask, but it does not choose what we run. Before D4-0 the
+        # alias travelled straight from the wire to the router while this check
+        # was handed only the model, so `provider: "deepseek_pro"` with no model
+        # passed a check that had nothing to look at. Note this refuses the
+        # named alias even when serving_alias is unset — nothing designated,
+        # nothing served.
+        if provider is not None and provider != self.compute_serving_alias:
+            logger.warning(
+                "Compute denied for %s: named provider '%s' is not this node's serving alias (%s)",
+                requester_node_id, provider, self.compute_serving_alias or "unset",
+            )
             return False
 
         # Check if requester is in allowed nodes list
@@ -1482,6 +1774,10 @@ class ContextFirewall:
                     if 'allowed_models' in compute and not isinstance(compute['allowed_models'], list):
                         errors.append("'compute.allowed_models' must be a list")
 
+                    if 'serving_alias' in compute and compute['serving_alias'] is not None \
+                            and not isinstance(compute['serving_alias'], str):
+                        errors.append("'compute.serving_alias' must be a provider alias (a string) or null")
+
             # Validate transcription section
             if 'transcription' in config_dict:
                 transcription = config_dict['transcription']
@@ -1638,57 +1934,14 @@ class ContextFirewall:
                         if not isinstance(tools, dict):
                             errors.append("'dpc_agent.tools' must be a dictionary")
                         else:
-                            # All valid tool names
-                            valid_tools = {
-                                # File operations (unified S31 + S149)
-                                'read_file', 'write_file', 'list_dir', 'repo_delete',
-                                'list_extended_sandbox_paths',
-                                # Memory/identity
-                                'update_scratchpad', 'update_identity', 'chat_history',
-                                # Knowledge
-                                'knowledge_list',
-                                'get_task_board',
-                                # DPC integration
-                                'get_dpc_context',
-                                # Web tools
-                                'browse_page', 'fetch_json', 'check_url', 'search_web',
-                                # Git tools
-                                'git_status', 'git_diff', 'git_log', 'git_add', 'git_commit', 'git_branch', 'git_init',
-                                'git_checkout', 'git_merge', 'git_tag', 'git_reset', 'git_snapshot',
-                                'git_push',
-                                # Restricted tools
-                                'run_shell',
-                                # Task queue tools (v0.16.0+)
-                                'schedule_task', 'get_task_status',
-                                # Search tools (v0.16.0+)
-                                'search_files', 'search_in_file',
-                                # Messaging tools (v0.18.0+)
-                                'send_user_message',
-                                # Knowledge tools (v0.18.0+)
-                                'deduplicate_identity',
-                                # Task type management tools (v0.18.0+)
-                                'register_task_type', 'list_task_types', 'unregister_task_type',
-                                # Memento-Skills tools (v0.20.0+)
-                                'execute_skill',
-                                # Inter-agent skill sharing tools (v0.21.0+)
-                                'list_local_agents', 'list_agent_skills', 'import_skill_from_agent',
-                                # Self-introspection tools
-                                'list_my_tools', 'list_my_skills',
-                                # Memory search (ADR-010)
-                                'memory_search',
-                                # Legacy aliases (S31 → read_file/write_file; S149 → list_dir)
-                                'repo_read', 'repo_write_commit', 'drive_read', 'drive_write',
-                                'extended_path_read', 'extended_path_write',
-                                'repo_list', 'drive_list', 'extended_path_list',
-                            }
-                            tool_metadata_keys = {'run_shell_tier1_whitelist', 'run_shell_group_allowed'}
+                            # Which names exist is the registry's business, not a
+                            # list maintained here (see _known_tool_names).
+                            valid_tools = _known_tool_names()
                             for tool_name, tool_enabled in tools.items():
-                                if tool_name.startswith('_'):
-                                    continue  # Skip comments
-                                if tool_name in tool_metadata_keys:
-                                    continue  # Non-boolean tool settings
-                                if tool_name not in valid_tools:
-                                    logger.warning("Unknown tool in dpc_agent.tools: '%s' (ignored — may be from older config)", tool_name)
+                                if not _is_tool_key(tool_name):
+                                    continue  # Comments and run_shell metadata
+                                if valid_tools is not None and tool_name not in valid_tools:
+                                    logger.warning("No registered tool named '%s' — key in dpc_agent.tools is ignored", tool_name)
                                 if not isinstance(tool_enabled, bool):
                                     errors.append(f"'dpc_agent.tools.{tool_name}' must be a boolean")
 
@@ -1731,45 +1984,13 @@ class ContextFirewall:
                                 if not isinstance(tools, dict):
                                     errors.append(f"'agent_profiles.{profile_name}.tools' must be a dictionary")
                                 else:
-                                    # Use the same valid tools as dpc_agent
-                                    valid_tools = {
-                                        'read_file', 'write_file', 'list_dir', 'repo_delete',
-                                        'list_extended_sandbox_paths',
-                                        'update_scratchpad', 'update_identity', 'chat_history',
-                                        'knowledge_list',
-                                        'get_task_board',
-                                        'get_dpc_context',
-                                        'browse_page', 'fetch_json', 'check_url', 'search_web',
-                                        'git_status', 'git_diff', 'git_log', 'git_add', 'git_commit', 'git_branch', 'git_init',
-                                        'git_checkout', 'git_merge', 'git_tag', 'git_reset', 'git_snapshot',
-                                        'git_push',
-                                        'run_shell',
-                                        'schedule_task', 'get_task_status',
-                                        'search_files', 'search_in_file',
-                                        'send_user_message',
-                                        'deduplicate_identity',
-                                        'register_task_type', 'list_task_types', 'unregister_task_type',
-                                        # Memento-Skills tools (v0.20.0+)
-                                        'execute_skill',
-                                        # Inter-agent skill sharing tools (v0.21.0+)
-                                        'list_local_agents', 'list_agent_skills', 'import_skill_from_agent',
-                                        # Self-introspection tools
-                                        'list_my_tools', 'list_my_skills',
-                                        # Memory search (ADR-010)
-                                        'memory_search',
-                                        # Legacy aliases (S31 → read_file/write_file; S149 → list_dir)
-                                        'repo_read', 'repo_write_commit', 'drive_read', 'drive_write',
-                                        'extended_path_read', 'extended_path_write',
-                                        'repo_list', 'drive_list', 'extended_path_list',
-                                    }
-                                    tool_metadata_keys = {'run_shell_tier1_whitelist', 'run_shell_group_allowed'}
+                                    # Same source as dpc_agent above: the registry.
+                                    valid_tools = _known_tool_names()
                                     for tool_name, tool_enabled in tools.items():
-                                        if tool_name.startswith('_'):
-                                            continue  # Skip comments
-                                        if tool_name in tool_metadata_keys:
-                                            continue  # Non-boolean tool settings
-                                        if tool_name not in valid_tools:
-                                            logger.warning("Unknown tool in agent_profiles.%s.tools: '%s' (ignored)", profile_name, tool_name)
+                                        if not _is_tool_key(tool_name):
+                                            continue  # Comments and run_shell metadata
+                                        if valid_tools is not None and tool_name not in valid_tools:
+                                            logger.warning("No registered tool named '%s' — key in agent_profiles.%s.tools is ignored", tool_name, profile_name)
                                         if not isinstance(tool_enabled, bool):
                                             errors.append(f"'agent_profiles.{profile_name}.tools.{tool_name}' must be a boolean")
 
@@ -1891,6 +2112,38 @@ class ContextFirewall:
 
         return warnings
 
+    def _repair_indexed_paths(self, rules_dict: Dict[str, Any],
+                              guess_renames: bool = False) -> List[Tuple[str, str]]:
+        """Re-attach index flags to the access paths they belong to, in place.
+
+        The UI writes an index flag as a copy of the access-path string, so editing a
+        path strands the old spelling in `indexed_paths` where it matches nothing and
+        the root stops being indexed without a word. Repairing on save keeps the file
+        honest; `collect_extended_files` repairs the same way at read time, so an
+        unsaved config still indexes correctly.
+        """
+        from dpc_client_core.dpc_agent.extended_paths_index import reconcile_indexed_paths
+
+        scopes: List[Tuple[str, Dict[str, Any]]] = []
+        global_sandbox = (rules_dict.get('dpc_agent') or {}).get('sandbox_extensions')
+        if isinstance(global_sandbox, dict):
+            scopes.append(("dpc_agent", global_sandbox))
+        for name, profile in (rules_dict.get('agent_profiles') or {}).items():
+            sandbox = (profile or {}).get('sandbox_extensions')
+            if isinstance(sandbox, dict):
+                scopes.append((name, sandbox))
+
+        report: List[Tuple[str, str]] = []
+        for scope, sandbox in scopes:
+            indexed = sandbox.get('indexed_paths')
+            if not isinstance(indexed, list) or not indexed:
+                continue
+            repaired, changes = reconcile_indexed_paths(sandbox, indexed, guess_renames)
+            if changes:
+                sandbox['indexed_paths'] = repaired
+                report.extend((scope, line) for line in changes)
+        return report
+
     def save_rules_from_dict(self, rules_dict: Dict[str, Any]) -> Tuple[bool, str, List[str]]:
         """Validate, write, and reload rules from a dict.
 
@@ -1906,6 +2159,9 @@ class ContextFirewall:
         path_warnings = self.find_missing_sandbox_paths(rules_dict)
         for warning in path_warnings:
             logger.warning("Firewall save: %s", warning)
+
+        for scope, line in self._repair_indexed_paths(rules_dict):
+            logger.warning("Firewall save: %s: %s", scope, line)
 
         backup = self.access_file_path.read_text() if self.access_file_path.exists() else None
 

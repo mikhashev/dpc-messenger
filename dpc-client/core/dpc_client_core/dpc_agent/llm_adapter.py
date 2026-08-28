@@ -141,7 +141,8 @@ class DpcLlmAdapter:
             messages: List of message dicts with role/content
             model: Optional model override (ignored, uses DPC's configured provider)
             tools: Optional list of tool schemas (handled via prompt injection)
-            reasoning_effort: Effort level (low/medium/high) - passed to provider if supported
+            reasoning_effort: one word from the shared scale (off/low/medium/high/max),
+                passed to the provider, which maps it onto what its own model can do
             max_tokens: Max completion tokens
             on_stream_chunk: Optional async callback for streaming: await on_stream_chunk(chunk, conversation_id)
             conversation_id: Optional conversation ID for streaming callbacks
@@ -236,7 +237,13 @@ class DpcLlmAdapter:
             tool_descriptions = self._format_tools_for_prompt(tools)
             prompt = f"{tool_descriptions}\n\n{prompt}"
 
-        # Call DPC provider - use streaming if available and callback provided
+        # Call DPC provider - use streaming if available and callback provided.
+        # The effort travels on both branches. It used to travel on neither: the
+        # native tools path built `gw_kwargs["reasoning_effort"]` and passed it,
+        # while these two dropped it silently — so an agent that fell back to text
+        # ran at whatever the alias carried, and so did every caller without tools.
+        # Every provider names the parameter now, including the ones that cannot
+        # act on it, so this call does not have to know which is which.
         try:
             if on_stream_chunk and hasattr(provider, 'generate_response_stream'):
                 # Use streaming
@@ -245,10 +252,13 @@ class DpcLlmAdapter:
                     prompt,
                     on_chunk=on_stream_chunk,
                     conversation_id=conversation_id,
+                    reasoning_effort=reasoning_effort,
                 )
             else:
                 # Non-streaming fallback
-                response = await provider.generate_response(prompt)
+                response = await provider.generate_response(
+                    prompt, reasoning_effort=reasoning_effort
+                )
 
             # Build response message in Ouroboros format
             response_msg: Dict[str, Any] = {
@@ -271,8 +281,39 @@ class DpcLlmAdapter:
                     response_msg["tool_calls"] = tool_calls
                     log.info(f"Found {len(tool_calls)} tool call(s): {[tc['function']['name'] for tc in tool_calls]}")
 
-            # Count tokens accurately using TokenCountManager (reuse existing)
+            # What the provider says beats what we can work out, and on DeepSeek
+            # the two differ in both directions at once: the estimate below sees
+            # no cache split, so every prompt token bills as a miss (dearer than
+            # the truth), and it cannot see reasoning tokens at all, because they
+            # are not in the answer text (cheaper than the truth). The tool path
+            # has preferred the reported numbers since it was written; this one
+            # counted for itself and priced its own count.
             model_name = self.default_model()
+            # No `hasattr` guard: `get_last_usage` is on `AIProvider` and every
+            # provider answers it. The guard existed while the method was on one
+            # class out of twelve, and it is what let three providers build a
+            # usage dict privately while this reader priced its own estimate.
+            reported = provider.get_last_usage()
+            if reported:
+                usage: Dict[str, Any] = dict(reported)
+                usage.setdefault(
+                    "cost",
+                    compute_cost_usd(
+                        self._provider_alias or "",
+                        int(usage.get("prompt_tokens", 0)),
+                        int(usage.get("completion_tokens", 0)),
+                        model=model_name,
+                        cache_hit_tokens=int(usage.get("prompt_cache_hit_tokens", 0) or 0),
+                        cache_miss_tokens=(
+                            int(usage["prompt_cache_miss_tokens"])
+                            if usage.get("prompt_cache_miss_tokens") is not None
+                            else None
+                        ),
+                    ),
+                )
+                return response_msg, usage
+
+            # Count tokens accurately using TokenCountManager (reuse existing)
             if self._token_counter:
                 prompt_tokens = self._token_counter.count_tokens(prompt, model_name)
                 completion_tokens = self._token_counter.count_tokens(response, model_name)
@@ -281,7 +322,7 @@ class DpcLlmAdapter:
                 prompt_tokens = len(prompt) // 4
                 completion_tokens = len(response) // 4
 
-            usage: Dict[str, Any] = {
+            usage = {
                 "prompt_tokens": prompt_tokens,
                 "completion_tokens": completion_tokens,
                 "total_tokens": prompt_tokens + completion_tokens,
@@ -583,6 +624,25 @@ class DpcLlmAdapter:
 
             i += 1
 
+        # A breakpoint on the last user turn: Anthropic caches the prefix up to a
+        # marked block, and the system blocks were the only marked ones — measured as
+        # a constant hit of the system size while the whole history missed. With the
+        # per-turn content now behind the history, the prefix up to here is what the
+        # next request repeats.
+        if anthropic_messages and anthropic_messages[-1].get("role") == "user":
+            last = anthropic_messages[-1]
+            content = last.get("content")
+            if isinstance(content, str):
+                last["content"] = [{"type": "text", "text": content,
+                                    "cache_control": {"type": "ephemeral"}}]
+            elif isinstance(content, list) and content:
+                tail = content[-1]
+                if isinstance(tail, dict) and tail.get("type") in ("text", "tool_result"):
+                    # A copy: the block list is shared with the loop's own messages,
+                    # and a marker left behind would ride into every later round.
+                    last["content"] = list(content[:-1]) + [
+                        dict(tail, cache_control={"type": "ephemeral"})]
+
         return system, anthropic_messages
 
     @staticmethod
@@ -644,8 +704,9 @@ class DpcLlmAdapter:
 
         try:
             # Call remote inference via CoreService
-            # Use configurable timeout from dpc_agent provider (default 180s)
-            timeout = getattr(dpc_agent_provider, 'timeout', 180) or 180
+            # Use configurable timeout from dpc_agent provider (default 1200s,
+            # the host's own budget plus overhead — ADR-040 D4-0)
+            timeout = getattr(dpc_agent_provider, 'timeout', 1200.0) or 1200.0
             log.info(f"Routing agent inference to remote peer: {dpc_agent_provider.peer_id} (timeout={timeout}s)")
             result = await service._request_inference_from_peer(
                 peer_id=dpc_agent_provider.peer_id,
@@ -848,17 +909,30 @@ class DpcLlmAdapter:
         # Make a copy to avoid modifying original
         messages = list(messages)
 
+        # An empty description is a failed vision call, and it has to read as
+        # one. Announcing "here is the visual analysis" over nothing tells the
+        # agent it has seen the image when it has not — the same substitution
+        # the provider stopped making when it quit returning reasoning in the
+        # answer's place, one layer up.
+        if not (description or "").strip():
+            header = (
+                "[The user has shared an image. The vision model returned no "
+                "description, so you have not seen it — say so rather than "
+                "guessing at its contents.]"
+            )
+        else:
+            header = (
+                "[The user has shared an image. Here is the visual analysis]:\n"
+                f"{description}"
+            )
+
         # Find the last user message and inject description
         for i in range(len(messages) - 1, -1, -1):
             if messages[i].get("role") == "user":
                 content = messages[i].get("content")
 
                 # Build the enhanced content with image context
-                enhanced_text = (
-                    f"[The user has shared an image. Here is the visual analysis]:\n"
-                    f"{description}\n\n"
-                    f"[User's message]: "
-                )
+                enhanced_text = f"{header}\n\n[User's message]: "
 
                 if isinstance(content, str):
                     messages[i] = {
@@ -1205,27 +1279,3 @@ class DpcLlmAdapter:
         return await self.chat(messages=messages, tools=tools, **kwargs)
 
 
-def normalize_reasoning_effort(effort: str, default: str = "medium") -> str:
-    """
-    Normalize reasoning effort level.
-
-    Maps various effort levels to standard values.
-    """
-    effort_lower = effort.lower().strip()
-
-    # Map to standard values
-    effort_map = {
-        "low": "low",
-        "minimal": "low",
-        "fast": "low",
-        "medium": "medium",
-        "normal": "medium",
-        "default": "medium",
-        "high": "high",
-        "thorough": "high",
-        "deep": "high",
-        "xhigh": "high",
-        "extended": "high",
-    }
-
-    return effort_map.get(effort_lower, default)

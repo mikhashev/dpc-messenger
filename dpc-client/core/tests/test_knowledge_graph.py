@@ -305,9 +305,9 @@ def test_fasade_backfill_edge_timestamps_per_file(kg, tmp_path):
     knowledge_dir.mkdir()
     md1 = knowledge_dir / "topic_a.md"
     md1.write_text("body", encoding="utf-8")
-    kg._ensure_node("kf:topic_a", NodeType.KNOWLEDGE_FILE, "Topic A")
+    kg._ensure_node("kf:knowledge/topic_a.md", NodeType.KNOWLEDGE_FILE, "Topic A")
     kg._ensure_node("other", NodeType.SESSION_ARCHIVE, "other")
-    _add_edge(kg.backend, "kf:topic_a", "other", t_created="")
+    _add_edge(kg.backend, "kf:knowledge/topic_a.md", "other", t_created="")
 
     count = kg.backfill_edge_timestamps(knowledge_dir)
     assert count == 1

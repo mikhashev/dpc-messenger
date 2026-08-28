@@ -834,3 +834,163 @@ class TestAgentContextDefaultDeny:
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+
+class TestComputeServingAlias:
+    """The alias the host serves peers from — D4-0 of ADR-040.
+
+    Until 2026-08-18 the peer named the provider and the gate was handed only
+    the model, so a peer sending `provider: "deepseek_pro"` and no model passed
+    a check that had nothing to examine and the host paid for the tokens. The
+    rule is not «any alias except the default» — this box has two DeepSeek
+    aliases and only one of them is the default. The host designates one alias
+    and every other name is refused.
+    """
+
+    @pytest.fixture
+    def firewall_serving(self, tmp_path):
+        import json
+        rules_file = tmp_path / ".dpc_access.json"
+        rules_file.write_text(json.dumps({
+            "compute": {
+                "enabled": True,
+                "allow_nodes": ["dpc-node-alice-123"],
+                "serving_alias": "ollama_local",
+            }
+        }))
+        return ContextFirewall(rules_file)
+
+    @pytest.fixture
+    def firewall_without_serving(self, tmp_path):
+        import json
+        rules_file = tmp_path / ".dpc_access.json"
+        rules_file.write_text(json.dumps({
+            "compute": {
+                "enabled": True,
+                "allow_nodes": ["dpc-node-alice-123"],
+            }
+        }))
+        return ContextFirewall(rules_file)
+
+    def test_the_serving_alias_is_read_from_the_compute_block(self, firewall_serving):
+        assert firewall_serving.compute_serving_alias == "ollama_local"
+
+    def test_a_node_without_the_setting_designates_nothing(self, firewall_without_serving):
+        assert firewall_without_serving.compute_serving_alias is None
+
+    def test_the_designated_alias_is_accepted(self, firewall_serving):
+        assert firewall_serving.can_request_inference(
+            "dpc-node-alice-123", provider="ollama_local") is True
+
+    def test_a_paid_alias_that_is_not_the_default_is_still_refused(self, firewall_serving):
+        # The exact case: default_provider on this box is deepseek_flash, so a
+        # rule of «never the default» would have let deepseek_pro through.
+        assert firewall_serving.can_request_inference(
+            "dpc-node-alice-123", provider="deepseek_pro") is False
+        assert firewall_serving.can_request_inference(
+            "dpc-node-alice-123", provider="deepseek_flash") is False
+
+    def test_a_named_provider_is_refused_even_with_no_model(self, firewall_without_serving):
+        # Johnny's case verbatim: provider named, model omitted. Before D4-0 the
+        # gate saw model=None, examined nothing and returned True.
+        assert firewall_without_serving.can_request_inference(
+            "dpc-node-alice-123", provider="deepseek_pro") is False
+
+    def test_naming_nothing_still_reaches_the_node_and_group_rules(self, firewall_serving):
+        assert firewall_serving.can_request_inference("dpc-node-alice-123") is True
+        assert firewall_serving.can_request_inference("dpc-node-stranger") is False
+
+
+class TestComputeSharingIsAnnouncedWhereTheLogCanHearIt:
+    """The startup warning for an unset serving alias could never appear.
+
+    `CoreService.__init__` builds the firewall (`service.py:165`) and
+    `run_service.main` configures logging afterwards (`run_service.py:431-434`),
+    so every line the firewall writes while parsing its rules the first time is
+    discarded before any handler exists. Measured 2026-08-18: after a restart
+    the log held no `Compute sharing settings updated` line at all, and one
+    appeared the moment the rules were reloaded through the API.
+    """
+
+    def _firewall(self, tmp_path, compute):
+        import json
+        f = tmp_path / ".dpc_access.json"
+        f.write_text(json.dumps({"compute": compute}))
+        return ContextFirewall(f)
+
+    def test_an_enabled_node_with_no_alias_says_so_out_loud(self, tmp_path, caplog):
+        import logging
+        fw = self._firewall(tmp_path, {"enabled": True, "allow_nodes": ["dpc-node-a"]})
+        caplog.clear()
+        with caplog.at_level(logging.WARNING):
+            fw.log_compute_sharing_state()
+        assert any("serving_alias" in r.getMessage() for r in caplog.records)
+
+    def test_an_enabled_node_names_what_it_serves(self, tmp_path, caplog):
+        import logging
+        fw = self._firewall(tmp_path, {"enabled": True, "serving_alias": "ollama_local"})
+        caplog.clear()
+        with caplog.at_level(logging.INFO):
+            fw.log_compute_sharing_state()
+        assert any("ollama_local" in r.getMessage() for r in caplog.records)
+        assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
+
+    def test_a_node_that_shares_nothing_is_not_warned_at(self, tmp_path, caplog):
+        import logging
+        fw = self._firewall(tmp_path, {"enabled": False})
+        caplog.clear()
+        with caplog.at_level(logging.INFO):
+            fw.log_compute_sharing_state()
+        assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
+        assert any("disabled" in r.getMessage() for r in caplog.records)
+
+    def test_an_alias_that_names_nothing_is_not_announced_as_if_it_worked(self, tmp_path, caplog):
+        """Observed 2026-08-21: `serving_alias` still named an Ollama alias
+        deleted hours earlier, and the state line announced it. The peer-facing
+        provider list filters to exactly this alias, so a dead one advertises
+        nothing while the log says the node serves from it."""
+        import logging
+        fw = self._firewall(tmp_path, {"enabled": True, "serving_alias": "qwen3.8:latest"})
+        caplog.clear()
+        with caplog.at_level(logging.INFO):
+            fw.log_compute_sharing_state(["deepseek_flash", "qwen3.8 27b Mythos"])
+
+        warnings = [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
+        assert len(warnings) == 1
+        assert "qwen3.8:latest" in warnings[0]
+        assert not any("serving peers from" in r.getMessage() for r in caplog.records)
+
+    def test_a_live_alias_passes_the_same_check(self, tmp_path, caplog):
+        import logging
+        fw = self._firewall(tmp_path, {"enabled": True, "serving_alias": "qwen3.8 27b Mythos"})
+        caplog.clear()
+        with caplog.at_level(logging.INFO):
+            fw.log_compute_sharing_state(["deepseek_flash", "qwen3.8 27b Mythos"])
+
+        assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
+        assert any("serving peers from 'qwen3.8 27b Mythos'" in r.getMessage()
+                   for r in caplog.records)
+
+    def test_without_a_registry_the_line_behaves_as_it_always_did(self, tmp_path, caplog):
+        """The check is optional on purpose — the firewall owns the rule, not
+        the provider list, and a caller with no registry to offer must not be
+        turned into a false alarm."""
+        import logging
+        fw = self._firewall(tmp_path, {"enabled": True, "serving_alias": "anything_at_all"})
+        caplog.clear()
+        with caplog.at_level(logging.INFO):
+            fw.log_compute_sharing_state()
+
+        assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
+        assert any("anything_at_all" in r.getMessage() for r in caplog.records)
+
+    def test_an_empty_registry_is_still_a_registry(self, tmp_path, caplog):
+        """`[]` means «nothing is configured», which is exactly when the alias
+        cannot resolve — it must not be read as «no registry offered»."""
+        import logging
+        fw = self._firewall(tmp_path, {"enabled": True, "serving_alias": "gone"})
+        caplog.clear()
+        with caplog.at_level(logging.INFO):
+            fw.log_compute_sharing_state([])
+
+        assert [r for r in caplog.records if r.levelno >= logging.WARNING]

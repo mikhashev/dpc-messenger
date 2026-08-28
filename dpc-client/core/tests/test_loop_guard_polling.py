@@ -126,3 +126,38 @@ class TestProgressTiming:
 
     def test_empty_samples_returns_blank(self):
         assert _format_progress_timing([], "url") == ""
+
+
+SNAPSHOT = "browser_snapshot"
+
+
+def snapshot_ctx(prev_output=None):
+    """A round calling browser_snapshot with no args — the call signature is
+    identical no matter which page is open."""
+    return poll_ctx(prev_output=prev_output, call_name=SNAPSHOT, call_args={})
+
+
+class TestLoopGuardBrowserSnapshot:
+    @pytest.mark.asyncio
+    async def test_snapshots_of_different_pages_do_not_stop(self):
+        """browser_snapshot takes no args, so a walk across pages looked like
+        one call repeated. Five snapshots of five different pages must not be
+        read as a stuck loop — that killed a warm-up run on the snapshot the
+        agent needed to verify its own click."""
+        g = LoopGuard(max_duplicate_calls=5)
+        assert await g.after_llm_call(snapshot_ctx(prev_output=None)) is None
+        for page in range(1, 12):
+            res = await g.after_llm_call(snapshot_ctx(prev_output=f"- page {page}"))
+            assert res is None
+
+    @pytest.mark.asyncio
+    async def test_snapshots_of_an_unchanged_page_still_stop(self):
+        """The guard must still catch the real stuck loop: same page, same
+        output, over and over."""
+        g = LoopGuard(max_duplicate_calls=5)
+        results = [await g.after_llm_call(snapshot_ctx(prev_output=None))]
+        for _ in range(8):
+            results.append(await g.after_llm_call(snapshot_ctx(prev_output="- same page")))
+        first_stop = next((i for i, r in enumerate(results) if r is not None), None)
+        assert first_stop == 4
+        assert results[first_stop] == HookAction.STOP_LOOP

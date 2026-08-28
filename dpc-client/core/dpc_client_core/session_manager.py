@@ -26,6 +26,10 @@ class NewSessionProposal:
     participants: Set[str]     # All node_ids in conversation
     votes: Dict[str, bool] = field(default_factory=dict)  # node_id → approve(True)/reject(False)
     deadline: float = 0.0      # time.time() + 60 seconds
+    # The signed payloads behind `votes`, kept so an approved reset can carry
+    # its own proof (ADR-038 Q3). Without them the marker would be a claim, and
+    # the votes that justify it live in the history the reset destroys.
+    signed_votes: Dict[str, Dict[str, Any]] = field(default_factory=dict)
 
 
 @dataclass
@@ -40,24 +44,25 @@ class VotingSession:
         return len(self.proposal.votes) == len(self.proposal.participants)
 
     def is_approved(self) -> bool:
-        """
-        Check if proposal is approved based on voting rules.
+        """Every participant has to say yes. One rule, whatever the size.
 
-        P2P (2 participants): Unanimous approval required
-        Multi-party (3+): Majority approval (>50%)
+        Majority was tried and is wrong here for a reason that is not about
+        fairness: the reset is undone by whoever did not take part. A member
+        outvoted or merely absent keeps its history, and hands it straight back
+        at the next sync — so a two-of-three reset is not a reset, it is a pause.
+        Unanimity is what makes the outcome stick.
+
+        The price is stated rather than hidden: a member that is gone for good
+        makes a reset impossible, and there is no override. That is deliberate
+        (Mike, 2026-08-06) — the alternative is a reset that silently comes back.
+
+        Counting over participants also gives the timeout its ending for free:
+        an unanswered proposal never reaches everyone, so silence is not consent.
         """
-        if not self.proposal.votes:
+        participants = self.proposal.participants
+        if not participants:
             return False
-
-        total_votes = len(self.proposal.votes)
-        approve_votes = sum(1 for v in self.proposal.votes.values() if v)
-
-        if len(self.proposal.participants) == 2:
-            # P2P: require unanimous approval
-            return approve_votes == 2 and total_votes == 2
-        else:
-            # Multi-party: require majority
-            return approve_votes > (total_votes / 2)
+        return all(self.proposal.votes.get(node_id) is True for node_id in participants)
 
 
 class NewSessionProposalManager:
@@ -124,8 +129,29 @@ class NewSessionProposalManager:
             deadline=deadline
         )
 
-        # Auto-vote approve for initiator
-        proposal.votes[self.core_service.p2p_manager.node_id] = True
+        # Auto-vote approve for initiator — signed like any other, so the
+        # evidence a marker carries is complete rather than "everyone but me".
+        me = self.core_service.p2p_manager.node_id
+        proposal.votes[me] = True
+        try:
+            from dpc_client_core.signing import sign_vote
+            own = {
+                "proposal_id": proposal_id,
+                "vote": True,
+                "voter_node_id": me,
+                "conversation_id": conversation_id,
+            }
+            own.update(sign_vote(
+                proposal_id=proposal_id,
+                conversation_id=conversation_id,
+                voter_node_id=me,
+                vote=True,
+                timestamp=timestamp,
+            ))
+            if own.get("signature"):
+                proposal.signed_votes[me] = own
+        except Exception as e:  # noqa: BLE001 — unsigned is survivable, crashing is not
+            self.logger.warning("Could not sign own proposal vote: %s", e)
 
         # Create voting session
         session = VotingSession(
@@ -162,7 +188,8 @@ class NewSessionProposalManager:
         self,
         proposal_id: str,
         voter_node_id: str,
-        approve: bool
+        approve: bool,
+        signed_payload: Optional[Dict[str, Any]] = None,
     ) -> None:
         """
         Record a vote for a proposal and check if voting is complete.
@@ -171,6 +198,9 @@ class NewSessionProposalManager:
             proposal_id: UUID of the proposal
             voter_node_id: Node ID of the voter
             approve: True for approve, False for reject
+            signed_payload: the vote as it arrived, when it carried a signature.
+                Kept so an approved reset can prove itself later without the
+                history that is about to be cleared.
         """
         session = self.active_sessions.get(proposal_id)
         if not session:
@@ -179,6 +209,8 @@ class NewSessionProposalManager:
 
         # Record vote
         session.proposal.votes[voter_node_id] = approve
+        if signed_payload and signed_payload.get("signature"):
+            session.proposal.signed_votes[voter_node_id] = dict(signed_payload)
 
         vote_str = "approve" if approve else "reject"
         self.logger.info(
@@ -265,6 +297,29 @@ class NewSessionProposalManager:
                 local_conversation_id = conversation_id
             else:
                 local_conversation_id = proposal.initiator_node_id
+
+        # A reset is a fact about the group, not a message about it (ADR-038
+        # Q3). Written by whoever can show the quorum — here, by everyone who
+        # reached this point — and idempotent, so the copies agree. A node that
+        # rejoins later reads the boundary and clears what predates it instead
+        # of handing its old history back and quietly undoing the reset.
+        if is_approved and is_group:
+            try:
+                group_manager = getattr(self.core_service, "group_manager", None)
+                if group_manager:
+                    group_manager.set_session_marker(
+                        local_conversation_id,
+                        datetime.now(timezone.utc).isoformat(),
+                        evidence={
+                            "proposal_id": proposal_id,
+                            "conversation_id": proposal.conversation_id,
+                            "participants": sorted(proposal.participants),
+                            "votes": dict(proposal.signed_votes),
+                        },
+                    )
+            except Exception as e:  # noqa: BLE001 — a missing marker must not block the reset
+                self.logger.error("Could not set session marker for %s: %s",
+                                  local_conversation_id, e)
 
         # If approved: clear local history
         if is_approved:
@@ -369,6 +424,18 @@ class NewSessionProposalManager:
         proposal_id = payload.get("proposal_id")
         conversation_id = payload.get("conversation_id")
 
+        # The same proposal can arrive twice — relayed by two neighbours, or
+        # resent — and rebuilding the session would drop every vote recorded so
+        # far, including this node's own, silently. The first arrival wins; a
+        # later copy is acknowledged and ignored.
+        existing = self.active_sessions.get(proposal_id)
+        if existing is not None:
+            self.logger.debug(
+                "Ignoring duplicate proposal %s from %s: %d vote(s) already recorded",
+                proposal_id[:8], sender_node_id[:20], len(existing.proposal.votes)
+            )
+            return
+
         self.logger.info(
             "Received new session proposal %s from %s for conversation %s",
             proposal_id[:8],
@@ -400,25 +467,37 @@ class NewSessionProposalManager:
         if self.on_proposal_received:
             await self.on_proposal_received(payload)
 
-    async def handle_vote_message(self, sender_node_id: str, payload: Dict[str, Any]) -> None:
+    async def handle_vote_message(
+        self,
+        sender_node_id: str,
+        payload: Dict[str, Any],
+        voter_node_id: Optional[str] = None,
+    ) -> None:
         """
         Handle incoming VOTE_NEW_SESSION message from peer.
 
         Args:
-            sender_node_id: Node ID of the voter
+            sender_node_id: the peer that handed us the message — the transport
+                hop, which in a star is usually not the voter
             payload: Vote payload
+            voter_node_id: who actually cast it, as established by the handler's
+                signature check. Falls back to the transport peer only when the
+                caller could not establish it, which is the old behaviour and
+                the reason a relayed reject was once recorded as the relayer's.
         """
         proposal_id = payload.get("proposal_id")
         vote = payload.get("vote")  # True = approve, False = reject
+        voter = voter_node_id or sender_node_id
 
         self.logger.info(
-            "Received vote from %s: %s",
-            sender_node_id[:20],
-            "approve" if vote else "reject"
+            "Received vote from %s: %s%s",
+            voter[:20],
+            "approve" if vote else "reject",
+            f" (relayed by {sender_node_id[:20]})" if voter != sender_node_id else "",
         )
 
         # Record vote
-        await self.record_vote(proposal_id, sender_node_id, vote)
+        await self.record_vote(proposal_id, voter, vote, signed_payload=payload)
 
     def get_pending_proposal(self, conversation_id: str) -> Optional[NewSessionProposal]:
         """

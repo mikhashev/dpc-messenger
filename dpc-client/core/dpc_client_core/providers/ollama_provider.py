@@ -3,13 +3,16 @@
 import asyncio
 import json
 import logging
+import time
 import uuid
+from contextlib import asynccontextmanager
 from types import SimpleNamespace
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any, Optional, List, Union
 
+import httpx
 import ollama
 
-from .base import AIProvider
+from .base import AIProvider, REASONING_OFF, normalize_reasoning_effort
 
 logger = logging.getLogger(__name__)
 
@@ -38,59 +41,434 @@ OLLAMA_THINKING_MODELS = [
     "qwen3",            # Qwen3 family (3b, 8b, 14b, 30b, 32b, 235b) — native think param
 ]
 
+# What the daemon says a model can do, keyed by model name. Both lists above
+# are a copy of knowledge Ollama already has, and a copy goes stale the day a
+# model is published: muse-glimmer is vision- and thinking-capable and appears
+# in neither. So ask, and keep the lists for a daemon too old to answer.
+# Cached process-wide because the answer cannot change without the model being
+# pulled again; measured 2026-08-13: 72 ms on the first call, 3 ms after.
+# The whole answer is kept rather than the capability list alone: the same
+# response also carries the model's own sampling defaults, and reading them
+# from a second call would double a question the daemon has already answered.
+_MODEL_INFO: Dict[str, Any] = {}
+
+# A silent host is one fact, not one per model: without this window eleven
+# aliases each buy the same timeout (23.5 s measured with the daemon down).
+# Short, because a daemon that came back is not asked until it expires.
+_HOST_SILENT_SECONDS = 5.0
+
+# When each host was last found silent. Not a cached answer — it only says
+# "do not ask yet", and is dropped as soon as the daemon answers anything.
+_HOST_SILENT_SINCE: Dict[str, float] = {}
+
+# The question is asked from paths that run on the event loop. Against a
+# local daemon it costs milliseconds, but `host` may be another machine, and
+# a black-hole address with no timeout hangs on the SYN for as long as the OS
+# allows — measured: with this timeout the same call raises ConnectTimeout in
+# 1.01 s. This is the deadline, not an expectation.
+_CAPABILITY_TIMEOUT_SECONDS = 2.0
+
+# The deadline a call gets when neither the caller nor the alias names one.
+# Raised from 300s on 2026-08-17, and the old number was not a budget: it was
+# headroom for a large model's first VRAM load, doing duty as a deadline for
+# everything. It was paid three times in one day — a sleep synthesis over a
+# hundred archives died on it twice overnight and took both morning briefs
+# with it, and an agent tool round died on it the next afternoon. Nobody waits
+# on these calls the way a person waits on a chat reply, so a generous
+# deadline costs only that a genuinely stuck daemon is noticed later; a short
+# one costs the work.
+DEFAULT_TIMEOUT_SECONDS = 900.0
+
+
+def _reported_capabilities(model: str, host: Optional[str]) -> Optional[frozenset]:
+    """Capabilities as Ollama reports them, or None if it could not be asked.
+
+    Three answers, and they must stay three. A frozenset is what the daemon
+    said — empty means it answered and named nothing. None means nobody
+    could tell us, either because the daemon is unreachable or because it is
+    old enough not to carry the field at all, and then the substring lists
+    below decide. Folding the third case into an empty set would quietly
+    strip vision from a model that has it."""
+    info = _describe(model, host)
+    if info is None:
+        return None
+    reported = getattr(info, "capabilities", None)
+    return None if reported is None else frozenset(reported)
+
+
+def _host_key(host: Optional[str]) -> str:
+    """One key per daemon; None and "" both mean the SDK's default host."""
+    return host or ""
+
+
+def _host_is_silent(key: str) -> bool:
+    """Whether asking this daemon again now would only buy the same timeout."""
+    since = _HOST_SILENT_SINCE.get(key)
+    if since is None:
+        return False
+    if time.monotonic() - since < _HOST_SILENT_SECONDS:
+        return True
+    del _HOST_SILENT_SINCE[key]
+    return False
+
+
+def _describe(model: str, host: Optional[str]) -> Optional[Any]:
+    """The daemon's whole answer about a model, or None if it could not be
+    asked. One call per model per process — and while a host is silent, one
+    call per host rather than one per model."""
+    if model in _MODEL_INFO:
+        return _MODEL_INFO[model]
+    key = _host_key(host)
+    if _host_is_silent(key):
+        return None
+    try:
+        info = ollama.Client(
+            host=host, timeout=_CAPABILITY_TIMEOUT_SECONDS
+        ).show(model)
+    except httpx.RequestError as e:
+        # No response at all: a fact about the host, not about this model.
+        _HOST_SILENT_SINCE[key] = time.monotonic()
+        logger.debug("Ollama at %s did not answer about %s (%s); skipping it for %.0fs",
+                     key or "default host", model, e, _HOST_SILENT_SECONDS)
+        return None
+    except Exception as e:
+        # The daemon answered, with an error about this model — the host is up.
+        _HOST_SILENT_SINCE.pop(key, None)
+        logger.debug("Ollama could not describe %s: %s", model, e)
+        return None
+    _HOST_SILENT_SINCE.pop(key, None)
+    _MODEL_INFO[model] = info
+    return info
+
+
+def _model_default(model: str, host: Optional[str], key: str) -> Optional[str]:
+    """A sampling default from the model's own Modelfile, as the daemon reports
+    it, or None if it does not name one.
+
+    `/api/show` returns these as the text of the PARAMETER lines — one
+    `name<spaces>value` per line — which is why this parses rather than
+    indexes. Only the value is returned, and as a string: it is for a log
+    line, and rounding it into a float would let `1` come back as `1.0` and
+    read as a number we chose."""
+    info = _describe(model, host)
+    text = getattr(info, "parameters", None) if info is not None else None
+    if not text:
+        return None
+    for line in text.splitlines():
+        name, _, value = line.strip().partition(" ")
+        if name == key and value.strip():
+            return value.strip()
+    return None
+
 
 class OllamaProvider(AIProvider):
     def __init__(self, alias: str, config: Dict[str, Any]):
         super().__init__(alias, config)
         self.client = ollama.AsyncClient(host=config.get("host"))
-        self._client_loop: Optional[Any] = None  # event loop self.client is bound to
+        # The loop `self.client` belongs to. Captured here when there is one,
+        # so the long-lived service loop keeps a reusable client; None means
+        # the first request adopts whatever loop it runs on.
+        try:
+            self._own_loop: Optional[Any] = asyncio.get_running_loop()
+        except RuntimeError:
+            self._own_loop = None
         self._last_thinking: Optional[str] = None
+        # Said once per provider, not once per round: both are properties of the
+        # (model, alias) pair, so repeating them per call would bury the log
+        # without telling anyone anything new.
+        self._effort_clamped_logged = False
+        self._effort_ignored_logged = False
+        self._effort_unknown_logged = False
+        self._effort_over_configured_off_logged = False
+        self._temperature_override_logged = False
 
-    def _client_for_loop(self) -> "ollama.AsyncClient":
-        """Return an AsyncClient bound to the current running event loop.
+    @asynccontextmanager
+    async def _client(self):
+        """Yield a client usable on the running loop, closing it if it is ours.
 
-        Agent tools run each async call in a fresh event loop that is closed
-        afterward (tools/registry.py execute), so a client cached across calls
-        ends up with an httpx connection pool bound to a dead loop → the next
-        call fails with 'Event loop is closed'. Recreate the client whenever the
-        running loop changes; within one persistent loop (chat) it is built once.
+        An httpx pool belongs to the loop that opened it, and agent tools run
+        each async call in a fresh loop that is closed afterwards
+        (tools/registry.py execute). The previous version handled that by
+        replacing `self.client` whenever the running loop changed — and
+        dropping the old one **without closing it**, because its loop was
+        already dead. Every such call leaked a client holding an open socket
+        to Ollama with a read still outstanding. One of those sockets is what
+        parked the process inside `IocpProactor.close()` at shutdown, where
+        the wait is unbounded: the exit never completed and the process had
+        to be killed.
+
+        Now the shared client is only ever used on the loop it belongs to.
+        Any other loop gets its own client and closes it before returning, on
+        that same loop — so nothing outlives its pool and shutdown has no
+        orphans to find. The cost is one connection per request from those
+        loops, which against a local Ollama is nothing; the old cache bought
+        no reuse there anyway, since each per-call loop rebuilt the client
+        regardless.
         """
         try:
             loop = asyncio.get_running_loop()
         except RuntimeError:
             loop = None
-        if self._client_loop is None:
-            # First request (or an externally-injected/mocked client): adopt the
-            # current loop without recreating, so the existing client is kept.
-            self._client_loop = loop
-        elif self._client_loop is not loop:
-            # The loop we were bound to has been replaced (agent per-call loop
-            # closed) — rebuild on the new one.
-            self.client = ollama.AsyncClient(host=self.config.get("host"))
-            self._client_loop = loop
-        return self.client
+        if self._own_loop is None:
+            self._own_loop = loop
+        if loop is self._own_loop:
+            yield self.client
+            return
+        client = ollama.AsyncClient(host=self.config.get("host"))
+        try:
+            yield client
+        finally:
+            try:
+                await client.close()
+            except Exception as exc:
+                logger.debug(
+                    "OllamaProvider '%s': closing per-call client failed: %s",
+                    self.alias, exc,
+                )
 
     def supports_vision(self) -> bool:
-        """Check if this Ollama model supports vision/multimodal inputs."""
+        """Whether this model takes images — the daemon's answer if there is
+        one, the name list only when there is not."""
+        caps = _reported_capabilities(self.model, self.config.get("host"))
+        if caps is not None:
+            return "vision" in caps
         return any(vm in self.model.lower() for vm in OLLAMA_VISION_MODELS)
 
     def supports_thinking(self) -> bool:
-        """Check if this Ollama model is a thinking/reasoning model."""
+        """Whether this model can reason before answering. Can, not should —
+        see `_think_flag`."""
+        caps = _reported_capabilities(self.model, self.config.get("host"))
+        if caps is not None:
+            return "thinking" in caps
         return any(tm in self.model.lower() for tm in OLLAMA_THINKING_MODELS)
+
+    def _think_flag(self, effort: Optional[str] = None) -> Optional[Union[bool, str]]:
+        """What to send as `think`: the per-call effort if there is a usable
+        one, else the configuration, else the capability.
+
+        A model that *can* think is not a model that *should* on every call:
+        qwen3.5:9b spent a whole QC verdict reasoning and returned nothing —
+        83,693 characters of thinking, `done_reason=length`, empty content.
+        Until now the capability decided alone, and the only way to say no
+        was to keep the model out of a hardcoded list.
+
+        This is the one place `think` is decided; it used to be three copies
+        at the call sites — a second source deciding the same flag is how the
+        two lists above came to disagree with the daemon.
+
+        The precedence between the per-call effort and the configuration is
+        asymmetric, by decision (Mike, 2026-08-16): **a room may always spend
+        less than the alias was set up to spend, and may never spend more.**
+        So a per-call `off` beats a configured `think: true`, and a per-call
+        *level* does not beat a configured `think: false`. That flag is
+        written by whoever owns the alias, and it is usually there for the
+        reason below — a model whose thinking eats the answer. Whoever turns
+        a knob in a room cannot see that, and until now could switch such a
+        model back on from another window.
+
+        Two things the daemon taught us in the measuring, both load-bearing:
+
+        `max` is sent as `high` because the Python SDK types the field as
+        `Literal['low','medium','high']`: `max` dies in pydantic before a
+        request leaves the process, so the clamp is what makes such a call
+        possible at all. It is required and it is not free. On qwen3.8 a fixed
+        seed makes the two byte-identical, which is where "nothing is lost"
+        came from — but `muse-glimmer` separates them, measured twice
+        independently and in opposite directions, so on that model the clamp
+        sends a depth nobody asked for. Sending the real `max` means reaching
+        past the SDK with a raw body, and that is not worth doing while no
+        agent sits on such an alias.
+
+        A level sent to a model that cannot think is **refused**, not ignored:
+        `400 "<model> does not support thinking"`. So the effort is dropped for
+        such a model rather than passed on — a group-scoped effort must not be
+        able to kill every call an agent makes because of the model it sits on.
+        `think=False` is the only value every model accepts — which is also why
+        `off` is answered before the capability is consulted at all. It is the
+        foot of the same scale, not a fifth level, and it is the direction the
+        nearer scope is allowed to win in."""
+        level = normalize_reasoning_effort(effort)
+        if level == REASONING_OFF:
+            return False
+        if level is not None:
+            if self.supports_thinking():
+                configured = self.config.get("think")
+                if configured is not None and not configured:
+                    if not self._effort_over_configured_off_logged:
+                        logger.info(
+                            "OllamaProvider '%s': reasoning_effort='%s' was not "
+                            "applied — this alias sets think: false, and a level "
+                            "chosen elsewhere does not switch thinking back on. "
+                            "Send 'off' to go lower, or change the alias.",
+                            self.alias, level,
+                        )
+                        self._effort_over_configured_off_logged = True
+                    return False
+                if level == "max":
+                    if not self._effort_clamped_logged:
+                        logger.info(
+                            "OllamaProvider '%s': could not send effort 'max' — the SDK "
+                            "types the field as low/medium/high, so 'high' went to %s "
+                            "instead. Some models treat the two as one depth and some "
+                            "do not.", self.alias, self.model,
+                        )
+                        self._effort_clamped_logged = True
+                    return "high"
+                return level
+            if not self._effort_ignored_logged:
+                logger.info(
+                    "OllamaProvider '%s': reasoning_effort='%s' ignored — %s does "
+                    "not report thinking, and a level would be refused with a 400.",
+                    self.alias, level, self.model,
+                )
+                self._effort_ignored_logged = True
+        elif (effort or "").strip():
+            # A word arrived and it is not one we know. Falling through to the
+            # configuration is the right behaviour — guessing at a level would be
+            # the very substitution this vocabulary exists to stop — but doing it
+            # silently is not: `none` and `minimal` are real DeepSeek words that a
+            # group's stored effort can carry to an Ollama agent, and without this
+            # line they would read as "the operator chose the configured value".
+            # The empty string is not this case: it is the header's own "Config".
+            if not self._effort_unknown_logged:
+                logger.info(
+                    "OllamaProvider '%s': reasoning_effort=%r is not a level this "
+                    "provider knows — it was dropped, and `think` is decided by "
+                    "the configuration or, failing that, by what %s reports.",
+                    self.alias, effort, self.model,
+                )
+                self._effort_unknown_logged = True
+        configured = self.config.get("think")
+        if configured is not None:
+            return bool(configured)
+        return True if self.supports_thinking() else None
+
+    def _warn_if_temperature_overrides_the_model(self, sent: Any) -> None:
+        """Say once that a configured temperature is displacing the model's own.
+
+        This board found five of seven Ollama aliases carrying `temperature:
+        0.7` that nobody had chosen — the number the old code used as a
+        sentinel for "unset", written into the config file by the editor's own
+        placeholder. They now reach the daemon and displace whatever the
+        Modelfile asks for. Which of the two numbers is better is not for this
+        code to say: the operator's is sent either way, and the log names both
+        so that a value can be seen rather than inherited.
+
+        Deliberately not gated on thinking. The decided package narrowed this
+        to thinking-on calls by analogy with DeepSeek, where the vendor
+        documents the field as ignored while reasoning; on Ollama no such
+        claim exists and none was measured, so the informative event is the
+        override itself, which is exactly as unintended on a model that cannot
+        think."""
+        if self._temperature_override_logged:
+            return
+        default = _model_default(self.model, self.config.get("host"), "temperature")
+        if default is None or str(sent) == default:
+            return
+        self._temperature_override_logged = True
+        logger.info(
+            "OllamaProvider '%s': sending temperature=%s; %s asks for %s in its "
+            "own Modelfile. Clear the field in the providers editor to run at "
+            "the model's default.",
+            self.alias, sent, self.model, default,
+        )
 
     def _build_options(self, **kwargs) -> Optional[Dict[str, Any]]:
         options: Dict[str, Any] = {}
         if self.config.get("context_window"):
             options["num_ctx"] = self.config["context_window"]
-        temp = kwargs.get("temperature", self.temperature)
-        if temp != 0.7:
+        # Send a temperature when somebody chose one. The previous rule
+        # skipped the value 0.7 to mean "unset", which made a configured 0.7
+        # indistinguishable from silence: five of the seven Ollama providers
+        # on this machine ask for 0.7 in providers.json and were running at
+        # the model's own default instead — 1.0 on the two that were checked.
+        temp = kwargs.get("temperature", self.config.get("temperature"))
+        if temp is not None:
             options["temperature"] = temp
+            self._warn_if_temperature_overrides_the_model(temp)
         for key in OLLAMA_SAMPLING_PARAMS:
             if key in self.config:
                 options[key] = self.config[key]
+        # `think` is logged beside the options because it is the one parameter
+        # whose effect cannot be read back from the answer: a model may reason
+        # after being told not to, and without this line there is no way to
+        # tell that from the flag never having been sent.
         if options:
-            logger.debug(f"OllamaProvider '{self.alias}': options={options}")
+            logger.debug(
+                "OllamaProvider '%s': options=%s think=%s",
+                self.alias, options, self._think_flag(kwargs.get("reasoning_effort")),
+            )
         return options or None
+
+    def _log_usage(self, response: Any, path: str) -> None:
+        """One line per call carrying what the daemon reported, not what we guessed.
+
+        `done_reason` separates a model that stopped from one that was cut off,
+        which is the difference a whole empty-answer diagnosis rested on; it is
+        returned on every response and was read on none of the three paths.
+        Ollama reports no reasoning/content split and no cache figures — those
+        are another vendor's fields — so this says what exists and nothing it
+        cannot measure. The thinking length is a character count and is named
+        as one, because the daemon gives no token figure for it.
+
+        The three durations are ADR-040 D4-T. Every lever in that decision is
+        argued from tokens/s at depth, and the SDK has carried `load_duration`,
+        `prompt_eval_duration` and `eval_duration` on every response while DPC
+        read none of them — so «did the lever help» had no answer but a feeling.
+        This is the whole of D4-T on the Ollama side; queue wait, swap counts and
+        VRAM headroom are not in this response and need their own reader.
+        """
+        prompt_tokens = getattr(response, "prompt_eval_count", 0) or 0
+        completion_tokens = getattr(response, "eval_count", 0) or 0
+        # The same numbers the line below prints, kept where a caller can ask for
+        # them. Until this existed the tools path built this dict privately and
+        # the text path priced a count it made itself (ADR-040, the usage
+        # contract on `providers/base.py`).
+        self._record_last_usage({
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": completion_tokens,
+            "total_tokens": prompt_tokens + completion_tokens,
+        })
+        logger.info(
+            "Ollama usage: alias=%s model=%s prompt=%s completion=%s "
+            "thinking_chars=%d done=%s prompt_tps=%s eval_tps=%s load_ms=%s path=%s",
+            self.alias, self.model,
+            getattr(response, "prompt_eval_count", None),
+            getattr(response, "eval_count", None),
+            len(self._last_thinking or ""),
+            getattr(response, "done_reason", None),
+            self._tokens_per_second(getattr(response, "prompt_eval_count", None),
+                                    getattr(response, "prompt_eval_duration", None)),
+            self._tokens_per_second(getattr(response, "eval_count", None),
+                                    getattr(response, "eval_duration", None)),
+            self._milliseconds(getattr(response, "load_duration", None)),
+            path,
+        )
+
+    @staticmethod
+    def _tokens_per_second(tokens: Any, duration_ns: Any) -> str:
+        """A rate, or the word for not knowing.
+
+        A zero duration is not a fast call, it is a daemon that reported
+        nothing; dividing by it would turn a missing measurement into an
+        infinity that looks like a record.
+        """
+        try:
+            if not tokens or not duration_ns:
+                return "n/a"
+            return "{:.1f}".format(tokens / (duration_ns / 1_000_000_000))
+        except (TypeError, ZeroDivisionError):
+            return "n/a"
+
+    @staticmethod
+    def _milliseconds(duration_ns: Any) -> str:
+        """Load time, where zero is a real answer: the model was already resident."""
+        try:
+            if duration_ns is None:
+                return "n/a"
+            return str(int(duration_ns / 1_000_000))
+        except TypeError:
+            return "n/a"
 
     async def generate_response(self, prompt: str, **kwargs) -> str:
         self._last_thinking = None  # clear from previous call
@@ -99,23 +477,41 @@ class OllamaProvider(AIProvider):
 
             options = self._build_options(**kwargs)
 
-            # Timeout: configurable via providers.json "timeout" field (default 300s).
-            # Large models (9B+) can take >60s for initial VRAM load on first query.
-            timeout = self.config.get("timeout", 300.0)
+            # Timeout: the caller's first, then the alias config, then the module
+            # default. A caller that knows its own workload is a long one has to be
+            # able to say so, the way the vision path always allowed.
+            timeout = kwargs.get("timeout", self.config.get("timeout", DEFAULT_TIMEOUT_SECONDS))
 
-            response = await asyncio.wait_for(
-                self._client_for_loop().chat(
-                    model=self.model,
-                    messages=[message],
-                    options=options,
-                    think=True if self.supports_thinking() else None,
-                ),
-                timeout=timeout
-            )
+            async with self._client() as client:
+                response = await asyncio.wait_for(
+                    client.chat(
+                        model=self.model,
+                        messages=[message],
+                        options=options,
+                        think=self._think_flag(kwargs.get("reasoning_effort")),
+                        # The residency hint the vision path has always sent, on the
+                        # path an agent actually talks to all day (ADR-040 0a). It is
+                        # a TTL and not a pin — under memory pressure the daemon
+                        # evicts whatever it likes — so this stops the five-minute
+                        # idle unload and nothing more. None when unset, which the
+                        # client omits from the request.
+                        keep_alive=self.config.get("keep_alive"),
+                    ),
+                    timeout=timeout
+                )
             self._last_thinking = response['message'].thinking
             content = response['message']['content']
+            # A chat answer is read by a person who can see it is reasoning, and the
+            # alternative here is a blank message — so this path keeps the fallback
+            # and says in the log that it fired. The vision path does not: see the
+            # note there for why the same trade goes the other way.
             if not content and self._last_thinking:
+                logger.warning(
+                    "OllamaProvider '%s': no answer, returning %d characters of "
+                    "reasoning in its place.", self.alias, len(self._last_thinking),
+                )
                 content = self._last_thinking
+            self._log_usage(response, "plain")
             return content
         except asyncio.TimeoutError:
             raise RuntimeError(f"Ollama provider '{self.alias}' timed out after {timeout}s.")
@@ -170,25 +566,43 @@ class OllamaProvider(AIProvider):
             options = self._build_options(**kwargs)
 
             # Vision queries may take longer; respect provider config timeout first
-            timeout = kwargs.get("timeout", self.config.get("timeout", 300.0))
+            timeout = kwargs.get("timeout", self.config.get("timeout", DEFAULT_TIMEOUT_SECONDS))
 
-            response = await asyncio.wait_for(
-                self._client_for_loop().chat(
-                    model=self.model,
-                    messages=[message],
-                    options=options,
-                    think=True if self.supports_thinking() else None,
-                    # Keep the VL model resident for a bit so back-to-back agent QC
-                    # calls don't cold-start a reload each time (was 0 = unload
-                    # immediately). Configurable via providers.json vision_keep_alive.
-                    keep_alive=self.config.get("vision_keep_alive", "1m"),
-                ),
-                timeout=timeout
-            )
+            async with self._client() as client:
+                response = await asyncio.wait_for(
+                    client.chat(
+                        model=self.model,
+                        messages=[message],
+                        options=options,
+                        think=self._think_flag(kwargs.get("reasoning_effort")),
+                        # Keep the VL model resident for a bit so back-to-back agent
+                        # QC calls don't cold-start a reload each time (was 0 =
+                        # unload immediately). Configurable via providers.json
+                        # vision_keep_alive. Unaffected by the per-call client: this
+                        # is the model's residency in Ollama, not our connection.
+                        keep_alive=self.config.get("vision_keep_alive", "1m"),
+                    ),
+                    timeout=timeout
+                )
             self._last_thinking = response['message'].thinking
             content = response['message']['content']
+            # No fallback to the reasoning here, unlike the two text paths. What a
+            # vision call returns is read as a description of what is in the image —
+            # a transcription, a QC verdict — and reasoning handed back in that slot
+            # is a plausible lie in the one place a plausible lie is worst. Measured
+            # 2026-08-13: a page whose reasoning ran the token budget out returned
+            # 0 characters of content beside 13,788 of thinking; with the fallback,
+            # that arrives at the caller as the answer. Empty is the honest report,
+            # and `describe_image` already says "returned no description" for it.
             if not content and self._last_thinking:
-                content = self._last_thinking
+                logger.warning(
+                    "OllamaProvider '%s': vision call produced %d characters of "
+                    "reasoning and no answer (done=%s) — reporting empty rather "
+                    "than passing the reasoning off as the answer.",
+                    self.alias, len(self._last_thinking),
+                    getattr(response, "done_reason", None),
+                )
+            self._log_usage(response, "vision")
             return content
         except asyncio.TimeoutError:
             raise RuntimeError(f"Ollama vision query '{self.alias}' timed out after {timeout}s.")
@@ -287,19 +701,23 @@ class OllamaProvider(AIProvider):
         ollama_tools = self._anthropic_to_openai_tools(tools)
 
         options = self._build_options(**kwargs)
-        timeout = self.config.get("timeout", 300.0)
+        timeout = kwargs.get("timeout", self.config.get("timeout", DEFAULT_TIMEOUT_SECONDS))
 
         try:
-            response = await asyncio.wait_for(
-                self._client_for_loop().chat(
-                    model=self.model,
-                    messages=ollama_messages,
-                    tools=ollama_tools,
-                    options=options,
-                    think=True if self.supports_thinking() else None,
-                ),
-                timeout=timeout,
-            )
+            async with self._client() as client:
+                response = await asyncio.wait_for(
+                    client.chat(
+                        model=self.model,
+                        messages=ollama_messages,
+                        tools=ollama_tools,
+                        options=options,
+                        think=self._think_flag(kwargs.get("reasoning_effort")),
+                        # See the plain path: same hint, same TTL-not-a-pin caveat.
+                        # This is the path the agent loop spends its day on.
+                        keep_alive=self.config.get("keep_alive"),
+                    ),
+                    timeout=timeout,
+                )
         except asyncio.TimeoutError:
             raise RuntimeError(f"Ollama provider '{self.alias}' timed out after {timeout}s.")
         except Exception as e:
@@ -323,11 +741,20 @@ class OllamaProvider(AIProvider):
                 input=args or {},
             ))
 
+        # Same trade as the chat path: an agent round with neither an answer nor a
+        # tool call is a dead round, and the reasoning is better than nothing to
+        # continue from. Logged, so the round can be told apart afterwards.
         if not content and not tool_calls_raw and self._last_thinking:
+            logger.warning(
+                "OllamaProvider '%s': round produced neither an answer nor a tool "
+                "call, continuing on %d characters of reasoning.",
+                self.alias, len(self._last_thinking),
+            )
             content = self._last_thinking
         if on_chunk and content:
             await on_chunk(content, conversation_id)
 
+        self._log_usage(response, "tools")
         prompt_tokens = getattr(response, 'prompt_eval_count', 0) or 0
         completion_tokens = getattr(response, 'eval_count', 0) or 0
         usage = {
@@ -353,7 +780,8 @@ class OllamaProvider(AIProvider):
                 - details: Model details (family, parameter_size, etc.)
         """
         try:
-            response = await self._client_for_loop().show(model=self.model)
+            async with self._client() as client:
+                response = await client.show(model=self.model)
 
             # Parse num_ctx from modelfile
             num_ctx = None
@@ -408,7 +836,23 @@ class OllamaProvider(AIProvider):
 
     async def close(self) -> None:
         """Close the Ollama async client. Model stays loaded — Ollama manages
-        VRAM via its own keep_alive TTL (default 5 min idle → auto-unload)."""
+        VRAM via its own keep_alive TTL (default 5 min idle → auto-unload).
+
+        Per-request clients are already closed by `_client()`, on the loop
+        that opened them; this only releases the one built in __init__ (or
+        one a caller swapped in). It must not raise: shutdown used to log
+        `Error closing provider 'ollama_vision': Event loop is closed` here
+        and move on, which was the visible half of the leak — the invisible
+        half was every client replaced before it, never closed at all.
+        """
         if hasattr(self.client, 'close'):
-            await self.client.close()
+            try:
+                await self.client.close()
+            except Exception as exc:
+                logger.debug(
+                    "OllamaProvider '%s': close failed (%s) — the per-call "
+                    "clients were already closed by their own loop",
+                    self.alias, exc,
+                )
+                return
         logger.debug(f"OllamaProvider '{self.alias}': Client closed")

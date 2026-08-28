@@ -43,7 +43,10 @@ class RemotePeerProvider(AIProvider):
         self.peer_id = config.get("peer_id")
         self.model = config.get("model")  # Model to request on remote peer
         self.remote_provider = config.get("provider")  # Optional: specific provider on remote
-        self.timeout = config.get("timeout", 60.0)
+        # 1200 s: the host's own DEFAULT_TIMEOUT_SECONDS (900) plus overhead.
+        # At 60 s this provider abandoned nearly every real generation while
+        # the host kept producing tokens for a caller that had left.
+        self.timeout = config.get("timeout", 1200.0)
 
         if not self.peer_id:
             raise ValueError(f"RemotePeerProvider '{alias}' requires 'peer_id' in config")

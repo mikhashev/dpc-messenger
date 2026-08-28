@@ -73,7 +73,19 @@
                 <div class="approval-header">
                     <span class="approval-icon">⚡</span>
                     <span class="approval-title">Shell Command Approval</span>
-                    <span class="approval-agent">{request.agent_name}</span>
+                </div>
+                <!-- Who is asking and from where, on its own line at full
+                     contrast. In the corner at 0.7 opacity it was there and
+                     still unreadable — and this is the line that makes the
+                     question answerable. -->
+                <div class="approval-origin-line">
+                    <span class="origin-agent">{request.agent_name}</span>
+                    {#if request.conversation_title || request.conversation_id}
+                        <span class="origin-sep">in</span>
+                        <span class="origin-chat"
+                            >{request.conversation_title || request.conversation_id}</span
+                        >
+                    {/if}
                 </div>
                 <div class="approval-command">
                     <code>{request.command}</code>
@@ -190,6 +202,12 @@
         flex-direction: column;
         gap: 8px;
         max-width: 420px;
+        /* Anchored to the bottom, so anything past the ceiling leaves through
+           the top of the window — where no scrollbar reaches it. Three cards
+           stack here (MAX_VISIBLE_CARDS), which gets there without any one of
+           them being tall. */
+        max-height: calc(100vh - 100px);
+        overflow-y: auto;
     }
 
     .shell-approval-card {
@@ -216,10 +234,30 @@
         color: var(--text-warning, #f9a825);
     }
 
-    .approval-agent {
-        margin-left: auto;
-        font-size: 0.85em;
-        opacity: 0.7;
+    /* Who asked and from where. Two agents can raise the same command in two
+       chats in the same second, so this is the line that makes the request
+       answerable — it is not decoration and does not get corner treatment. */
+    .approval-origin-line {
+        display: flex;
+        align-items: baseline;
+        gap: 6px;
+        flex-wrap: wrap;
+        margin-bottom: 8px;
+        font-size: 0.9em;
+    }
+
+    .origin-agent {
+        font-weight: 600;
+        color: var(--text-primary, #e6e6e6);
+    }
+
+    .origin-sep {
+        opacity: 0.6;
+    }
+
+    .origin-chat {
+        font-weight: 600;
+        color: var(--text-info, #4fc3f7);
     }
 
     .approval-command {
@@ -228,6 +266,12 @@
         border-radius: 4px;
         margin-bottom: 8px;
         overflow-x: auto;
+        /* A wrapped command grows down, and the card grows up: a docker exec
+           carrying a heredoc took the title and the who-asked line off the
+           screen. The command scrolls in its own box, as the result card's
+           output already does. */
+        max-height: 200px;
+        overflow-y: auto;
     }
 
     .approval-command code {

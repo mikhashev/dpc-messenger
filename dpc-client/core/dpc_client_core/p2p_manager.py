@@ -11,9 +11,10 @@ import time
 from typing import Dict, Any, Callable, Tuple, Union, Optional
 
 from cryptography import x509
+from cryptography.hazmat.primitives import serialization
 import websockets
 
-from dpc_protocol.crypto import generate_node_id, load_identity, generate_identity
+from dpc_protocol.crypto import DPC_HOME_DIR, generate_node_id, load_identity, generate_identity
 from dpc_protocol.protocol import read_message, write_message, create_hello_message
 from dpc_protocol.pcm_core import PCMCore, PersonalContext
 from dpc_protocol.utils import parse_dpc_uri
@@ -533,6 +534,10 @@ class P2PManager:
                     f"— connection rejected"
                 )
 
+            # Keep what the three checks above just proved — otherwise every
+            # signature this peer ever makes verifies as None ("cannot verify").
+            self._persist_peer_certificate(peer_node_id, cert_pem)
+
             logger.info("Connection from node: %s (identity verified)", peer_node_id)
             if peer_name:
                 logger.info("Peer name: %s", peer_name)
@@ -738,6 +743,14 @@ class P2PManager:
 
             logger.info("TLS certificate validated successfully for %s", target_node_id)
 
+            # Dialling out, the peer's cert arrives over TLS and never in HELLO
+            # (HELLO_ACK carries only name and node_id), so this is the only
+            # place an outbound connection can learn it.
+            self._persist_peer_certificate(
+                target_node_id,
+                peer_cert.public_bytes(serialization.Encoding.PEM).decode("utf-8")
+            )
+
             # Read the server's challenge nonce (new in authenticated HELLO protocol).
             import base64 as _b64
             challenge_msg = await read_message(reader)
@@ -938,10 +951,20 @@ class P2PManager:
 
             # Verify CN matches expected node_id
             if cn != expected_node_id:
-                logger.error(
-                    "Certificate validation failed: CN='%s' but expected node_id='%s'",
-                    cn, expected_node_id
-                )
+                if cn.strip() == expected_node_id.strip():
+                    # Naming the cause, because the generic message below ends
+                    # with "MITM attack detected" and a stray space is not one.
+                    logger.error(
+                        "Certificate validation failed on whitespace alone: "
+                        "CN=%r vs expected %r — the identity matches, the URI "
+                        "picked up whitespace in transit",
+                        cn, expected_node_id
+                    )
+                else:
+                    logger.error(
+                        "Certificate validation failed: CN=%r but expected node_id=%r",
+                        cn, expected_node_id
+                    )
                 return False
 
             logger.info("Certificate validated: node_id=%s", cn)
@@ -1057,6 +1080,52 @@ class P2PManager:
 
         except Exception as e:
             logger.warning("HELLO identity verification failed for %s: %s", peer_node_id, e)
+            return False
+
+    def _persist_peer_certificate(
+        self,
+        peer_node_id: str,
+        cert_pem: str,
+        peers_dir: Optional[Path] = None
+    ) -> bool:
+        """Remember a peer's certificate so its signatures stay verifiable.
+
+        Without this, ~/.dpc/peers/ never fills and CommitSigner.verify_signature
+        answers None ("cert not cached") for every peer, every time — so message
+        signatures can be produced but never checked.
+
+        The identity is re-derived here rather than trusted from the caller: the
+        outbound path validates CN alone (_validate_peer_certificate), and a CN
+        is a claim. node_id is the fingerprint of the public key, so a cert whose
+        key hashes to the claimed node_id is that peer's by construction — which
+        also makes overwriting a re-issued cert for the same key safe.
+
+        Returns:
+            True if the certificate is now stored, False if it was refused.
+        """
+        if peers_dir is None:
+            peers_dir = DPC_HOME_DIR / "peers"
+
+        try:
+            cert = x509.load_pem_x509_certificate(cert_pem.encode("utf-8"))
+            derived_id = generate_node_id(cert.public_key())
+            if derived_id != peer_node_id:
+                logger.warning(
+                    "Refusing to cache certificate for %s: its public key hashes to %s",
+                    peer_node_id, derived_id
+                )
+                return False
+
+            peers_dir.mkdir(parents=True, exist_ok=True)
+            cert_path = peers_dir / f"{peer_node_id}.crt"
+            tmp_path = cert_path.with_suffix(".crt.tmp")
+            tmp_path.write_text(cert_pem, encoding="utf-8")
+            tmp_path.replace(cert_path)
+            logger.debug("Cached peer certificate for %s", peer_node_id)
+            return True
+
+        except Exception as e:
+            logger.warning("Could not cache certificate for %s: %s", peer_node_id, e)
             return False
 
     async def _listen_to_peer(self, peer: PeerConnection):

@@ -59,6 +59,9 @@ class NativeVectorIndex(VectorIndex):
     def remove_by_source(self, source_file: str) -> int:
         return self._inner.remove_by_source(source_file)
 
+    def remove_by_sources(self, source_files) -> int:
+        return self._inner.remove_by_sources(source_files)
+
     def save(self) -> None:
         self._inner.save()
 
@@ -96,11 +99,29 @@ class NativeTextIndex(TextIndex):
         ]
         self._inner.add(texts, metas)
 
+    def begin_batch(self) -> None:
+        """Forward the deferral the indexing pass asks for.
+
+        `BM25Index.add` rebuilds the whole index on every call, and it implements
+        `begin_batch`/`end_batch` to skip that during a bulk pass. The pass asks
+        for it behind a `hasattr` check, so while this wrapper lacked the two
+        methods the request was answered "no" in silence: a 328-document rebuild
+        rebuilt the index twenty-one times, once per batch of sixteen, and the
+        cost grows with the square of the corpus.
+        """
+        self._inner.begin_batch()
+
+    def end_batch(self) -> None:
+        self._inner.end_batch()
+
     def search(self, query: str, top_k: int) -> List[Tuple[dict, float]]:
         return self._inner.search(query, top_k)
 
     def remove_by_source(self, source_file: str) -> int:
         return self._inner.remove_by_source(source_file)
+
+    def remove_by_sources(self, source_files) -> int:
+        return self._inner.remove_by_sources(source_files)
 
     def save(self) -> None:
         self._inner.save()

@@ -3,7 +3,7 @@
 
 <script lang="ts">
   import { createEventDispatcher } from 'svelte';
-  import { sendCommand } from '$lib/coreService';
+  import { sendCommand, providersList } from '$lib/coreService';
   import AgentPermissionsPanel from './AgentPermissionsPanel.svelte';
   import { confirmAsync } from '$lib/utils/dialog';
 
@@ -22,6 +22,7 @@
       allow_nodes: string[];
       allow_groups: string[];
       allowed_models: string[];
+      serving_alias?: string | null;
     };
     transcription?: {
       _comment?: string;
@@ -171,7 +172,6 @@
   // Intermediate string variables for textarea editing (compute sharing)
   let allowNodesText: string = '';
   let allowGroupsText: string = '';
-  let allowedModelsText: string = '';
 
   // Intermediate string variables for textarea editing (transcription sharing)
   let transcriptionAllowNodesText: string = '';
@@ -225,11 +225,17 @@
     }
   }
 
+  // The aliases that can serve a peer's inference. Whisper is left out: it is
+  // reached through Transcription Sharing, which has a gate of its own.
+  $: servingAliasChoices = ($providersList || []).filter((entry) => entry.type !== 'local_whisper');
+  $: servingAliasMissing =
+    !!displayRules?.compute?.serving_alias &&
+    !servingAliasChoices.some((entry) => entry.alias === displayRules?.compute?.serving_alias);
+
   // Sync string variables with arrays when entering edit mode
   $: if (editMode && editedRules?.compute) {
     allowNodesText = editedRules.compute.allow_nodes.join('\n');
     allowGroupsText = editedRules.compute.allow_groups.join('\n');
-    allowedModelsText = editedRules.compute.allowed_models.join('\n');
   }
 
   // Sync transcription string variables with arrays when entering edit mode
@@ -642,10 +648,14 @@
         : displayRules.agent_profiles?.[selectedAgentId] || displayRules.dpc_agent || null)
     : null;
 
+  // An agent with no profile of its own inherits the global one, and the panel binds
+  // to whatever this returns. Returning null for that case handed the tool checkboxes
+  // a null to write through — one thrown setter per checkbox. Copy-on-write still runs
+  // below and replaces this with the agent's own copy before anything is saved.
   $: effectiveEditProfile = editedRules
     ? (selectedAgentId === 'default'
         ? editedRules.dpc_agent || null
-        : editedRules.agent_profiles?.[selectedAgentId] || null)
+        : editedRules.agent_profiles?.[selectedAgentId] || editedRules.dpc_agent || null)
     : null;
 
   // Track whether current agent uses inherited (global) settings
@@ -658,6 +668,21 @@
   // This ensures edits never mutate the shared dpc_agent object.
   $: if (editMode && selectedAgentId && selectedAgentId !== 'default' && editedRules) {
     ensureAgentProfileExists();
+  }
+
+  // Write one rule without `bind:` to a member expression.
+  //
+  // `bind:value={obj[key]}` where `key` comes from an `{#each ... as [key, …]}`
+  // compiles to a setter carrying an invalidation list, and that list is built
+  // across all the like-shaped binds in this file: the generated code for the hub
+  // select referenced `scopeName`, `presetName`, `groupName` and `nodeId` — each-block
+  // variables from elsewhere in the template, undeclared at that point. The first
+  // reactive flush that reached it threw a ReferenceError, which aborted the flush
+  // that was creating a new agent's permission profile.
+  function setRule(target: any, key: string, value: any): void {
+    if (!target) return;
+    target[key] = value;
+    editedRules = editedRules;
   }
 
   // Create agent profile as copy of global settings (copy-on-write)
@@ -1068,7 +1093,7 @@
                     <div class="rule-item">
                       <strong>{path}:</strong>
                       {#if editMode && editedRules && editedRules.hub}
-                        <select id="hub-rule-{path}" name="hub-rule-{path}" bind:value={editedRules.hub[path]}>
+                        <select id="hub-rule-{path}" name="hub-rule-{path}" value={editedRules.hub[path]} on:change={(e) => setRule(editedRules?.hub, path, e.currentTarget.value)}>
                           <option value="allow">allow</option>
                           <option value="deny">deny</option>
                         </select>
@@ -1324,33 +1349,47 @@
                   </div>
 
                   <div class="subsection">
-                    <h4>Allowed Models</h4>
-                    <p class="help-text-small">Leave empty to allow all models.</p>
+                    <h4>Serving Alias</h4>
+                    <p class="help-text-small">
+                      The one provider alias peers are served from. Peers cannot choose:
+                      a request naming any other provider is refused, and choosing nothing
+                      shares no compute at all. This is the only control here &mdash;
+                      <code>compute.allowed_models</code> is still read from the rules file
+                      for compatibility, but once an alias decides what runs, a list of
+                      models can only refuse, never choose (ADR-040 D4-0).
+                    </p>
                     {#if editMode && editedRules}
-                      <textarea
-                        id="compute-allowed-models"
-                        name="compute-allowed-models"
-                        class="edit-textarea"
-                        rows="3"
-                        placeholder="Enter model names (one per line)"
-                        bind:value={allowedModelsText}
-                        on:blur={() => {
+                      <select
+                        id="compute-serving-alias"
+                        name="compute-serving-alias"
+                        class="inline-input"
+                        value={editedRules.compute?.serving_alias ?? ''}
+                        on:change={(e) => {
                           if (editedRules?.compute) {
-                            // Remove duplicates using Set
-                            const models = allowedModelsText.split('\n').map(s => s.trim()).filter(s => s.length > 0);
-                            editedRules.compute.allowed_models = [...new Set(models)];
-                            // Update textarea to show deduplicated list
-                            allowedModelsText = editedRules.compute.allowed_models.join('\n');
+                            const v = (e.currentTarget as HTMLSelectElement).value;
+                            editedRules.compute.serving_alias = v.length > 0 ? v : null;
                           }
                         }}
-                      ></textarea>
+                      >
+                        <option value="">&mdash; share no compute &mdash;</option>
+                        {#each servingAliasChoices as choice (choice.alias)}
+                          <option value={choice.alias}>{choice.alias} ({choice.model})</option>
+                        {/each}
+                        <!-- An alias no longer in providers.json would otherwise vanish from
+                             the list and be cleared by the next save without a word. It stays
+                             selectable, and says what happened to it. -->
+                        {#if servingAliasMissing}
+                          <option value={displayRules.compute.serving_alias}
+                            >{displayRules.compute.serving_alias} (not in providers.json)</option>
+                        {/if}
+                      </select>
                     {:else}
                       <div class="tags">
-                        {#each displayRules.compute.allowed_models as model}
-                          <span class="tag">{model}</span>
+                        {#if displayRules.compute.serving_alias}
+                          <span class="tag">{displayRules.compute.serving_alias}</span>
                         {:else}
-                          <span class="empty-small">All models allowed</span>
-                        {/each}
+                          <span class="empty-small">No alias designated &mdash; peer inference is refused</span>
+                        {/if}
                       </div>
                     {/if}
                   </div>
@@ -1509,7 +1548,7 @@
                             <code class="rule-path">{path}</code>
                             {#if editMode && editedRules && editedRules.ai_scopes && editedRules.ai_scopes[scopeName]}
                               <div style="display: flex; gap: 0.5rem; align-items: center;">
-                                <select id="ai-scope-rule-{scopeName}-{path}" name="ai-scope-rule-{scopeName}-{path}" bind:value={editedRules.ai_scopes[scopeName][path]}>
+                                <select id="ai-scope-rule-{scopeName}-{path}" name="ai-scope-rule-{scopeName}-{path}" value={editedRules.ai_scopes[scopeName][path]} on:change={(e) => setRule(editedRules?.ai_scopes?.[scopeName], path, e.currentTarget.value)}>
                                   <option value="allow">allow</option>
                                   <option value="deny">deny</option>
                                 </select>
@@ -1591,7 +1630,7 @@
                             <code class="rule-path">{path}</code>
                             {#if editMode && editedRules && editedRules.device_sharing && editedRules.device_sharing[presetName]}
                               <div style="display: flex; gap: 0.5rem; align-items: center;">
-                                <select id="device-sharing-rule-{presetName}-{path}" name="device-sharing-rule-{presetName}-{path}" bind:value={editedRules.device_sharing[presetName][path]}>
+                                <select id="device-sharing-rule-{presetName}-{path}" name="device-sharing-rule-{presetName}-{path}" value={editedRules.device_sharing[presetName][path]} on:change={(e) => setRule(editedRules?.device_sharing?.[presetName], path, e.currentTarget.value)}>
                                   <option value="allow">allow</option>
                                   <option value="deny">deny</option>
                                 </select>
@@ -1672,7 +1711,7 @@
                         <div class="setting-item">
                           <span><strong>File Transfer Allowed:</strong></span>
                           {#if editMode && editedRules?.file_transfer?.groups?.[groupName]}
-                            <select bind:value={editedRules.file_transfer.groups[groupName]['file_transfer.allow']}>
+                            <select value={editedRules.file_transfer.groups[groupName]['file_transfer.allow']} on:change={(e) => setRule(editedRules?.file_transfer?.groups?.[groupName], 'file_transfer.allow', e.currentTarget.value)}>
                               <option value="allow">allow</option>
                               <option value="deny">deny</option>
                             </select>
@@ -1687,7 +1726,8 @@
                               type="number"
                               min="1"
                               max="10000"
-                              bind:value={editedRules.file_transfer.groups[groupName]['file_transfer.max_size_mb']}
+                              value={editedRules.file_transfer.groups[groupName]['file_transfer.max_size_mb']}
+                              on:input={(e) => setRule(editedRules?.file_transfer?.groups?.[groupName], 'file_transfer.max_size_mb', e.currentTarget.value === '' ? null : Number(e.currentTarget.value))}
                               placeholder="No limit"
                             />
                           {:else}
@@ -1756,7 +1796,7 @@
                         <div class="setting-item">
                           <span><strong>File Transfer Allowed:</strong></span>
                           {#if editMode && editedRules?.file_transfer?.nodes?.[nodeId]}
-                            <select bind:value={editedRules.file_transfer.nodes[nodeId]['file_transfer.allow']}>
+                            <select value={editedRules.file_transfer.nodes[nodeId]['file_transfer.allow']} on:change={(e) => setRule(editedRules?.file_transfer?.nodes?.[nodeId], 'file_transfer.allow', e.currentTarget.value)}>
                               <option value="allow">allow</option>
                               <option value="deny">deny</option>
                             </select>
@@ -1771,7 +1811,8 @@
                               type="number"
                               min="1"
                               max="10000"
-                              bind:value={editedRules.file_transfer.nodes[nodeId]['file_transfer.max_size_mb']}
+                              value={editedRules.file_transfer.nodes[nodeId]['file_transfer.max_size_mb']}
+                              on:input={(e) => setRule(editedRules?.file_transfer?.nodes?.[nodeId], 'file_transfer.max_size_mb', e.currentTarget.value === '' ? null : Number(e.currentTarget.value))}
                               placeholder="No limit"
                             />
                           {:else}
@@ -2141,7 +2182,7 @@
                             <code class="rule-path">{path}</code>
                             {#if editMode && editedRules && editedRules.nodes && editedRules.nodes[nodeId]}
                               <div style="display: flex; gap: 0.5rem; align-items: center;">
-                                <select id="node-rule-{nodeId}-{path}" name="node-rule-{nodeId}-{path}" bind:value={editedRules.nodes[nodeId][path]}>
+                                <select id="node-rule-{nodeId}-{path}" name="node-rule-{nodeId}-{path}" value={editedRules.nodes[nodeId][path]} on:change={(e) => setRule(editedRules?.nodes?.[nodeId], path, e.currentTarget.value)}>
                                   <option value="allow">allow</option>
                                   <option value="deny">deny</option>
                                 </select>
@@ -2213,7 +2254,7 @@
                             <code class="rule-path">{path}</code>
                             {#if editMode && editedRules && editedRules.groups && editedRules.groups[groupName]}
                               <div style="display: flex; gap: 0.5rem; align-items: center;">
-                                <select id="group-rule-{groupName}-{path}" name="group-rule-{groupName}-{path}" bind:value={editedRules.groups[groupName][path]}>
+                                <select id="group-rule-{groupName}-{path}" name="group-rule-{groupName}-{path}" value={editedRules.groups[groupName][path]} on:change={(e) => setRule(editedRules?.groups?.[groupName], path, e.currentTarget.value)}>
                                   <option value="allow">allow</option>
                                   <option value="deny">deny</option>
                                 </select>

@@ -1,6 +1,6 @@
 # ADR-023: Group Chat Participant Model
 
-**Status:** Proposed
+**Status:** Implemented — the participant schema (`sender_type`, `agent_owner`) is in production; Phase 3's richer multi-node roster was deferred to ADR-038
 **Date:** 2026-05-03
 **Authors:** CC (draft), Ark (review)
 **Origin:** S89 group chat dogfooding discussion

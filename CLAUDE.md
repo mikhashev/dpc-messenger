@@ -2,6 +2,35 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## Kill-switch — five rules checked at the moment of action, not at reading time
+
+They open the file on purpose: a rule at the end of 1400 lines is recalled while reading
+and skipped while acting. One fires — stop, close the check, then continue.
+
+1. **A conclusion about a chat, a log or a file was drawn from a slice** (`| tail`,
+   `| head`, `| grep`, `--last` other than 10, `Read` at a tail offset on a persisted
+   dump) → the conclusion is void; re-read the channel from the start. Need less output —
+   narrow the selection inside the command, never cut the output.
+2. **A number came from a colleague, an aggregator, or my own older note** → fetch the
+   primary source (`git show`, a datasheet, the registry, a script), or mark it
+   "per X, unverified".
+3. **"Done / green / works / fixed"** → name what was actually run in this session and the
+   state of the tree (`git status`). CI is `.github/workflows/tests.yml`; until a run
+   exists for the ref in question, "green" means "locally, on my toolchain, on the layer
+   I touched".
+4. **"X is absent / does not exist / was never filed"** → enumerate, or say "not found in
+   \<place\>". A directory-wide search does not see `.gitignore`d paths, and this repo
+   keeps `backlog.md`, `ideas/`, `audit/` and `sprint-logs/` there — reach those with
+   `rg --no-ignore` or an explicit file path.
+5. **Work started without an explicit verb from the owner** ("agreed", "ok", a created
+   artefact — none of these is a command) → stop and ask. A compound instruction is
+   expanded into a queue and closed part by part.
+
+The working tree is shared — a second developer and a second CC session write here. Never
+`git add -A`; before editing `backlog.md` or another shared gitignored document, check its
+mtime and do not assume a change there is mine. `backlog.md` is a dated synthesis, not the
+state of the code: an entry tells you what to check, never that it is still true.
+
 ## Project Overview
 
 **D-PC Messenger** is a privacy-first, peer-to-peer messaging platform enabling collaborative AI intelligence through secure sharing of personal contexts. The project implements a novel "transactional communication" paradigm with end-to-end encryption and no server-stored messages.
@@ -32,11 +61,25 @@ dpc-messenger/
 **Backend (Python):**
 ```bash
 cd dpc-client/core
-uv sync                           # Install dependencies (default)
+uv sync                           # Install dependencies (default, no extras)
 uv run python run_service.py      # Run backend service (ports 8888, 9999)
 uv run pytest                     # Run tests
 uv run pytest --cov=dpc_client_core  # Run with coverage
 ```
+
+> ⚠️ **`uv sync` is declarative, not additive.** It makes the environment match
+> exactly what the command asks for, so a bare `uv sync` **uninstalls** every
+> optional extra installed earlier — `browser` (camoufox, playwright),
+> `graph-ner` (gliner), `graph-grafeo` (grafeo). Re-syncing an environment that
+> uses extras must repeat the full list in one command:
+>
+> ```bash
+> uv sync --extra browser --extra graph-ner --extra graph-grafeo
+> ```
+>
+> The same applies to `uv sync --extra X` on its own: it keeps `X` and drops the
+> others. Check with `uv sync --dry-run` before running it on a live environment
+> — it prints exactly what would be uninstalled.
 
 **Platform-Specific Dependencies (macOS Apple Silicon):**
 
@@ -51,6 +94,11 @@ uv sync
 # Install with MLX support (enables GPU-accelerated offline transcription)
 uv sync --extra mlx
 ```
+
+> These two are alternatives, not steps — and `--extra mlx` alone drops any
+> other extras (see the `uv sync` warning above). On a machine that also uses
+> `browser`/`graph-ner`/`graph-grafeo`, list them together:
+> `uv sync --extra mlx --extra browser --extra graph-ner --extra graph-grafeo`.
 
 **Technical Details:**
 - **Dependencies**: `mlx>=0.4.0`, `mlx-whisper>=0.2.0`
@@ -230,7 +278,7 @@ D-PC Messenger uses an intelligent 6-tier connection fallback hierarchy for near
    - Timeout: 15s
    - **Status**: Experimental (PoC) with DTLS encryption; **disabled by default** (`enable_hole_punching = false` in `settings.py`) — opt-in
    - Location: `connection_strategies/udp_hole_punch.py`, `managers/hole_punch_manager.py`
-   - Testing: See `docs/MANUAL_TESTING_GUIDE.md`
+   - Testing: See `archive/docs/MANUAL_TESTING_GUIDE.md` (archived)
 
 **Priority 5: Volunteer Relay** (100% NAT coverage, Hub-independent)
    - Relay discovery via DHT quality scoring (uptime 50%, capacity 30%, latency 20%)
@@ -430,7 +478,7 @@ Rollback: remove the keys + restart; FAISS state at
 - `webrtc_peer.py` - WebRTC peer wrapper (aiortc)
 - `hub_client.py` - Federation Hub communication (OAuth, WebSocket signaling)
 - `llm_manager.py` - AI provider registry and routing (implementations in `providers/`)
-  - `providers/base.py` - AbstractLLMProvider ABC
+  - `providers/base.py` - `AIProvider`, the base class every provider extends (a conventional base class, not an `abc.ABC`)
   - `providers/ollama_provider.py`, `openai_provider.py`, `anthropic_provider.py`, `zai_provider.py`
   - `providers/gemini_provider.py`, `gigachat_provider.py`, `github_models_provider.py`
   - `providers/whisper_provider.py` - local Whisper transcription
@@ -468,7 +516,7 @@ Rollback: remove the keys + restart; FAISS state at
   - CHAT_HISTORY_RESPONSE - Send conversation history to peer
   - Automatic sync on reconnect
   - Backend→frontend sync for page refresh scenarios
-  - See [CHAT_HISTORY_SYNC_DESIGN.md](docs/CHAT_HISTORY_SYNC_DESIGN.md) for full specification
+  - See [CHAT_HISTORY_SYNC_DESIGN.md](archive/docs/CHAT_HISTORY_SYNC_DESIGN.md) for full specification (archived)
 
 **Frontend Components:**
 - `NewSessionDialog.svelte` - UI for session reset voting
@@ -482,7 +530,7 @@ Rollback: remove the keys + restart; FAISS state at
 - Backend communication: `src/lib/coreService.ts` (WebSocket client, thin bootstrapper)
 - SSG mode with adapter-static (SPA fallback)
 - **Domain panels** (`src/lib/panels/`, 15 files): ChatPanel, AgentPanel, VoicePanel, GroupPanel, TelegramPanel, KnowledgeEventsPanel, ModelDownloadPanel, HistorySyncPanel, ChatHistorySyncPanel, SessionEventsPanel, MessageRouterPanel, PersistencePanel, AgentManagementPanel, GroupManagementPanel, AddAIChatPanel
-- **Domain services** (`src/lib/services/`, 10 files): messaging.ts, agents.ts, connection.ts, voice.ts, knowledge.ts, telegram.ts, groups.ts, fileTransfer.ts, session.ts, providers.ts
+- **Domain services** (`src/lib/services/`, 13 files): messaging.ts, agents.ts, connection.ts, voice.ts, knowledge.ts, telegram.ts, groups.ts, fileTransfer.ts, session.ts, providers.ts
 
 **Notification System (v0.11.3+):**
 - `notificationService.ts` - Native desktop notifications
@@ -543,11 +591,11 @@ Voice messages use the existing file transfer infrastructure (FILE_OFFER/FILE_CH
 - **Cross-platform**:
   - Windows: Native via Edge WebView2
   - Linux: Rust cpal library with ALSA/PipeWire support (v0.15.0+)
-  - macOS: Requires Info.plist permissions (see `docs/VOICE_MESSAGES_KNOWN_ISSUES.md`)
+  - macOS: Requires Info.plist permissions
 - **Storage**: `~/.dpc/conversations/{peer_id}/files/`
 
 **Transcription:**
-- **Local Whisper**: `LocalWhisperProvider` in `llm_manager.py`
+- **Local Whisper**: `LocalWhisperProvider` in `providers/whisper_provider.py`
 - **GPU Acceleration**:
   - MLX (Apple Silicon M1/M2/M3/M4) - Optional via `uv sync --extra mlx`
   - CUDA (NVIDIA GPUs) - Auto-detected
@@ -1012,6 +1060,25 @@ When adding new UI components that display data from `privacy_rules.json` (e.g.,
 
 ## Development Workflow
 
+### Commit message hook — one command per clone
+
+```bash
+git config core.hooksPath tools/git-hooks
+```
+
+The hook refuses a commit message containing Cyrillic and warns when a
+teammate's name stands beside a quotation. Both rules exist because a commit
+message is public and permanent while a chat line is neither: on 2026-08-28 ten
+of the 432 commits on `dev` were found to carry somebody's words from the team
+room, the oldest three weeks old, and the messages had to be rewritten. Write
+the reason in English and attribute the decision — «Mike's call, 2026-08-28» —
+rather than transcribing the sentence; the verbatim line belongs in the backlog
+entry or the ADR. Deliberate exception: `git commit --no-verify`.
+
+The check is `tools/git-hooks/commit_msg_check.py`; its tests run in the client
+suite (`tests/test_a_commit_message_carries_no_quoted_chat.py`), because
+`tools/` is imported by no package and would otherwise go untested.
+
 ### Starting Full Stack Locally
 
 **Terminal 1 - Hub (optional for Direct TLS only):**
@@ -1051,6 +1118,15 @@ uv run pytest -v --cov=dpc_hub
 
 **Coverage Reports:**
 - HTML: `htmlcov/index.html` (generated after running with --cov)
+
+> If `uv run pytest` fails with `uv trampoline failed to canonicalize script
+> path`, the tests are fine — the launcher `.exe` in `.venv\Scripts` has a stale
+> absolute path baked in (typically after a Windows OneDrive Documents
+> redirection is switched on or off). `uv run python -m pytest` works regardless;
+> the repair is in
+> [QUICK_START.md](QUICK_START.md#if-a-command-in-venv-stops-starting-windows).
+> Do **not** reach for `uv sync --reinstall` — it drops every extra not named on
+> the line.
 
 ---
 
@@ -1108,7 +1184,9 @@ UI connects via WebSocket (localhost:9999) for:
 ### WebRTC NAT Traversal
 
 - STUN servers for public IP discovery (Google STUN)
-- TURN server fallback for symmetric NAT (OpenRelay)
+- TURN relay for symmetric NAT — **opt-in, nothing configured by default.** Fill
+  `[turn]` username/credential/servers in `config.ini` (or `DPC_TURN_*` env vars);
+  a fresh config ships empty so no traffic reaches a third party unasked
 - ICE candidate gathering and connectivity checks
 - Connection state monitoring in `webrtc_peer.py`
 
@@ -1260,7 +1338,7 @@ uv run pytest tests/test_turn_connectivity.py
 
 ### Important Documentation
 - `README.md` - Project overview
-- `docs/QUICK_START.md` - 5-minute setup guide
+- `QUICK_START.md` - 5-minute setup guide (repo root, not `docs/`)
 - `docs/WEBRTC_SETUP_GUIDE.md` - Production deployment
 - `docs/CONFIGURATION.md` - Complete configuration reference
 - `docs/LOGGING.md` - Logging system configuration and troubleshooting
@@ -1276,7 +1354,6 @@ uv run pytest tests/test_turn_connectivity.py
   - `001-service-split.md` - Why and how service.py was split into domain services (refactor/grand)
   - `002-provider-abc.md` - LLM provider abstract base class design
   - `003-frontend-stores.md` - Frontend hybrid local/global store strategy
-- `docs/REFACTORING_GUIDELINES_FOR_CLAUDE_CODE.md` - AI-assisted refactoring principles
 
 ---
 
@@ -1289,8 +1366,7 @@ D-PC Messenger supports multiple AI providers for local and cloud-based inferenc
 - **OpenAI Compatible**: OpenAI and compatible APIs (OpenAI, LM Studio, etc.)
 - **Anthropic**: Claude models (Claude 3.5 Sonnet, Claude Opus, etc.)
 - **DeepSeek**: Pay-per-token V4 models (`deepseek-v4-flash` / `deepseek-v4-pro`) via OpenAI-compatible endpoint; native pay-per-token cost + account-balance tracking and per-call reasoning-effort control (`deepseek` provider type, `deepseek_provider.py`)
-- **Z.AI**: GLM models (GLM-4.7, GLM-4.6, GLM-4.5, etc.)
-- **Z.AI Coding Plan**: GLM Coding Plan (subscription) via the `zai_coding` provider type — separate from the pay-per-token **Z.AI** above
+- **Z.AI**: GLM models (GLM-4.7, GLM-4.6, GLM-5.3, etc.) over the prepaid pay-per-token platform API (`zai` provider type, `zai_provider.py`). One provider, one endpoint — the `zai_coding` type is gone, see below
 - **Gemini**: Google Gemini models via `gemini_provider.py`
 - **GigaChat**: Sber GigaChat models via `gigachat_provider.py`
 - **GitHub Models**: GitHub-hosted models via `github_models_provider.py`
@@ -1299,68 +1375,97 @@ D-PC Messenger supports multiple AI providers for local and cloud-based inferenc
 
 ### Z.AI Setup
 
-Z.AI provides access to the GLM series of language models, including both text and vision capabilities.
+> ⚠️ **Untested since the rewrite, and the balance is empty.** This section used to
+> contradict itself: a warning naming a month-long ban, and eight lines below it, praise
+> for the endpoint that caused the ban ("avoids prepaid balance requirements"). Both
+> halves are replaced. The code now speaks only to the prepaid platform API, but no live
+> call has been made through it — the platform balance read $0.00 on 2026-08-23 and
+> `ZAI_API_KEY` is unset — so the paths below are verified against the vendor's docs and
+> the test suite, not against a response. Tested providers remain Ollama, Anthropic and
+> DeepSeek.
 
-**Implementation Note:**
-D-PC Messenger uses Z.AI's **Anthropic-compatible endpoint** (`https://api.z.ai/api/anthropic`) via the `anthropic` Python SDK, not the PaaS endpoint. This avoids prepaid balance requirements and provides a more reliable billing experience.
+**Which endpoint, and why it is not a preference.** Z.AI sells two things through one
+account: the **GLM Coding Plan**, a flat-fee subscription, and the **open platform API**,
+prepaid and billed per token. The Coding Plan reaches the models through three base URLs
+— `api/anthropic`, `api/coding/paas/v4` and `api/v1` — and the vendor limits it to a
+published list of tools:
+
+> "The GLM Coding Plan is limited to use within the following officially supported tools
+> and product environments; users may not use their subscription benefits for tools or
+> scenarios outside of this scope."
+> — [docs.z.ai/devpack/tool/others](https://docs.z.ai/devpack/tool/others), read 2026-08-23
+
+That list holds 19 products (16 coding agents plus OpenClaw, Hermes Agent and
+SillyTavern). D-PC Messenger is not one of them, and reaching the Coding Plan from here is
+what got this account banned for a month. The same account carries the owner's ZCode
+subscription, which *is* on the list — so his own use is legitimate and ours is what puts
+it at risk. The usage policy counts: "Accounts with more than three violations may be
+banned."
+
+`ZaiProvider` therefore **raises at construction** on any of the three subscription URLs
+rather than warning, and a 1313 Fair-Usage code — which should be unreachable on the paid
+API — is logged at ERROR as a canary rather than retried.
+
+**Implementation.** The `zai` provider type talks to
+`https://api.z.ai/api/paas/v4` with the **OpenAI** SDK (`AsyncOpenAI`), converting
+Anthropic message and tool shapes on both sides because the agent layer speaks Anthropic.
+All four call paths — plain, stream, tools, vision — record usage; the stream sends
+`stream_options: {include_usage: true}` and reads the usage-only chunk, which arrives with
+an empty `choices`.
 
 **Installation:**
 ```bash
 cd dpc-client/core
-uv sync  # anthropic package is already included
+uv sync  # the openai package is already included
 ```
 
 **Configuration:**
-1. Get API key from [docs.z.ai](https://docs.z.ai)
-2. Set environment variable:
+1. Top up the prepaid balance at [z.ai/manage-apikey/billing](https://z.ai/manage-apikey/billing)
+   — auto-recharge is off by default, and the service is suspended when the balance runs out
+2. Get an API key from [docs.z.ai](https://docs.z.ai)
+3. Set the environment variable:
    ```bash
    export ZAI_API_KEY="your_key_here"
    ```
-3. Add to `~/.dpc/providers.json`:
+4. Add to `~/.dpc/providers.json`:
    ```json
    {
      "alias": "zai_glm47",
      "type": "zai",
      "model": "glm-4.7",
      "api_key_env": "ZAI_API_KEY",
-     "base_url": "https://api.z.ai/api/anthropic",
+     "base_url": "https://api.z.ai/api/paas/v4",
      "context_window": 128000
    }
    ```
 
 **Available Models:**
-- **Text Models:** `glm-4.7`, `glm-4.6`, `glm-4.5`, `glm-4.5-air`, `glm-4.5-airx`, `glm-4.5-flash`, `glm-4-plus`, `glm-4-128-0414-128k`
-- **Vision Models:** `glm-4.6v-flash`, `glm-4.5v`, `glm-4.0v`
+- **Text:** `glm-5.3`, `glm-5.2`, `glm-5.1`, `glm-5`, `glm-5-turbo`, `glm-4.7`, `glm-4.7-flashx`, `glm-4.7-flash` (free), `glm-4.6`, `glm-4.5`, `glm-4.5-x`, `glm-4.5-air`, `glm-4.5-airx`, `glm-4.5-flash` (free), `glm-4-32b-0414-128k`
+- **Vision:** `glm-5v-turbo`, `glm-4.6v`, `glm-4.6v-flashx`, `glm-4.6v-flash` (free), `glm-4.5v`, `glm-ocr`
+
+**Pricing** (USD per 1M tokens, input / cached input / output, from
+[docs.z.ai/guides/overview/pricing](https://docs.z.ai/guides/overview/pricing), 2026-08-23):
+
+| Model | Input | Cached | Output |
+|---|---|---|---|
+| GLM-5.3 / 5.2 / 5.1 | $1.4 | $0.26 | $4.4 |
+| GLM-5 | $1.0 | $0.2 | $3.2 |
+| GLM-4.7 / 4.6 / 4.5 | $0.6 | $0.11 | $2.2 |
+| GLM-4.5-Air | $0.2 | $0.03 | $1.1 |
+| GLM-4.7-FlashX | $0.07 | $0.01 | $0.4 |
+| GLM-4.7-Flash, GLM-4.5-Flash | free | free | free |
+
+The full table lives in `dpc_agent/pricing.py` (`ZAI_RATES`), which is what the cost meter
+reads. DeepSeek's doubled peak hours do **not** apply to these rates — both vendors share
+one rate table and `_peak_applies` keeps the windows with the vendor that has them.
 
 **Rate Limits:**
-Z.AI uses concurrency-based rate limiting (not token-based):
-- GLM-4.7: 2 concurrent requests
-- GLM-4.6: 3 concurrent requests
-- GLM-4.5: 10 concurrent requests
-- GLM-4-Plus: 20 concurrent requests
-
-**Example Usage:**
-```json
-{
-  "default_provider": "zai_glm47",
-  "providers": [
-    {
-      "alias": "zai_glm47",
-      "type": "zai",
-      "model": "glm-4.7",
-      "api_key_env": "ZAI_API_KEY",
-      "base_url": "https://api.z.ai/api/anthropic"
-    },
-    {
-      "alias": "zai_vision",
-      "type": "zai",
-      "model": "glm-4.6v-flash",
-      "api_key_env": "ZAI_API_KEY",
-      "base_url": "https://api.z.ai/api/anthropic"
-    }
-  ]
-}
-```
+Concurrency-based, not token-based — GLM-4.7: 2, GLM-4.6: 3, GLM-4.5: 10 concurrent
+requests. Read from the docs during the Coding Plan era and **not re-verified**: the
+platform's live limits page (`z.ai/manage-apikey/rate-limits`) is behind a login. The
+numbers survive in `dpc_agent/budget.py` and are only reached by an agent explicitly
+configured `billing_model = subscription`; a z.ai agent belongs in `pay_per_use`, where
+dollars are tracked instead.
 
 **See also:** `dpc-client/providers.example.json` for complete configuration examples
 
@@ -1431,4 +1536,4 @@ AI: Analyzes code → Detects Tauri 2.x → Suggests @tauri-apps/plugin-screen-c
 - Federation Hub: AGPL v3
 - Protocol Specs: CC0
 
-See `LICENSE.md` for details.
+See `LICENSING.md` for details. The root `LICENSE` file is the GPL v3 text the repository declares to GitHub; `LICENSING.md` is the authoritative per-component statement.

@@ -21,7 +21,9 @@ import platform
 import re
 import ssl
 import time
-from concurrent.futures import ThreadPoolExecutor
+import queue
+import threading
+from concurrent.futures import Future
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from html.parser import HTMLParser
@@ -29,7 +31,7 @@ from io import StringIO
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from .registry import ToolEntry, ToolContext
+from .registry import ToolEntry, ToolContext, agent_display_name, conversation_origin
 
 log = logging.getLogger(__name__)
 
@@ -169,6 +171,167 @@ _SIZE_PRESETS = {
 }
 
 
+_APP_SHELL_MARKERS = (
+    'id="root"', "id='root'", 'id="app"', "id='app'",
+    "__NEXT_DATA__", "data-reactroot", "ng-app",
+    "window.__NUXT__", "__remixContext", "data-svelte",
+)
+
+
+def _page_signals(html: str, text: str) -> Dict[str, Any]:
+    """What the fetched bytes themselves say about their own completeness.
+
+    Three questions the tool used to answer with silence, and what is
+    actually available to answer them without a second request:
+
+    * did the transport cut the document — a body that ends in `</html>`
+      was not cut short mid-stream. It does NOT establish that this is the
+      page that was asked for: a CDN error page and a login wall are also
+      complete documents.
+    * can content appear after the first frame — a page with no script tags
+      and no app-shell marker cannot render anything else, whatever its
+      length. One with them can, and then the absence of further content is
+      simply not established by a static fetch.
+    * how much of the fetched bytes became text.
+
+    Measured 2026-08-23: example.com is 559 chars of HTML, 0 script tags, no
+    marker — complete and inert. habr.com/ru/articles/1072656 is 240 140
+    chars with 14 script tags and `id="app"` — its article text arrives
+    server-rendered, but the page is a JS application, so "51 685 chars is
+    all of it" was never something the tool could know.
+    """
+    stripped = html.rstrip()
+    scripts = len(re.findall(r"<script\b", html, re.I)) if html else 0
+    markers = [m for m in _APP_SHELL_MARKERS if m in html] if html else []
+    return {
+        "html_chars": len(html),
+        "text_chars": len(text),
+        # No HTML means the question was not asked, not that the answer is no.
+        # Measured 2026-08-24 over the 41 audit rows the line had collected:
+        # 8 carried document_closed=false and 4 of those 8 had html_chars=0 —
+        # rows where the body was never read (a clean-text content type takes
+        # that route), so the detector was reporting "cut" for a reason that
+        # has nothing to do with truncation. Half of the only signal this
+        # instrument produces was its own artefact.
+        "document_closed": bool(stripped.endswith("</html>")) if html else None,
+        "script_tags": scripts,
+        "app_shell_markers": markers,
+        "js_capable": bool(scripts or markers),
+    }
+
+
+def _completeness_header(
+    url: str,
+    sig: Dict[str, Any],
+    renderer: str,
+    rendered_chars: Optional[int],
+    shown: int,
+    total: int,
+    preset: str,
+    session: Optional[str] = None,
+) -> str:
+    """The line the entry was opened for: three separate statements about
+    completeness, never collapsed into one "truncated" or one silence.
+
+    (c) the preset cut what was fetched — always known.
+    (a) the transport cut the document — knowable from the body's own end.
+    (b) content can appear after the first frame — knowable as *possible*,
+        never as absent; a static fetch cannot prove a page has no more.
+
+    Deliberately not a percentage. A web page has no total length until it
+    is fully fetched, so any figure of "how much of the page" would be the
+    same invented number the agent guessed by hand before this existed.
+    """
+    parts = [f"[browse_page {url}"]
+    if sig.get("html_chars"):
+        parts.append(f"fetched {sig['html_chars']} chars of HTML → {total} chars of markdown")
+    else:
+        parts.append(f"{total} chars")
+
+    # Which browser served this, in the arguments the caller actually passed.
+    # Deliberately not a statement about cookies: the session may carry a login
+    # this call did not ask for, and naming one would be a claim nobody checked.
+    if session:
+        parts.append(f"session: {session}")
+
+    if renderer == "camoufox":
+        parts.append(
+            f"renderer: browser (JS executed, {rendered_chars} chars) — this is what was"
+            " visible at the moment of the snapshot; a page can still load more on scroll"
+        )
+    else:
+        if sig.get("js_capable"):
+            why = f"{sig.get('script_tags', 0)} script tags"
+            if sig.get("app_shell_markers"):
+                why += f", app-shell marker {sig['app_shell_markers'][0]}"
+            note = (
+                f"renderer: static fetch, JS NOT executed — this page runs JS ({why}),"
+                " so content rendered after the first frame is not included and its"
+                " absence is NOT established; pass verify=true to render and compare"
+            )
+            if rendered_chars is not None:
+                note += f" (verify ran: browser saw {rendered_chars} chars)"
+            parts.append(note)
+        else:
+            parts.append(
+                "renderer: static fetch — no script tags and no app-shell marker,"
+                " so nothing further can render into this page"
+            )
+
+    if sig.get("html_chars"):
+        if sig.get("document_closed"):
+            parts.append(
+                "transport: body ends with </html>, so the stream was not cut short"
+                " — this does not establish that it is the page you asked for, a CDN"
+                " error page or a login wall is also a complete document"
+            )
+        else:
+            parts.append(
+                "transport: body does NOT end with </html> — it may have been cut"
+                " before the end of the document"
+            )
+
+    if shown < total:
+        parts.append(
+            f"preset {preset} kept {shown} of {total} chars — use size='l' or 'f' for more"
+        )
+    else:
+        parts.append(f"preset {preset} did not cut this: all {total} chars are here")
+    return " | ".join(parts) + "]"
+
+
+def _rendered_page_answer(
+    url: str, html: str, text: str, size: str, session: str,
+) -> str:
+    """The same header for the two `browse_page` paths a real browser serves.
+
+    Until 2026-08-24 `use_auth` and `keep_open` returned a one-line
+    `Content from … (markdown, auth=…/headed, N chars)`: no transport
+    statement, no renderer statement, no preset statement — and the cut notice
+    in the TAIL, which is where `_truncate_tool_result` removes it. The
+    anonymous path had carried all four since 2026-08-23, so the three
+    detectors were absent from exactly the two paths that reach a logged-in
+    site, where "is this the page or a login wall" is the whole question.
+    Observed in agent_001's own tool calls the same day:
+    `Content from https://tomsk.hh.ru/… (markdown, headed, 407 chars)` — 407
+    characters of a wall, announced as a page.
+
+    `renderer="camoufox"` is not a guess here: both callers get their HTML
+    from a live browser, so the honest sentence is the snapshot caveat rather
+    than the static fetch's "JS NOT executed".
+    """
+    sig = _page_signals(html, text)
+    max_chars = _SIZE_PRESETS.get(size, _SIZE_PRESETS["m"])
+    total = len(text)
+    shown = min(total, max_chars) if max_chars else total
+    if max_chars and total > max_chars:
+        text = text[:max_chars]
+    header = _completeness_header(
+        url, sig, "camoufox", total, shown, total, size, session=session,
+    )
+    return f"{header}\n\n{text}"
+
+
 def _browse_sync(url: str) -> Dict[str, Any]:
     result = _fetch_url(url)
     if not result["success"]:
@@ -208,7 +371,17 @@ def _browse_sync(url: str) -> Dict[str, Any]:
             text = _extract_text(content)
 
     result["text"] = text
-    result["needs_js"] = not is_clean_text and len(text or "") < 200
+    result["signals"] = _page_signals(content if not is_clean_text else "", text or "")
+    # Historically: `len(text) < 200` alone. Measured 2026-08-23 — that fires
+    # on example.com (113 chars of text, a complete document with ZERO script
+    # tags), buying a 7-10 s Camoufox launch for a page no browser could add
+    # anything to. The length still gates it, but a page has to be able to
+    # render for rendering to be worth trying.
+    result["needs_js"] = (
+        not is_clean_text
+        and len(text or "") < 200
+        and result["signals"]["js_capable"]
+    )
     return result
 
 
@@ -285,7 +458,33 @@ def _attach_page_diagnostics(page, agent_id: str = "<anonymous>") -> None:
         log.debug("attach diagnostics failed: %s", e)
 
 
-def _browse_with_camoufox(url: str) -> Optional[str]:
+_SESSION_DEAD_MARKERS = (
+    "target page, context or browser has been closed",
+    "browser has been closed",
+    "browser closed",
+    "connection closed",
+    "target closed",
+    "page closed",
+    "browser is not connected",
+    "session is closed",
+)
+
+
+def _is_session_dead(exc: BaseException) -> bool:
+    """True when the exception says the browser/page is gone, as opposed
+    to the navigation itself having failed.
+
+    Everything that is not on this list — a timeout, an aborted load, a
+    navigation superseded by another navigation — leaves a perfectly
+    usable browser behind, and answering it by tearing the browser down
+    costs a relaunch, the page state, and (headed) a window that vanishes
+    and reappears in front of the user.
+    """
+    text = f"{type(exc).__name__}: {exc}".lower()
+    return any(marker in text for marker in _SESSION_DEAD_MARKERS)
+
+
+def _browse_with_camoufox(url: str, agent_id: str = "<anonymous>") -> Optional[str]:
     try:
         from camoufox.sync_api import Camoufox
     except ImportError:
@@ -294,7 +493,7 @@ def _browse_with_camoufox(url: str) -> Optional[str]:
     try:
         with Camoufox(headless=True, **_camoufox_launch_kwargs()) as browser:
             page = browser.new_page()
-            _attach_page_diagnostics(page)
+            _attach_page_diagnostics(page, agent_id=agent_id)
             page.goto(url, wait_until="domcontentloaded", timeout=60000)
             html = page.content()
 
@@ -428,6 +627,63 @@ def get_active_browser_sessions() -> dict[str, "AuthBrowser"]:
     return _active_browser_sessions
 
 
+# Headless browsers kept for the `browse_page` JS fallback, one per agent.
+# Deliberately separate from `_active_browser_sessions`: that registry is
+# what the interactive `browser_*` tools resolve, and a fetch must never
+# navigate the page an agent is holding refs into. Same idle sweep, same
+# shutdown set — only the lookup is distinct.
+_fetch_sessions: dict[str, "AuthBrowser"] = {}
+
+
+def get_fetch_sessions() -> dict[str, "AuthBrowser"]:
+    """Accessor for tests and shutdown — returns the live dict."""
+    return _fetch_sessions
+
+
+async def sweep_closed_windows() -> int:
+    """Close headed sessions whose window the person has closed.
+
+    Separate from the idle sweep and running far more often, because the
+    two answer different questions. Idle asks how long nobody has used a
+    browser and can afford half an hour; this asks whether the window is
+    still there at all, and the person who closed it expects the processes
+    to go with it. Returns the number of sessions released.
+    """
+    released = 0
+    for agent_id, session in list(_active_browser_sessions.items()):
+        if not session._headed:
+            continue
+        started = time.monotonic()
+        try:
+            gone = await _run_in_session(
+                session, "window_is_gone",
+                _touch=False, _timeout=WINDOW_PROBE_TIMEOUT_SECONDS,
+            )
+        except Exception as e:
+            # Includes the timeout. A session that does not answer is not a
+            # closed window — it is a busy or wedged one, and closing it
+            # would take a live page away. Skip it and ask again next tick;
+            # the idle sweep is what eventually collects a wedged session.
+            log.debug("window probe failed for %s: %s", agent_id, e)
+            continue
+        log.debug(
+            "window probe for %s: gone=%s in %.0f ms",
+            agent_id, gone, (time.monotonic() - started) * 1000,
+        )
+        if not gone:
+            continue
+        log.info("Window closed for %s — releasing the browser", agent_id)
+        try:
+            await _run_in_session(session, "close", _touch=False)
+        except Exception as e:
+            log.warning(
+                "Error releasing %s after its window went away: %s", agent_id, e
+            )
+        _active_browser_sessions.pop(agent_id, None)
+        released += 1
+    return released
+
+
 async def cleanup_idle_browser_sessions() -> int:
     """Close browser sessions idle longer than IDLE_TIMEOUT_SECONDS.
 
@@ -436,16 +692,22 @@ async def cleanup_idle_browser_sessions() -> int:
     """
     now = time.monotonic()
     closed = 0
-    for agent_id, session in list(_active_browser_sessions.items()):
-        idle = now - session._last_activity
-        if idle > IDLE_TIMEOUT_SECONDS:
-            log.info("Closing idle browser session for %s (idle %.0fs)", agent_id, idle)
-            try:
-                await _run_in_session(session, "close")
-            except Exception as e:
-                log.warning("Error closing idle session %s: %s", agent_id, e)
-            _active_browser_sessions.pop(agent_id, None)
-            closed += 1
+    for registry, label in (
+        (_active_browser_sessions, "browser session"),
+        (_fetch_sessions, "fetch browser"),
+    ):
+        for agent_id, session in list(registry.items()):
+            idle = now - session._last_activity
+            if idle > IDLE_TIMEOUT_SECONDS:
+                log.info(
+                    "Closing idle %s for %s (idle %.0fs)", label, agent_id, idle
+                )
+                try:
+                    await _run_in_session(session, "close")
+                except Exception as e:
+                    log.warning("Error closing idle %s %s: %s", label, agent_id, e)
+                registry.pop(agent_id, None)
+                closed += 1
     return closed
 
 
@@ -458,23 +720,39 @@ def get_pending_auth_approvals() -> dict[str, dict]:
     return _pending_auth_approvals
 
 
-class _DaemonThreadPoolExecutor(ThreadPoolExecutor):
-    """ThreadPoolExecutor whose worker threads are daemon.
+# How long a headless auth request waits for a human before it is refused.
+_HEADLESS_APPROVAL_TIMEOUT_SEC = 120
 
-    Stdlib ThreadPoolExecutor creates non-daemon workers, so a worker
-    stuck in a blocking call (e.g. Playwright IPC after the Camoufox
-    subprocess has crashed) keeps the Python interpreter alive even
-    after `sys.exit` / Ctrl+C, forcing the user to kill the process
-    via the OS. Marking the worker daemon lets Python exit cleanly
-    while leaving the stuck IPC for the OS to reap."""
 
-    def _adjust_thread_count(self) -> None:
-        super()._adjust_thread_count()
-        for thread in list(self._threads):
-            try:
-                thread.daemon = True
-            except RuntimeError:
-                pass
+class _CrossLoopSignal:
+    """One-shot signal set from any loop, awaited on the loop that made it.
+
+    The waiter is a tool handler, which the registry runs on a loop of its
+    own; the setter is a WebSocket command handler on the main loop. A
+    `threading.Event` bridges them, but only by parking a pool worker for
+    the whole wait — and pool workers are joined at interpreter exit, so a
+    shutdown during an approval waited out the full timeout before the
+    process could leave.
+    """
+
+    def __init__(self) -> None:
+        self._loop = asyncio.get_running_loop()
+        self._event = asyncio.Event()
+
+    def set(self) -> None:
+        try:
+            self._loop.call_soon_threadsafe(self._event.set)
+        except RuntimeError:
+            # Waiter's loop is already gone: the tool call it belonged to
+            # has returned, so there is nobody left to signal. Say so —
+            # swallowing this is how a dead mechanism looks healthy.
+            log.warning(
+                "Approval signalled after its waiter's loop closed — "
+                "the call it belonged to has already returned"
+            )
+
+    async def wait(self) -> None:
+        await self._event.wait()
 
 
 def _get_session_lock(agent_id: str) -> asyncio.Lock:
@@ -503,7 +781,7 @@ def _get_session_lock(agent_id: str) -> asyncio.Lock:
 
 
 _A11Y_DOM_SNAPSHOT_JS = """
-() => {
+(serial) => {
   const TAG_TO_ROLE = {
     'a': 'link', 'button': 'button',
     'input': 'textbox', 'textarea': 'textbox',
@@ -575,10 +853,18 @@ _A11Y_DOM_SNAPSHOT_JS = """
   }
   let nodeCount = 0;
   const MAX_NODES = 3000;
+  // Stamp every visited element with an identity the Python side can turn
+  // back into an exact locator. Without it a ref is only (role, name), and
+  // that pair addresses nothing on a real page: an icon button has no name
+  // at all, and a name that does exist is rarely unique.
+  // Scoped by `serial` so marks left by earlier snapshots — on elements this
+  // walk no longer reaches — cannot be mistaken for current ones.
   function walk(el) {
     if (!el || el.nodeType !== 1) return null;
     if (nodeCount >= MAX_NODES) return null;
     if (isHidden(el)) return null;
+    const elId = serial + ':' + nodeCount;
+    try { el.setAttribute('data-dpc-el', elId); } catch (e) { /* read-only DOM */ }
     nodeCount += 1;
     const role = getRole(el);
     const name = getName(el);
@@ -602,7 +888,7 @@ _A11Y_DOM_SNAPSHOT_JS = """
           if (t) directText += (directText ? ' ' : '') + t;
         }
       }
-      if (directText) return {role: 'generic', name: directText.slice(0, 200), value: '', hidden: false, children: []};
+      if (directText) return {role: 'generic', name: directText.slice(0, 200), value: '', hidden: false, children: [], el: elId};
       return null;
     }
     return {
@@ -611,9 +897,10 @@ _A11Y_DOM_SNAPSHOT_JS = """
       value: value,
       hidden: false,
       children: children,
+      el: elId,
     };
   }
-  return walk(document.body) || {role: 'generic', name: '', children: []};
+  return walk(document.body) || {role: 'generic', name: '', children: [], el: ''};
 }
 """
 
@@ -732,7 +1019,7 @@ def _build_a11y_tree(root: dict) -> tuple[str, dict]:
         if role in _A11Y_INTERACTIVE_ROLES:
             counter[0] += 1
             ref = f"@e{counter[0]}"
-            refs[ref] = {"role": role, "name": name}
+            refs[ref] = {"role": role, "name": name, "el": node.get("el", "")}
             ref_tag = f" [{ref}]"
         indent = "  " * depth
         line = f"{indent}- {role}"
@@ -751,6 +1038,15 @@ def _build_a11y_tree(root: dict) -> tuple[str, dict]:
 
 
 SNAPSHOT_SUMMARIZE_THRESHOLD = 8000
+
+# The auxiliary summarizer must finish well inside the calling tool's own
+# budget (browser_snapshot gets 60s). An unbounded call once ran for 10
+# minutes on a video page: the tool timed out at 60s, the agent got
+# nothing, retried until the loop guard killed the run — and the
+# abandoned request went on billing tokens after the turn had ended.
+SNAPSHOT_SUMMARIZE_TIMEOUT_SEC = 25
+
+HTTP_ERROR_PREFIX = "⚠️ HTTP "
 
 
 def _truncate_snapshot(
@@ -773,11 +1069,85 @@ def _truncate_snapshot(
         chars += len(line) + 1
     remaining = len(lines) - len(result)
     if remaining > 0:
+        # The old marker read "use browser_snapshot for full content" and was
+        # printed from inside browser_snapshot, so the advice pointed at the
+        # call that had just truncated. The handle that actually returns the
+        # whole tree is the raw flag.
         result.append(
-            f"\n[... {remaining} more lines truncated, "
-            "use browser_snapshot for full content]"
+            f"\n[... {remaining} of {len(lines)} lines truncated at"
+            f" {max_chars} chars | full tree: browser_snapshot(raw=True)]"
         )
     return "\n".join(result)
+
+
+def _audit_error(exc: BaseException) -> dict:
+    """Audit fields for a failed browser action.
+
+    The type alone does not identify the failure: `Error` covered both a
+    strict-mode violation naming 24 matching buttons and unrelated
+    Playwright refusals, and the record kept neither message. Reading the
+    audit afterwards could establish that something failed and nothing
+    about why. First line only — Playwright appends a call log that runs
+    to dozens of lines.
+    """
+    message = str(exc).strip().split("\n", 1)[0]
+    return {"error": type(exc).__name__, "error_message": message[:300]}
+
+
+_REF_LINE_RE = re.compile(r"\[@e\d+\]")
+
+
+def _split_actionable_lines(snapshot_text: str) -> tuple[list[str], str]:
+    """Separate the lines that carry a `@eN` ref from everything else.
+
+    A ref is the only thing on the page the agent can actually address.
+    Handing the whole tree to a summarizing model and asking it to be
+    concise loses them wholesale: a calendar of 31 day cells came back as
+    the single line "Calendar showing August 2026 (day grid 1-31)", after
+    which the agent had nothing to click and spent minutes guessing CSS
+    selectors that timed out one by one.
+
+    So the refs never reach the model. Only the prose around them does.
+    """
+    actionable: list[str] = []
+    prose: list[str] = []
+    for line in snapshot_text.split("\n"):
+        (actionable if _REF_LINE_RE.search(line) else prose).append(line)
+    return actionable, "\n".join(prose)
+
+
+def _summary_notice(tree_chars: int, summary_chars: int, provider: str | None) -> str:
+    """Say that what follows is a rewrite, not the page.
+
+    The LLM path returned the auxiliary model's prose with no marker of any
+    kind, so an agent could not tell a summarised snapshot from a real one:
+    the only silent substitution in the tool set, and the one that is not
+    about length at all. Everything the caller needs to judge it — that a
+    model rewrote it, which model, how much was compressed, and the handle
+    that returns the tree itself — belongs in front of the text.
+    """
+    return (
+        f"[snapshot summarised by {provider or 'the configured summariser'}:"
+        f" {tree_chars} chars of accessibility tree rewritten as"
+        f" {summary_chars} chars of prose — this is a summary, not the tree."
+        f" Interactive elements below are verbatim."
+        f" Full tree: browser_snapshot(raw=True)]\n\n"
+    )
+
+
+def _rejoin_with_actionable(summary: str, actionable: list[str]) -> str:
+    """Put the untouched ref lines back after the summarized prose.
+
+    The result can exceed the threshold the summarization was asked to
+    meet. That is deliberate: a snapshot under budget that the agent
+    cannot act on is worse than one over it.
+    """
+    if not actionable:
+        return summary
+    block = "\n".join(actionable)
+    if not summary:
+        return block
+    return f"{summary}\n\nInteractive elements (verbatim, refs intact):\n{block}"
 
 
 _LLM_EXTRACT_WITH_TASK = (
@@ -786,25 +1156,25 @@ _LLM_EXTRACT_WITH_TASK = (
     "Given the following page snapshot (accessibility tree representation), "
     "extract and summarize the most relevant information for completing "
     "this task. Focus on:\n"
-    "1. Interactive elements (buttons, links, inputs) that might be needed\n"
-    "2. Text content relevant to the task "
+    "1. Text content relevant to the task "
     "(prices, descriptions, headings, important info)\n"
-    "3. Navigation structure if relevant\n\n"
-    "Keep ref IDs (like @e5) for interactive elements so the agent "
-    "can use them.\n\n"
-    "Page Snapshot:\n{snapshot}\n\n"
-    "Provide a concise summary that preserves actionable information "
-    "and relevant content."
+    "2. Navigation structure if relevant\n\n"
+    "The interactive elements have already been separated out and will be "
+    "appended to your answer verbatim. They are not in the text below — do "
+    "not try to reproduce or refer to them.\n\n"
+    "Page Snapshot (surrounding content only):\n{snapshot}\n\n"
+    "Provide a concise summary of this content."
 )
 
 _LLM_EXTRACT_NO_TASK = (
     "Summarize this page snapshot, preserving:\n"
-    "1. All interactive elements with their ref IDs (like @e5)\n"
-    "2. Key text content and headings\n"
-    "3. Important information visible on the page\n\n"
-    "Page Snapshot:\n{snapshot}\n\n"
-    "Provide a concise summary focused on interactive elements and "
-    "key content."
+    "1. Key text content and headings\n"
+    "2. Important information visible on the page\n\n"
+    "The interactive elements have already been separated out and will be "
+    "appended to your answer verbatim. They are not in the text below — do "
+    "not try to reproduce or refer to them.\n\n"
+    "Page Snapshot (surrounding content only):\n{snapshot}\n\n"
+    "Provide a concise summary of this content."
 )
 
 
@@ -819,27 +1189,102 @@ async def _llm_summarize_snapshot(
     current task through the LLM Manager (same path Sleep Consolidation
     uses) so an auxiliary model can extract just the task-relevant
     elements. Falls back to `_truncate_snapshot` when llm_manager is
-    None, when the auxiliary call raises, or when the model returns an
+    None, when the auxiliary call raises or outruns
+    `SNAPSHOT_SUMMARIZE_TIMEOUT_SEC`, or when the model returns an
     empty string. No-op when `snapshot_text` already fits under
     `max_chars`."""
     if len(snapshot_text) <= max_chars:
         return snapshot_text
+    actionable, prose = _split_actionable_lines(snapshot_text)
     if llm_manager is None:
-        return _truncate_snapshot(snapshot_text, max_chars)
+        return _rejoin_with_actionable(
+            _truncate_snapshot(prose, max_chars), actionable,
+        )
     if user_task:
         prompt = _LLM_EXTRACT_WITH_TASK.format(
-            user_task=user_task, snapshot=snapshot_text,
+            user_task=user_task, snapshot=prose,
         )
     else:
-        prompt = _LLM_EXTRACT_NO_TASK.format(snapshot=snapshot_text)
+        prompt = _LLM_EXTRACT_NO_TASK.format(snapshot=prose)
     try:
-        response = await llm_manager.query(
-            prompt, provider_alias=provider_alias,
+        response = await asyncio.wait_for(
+            llm_manager.query(prompt, provider_alias=provider_alias),
+            timeout=SNAPSHOT_SUMMARIZE_TIMEOUT_SEC,
         )
         extracted = (response or "").strip()
-        return extracted or _truncate_snapshot(snapshot_text, max_chars)
+        if extracted:
+            return _rejoin_with_actionable(
+                _summary_notice(len(snapshot_text), len(extracted), provider_alias)
+                + extracted,
+                actionable,
+            )
+        return _rejoin_with_actionable(
+            _truncate_snapshot(prose, max_chars), actionable,
+        )
+    except asyncio.TimeoutError:
+        log.warning(
+            "snapshot summarization exceeded %ss, falling back to truncation",
+            SNAPSHOT_SUMMARIZE_TIMEOUT_SEC,
+        )
+        return _rejoin_with_actionable(
+            _truncate_snapshot(prose, max_chars), actionable,
+        )
     except Exception:
         return _truncate_snapshot(snapshot_text, max_chars)
+
+
+class _PinnedThread:
+    """One daemon thread that runs every call belonging to one browser session.
+
+    Deliberately not a `ThreadPoolExecutor`, though it wears the same `submit`
+    so `loop.run_in_executor` accepts it. A pool worker parked on a dead
+    Playwright IPC keeps the whole process alive after everything else has
+    stopped: `ThreadPoolExecutor._adjust_thread_count` registers every worker in
+    `concurrent.futures.thread._threads_queues`, and `_python_exit` joins each
+    thread in that map - through `threading._register_atexit`, so it runs before
+    the interpreter joins non-daemon threads (CPython 3.12, `thread.py:205`
+    and `:23-31`). The daemon flag cannot help against an explicit join.
+
+    Observed 2026-08-12 17:32: a shutdown left the process alive with
+    `camoufox-agent_001_0` inside `AuthBrowser.close()` ->
+    `_dispatcher_fiber.switch()`, minutes after the service logged itself down
+    and one second after its own 5 s timeout had force-killed the browser
+    subprocess. Killing the child does not unpark the fiber.
+
+    A raw daemon thread is in no such map and is not waited for, so the same
+    parked call costs a leaked thread in a process that is exiting anyway.
+    """
+
+    def __init__(self, name: str):
+        self._queue: "queue.Queue[Optional[tuple]]" = queue.Queue()
+        self._thread = threading.Thread(target=self._run, name=name, daemon=True)
+        self._thread.start()
+
+    def _run(self) -> None:
+        while True:
+            item = self._queue.get()
+            if item is None:
+                return
+            fn, args, kwargs, future = item
+            if not future.set_running_or_notify_cancel():
+                continue  # the caller's wait_for timed out and cancelled it
+            try:
+                future.set_result(fn(*args, **kwargs))
+            except BaseException as exc:  # noqa: BLE001 - mirrors executor semantics
+                future.set_exception(exc)
+
+    def submit(self, fn, *args: Any, **kwargs: Any) -> Future:
+        future: Future = Future()
+        self._queue.put((fn, args, kwargs, future))
+        return future
+
+    def shutdown(self) -> None:
+        """Ask the thread to stop after whatever it is currently running.
+
+        Never waits: the reason this class exists is that the current call may
+        never return.
+        """
+        self._queue.put(None)
 
 
 class AuthBrowser:
@@ -883,11 +1328,18 @@ class AuthBrowser:
         *,
         headed: bool = False,
         domain: str | None = None,
+        anonymous: bool = False,
     ):
         from dpc_client_core import web_auth
 
         self._agent_id = agent_id
         self._headed = headed
+        # Carries no identity: opens without the agent's saved cookies and
+        # writes none back. For the browse_page JS fallback, which is the
+        # *unauthenticated* path — authenticated fetches go through use_auth.
+        # Without this the fallback inherited the agent's whole login and ran
+        # it as a second, concurrent browser against the same account.
+        self._anonymous = anonymous
         # Normalize: accept either `domains=[...]` (new multi-domain) or
         # `domain="..."` (legacy single-domain). Both produce a list.
         if domain is not None and domains is None:
@@ -908,7 +1360,10 @@ class AuthBrowser:
         self._domain_blocks = 0
         self._disconnected = False
         self._last_refs: dict[str, dict] = {}
-        self._executor: Optional[ThreadPoolExecutor] = None
+        # Scopes the `data-dpc-el` marks to one snapshot, so a mark left on an
+        # element this walk no longer reaches cannot answer a current ref.
+        self._snapshot_serial: int = 0
+        self._executor: Optional["_PinnedThread"] = None
         self._last_activity: float = time.monotonic()
         # PIDs of the Camoufox/Firefox subprocess tree spawned by this
         # browser, captured at launch. Used only as a last-resort kill when
@@ -917,34 +1372,28 @@ class AuthBrowser:
         # _force_kill_process.
         self._browser_pids: set[int] = set()
 
-    def _get_executor(self) -> ThreadPoolExecutor:
-        """Lazy single-worker executor pinned to this AuthBrowser.
+    def _get_executor(self) -> "_PinnedThread":
+        """Lazy single-thread runner pinned to this AuthBrowser.
 
         Playwright sync API objects (Page, BrowserContext, Browser) are
         thread-affine — every call must come from the thread that owns
         the connection. The agent loop is async, so direct calls would
         cross threads via `asyncio.to_thread` (which uses the default
         pool and hands out arbitrary workers). Routing every sync call
-        for one AuthBrowser through one dedicated executor keeps every
+        for one AuthBrowser through one dedicated thread keeps every
         Playwright op on the same thread for the lifetime of the
         session, eliminating the `cannot switch to a different thread`
         error surfaced in S155.
 
-        The executor is built with `_DaemonThreadPoolExecutor` so the
-        worker thread is daemon — if a Playwright IPC call hangs after
-        Camoufox crashed, Python can still exit cleanly instead of
-        waiting indefinitely for a thread that will never complete."""
+        See `_PinnedThread` for why this is not a ThreadPoolExecutor."""
         if self._executor is None:
-            self._executor = _DaemonThreadPoolExecutor(
-                max_workers=1,
-                thread_name_prefix=f"camoufox-{self._agent_id}",
-            )
+            self._executor = _PinnedThread(f"camoufox-{self._agent_id}")
         return self._executor
 
     def _shutdown_executor(self) -> None:
         if self._executor is not None:
             try:
-                self._executor.shutdown(wait=False, cancel_futures=True)
+                self._executor.shutdown()
             except Exception:
                 pass
             self._executor = None
@@ -1105,7 +1554,12 @@ class AuthBrowser:
 
         state_path = self._state_path()
         context_kwargs: dict = {}
-        if state_path.exists():
+        if self._anonymous:
+            log.debug(
+                "anonymous browser for agent=%s — no saved login loaded",
+                self._agent_id,
+            )
+        elif state_path.exists():
             try:
                 state_data = json.loads(state_path.read_text(encoding="utf-8"))
                 # Strip origins (localStorage/sessionStorage) — they cause
@@ -1190,6 +1644,11 @@ class AuthBrowser:
     def _save_storage_state(self) -> None:
         if self._context is None:
             return
+        if self._anonymous:
+            # It never held the agent's login, so it has nothing to
+            # contribute — and writing here would overwrite the file the
+            # interactive session owns with a session that knows nothing.
+            return
         if self._disconnected:
             # Browser already detached (e.g. user closed the window): the
             # context is dead, so storage_state() would only raise and the
@@ -1203,7 +1662,20 @@ class AuthBrowser:
             state_path = self._state_path()
             state_path.parent.mkdir(parents=True, exist_ok=True)
             tmp_path = state_path.with_suffix(".json.tmp")
-            state = self._context.storage_state(path=str(tmp_path))
+            # Cookies only, deliberately. `storage_state()` also collects
+            # localStorage, and Firefox reads it by *opening a window on each
+            # origin* — measured: a save with two origins peaked at two extra
+            # visible windows, appearing and vanishing within a second. This
+            # runs after every navigate and at close, which is the flicker of
+            # windows opening and closing that the user kept seeing.
+            #
+            # Nothing is lost: the load path strips origins before handing the
+            # state to new_context, for the same reason in reverse ("they
+            # cause Firefox to briefly visit each origin on context creation").
+            # So the localStorage we paid those windows to collect was written
+            # to disk and then discarded on the next open.
+            state = {"cookies": self._context.cookies(), "origins": []}
+            tmp_path.write_text(json.dumps(state), encoding="utf-8")
             os.replace(tmp_path, state_path)
             if os.name == "posix":
                 try:
@@ -1408,16 +1880,21 @@ class AuthBrowser:
             )
             raise
         try:
-            self._page.goto(url, wait_until="domcontentloaded", timeout=60000)
+            response = self._page.goto(
+                url, wait_until="domcontentloaded", timeout=60000,
+            )
         except Exception as exc:
             self._audit_action(
                 "navigate", url, "failed",
-                from_url=from_url, error=type(exc).__name__,
+                from_url=from_url, **_audit_error(exc),
             )
             raise
+        status = response.status if response is not None else None
         self._wait_for_content_stable()
         snapshot_text = ""
         snapshot_audit: dict[str, Any] = {"from_url": from_url}
+        if status is not None:
+            snapshot_audit["status"] = status
         try:
             snapshot_text, refs = self.a11y_snapshot()
             snapshot_audit["snapshot_node_count"] = len(refs)
@@ -1425,6 +1902,8 @@ class AuthBrowser:
         except Exception as exc:
             snapshot_audit["snapshot_error"] = type(exc).__name__
         self._audit_action("navigate", url, "ok", **snapshot_audit)
+        if status is not None and status >= 400:
+            snapshot_text = f"{HTTP_ERROR_PREFIX}{status}\n\n{snapshot_text}"
         try:
             self._save_storage_state()
         except Exception as exc:
@@ -1437,6 +1916,22 @@ class AuthBrowser:
         goto() and discard the return; proper wrapper (not class-level
         assignment) so subclass overrides of navigate() are honored."""
         return self.navigate(url)
+
+    def fetch_html(self, url: str) -> str:
+        """Navigate and return raw HTML, skipping the accessibility
+        snapshot that `navigate()` builds inline.
+
+        The snapshot exists for interactive callers that need `@eN` refs
+        next; the browse_page fallback reads the DOM and throws the refs
+        away, and the summarizer behind it is the single most expensive
+        step in the call (it has its own 25 s budget)."""
+        self._require_open()
+        self._check_domain(url)
+        self._page.goto(url, wait_until="domcontentloaded", timeout=60000)
+        self._wait_for_content_stable()
+        html = self._page.content()
+        self._audit_action("fetch_html", url, "ok", html_size=len(html))
+        return html
 
     def get_page_html(self) -> str:
         """Return raw HTML of the current page. Used by T9 challenge
@@ -1470,7 +1965,7 @@ class AuthBrowser:
             self._audit_action(
                 "scroll", url, "failed",
                 direction=direction, amount=amount,
-                error=type(exc).__name__,
+                **_audit_error(exc),
             )
             raise
         scrolled = (result or {}).get("scrolled", 0)
@@ -1503,7 +1998,7 @@ class AuthBrowser:
             self._audit_action(
                 "click", url, "failed",
                 selector=ref_or_selector, mode=mode,
-                error=type(exc).__name__,
+                **_audit_error(exc),
             )
             raise
         self._audit_action(
@@ -1523,7 +2018,7 @@ class AuthBrowser:
             self._audit_action(
                 "fill", url, "failed",
                 selector=ref_or_selector, mode=mode,
-                text_length=text_length, error=type(exc).__name__,
+                text_length=text_length, **_audit_error(exc),
             )
             raise
         self._audit_action(
@@ -1569,7 +2064,7 @@ class AuthBrowser:
         except Exception as exc:
             self._audit_action(
                 "screenshot", url, "failed",
-                full_page=full_page, error=type(exc).__name__,
+                full_page=full_page, **_audit_error(exc),
             )
             raise
 
@@ -1605,7 +2100,7 @@ class AuthBrowser:
             html = self.get_page_html()
         except Exception as exc:
             self._audit_action(
-                "extract", url, "failed", error=type(exc).__name__,
+                "extract", url, "failed", **_audit_error(exc),
             )
             raise
         self._audit_action("extract", url, "ok", html_size=len(html))
@@ -1630,7 +2125,7 @@ class AuthBrowser:
             self._audit_action(
                 "switch_tab", from_url, "failed",
                 from_index=from_index, to_index=index,
-                error=type(exc).__name__,
+                **_audit_error(exc),
             )
             raise
         self._audit_action(
@@ -1660,12 +2155,15 @@ class AuthBrowser:
         self._require_open()
         url = self._page.url
         try:
-            raw = self._page.evaluate(_A11Y_DOM_SNAPSHOT_JS)
+            self._snapshot_serial += 1
+            raw = self._page.evaluate(
+                _A11Y_DOM_SNAPSHOT_JS, self._snapshot_serial,
+            )
             tree_text, refs = _build_a11y_tree(raw) if raw else ("", {})
             self._last_refs = refs
         except Exception as exc:
             self._audit_action(
-                "snapshot", url, "failed", error=type(exc).__name__,
+                "snapshot", url, "failed", **_audit_error(exc),
             )
             raise
         self._audit_action(
@@ -1738,7 +2236,12 @@ class AuthBrowser:
         max_consecutive_empty = 10
         url = self._page.url
 
-        for _ in range(max_scrolls + 1):
+        # Three ways out of this loop and they mean opposite things: the list
+        # ended, the scroll budget ran out, or scrolling threw. Reporting only
+        # the item count made "collected everything" and "stopped early"
+        # print identically, and an agent could not tell which it had.
+        stop_reason = "scroll_budget_exhausted"
+        for _pass in range(max_scrolls + 1):
             result = self._page.evaluate(_COLLECT_ITEMS_JS, {
                 "containerSel": container,
                 "itemSelector": item_selector,
@@ -1763,11 +2266,21 @@ class AuthBrowser:
             elif scrolls_done > 0:
                 consecutive_empty += 1
                 if consecutive_empty >= max_consecutive_empty:
+                    stop_reason = "list_exhausted"
                     break
+
+            # The last pass collects and stops: scrolling once more would move
+            # the page with nothing left to read it. Without this the loop
+            # scrolled `max_scrolls + 1` times and reported one more scroll
+            # than the caller asked for — Ark, 2026-08-23, live on Hacker News:
+            # «6 scrolls» against `max_scrolls=5`.
+            if _pass == max_scrolls:
+                break
 
             try:
                 self.scroll("down", 800)
-            except Exception:
+            except Exception as e:
+                stop_reason = f"scroll_failed: {type(e).__name__}"
                 break
 
             scrolls_done += 1
@@ -1782,6 +2295,16 @@ class AuthBrowser:
             "items": all_items,
             "total": len(all_items),
             "scrolls_done": scrolls_done,
+            "max_scrolls": max_scrolls,
+            "stop_reason": stop_reason,
+            # How many scrolls in a row added nothing when the loop ended.
+            # «The budget ran out» and «the budget ran out while the last four
+            # scrolls added nothing» are different claims: the first invites
+            # raising max_scrolls, the second says the page may simply have no
+            # more to give. Ark, 2026-08-23, on Hacker News: 30 fixed items,
+            # 150 duplicates, and advice to raise a budget that would change
+            # nothing.
+            "consecutive_empty": consecutive_empty,
         }
         if dupes_skipped > 0:
             result_dict["warning"] = f"{dupes_skipped} duplicates skipped, consider specifying unique attribute for dedup_by"
@@ -1791,8 +2314,23 @@ class AuthBrowser:
         """Map a `@eN` ref against the last snapshot to a Playwright
         locator; fall back to treating the string as a CSS selector.
 
-        Raises ValueError for `@eN` refs missing from `_last_refs` so
-        the caller can prompt the agent to take a new snapshot."""
+        The ref addresses the exact element the snapshot walked, via the
+        `data-dpc-el` mark stamped during that walk. Addressing it by
+        (role, name) instead — what this did before — fails on real
+        pages in two ways, both seen in one session against YouTube
+        Studio and TikTok:
+
+        * an element with no accessible name (every icon button) produced
+          `get_by_role("button")`, which matched all 24 buttons on the
+          page and died instantly on strict mode;
+        * a name that does exist is rarely unique, and the ordinal used to
+          disambiguate it assumed the page had not re-rendered between
+          the snapshot and the click — on a Polymer app it usually has.
+
+        Raises ValueError for a ref missing from `_last_refs`, and for one
+        whose element is no longer in the page, so the caller can tell the
+        agent to take a fresh snapshot instead of waiting out a timeout on
+        a locator that can never match."""
         self._require_open()
         if ref_or_selector.startswith("@e"):
             node = self._last_refs.get(ref_or_selector)
@@ -1801,11 +2339,27 @@ class AuthBrowser:
                     f"unknown ref {ref_or_selector!r} — "
                     "call a11y_snapshot() to refresh"
                 )
-            role = node.get("role", "")
-            name = node.get("name", "")
-            if name:
-                return self._page.get_by_role(role, name=name)
-            return self._page.get_by_role(role)
+            el_id = node.get("el", "")
+            if not el_id:
+                raise ValueError(
+                    f"ref {ref_or_selector!r} carries no element mark — "
+                    "call a11y_snapshot() to refresh"
+                )
+            locator = self._page.locator(f'[data-dpc-el="{el_id}"]')
+            # count() answers now; letting a vanished element go to click()
+            # costs the full timeout and then reports it as if the element
+            # were merely slow. A count() that itself fails decides nothing —
+            # fall through and let the action speak.
+            try:
+                present = locator.count()
+            except Exception:
+                present = -1
+            if present == 0:
+                raise ValueError(
+                    f"ref {ref_or_selector!r} is stale — the page changed "
+                    "since the snapshot; call a11y_snapshot() to refresh"
+                )
+            return locator
         return self._page.locator(ref_or_selector)
 
     def close(self) -> None:
@@ -1818,10 +2372,12 @@ class AuthBrowser:
         teardown) runs unconditionally in the finally block — even after a
         disconnect — so the subprocess and its OS pipe are always released;
         skipping it orphaned the pipe and left a Windows IOCP overlapped
-        read pending → ProactorEventLoop spin at shutdown. It is bounded by
-        the caller's `_run_in_session` timeout + the daemon executor, so a
-        doomed IPC here can never block process exit. Registry / lock /
-        executor teardown always runs too."""
+        read pending → ProactorEventLoop spin at shutdown. This call can
+        itself hang forever — Playwright's `__exit__` parks in its dispatcher
+        fiber and does not return even after the subprocess is killed
+        (observed 2026-08-12 17:32) — which is why the thread it runs on is a
+        daemon `_PinnedThread` rather than a pool worker the interpreter
+        joins. Registry / lock / thread teardown always runs too."""
         try:
             if not self._disconnected:
                 url = ""
@@ -1857,9 +2413,48 @@ class AuthBrowser:
             self._context = None
             self._page = None
             _active_camoufox_browsers.discard(self)
+            self._deregister()
+            self._shutdown_executor()
+
+    def _deregister(self) -> None:
+        """Drop this instance from the per-agent registries — but only the
+        entries that point at *this* object. An agent can hold more than one
+        AuthBrowser at a time (interactive session + the browse_page fetch
+        browser), and both carry the same `agent_id`; popping by id alone
+        made whichever closed first evict the other's registration while
+        that browser was still running."""
+        if _active_browser_sessions.get(self._agent_id) is self:
             _active_browser_sessions.pop(self._agent_id, None)
             _session_locks.pop(self._agent_id, None)
-            self._shutdown_executor()
+        if _fetch_sessions.get(self._agent_id) is self:
+            _fetch_sessions.pop(self._agent_id, None)
+
+    def window_is_gone(self) -> bool:
+        """True when this session no longer has a window behind it.
+
+        Asked, not subscribed to. The sync Playwright client dispatches
+        events only while its thread is inside a call, and a session whose
+        agent has finished parks on its queue — so the `disconnected`
+        listener attached at open never gets a chance to fire. Measured
+        2026-08-13: a window closed by hand left seven Camoufox processes
+        and 620 MB alive for as long as it was watched, with not one line
+        in the log. The round trip here doubles as the flush that lets any
+        pending event through.
+
+        Only the browser-is-gone markers count. A timeout or a failed
+        navigation leaves a perfectly usable window, and answering that by
+        tearing the browser down would take the page out from under the
+        person sitting in front of it."""
+        if self._disconnected:
+            return True
+        page = self._page
+        if page is None:
+            return True
+        try:
+            page.title()
+            return False
+        except Exception as exc:
+            return _is_session_dead(exc)
 
     def _on_browser_disconnected(self, *args: Any) -> None:
         """Fired by Playwright when the browser process detaches."""
@@ -1867,12 +2462,28 @@ class AuthBrowser:
             return
         self._disconnected = True
         log.info(
-            "Camoufox browser disconnected (agent=%s) — removed from active set",
+            "Camoufox browser disconnected (agent=%s) — releasing it",
             self._agent_id,
         )
         _active_camoufox_browsers.discard(self)
-        _active_browser_sessions.pop(self._agent_id, None)
-        _session_locks.pop(self._agent_id, None)
+        self._deregister()
+        # Hand the teardown to this session's own thread rather than just
+        # dropping the handles: without `close()` the Camoufox context
+        # manager never exits, so the driver subprocess and its pipe
+        # outlive the browser and nothing can reach them afterwards — the
+        # registries this method just emptied were the only way in.
+        # Queued rather than called here, because this runs inside
+        # Playwright's event dispatch and the teardown talks to the same
+        # connection. `close()` shuts the thread down when it is done.
+        executor = self._executor
+        if executor is not None:
+            try:
+                executor.submit(self.close)
+                return
+            except Exception as exc:
+                log.debug(
+                    "could not queue close for agent=%s: %s", self._agent_id, exc
+                )
         self._shutdown_executor()
 
 
@@ -1910,25 +2521,50 @@ def _get_or_create_session(
 
 IDLE_TIMEOUT_SECONDS = 30 * 60
 
+# How often to ask a headed session whether its window is still there.
+# The person who closed it should not wait minutes for the processes to
+# follow, and the question costs one round trip to a browser that is
+# already running.
+WINDOW_PROBE_INTERVAL_SECONDS = 30
+
+# One idle sweep per this many probe ticks — keeps the original five
+# minutes without a second loop.
+IDLE_SWEEP_EVERY_N_PROBES = 10
+
+# The probe waits far less than an ordinary call. Sessions are asked one
+# after another, so a single wedged browser would otherwise hold the whole
+# tick for the two minutes an agent's own call is allowed — and every
+# other window would go unnoticed for that long. A browser that cannot
+# answer in ten seconds is not the case this sweep is looking for.
+WINDOW_PROBE_TIMEOUT_SECONDS = 10
+
 
 _SESSION_CALL_TIMEOUT = 120  # seconds — prevents hung executor from blocking the event loop forever
 
 
 async def _run_in_session(
-    session: "AuthBrowser", method_name: str, *args: Any, **kwargs: Any,
+    session: "AuthBrowser", method_name: str, *args: Any,
+    _touch: bool = True, _timeout: float = _SESSION_CALL_TIMEOUT,
+    **kwargs: Any,
 ) -> Any:
     """Invoke a sync AuthBrowser method on the session's dedicated
     single-worker thread. Required because Playwright sync API objects
     (Page, Context, Browser) are thread-affine; every call must come
-    from the thread that owns the connection."""
-    session._last_activity = time.monotonic()
+    from the thread that owns the connection.
+
+    `_touch=False` for calls the housekeeping makes on its own behalf:
+    the window probe runs every half minute, and counting it as use would
+    keep the idle timer permanently reset — a session nobody had touched
+    for hours would look busy because we kept asking whether it was."""
+    if _touch:
+        session._last_activity = time.monotonic()
     loop = asyncio.get_running_loop()
     method = getattr(session, method_name)
     return await asyncio.wait_for(
         loop.run_in_executor(
             session._get_executor(), lambda: method(*args, **kwargs),
         ),
-        timeout=_SESSION_CALL_TIMEOUT,
+        timeout=_timeout,
     )
 
 
@@ -1964,6 +2600,109 @@ async def _get_or_create_session_async(
         return session
 
 
+async def _navigate_with_recovery(
+    session: "AuthBrowser", agent_id: str, url: str, domains: list[str],
+) -> "AuthBrowser":
+    """Navigate, absorbing a transient failure without losing the browser.
+
+    Order matters. A navigation can fail for two unrelated reasons, and
+    they call for opposite responses:
+
+    * the browser is gone (crashed, closed underneath us) — the session
+      is unusable and must be replaced;
+    * the navigation itself lost — a timeout, an aborted load, or a
+      `goto` superseded by another navigation still in flight. The
+      browser is fine; retrying on the same page is enough.
+
+    Recycling on *any* exception treated the second case as the first:
+    it tore down a working browser, dropped the page state, and in a
+    headed session made the window vanish and a new one appear.
+
+    Returns the session that ended up serving the navigation — the same
+    one on the retry path, a fresh one after a genuine recycle.
+    """
+    try:
+        await _run_in_session(session, "navigate", url)
+        return session
+    except Exception as nav_err:
+        if not _is_session_dead(nav_err):
+            log.info(
+                "navigate failed (agent=%s, url=%s): %s — retrying on the "
+                "same page (browser is alive)",
+                agent_id, url, nav_err,
+            )
+            await _run_in_session(session, "navigate", url)
+            return session
+        log.warning(
+            "navigate failed (agent=%s, url=%s): %s — session is dead, "
+            "recreating",
+            agent_id, url, nav_err,
+        )
+    try:
+        await _run_in_session(session, "close")
+    except Exception:
+        pass
+    _active_browser_sessions.pop(agent_id, None)
+    session = await _get_or_create_session_async(agent_id, domains, True)
+    await _run_in_session(session, "navigate", url)
+    return session
+
+
+_fetch_create_locks: dict[str, asyncio.Lock] = {}
+
+
+async def _get_or_create_fetch_session(agent_id: str) -> "AuthBrowser":
+    """Return this agent's headless fetch browser, opening one if needed.
+
+    No auth domains, so `_check_domain` is a no-op and no vault entry is
+    read — this browser exists only to run JS for `browse_page`."""
+    if agent_id not in _fetch_create_locks:
+        _fetch_create_locks[agent_id] = asyncio.Lock()
+    async with _fetch_create_locks[agent_id]:
+        existing = _fetch_sessions.get(agent_id)
+        if existing is not None and existing._page is not None:
+            try:
+                if not existing._page.is_closed():
+                    return existing
+            except Exception:
+                pass
+            _fetch_sessions.pop(agent_id, None)
+        session = AuthBrowser(
+            agent_id=agent_id, domains=[], headed=False, anonymous=True,
+        )
+        await _run_in_session(session, "start")
+        _fetch_sessions[agent_id] = session
+        return session
+
+
+async def _fetch_js_text(url: str, agent_id: Optional[str]) -> Optional[str]:
+    """Render `url` in a real browser and return it as markdown.
+
+    Reuses the agent's fetch browser across calls. Before this, every
+    JS-needing page cost a full Camoufox launch and teardown — measured
+    at 7 processes and ~7-10 s per call, repeated for each page in a
+    research run. Falls back to the one-shot browser when no agent is
+    known or the pooled one fails, so the tool never gets worse than it
+    was.
+    """
+    if agent_id:
+        try:
+            session = await _get_or_create_fetch_session(agent_id)
+            html = await _run_in_session(session, "fetch_html", url)
+            return _html_to_markdown(html)
+        except Exception as exc:
+            log.warning(
+                "pooled fetch browser failed (agent=%s, url=%s): %s — "
+                "falling back to one-shot",
+                agent_id, url, exc,
+            )
+            if _is_session_dead(exc):
+                _fetch_sessions.pop(agent_id, None)
+    return await asyncio.to_thread(
+        _browse_with_camoufox, url, agent_id or "<anonymous>",
+    )
+
+
 def _html_to_markdown(html: str) -> str:
     """Trafilatura HTML→markdown conversion. Extracted so AuthBrowser and
     the T9 popup-fallback path share one conversion pipeline."""
@@ -1996,12 +2735,22 @@ def _auth_browse(
     return _html_to_markdown(_auth_browse_html(agent_id, domain, url, headed))
 
 
+def _domain_of(url: str) -> str:
+    """Host part of a URL, for the audit row. Never raises."""
+    try:
+        from urllib.parse import urlparse
+        return urlparse(url).netloc or "?"
+    except Exception:
+        return "?"
+
+
 async def browse_page(
     ctx: ToolContext,
     url: str,
     size: str = "m",
     use_auth: Optional[str] = None,
     keep_open: bool = False,
+    verify: bool = False,
 ) -> str:
     """
     Fetch a web page and extract content as structured markdown.
@@ -2036,25 +2785,70 @@ async def browse_page(
         # must move to a helper there — track via grep on `agent_root.name`.
         agent_id = ctx.agent_root.name
 
-        # ADR-028 T5: per-agent + per-domain auth gate. Reject before
-        # opening Camoufox if the agent's web_auth.allowed_domains
-        # whitelist doesn't permit this domain, or if no cookies are in
-        # the vault. firewall is None in pure-unit-test contexts (no
-        # dpc_service wired) — those tests bypass the gate by design.
+        # ADR-028 T5 (:179): reject a `use_auth` domain outside the agent's
+        # web_auth.allowed_domains, before Camoufox opens. `firewall is None`
+        # is the pure-unit-test context and skips the gate by design — so a
+        # wiring mistake that leaves `dpc_service` unset skips it too.
+        #
+        # ADR-028:179 names `fetch_json` as well; it has no `use_auth` today.
+        # If it gains one, hoist this into a helper both call rather than
+        # copying it — a second copy of an access check is how one ends up a
+        # version behind. The empty-vault case is deliberately not decided
+        # here; see THE-EMPTY-VAULT-CASE-HAS-TWO-TESTS-ASSERTING-OPPOSITE-THINGS.
         firewall = None
         dpc_service = getattr(ctx, "dpc_service", None)
+        if dpc_service is not None:
+            firewall = getattr(dpc_service, "firewall", None)
         from dpc_client_core import web_auth as _web_auth_mod
+
+        # Both sides go through `resolve_etld1`, which is the vault's own key —
+        # so no subdomain spelling reads another domain's cookies. What it is
+        # NOT is a public-suffix resolver: `ETLD1_MAP` holds 12 hardcoded test
+        # hostnames and passes everything else through unchanged, so for a real
+        # site `example.com` does not cover `www.example.com` and each spelling
+        # must be listed. The refusal below says so; the fix is a PSL.
+        _requested_etld1 = _web_auth_mod.resolve_etld1(use_auth)
+        if firewall is not None:
+            _allowed = {
+                _web_auth_mod.resolve_etld1(d)
+                for d in firewall.get_agent_web_auth_domains(agent_id)
+            }
+            if not _requested_etld1 or _requested_etld1 not in _allowed:
+                _web_auth_mod.audit_append(
+                    agent_id, use_auth, url,
+                    status="firewall_denied:not_in_whitelist",
+                )
+                return (
+                    f"⚠️ '{use_auth}' is not in this agent's authorised web-auth "
+                    f"domains. Add **this exact hostname** to privacy_rules.json "
+                    f"→ agent_profiles.{agent_id}.web_auth.allowed_domains, then "
+                    f"log in via the web-auth UI. Subdomains are not covered by "
+                    f"their parent domain: 'www.{_requested_etld1 or use_auth}' "
+                    f"and '{_requested_etld1 or use_auth}' are separate entries."
+                )
 
         # ADR-029 Task 008: per-request approval for headless auth.
         # Headed (keep_open=True) needs no gate — human sees the browser.
         # Headless (keep_open=False) broadcasts approval request to UI.
         if not keep_open:
             local_api = getattr(dpc_service, "local_api", None) if dpc_service else None
+            if local_api is not None and not getattr(local_api, "has_clients", True):
+                # broadcast_event drops the request when nobody is connected,
+                # so the wait below could only ever time out. Two minutes of
+                # silence per call, and the agent is told "not approved" as
+                # though a human had refused. Say what actually happened.
+                _web_auth_mod.audit_append(
+                    agent_id, use_auth, url, status="headless_no_ui",
+                )
+                return (
+                    f"⚠️ Headless access to '{use_auth}' needs approval, but no "
+                    f"UI client is connected to approve it. Use keep_open=true "
+                    f"for a headed browser."
+                )
             if local_api is not None:
-                import threading
                 import uuid as _uuid
                 approval_id = _uuid.uuid4().hex[:12]
-                approval_event = threading.Event()
+                approval_event = _CrossLoopSignal()
                 _pending_auth_approvals[approval_id] = {
                     "event": approval_event,
                     "agent_id": agent_id,
@@ -2062,23 +2856,29 @@ async def browse_page(
                     "url": url,
                     "approved": False,
                 }
+                # This gate asked the least of the three: an agent id and no
+                # chat at all, so the person was told neither who was using
+                # their logged-in account nor from where.
+                _origin_id, _origin_title = conversation_origin(ctx)
                 await local_api.broadcast_event(
                     "web_auth_headless_approval_request",
                     {
                         "request_id": approval_id,
                         "agent_id": agent_id,
+                        "agent_name": agent_display_name(ctx),
                         "domain": use_auth,
                         "url": url,
+                        "conversation_id": _origin_id,
+                        "conversation_title": _origin_title,
                     },
                 )
-                loop = asyncio.get_running_loop()
                 try:
-                    approved = await asyncio.wait_for(
-                        loop.run_in_executor(None, approval_event.wait, 120),
-                        timeout=120,
+                    await asyncio.wait_for(
+                        approval_event.wait(),
+                        timeout=_HEADLESS_APPROVAL_TIMEOUT_SEC,
                     )
                 except asyncio.TimeoutError:
-                    approved = False
+                    pass
                 entry = _pending_auth_approvals.pop(approval_id, {})
                 if not entry.get("approved", False):
                     _web_auth_mod.audit_append(
@@ -2097,27 +2897,18 @@ async def browse_page(
                 session = await _get_or_create_session_async(
                     agent_id, [use_auth], True,
                 )
-                try:
-                    await _run_in_session(session, "navigate", url)
-                except Exception as nav_err:
-                    log.warning(
-                        "navigate failed (agent=%s, url=%s): %s — "
-                        "closing session and retrying with fresh context",
-                        agent_id, url, nav_err,
-                    )
-                    try:
-                        await _run_in_session(session, "close")
-                    except Exception:
-                        pass
-                    _active_browser_sessions.pop(agent_id, None)
-                    session = await _get_or_create_session_async(
-                        agent_id, [use_auth], True,
-                    )
-                    await _run_in_session(session, "navigate", url)
+                session = await _navigate_with_recovery(
+                    session, agent_id, url, [use_auth],
+                )
                 html = await _run_in_session(session, "get_page_html")
             else:
+                # headed=False: the gate above asked the user to approve
+                # *headless* access and the audit records it as such
+                # (`headless_approved` / `headless_rejected`). Passing a
+                # headed browser here opened a visible window per call
+                # while telling the user it would not.
                 html = await asyncio.to_thread(
-                    _auth_browse_html, agent_id, use_auth, url, True
+                    _auth_browse_html, agent_id, use_auth, url, False
                 )
         except AuthRequiredError as e:
             _web_auth_mod.audit_append(
@@ -2155,39 +2946,27 @@ async def browse_page(
         _web_auth_mod.audit_append(
             agent_id, use_auth, url, status=200, bytes_size=len(text)
         )
-        max_chars = _SIZE_PRESETS.get(size, _SIZE_PRESETS["m"])
-        total = len(text)
-        if max_chars and total > max_chars:
-            text = text[:max_chars] + f"\n\n... (truncated, {total} total chars, use size='l' or 'f' for more)"
-        return f"Content from {url} (markdown, auth={use_auth}, {total} chars):\n\n{text}"
+        return _rendered_page_answer(
+            url, html, text, size,
+            session=(
+                f"{'headed' if keep_open else 'headless'} browser, "
+                f"auth domain {use_auth}"
+            ),
+        )
 
     if keep_open:
         agent_id = ctx.agent_root.name if hasattr(ctx, 'agent_root') else "anonymous"
         try:
             session = await _get_or_create_session_async(agent_id, [], True)
-            try:
-                await _run_in_session(session, "navigate", url)
-            except Exception as nav_err:
-                log.warning(
-                    "navigate failed (agent=%s, url=%s): %s — retrying fresh",
-                    agent_id, url, nav_err,
-                )
-                try:
-                    await _run_in_session(session, "close")
-                except Exception:
-                    pass
-                _active_browser_sessions.pop(agent_id, None)
-                session = await _get_or_create_session_async(agent_id, [], True)
-                await _run_in_session(session, "navigate", url)
+            session = await _navigate_with_recovery(session, agent_id, url, [])
             html = await _run_in_session(session, "get_page_html")
         except Exception as e:
             return f"⚠️ Camoufox browser failed: {e}"
         text = _html_to_markdown(html)
-        max_chars = _SIZE_PRESETS.get(size, _SIZE_PRESETS["m"])
-        total = len(text)
-        if max_chars and total > max_chars:
-            text = text[:max_chars] + f"\n\n... (truncated, {total} total chars, use size='l' or 'f' for more)"
-        return f"Content from {url} (markdown, headed, {total} chars):\n\n{text}"
+        return _rendered_page_answer(
+            url, html, text, size,
+            session="headed browser, no auth domain named",
+        )
 
     result = await asyncio.to_thread(_browse_sync, url)
 
@@ -2195,29 +2974,99 @@ async def browse_page(
         return f"⚠️ Failed to fetch page: {result['error']}"
 
     text = result.get("text", "")
+    sig = result.get("signals", {})
+    agent_id = getattr(getattr(ctx, "agent_root", None), "name", None)
+    renderer = "static"
+    rendered_chars: Optional[int] = None
 
-    if result.get("needs_js"):
-        js_text = await asyncio.to_thread(_browse_with_camoufox, url)
-        if js_text and len(js_text) > len(text or ""):
-            text = js_text
+    if result.get("needs_js") or verify:
+        js_text = await _fetch_js_text(url, agent_id)
+        if js_text is not None:
+            rendered_chars = len(js_text)
+            if len(js_text) > len(text or ""):
+                text = js_text
+                renderer = "camoufox"
     max_chars = _SIZE_PRESETS.get(size, _SIZE_PRESETS["m"])
     total = len(text)
+    shown = min(total, max_chars) if max_chars else total
     if max_chars and total > max_chars:
-        text = text[:max_chars] + f"\n\n... (truncated, {total} total chars, use size='l' or 'f' for more)"
+        text = text[:max_chars]
 
-    return f"Content from {url} (markdown, {total} chars):\n\n{text}"
+    header = _completeness_header(
+        url, sig, renderer, rendered_chars, shown, total, size,
+    )
+    # The anonymous path wrote no audit record at all, so the two questions
+    # this header now answers had no history behind them: 3 929 audit rows on
+    # 2026-08-23, every one of them from the authenticated path. One line per
+    # fetch turns "is a cut transport rare?" from an opinion into a count.
+    if agent_id:
+        try:
+            from dpc_client_core import web_auth as _wa
+            _wa.log_browser_action(
+                agent_id, _domain_of(url), "fetch_anonymous", url,
+                result="ok",
+                html_chars=sig.get("html_chars"),
+                text_chars=total,
+                document_closed=sig.get("document_closed"),
+                script_tags=sig.get("script_tags"),
+                app_shell=bool(sig.get("app_shell_markers")),
+                js_capable=sig.get("js_capable"),
+                needs_js=bool(result.get("needs_js")),
+                renderer=renderer,
+                rendered_chars=rendered_chars,
+                preset=size,
+                shown_chars=shown,
+            )
+        except Exception as e:  # auditing must never break a fetch
+            log.warning("anonymous fetch audit failed (%s): %s", url, e)
+
+    return f"{header}\n\n{text}"
 
 
-def fetch_json(ctx: ToolContext, url: str) -> str:
+FETCH_JSON_WINDOW = 10_000  # chars of pretty-printed JSON per call
+
+
+def _json_shape(data: Any) -> str:
+    """One line saying what the document is, from the already-parsed object.
+
+    The window below is a slice of pretty-printed text, so an agent that
+    sees only the first 10 000 characters cannot tell whether the part it
+    is missing is one more field or ten thousand records. `json.loads` has
+    already produced the whole object by this point — the shape is free,
+    and it answers "what else is in here" without asking the network
+    again, which the offset does not.
     """
-    Fetch JSON data from a URL.
+    if isinstance(data, dict):
+        keys = list(data.keys())
+        shown = ", ".join(str(k) for k in keys[:12])
+        more = f" +{len(keys) - 12} more" if len(keys) > 12 else ""
+        return f"object with {len(keys)} top-level keys [{shown}{more}]"
+    if isinstance(data, list):
+        if not data:
+            return "empty array"
+        return f"array of {len(data)} items, first is {type(data[0]).__name__}"
+    return f"scalar ({type(data).__name__})"
+
+
+def fetch_json(ctx: ToolContext, url: str, offset: int = 0, limit: int | None = None) -> str:
+    """
+    Fetch JSON data from a URL, one window of characters at a time.
+
+    The old form cut at 10 000 chars and appended a bare `... (truncated)`:
+    no size, no way to continue, and the cut lands mid-structure so what
+    came back was not parseable JSON either. The window below says how
+    large the document is, which slice of it this is, and how to ask for
+    the next one — and names the price, because there is no buffer here:
+    a second window is a second request to the server.
 
     Args:
         ctx: Tool context (unused)
         url: URL to fetch
+        offset: First character of the pretty-printed document to return
+        limit: How many characters to return (default FETCH_JSON_WINDOW)
 
     Returns:
-        JSON content formatted for reading
+        A window of the JSON document, prefixed with its bounds
     """
     import json
 
@@ -2229,14 +3078,33 @@ def fetch_json(ctx: ToolContext, url: str) -> str:
     try:
         data = json.loads(result["content"])
         formatted = json.dumps(data, indent=2, ensure_ascii=False)
-
-        if len(formatted) > 10000:
-            formatted = formatted[:10000] + f"\n\n... (truncated)"
-
-        return f"JSON from {url}:\n\n{formatted}"
-
     except json.JSONDecodeError as e:
         return f"⚠️ Invalid JSON: {e}"
+
+    total = len(formatted)
+    window = FETCH_JSON_WINDOW if limit is None else max(1, limit)
+    start = max(0, offset)
+    if start >= total and total:
+        return (
+            f"[json from {url}: {total} chars total, offset={start} is past the"
+            f" end — the last window starts at offset={max(0, total - window)}]"
+        )
+    chunk = formatted[start:start + window]
+    end = start + len(chunk)
+    if start == 0 and end >= total:
+        return f"JSON from {url}:\n\n{formatted}"
+    return (
+        f"[json from {url}: {_json_shape(data)}, {total} chars pretty-printed"
+        f" | this window is chars {start}-{end} — A SLICE, not parseable JSON,"
+        f" it is cut mid-structure"
+        + (
+            f" | next window: fetch_json(url, offset={end}) — this RE-FETCHES"
+            f" the document from the network]"
+            if end < total
+            else " | this is the final window]"
+        )
+        + f"\n\n{chunk}"
+    )
 
 
 
@@ -2355,7 +3223,15 @@ async def _maybe_summarize_snapshot(
     """Apply Phase 2 LLM summarization or Phase 1 line truncation when
     `snapshot_text` exceeds the per-agent threshold; pass through
     otherwise. Reads provider + threshold from agent config and pulls
-    llm_manager from `ctx.dpc_service`."""
+    llm_manager from `ctx.dpc_service`.
+
+    No task is passed to the summarizer. The only candidate on the
+    context is `current_task_type`, which is the literal "chat" for
+    every agent turn; handing that over as the user's task made the
+    auxiliary model answer "is there a chat widget on this page?" and
+    drop the elements the agent had navigated there to use. Without a
+    task it keeps interactive elements and their refs, which is what
+    the caller needs."""
     if not snapshot_text:
         return snapshot_text
     provider, threshold = _load_agent_summarize_config(agent_id)
@@ -2365,9 +3241,8 @@ async def _maybe_summarize_snapshot(
     dpc_service = getattr(ctx, "dpc_service", None)
     if dpc_service is not None:
         llm_manager = getattr(dpc_service, "llm_manager", None)
-    user_task = getattr(ctx, "current_task_type", None) or None
     return await _llm_summarize_snapshot(
-        snapshot_text, user_task, llm_manager,
+        snapshot_text, None, llm_manager,
         provider_alias=provider, max_chars=threshold,
     )
 
@@ -2414,6 +3289,10 @@ async def browser_snapshot(ctx: ToolContext, raw: bool = False) -> str:
         try:
             tree, _refs = await _run_in_session(session, "a11y_snapshot")
         except Exception as e:
+            log.warning(
+                "snapshot failed (agent=%s): %s: %s",
+                agent_id, type(e).__name__, str(e).split(chr(10))[0],
+            )
             return f"⚠️ Snapshot failed: {type(e).__name__}: {e}"
         try:
             containers = await _run_in_session(
@@ -2430,7 +3309,11 @@ async def browser_snapshot(ctx: ToolContext, raw: bool = False) -> str:
 
 async def browser_navigate(ctx: ToolContext, url: str) -> str:
     """Navigate the active browser session to URL within the auth
-    domains. Returns the post-navigation accessibility snapshot."""
+    domains. Returns the post-navigation accessibility snapshot,
+    prefixed with the HTTP status when the server answered 4xx/5xx —
+    a 404 renders as an ordinary page, so without this the agent
+    cannot tell a missing page from a real one and waits out full
+    click timeouts on elements that were never there."""
     agent_id = ctx.agent_root.name
     session = _get_session_or_error(agent_id)
     if session is None:
@@ -2442,10 +3325,20 @@ async def browser_navigate(ctx: ToolContext, url: str) -> str:
         except ValueError as e:
             return f"⚠️ Domain blocked: {e}"
         except Exception as e:
+            log.warning(
+                "navigate failed (agent=%s): %s: %s",
+                agent_id, type(e).__name__, str(e).split(chr(10))[0],
+            )
             return f"⚠️ Navigate failed: {type(e).__name__}: {e}"
+    status_note = ""
+    if snapshot.startswith(HTTP_ERROR_PREFIX):
+        head, _, snapshot = snapshot.partition("\n\n")
+        status_note = f"{head}\n\n"
     summarized = await _maybe_summarize_snapshot(snapshot, ctx, agent_id)
     if summarized:
-        return f"Navigated to {url}\n\n{summarized}"
+        return f"Navigated to {url}\n\n{status_note}{summarized}"
+    if status_note:
+        return f"Navigated to {url}\n\n{status_note.strip()}"
     return f"Navigated to {url}"
 
 
@@ -2462,6 +3355,10 @@ async def browser_scroll(
         try:
             await _run_in_session(session, "scroll", direction, amount)
         except Exception as e:
+            log.warning(
+                "scroll failed (agent=%s): %s: %s",
+                agent_id, type(e).__name__, str(e).split(chr(10))[0],
+            )
             return f"⚠️ Scroll failed: {type(e).__name__}: {e}"
     return f"Scrolled {direction} by {amount}px"
 
@@ -2481,6 +3378,10 @@ async def browser_click(
         except ValueError as e:
             return f"⚠️ {e}"
         except Exception as e:
+            log.warning(
+                "click failed (agent=%s): %s: %s",
+                agent_id, type(e).__name__, str(e).split(chr(10))[0],
+            )
             return f"⚠️ Click failed: {type(e).__name__}: {e}"
     return f"Clicked {ref_or_selector}"
 
@@ -2500,6 +3401,10 @@ async def browser_fill(
         except ValueError as e:
             return f"⚠️ {e}"
         except Exception as e:
+            log.warning(
+                "fill failed (agent=%s): %s: %s",
+                agent_id, type(e).__name__, str(e).split(chr(10))[0],
+            )
             return f"⚠️ Fill failed: {type(e).__name__}: {e}"
     return f"Filled {ref_or_selector} ({len(text)} chars)"
 
@@ -2521,6 +3426,10 @@ async def browser_wait_for(
         except ValueError as e:
             return f"⚠️ {e}"
         except Exception as e:
+            log.warning(
+                "wait failed (agent=%s): %s: %s",
+                agent_id, type(e).__name__, str(e).split(chr(10))[0],
+            )
             return f"⚠️ Wait failed: {type(e).__name__}: {e}"
     return f"Element {ref_or_selector} is visible"
 
@@ -2537,6 +3446,10 @@ async def browser_extract(ctx: ToolContext) -> str:
         try:
             html = await _run_in_session(session, "extract")
         except Exception as e:
+            log.warning(
+                "extract failed (agent=%s): %s: %s",
+                agent_id, type(e).__name__, str(e).split(chr(10))[0],
+            )
             return f"⚠️ Extract failed: {type(e).__name__}: {e}"
     return html
 
@@ -2561,6 +3474,10 @@ async def browser_screenshot(
                 session, "screenshot", full_page, str(path),
             )
         except Exception as e:
+            log.warning(
+                "screenshot failed (agent=%s): %s: %s",
+                agent_id, type(e).__name__, str(e).split(chr(10))[0],
+            )
             return f"⚠️ Screenshot failed: {type(e).__name__}: {e}"
     try:
         _cleanup_screenshots_lru(screenshots_dir, max_keep=50)
@@ -2585,6 +3502,10 @@ async def browser_switch_tab(ctx: ToolContext, index: int) -> str:
         try:
             new_page = await _run_in_session(session, "switch_tab", index)
         except Exception as e:
+            log.warning(
+                "switch tab failed (agent=%s): %s: %s",
+                agent_id, type(e).__name__, str(e).split(chr(10))[0],
+            )
             return f"⚠️ Switch tab failed: {type(e).__name__}: {e}"
     try:
         url = new_page.url
@@ -2617,6 +3538,10 @@ async def browser_collect(
                 max_scrolls, scroll_pause_ms, dedup_by,
             )
         except Exception as e:
+            log.warning(
+                "collect failed (agent=%s): %s: %s",
+                agent_id, type(e).__name__, str(e).split(chr(10))[0],
+            )
             return f"⚠️ Collect failed: {type(e).__name__}: {e}"
     import json as _json
     if isinstance(result, dict) and result.get("error"):
@@ -2624,6 +3549,27 @@ async def browser_collect(
     total = result.get("total", 0)
     scrolls = result.get("scrolls_done", 0)
     header = f"Collected {total} items ({scrolls} scrolls)"
+    # Say which of the three exits happened. "Collected 120 items (30 scrolls)"
+    # read the same whether the list had ended or the budget had, and only one
+    # of those means the collection is complete.
+    reason = result.get("stop_reason")
+    if reason == "list_exhausted":
+        header += " — list exhausted, this is the whole list"
+    elif reason == "scroll_budget_exhausted":
+        idle = result.get("consecutive_empty") or 0
+        if idle:
+            header += (
+                f" — stopped at the max_scrolls={result.get('max_scrolls', scrolls)} budget,"
+                f" and the last {idle} scroll(s) added nothing: the page may have no more"
+                " to load, in which case raising max_scrolls changes nothing"
+            )
+        else:
+            header += (
+                f" — INCOMPLETE: stopped at the max_scrolls={result.get('max_scrolls', scrolls)}"
+                " budget while the list was still growing; raise max_scrolls to collect more"
+            )
+    elif reason:
+        header += f" — INCOMPLETE: scrolling stopped early ({reason})"
     if result.get("warning"):
         header += f"\n⚠️ {result['warning']}"
     items_json = _json.dumps(result.get("items", []), ensure_ascii=False, indent=2)
@@ -2641,6 +3587,10 @@ async def browser_close(ctx: ToolContext) -> str:
         try:
             await _run_in_session(session, "close")
         except Exception as e:
+            log.warning(
+                "close failed (agent=%s): %s: %s",
+                agent_id, type(e).__name__, str(e).split(chr(10))[0],
+            )
             return f"⚠️ Close failed: {type(e).__name__}: {e}"
     _session_locks.pop(agent_id, None)
     return "Browser session closed"
@@ -2675,6 +3625,11 @@ def get_tools() -> List[ToolEntry]:
                             "type": "boolean",
                             "description": "When true, leave the headed Camoufox window open after the fetch returns. Works on both the anonymous and use_auth paths: either way a headed Camoufox session is opened and reused on subsequent keep_open browse_page calls for the same agent, so opening one site and then another navigates the same window. Window stays open until DPC restart, an explicit close_browser call, or the next keep_open fetch that reuses it. Use for visual debugging or as the foundation for Task 002 interactive flows.",
                             "default": False
+                        },
+                        "verify": {
+                            "type": "boolean",
+                            "description": "When true, also render the page in a real browser and report how many characters JS produced against the static fetch. Costs a browser launch (~7-10s). Use when the response says the page runs JS and you need to know whether anything is missing — a static fetch cannot establish that a page has no more content.",
+                            "default": False
                         }
                     },
                     "required": ["url"]
@@ -2698,13 +3653,33 @@ def get_tools() -> List[ToolEntry]:
             name="fetch_json",
             schema={
                 "name": "fetch_json",
-                "description": "Fetch JSON data from a URL API endpoint",
+                "description": (
+                    "Fetch JSON data from a URL API endpoint. Documents larger"
+                    " than 10000 characters come back one window at a time; the"
+                    " response states the total size and the offset of the next"
+                    " window. Each window is a fresh request to the server."
+                ),
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "url": {
                             "type": "string",
                             "description": "URL to fetch JSON from"
+                        },
+                        "offset": {
+                            "type": "integer",
+                            "description": (
+                                "First character of the document to return"
+                                " (default 0). Use the offset the previous"
+                                " response named to read the next window."
+                            )
+                        },
+                        "limit": {
+                            "type": "integer",
+                            "description": (
+                                "Characters to return in this window"
+                                " (default 10000)."
+                            )
                         }
                     },
                     "required": ["url"]

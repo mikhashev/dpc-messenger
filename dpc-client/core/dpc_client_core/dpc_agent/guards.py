@@ -115,10 +115,15 @@ class ResearchLimitGuard(GuardMiddleware):
         )
 
 
-# Tools whose whole job is to poll a long-running external task. Calling
-# them with identical args is legitimate while a generation runs — what
-# matters is whether the OUTPUT keeps advancing, not the call signature.
-_POLLING_TOOLS = frozenset({"comfyui_progress", "comfyui_wait", "comfyui_check"})
+# Tools whose call signature does not identify the call, so repeats have to
+# be judged by whether the OUTPUT advanced. Two shapes qualify: polling a
+# long-running external task (the comfyui family, identical args for the
+# whole render), and reading live external state (browser_snapshot takes no
+# args at all, so five snapshots of five different pages are indistinguishable
+# from one call repeated five times).
+_OUTPUT_KEYED_TOOLS = frozenset({
+    "comfyui_progress", "comfyui_wait", "comfyui_check", "browser_snapshot",
+})
 
 
 class LoopGuard(GuardMiddleware):
@@ -130,10 +135,11 @@ class LoopGuard(GuardMiddleware):
     ``args`` may arrive as a JSON string from some providers and is
     normalised before fingerprinting.
 
-    Exception for :data:`_POLLING_TOOLS`: when a poll's output advances vs
-    the previous poll (new progress = new information), the repeat counter
-    for that tool is reset, so monitoring a slow generation is not killed.
-    A poll whose output stops changing (done/stuck) still trips the cap.
+    Exception for :data:`_OUTPUT_KEYED_TOOLS`: when such a call's output
+    advances vs the previous one (new output = new information), the repeat
+    counter for that tool is reset, so monitoring a slow generation — or
+    walking a browser session page by page — is not killed. Output that
+    stops changing (done/stuck/same page) still trips the cap.
     """
 
     def __init__(self, max_duplicate_calls: int = 5) -> None:
@@ -161,14 +167,15 @@ class LoopGuard(GuardMiddleware):
         return f"{name}::{args_key}"
 
     async def after_llm_call(self, ctx: HookContext) -> Optional[HookAction]:
-        # A polling tool whose output advanced since the last poll produced
-        # NEW information — reset its repeat counter so live monitoring of a
-        # long task is not mistaken for a stuck loop.
+        # An output-keyed tool whose output advanced since the last call
+        # produced NEW information — reset its repeat counter so live
+        # monitoring of a long task, or a walk across pages, is not mistaken
+        # for a stuck loop.
         for res in (ctx.state.recent_tool_results or []):
             if not isinstance(res, dict):
                 continue
             name = res.get("name", "")
-            if name not in _POLLING_TOOLS:
+            if name not in _OUTPUT_KEYED_TOOLS:
                 continue
             out = res.get("output", "")
             if self._last_poll_output.get(name) not in (None, out):
@@ -251,3 +258,58 @@ __all__ = [
     "LoopGuard",
     "BudgetLimitGuard",
 ]
+
+
+class ContextLimitGuard(GuardMiddleware):
+    """Stop before a round the window cannot hold.
+
+    The sixth guard, and the loop ran without it until 2026-08-23: rounds, tools,
+    research, loop-detection and budget were all watched, and the one resource an
+    agent actually exhausts on a long task was watched by nothing. Compaction was
+    the only defence, and compaction is not a limit — it is a best effort that
+    reaches only tool results outside the recent rounds and reduces each of them
+    once.
+
+    A ceiling rather than a predictor, deliberately. It reads the previous
+    round's real input size, which is the same number compaction triggers on, and
+    fires only when that already sits above `ratio` of the window. By then
+    compaction has had every round to work and the size is still there, so what
+    is left is the part it cannot reach. Stopping here ends the turn with its work
+    intact and a named reason, instead of discovering the limit inside the engine
+    — where on this platform the likelier answer is not an error but the driver
+    paging and prefill collapsing, which reads as an agent that became slow.
+
+    Default 0.95: high enough that a run compaction can still rescue is never
+    interrupted, low enough to leave room for one more round's growth.
+    """
+
+    def __init__(self, ratio: float = 0.95) -> None:
+        self._ratio = ratio
+        self._seen_ratio: Optional[float] = None
+
+    async def between_rounds(self, ctx: HookContext) -> Optional[HookAction]:
+        window = ctx.context_window
+        used = ctx.last_prompt_tokens
+        # Round one has no previous size, and a window nobody could resolve is
+        # not a limit to enforce — silence there, not a guess.
+        if window <= 0 or used <= 0:
+            return None
+        ratio = used / window
+        if ratio < self._ratio:
+            return None
+        self._seen_ratio = ratio
+        log.warning(
+            "ContextLimitGuard: last prompt %d tokens is %.1f%% of the %d-token "
+            "window (limit %.0f%%) — stopping before the round that would not fit",
+            used, ratio * 100, window, self._ratio * 100,
+        )
+        return HookAction.STOP_LOOP
+
+    def stop_message(self) -> str:
+        seen = f"{self._seen_ratio * 100:.0f}%" if self._seen_ratio else "the limit"
+        return (
+            f"[CONTEXT_LIMIT] The conversation reached {seen} of the model's context "
+            "window and compaction could not reduce it further. Stopping with the work "
+            "so far rather than failing inside the engine. Start a new task, or raise "
+            "the agent's context_window if the model has room."
+        )

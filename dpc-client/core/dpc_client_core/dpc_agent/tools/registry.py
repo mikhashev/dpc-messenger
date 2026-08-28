@@ -16,15 +16,105 @@ ToolRegistry collects all tools, provides schemas() and execute().
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import logging
 import pathlib
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from ..utils import safe_relpath, is_path_in_sandbox, get_agent_root
 
 log = logging.getLogger(__name__)
+
+# Names models reach for that mean a parameter we already have. Renaming beats
+# failing the call: the intent is unambiguous and the alternative is a round spent
+# on a TypeError the model then has to guess its way out of.
+ARG_ALIASES: Dict[str, str] = {
+    "file_path": "path",
+    "filepath": "path",
+}
+
+
+def _resolve_arg_aliases(handler: Callable, args: Dict[str, Any], tool_name: str) -> Dict[str, Any]:
+    """Rename an aliased argument onto the parameter the handler actually takes.
+
+    Only when the rename is unambiguous: the handler must accept the canonical name
+    and not the alias, and the caller must not have supplied both. Anything else is
+    left alone so a genuine argument error still surfaces as one.
+    """
+    if not args or not any(alias in args for alias in ARG_ALIASES):
+        return args
+
+    try:
+        params = inspect.signature(handler).parameters
+    except (TypeError, ValueError):
+        return args
+    if any(p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values()):
+        return args
+
+    resolved = dict(args)
+    for alias, canonical in ARG_ALIASES.items():
+        if alias not in resolved:
+            continue
+        if alias in params or canonical not in params or canonical in resolved:
+            continue
+        resolved[canonical] = resolved.pop(alias)
+        log.debug("Tool %s: argument %r accepted as %r", tool_name, alias, canonical)
+    return resolved
+
+
+def agent_display_name(ctx: Any) -> str:
+    """The agent's name for a person to read, or an honest identifier.
+
+    `getattr(agent, "display_name", "Agent")` turned "we do not know who is
+    asking" into a plausible signature, and it reached production twice: the
+    shell dialog on 2026-08-14 and the schedule card on 2026-08-16, both
+    reading «Agent wants …». An unknown agent is better shown as unknown, and
+    the sandbox directory is a real identifier when the object has no name.
+    """
+    agent = getattr(ctx, "_agent", None)
+    name = getattr(agent, "display_name", "") if agent is not None else ""
+    if name:
+        return name
+    # `DpcAgent` carries no `display_name` at all — observed 2026-08-21, when the
+    # popup read «agent_001 @ DPC Research» after the default was fixed, and
+    # «Agent» before it. The name has always lived in the agent's own config,
+    # which is where AgentManager._load_display_name and the service read it.
+    # Read the file rather than load_agent_config(agent_id): that helper resolves
+    # through get_agent_root, which creates the directory it is asked about.
+    root = getattr(ctx, "agent_root", None)
+    if root is not None:
+        try:
+            import json as _json
+            cfg = _json.loads((root / "config.json").read_text(encoding="utf-8"))
+            if cfg.get("name"):
+                return str(cfg["name"])
+        except Exception:
+            pass
+    return getattr(root, "name", "") or "Unknown agent"
+
+
+def conversation_origin(ctx: Any) -> Tuple[str, str]:
+    """(id, readable name) of the chat this run came from, or two empty strings.
+
+    Every gate that asks a person something needs this: with four agents in
+    four chats, "X wants to run Y" is unanswerable, and two agents can raise
+    the same request in the same second. The title is whatever the caller
+    already knew — a group run carries its name — and the rest is named by the
+    service, which is the one holding groups and peers. A run with no chat
+    behind it (a schedule, a sleep) stays empty rather than inventing one.
+    """
+    cid = getattr(ctx, "conversation_id", "") or ""
+    title = getattr(ctx, "conversation_title", "") or ""
+    if cid and not title:
+        resolve = getattr(getattr(ctx, "dpc_service", None), "_conversation_display_name", None)
+        if resolve is not None:
+            try:
+                title = resolve(cid) or ""
+            except Exception:  # a name is never worth failing a gate over
+                title = ""
+    return cid, title
 
 
 @dataclass
@@ -54,6 +144,12 @@ class ToolContext:
     # executor threads can schedule async calls back via asyncio.run_coroutine_threadsafe.
     agent_event_loop: Optional[Any] = None
 
+    # How many check_back wake-ups deep this turn already is. Set by the task
+    # executor from the task record, never from a tool argument — a depth the
+    # model could pass is a depth the model can reset, and then the cap guards
+    # nothing.
+    check_back_depth: int = 0
+
     # ConversationMonitor for knowledge extraction (set by agent_manager)
     conversation_monitor: Optional[Any] = None
 
@@ -69,6 +165,14 @@ class ToolContext:
 
     # Skill store for execute_skill tool (set by DpcAgent.process())
     skill_store: Optional[Any] = None
+
+    # Which conversation this run belongs to, and what to call it in front of a
+    # person. Set by DpcAgent.process(); empty for runs with no chat behind them
+    # (a schedule, a sleep). The tier-1 approval prompt is what needs it: with
+    # four agents working in four chats, "Johnny wants to run rm -rf" is not an
+    # answerable question until it says where the request came from.
+    conversation_id: Optional[str] = None
+    conversation_title: Optional[str] = None
 
     # -----------------------------------------------------------------------
     # Path helpers (all sandboxed to agent_root)
@@ -218,7 +322,7 @@ CORE_TOOL_NAMES = {
     "update_scratchpad", "update_identity",
     "chat_history",
     # Knowledge
-    "knowledge_read", "knowledge_write", "knowledge_list",
+    "knowledge_list",
     "memory_search",
     # DPC integration
     "get_dpc_context",
@@ -237,10 +341,7 @@ CORE_TOOL_NAMES = {
 # Restricted tools (require explicit enable in config)
 RESTRICTED_TOOL_NAMES = {
     "run_shell",           # Shell access
-    "claude_code_edit",    # Code editing via Claude
     "git_push",            # Git push
-    "request_restart",     # Control operations
-    "promote_to_stable",
     # Git tools (can modify files / history)
     "git_add", "git_commit", "git_init",
     "git_checkout", "git_merge", "git_tag", "git_reset", "git_snapshot",
@@ -258,7 +359,7 @@ class ToolRegistry:
     """
 
     CODE_TOOLS = frozenset({
-        "repo_write_commit", "claude_code_edit", "run_shell"
+        "repo_write_commit", "run_shell"
     })
 
     def __init__(self, agent_root: Optional[pathlib.Path] = None):
@@ -269,6 +370,11 @@ class ToolRegistry:
             agent_root: Root directory for agent storage (defaults to ~/.dpc/agent/)
         """
         self._entries: Dict[str, ToolEntry] = {}
+        # Modules that failed to import, name -> error text. A non-empty dict
+        # means this registry is an incomplete picture of the tools that exist:
+        # callers that compare it against stored config (firewall seeding and
+        # pruning) must not treat "absent from the registry" as "does not exist".
+        self.load_failures: Dict[str, str] = {}
         self._agent_root = agent_root or get_agent_root("default")
         self._ctx = ToolContext(agent_root=self._agent_root)
         self._load_modules()
@@ -288,20 +394,32 @@ class ToolRegistry:
         tools_path = pathlib.Path(__file__).parent
 
         tools_loaded = 0
+        modules_loaded = 0
         for _importer, modname, _ispkg in pkgutil.iter_modules([str(tools_path)]):
             if modname.startswith("_") or modname == "registry":
                 continue
             try:
                 mod = importlib.import_module(f".{modname}", package="dpc_client_core.dpc_agent.tools")
                 if hasattr(mod, "get_tools"):
+                    modules_loaded += 1
                     for entry in mod.get_tools():
                         self._entries[entry.name] = entry
                         tools_loaded += 1
             except Exception as e:
-                log.warning(f"Failed to load tool module {modname}: {e}", exc_info=True)
+                # ERROR, not WARNING: a module that does not import takes its
+                # tools out of the registry, out of the permissions panel and
+                # out of every agent — silently, and the only trace is here.
+                self.load_failures[modname] = str(e)
+                log.error(f"Failed to load tool module {modname}: {e}", exc_info=True)
 
         if tools_loaded > 0:
-            log.info(f"Loaded {tools_loaded} agent tools from {len(self._entries)} modules")
+            log.info(f"Loaded {tools_loaded} agent tools from {modules_loaded} modules")
+        if self.load_failures:
+            log.error(
+                "%d tool module(s) failed to load — their tools are missing from "
+                "this registry: %s",
+                len(self.load_failures), ", ".join(sorted(self.load_failures)),
+            )
 
     def set_context(self, ctx: ToolContext) -> None:
         """Set the execution context for subsequent tool calls."""
@@ -342,8 +460,11 @@ class ToolRegistry:
             # Filter restricted tools
             if not include_restricted and e.name in RESTRICTED_TOOL_NAMES:
                 continue
-            # Check whitelist
-            if self._ctx.tool_whitelist and e.name not in self._ctx.tool_whitelist:
+            # Check whitelist. `None` means no firewall answered, so no gate;
+            # an EMPTY set means the firewall allowed nothing, which has to deny
+            # everything — under truthiness those two read the same, and the
+            # empty one silently offered the model every tool it had.
+            if self._ctx.tool_whitelist is not None and e.name not in self._ctx.tool_whitelist:
                 continue
 
             result.append({"type": "function", "function": e.schema})
@@ -399,9 +520,11 @@ class ToolRegistry:
         elif ctx is None:
             log.warning("Tool %s: using shared ctx %x (no isolation — potential race)", name, _ctx_id)
 
-        # Check whitelist
-        if _ctx.tool_whitelist and name not in _ctx.tool_whitelist:
+        # Check whitelist — `None` is "no gate", empty is "nothing allowed".
+        if _ctx.tool_whitelist is not None and name not in _ctx.tool_whitelist:
             return f"⚠️ Tool '{name}' is not in the allowed tools list"
+
+        args = _resolve_arg_aliases(entry.handler, args, name)
 
         try:
             result = entry.handler(_ctx, **args)

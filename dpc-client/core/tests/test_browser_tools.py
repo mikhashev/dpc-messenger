@@ -286,3 +286,81 @@ class TestFetchJSON:
 
         result = fetch_json(ctx, "http://example.com/api")
         assert "Invalid JSON" in result
+
+
+# ─────────────────────────────────────────────────────────────
+# Snapshot summarization — bounded, and not asked the wrong question
+# ─────────────────────────────────────────────────────────────
+
+
+class _RecordingManager:
+    """Captures the prompt the auxiliary summarizer is called with."""
+
+    def __init__(self, reply="SUMMARY"):
+        self.prompts: list[str] = []
+        self._reply = reply
+
+    async def query(self, prompt, provider_alias=None):
+        self.prompts.append(prompt)
+        return self._reply
+
+
+class _HangingManager:
+    async def query(self, prompt, provider_alias=None):
+        import asyncio as _asyncio
+
+        await _asyncio.sleep(3600)
+
+
+@pytest.mark.asyncio
+async def test_summarize_without_task_keeps_refs_prompt():
+    """The context carries no real task — only the literal task *type*
+    "chat". Passing that on made the model answer "is there a chat
+    widget here?" and drop the elements the agent needed.
+
+    Asking it to preserve the refs did not save them either: they are now
+    withheld from the model entirely and re-attached afterwards, so the
+    prompt says so rather than asking for something it cannot see."""
+    from dpc_client_core.dpc_agent.tools import browser
+
+    manager = _RecordingManager()
+    oversized = "line\n" * 4000
+    out = await browser._llm_summarize_snapshot(oversized, None, manager)
+    # The rewrite reaches the agent labelled as a rewrite (2026-08-23): the
+    # summary itself is unchanged, it now travels behind a notice saying a
+    # model produced it and naming browser_snapshot(raw=True) for the tree.
+    assert out.endswith("SUMMARY")
+    assert out.startswith("[snapshot summarised by")
+    assert "The user's task is" not in manager.prompts[0]
+    assert "appended to your answer verbatim" in manager.prompts[0]
+
+
+@pytest.mark.asyncio
+async def test_summarize_falls_back_to_truncation_on_timeout(monkeypatch):
+    """An unbounded summarizer once ran ten minutes against a 60s tool
+    budget: the tool timed out, the agent got nothing, and the abandoned
+    request kept billing. Truncated output beats no output."""
+    from dpc_client_core.dpc_agent.tools import browser
+
+    monkeypatch.setattr(browser, "SNAPSHOT_SUMMARIZE_TIMEOUT_SEC", 0.05)
+    oversized = "line\n" * 4000
+    out = await browser._llm_summarize_snapshot(oversized, None, _HangingManager())
+    assert out.startswith("line")
+    assert len(out) < len(oversized)
+
+
+@pytest.mark.asyncio
+async def test_maybe_summarize_does_not_forward_task_type(tmp_path):
+    """`current_task_type` is "chat" for every agent turn; it must not
+    reach the summarizer as the user's task."""
+    import types as _types
+    from dpc_client_core.dpc_agent.tools import browser
+
+    manager = _RecordingManager()
+    ctx = _types.SimpleNamespace(
+        current_task_type="chat",
+        dpc_service=_types.SimpleNamespace(llm_manager=manager),
+    )
+    await browser._maybe_summarize_snapshot("line\n" * 4000, ctx, "agent_a")
+    assert manager.prompts, "summarizer was not called"
+    assert "chat" not in manager.prompts[0].split("Page Snapshot:")[0]

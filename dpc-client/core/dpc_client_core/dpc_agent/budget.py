@@ -1,8 +1,10 @@
 """
 DPC Agent Budget - Subscription-aware rate limiting.
 
-For subscription plans (like ZAI GLM-4.7), track rate limits instead of dollars.
-For pay-per-use plans, track token costs.
+For subscription plans, track rate limits instead of dollars. For pay-per-use
+plans, track token costs. ZAI GLM used to be the example of the first kind and is
+now the second: the provider moved to the prepaid platform API, where every call
+draws a balance that can run out.
 
 Supports:
 - Concurrent request limits
@@ -28,7 +30,7 @@ log = logging.getLogger(__name__)
 class BillingModel(Enum):
     """Billing model type."""
     PAY_PER_USE = "pay_per_use"      # OpenRouter style - track dollars
-    SUBSCRIPTION = "subscription"     # ZAI style - track rate limits
+    SUBSCRIPTION = "subscription"     # flat-fee plan - track rate limits, not dollars
 
 
 @dataclass
@@ -49,7 +51,18 @@ class ProviderLimits:
 
 # Z.AI concurrency limits from https://docs.z.ai (2026-05-04)
 # Z.AI only enforces concurrency, not RPM/RPD — those are conservative defaults.
-# Update when provider changes limits on their site.
+#
+# Read while z.ai was reached through the GLM Coding Plan, and not re-verified
+# since: the platform's live limits live at z.ai/manage-apikey/rate-limits, which
+# is behind a login and unreadable from a build machine (checked 2026-08-23). They
+# are kept rather than deleted because they can only throttle us, never spend, and
+# because deleting them would silently drop every model to the default of 2.
+#
+# They are also mostly unreachable now. `HybridBudget` is either/or — subscription
+# tracks concurrency and no dollars, pay-per-use tracks dollars and no concurrency
+# — and a z.ai agent belongs in the second branch, like DeepSeek, because a prepaid
+# balance is the thing that actually runs out. An agent still configured
+# `billing_model = subscription` is the only caller that reaches this table.
 PROVIDER_LIMITS: Dict[str, ProviderLimits] = {
     "zai_glm51": ProviderLimits(provider="zai_glm51", max_concurrent=10),
     "zai_glm5": ProviderLimits(provider="zai_glm5", max_concurrent=2),

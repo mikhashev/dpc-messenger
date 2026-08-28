@@ -5,12 +5,13 @@
   import { createEventDispatcher } from 'svelte';
   import { sendCommand, peerProviders, providerBalance, getProviderBalance } from '$lib/coreService';
   import { confirmAsync } from '$lib/utils/dialog';
+  import { trackRename } from '$lib/utils/aliasRenames';
 
   export let open: boolean = false;
 
   const dispatch = createEventDispatcher();
 
-  type ProviderType = 'ollama' | 'openai_compatible' | 'anthropic' | 'zai' | 'zai_coding' | 'deepseek' | 'local_whisper' | 'dpc_agent' | 'gemini' | 'github_models' | 'gigachat';
+  type ProviderType = 'ollama' | 'openai_compatible' | 'anthropic' | 'zai' | 'deepseek' | 'llamacpp_server' | 'local_whisper' | 'dpc_agent' | 'gemini' | 'github_models' | 'gigachat';
 
   type Provider = {
     alias: string;
@@ -24,12 +25,46 @@
     temperature?: number;    // Model creativity (0.0-2.0, default 0.7)
     max_tokens?: number;     // Max output tokens (zai/anthropic)
     top_p?: number;          // Nucleus sampling (zai, ollama)
+    // Whether the model reasons before answering. Unset is not the same as
+    // false: unset lets the capability decide, false says no to a model that
+    // can (Ollama only).
+    think?: boolean;
     // Ollama sampling params (unset = modelfile default)
     min_p?: number;
     presence_penalty?: number;
     repeat_penalty?: number;
     top_k?: number;
     num_predict?: number;
+    // llamacpp_server specific: the model file the DPC-owned llama-server
+    // child serves, the per-request thinking cap (ADR-040 route b2), and the
+    // supervisor knobs the form exposes doors to
+    gguf_path?: string;
+    reasoning_budget_tokens?: number;
+    mmproj?: string;         // vision projector; absent = text-only child
+    n_ctx?: number;          // KV cells the child allocates (-c); unset = 262144
+    cache_type_k?: string;   // KV quant; unset = the auto ladder (q8_0 -> q4_0)
+    cache_type_v?: string;
+    n_parallel?: number;     // unset = the server's own slot choice
+    n_ubatch?: number;       // micro-batch; unset = the build's 512
+    n_batch?: number;        // logical batch, the micro-batch's ceiling
+    cache_reuse?: number;    // KV-shift reuse chunk; unset = the build's 0 (off)
+    // The rest of the supervisor's DEFAULTS. They were reachable only by hand-
+    // editing providers.json, which is how a measured MTP experiment came to be
+    // set on the wrong field: `spec_draft_n_max` had no control, so "n=4" landed
+    // on Parallel slots and the run measured nothing.
+    binary_path?: string;       // overrides the ADR-040 pin; missing file = a loud refusal
+    n_gpu_layers?: number;      // unset = 999, every context fully on the card
+    flash_attn?: boolean;       // unset = false
+    spec_type?: string;         // unset = draft-mtp
+    spec_draft_n_max?: number;  // unset = 3
+    ctx_checkpoints?: number;   // unset = the build's 32
+    checkpoint_min_step?: number; // unset = the build's 8192
+    kv_unified?: boolean;       // unset = true; only meaningful above one slot
+    cache_ram_mib?: number;     // host RAM prompt cache, not VRAM
+    slot_save_path?: string;    // where slot state is persisted
+    jinja?: boolean;            // unset = true
+    start_timeout_s?: number;   // unset = 300
+    extra_args?: string[];      // raw flags appended last, one token per entry
     // Local Whisper specific (v0.13.1+)
     device?: string;         // 'cuda', 'cpu', or 'auto'
     compile_model?: boolean; // torch.compile optimization
@@ -62,6 +97,7 @@
     vision_provider?: string;  // Optional vision provider for image queries
     voice_provider?: string;   // v0.13.0+: Optional voice provider for transcription
     agent_provider?: string;   // v0.18.0+: Optional agent provider for AI agent
+    knowledge_provider?: string;  // Provider that extracts knowledge from a conversation
     providers: Provider[];
   };
 
@@ -72,6 +108,116 @@
   let isSaving: boolean = false;
   let saveMessage: string = '';
   let saveMessageType: 'success' | 'error' | '' = '';
+
+  // Tauri only. The browser dev server has no file dialog, and a Browse button
+  // that silently does nothing is worse than no button — so the control is not
+  // rendered there at all. Re-checked whenever the modal opens rather than once
+  // at init: `window.isTauri` is set during the page's onMount, which can land
+  // after this component is constructed.
+  $: canBrowse = open
+    && typeof window !== 'undefined'
+    && ((window as any).isTauri === true || !!(window as any).__TAURI__);
+
+  // Three setters shared by the supervisor-flag controls below. Written once
+  // rather than inlined twelve times: an empty control means "unset", and unset
+  // has to delete the key, not write 0 / "" / false — the supervisor fills its
+  // own DEFAULTS over whatever the alias omits, so a written falsy value is a
+  // different instruction from an absent one.
+  function setNum(i: number, key: keyof Provider, raw: string, float = false) {
+    if (!editedConfig) return;
+    const p = editedConfig.providers[i] as any;
+    const n = float ? parseFloat(raw) : parseInt(raw);
+    if (raw === '' || isNaN(n)) delete p[key];
+    else p[key] = n;
+    editedConfig = editedConfig;
+  }
+
+  function setStr(i: number, key: keyof Provider, raw: string) {
+    if (!editedConfig) return;
+    const p = editedConfig.providers[i] as any;
+    if (raw === '') delete p[key];
+    else p[key] = raw;
+    editedConfig = editedConfig;
+  }
+
+  /** Tri-state: '' leaves the key out, 'true'/'false' write the boolean.
+   *  A checkbox cannot express "unset", and for jinja and kv_unified the
+   *  default is true — so an unchecked box would silently mean "off". */
+  function setBool(i: number, key: keyof Provider, raw: string) {
+    if (!editedConfig) return;
+    const p = editedConfig.providers[i] as any;
+    if (raw === '') delete p[key];
+    else p[key] = raw === 'true';
+    editedConfig = editedConfig;
+  }
+
+  /** `extra_args` is a flag array; the textarea holds one token per line so a
+   *  path with spaces survives, which a space-split would tear in half. */
+  function setExtraArgs(i: number, raw: string) {
+    if (!editedConfig) return;
+    const p = editedConfig.providers[i];
+    const tokens = raw.split('\n').map((s) => s.trim()).filter((s) => s.length > 0);
+    if (tokens.length === 0) delete p.extra_args;
+    else p.extra_args = tokens;
+    editedConfig = editedConfig;
+  }
+
+  /** Same dialog for the server executable, which has its own extension. */
+  async function pickBinaryPath(i: number) {
+    if (!editedConfig || !canBrowse) return;
+    const provider = editedConfig.providers[i];
+    const current = provider.binary_path || '';
+    const startIn = current ? current.replace(/[\\/][^\\/]*$/, '') : undefined;
+    try {
+      const { open: openDialog } = await import('@tauri-apps/plugin-dialog');
+      const picked = await openDialog({
+        multiple: false,
+        directory: false,
+        defaultPath: startIn,
+        title: 'Select a llama-server executable',
+        filters: [
+          { name: 'Executable', extensions: ['exe'] },
+          { name: 'All files', extensions: ['*'] },
+        ],
+      });
+      if (typeof picked !== 'string' || !picked) return;
+      provider.binary_path = picked;
+      editedConfig = editedConfig;
+    } catch (err) {
+      console.error('[ProvidersEditor] binary dialog failed:', err);
+    }
+  }
+
+  /** Fill a model path from a file dialog, starting where the current value points. */
+  async function pickModelPath(i: number, field: 'gguf_path' | 'mmproj') {
+    if (!editedConfig || !canBrowse) return;
+    const provider = editedConfig.providers[i];
+    // For mmproj fall back to the GGUF's own folder: a projector almost always
+    // ships beside the weights it belongs to.
+    const current = provider[field] || provider.gguf_path || '';
+    const startIn = current ? current.replace(/[\\/][^\\/]*$/, '') : undefined;
+    try {
+      // Named to avoid shadowing this component's own `open` prop.
+      const { open: openDialog } = await import('@tauri-apps/plugin-dialog');
+      const picked = await openDialog({
+        multiple: false,
+        directory: false,
+        defaultPath: startIn,
+        title: field === 'mmproj'
+          ? 'Select the vision projector (mmproj)'
+          : 'Select the GGUF model file',
+        filters: [
+          { name: 'GGUF model', extensions: ['gguf'] },
+          { name: 'All files', extensions: ['*'] },
+        ],
+      });
+      if (typeof picked !== 'string' || !picked) return;   // cancelled
+      provider[field] = picked;
+      editedConfig = editedConfig;
+    } catch (err) {
+      console.error('[ProvidersEditor] file dialog failed:', err);
+    }
+  }
 
   // Model info query state
   let showModelInfo: boolean = false;
@@ -119,13 +265,42 @@
     { key: 'num_predict', step: 1, min: -2, max: 1000000, isInt: true, hint: 'max tokens' },
   ];
 
+  // The llamacpp_server sampling subset the model card actually prescribes
+  // (thinking mode: temperature 1.0, top_p 0.95, top_k 20); temperature has
+  // its own generic field above, so these two are the remainder.
+  const LLAMA_SAMPLING_PARAMS = [
+    { key: 'top_p', step: 0.05, min: 0, max: 1, isInt: false, hint: '0.0–1.0' },
+    { key: 'top_k', step: 1, min: 0, max: 200, isInt: true, hint: 'integer' },
+  ];
+
+  // Every sampling parameter, each once. The two lists above overlap on `top_k`
+  // and `top_p` — they are the same knobs offered to two provider types — so a
+  // read-only card that concatenated them printed those two twice.
+  const ALL_SAMPLING_PARAMS = [
+    ...OLLAMA_SAMPLING_PARAMS,
+    ...LLAMA_SAMPLING_PARAMS.filter(
+      (p) => !OLLAMA_SAMPLING_PARAMS.some((o) => o.key === p.key)
+    ),
+  ];
+
   // Unset temperature means different things per provider type: ollama omits
-  // the key (modelfile default applies), deepseek/zai_coding fall back to 1.0,
-  // the rest send self.temperature = 0.7.
+  // the key (modelfile default applies), deepseek/zai/llama-server fall back to
+  // 1.0, the rest send self.temperature = 0.7. Z.AI joined that first group when
+  // it moved to the OpenAI-shaped platform API — same 1.0-while-thinking rule the
+  // coding endpoint had.
   function temperatureDefaultLabel(type: ProviderType): string {
     if (type === 'ollama') return 'Model default (not sent)';
-    if (type === 'deepseek' || type === 'zai_coding') return 'Provider default (1.0)';
+    if (type === 'deepseek' || type === 'zai' || type === 'llamacpp_server') return 'Provider default (1.0)';
     return 'Default (0.7)';
+  }
+
+  // DeepSeek accepts the number and ignores it while thinking is on: measured
+  // 2026-08-15 -- with thinking off, temperature 0.0 returned the same answer
+  // five times out of five; with thinking on it returned four different ones.
+  // The backend stops sending it there, so the field must stop looking like a
+  // control the operator can use without turning thinking off first.
+  function temperatureIsInert(p: { type: ProviderType; thinking?: { enabled?: boolean } }): boolean {
+    return p.type === 'deepseek' && p.thinking?.enabled !== false;
   }
 
   // Selecting "Custom..." must show the manual input even while temperature is
@@ -136,6 +311,16 @@
     const t = editedConfig?.providers[i]?.temperature;
     if (customTempMode[i] || (t !== undefined && !TEMPERATURE_PRESETS.some(p => p.value === t))) return 'custom';
     return t ?? '';
+  }
+
+  // Three states, and a checkbox can only hold two. Leaving it out is the
+  // third: the daemon reports whether the model can think and that decides.
+  // Saying no explicitly is what a checkbox cannot express, and it is the
+  // case that matters — a model that spends its whole budget reasoning
+  // answers with nothing at all.
+  function thinkSelectValue(i: number): string {
+    const t = editedConfig?.providers[i]?.think;
+    return t === undefined ? '' : t ? 'on' : 'off';
   }
 
   function getSamplingParam(i: number, key: string): number | '' {
@@ -161,6 +346,7 @@
     type: 'ollama',
     model: '',
     peer_id: '',  // For dpc_agent remote inference
+    think: false, // Reasoning is opt-in on a new provider — see the form's help text
   };
 
   // Load config when modal opens
@@ -185,6 +371,7 @@
   function cancelEditing() {
     editMode = false;
     editedConfig = null;
+    pendingRenames = {};
     selectedTab = 'list';
     saveMessage = '';
     saveMessageType = '';
@@ -201,12 +388,18 @@
 
     try {
       const result = await sendCommand('save_providers_config', {
-        config_dict: editedConfig
+        config_dict: editedConfig,
+        alias_renames: pendingRenames
       });
 
       if (result.status === 'success') {
         saveMessage = result.message;
-        saveMessageType = 'success';
+        if (result.warnings && result.warnings.length > 0) {
+          saveMessage += '\nStill naming a provider that no longer exists:\n' + result.warnings.join('\n');
+          saveMessageType = 'error';
+        } else {
+          saveMessageType = 'success';
+        }
 
         // Update the displayed config
         config = JSON.parse(JSON.stringify(editedConfig));
@@ -214,13 +407,16 @@
         // Exit edit mode
         editMode = false;
         editedConfig = null;
+        pendingRenames = {};
         selectedTab = 'list';
 
-        // Clear success message after short delay
-        setTimeout(() => {
-          saveMessage = '';
-          saveMessageType = '';
-        }, 2000);
+        // Clear success message after short delay — a warning stays until it is read
+        if (saveMessageType === 'success') {
+          setTimeout(() => {
+            saveMessage = '';
+            saveMessageType = '';
+          }, 2000);
+        }
       } else {
         saveMessage = result.message;
         if (result.errors && result.errors.length > 0) {
@@ -244,6 +440,7 @@
     }
     editMode = false;
     editedConfig = null;
+    pendingRenames = {};
     config = null;
     selectedTab = 'list';
     resetNewProviderForm();
@@ -315,6 +512,12 @@
       if (editedConfig.agent_provider === provider.alias) {
         editedConfig.agent_provider = editedConfig.providers[0]?.alias || '';
       }
+      // Knowledge extraction clears rather than moving to another provider:
+      // unset means «use the model that answered in the conversation», which is
+      // a safe answer, and the first provider in the list may be a paid API.
+      if (editedConfig.knowledge_provider === provider.alias) {
+        editedConfig.knowledge_provider = '';
+      }
       editedConfig = editedConfig; // Trigger reactivity
     }
   }
@@ -347,8 +550,21 @@
     editedConfig = editedConfig; // Trigger reactivity
   }
 
+  // The provider that extracts knowledge. Clicking the active one clears it,
+  // because «not set» is a real choice here: it means the model that answered
+  // in the conversation does the extracting.
+  function setKnowledgeDefault(alias: string) {
+    if (!editedConfig) return;
+    editedConfig.knowledge_provider = editedConfig.knowledge_provider === alias ? '' : alias;
+    editedConfig = editedConfig; // Trigger reactivity
+  }
+
   // Track original aliases to detect changes on blur
   let originalAliases = new Map<number, string>();
+
+  // Renames to carry into everything else that names the alias — agent configs,
+  // the registry, the firewall's serving alias, the voice priority list.
+  let pendingRenames: Record<string, string> = {};
 
   // Handle alias change with auto-update of defaults (triggered on blur)
   function handleAliasBlur(index: number) {
@@ -361,6 +577,8 @@
       originalAliases.set(index, newAlias);
       return;
     }
+
+    pendingRenames = trackRename(pendingRenames, oldAlias, newAlias);
 
     // Auto-update default_provider if this was the default
     if (editedConfig.default_provider === oldAlias) {
@@ -382,6 +600,11 @@
       editedConfig.agent_provider = newAlias;
     }
 
+    // The extraction provider follows a rename like every other role.
+    if (editedConfig.knowledge_provider === oldAlias) {
+      editedConfig.knowledge_provider = newAlias;
+    }
+
     // Update the tracked alias
     originalAliases.set(index, newAlias);
     editedConfig = editedConfig; // Trigger reactivity
@@ -395,6 +618,7 @@
     editedConfig = JSON.parse(JSON.stringify(config));
     if (!editedConfig) return; // Guard against null
     // Track original aliases
+    pendingRenames = {};
     originalAliases.clear();
     editedConfig.providers.forEach((p, i) => {
       originalAliases.set(i, p.alias);
@@ -425,6 +649,7 @@
       type: 'ollama',
       model: '',
       peer_id: '',  // For dpc_agent remote inference
+      think: false, // Reasoning is opt-in on a new provider — see the form's help text
     };
   }
 
@@ -441,25 +666,39 @@
 
     if (newProvider.type === 'ollama') {
       provider.host = 'http://127.0.0.1:11434';
+      // Only when the form says so: leaving the key out means the model decides,
+      // and that is a third state rather than a synonym for off.
+      if (newProvider.think !== undefined) provider.think = newProvider.think;
     } else if (newProvider.type === 'openai_compatible') {
       provider.base_url = 'https://api.openai.com/v1';
       provider.api_key_env = 'OPENAI_API_KEY';
     } else if (newProvider.type === 'anthropic') {
       provider.api_key_env = 'ANTHROPIC_API_KEY';
     } else if (newProvider.type === 'zai') {
+      // The prepaid platform API. This used to fill in api/anthropic, which is a
+      // GLM Coding Plan endpoint: the subscription may only be used from the
+      // vendor's published list of tools, which does not include this one, and
+      // the backend now refuses to construct a provider pointed at it.
       provider.api_key_env = 'ZAI_API_KEY';
-      provider.model = newProvider.model || 'glm-5.2';
-      provider.base_url = 'https://api.z.ai/api/anthropic';
-    } else if (newProvider.type === 'zai_coding') {
-      provider.api_key_env = 'ZAI_API_KEY';
-      provider.model = newProvider.model || 'glm-5.2';
-      provider.base_url = 'https://api.z.ai/api/coding/paas/v4';
+      provider.model = newProvider.model || 'glm-4.7';
+      provider.base_url = 'https://api.z.ai/api/paas/v4';
       provider.context_window = 200000;
     } else if (newProvider.type === 'deepseek') {
       provider.api_key_env = 'DEEPSEEK_API_KEY';
       provider.model = newProvider.model || 'deepseek-v4-flash';
       provider.base_url = 'https://api.deepseek.com';
       provider.context_window = 1000000;
+    } else if (newProvider.type === 'llamacpp_server') {
+      // The form's single Model field carries the GGUF path — that is the one
+      // thing this type cannot default. Everything else has a measured default
+      // in the supervisor (n_ctx 262144, -ngl 999, MTP draft 3, --jinja).
+      provider.gguf_path = newProvider.model || '';
+      provider.context_window = 262144;
+      // The card's thinking-mode sampling, prefilled so the alias is honest
+      // from birth; the backend logs an advisory when these are missing.
+      provider.temperature = 1.0;
+      provider.top_p = 0.95;
+      provider.top_k = 20;
     } else if (newProvider.type === 'local_whisper') {
       provider.device = 'auto';
       provider.compile_model = true;
@@ -689,6 +928,13 @@
 
           <!-- Provider Cards -->
           <div class="providers-list">
+            {#if editMode}
+              <p class="role-hint">
+                🧠 <strong>Knowledge extraction</strong> — unset means the model
+                that answered in a conversation extracts that conversation; the
+                extraction prompt carries the whole transcript.
+              </p>
+            {/if}
             {#each displayConfig.providers as provider, i (i)}
               <div class="provider-card" class:default={provider.alias === displayConfig.default_provider}>
                 <div class="provider-header">
@@ -698,6 +944,7 @@
                     {#if provider.alias === displayConfig.vision_provider}<span class="default-badge vision-badge">👁️ Vision Default</span>{/if}
                     {#if provider.alias === displayConfig.voice_provider}<span class="default-badge voice-badge">🎤 Voice Default</span>{/if}
                     {#if provider.alias === displayConfig.agent_provider}<span class="default-badge agent-badge">🤖 Agent Default</span>{/if}
+                    {#if provider.alias === displayConfig.knowledge_provider}<span class="default-badge">🧠 Knowledge Extraction</span>{/if}
                   </h3>
                   {#if editMode}
                     <button class="btn-delete" on:click={() => deleteProvider(i)}>Delete</button>
@@ -728,8 +975,8 @@
                         <option value="openai_compatible">OpenAI Compatible</option>
                         <option value="anthropic">Anthropic</option>
                         <option value="zai">Z.AI</option>
-                        <option value="zai_coding">Z.AI Coding Plan</option>
                         <option value="deepseek">DeepSeek</option>
+                        <option value="llamacpp_server">llama-server (local, DPC pin)</option>
                         <option value="local_whisper">Local Whisper</option>
                         <option value="dpc_agent">DPC Agent</option>
                         <option value="gemini">Google Gemini</option>
@@ -863,6 +1110,596 @@
                       </div>
                     {/if}
 
+                    {#if editedConfig.providers[i].type === 'llamacpp_server'}
+                      <div class="form-group">
+                        <label for="gguf-{i}">GGUF path</label>
+                        <div class="path-row">
+                          <input
+                            id="gguf-{i}"
+                            type="text"
+                            bind:value={editedConfig.providers[i].gguf_path}
+                            placeholder="Absolute path to the .gguf model file"
+                          />
+                          {#if canBrowse}
+                            <button
+                              type="button"
+                              class="btn btn-browse"
+                              on:click={() => pickModelPath(i, 'gguf_path')}
+                              title="Pick the model file from disk"
+                            >Browse…</button>
+                          {/if}
+                        </div>
+                        <p class="help-text">
+                          Absolute path to the model file. DPC starts its own llama-server on it
+                          (ADR-040): first call fetch-verifies the pinned binary, then serves —
+                          no host, no key.
+                        </p>
+                      </div>
+
+                      <div class="form-group">
+                        <label for="mmproj-{i}">mmproj (vision projector, optional)</label>
+                        <div class="path-row">
+                          <input
+                            id="mmproj-{i}"
+                            type="text"
+                            bind:value={editedConfig.providers[i].mmproj}
+                            placeholder="Absolute path to the mmproj .gguf (vision only)"
+                          />
+                          {#if canBrowse}
+                            <button
+                              type="button"
+                              class="btn btn-browse"
+                              on:click={() => pickModelPath(i, 'mmproj')}
+                              title="Pick the projector file from disk"
+                            >Browse…</button>
+                          {/if}
+                        </div>
+                        <p class="help-text">
+                          The vision projector file passed to llama-server as --mmproj. With it
+                          the server serves images (and video) at full context; without it the
+                          alias is text-only. Needs KV headroom — q4_0 leaves it, q8_0 does not.
+                        </p>
+                      </div>
+
+                      <div class="form-group">
+                        <label for="nctx-{i}">KV pool size, n_ctx (optional)</label>
+                        <input
+                          id="nctx-{i}"
+                          type="number"
+                          min="4096"
+                          step="4096"
+                          value={editedConfig.providers[i].n_ctx ?? ''}
+                          placeholder="262144 (default)"
+                          on:input={(e) => {
+                            if (!editedConfig) return;
+                            const raw = (e.currentTarget as HTMLInputElement).value;
+                            const n = parseInt(raw, 10);
+                            editedConfig.providers[i].n_ctx = raw === '' || isNaN(n) ? undefined : n;
+                          }}
+                        />
+                        <p class="help-text">
+                          How many KV cells llama-server allocates (-c). Unset = 262 144. This is
+                          <strong>one pool shared by every slot</strong>, not a per-conversation
+                          limit — «Context Window» below is what a single conversation may occupy,
+                          and nothing derives one from the other. Two agents of one group carried
+                          137 616 + 139 819 tokens here and did not fit the default pool: the
+                          parked conversation could not be laid back down and was re-read from
+                          zero. Costs VRAM — measured ≈18 KiB per cell with q4_0 KV on this card.
+                        </p>
+                      </div>
+
+                      <div class="form-group">
+                        <label for="ubatch-{i}">Micro-batch size (optional)</label>
+                        <input
+                          id="ubatch-{i}"
+                          type="number"
+                          min="64"
+                          step="64"
+                          value={editedConfig.providers[i].n_ubatch ?? ''}
+                          placeholder="512 (build default)"
+                          on:input={(e) => {
+                            if (!editedConfig) return;
+                            const raw = (e.currentTarget as HTMLInputElement).value;
+                            const n = parseInt(raw, 10);
+                            editedConfig.providers[i].n_ubatch = raw === '' || isNaN(n) ? undefined : n;
+                          }}
+                        />
+                        <p class="help-text">
+                          How many tokens the server reads at once inside a prompt (-ub). The gain
+                          needs depth: on one card and one build (RTX PRO 4500, b10472, a 27B at
+                          Q4_K_M) 1024 beat the default 512 by 5.6 % at a 60 000-token prefill and
+                          2048 added 2.8 %, while below ~8 000 tokens it changed nothing. Those are
+                          our numbers, not yours — and it costs VRAM (683 MiB for that step here),
+                          so measure on your own install before raising it.
+                        </p>
+                      </div>
+
+                      <div class="form-group">
+                        <label for="batch-{i}">Batch size (optional)</label>
+                        <input
+                          id="batch-{i}"
+                          type="number"
+                          min="64"
+                          step="64"
+                          value={editedConfig.providers[i].n_batch ?? ''}
+                          placeholder="2048 (build default)"
+                          on:input={(e) => {
+                            if (!editedConfig) return;
+                            const raw = (e.currentTarget as HTMLInputElement).value;
+                            const n = parseInt(raw, 10);
+                            editedConfig.providers[i].n_batch = raw === '' || isNaN(n) ? undefined : n;
+                          }}
+                        />
+                        <p class="help-text">
+                          The logical batch (-b) the micro-batch is cut from, so it is the ceiling
+                          on the field above: a micro-batch larger than this is silently clamped.
+                          We measured no effect from changing it on its own — it is here so that
+                          raising the micro-batch past 2048 is possible rather than quietly ignored.
+                        </p>
+                      </div>
+
+                      <div class="form-group">
+                        <label for="cache-reuse-{i}">Cache reuse chunk (optional)</label>
+                        <input
+                          id="cache-reuse-{i}"
+                          type="number"
+                          min="0"
+                          step="64"
+                          value={editedConfig.providers[i].cache_reuse ?? ''}
+                          placeholder="0 — off (build default)"
+                          on:input={(e) => {
+                            if (!editedConfig) return;
+                            const raw = (e.currentTarget as HTMLInputElement).value;
+                            const n = parseInt(raw, 10);
+                            editedConfig.providers[i].cache_reuse = raw === '' || isNaN(n) ? undefined : n;
+                          }}
+                        />
+                        <p class="help-text">
+                          The smallest run of tokens the server will try to keep by shifting the KV
+                          cache when a cached prompt diverges in the middle (--cache-reuse). Off by
+                          default, and with it off one changed line early in a prompt costs a
+                          re-read of everything behind it — which matters if your prompt rebuilds
+                          anything ahead of the conversation. We have not measured a value on this
+                          fleet yet; start around 256 and watch how much of each prompt the server
+                          reports as already present.
+                        </p>
+                      </div>
+
+                      <div class="form-group">
+                        <label for="kv-type-{i}">KV cache type (optional)</label>
+                        <select
+                          id="kv-type-{i}"
+                          value={editedConfig.providers[i].cache_type_k ?? ''}
+                          on:change={(e) => {
+                            if (!editedConfig) return;
+                            const v = (e.target as HTMLSelectElement).value;
+                            const p = editedConfig.providers[i];
+                            if (v === '') {
+                              delete p.cache_type_k;
+                              delete p.cache_type_v;
+                            } else {
+                              p.cache_type_k = v;
+                              p.cache_type_v = v;
+                            }
+                            editedConfig = editedConfig;
+                          }}
+                        >
+                          <!-- The nine types `llama-server --help` accepts for -ctk/-ctv, in
+                               cost order. Bits per element rather than GiB: the GiB figure
+                               depends on the model's attention layers and head width, so a
+                               number baked into a label would be right for one model only.
+
+                               What the argument parser accepts is NOT what the attention
+                               kernels implement. Measured 2026-08-22 on b10472 + this card:
+                               iq4_nl parsed fine and dropped prefill from ~1200-2500 tok/s to
+                               66 and falling, GPU at 2 % and CPU at 50 % — the CUDA build
+                               carries set_rows/get_rows/dequantize for it while every one of
+                               its 301 attention instantiations is flash_attn_ext_f16<…>.
+                               «Unverified» was itself a guess, and it was wrong for four of
+                               the nine. Decided 2026-08-22 by decoding the 48
+                               flash_attn_ext_vec instantiations in ggml-cuda.dll: the template
+                               arguments are Itanium-mangled enum values (L9ggml_type<N>E), so
+                               the type names never appear as text and searching for them
+                               returns nothing for every type, compiled or not. Decoded, the
+                               compiled K/V pairs are exactly BF16, F16, Q4_0 and Q8_0, twelve
+                               each. F32, Q4_1, Q5_0, Q5_1 and IQ4_NL have none.
+
+                               The asymmetry is the point: absence of a kernel is decisive —
+                               that type WILL fall to the CPU — while presence says only that
+                               the path exists, not that it is fast here. So four options now
+                               carry the iq4_nl warning, and the ones that compile say what
+                               was and was not measured. -->
+                          <option value="">Auto (q8_0 → q4_0 by free VRAM)</option>
+                          <option value="f32">f32 — 32 bit — NO CUDA ATTENTION KERNEL, falls back to CPU</option>
+                          <option value="f16">f16 — 16 bit, kernel present (needs headroom, check the card)</option>
+                          <option value="bf16">bf16 — 16 bit, kernel present (speed unmeasured here)</option>
+                          <option value="q8_0">q8_0 — 8.5 bit, kernel present (speed unmeasured here)</option>
+                          <option value="q5_1">q5_1 — 6 bit — NO CUDA ATTENTION KERNEL, falls back to CPU</option>
+                          <option value="q5_0">q5_0 — 5.5 bit — NO CUDA ATTENTION KERNEL, falls back to CPU</option>
+                          <option value="q4_1">q4_1 — 5 bit — NO CUDA ATTENTION KERNEL, falls back to CPU</option>
+                          <option value="iq4_nl">iq4_nl — 4.5 bit — NO CUDA ATTENTION KERNEL, falls back to CPU</option>
+                          <option value="q4_0">q4_0 — 4.5 bit — kernel present, and what this fleet runs</option>
+                        </select>
+                        <p class="help-text">
+                          Auto never picks f16: on a full card Windows pages it into system RAM
+                          and prefill collapses instead of failing. An explicit choice is loaded
+                          as configured, with a warning in the log when the arithmetic says it
+                          does not fit.
+                          <br />
+                          Cost scales with bits per element, so q8_0 is roughly twice q4_0 and
+                          f16 roughly four times. <strong>Memory is not the only cost.</strong>
+                          The argument parser accepts all nine; this CUDA build implements
+                          attention for four. A type it does not cover moves attention onto the
+                          CPU — the model still answers, and prefill collapses by more than an
+                          order of magnitude, worsening with depth. Measured here on 2026-08-22:
+                          <code>iq4_nl</code> costs exactly what <code>q4_0</code> costs in VRAM
+                          and took prefill from ~1200–2500 tok/s to 66 and falling.
+                          <br />
+                          <strong>The four marked «no kernel» are not a guess.</strong> The
+                          compiled attention instantiations in <code>ggml-cuda.dll</code> were
+                          decoded on 2026-08-22 and cover exactly bf16, f16, q4_0 and q8_0.
+                          Choosing f32, q4_1, q5_0, q5_1 or iq4_nl buys the collapse above, on
+                          purpose. <strong>Presence of a kernel is not a measurement:</strong>
+                          only q4_0 has been run here — it is what this fleet uses. For any
+                          other, change one, send a long prompt, and read the child's
+                          <code>prompt processing</code> rate before trusting it.
+                        </p>
+                      </div>
+
+                      <div class="form-group">
+                        <label for="n-parallel-{i}">Parallel slots (optional)</label>
+                        <input
+                          id="n-parallel-{i}"
+                          type="number"
+                          min="1"
+                          value={editedConfig.providers[i].n_parallel ?? ''}
+                          on:input={(e) => {
+                            if (!editedConfig) return;
+                            const raw = (e.target as HTMLInputElement).value;
+                            const n = parseInt(raw);
+                            const p = editedConfig.providers[i];
+                            if (raw === '' || isNaN(n)) {
+                              delete p.n_parallel;
+                            } else {
+                              p.n_parallel = n;
+                            }
+                            editedConfig = editedConfig;
+                          }}
+                          placeholder="auto — 4 slots here"
+                        />
+                        <p class="help-text">
+                          Empty sends nothing, and the build's own default for <code>-np</code>
+                          is <code>-1</code>, meaning auto — not a fixed number. On this fleet
+                          auto has resolved to <strong>4</strong> unified slots; the child prints
+                          <code>n_slots = 4</code> in its startup line, so the figure is one you
+                          can check rather than one this form promises. An explicit value is
+                          always sent — set 1 to serialize every request through one slot.
+                        </p>
+                      </div>
+
+                      <div class="form-group">
+                        <label for="reasoning-budget-{i}">Reasoning budget (tokens, optional)</label>
+                        <input
+                          id="reasoning-budget-{i}"
+                          type="number"
+                          value={editedConfig.providers[i].reasoning_budget_tokens ?? ''}
+                          on:input={(e) => {
+                            if (!editedConfig) return;
+                            const raw = (e.target as HTMLInputElement).value;
+                            const n = parseInt(raw);
+                            editedConfig.providers[i].reasoning_budget_tokens = raw === '' || isNaN(n) ? undefined : n;
+                            editedConfig = editedConfig;
+                          }}
+                          placeholder="e.g. 10000"
+                        />
+                        <p class="help-text">
+                          Caps thinking per request. Without it the template's own default
+                          effort (xhigh) is unbounded — on deep context it can spend the whole
+                          window thinking and answer nothing.
+                        </p>
+                      </div>
+
+                      <details class="supervisor-flags">
+                        <summary>Supervisor flags — the rest of what the child is started with</summary>
+                        <p class="help-text">
+                          Every field here is optional and every one of them means the same
+                          thing when left empty: <strong>the supervisor's own default is
+                          used</strong>. Clearing a field removes it from the alias rather than
+                          writing a zero — an explicit 0 and an absent key are different
+                          instructions to the child.
+                        </p>
+
+                        <div class="form-group">
+                          <label for="spec-type-{i}">Speculative decoding</label>
+                          <select
+                            id="spec-type-{i}"
+                            value={editedConfig.providers[i].spec_type ?? ''}
+                            on:change={(e) => setStr(i, 'spec_type', (e.target as HTMLSelectElement).value)}
+                          >
+                            <!-- The eleven values `--spec-type` accepts on the pin, with the
+                                 same honesty the KV menu above got. A name in the parser's
+                                 list is not a working implementation: draft-dflash is in this
+                                 list and cannot load on the pinned build at all. The list was
+                                 read off b10472's own --help on 2026-08-22; three values were
+                                 missing from this menu until then. -->
+                            <option value="">default (draft-mtp)</option>
+                            <option value="none">none — plain decoding</option>
+                            <option value="draft-mtp">draft-mtp — head inside the GGUF, measured here</option>
+                            <option value="draft-dflash">draft-dflash — DOES NOT LOAD ON THE PINNED BUILD</option>
+                            <option value="draft-eagle3">draft-eagle3 — needs a drafter file (unverified here)</option>
+                            <option value="draft-simple">draft-simple — needs a drafter file (unverified here)</option>
+                            <option value="draft-dspark">draft-dspark — needs a drafter file (unverified here)</option>
+                            <option value="ngram-simple">ngram-simple — no drafter file (unverified here)</option>
+                            <option value="ngram-cache">ngram-cache — no drafter file (unverified here)</option>
+                            <option value="ngram-map-k">ngram-map-k — no drafter file (unverified here)</option>
+                            <option value="ngram-map-k4v">ngram-map-k4v — no drafter file (unverified here)</option>
+                            <option value="ngram-mod">ngram-mod — no drafter file (unverified here)</option>
+                          </select>
+                          <p class="help-text">
+                            <code>draft-mtp</code> needs nothing else: the head ships inside the
+                            GGUF, and it is the one value measured on this fleet — depth 3
+                            accepts 0.686 of its drafts against depth 4's 0.578. Everything
+                            beginning <code>draft-</code> other than that needs a separate
+                            drafter file, named through <code>--spec-draft-model</code> in Extra
+                            flags below — and a drafter beside an mmproj kills every request
+                            carrying an image on this build.
+                            <br />
+                            <strong><code>draft-dflash</code> cannot start on the pinned
+                            binary.</strong> The DFlash2 drafter declares 81 tensors and the pin
+                            builds 58 of them — measured on b10472 and unchanged on b10566, because PR&nbsp;27342 is still unmerged — the 20 convolution and 3 selector tensors are
+                            what PR&nbsp;27342 adds — so the child dies with
+                            <code>expected 81, got 58</code> before serving anything. It loads
+                            only under a <code>binary_path</code> pointing at a build carrying
+                            that PR. Everything else here is accepted by the parser and
+                            <strong>unverified on this build</strong>: the parser's list is not
+                            evidence that the path works, which is the same trap the KV menu
+                            above documents.
+                          </p>
+                        </div>
+
+                        <div class="form-group">
+                          <label for="spec-n-max-{i}">Draft tokens per step (spec_draft_n_max)</label>
+                          <input
+                            id="spec-n-max-{i}"
+                            type="number"
+                            min="1"
+                            value={editedConfig.providers[i].spec_draft_n_max ?? ''}
+                            on:input={(e) => setNum(i, 'spec_draft_n_max', (e.target as HTMLInputElement).value)}
+                            placeholder="default 3"
+                          />
+                          <p class="help-text">
+                            How many tokens the drafter proposes before the model verifies.
+                            Higher is not automatically worse: acceptance <em>ratio</em> falls
+                            with it while accepted <em>length</em> — which is what throughput
+                            follows — can still rise. Judge it by the child's
+                            <code>mean len</code>, not by <code>draft acceptance</code>.
+                          </p>
+                        </div>
+
+                        <div class="form-group">
+                          <label for="ngl-{i}">GPU layers (n_gpu_layers)</label>
+                          <input
+                            id="ngl-{i}"
+                            type="number"
+                            value={editedConfig.providers[i].n_gpu_layers ?? ''}
+                            on:input={(e) => setNum(i, 'n_gpu_layers', (e.target as HTMLInputElement).value)}
+                            placeholder="default 999 (all)"
+                          />
+                          <p class="help-text">
+                            999 puts every context fully on the card, which was measured worth
+                            +11.3 % of prefill here. Lower it only for a card that cannot hold
+                            the whole model — a partial split disables fused kernels on the
+                            layers that land on the CPU side.
+                          </p>
+                        </div>
+
+                        <div class="form-group">
+                          <label for="flash-attn-{i}">Flash attention</label>
+                          <select
+                            id="flash-attn-{i}"
+                            value={editedConfig.providers[i].flash_attn === undefined ? '' : String(editedConfig.providers[i].flash_attn)}
+                            on:change={(e) => setBool(i, 'flash_attn', (e.target as HTMLSelectElement).value)}
+                          >
+                            <option value="">default (auto — the binary decides)</option>
+                            <option value="true">on</option>
+                            <option value="false">off</option>
+                          </select>
+                          <p class="help-text">
+                            Passed as <code>--flash-attn on|off</code>. The binary's own default
+                            is <code>auto</code>, not off, which is what leaving this empty
+                            gives you — the label said «off» until 2026-08-22 and was wrong.
+                            Until the same day the flag was also sent <em>bare</em>, and the pin
+                            refuses it that way: <code>unknown value for --flash-attn</code>,
+                            and the child died on argv before loading a backend. Its kernels
+                            exist only for some KV types; with a type they do not cover,
+                            attention falls back to the CPU and prefill collapses. Change one
+                            thing at a time and read the child's
+                            <code>prompt processing</code> rate afterwards.
+                          </p>
+                        </div>
+
+                        <div class="form-group">
+                          <label for="kv-unified-{i}">Unified KV pool</label>
+                          <select
+                            id="kv-unified-{i}"
+                            value={editedConfig.providers[i].kv_unified === undefined ? '' : String(editedConfig.providers[i].kv_unified)}
+                            on:change={(e) => setBool(i, 'kv_unified', (e.target as HTMLSelectElement).value)}
+                          >
+                            <option value="">default (on)</option>
+                            <option value="true">on — one pool shared by all slots</option>
+                            <option value="false">off — the pool is split per slot</option>
+                          </select>
+                          <p class="help-text">
+                            Only changes anything above one slot: at a single slot unified and
+                            split are the same pool. Sent as <code>--kv-unified</code> or
+                            <code>--no-kv-unified</code>, always — the binary's own default is
+                            conditional («enabled if number of slots is auto»), so saying
+                            nothing means one thing with <code>-np</code> set and the opposite
+                            without it. Until 2026-08-22 this was emitted only above two slots,
+                            which left an alias asking for a unified pool beside an explicit
+                            <code>-np</code> quietly running a split one.
+                          </p>
+                        </div>
+
+                        <div class="form-group">
+                          <label for="ctx-checkpoints-{i}">Context checkpoints per slot</label>
+                          <input
+                            id="ctx-checkpoints-{i}"
+                            type="number"
+                            min="0"
+                            value={editedConfig.providers[i].ctx_checkpoints ?? ''}
+                            on:input={(e) => setNum(i, 'ctx_checkpoints', (e.target as HTMLInputElement).value)}
+                            placeholder="default 32 (the build's)"
+                          />
+                          <p class="help-text">
+                            A checkpoint snapshots the recurrent state and costs ~585–700 MiB
+                            here, so the count decides how many parked conversations fit rather
+                            than whether resuming works at all. Four checkpoints put a 150K state
+                            near 5 GB.
+                          </p>
+                        </div>
+
+                        <div class="form-group">
+                          <label for="checkpoint-step-{i}">Minimum tokens between checkpoints</label>
+                          <input
+                            id="checkpoint-step-{i}"
+                            type="number"
+                            min="0"
+                            value={editedConfig.providers[i].checkpoint_min_step ?? ''}
+                            on:input={(e) => setNum(i, 'checkpoint_min_step', (e.target as HTMLInputElement).value)}
+                            placeholder="default 8192 (the build's)"
+                          />
+                          <p class="help-text">
+                            Read together with the count above: spacing times count is how far
+                            back the child can resume from.
+                          </p>
+                        </div>
+
+                        <div class="form-group">
+                          <label for="cache-ram-{i}">Host prompt cache, MiB (cache_ram_mib)</label>
+                          <input
+                            id="cache-ram-{i}"
+                            type="number"
+                            min="0"
+                            value={editedConfig.providers[i].cache_ram_mib ?? ''}
+                            on:input={(e) => setNum(i, 'cache_ram_mib', (e.target as HTMLInputElement).value)}
+                            placeholder="e.g. 24576"
+                          />
+                          <p class="help-text">
+                            System RAM, <strong>not</strong> VRAM — it holds whole conversations
+                            outside the card so a returning slot need not re-read its prompt.
+                            Raising it costs nothing on the GPU.
+                          </p>
+                        </div>
+
+                        <div class="form-group">
+                          <label for="slot-save-{i}">Slot save path</label>
+                          <input
+                            id="slot-save-{i}"
+                            type="text"
+                            value={editedConfig.providers[i].slot_save_path ?? ''}
+                            on:input={(e) => setStr(i, 'slot_save_path', (e.target as HTMLInputElement).value)}
+                            placeholder="empty = slot state is not persisted"
+                          />
+                          <p class="help-text">
+                            Directory the child writes slot state into
+                            (<code>--slot-save-path</code>). Empty means state lives only for as
+                            long as the process does.
+                          </p>
+                        </div>
+
+                        <div class="form-group">
+                          <label for="binary-path-{i}">llama-server binary (overrides the pin)</label>
+                          <div class="path-row">
+                            <input
+                              id="binary-path-{i}"
+                              type="text"
+                              value={editedConfig.providers[i].binary_path ?? ''}
+                              on:input={(e) => setStr(i, 'binary_path', (e.target as HTMLInputElement).value)}
+                              placeholder="empty = the ADR-040 pinned build"
+                            />
+                            {#if canBrowse}
+                              <button
+                                type="button"
+                                class="btn btn-browse"
+                                on:click={() => pickBinaryPath(i)}
+                                title="Pick a llama-server executable from disk"
+                              >Browse…</button>
+                            {/if}
+                          </div>
+                          <p class="help-text warn">
+                            Empty is the right answer almost always: the pin is fetched and
+                            hash-verified, a hand-picked build is neither. Set it only to test a
+                            build the pin does not contain, and set it back afterwards. A path
+                            that names no file is refused loudly rather than falling back.
+                          </p>
+                        </div>
+
+                        <div class="form-group">
+                          <label for="jinja-{i}">Jinja chat template</label>
+                          <select
+                            id="jinja-{i}"
+                            value={editedConfig.providers[i].jinja === undefined ? '' : String(editedConfig.providers[i].jinja)}
+                            on:change={(e) => setBool(i, 'jinja', (e.target as HTMLSelectElement).value)}
+                          >
+                            <option value="">default (on)</option>
+                            <option value="true">on</option>
+                            <option value="false">off</option>
+                          </select>
+                          <p class="help-text">
+                            Uses the template baked into the GGUF. Off falls back to the
+                            server's built-in formatting, which for most modern models is the
+                            wrong one — turn it off only if the model ships no template. Sent as
+                            <code>--jinja</code> or <code>--no-jinja</code>: the binary ships
+                            jinja <em>enabled</em>, so until 2026-08-22 «off» emitted nothing at
+                            all and left it on — the one thing this control existed to do was
+                            the one thing it could not do.
+                          </p>
+                        </div>
+
+                        <div class="form-group">
+                          <label for="start-timeout-{i}">Start timeout, seconds</label>
+                          <input
+                            id="start-timeout-{i}"
+                            type="number"
+                            min="1"
+                            value={editedConfig.providers[i].start_timeout_s ?? ''}
+                            on:input={(e) => setNum(i, 'start_timeout_s', (e.target as HTMLInputElement).value, true)}
+                            placeholder="default 300"
+                          />
+                          <p class="help-text">
+                            How long the supervisor waits for the child to answer /health before
+                            giving up with the child's last log lines attached. A very large
+                            model on a cold disk can need more than 300 s.
+                            <br />
+                            The one field here that does <strong>not</strong> restart the child:
+                            it is not part of the command line, so a save that changes nothing
+                            else keeps the running model loaded. The new value is still recorded
+                            and applies to the next start — you simply do not pay a re-load to
+                            set it.
+                          </p>
+                        </div>
+
+                        <div class="form-group">
+                          <label for="extra-args-{i}">Extra flags (one token per line)</label>
+                          <textarea
+                            id="extra-args-{i}"
+                            rows="4"
+                            value={(editedConfig.providers[i].extra_args ?? []).join('\n')}
+                            on:input={(e) => setExtraArgs(i, (e.target as HTMLTextAreaElement).value)}
+                            placeholder={'--spec-draft-model\nD:\\models\\drafter.gguf\n--spec-draft-ngl\n999'}
+                          ></textarea>
+                          <p class="help-text warn">
+                            Appended to the command line last, verbatim and unchecked. One token
+                            per line — a flag and its value are separate lines, which is what
+                            keeps a path containing spaces in one piece. Anything the child
+                            rejects makes it exit before becoming healthy, and the supervisor
+                            reports that with the child's own last lines.
+                          </p>
+                        </div>
+                      </details>
+                    {/if}
+
                     {#if editedConfig.providers[i].type === 'openai_compatible'}
                       <div class="form-group">
                         <label for="base-url-{i}">Base URL</label>
@@ -931,16 +1768,21 @@
                       </div>
                     {/if}
 
-                    {#if editedConfig.providers[i].type === 'zai_coding'}
+                    {#if editedConfig.providers[i].type === 'zai'}
                       <div class="form-group">
-                        <label for="base-url-{i}">Base URL (Coding Plan)</label>
+                        <label for="base-url-{i}">Base URL</label>
                         <input
                           id="base-url-{i}"
                           type="text"
                           bind:value={editedConfig.providers[i].base_url}
-                          placeholder="https://api.z.ai/api/coding/paas/v4"
+                          placeholder="https://api.z.ai/api/paas/v4"
                         />
-                        <p class="help-text">GLM Coding Plan endpoint (OpenAI-compatible)</p>
+                        <p class="help-text">
+                          Prepaid pay-per-token platform endpoint. A GLM Coding Plan URL
+                          (api/anthropic, api/coding/paas/v4, api/v1) is refused by the
+                          backend: the subscription is licensed only to the vendor's own
+                          list of supported tools, and this is not one of them.
+                        </p>
                       </div>
                     {/if}
 
@@ -957,7 +1799,7 @@
                       </div>
                     {/if}
 
-                    {#if editedConfig.providers[i].type === 'zai' || editedConfig.providers[i].type === 'zai_coding' || editedConfig.providers[i].type === 'deepseek'}
+                    {#if editedConfig.providers[i].type === 'zai' || editedConfig.providers[i].type === 'deepseek'}
                       <div class="form-group">
                         <label for="api-key-env-{i}">API Key Environment Variable</label>
                         <input
@@ -1235,7 +2077,11 @@
                         {/each}
                         <option value="custom">Custom...</option>
                       </select>
-                      <p class="help-text">Controls creativity: 0.2 = deterministic, 1.5 = creative</p>
+                      {#if temperatureIsInert(editedConfig.providers[i])}
+                        <p class="help-text warn">Not sent while thinking is enabled — DeepSeek ignores it. Turn thinking off for this alias to steer sampling.</p>
+                      {:else}
+                        <p class="help-text">Controls creativity: 0.2 = deterministic, 1.5 = creative</p>
+                      {/if}
 
                       {#if tempSelectValue(i) === 'custom'}
                         <input
@@ -1260,10 +2106,41 @@
 
                     {#if editedConfig.providers[i].type === 'ollama'}
                       <div class="form-group">
+                        <label for="think-{i}">Thinking</label>
+                        <select
+                          id="think-{i}"
+                          value={thinkSelectValue(i)}
+                          on:change={(e) => {
+                            if (!editedConfig) return;
+                            const val = (e.target as HTMLSelectElement).value;
+                            editedConfig.providers[i].think =
+                              val === '' ? undefined : val === 'on';
+                            editedConfig = editedConfig;
+                          }}
+                        >
+                          <option value="">Model default (on if the model can)</option>
+                          <option value="on">Always on</option>
+                          <option value="off">Always off</option>
+                        </select>
+                        <p class="help-text">
+                          Reasoning before the answer. Turn it off when a model
+                          spends its whole output budget thinking and returns
+                          nothing — that is a real failure we have seen, not a
+                          preference about style.
+                        </p>
+                      </div>
+                    {/if}
+
+                    {#if editedConfig.providers[i].type === 'ollama' || editedConfig.providers[i].type === 'llamacpp_server'}
+                      <div class="form-group">
                         <label for="sampling-{i}">Sampling Parameters (optional)</label>
-                        <p class="help-text">Empty = model default. Check actual values via the ⓘ Query Info button.</p>
+                        <p class="help-text">
+                          {editedConfig.providers[i].type === 'llamacpp_server'
+                            ? 'Empty = provider default. The model card prescribes top_p 0.95 and top_k 20 for thinking mode.'
+                            : 'Empty = model default. Check actual values via the ⓘ Query Info button.'}
+                        </p>
                         <div class="sampling-grid" id="sampling-{i}">
-                          {#each OLLAMA_SAMPLING_PARAMS as param}
+                          {#each (editedConfig.providers[i].type === 'llamacpp_server' ? LLAMA_SAMPLING_PARAMS : OLLAMA_SAMPLING_PARAMS) as param}
                             <div class="sampling-field">
                               <label for="sampling-{param.key}-{i}">{param.key}</label>
                               <input
@@ -1310,6 +2187,14 @@
                         on:click={() => setAgentDefault(provider.alias)}
                       >
                         {provider.alias === displayConfig.agent_provider ? '✓ Agent Default' : 'Set as Agent Default'}
+                      </button>
+                      <button
+                        class="btn-set-default"
+                        class:active={provider.alias === displayConfig.knowledge_provider}
+                        title="Extracts knowledge from a conversation. Unset means the model that answered in that conversation does it."
+                        on:click={() => setKnowledgeDefault(provider.alias)}
+                      >
+                        {provider.alias === displayConfig.knowledge_provider ? '✓ Knowledge Extraction' : 'Set knowledge extraction default'}
                       </button>
                     </div>
                   </div>
@@ -1375,8 +2260,16 @@
                       <p><strong>Temperature:</strong> {provider.temperature}</p>
                     {/if}
 
-                    {#if OLLAMA_SAMPLING_PARAMS.some(p => (provider as any)[p.key] !== undefined)}
-                      <p><strong>Sampling:</strong> {OLLAMA_SAMPLING_PARAMS.filter(p => (provider as any)[p.key] !== undefined).map(p => `${p.key}=${(provider as any)[p.key]}`).join(', ')}</p>
+                    {#if provider.think !== undefined}
+                      <p><strong>Thinking:</strong> {provider.think ? 'always on' : 'always off'}</p>
+                    {/if}
+
+                    <!-- One entry per parameter. The two lists overlap on `top_k`
+                         and `top_p`, so concatenating them printed those twice:
+                         a llama-server card read «top_k=20, top_p=0.95,
+                         top_p=0.95, top_k=20». -->
+                    {#if ALL_SAMPLING_PARAMS.some(p => (provider as any)[p.key] !== undefined)}
+                      <p><strong>Sampling:</strong> {ALL_SAMPLING_PARAMS.filter(p => (provider as any)[p.key] !== undefined).map(p => `${p.key}=${(provider as any)[p.key]}`).join(', ')}</p>
                     {/if}
 
                     {#if provider.type === 'ollama'}
@@ -1411,8 +2304,8 @@
                 <option value="openai_compatible">OpenAI Compatible</option>
                 <option value="anthropic">Anthropic</option>
                 <option value="zai">Z.AI</option>
-                <option value="zai_coding">Z.AI Coding Plan</option>
                 <option value="deepseek">DeepSeek</option>
+                <option value="llamacpp_server">llama-server (local, DPC pin)</option>
                 <option value="local_whisper">Local Whisper</option>
                 <option value="dpc_agent">DPC Agent</option>
                 <option value="gemini">Google Gemini</option>
@@ -1423,17 +2316,17 @@
 
             {#if newProvider.type !== 'dpc_agent'}
               <div class="form-group">
-                <label for="new-model">Model</label>
+                <label for="new-model">{newProvider.type === 'llamacpp_server' ? 'GGUF path' : 'Model'}</label>
                 <input
                   id="new-model"
                   type="text"
                   bind:value={newProvider.model}
                   placeholder={
                     newProvider.type === 'ollama' ? 'llama3.1:8b' :
+                    newProvider.type === 'llamacpp_server' ? 'Absolute path to the .gguf model file' :
                     newProvider.type === 'openai_compatible' ? 'gpt-4o' :
                     newProvider.type === 'local_whisper' ? 'openai/whisper-large-v3' :
                     newProvider.type === 'zai' ? 'glm-4.7' :
-                    newProvider.type === 'zai_coding' ? 'glm-5.2' :
                     newProvider.type === 'deepseek' ? 'deepseek-v4-flash' :
                     newProvider.type === 'gemini' ? 'gemini-2.0-flash' :
                     newProvider.type === 'github_models' ? 'gpt-4o' :
@@ -1441,10 +2334,16 @@
                     'claude-3-5-sonnet-20240620'
                   }
                 />
+                {#if newProvider.type === 'llamacpp_server'}
+                  <p class="help-text">
+                    Absolute path to the model file — DPC starts its own llama-server on it
+                    (no host, no key). The Ollama blob can be named here directly.
+                  </p>
+                {/if}
               </div>
             {/if}
 
-            {#if newProvider.type === 'anthropic' || newProvider.type === 'zai' || newProvider.type === 'zai_coding' || newProvider.type === 'deepseek' || newProvider.type === 'gemini' || newProvider.type === 'github_models' || newProvider.type === 'gigachat'}
+            {#if newProvider.type === 'anthropic' || newProvider.type === 'zai' || newProvider.type === 'deepseek' || newProvider.type === 'gemini' || newProvider.type === 'github_models' || newProvider.type === 'gigachat'}
               <div class="form-group">
                 <label for="new-api-key-env">API Key Environment Variable</label>
                 <input
@@ -1452,7 +2351,7 @@
                   type="text"
                   bind:value={newProvider.api_key_env}
                   placeholder={
-                    newProvider.type === 'zai' || newProvider.type === 'zai_coding' ? 'ZAI_API_KEY' :
+                    newProvider.type === 'zai' ? 'ZAI_API_KEY' :
                     newProvider.type === 'deepseek' ? 'DEEPSEEK_API_KEY' :
                     newProvider.type === 'anthropic' ? 'ANTHROPIC_API_KEY' :
                     newProvider.type === 'gemini' ? 'GEMINI_API_KEY' :
@@ -1485,6 +2384,30 @@
                   placeholder="Or enter exact value (tokens)"
                   class="custom-context-input"
                 />
+              </div>
+            {/if}
+
+            {#if newProvider.type === 'ollama'}
+              <div class="form-group">
+                <label for="new-think">Thinking</label>
+                <select
+                  id="new-think"
+                  value={newProvider.think === undefined ? '' : newProvider.think ? 'on' : 'off'}
+                  on:change={(e) => {
+                    const val = (e.target as HTMLSelectElement).value;
+                    newProvider.think = val === '' ? undefined : val === 'on';
+                  }}
+                >
+                  <option value="off">Always off (default)</option>
+                  <option value="on">Always on</option>
+                  <option value="">Model default (on if the model can)</option>
+                </select>
+                <p class="help-text">
+                  A new provider starts with reasoning off, because that is the
+                  setting that cannot fail: a model which spends its whole output
+                  budget thinking answers with nothing. Turn it on where the
+                  reasoning is what you came for.
+                </p>
               </div>
             {/if}
 
@@ -1537,7 +2460,14 @@
             {#if newProvider.type !== 'dpc_agent' && newProvider.type !== 'local_whisper'}
               <div class="form-group">
                 <label for="new-temperature">Temperature (optional)</label>
-                <input id="new-temperature" type="number" step="0.1" min="0" max="2" bind:value={newProvider.temperature} placeholder="0.7" />
+                <!-- The placeholder used to read 0.7 for every provider type, and an
+                     example number in an empty field is an invitation: five Ollama
+                     aliases on this machine carried a 0.7 nobody had chosen. It now
+                     names what silence actually buys for the type being added. -->
+                <input id="new-temperature" type="number" step="0.1" min="0" max="2" bind:value={newProvider.temperature} placeholder={temperatureDefaultLabel(newProvider.type)} />
+                {#if temperatureIsInert(newProvider)}
+                  <p class="help-text warn">Not sent while thinking is enabled — DeepSeek ignores it.</p>
+                {/if}
               </div>
             {/if}
 
@@ -1689,6 +2619,24 @@
 {/if}
 
 <style>
+  /* The colour was inherited and then dimmed by opacity, which fades the text,
+     the tint and the rule together — grey on dark navy, unreadable at 0.85em.
+     An explicit foreground and a slightly stronger tint instead: opacity is the
+     wrong instrument when only one of the three layers should be quiet. */
+  .role-hint {
+    margin: 0 0 12px;
+    padding: 8px 12px;
+    border-left: 3px solid #4a9eff;
+    background: rgba(74, 158, 255, 0.12);
+    color: #d6e4f5;
+    font-size: 0.85em;
+    line-height: 1.45;
+  }
+
+  .role-hint strong {
+    color: #fff;
+  }
+
   /* Account balance card (Phase 2b) — dark theme, matches .provider-card */
   .balance-card {
     margin: 0 0 1rem;
@@ -2007,6 +2955,81 @@
     border-color: #007acc;
   }
 
+  /* A path field and its Browse button on one line. The input keeps the
+     .form-group styling above; only the layout changes, and min-width: 0 stops
+     a long absolute path from pushing the button off the card. */
+  .path-row {
+    display: flex;
+    gap: 6px;
+    align-items: stretch;
+  }
+
+  .path-row input {
+    flex: 1 1 auto;
+    min-width: 0;
+  }
+
+  .btn-browse {
+    flex: 0 0 auto;
+    background: #3a3a3a;
+    color: #fff;
+    border: 1px solid #555;
+    white-space: nowrap;
+  }
+
+  .btn-browse:hover {
+    background: #4a4a4a;
+    border-color: #007acc;
+  }
+
+  /* The twelve knobs that had no door. Folded away by default because most of
+     them are rarely touched, but present — the alternative was hand-editing
+     providers.json, and that is how a measured experiment came to be set on the
+     wrong field. */
+  .supervisor-flags {
+    border: 1px solid #333;
+    border-radius: 6px;
+    padding: 8px 12px;
+    background: #202020;
+  }
+
+  .supervisor-flags > summary {
+    cursor: pointer;
+    color: #cfcfcf;
+    font-size: 0.9rem;
+    padding: 2px 0;
+  }
+
+  .supervisor-flags > summary:hover {
+    color: #fff;
+  }
+
+  .supervisor-flags[open] > summary {
+    margin-bottom: 10px;
+    border-bottom: 1px solid #333;
+    padding-bottom: 8px;
+  }
+
+  .supervisor-flags .form-group {
+    margin-bottom: 14px;
+  }
+
+  .supervisor-flags textarea {
+    background: #2a2a2a;
+    border: 1px solid #444;
+    color: #fff;
+    padding: 8px;
+    border-radius: 4px;
+    font-size: 0.85rem;
+    font-family: 'Courier New', monospace;
+    resize: vertical;
+  }
+
+  .supervisor-flags textarea:focus {
+    outline: none;
+    border-color: #007acc;
+  }
+
   .radio-group {
     display: flex;
     flex-direction: column;
@@ -2028,6 +3051,20 @@
 
   .help-text.warn {
     color: #ffc107;
+  }
+
+  /* Same treatment inline code and emphasis already get in .info-text, so a
+     flag name reads as a flag name wherever it appears in this form. */
+  .help-text code {
+    background: rgba(255, 255, 255, 0.1);
+    padding: 1px 5px;
+    border-radius: 3px;
+    font-family: 'Courier New', monospace;
+    color: #90caf9;
+  }
+
+  .help-text strong {
+    color: #fff;
   }
 
   .help-text.success {

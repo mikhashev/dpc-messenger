@@ -74,3 +74,101 @@ def test_full_rebuild_empty(tmp_path):
         tmp_path, _mock_embedding_provider(), _mock_backend()
     )
     assert count == 0
+
+
+_KNOWLEDGE_COMMIT = """---
+# Commit Identification
+topic: how the relay reattributes an author
+commit_id: commit-1d4be86bc4463f6c
+content_hash: 5081ecf18571ad48
+
+# Cryptographic Signatures
+signatures:
+  dpc-node-86cdcd: "DwaTgCbLc9S8Yers6YCmloY+4SVFW2lpWiMtVDejcnTr5g0qq7oz"
+
+---
+
+# How The Relay Reattributes An Author
+
+## Overview
+
+Messages passed on by a relay arrived under the relay's name.
+"""
+
+
+def test_a_knowledge_commit_is_headed_by_its_topic_not_its_envelope(tmp_path):
+    """The envelope opens with `# Commit Identification` and is not the document.
+
+    Read as markdown it made all 323 files in the live store carry that same
+    heading and a hash as their excerpt — identical to each other and silent
+    about their contents.
+    """
+    path = tmp_path / "relay.md"
+    path.write_text(_KNOWLEDGE_COMMIT, encoding="utf-8")
+    backend = _mock_backend()
+
+    index_single_file(path, _mock_embedding_provider(), backend)
+
+    meta = backend.vector.add.call_args[0][0][0].meta
+    assert meta["heading"] == "How The Relay Reattributes An Author"
+    assert meta["text"].startswith("# How The Relay Reattributes An Author")
+    assert "commit_id" not in meta["text"]
+    assert "signatures" not in meta["text"]
+
+    embedded = backend.text.add.call_args[0][0][0].text
+    assert "content_hash" not in embedded, "the envelope must not be embedded either"
+
+
+def test_a_document_without_an_envelope_is_left_alone(tmp_path):
+    path = tmp_path / "plain.md"
+    path.write_text("# Plain Heading\n\nBody text.\n", encoding="utf-8")
+    backend = _mock_backend()
+
+    index_single_file(path, _mock_embedding_provider(), backend)
+
+    meta = backend.vector.add.call_args[0][0][0].meta
+    assert meta["heading"] == "Plain Heading"
+    assert meta["text"].startswith("# Plain Heading")
+
+
+def test_the_same_document_reads_the_same_on_either_line_ending(tmp_path):
+    """Three platforms, one document — the hint must not depend on who wrote it.
+
+    It holds because the reader normalises: extract_text goes through read_text,
+    so a carriage return never reaches the strip. This guards that, not the
+    strip — a reader that stopped translating would put a stray return at the
+    head of every excerpt written on Windows and nowhere else.
+    """
+    unix = tmp_path / "unix.md"
+    unix.write_text(_KNOWLEDGE_COMMIT, encoding="utf-8", newline="")
+    windows = tmp_path / "windows.md"
+    windows.write_text(_KNOWLEDGE_COMMIT.replace("\n", "\r\n"), encoding="utf-8", newline="")
+
+    metas = []
+    for path in (unix, windows):
+        backend = _mock_backend()
+        index_single_file(path, _mock_embedding_provider(), backend)
+        metas.append(backend.vector.add.call_args[0][0][0].meta)
+
+    assert metas[0]["heading"] == metas[1]["heading"]
+    assert metas[1]["text"].startswith("# How The Relay Reattributes An Author")
+
+
+def test_every_indexing_path_reads_a_document_the_same_way():
+    """The fix that missed: three call sites kept reading the raw text.
+
+    `_strip_front_matter` was added to this module's two functions, and the path a
+    live agent rebuilds through — agent_manager's per-file sync — called the
+    pieces directly instead. The index came back stamped with the new format and
+    every shared-knowledge row still headed by its envelope. One entry point is
+    the repair; this asserts nobody re-opens the second one.
+    """
+    import pathlib
+    source = (
+        pathlib.Path(__file__).resolve().parents[1]
+        / "dpc_client_core" / "managers" / "agent_manager.py"
+    ).read_text(encoding="utf-8")
+
+    assert "document_fields(" in source
+    assert "_extract_heading(" not in source, "read the document through document_fields"
+    assert "_build_doc_text(" not in source, "read the document through document_fields"

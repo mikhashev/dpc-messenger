@@ -105,14 +105,18 @@ class FileOfferHandler(MessageHandler):
                 )
                 return None
 
-        # Check firewall permission
-        allowed = await file_transfer_manager._check_file_transfer_permission(
+        # Check firewall permission. The answer is a pair — testing the pair
+        # itself is always true, which is how every allow-list, size cap and
+        # MIME filter came to be unreachable on the receiving side.
+        allowed, denial_reason = await file_transfer_manager._check_file_transfer_permission(
             sender_node_id, filename, size_bytes, mime_type
         )
 
         if not allowed:
             transfer_type = 'Image' if is_image else 'Voice' if is_voice else 'File'
-            self.logger.warning(f"{transfer_type} transfer denied by firewall from {sender_node_id}")
+            self.logger.warning(
+                f"{transfer_type} transfer denied by firewall from {sender_node_id}: {denial_reason}"
+            )
             # Send FILE_CANCEL (rejected)
             await self.service.p2p_manager.send_message_to_peer(sender_node_id, {
                 "command": "FILE_CANCEL",

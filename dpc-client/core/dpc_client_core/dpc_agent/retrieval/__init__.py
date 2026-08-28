@@ -30,7 +30,12 @@ from .base import (
     VectorAddItem,
     VectorIndex,
 )
-from .factory import build_retrieval_backend, make_backend_for_agent
+from .factory import (
+    backend_id_from_config,
+    build_retrieval_backend,
+    make_backend_for_agent,
+    resolve_backend_id,
+)
 from .grafeo import (
     GrafeoHybridFuser,
     GrafeoTextIndex,
@@ -63,6 +68,8 @@ __all__ = [
     "GrafeoTextIndex",
     "GrafeoHybridFuser",
     # Factory
+    "backend_id_from_config",
     "build_retrieval_backend",
     "make_backend_for_agent",
+    "resolve_backend_id",
 ]

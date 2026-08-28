@@ -37,6 +37,7 @@ import hashlib
 import base64
 import uuid
 import zlib  # For CRC32 checksums
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional, Dict, Callable, List, Any, TYPE_CHECKING
 from dataclasses import dataclass, field
@@ -196,6 +197,40 @@ class FileTransferManager:
         path = self.storage_base_path / node_id / subdir
         path.mkdir(parents=True, exist_ok=True)
         return path
+
+    # Kept as insurance for older Windows, not because the hazard was observed.
+    # The claim first written here — that Windows resolves these to devices
+    # whatever the directory, so a file named CON vanishes into one — does not
+    # hold on Windows 11 26200: `CON`, `CON.txt`, `NUL.txt` and `aux .log` were
+    # each created as ordinary files and listed by `dir` (checked 2026-08-07,
+    # three ways). The guard costs one underscore on a name nobody sends by
+    # accident, so it stays; the reasoning is corrected rather than the code.
+    _RESERVED_NAMES = frozenset(
+        ["CON", "PRN", "AUX", "NUL"]
+        + [f"COM{i}" for i in range(1, 10)]
+        + [f"LPT{i}" for i in range(1, 10)]
+    )
+
+    @staticmethod
+    def _safe_incoming_name(filename: str) -> str:
+        """A peer sends a name. Everything that makes it a path is removed here.
+
+        The old code replaced `/` and nothing else, which left three ways out of
+        the peer's directory on Windows: a backslash still separates
+        (`..\\..\\node.key`), an absolute path replaces the base outright
+        (`Path(base) / "C:/x"` is `C:\\x`), and a drive-relative prefix (`C:x`)
+        resolves against that drive's working directory. A colon also opens an
+        NTFS alternate stream. Both separators are cut before taking the last
+        segment, so neither platform's convention survives the trip.
+        """
+        name = str(filename or "").replace("\\", "/").rsplit("/", 1)[-1]
+        name = name.replace(":", "_").strip()
+        if not name.strip(". "):
+            # "", ".", "..", "..." — a name that would address a directory.
+            return "received_file"
+        if name.split(".")[0].upper() in FileTransferManager._RESERVED_NAMES:
+            name = "_" + name
+        return name
 
     def _compute_file_hash(self, file_path: Path) -> str:
         """Compute SHA256 hash of file."""
@@ -654,6 +689,11 @@ class FileTransferManager:
 
         is_image = (transfer.mime_type and transfer.mime_type.startswith("image/")
                    and transfer.image_metadata is not None)
+        # Assigned here rather than inside the `if self.local_api:` block below,
+        # where it used to live: the transcription branch at the end of this
+        # method reads it unconditionally, so a manager without a local API
+        # raised UnboundLocalError after the file was already on disk.
+        is_voice = transfer.voice_metadata is not None
 
         subdir = "files/screenshots" if is_image else "files"
 
@@ -667,7 +707,7 @@ class FileTransferManager:
         else:
             storage_path = self._get_peer_storage_path(node_id, subdir)
 
-        safe_filename = f"{transfer.filename.replace('/', '_')}"
+        safe_filename = self._safe_incoming_name(transfer.filename)
         file_path = storage_path / safe_filename
 
         save_to_disk = True
@@ -734,11 +774,6 @@ class FileTransferManager:
                 sender_name = self.service.peer_metadata.get(node_id, {}).get("name") or node_id
 
             size_mb = round(transfer.size_bytes / (1024 * 1024), 2)
-
-            # Detect if this is an image or voice transfer
-            is_image = (transfer.mime_type and transfer.mime_type.startswith("image/")
-                       and transfer.image_metadata is not None)
-            is_voice = transfer.voice_metadata is not None
 
             # Build attachment
             attachment = {
@@ -820,8 +855,22 @@ class FileTransferManager:
                 else:
                     message_content = f"Received file: {transfer.filename} ({size_mb} MB)"
 
-                # Add as "assistant" role (peer's message from receiver's perspective)
-                conversation_monitor.add_message("assistant", message_content, [attachment])
+                # Add as "assistant" role (peer's message from receiver's perspective).
+                # The node that sent the file is the author of this note: without
+                # it the row rendered as "You" on the receiving node, and the
+                # record joined the per-author digest under an empty author whose
+                # contents differ on every node, so that author never agreed.
+                conversation_monitor.add_message(
+                    "assistant", message_content, [attachment],
+                    timestamp=datetime.now(timezone.utc).isoformat(),
+                    sender_node_id=node_id,
+                    sender_name=sender_name,
+                    # The same id the broadcast above carried. Without it the
+                    # stored record and the bubble already on screen are two
+                    # messages to anything that joins them by id, and the
+                    # history backfill drew the file a second time.
+                    message_id=message_id,
+                )
                 logger.debug(f"Added received {attachment['type']} to conversation history: {transfer.filename}")
 
         # Auto-transcribe voice messages if enabled (v0.13.2+ recipient-side)

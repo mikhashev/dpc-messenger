@@ -6,8 +6,10 @@
   import ImageMessage from './ImageMessage.svelte';
   import VoicePlayer from './VoicePlayer.svelte';
   import ThinkingBlock from './ThinkingBlock.svelte';
+  import { showsThinkingBlock } from '$lib/utils/thinkingVisibility';
   import AgentProgressCollapsible from './AgentProgressCollapsible.svelte';
   import { agentLiveTools } from '$lib/coreService';
+  import { agentsList } from '$lib/services/agents';
   import type { Message, Mention } from '$lib/types.js';
 
   // Props (Svelte 5 runes mode)
@@ -21,7 +23,8 @@
     agentProgressTool = null,  // v0.15.0+: Current tool being executed
     agentProgressRound = 0,  // v0.15.0+: Current round number
     agentProgressName = "",  // S185: Agent display name for live progress
-    agentProgressAgentId = "",  // S190: Agent ID for Stop button routing
+    agentProgressAgentId = "",
+    agentProgressSpeed = null,  // S190: Agent ID for Stop button routing
     agentStreamingText = "",  // v0.16.0+: Streaming text from agent
     peerDisplayNames = new Map<string, string>(),  // v0.19.1+: Map of node_id -> display name
     selfNodeId = "",  // v0.19.1+: Current user's node ID
@@ -37,6 +40,7 @@
     agentProgressRound?: number;
     agentProgressName?: string;
     agentProgressAgentId?: string;
+    agentProgressSpeed?: Record<string, unknown> | null;
     agentStreamingText?: string;
     peerDisplayNames?: Map<string, string>;
     selfNodeId?: string;
@@ -59,6 +63,13 @@
   // dropped results, survives chat switches. The currently-executing tool shows via the
   // live spinner (currentTool); completed tools come from the snapshot with their results.
   let liveToolCalls = $derived($agentLiveTools[conversationId] ?? []);
+
+  // First registered agent — fallback agent_id for the group-chat Stop button.
+  // The 1:1 fallback below only covers conversation_id starting with 'agent_'; in a
+  // group chat that's never true, so without this an empty agent_id is sent and the
+  // backend interrupt is a no-op (no agent_id provided). See backend defense-in-depth
+  // in CoreService.interrupt_agent.
+  let defaultAgentId = $derived($agentsList[0]?.agent_id ?? '');
 
   // Filter tool_call code blocks from streaming when collapsible is active
   let filteredStreamingText = $derived.by(() => {
@@ -152,8 +163,12 @@
           </strong>
           <span class="timestamp">{#if msg.msg_index}<span class="msg-index">#{msg.msg_index}</span> {/if}{new Date(msg.timestamp).toLocaleTimeString()}</span>
         </div>
-        <!-- Thinking block hidden for all agent messages -->
-        {#if !isAiSender(msg.sender, msg) && msg.thinking}
+        <!-- Whose reasoning is shown is a property of the surface, not of the
+             sender: an agent chat renders rounds and tool calls of its own, and
+             the local AI chat has nothing else — while marking its own answers
+             `sender: 'ai'`, which is how it fell under a rule written for agents
+             and could never draw this block at all. -->
+        {#if msg.thinking && showsThinkingBlock(conversationId, isAiSender(msg.sender, msg))}
           <ThinkingBlock thinking={msg.thinking} tokenCount={msg.thinkingTokens} />
         {/if}
 
@@ -174,6 +189,7 @@
           <AgentProgressCollapsible
             toolCalls={msg.tool_calls}
             agentName={msg.senderName || ''}
+            speed={(msg as any).speed_summary || null}
           />
         {/if}
 
@@ -267,7 +283,8 @@
       currentRound={agentProgressRound}
       streamingText={filteredStreamingText}
       conversationId={conversationId}
-      agentId={agentProgressAgentId || (conversationId.startsWith('agent_') ? conversationId : '')}
+      agentId={agentProgressAgentId || (conversationId.startsWith('agent_') ? conversationId : '') || defaultAgentId}
+      speed={agentProgressSpeed}
     />
   {/if}
 </div>

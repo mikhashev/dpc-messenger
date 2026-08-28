@@ -16,7 +16,232 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 
 from dpc_protocol.pcm_core import PersonalContext, KnowledgeEntry, KnowledgeSource
+
+from . import knowledge_routing
+from . import conversation_paths
+
+
+def chain_hash_for(message: Dict[str, Any], prev_hash: str) -> str:
+    """The local chain hash of a message, given its predecessor's.
+
+    One definition. The same expression was written out at three call sites —
+    the add path, the loader's verification and the loader's one-time rebuild —
+    and a chain formula that exists in several copies is a formula that will
+    eventually disagree with itself.
+    """
+    chain_input = (
+        f"{message.get('msg_index', '')}|{message.get('id', '')}|{message.get('role', '')}"
+        f"|{message.get('sender_name', '') or ''}|{message.get('content', '') or ''}"
+        f"|{message.get('timestamp', '') or ''}|{prev_hash}"
+    )
+    return hashlib.sha256(chain_input.encode("utf-8")).hexdigest()
+
+
+def rechain(messages: List[Dict[str, Any]]) -> None:
+    """Renumber and re-hash a whole history in place, from genesis."""
+    prev_hash = "genesis"
+    for i, m in enumerate(messages):
+        m["msg_index"] = i + 1
+        m["chain_hash"] = chain_hash_for(m, prev_hash)
+        prev_hash = m["chain_hash"]
+
+
+def digest_for(messages: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Per-author counts and digests over a message list.
+
+    A free function so a node can advertise what it holds without loading the
+    conversation into memory first: monitors are created lazily, so on connect
+    the common case is that no monitor exists yet, and a node that cannot
+    produce a digest falls back to comparing chain tips — a comparison that
+    never matches between two honest nodes, because the tip covers arrival
+    order and the per-reader `role`.
+    """
+    by_author: Dict[str, List[str]] = {}
+    for msg in messages:
+        author = msg.get("sender_node_id") or ""
+        key = msg.get("content_hash") or f"id:{msg.get('id', '')}"
+        by_author.setdefault(author, []).append(key)
+
+    authors = {}
+    for author, keys in by_author.items():
+        joined = "|".join(sorted(keys))
+        authors[author] = {
+            "count": len(keys),
+            "digest": "sha256:" + hashlib.sha256(joined.encode("utf-8")).hexdigest()[:16],
+        }
+
+    if not authors:
+        return {"authors": {}, "digest": "sha256:empty"}
+
+    overall = "|".join(
+        f"{author}:{authors[author]['count']}:{authors[author]['digest']}"
+        for author in sorted(authors)
+    )
+    return {
+        "authors": authors,
+        "digest": "sha256:" + hashlib.sha256(overall.encode("utf-8")).hexdigest()[:16],
+    }
+
+
+def authors_that_differ_between(
+    local_digest: Dict[str, Any], remote_digest: Dict[str, Any]
+) -> List[str]:
+    """Which authors two digests disagree about; empty means agreement.
+
+    Free-standing for the same reason as `digest_for`: the comparison must be
+    available on a node that has not loaded the conversation.
+    """
+    mine = (local_digest or {}).get("authors", {})
+    theirs = (remote_digest or {}).get("authors", {})
+    return sorted(
+        author for author in set(mine) | set(theirs)
+        if mine.get(author) != theirs.get(author)
+    )
+
+
+def _chronological_key(indexed_message):
+    """Sort by timestamp, keeping unparseable ones last in their original order."""
+    i, m = indexed_message
+    ts = m.get("timestamp")
+    if isinstance(ts, str) and ts:
+        try:
+            parsed = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=timezone.utc)
+            return (0, parsed, i)
+        except ValueError:
+            pass
+    return (1, None, i)
+
+
+def _read_messages(history_path: Path) -> List[Dict[str, Any]]:
+    try:
+        with open(history_path, encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, json.JSONDecodeError) as exc:
+        logger.warning("Could not read %s: %s", history_path, exc)
+        return []
+    messages = data.get("messages")
+    return messages if isinstance(messages, list) else []
+
+
+def _identity(message: Dict[str, Any]):
+    """What makes two stored messages the same message.
+
+    `id` is the real key — `export_history` carries it precisely so that
+    `merge_history` can deduplicate, and it was present and distinct on every
+    message of both halves of the split that prompted this. The fallback triple
+    only covers records written before ids existed; it can merge two genuinely
+    identical messages sent in the same second, which is the safer of the two
+    mistakes available here.
+    """
+    msg_id = message.get("id")
+    if msg_id:
+        return ("id", msg_id)
+    return (
+        "triple",
+        message.get("timestamp"),
+        message.get("sender_name"),
+        message.get("content"),
+    )
+
+
+def consolidate_conversation_stores(
+    base: Path, conversation_id: str, display_name: Optional[str] = None
+) -> Dict[str, Any]:
+    """Fold every stray folder of one conversation into a single store.
+
+    A conversation whose folder name changed used to leave its old history
+    behind, readable by half the code and written by none of it. The resolver
+    in `conversation_paths` stops new splits; this repairs the ones on disk.
+
+    Nothing is deleted. Messages are unioned by id, ordered by timestamp and
+    re-chained locally, payload files are moved only where the canonical store
+    has no file of that name, and the emptied folder is renamed rather than
+    removed — it held the only copy of 66 messages for thirteen days once.
+
+    Returns a summary; `{"merged": 0}` when there was nothing to do.
+    """
+    summary = {"merged": 0, "orphans": [], "messages_added": 0, "files_moved": 0}
+    canonical, orphans = conversation_paths.split_stores(base, conversation_id, display_name)
+    if canonical is None or not orphans:
+        return summary
+
+    canonical_history = canonical / "history.json"
+    messages = _read_messages(canonical_history)
+    seen = {_identity(m) for m in messages}
+    added = 0
+    files_moved = 0
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%d")
+
+    for orphan in orphans:
+        for m in _read_messages(orphan / "history.json"):
+            key = _identity(m)
+            if key in seen:
+                continue
+            seen.add(key)
+            messages.append(m)
+            added += 1
+        files_moved += conversation_paths.adopt_payload(
+            orphan, canonical, skip=("history.json", ".chain_meta.json")
+        )
+        summary["orphans"].append(orphan.name)
+
+    if added:
+        messages = [m for _, m in sorted(
+            list(enumerate(messages)), key=_chronological_key
+        )]
+        rechain(messages)
+        _write_history_messages(canonical_history, conversation_id, messages)
+
+    for orphan in orphans:
+        conversation_paths.retire_orphan(orphan, stamp)
+
+    summary["merged"] = len(orphans)
+    summary["messages_added"] = added
+    summary["files_moved"] = files_moved
+    logger.warning(
+        "Consolidated %d stray folder(s) of %s into %s: %d message(s) recovered, "
+        "%d file(s) moved; the emptied folder(s) were renamed, not deleted",
+        len(orphans), conversation_id, canonical.name, added, files_moved,
+    )
+    return summary
+
+
+def _write_history_messages(
+    path: Path, conversation_id: str, messages: List[Dict[str, Any]]
+) -> None:
+    """Rewrite a history file's message list, keeping the rest of its envelope."""
+    data = {}
+    if path.exists():
+        try:
+            with open(path, encoding="utf-8") as f:
+                loaded = json.load(f)
+            if isinstance(loaded, dict):
+                data = loaded
+        except (OSError, json.JSONDecodeError):
+            data = {}
+    data.setdefault("conversation_id", conversation_id)
+    data.setdefault("version", 1)
+    data["messages"] = messages
+    data["message_count"] = len(messages)
+    data["last_updated"] = datetime.now(timezone.utc).isoformat()
+    # Recomputed by the monitor on its next save; a stale digest here would
+    # claim a history that no longer exists.
+    data.pop("history_hash", None)
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2, ensure_ascii=False)
+
+    last_hash = messages[-1].get("chain_hash", "") if messages else ""
+    try:
+        with open(path.parent / ".chain_meta.json", "w", encoding="utf-8") as f:
+            json.dump({"msg_count": len(messages), "last_chain_hash": last_hash}, f)
+    except OSError as exc:
+        logger.warning("Could not update the chain anchor beside %s: %s", path, exc)
 from dpc_protocol.knowledge_commit import KnowledgeCommitProposal
+from dpc_protocol.message_signing import PREIMAGE_VERSION, message_content_hash
 
 logger = logging.getLogger(__name__)
 
@@ -33,6 +258,11 @@ class Message:
     attachment_transfer_id: Optional[str] = None  # Link to attachment transfer (v0.14.0)
     sender_type: Optional[str] = None  # "human" or "agent"
     agent_owner: Optional[str] = None  # node_id of agent's owner
+    # {content_hash, signature, signer_node_id} as made by the author. Carried
+    # so a verified signature survives being stored: without it the monitor
+    # signs everything with the local key on the way to disk, and a checked
+    # signature is replaced by the checker's own.
+    signature_fields: Optional[Dict[str, Any]] = None
 
 
 class ConversationMonitor:
@@ -112,6 +342,9 @@ class ConversationMonitor:
         self.message_ids: Set[str] = set()  # Track unique message IDs for deduplication
         self._history_dirty: bool = False  # Track unsaved changes
         self._signer = None  # Lazy-loaded CommitSigner for message signing
+        self._chain_rebuilt = False  # One-time local repair of a pre-local chain
+        # What the last folder consolidation did, for the caller to announce.
+        self.last_consolidation: Dict[str, Any] = {"merged": 0}
         self.peer_context_hashes: Dict[str, str] = {}  # {node_id: context_hash} for peer cache invalidation
 
         # Phase 7: Peer context caching (to avoid re-fetching unchanged contexts)
@@ -146,24 +379,16 @@ class ConversationMonitor:
         )
 
     def _get_signer(self):
-        """Lazy-load CommitSigner for RSA message signing."""
+        """Lazy-load CommitSigner for RSA message signing.
+
+        The loading itself lives in `signing.node_signer` so there is one copy
+        of it; this keeps the per-monitor cache the call sites already expect.
+        """
         if self._signer is not None:
             return self._signer
-        try:
-            from cryptography.hazmat.primitives import serialization
-            from dpc_protocol.commit_integrity import CommitSigner
-            key_path = Path.home() / ".dpc" / "node.key"
-            if not key_path.exists():
-                return None
-            with open(key_path, "rb") as f:
-                private_key = serialization.load_pem_private_key(f.read(), password=None)
-            node_id_path = Path.home() / ".dpc" / "node.id"
-            node_id = node_id_path.read_text().strip() if node_id_path.exists() else ""
-            self._signer = CommitSigner(node_id, private_key)
-            return self._signer
-        except Exception as e:
-            logger.debug("CommitSigner init failed: %s", e)
-            return None
+        from dpc_client_core.signing import node_signer
+        self._signer = node_signer()
+        return self._signer
 
     async def on_message(self, message: Message) -> Optional[KnowledgeCommitProposal]:
         """Process new message in conversation
@@ -200,7 +425,8 @@ class ConversationMonitor:
         self.add_message(role, message.text, attachments=attachments,
                         timestamp=timestamp, sender_node_id=sender_node_id,
                         sender_name=sender_name, message_id=message.message_id,
-                        sender_type=sender_type, agent_owner=agent_owner)
+                        sender_type=sender_type, agent_owner=agent_owner,
+                        signature_fields=getattr(message, "signature_fields", None))
         logger.debug(f"Added message to history: role={role}, text_len={len(message.text)}")
 
         # Only run automatic detection if enabled
@@ -290,38 +516,58 @@ class ConversationMonitor:
         finally:
             self._extracting = False
 
-    def _infer_inference_settings(self) -> tuple[str | None, str | None, str | None]:
-        """Infer inference settings when not explicitly tracked.
+    def _cold_fallback_alias(self) -> Optional[str]:
+        """The alias a retry may use here, or None when there is none."""
+        configured = ""
+        if self.settings is not None:
+            getter = getattr(self.settings, "get_knowledge_cold_fallback_provider", None)
+            if getter is not None:
+                configured = getter()
+        try:
+            return knowledge_routing.cold_fallback(
+                getattr(self.llm_manager, "providers", None) or {}, configured)
+        except knowledge_routing.NoKnowledgeProvider:
+            return None
 
-        Priority order:
-        1. Local inference (if default provider configured)
-        2. Remote inference (fallback for peer conversations)
+    def _infer_inference_settings(self) -> tuple[str | None, str | None, str | None]:
+        """Who extracts this conversation, as a chain — see `knowledge_routing`.
+
+        Silence walks the chain; it does not mean the global text default, which
+        is what sent whole transcripts to a paid API. Raises NoKnowledgeProvider
+        when no step names anything, rather than reaching for that default.
 
         Returns:
             (compute_host, model, provider) tuple
         """
-        # PRIORITY 1: Check if local inference is available (default provider configured)
-        if self.llm_manager and self.llm_manager.default_provider:
-            logger.info("Monitor %s: Using local inference for knowledge extraction (default provider available)",
-                       self.conversation_id)
-            return (None, None, None)  # Local inference with default provider
+        chosen = knowledge_routing.chosen_provider(
+            getattr(self.llm_manager, "knowledge_provider", None),
+            getattr(self.llm_manager, "providers", None) or {})
+        if chosen:
+            logger.info("Monitor %s: extracting with '%s' — the configured extraction provider",
+                        self.conversation_id, chosen)
+            return (None, None, chosen)
 
-        # PRIORITY 2: For peer conversations, try using peer compute as fallback
-        if self.conversation_id.startswith("dpc-node-"):
-            logger.info("Monitor %s: Will attempt peer compute for knowledge extraction (no local provider, compute_host=%s)",
-                       self.conversation_id, self.conversation_id)
-            return (self.conversation_id, self.last_model, None)  # Peer compute fallback
-
-        # PRIORITY 2b: Use last known compute host (works for group and P2P conversations)
-        if self.last_compute_host:
-            logger.info("Monitor %s: Using last_compute_host %s for knowledge extraction",
-                       self.conversation_id, self.last_compute_host)
+        # The conversation's own provenance: whoever has been answering in it.
+        # Read from all three fields, not from the host alone — a locally
+        # answered conversation has no host and still knows its provider.
+        if self.last_provider or self.last_compute_host:
+            logger.info(
+                "Monitor %s: extracting with the conversation's provenance "
+                "(host=%s, model=%s, provider=%s)",
+                self.conversation_id, self.last_compute_host or "local",
+                self.last_model, self.last_provider)
             return (self.last_compute_host, self.last_model, self.last_provider)
 
-        # PRIORITY 3: Final fallback - try local anyway (will fail gracefully if no providers)
-        logger.warning("Monitor %s: No inference provider available for knowledge extraction",
-                      self.conversation_id)
-        return (None, None, None)
+        configured = ""
+        if self.settings is not None:
+            getter = getattr(self.settings, "get_knowledge_cold_fallback_provider", None)
+            if getter is not None:
+                configured = getter()
+        providers = getattr(self.llm_manager, "providers", None) or {}
+        alias = knowledge_routing.cold_fallback(providers, configured)
+        logger.info("Monitor %s: nobody has answered here yet — extracting with '%s'",
+                    self.conversation_id, alias)
+        return (None, None, alias)
 
     def _detect_conversation_type(self) -> str:
         """Detect conversation type from message content and participant context.
@@ -768,16 +1014,19 @@ DO NOT include any text before or after the JSON. DO NOT use markdown code block
                     # Try fallback: if primary was remote, try local; if primary was local, try remote
                     fallback_attempted = False
 
-                    # Case 1: Remote failed, try local as fallback
-                    if compute_host and self.llm_manager and self.llm_manager.default_provider:
-                        logger.warning("Remote inference failed, trying local inference as fallback: %s", primary_error)
+                    # Case 1: Remote failed, retry here — on the cold fallback,
+                    # never on the global text default: the retry carries the
+                    # same transcript as the call that failed.
+                    local_retry = self._cold_fallback_alias() if compute_host else None
+                    if local_retry:
+                        logger.warning("Remote inference failed, retrying on '%s': %s", local_retry, primary_error)
                         fallback_attempted = True
                         try:
                             result = await self.ai_query_func(
                                 prompt=prompt,
                                 compute_host=None,  # Force local inference
                                 model=None,
-                                provider=None
+                                provider=local_retry
                             )
                             response = result["response"]
                             primary_error = None  # Success! Clear error
@@ -1015,6 +1264,11 @@ DO NOT include any text before or after the JSON. DO NOT use markdown code block
         Returns:
             KnowledgeCommitProposal object
         """
+        # The anchor is read before the model runs, not after: extraction takes
+        # seconds to minutes and the conversation keeps moving underneath it.
+        # Both the proposal and the error proposal below must name the same
+        # window, or two voters could verify against different ones.
+
         # Detect conversation type (v0.9.3)
         self.conversation_type = self._detect_conversation_type()
         logger.info("Monitor %s: Detected conversation type: %s",
@@ -1039,6 +1293,7 @@ DO NOT include any text before or after the JSON. DO NOT use markdown code block
         # Use full_conversation for manual extraction (includes all messages)
         # Use message_buffer only for automatic incremental extraction
         messages_to_analyze = self.full_conversation if self.full_conversation else self.message_buffer
+        _anchor_hashes = self.window_content_hashes(messages_to_analyze)
         messages_text = self._format_messages_for_analysis(messages_to_analyze)
 
         # Extract voice transcriptions from message_history (v0.13.2+)
@@ -1092,16 +1347,19 @@ PARTICIPANTS' CULTURAL CONTEXTS:
                     # Try fallback: if primary was remote, try local; if primary was local, try remote
                     fallback_attempted = False
 
-                    # Case 1: Remote failed, try local as fallback
-                    if compute_host and self.llm_manager and self.llm_manager.default_provider:
-                        logger.warning("Remote inference failed, trying local inference as fallback: %s", primary_error)
+                    # Case 1: Remote failed, retry here — on the cold fallback,
+                    # never on the global text default: the retry carries the
+                    # same transcript as the call that failed.
+                    local_retry = self._cold_fallback_alias() if compute_host else None
+                    if local_retry:
+                        logger.warning("Remote inference failed, retrying on '%s': %s", local_retry, primary_error)
                         fallback_attempted = True
                         try:
                             inference_result = await self.ai_query_func(
                                 prompt=prompt,
                                 compute_host=None,  # Force local inference
                                 model=None,
-                                provider=None
+                                provider=local_retry
                             )
                             response = inference_result["response"]
                             primary_error = None  # Success! Clear error
@@ -1273,6 +1531,7 @@ PARTICIPANTS' CULTURAL CONTEXTS:
                 summary=result.get('summary', 'Knowledge from group discussion'),
                 entries=entries,
                 participants=[p['node_id'] for p in self.participants],
+                based_on_content_hashes=_anchor_hashes,
                 proposed_by=proposed_by,
                 initiated_by=initiated_by,
                 cultural_perspectives=result.get('cultural_perspectives', []),
@@ -1315,7 +1574,8 @@ PARTICIPANTS' CULTURAL CONTEXTS:
                 conversation_id=self.conversation_id,
                 topic='error',
                 summary=error_msg,
-                participants=[p['node_id'] for p in self.participants]
+                participants=[p['node_id'] for p in self.participants],
+                based_on_content_hashes=_anchor_hashes,
             )
 
     def _format_messages_for_analysis(self, messages: List[Message]) -> str:
@@ -1471,7 +1731,8 @@ PARTICIPANTS' CULTURAL CONTEXTS:
                     thinking: Optional[str] = None, streaming_raw: Optional[str] = None,
                     source: Optional[str] = None, sender_type: Optional[str] = None,
                     agent_owner: Optional[str] = None,
-                    tool_calls: Optional[List[Dict[str, Any]]] = None):
+                    tool_calls: Optional[List[Dict[str, Any]]] = None,
+                    signature_fields: Optional[Dict[str, Any]] = None):
         """Add a message to the conversation history
 
         Args:
@@ -1495,12 +1756,22 @@ PARTICIPANTS' CULTURAL CONTEXTS:
         if not message_id:
             message_id = str(uuid.uuid4())
 
+        # A record with no timestamp cannot be ordered by anything, and the UI
+        # then invents one from the clock at load time — so it sorts below every
+        # real message, at a place that moves on every reload. Two file notes
+        # written that way (2026-08-07) read as "sent just now" days later. The
+        # default is here rather than at each caller because the next caller to
+        # forget should not be able to produce such a record at all; a timestamp
+        # the caller supplies is never touched, since a peer's is covered by
+        # their signature.
+        if not timestamp:
+            timestamp = datetime.now(timezone.utc).isoformat()
+
         # Add to message_history (for chat history sync)
         message_dict = {"id": message_id, "role": role, "content": content}
         if attachments:
             message_dict["attachments"] = attachments
-        if timestamp:
-            message_dict["timestamp"] = timestamp
+        message_dict["timestamp"] = timestamp
         if sender_node_id:
             message_dict["sender_node_id"] = sender_node_id
         if sender_name:
@@ -1528,15 +1799,42 @@ PARTICIPANTS' CULTURAL CONTEXTS:
         message_dict["msg_index"] = msg_index
 
         prev_hash = self.message_history[-1].get("chain_hash", "genesis") if self.message_history else "genesis"
-        chain_input = f"{msg_index}|{message_id}|{role}|{sender_name or ''}|{content}|{timestamp or ''}|{prev_hash}"
-        message_dict["chain_hash"] = hashlib.sha256(chain_input.encode("utf-8")).hexdigest()
+        message_dict["chain_hash"] = chain_hash_for(message_dict, prev_hash)
 
-        content_hash_input = f"{message_id}|{sender_node_id or ''}|{content}|{timestamp or ''}"
-        message_dict["content_hash"] = hashlib.sha256(content_hash_input.encode("utf-8")).hexdigest()
-        signer = self._get_signer()
-        if signer:
-            message_dict["signature"] = signer.sign_commit(message_dict["content_hash"])
-            message_dict["signer_node_id"] = signer.node_id
+        if signature_fields:
+            # The author already signed this; keep what was verified. Minting
+            # here is how a checked signature became the checker's own, which
+            # is why signer_node_id used to name whoever stored the message
+            # rather than whoever wrote it.
+            for field in ("content_hash", "signature", "signer_node_id", "preimage_version"):
+                if signature_fields.get(field):
+                    message_dict[field] = signature_fields[field]
+        else:
+            # The canonical preimage of specs/dptp_v1.md §4.1 — the same bytes
+            # a verifier recomputes. The old four-field string left group_id,
+            # sender_name, sender_type, agent_owner and tool_calls outside the
+            # signature, and signing one form while checking another rejects
+            # honest messages.
+            message_dict["content_hash"] = message_content_hash(
+                conversation_id=self.conversation_id,
+                message_id=message_id,
+                sender_node_id=sender_node_id,
+                sender_name=sender_name,
+                sender_type=sender_type,
+                agent_owner=agent_owner,
+                timestamp=timestamp,
+                content=content,
+                tool_calls=tool_calls,
+            )
+            signer = self._get_signer()
+            if signer:
+                message_dict["signature"] = signer.sign_commit(message_dict["content_hash"])
+                message_dict["signer_node_id"] = signer.node_id
+                # Stamped so a record can be told from one written before this
+                # preimage existed. Without it, every message already on disk —
+                # hashed the old four-field way — would be re-exported, fail a
+                # verifier's recomputation, and be rejected as tampered.
+                message_dict["preimage_version"] = PREIMAGE_VERSION
 
         self.message_history.append(message_dict)
 
@@ -1572,6 +1870,130 @@ PARTICIPANTS' CULTURAL CONTEXTS:
             List of message dicts with 'role' and 'content' keys
         """
         return self.message_history.copy()
+
+    def reverify_author(self, node_id: str) -> int:
+        """Re-check this author's signatures now that a certificate exists.
+
+        `unverified` used to be permanent. The flag was written once, on the way
+        in, and nothing ever revisited it — so a message that arrived before the
+        certificate stayed unproven for good, even after the two nodes finally
+        connected. ADR-036 listed the re-check in scope and it was never built.
+
+        The verdict is recomputed rather than trusted from storage, so this also
+        repairs records written by the live path, which stored the signature but
+        no verdict at all.
+
+        Returns how many records changed.
+        """
+        if not node_id:
+            return 0
+
+        from dpc_protocol.commit_integrity import CommitSigner
+
+        changed = 0
+        for msg in self.message_history:
+            if msg.get("signer_node_id") != node_id:
+                continue
+            content_hash = msg.get("content_hash")
+            signature = msg.get("signature")
+            if not (content_hash and signature):
+                continue
+            try:
+                result = CommitSigner.verify_signature(node_id, content_hash, signature)
+            except Exception:  # noqa: BLE001
+                continue
+            if result is None:
+                continue  # still no certificate; leave it parked
+            verdict = "verified" if result else "rejected"
+            if msg.get("verification") != verdict:
+                msg["verification"] = verdict
+                changed += 1
+
+        if changed:
+            self._history_dirty = True
+            self.save_history()
+            logger.info(
+                "Monitor %s: re-verified %d message(s) from %s",
+                self.conversation_id, changed, str(node_id)[:20],
+            )
+        return changed
+
+    def clear_before(self, boundary: str) -> int:
+        """Drop messages older than a session boundary, keep the rest.
+
+        A reset agreed while this node was away arrives as a fact rather than a
+        command (`session_started_at`, ADR-038 Q3), and the node applies it to
+        itself. Wholesale `reset_conversation` would be wrong here: messages
+        written *after* the boundary are part of the new session and throwing
+        them away would turn a late arrival into a second reset.
+
+        Returns how many were dropped, so the caller can stay quiet when the
+        answer is none.
+        """
+        if not boundary:
+            return 0
+
+        kept = [m for m in self.message_history if (m.get("timestamp") or "") >= boundary]
+        dropped = len(self.message_history) - len(kept)
+        if not dropped:
+            return 0
+
+        self.message_history = kept
+        kept_ids = {m.get("id") for m in kept}
+        self.full_conversation = [
+            m for m in self.full_conversation if m.message_id in kept_ids
+        ]
+        self.message_buffer = [
+            m for m in self.message_buffer if m.message_id in kept_ids
+        ]
+        self._history_dirty = True
+        self.save_history()
+        logger.info(
+            "Monitor %s: dropped %d message(s) predating %s",
+            self.conversation_id, dropped, boundary,
+        )
+        return dropped
+
+    def window_content_hashes(self, messages: List[Any]) -> List[str]:
+        """The `content_hash` of every message an extraction read.
+
+        This replaces an anchor of `(msg_index, chain_hash)`, which could not
+        work between nodes and quietly refused every remote vote: `chain_hash`
+        covers `role`, and `role` is a rendering — each node calls its own
+        messages "user" and everyone else's "peer" — so three honest copies of
+        the same five messages produced three different chains. `content_hash`
+        is the signing preimage's own value (ADR-036 §4.1) and is identical on
+        every node holding the message.
+
+        A set rather than a position, and the difference is not cosmetic. A
+        single hash of the last message proves "I have that message"; it does
+        not prove the voter has the text the knowledge was drawn from. Somebody
+        missing a message in the middle of the window would pass and vote on an
+        extraction from a conversation they never saw. Naming the whole window
+        asks the question that matters.
+
+        Order is kept and duplicates dropped, so the value reads the way the
+        extraction did. Messages with no `content_hash` — written before
+        signing existed — are left out rather than faked: they cannot be
+        proven, and claiming them would refuse honest voters forever.
+        """
+        by_id = {}
+        for stored in self.message_history:
+            content_hash = stored.get("content_hash")
+            if content_hash:
+                by_id[stored.get("id")] = content_hash
+
+        seen = set()
+        window = []
+        for message in messages or []:
+            message_id = getattr(message, "message_id", None) or (
+                message.get("id") if isinstance(message, dict) else None
+            )
+            content_hash = by_id.get(message_id)
+            if content_hash and content_hash not in seen:
+                seen.add(content_hash)
+                window.append(content_hash)
+        return window
 
     def get_last_msg_index(self) -> int:
         if self.message_history:
@@ -1700,12 +2122,15 @@ PARTICIPANTS' CULTURAL CONTEXTS:
                         / self.conversation_id / "logs" / "tools.jsonl"
                     )
                     if tools_path.exists():
+                        from .dpc_agent.tool_ledger import is_outcome
                         first_ts = timestamps[0]
                         last_ts = timestamps[-1]
                         with open(tools_path, encoding="utf-8") as tf:
                             for line in tf:
                                 try:
                                     entry = json.loads(line.strip())
+                                    if not is_outcome(entry):
+                                        continue
                                     ts = entry.get("ts", "")
                                     if first_ts <= ts <= last_ts or entry.get("session_id") == self.conversation_id:
                                         name = entry.get("tool", "unknown")
@@ -1845,31 +2270,81 @@ PARTICIPANTS' CULTURAL CONTEXTS:
 
         return remapped
 
-    def export_history(self) -> List[Dict[str, Any]]:
+    def export_history(self, authors: Optional[List[str]] = None) -> List[Dict[str, Any]]:
         """Export conversation history for syncing with peer
 
         Returns history in serializable format with timestamps added.
-        No message limit - returns full history.
+
+        Args:
+            authors: node ids to restrict the export to. `None` means the whole
+                history, which is what a peer predating the field asks for. An
+                empty list means "nothing differs" and exports nothing — it is
+                explicitly not the same as `None`, and reading it as falsy would
+                turn the cheapest request into the most expensive one.
+
+                β already names the authors it needs (`group_handler.py`), but
+                the answering side used to ignore them and send everything, so
+                the property "sync asks only for what is missing" held in the
+                request and never in the transfer.
 
         Returns:
             List of message dicts with 'role', 'content', 'timestamp', 'attachments'
         """
+        wanted = set(authors) if authors is not None else None
         exported = []
         for msg in self.message_history:
+            if wanted is not None and (msg.get("sender_node_id") or "") not in wanted:
+                continue
             exported_msg = {
                 "id": msg.get("id"),  # Preserve ID so merge_history can deduplicate
                 "role": msg["role"],
                 "content": msg["content"],
-                "timestamp": msg.get("timestamp", datetime.now(timezone.utc).isoformat()),
             }
+            # Absent stays absent. Substituting "now" here invented a value for
+            # a field the signature covers, so the receiver recomputed a
+            # different hash and rejected an untouched message as tampered.
+            if msg.get("timestamp"):
+                exported_msg["timestamp"] = msg["timestamp"]
             if "attachments" in msg:
                 exported_msg["attachments"] = msg["attachments"]
-            for field in ("sender_node_id", "sender_name", "sender_type", "agent_owner", "isAgent"):
+            # msg_index and chain_hash are the integrity pair. Dropping them
+            # did more than hide the numbering: the receiver's loader mints a
+            # hash for any message that arrives without one and then reports
+            # "chain integrity verified", so a chain built to detect tampering
+            # in transit was re-blessing whatever came off the wire. The index
+            # travels with it because the hash is computed over it — recomputed
+            # against a positional backfill, it would never match.
+            # content_hash/signature/signer_node_id are here because without
+            # them merge_history's verification branch was unreachable: the
+            # export stripped exactly the fields the check reads, so no message
+            # arriving this way was ever verified.
+            # msg_index and chain_hash are deliberately absent: both describe
+            # this node's copy, not the message, and the receiver recomputes
+            # them for its own. Sending them made the receiver's chain break on
+            # every load, and they never verified anything on the far side
+            # because the hash covers `role`, which differs by reader.
+            for field in ("sender_node_id", "sender_name", "sender_type", "agent_owner",
+                          "isAgent"):
                 if field in msg:
                     exported_msg[field] = msg[field]
+            # Signature fields travel only when they were made over the current
+            # preimage. A record predating it carries a hash of a different
+            # shape, and shipping it would have the receiver recompute, find a
+            # mismatch, and reject a legitimate message as tampered.
+            if msg.get("preimage_version") == PREIMAGE_VERSION:
+                for field in ("content_hash", "signature", "signer_node_id",
+                              "preimage_version"):
+                    if field in msg:
+                        exported_msg[field] = msg[field]
             exported.append(exported_msg)
 
-        logger.info(f"Exported {len(exported)} messages from conversation history")
+        if wanted is None:
+            logger.info(f"Exported {len(exported)} messages from conversation history")
+        else:
+            logger.info(
+                "Exported %d of %d messages, limited to %d author(s)",
+                len(exported), len(self.message_history), len(wanted),
+            )
         return exported
 
     def import_history(self, messages: List[Dict[str, Any]]):
@@ -1885,6 +2360,30 @@ PARTICIPANTS' CULTURAL CONTEXTS:
             logger.info("No messages to import")
             return
 
+        # This path replaces the whole local history, so every record is
+        # checked before anything is thrown away. It had no check at all: the
+        # request registry above proves we asked the question, never that the
+        # answer is honest. An import that survives nothing is refused, so a
+        # peer cannot empty a conversation by answering with records that fail.
+        accepted = []
+        refused = 0
+        for msg in messages:
+            checked, verdict = self._verify_incoming(msg)
+            if checked is None:
+                logger.warning("Rejected imported message %s: %s", msg.get("id", "?"), verdict)
+                refused += 1
+                continue
+            accepted.append(checked)
+
+        if not accepted:
+            logger.error(
+                "Refused the whole import into %s: %d record(s) arrived, none passed",
+                self.conversation_id, len(messages),
+            )
+            return
+        if refused:
+            logger.warning("Import refused %d of %d records", refused, len(messages))
+
         # Replace all three message stores (v0.14.0 fix)
         self.message_history = []
         self.message_buffer = []
@@ -1892,16 +2391,20 @@ PARTICIPANTS' CULTURAL CONTEXTS:
 
         import uuid
 
-        for msg in messages:
+        for msg in accepted:
             # 1. Add to message_history preserving all sender metadata
             imported_msg = {
                 "role": msg.get("role", "user"),
                 "content": msg.get("content", "")
             }
             for field in ("sender_name", "sender_node_id", "sender_type", "agent_owner",
-                          "timestamp", "id", "isAgent"):
+                          "timestamp", "id", "isAgent",
+                          "content_hash", "signature", "signer_node_id",
+                          "preimage_version", "verification"):
                 if field in msg:
                     imported_msg[field] = msg[field]
+            # msg_index and chain_hash are this node's, not the sender's.
+            imported_msg = self._chain_locally(imported_msg)
             if "attachments" in msg:
                 imported_msg["attachments"] = self._remap_attachment_paths(msg["attachments"])
             self.message_history.append(imported_msg)
@@ -1932,7 +2435,7 @@ PARTICIPANTS' CULTURAL CONTEXTS:
             self.message_buffer.append(message_obj)
             self.full_conversation.append(message_obj)
 
-        logger.info(f"Imported {len(messages)} messages into all conversation buffers")
+        logger.info(f"Imported {len(accepted)} messages into all conversation buffers")
 
     # Phase 7: Peer context cache management methods
     def cache_peer_context(self, node_id: str, context: Any, device_context: dict = None):
@@ -1987,53 +2490,72 @@ PARTICIPANTS' CULTURAL CONTEXTS:
 
     @staticmethod
     def _slugify(name: str) -> str:
-        """Convert a display name to a filesystem-safe slug."""
-        import re
-        slug = name.lower()
-        slug = re.sub(r'[^a-z0-9\s-]', '', slug)
-        slug = re.sub(r'\s+', '-', slug)
-        slug = re.sub(r'-+', '-', slug).strip('-')
-        return slug[:20]
+        """Convert a display name to a filesystem-safe slug.
+
+        Delegates to `conversation_paths`, the single definition.
+        """
+        return conversation_paths.slugify(name)
 
     def _get_folder_name(self) -> str:
-        """Return the folder name for this conversation, with display_name suffix if set."""
-        if self.display_name:
-            slug = self._slugify(self.display_name)
-            if slug:
-                return f"{self.conversation_id}-{slug}"
-        return self.conversation_id
+        """The folder name a *new* store for this conversation would be given.
+
+        Not the folder in use: that is `_get_conversation_dir`, which prefers
+        whatever already exists.
+        """
+        return conversation_paths.preferred_folder_name(
+            self.conversation_id, self.display_name
+        )
 
     def _get_conversation_dir(self) -> Path:
         """Get the conversation folder path.
 
+        An existing store wins over the preferred name, so a display name that
+        arrives late — or changes — never moves a live conversation. The
+        migration this used to perform (rename the bare folder once a name
+        appeared) was gated on the target not existing, and `GroupManager`
+        creates that target when it saves `metadata.json`; whichever ran first
+        decided where the history went. Now neither can move it.
+
         Returns:
-            Path to ~/.dpc/conversations/{conversation_id}-{slug}/
-            Falls back to ~/.dpc/conversations/{conversation_id}/ if no display_name.
-            Auto-migrates old unnamed folder to new named folder on first access.
-            For groups: discovers existing slugged directory even if display_name wasn't
-            set at monitor creation time (fixes duplicate directory bug).
+            Path to ~/.dpc/conversations/{conversation_id}-{slug}/ or
+            ~/.dpc/conversations/{conversation_id}/ — created by the caller.
         """
         base = Path.home() / ".dpc" / "conversations"
-        folder = self._get_folder_name()
-        new_dir = base / folder
-        old_dir = base / self.conversation_id
-        # If no display_name for a group, check if a slugged dir already exists on disk
-        if folder == self.conversation_id and self.conversation_id.startswith("group-") and base.exists():
-            prefix = self.conversation_id + "-"
-            for d in base.iterdir():
-                if d.is_dir() and d.name.startswith(prefix):
-                    self.display_name = d.name[len(prefix):]
-                    logger.info("Discovered slugged dir for %s: %s", self.conversation_id, d.name)
-                    new_dir = d
-                    break
-        if folder != self.conversation_id and old_dir.exists() and not new_dir.exists():
-            try:
-                old_dir.rename(new_dir)
-                logger.info("Renamed conversation folder: %s → %s", old_dir.name, new_dir.name)
-            except Exception as e:
-                logger.warning("Could not rename conversation folder %s: %s", old_dir.name, e)
-                return old_dir
-        return new_dir
+        chosen = conversation_paths.resolve_store_dir(
+            base, self.conversation_id, self.display_name
+        )
+        # Adopting the on-disk name keeps `_get_folder_name` and the store in
+        # agreement for the rest of this monitor's life.
+        prefix = self.conversation_id + "-"
+        if not self.display_name and chosen.name.startswith(prefix):
+            self.display_name = chosen.name[len(prefix):]
+            logger.info(
+                "Discovered existing folder for %s: %s", self.conversation_id, chosen.name
+            )
+        return chosen
+
+    def consolidate_split_stores(self) -> Dict[str, Any]:
+        """Fold any stray folder of this conversation into its store.
+
+        Idempotent and cheap when there is nothing to do: one directory
+        listing. Runs before every load rather than once at startup, because a
+        split can also be created by a peer's node on a version that still has
+        the old resolver.
+        """
+        base = Path.home() / ".dpc" / "conversations"
+        try:
+            summary = consolidate_conversation_stores(
+                base, self.conversation_id, self.display_name
+            )
+        except Exception as exc:
+            # Never let a repair stop a conversation from loading.
+            logger.error("Could not consolidate folders for %s: %s", self.conversation_id, exc)
+            summary = {"merged": 0, "error": str(exc)}
+        # Kept so the caller can tell peers what changed here. Without an
+        # announcement a repaired node waits for the next reconnect before
+        # anyone learns it stopped being half a conversation.
+        self.last_consolidation = summary
+        return summary
 
     def _get_history_path(self) -> Path:
         """Get path to history file for this conversation
@@ -2153,6 +2675,36 @@ PARTICIPANTS' CULTURAL CONTEXTS:
         )
         return "sha256:" + hashlib.sha256(data.encode()).hexdigest()[:16]
 
+    def history_digest(self) -> Dict[str, Any]:
+        """What this node holds, in a form two nodes can compare.
+
+        Per author, a count and a digest over the sorted `content_hash` values
+        of that author's messages. Two properties matter and neither is
+        incidental:
+
+        **Order does not enter it.** The previous comparison hashed the last
+        `chain_hash`, which covers `msg_index` and `prev_hash` — both functions
+        of the order this node received things in.
+
+        **Nothing per-reader enters it.** `chain_hash` also covers `role`, and
+        `role` is a rendering: each node calls its own messages `user` and
+        everyone else's `peer`. Measured across three nodes holding an
+        identical nine messages, that alone produced three different tips. A
+        digest over `content_hash` inherits the signing preimage's field set,
+        which excludes `role` deliberately (ADR-031).
+
+        Per author rather than one number for the room, so a mismatch says
+        *whose* messages are missing and only those need fetching.
+
+        Records written before `content_hash` existed fall back to their id, so
+        a legacy history is compared as best it can be rather than dropped.
+        """
+        return digest_for(self.message_history)
+
+    def authors_that_differ(self, remote_digest: Dict[str, Any]) -> List[str]:
+        """Which authors the two sides disagree about; empty means agreement."""
+        return authors_that_differ_between(self.history_digest(), remote_digest)
+
     def compute_history_hash(self) -> str:
         """Compute SHA256 hash of current message history.
 
@@ -2167,27 +2719,34 @@ PARTICIPANTS' CULTURAL CONTEXTS:
 
         Used by the on-connect GROUP_HISTORY_STATUS exchange so a node advertises
         its real history even when the group's monitor has not been loaded into
-        memory yet (chat not opened this session). Read-only: resolves the slugged
+        memory yet (chat not opened this session). Read-only: resolves the
         conversation dir without migrating or mutating state.
+
+        This was a fourth resolver with a fourth preference — the bare folder
+        first, then any prefixed one with a history in it — so while a group was
+        split it advertised whichever half it happened to land on rather than
+        the half the monitor was writing. It goes through `conversation_paths`
+        like everything else now.
         """
-        base = Path.home() / ".dpc" / "conversations"
-        target = base / conversation_id
-        if not (target / "history.json").exists() and base.exists():
-            prefix = conversation_id + "-"
-            for d in base.iterdir():
-                if d.is_dir() and d.name.startswith(prefix) and (d / "history.json").exists():
-                    target = d
-                    break
-        path = target / "history.json"
-        if not path.exists():
+        messages = ConversationMonitor.peek_group_messages(conversation_id)
+        if not messages:
             return (0, "sha256:empty")
+        return (len(messages), ConversationMonitor.history_hash_for(messages))
+
+    @staticmethod
+    def peek_group_messages(conversation_id: str) -> List[Dict[str, Any]]:
+        """A group's stored messages, straight from disk, without a monitor."""
+        base = Path.home() / ".dpc" / "conversations"
+        path = conversation_paths.resolve_store_dir(base, conversation_id) / "history.json"
+        if not path.exists():
+            return []
         try:
             with open(path, encoding="utf-8") as f:
                 data = json.load(f)
-            messages = data.get("messages", []) if isinstance(data, dict) else []
-            return (len(messages), ConversationMonitor.history_hash_for(messages))
         except (json.JSONDecodeError, OSError):
-            return (0, "sha256:empty")
+            return []
+        messages = data.get("messages", []) if isinstance(data, dict) else []
+        return messages if isinstance(messages, list) else []
 
     def save_history(self) -> bool:
         """Persist message history to disk
@@ -2253,6 +2812,12 @@ PARTICIPANTS' CULTURAL CONTEXTS:
         Returns:
             True if loaded successfully, False if file doesn't exist or on error
         """
+        # Before reading: if this conversation was left split across two
+        # folders by the old name-dependent path, fold them into one now, so
+        # what is read below is the whole history rather than the half that
+        # happened to be in the folder the current name points at.
+        self.consolidate_split_stores()
+
         path = self._get_history_path()
 
         # Check for legacy path (migration support)
@@ -2281,25 +2846,62 @@ PARTICIPANTS' CULTURAL CONTEXTS:
 
             # Backfill msg_index + verify chain_hash (MSG-CHAIN, S105)
             chain_ok = True
+            minted = 0
             prev_hash = "genesis"
             for i, m in enumerate(messages):
                 if "msg_index" not in m:
                     m["msg_index"] = i + 1  # 1-based backfill
-                expected_input = (
-                    f"{m['msg_index']}|{m.get('id', '')}|{m.get('role', '')}"
-                    f"|{m.get('sender_name', '')}|{m.get('content', '')}"
-                    f"|{m.get('timestamp', '')}|{prev_hash}"
-                )
-                expected_hash = hashlib.sha256(expected_input.encode("utf-8")).hexdigest()
+                # Through the shared formula: this site used to render a stored
+                # `None` as the string "None" while the add path rendered it as
+                # "", so any message holding an explicit null in one of the
+                # covered fields verified as broken on every load, for ever.
+                expected_hash = chain_hash_for(m, prev_hash)
                 stored_hash = m.get("chain_hash")
                 if stored_hash and stored_hash != expected_hash:
                     logger.warning("Chain broken at message #%d (conversation %s)", m["msg_index"], self.conversation_id)
                     chain_ok = False
                 if not stored_hash:
+                    # Writing our own hash here is how a message with none
+                    # becomes indistinguishable from a verified one. Legitimate
+                    # for files written before the chain existed; never a
+                    # verification, so it is counted and said out loud rather
+                    # than folded into the success line below.
                     m["chain_hash"] = expected_hash
+                    minted += 1
                 prev_hash = m.get("chain_hash", "genesis")
-            if chain_ok and any(m.get("chain_hash") for m in messages):
-                logger.info("Chain integrity verified: %d messages OK", len(messages))
+            if minted:
+                logger.warning(
+                    "Chain: minted a hash for %d of %d message(s) that arrived "
+                    "without one (conversation %s) — those are unverified, not verified",
+                    minted, len(messages), self.conversation_id,
+                )
+
+            if not chain_ok and not self._chain_rebuilt:
+                # A file written before the chain became local carries foreign
+                # indices and hashes, appended verbatim by the old merge. Those
+                # breaks are ours, they are permanent, and they fire on every
+                # load — which is how an alarm stops being read. Rebuilt once,
+                # locally, because the chain describes this node's copy.
+                #
+                # Said out loud rather than quietly: a rebuild also erases the
+                # evidence of a genuine local edit, if there was one. It runs
+                # once per conversation, and a break reported after it means
+                # something.
+                logger.warning(
+                    "Chain: rebuilding locally for %d message(s) (conversation %s) — "
+                    "one-time repair of chains merged before they became local; "
+                    "this also clears any earlier local tampering from view",
+                    len(messages), self.conversation_id,
+                )
+                rechain(messages)
+                self._chain_rebuilt = True
+                chain_ok = True
+                self._history_dirty = True
+
+            verified = len(messages) - minted
+            if chain_ok and verified and any(m.get("chain_hash") for m in messages):
+                logger.info("Chain integrity verified: %d of %d messages OK",
+                            verified, len(messages))
 
             # Check chain anchor for deletion detection (MSG-CHAIN-2, S105)
             meta_path = path.parent / ".chain_meta.json"
@@ -2339,8 +2941,13 @@ PARTICIPANTS' CULTURAL CONTEXTS:
             # Idempotent — repeats are safe (rebuild dedupes by message_id).
             self.rebuild_extraction_buffers_from_history()
 
+            was_rebuilt = self._chain_rebuilt and self._history_dirty
             self._history_dirty = False
             logger.info(f"Loaded {len(messages)} messages from {path}")
+            if was_rebuilt:
+                # Persisted immediately, or the repair happens again on every
+                # start and the warning it prints never stops either.
+                self.save_history()
             return True
 
         except Exception as e:
@@ -2385,6 +2992,142 @@ PARTICIPANTS' CULTURAL CONTEXTS:
             logger.debug(f"Rebuilt extraction buffers: added {added} historical messages for {self.conversation_id}")
         return added
 
+    def _chain_locally(self, message: Dict[str, Any]) -> Dict[str, Any]:
+        """Give an arriving message this node's index and chain hash.
+
+        `chain_hash` covers `msg_index`, `prev_hash` and `role` — a position in
+        this node's sequence, the hash before it, and a rendering that differs
+        by reader. None of the three is a property of the message, so a chain
+        cannot be shared between nodes: measured across three holding an
+        identical nine messages, all three tips differed.
+
+        It was carried across the wire (05d646de) to catch tampering in
+        transit. The author's signature does that now, keyed to the author and
+        computed over fields every reader agrees on — so the chain goes back to
+        the one job it can do: detecting a local file edited underneath us.
+        """
+        chained = {k: v for k, v in message.items()
+                   if k not in ("msg_index", "chain_hash")}
+
+        prev_index = max((m.get("msg_index", 0) for m in self.message_history), default=0)
+        chained["msg_index"] = prev_index + 1 if self.message_history else 1
+
+        prev_hash = self.message_history[-1].get("chain_hash", "genesis") if self.message_history else "genesis"
+        chained["chain_hash"] = chain_hash_for(chained, prev_hash)
+        return chained
+
+    def _reject_unsigned(self) -> bool:
+        """Whether a record this node cannot check is refused rather than labelled.
+
+        Covers both classes the gate calls `legacy`: no signature fields, and a
+        preimage version this node cannot recompute.
+        """
+        getter = getattr(self.settings, "get_reject_unsigned_history", None)
+        if not callable(getter):
+            return False
+        try:
+            return bool(getter())
+        except Exception:  # noqa: BLE001
+            return False
+
+    def _room_candidates(self) -> tuple:
+        """The names this conversation can go by, for recomputing a hash.
+
+        A group is named the same on every node. A 1:1 is not: each side keys
+        the monitor by the *other* node, so the author signed under our node id
+        and we hold theirs. Both are ours to derive — neither is read off the
+        message — so the hash stays bound to a room either way.
+        """
+        local = self.participants[0].get("node_id") if self.participants else None
+        if local and local != self.conversation_id:
+            return (self.conversation_id, local)
+        return (self.conversation_id,)
+
+    def _verify_incoming(self, message: Dict[str, Any]) -> tuple[Optional[Dict[str, Any]], str]:
+        """Decide what an arriving record is before it can enter history.
+
+        Returns the record to store and its verdict, or `(None, reason)` to
+        refuse it. Every path returns a verdict, so a record cannot enter
+        unlabelled — the hole this closes was not a forgeable signature but an
+        absent one, which used to skip the whole block and store as if checked.
+
+        The `verification` field is always written here and never read off the
+        wire: a peer that can label its own forgery "verified" has defeated the
+        check by filling it in.
+
+        Verdicts are the live path's (`group_handler._authenticate_author`):
+        "verified", "unverified" (signed, certificate not here yet), "legacy"
+        (no signature this node can recompute). That path can demote a legacy
+        message to its transport author; here there is no equivalent, because
+        the peer handing over a history did not write it — so a legacy record
+        keeps a claimed author with nothing behind it, and `reject_unsigned`
+        is what closes that.
+        """
+        sig = message.get("signature")
+        content_hash = message.get("content_hash")
+        signer = message.get("signer_node_id")
+        present = sum(1 for v in (sig, content_hash, signer) if v)
+
+        if present < 3:
+            # Predates ADR-036, or was written by a node holding no key — which
+            # also produces a hash with nothing signing it. Refusing outright
+            # strands what is already on disk, because export_history ships the
+            # signature fields only for the current preimage; so it is stored
+            # labelled, and `reject_unsigned` turns the label into a refusal
+            # once the legacy records are gone.
+            if self._reject_unsigned():
+                return None, "unsigned, and reject_unsigned is on"
+            return dict(message, verification="legacy"), "legacy"
+
+        if message.get("preimage_version") != PREIMAGE_VERSION:
+            # Signed over a preimage we cannot recompute — a node one version
+            # ahead or behind. Refusing that is not a security decision, it is
+            # an outage, so it is treated as legacy exactly as the live path
+            # treats it.
+            if self._reject_unsigned():
+                return None, "preimage %s cannot be recomputed" % message.get("preimage_version")
+            return dict(message, verification="legacy"), "legacy"
+
+        # The hash is recomputed rather than read: a hash taken from the
+        # message it describes attests nothing, and the signature over it
+        # inherits that. The room name comes from us, never from the message —
+        # otherwise a signed message from another room verifies happily here.
+        if not any(
+            content_hash == message_content_hash(
+                conversation_id=room,
+                message_id=message.get("id"),
+                sender_node_id=message.get("sender_node_id"),
+                sender_name=message.get("sender_name"),
+                sender_type=message.get("sender_type"),
+                agent_owner=message.get("agent_owner"),
+                timestamp=message.get("timestamp"),
+                content=message.get("content") or "",
+                tool_calls=message.get("tool_calls"),
+            )
+            for room in self._room_candidates()
+        ):
+            return None, "content does not match its hash"
+        if signer != message.get("sender_node_id"):
+            return None, f"signed by {str(signer)[:20]} but attributed to {str(message.get('sender_node_id'))[:20]}"
+
+        try:
+            from dpc_protocol.commit_integrity import CommitSigner
+            result = CommitSigner.verify_signature(signer, content_hash, sig)
+        except Exception as e:  # noqa: BLE001
+            # Was DEBUG-and-accept, which turned a failed check into a silent
+            # pass — the opposite of what verify_signature does with the same
+            # exceptions.
+            return None, f"signature check failed: {e}"
+
+        if result is False:
+            return None, f"invalid signature from {str(signer)[:20]}"
+        if result is None:
+            # Cannot check yet — the peer's certificate is not cached. Kept and
+            # flagged rather than rejected: on first contact rejecting would be
+            # a denial of service against ourselves. reverify_author() revisits.
+            return dict(message, verification="unverified"), "unverified"
+        return dict(message, verification="verified"), "verified"
+
     def add_message_with_id(self, message: Dict[str, Any]) -> bool:
         """Add a message to history with duplicate detection
 
@@ -2410,8 +3153,11 @@ PARTICIPANTS' CULTURAL CONTEXTS:
         if msg_id:
             self.message_ids.add(msg_id)
 
-        # Add to history
-        self.message_history.append(message)
+        # Add to history, re-chained for this node. A foreign index and hash
+        # appended verbatim broke the local chain permanently: the loader
+        # recomputes what it expects from the local sequence, finds the
+        # imported values, and logs "Chain broken" on every load ever after.
+        self.message_history.append(self._chain_locally(message))
         self._history_dirty = True
 
         return True
@@ -2432,31 +3178,63 @@ PARTICIPANTS' CULTURAL CONTEXTS:
         """
         added = 0
         rejected = 0
+        legacy = 0
         for msg in remote_messages:
-            sig = msg.get("signature")
-            content_hash = msg.get("content_hash")
-            signer = msg.get("signer_node_id")
-            if sig and content_hash and signer:
-                try:
-                    from dpc_protocol.commit_integrity import CommitSigner
-                    result = CommitSigner.verify_signature(signer, content_hash, sig)
-                    if result is False:
-                        logger.warning("Rejected message %s: invalid signature from %s",
-                                       msg.get("id", "?"), signer)
-                        rejected += 1
-                        continue
-                except Exception as e:
-                    logger.debug("Signature verification skipped: %s", e)
-            if self.add_message_with_id(msg):
+            checked, verdict = self._verify_incoming(msg)
+            if checked is None:
+                logger.warning("Rejected message %s: %s", msg.get("id", "?"), verdict)
+                rejected += 1
+                continue
+            if self.add_message_with_id(checked):
                 added += 1
+                if verdict == "legacy":
+                    legacy += 1
 
         if rejected:
-            logger.warning("Rejected %d messages with invalid signatures during merge", rejected)
+            logger.warning("Merge refused %d of %d records", rejected, len(remote_messages))
+        if legacy:
+            logger.warning(
+                "Merged %d unsigned record(s) into %s: stored `verification: legacy`, not checked",
+                legacy, self.conversation_id,
+            )
         if added > 0:
+            self.restore_chronological_order()
             self.save_history()
             logger.info("Merged %d new messages into conversation history", added)
 
         return added
+
+    def restore_chronological_order(self) -> bool:
+        """Put the history back in time order, re-chaining if anything moved.
+
+        A merge appends: `add_message_with_id` puts each arrival at the end and
+        chains it there. That is correct for messages that really are newer, and
+        wrong for a history handed over after a gap — the recovered older block
+        lands *after* the recent one, and the file becomes two or three
+        chronological runs concatenated in arrival order.
+
+        Measured on the live pair: this node's copy was sorted by the folder
+        consolidation, the peer's copy was not, and the peer's broke order at
+        index 31 and again at 61 — which is what a reader sees as "it stops at
+        61". Same messages, same count, different order.
+
+        Returns True when something was actually reordered.
+        """
+        if len(self.message_history) < 2:
+            return False
+        ordered = [m for _, m in sorted(
+            list(enumerate(self.message_history)), key=_chronological_key
+        )]
+        if ordered == self.message_history:
+            return False
+        self.message_history = ordered
+        rechain(self.message_history)
+        self._history_dirty = True
+        logger.info(
+            "Reordered %d message(s) of %s into time order after a merge",
+            len(ordered), self.conversation_id,
+        )
+        return True
 
     def clear_history(self, preserve: bool = True, max_sessions: int = 0) -> int:
         """Clear all message history and delete persisted file.

@@ -8,7 +8,7 @@ import secrets
 import stat
 import weakref
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Optional
 import websockets
 from websockets.server import WebSocketServerProtocol
 
@@ -18,6 +18,13 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 ui_logger = logging.getLogger("dpc_ui")
 
+# Off by default: this logs a line per outbound frame, and the paths it watches
+# are the busy ones (agent progress is fire-and-forget, hundreds per second at
+# browse_page start). Turn on with DPC_DEBUG_WS=1 when chasing corrupted frames
+# — S145 measured 558 of them in 50ms, and the only reason it stayed a guess
+# for a day is that broadcast_event said nothing about itself.
+_DEBUG_WS = os.environ.get("DPC_DEBUG_WS") == "1"
+
 # Local API authentication: a fresh random token is generated on every backend
 # startup and written to ~/.dpc/.ws_token. The frontend reads this file via a
 # Tauri command and presents the token as the first message on each WebSocket
@@ -25,6 +32,28 @@ ui_logger = logging.getLogger("dpc_ui")
 # and invoke backend commands.
 WS_TOKEN_PATH = Path.home() / ".dpc" / ".ws_token"
 AUTH_TIMEOUT_SECONDS = 5.0
+
+
+def sends_own_response(handler):
+    """Dispatch as a task; the handler answers the client itself.
+
+    It is handed command_id and _websocket and is responsible for the reply.
+    """
+    handler.dpc_sends_own_response = True
+    return handler
+
+
+def slow_command(handler):
+    """Dispatch as a task and answer normally when it returns.
+
+    The message loop otherwise awaits each handler inline, so one slow command
+    holds back every request behind it on the same socket. Mark a handler that
+    waits on something outside this process — a model, a peer, a remote API.
+    Marking changes ordering: this command may finish after commands sent later,
+    so do not mark one whose effect a following command depends on.
+    """
+    handler.dpc_slow = True
+    return handler
 
 _UI_LOG_LEVELS = {
     "debug": ui_logger.debug,
@@ -139,6 +168,24 @@ ALLOWED_COMMANDS: frozenset = frozenset({
     "delete_agent",
     "list_agent_profiles",
     "get_agent_permissions",  # Agent permissions transparency (v0.22.0)
+    # Graph counts from the process that holds the store — it cannot be read from
+    # anywhere else while the backend runs, which is how three analyses came to
+    # measure a file from May and call it the live graph.
+    "get_graph_snapshot",
+    # The whole graph out to a file, for the same reason and from the same handle:
+    # the first backup this store has ever had, the only way to move it to the other
+    # backend, and the measurement that replaces arithmetic over totals.
+    "export_knowledge_graph",
+    # What each indexed corpus costs and returns — the evidence the "what belongs in
+    # the index" decision waits on, reported rather than argued.
+    "get_corpus_stats",
+    # Undo what the broken gate wrote: the fix stopped the leak, the rows stayed.
+    "purge_denied_shared_knowledge",
+    # Path drift in privacy_rules.json: report, and repair only when asked. The repair
+    # can drop an entry, and an unmounted disk must not lose its root silently.
+    "check_paths_exist",
+    "get_indexed_path_drift",
+    "repair_indexed_paths",
     "get_agent_model_config",
     "save_agent_model_config",
     # Agent Task Board (v0.20.0)
@@ -161,6 +208,7 @@ ALLOWED_COMMANDS: frozenset = frozenset({
     "web_auth_approve_headless",
     "web_auth_reject_headless",
     # Shell approval (ADR-030 v2)
+    "resolve_schedule_approval",
     "shell_approve_command",
     "shell_reject_command",
     "shell_add_to_whitelist",
@@ -195,6 +243,20 @@ def _sanitize_payload_for_logging(payload: dict, max_length: int = 30) -> dict:
     return sanitized
 
 
+def _log_error_under_ok(command: str, result, envelope: str = "OK") -> None:
+    """H2 Step 0 — the envelope is left as it is; only the silence becomes audible."""
+    if envelope != "OK" or not isinstance(result, dict):
+        return
+    inner = result.get("status")
+    if not isinstance(inner, str) or inner.casefold() != "error":
+        return
+    detail = result.get("message") or result.get("error") or ""
+    logger.warning(
+        "Command '%s' answered an error under an OK envelope: %s",
+        command, str(detail)[:300] or "(no message given)",
+    )
+
+
 class LocalApiServer:
     def __init__(self, core_service: "CoreService", host: str = "127.0.0.1", port: int = 9999):
         self.core_service = core_service
@@ -212,6 +274,10 @@ class LocalApiServer:
         # doesn't run) don't leak Lock objects — entries vanish as soon as
         # the WebSocketServerProtocol is garbage-collected.
         self._client_locks: "weakref.WeakKeyDictionary" = weakref.WeakKeyDictionary()
+        # The loop the locks belong to. A send arriving from another loop
+        # cannot take them, and until now that meant sending unlocked — see
+        # _send_locked.
+        self._owner_loop: Optional[asyncio.AbstractEventLoop] = None
         self._auth_token: str = ""
 
     def _generate_and_persist_auth_token(self) -> None:
@@ -305,14 +371,114 @@ class LocalApiServer:
         if lock is None:
             await client.send(message)
             return
+
+        # An asyncio.Lock does not police which loop takes it: a free one is
+        # acquired from any loop silently, and a held one blocks the foreign
+        # waiter instead of raising. So cross-loop use neither serializes
+        # reliably nor announces itself — it has to be caught by comparing
+        # loops, not by waiting for an error that only some paths produce.
+        owner = self._owner_loop
+        if owner is not None and owner.is_running():
+            try:
+                here = asyncio.get_running_loop()
+            except RuntimeError:
+                here = None
+            if here is not owner:
+                self._debug_ws("rerouted from a foreign loop", message)
+                future = asyncio.run_coroutine_threadsafe(
+                    self._send_on_owner_loop(client, message), owner
+                )
+                await asyncio.wrap_future(future)
+                return
+
         try:
             async with lock:
                 await client.send(message)
         except RuntimeError as e:
-            if "bound to a different event loop" in str(e):
-                await client.send(message)
-            else:
+            if "bound to a different event loop" not in str(e):
                 raise
+            # Sending unlocked here reopened the very hole the lock closed:
+            # S145 measured 558 corrupted frames in 50ms during browse_page
+            # start, and the corruption ate web_auth_popup_request so the
+            # modal never appeared. Agent tools run on a per-call loop, so
+            # this branch is reachable from every tool that broadcasts —
+            # and it was silent, which is why the flood looked causeless.
+            owner = self._owner_loop
+            if owner is not None and owner.is_running():
+                logger.warning(
+                    "Send arrived from a foreign event loop; routing it back to "
+                    "the server loop instead of sending unlocked"
+                )
+                future = asyncio.run_coroutine_threadsafe(
+                    self._send_on_owner_loop(client, message), owner
+                )
+                await asyncio.wrap_future(future)
+                return
+            logger.warning(
+                "Send arrived from a foreign event loop and the server loop is "
+                "gone — sending unlocked, frames may interleave"
+            )
+            await client.send(message)
+
+    def _debug_ws(self, what: str, message: str) -> None:
+        """Name an outbound frame: how long it is and which loop wrote it.
+
+        Corruption shows up as two frames overlapping, so the useful facts are
+        size and origin loop — a frame written from a per-call tool loop is the
+        one worth suspecting.
+        """
+        if not _DEBUG_WS:
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+        logger.debug(
+            "WS %s: %d bytes, loop=%s%s, clients=%d, head=%s",
+            what, len(message), id(loop) if loop else None,
+            "" if loop is self._owner_loop else " (FOREIGN)",
+            len(self._clients), message[:60],
+        )
+
+    async def _send_on_owner_loop(self, client: WebSocketServerProtocol, message: str) -> None:
+        """Take the lock on the loop that owns it, then send."""
+        lock = self._client_locks.get(client)
+        if lock is None:
+            await client.send(message)
+            return
+        async with lock:
+            await client.send(message)
+
+    async def _run_and_respond(
+        self,
+        websocket: WebSocketServerProtocol,
+        command_id: str,
+        command: str,
+        handler_method,
+        payload: dict,
+    ) -> None:
+        """Await a slow handler off the read loop and answer when it returns.
+
+        Same response and error shapes as the inline path, so a caller cannot
+        tell which way its command was dispatched.
+        """
+        try:
+            result = await handler_method(**payload)
+            _log_error_under_ok(command, result)
+            response = {"id": command_id, "command": command, "status": "OK", "payload": result}
+        except Exception as e:
+            logger.error("Error processing command: %s", e, exc_info=True)
+            response = {
+                "id": command_id,
+                "command": command,
+                "status": "ERROR",
+                "payload": {"message": str(e)},
+            }
+        try:
+            await self._send_locked(websocket, json.dumps(response))
+            logger.debug("Response sent for '%s' (id=%s)", command, command_id)
+        except Exception:
+            logger.debug("Client gone before '%s' (id=%s) could answer", command, command_id)
 
     async def _handler(self, websocket: WebSocketServerProtocol):
         if not await self._authenticate(websocket):
@@ -357,16 +523,18 @@ class LocalApiServer:
                         else:
                             logger.debug("Executing command '%s' with payload: %s", command, sanitized_payload)
 
-                        # For long-running tasks, run them in the background
-                        # get_status can take 30s on Linux (IP detection), execute_ai_query for AI
-                        if command in ["execute_ai_query", "get_status"]:
-                            # Pass the command_id to the handler
+                        if getattr(handler_method, "dpc_sends_own_response", False):
                             payload['command_id'] = command_id
                             payload['_websocket'] = websocket
                             asyncio.create_task(handler_method(**payload))
+                        elif getattr(handler_method, "dpc_slow", False):
+                            asyncio.create_task(self._run_and_respond(
+                                websocket, command_id, command, handler_method, payload
+                            ))
                         else:
                             # For short tasks, await the result and send it back
                             result = await handler_method(**payload)
+                            _log_error_under_ok(command, result)
                             response = {"id": command_id, "command": command, "status": "OK", "payload": result}
                             await self._send_locked(websocket, json.dumps(response))
                             # Mike S141: pair every "Executing command" with a
@@ -405,6 +573,9 @@ class LocalApiServer:
             await self._unregister(websocket)
 
     async def start(self):
+        # Remembered here rather than at __init__: the locks are created on
+        # whichever loop serves the connections, and that is this one.
+        self._owner_loop = asyncio.get_running_loop()
         self._generate_and_persist_auth_token()
         logger.info("Starting Local API Server on ws://%s:%d", self.host, self.port)
 
@@ -426,10 +597,20 @@ class LocalApiServer:
             await self.server.wait_closed()
             logger.info("Local API Server stopped")
 
+    @property
+    def has_clients(self) -> bool:
+        """Whether any UI client is connected right now.
+
+        Callers that broadcast a request and then *wait* for an answer need
+        this: broadcast_event drops the message when nobody is listening, so
+        without the check the wait can only end in a timeout."""
+        return bool(self._clients)
+
     async def broadcast_event(self, event_name: str, payload: dict):
         if not self._clients:
             return
         message = json.dumps({"event": event_name, "payload": payload})
+        self._debug_ws(f"broadcast {event_name}", message)
         # Send to all clients under per-client locks, but don't fail if one
         # client is disconnected. Locking is required because fire-and-forget
         # broadcast callers (e.g. agent_manager._emit_progress) create
@@ -448,6 +629,10 @@ class LocalApiServer:
         """Helper to send a response to all connected UI clients."""
         if not self._clients:
             return
+        # The third dispatch branch: a handler decorated @sends_own_response builds its
+        # own envelope, so the two sites above never see it. execute_ai_query is here,
+        # and that is the Local AI Chat path the next two records are built on.
+        _log_error_under_ok(command, payload, status)
         response = {"id": command_id, "command": command, "status": status, "payload": payload}
         message = json.dumps(response)
         # Per-client locks (see broadcast_event for rationale).

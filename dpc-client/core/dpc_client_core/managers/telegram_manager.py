@@ -192,6 +192,27 @@ class TelegramBotManager:
         chat_id_str = str(chat_id)
         return chat_id_str in self.allowed_chat_ids
 
+    def _install_message_handlers(self, application, bridge) -> None:
+        """Attach the five inbound handlers to `application`.
+
+        Called for **every** application object that might end up polling. The
+        retry below builds a fresh one, and an application with no handlers
+        still polls, still consumes every update, and drops all of them — which
+        on the outside is indistinguishable from nobody writing to the bot.
+        """
+        from telegram.ext import MessageHandler, filters
+
+        application.add_handler(
+            MessageHandler(filters.TEXT & ~filters.COMMAND, bridge.handle_text_message))
+        application.add_handler(
+            MessageHandler(filters.VOICE, bridge.handle_voice_message))
+        application.add_handler(
+            MessageHandler(filters.PHOTO, bridge.handle_photo_message))
+        application.add_handler(
+            MessageHandler(filters.Document.ALL, bridge.handle_document_message))
+        application.add_handler(
+            MessageHandler(filters.VIDEO, bridge.handle_video_message))
+
     async def start(self):
         """
         Start the Telegram bot.
@@ -239,40 +260,7 @@ class TelegramBotManager:
 
                 bridge = self.service.telegram_bridge
 
-                # Text messages handler
-                text_handler = MessageHandler(
-                    filters.TEXT & ~filters.COMMAND,
-                    bridge.handle_text_message
-                )
-                self.application.add_handler(text_handler)
-
-                # Voice messages handler
-                voice_handler = MessageHandler(
-                    filters.VOICE,
-                    bridge.handle_voice_message
-                )
-                self.application.add_handler(voice_handler)
-
-                # Photo messages handler
-                photo_handler = MessageHandler(
-                    filters.PHOTO,
-                    bridge.handle_photo_message
-                )
-                self.application.add_handler(photo_handler)
-
-                # Document messages handler
-                document_handler = MessageHandler(
-                    filters.Document.ALL,
-                    bridge.handle_document_message
-                )
-                self.application.add_handler(document_handler)
-
-                # Video messages handler
-                video_handler = MessageHandler(
-                    filters.VIDEO,
-                    bridge.handle_video_message
-                )
-                self.application.add_handler(video_handler)
+                self._install_message_handlers(self.application, bridge)
 
                 # Start the bot
                 if self.use_webhook:
@@ -318,6 +306,11 @@ class TelegramBotManager:
                                 .token(self.bot_token)
                                 .build()
                             )
+                            # The handlers belonged to the application that just
+                            # failed. Measured 2026-08-27: one timeout at startup
+                            # and the bot spent the day fetching every message
+                            # and discarding it, while sending still worked.
+                            self._install_message_handlers(self.application, bridge)
 
                     # Stop bot immediately when a Conflict error is detected (another instance running)
                     async def _conflict_error_handler(update, context):

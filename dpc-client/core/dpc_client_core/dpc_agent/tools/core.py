@@ -18,7 +18,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from .registry import ToolEntry, ToolContext
+from .registry import ToolEntry, ToolContext, agent_display_name, conversation_origin
+from ..memory import _BACKFILL_SKIP
 from ..utils import auto_commit_agent_change
 
 log = logging.getLogger(__name__)
@@ -42,16 +43,73 @@ def _paginate_content(content: str, path: str, offset: int | None, limit: int | 
         shown_end = min(end, total)
         return f"[Lines {shown_start}-{shown_end} of {total} total | {path}]\n{result}"
 
-    # No pagination — apply legacy truncation
+    # No pagination — truncate, and say so where it will be read. The old
+    # notice sat after the content, counted characters while the reader
+    # counts lines, and named no way to continue: a reader who took the
+    # first page for the whole file got its size right and its extent
+    # wrong, then reasoned on a quarter of the document.
     if len(content) > fallback_truncate:
-        content = content[:fallback_truncate] + f"\n\n... (truncated, {len(content)} total chars)"
+        # Cut on a line boundary, so the offset offered below resumes exactly
+        # where this page stops. A character cut lands mid-line and the
+        # advertised offset would skip its remainder.
+        shown = 0
+        size = 0
+        for line in lines:
+            if size + len(line) > fallback_truncate:
+                break
+            size += len(line)
+            shown += 1
+        head = "".join(lines[:shown])
+        return (
+            f"[Lines 1-{shown} of {total} | truncated at {size} "
+            f"of {len(content)} chars | continue: offset={shown}]\n{head}"
+        )
     return content
+
+
+def _is_shared_knowledge_read(ctx: ToolContext, path: str) -> bool:
+    """Is this a read of the shared human knowledge layer the agent already indexes?
+
+    L6 lives at $DPC_HOME/knowledge, outside every agent sandbox, and is admitted to
+    an agent's index by can_agent_access_context('knowledge') — not by the extended
+    path list. So an agent can hold a document in its index, be offered it by Active
+    Recall, and then be refused the read, purely because the directory was never added
+    to a second, unrelated list. Honour the same permission that put it there.
+
+    Which is the whole justification, and it bounds the gate: the indexer takes the
+    top-level `.md` files of that directory and nothing else, so a file deeper in the
+    tree or of another type was never offered and this rule was never about it. It
+    used to admit any file at any depth — wider than its own reason, and quietly, since
+    the two sets happen to coincide today (measured 2026-08-02: 301 files, all `.md`,
+    no subdirectories). A refusal here is logged rather than silent, because the day
+    the sets stop coinciding is the day someone needs to know which rule to change.
+
+    Reads only. Write access to the shared layer stays where it was.
+    """
+    if not ctx.firewall:
+        return False
+    import os
+    dpc_home = Path(os.environ.get("DPC_HOME", Path.home() / ".dpc"))
+    knowledge_dir = (dpc_home / "knowledge").resolve()
+    try:
+        resolved = Path(path).expanduser().resolve()
+        resolved.relative_to(knowledge_dir)
+    except (ValueError, OSError):
+        return False
+    if resolved.parent != knowledge_dir or resolved.suffix.lower() != ".md":
+        log.info("shared knowledge read refused: %s is under the shared layer but is not "
+                 "what the indexer admits (top-level .md)", resolved)
+        return False
+    profile = getattr(getattr(ctx, "_agent", None), "_firewall_profile", None)
+    return bool(ctx.firewall.can_agent_access_context("knowledge", profile_name=profile))
 
 
 def _resolve_file_path(ctx: ToolContext, path: str, require_write: bool = False) -> Path:
     """Resolve path to a file: relative → sandbox, absolute → firewall-checked extended path."""
     import os
     if os.path.isabs(path):
+        if not require_write and _is_shared_knowledge_read(ctx, path):
+            return Path(path).expanduser().resolve()
         # Check extended path access gates (S31) — per-agent profile aware (S110 fix)
         if ctx.firewall:
             profile = getattr(getattr(ctx, "_agent", None), "_firewall_profile", None)
@@ -87,6 +145,7 @@ def read_file(ctx: ToolContext, path: str, offset: int | None = None, limit: int
             return f"⚠️ Not a file: {path}"
 
         content = file_path.read_text(encoding="utf-8", errors="replace")
+        _record_knowledge_read(ctx, file_path)
         import os
         truncate_limit = 100000 if os.path.isabs(path) else 50000
         return _paginate_content(content, path, offset, limit, fallback_truncate=truncate_limit)
@@ -95,6 +154,26 @@ def read_file(ctx: ToolContext, path: str, offset: int | None = None, limit: int
         return f"⚠️ Access denied: {e}"
     except Exception as e:
         return f"⚠️ Error reading file: {e}"
+
+
+def _record_knowledge_read(ctx: ToolContext, file_path: Path) -> None:
+    """Credit a read to the document that was read.
+
+    The access registry only covers the agent's own knowledge directory — the shared
+    and external layers have no _meta.json to write to, and they are ranked by the
+    recall counter instead. Bookkeeping must never be the reason a read fails, so a
+    problem here is logged and swallowed: the content is already in hand.
+    """
+    knowledge_dir = ctx.agent_root / "knowledge"
+    try:
+        if file_path.parent.resolve() != knowledge_dir.resolve():
+            return
+        if file_path.name in _BACKFILL_SKIP:
+            return
+        from ..memory import update_access
+        update_access(knowledge_dir, file_path.name)
+    except Exception as e:
+        log.debug("Could not record read of %s: %s", file_path, e)
 
 
 # Legacy aliases for backward compatibility
@@ -183,7 +262,7 @@ def write_file(ctx: ToolContext, path: str, content: str) -> str:
 
         # Update _meta.json + regenerate smart _index.md for knowledge writes
         if not os.path.isabs(path) and path.startswith("knowledge/") and not path.endswith("_index.md"):
-            from ..memory import read_file_meta, write_file_meta, update_access
+            from ..memory import read_file_meta, write_file_meta, record_write
             knowledge_dir = ctx.agent_root / "knowledge"
             filename = Path(path).name
             meta = read_file_meta(knowledge_dir, filename)
@@ -191,30 +270,42 @@ def write_file(ctx: ToolContext, path: str, content: str) -> str:
                 meta.summary = content[:1000].strip()
                 meta.tags = [t for t in Path(path).stem.replace("_", "-").split("-") if len(t) > 2]
                 write_file_meta(knowledge_dir, filename, meta)
-            update_access(knowledge_dir, filename)
+            record_write(knowledge_dir, filename)
             # Incremental reindex for Active Recall (MEM-3.7)
             try:
                 agent = getattr(ctx, '_agent', None)
                 provider = getattr(agent, '_embedding_provider', None) if agent else None
                 if provider:
                     from ..indexing_pipeline import index_single_file
+                    from ..index_writer import write_index
                     from ..retrieval import make_backend_for_agent
                     index_dir = ctx.agent_root / "state" / "memory_index"
                     if index_dir.exists():
-                        backend = make_backend_for_agent(ctx.agent_root)
-                        if backend.vector.load():
+                        def _add_to_index():
+                            # Built inside the writer: a backend made outside it would
+                            # have read the index before another mutation wrote it.
+                            backend = make_backend_for_agent(ctx.agent_root)
+                            if not backend.vector.load():
+                                return False
                             backend.text.load()
-                            # L5 key shape must match agent_manager._sync_index
-                            # (base = agent_root/knowledge) so incremental adds line up
-                            # with full-rebuild keys.
-                            _knowledge_dir = ctx.agent_root / "knowledge"
-                            try:
-                                _l5_key = file_path.relative_to(_knowledge_dir).as_posix()
-                            except ValueError:
-                                _l5_key = file_path.name
+                            # Same key shape as the full rebuild, from the same helper —
+                            # an incremental add under a different name would sit beside
+                            # the rebuilt entry instead of replacing it.
+                            from ..index_keys import l5_key
+                            _l5_key = l5_key(file_path, ctx.agent_root / "knowledge")
                             index_single_file(file_path, provider, backend, source_layer="L5", source_file_key=_l5_key)
                             backend.save()
+                            return True
+
+                        if write_index(index_dir, _add_to_index):
                             log.info("Incremental reindex: added %s to retrieval backend", file_path.name)
+                        else:
+                            # The index refused to load, so this document is not in it and
+                            # will not be until the next start rebuilds. Said out loud
+                            # because the silence is the defect: recall then answers
+                            # without it and nothing anywhere reports a gap.
+                            log.warning("Incremental reindex skipped for %s — the index would not load",
+                                        file_path.name)
             except Exception as e:
                 log.warning("Incremental reindex failed for %s: %s", path, e)
 
@@ -262,17 +353,26 @@ def repo_delete(ctx: ToolContext, path: str, recursive: bool = False) -> str:
             # Remove from retrieval backend if knowledge file
             if path.startswith("knowledge/") and not path.endswith("_index.md"):
                 try:
+                    from ..index_writer import write_index
                     from ..retrieval import make_backend_for_agent
                     index_dir = ctx.agent_root / "state" / "memory_index"
                     if index_dir.exists():
-                        backend = make_backend_for_agent(ctx.agent_root)
-                        source_file = Path(path).name
-                        if backend.vector.load():
-                            backend.vector.remove_by_source(source_file)
-                            backend.vector.save()
-                        if backend.text.load():
-                            backend.text.remove_by_source(source_file)
-                            backend.text.save()
+                        from ..index_keys import l5_key
+                        # Delete by the key the file was indexed under, not by its bare
+                        # name: a mismatch here leaves the deleted file in the index and
+                        # Active Recall keeps offering a path that no longer exists.
+                        source_file = l5_key(target, ctx.agent_root / "knowledge")
+
+                        def _remove_from_index():
+                            backend = make_backend_for_agent(ctx.agent_root)
+                            if backend.vector.load():
+                                backend.vector.remove_by_source(source_file)
+                                backend.vector.save()
+                            if backend.text.load():
+                                backend.text.remove_by_source(source_file)
+                                backend.text.save()
+
+                        write_index(index_dir, _remove_from_index)
                         log.info("Removed %s from retrieval backend", source_file)
                 except Exception as e:
                     log.warning("Index cleanup failed for %s: %s", path, e)
@@ -928,6 +1028,179 @@ def get_dpc_context(ctx: ToolContext, context_type: str = "personal") -> str:
 # Task Queue Tools
 # ---------------------------------------------------------------------------
 
+# How many times an agent may hand itself the next wake-up before it has to
+# report back to the person instead. Three is enough for "still rendering,
+# check again" and short enough that an agent that will never finish says so.
+_CHECK_BACK_MAX_DEPTH = 3
+
+# How long a queue request waits for a person. Shorter than the shell gate:
+# nothing is blocked meanwhile, and an unanswered "wake me in 20 minutes" is
+# better refused than left hanging.
+_SCHEDULE_APPROVAL_TTL_SECONDS = 60
+
+# request_id -> {"event": threading.Event, "approved": bool}
+_pending_schedule_approvals: dict = {}
+
+
+def _schedule_needs_approval(ctx) -> bool:
+    """Whether this agent must ask before queueing a wake-up.
+
+    Default is to ask. A fully trusted agent can be exempted by setting
+    `schedule_approval: false` in its firewall profile — the same shape as the
+    shell gate, so there is one idea to learn rather than two.
+    """
+    firewall = getattr(ctx, "firewall", None)
+    if firewall is None:
+        return True
+    getter = getattr(firewall, "get_tool_setting", None)
+    if getter is None:
+        return True
+    try:
+        agent_obj = getattr(ctx, "_agent", None)
+        profile = getattr(agent_obj, "_firewall_profile", None)
+        # Keyword arguments on purpose: the positional order here is
+        # (tool_name, setting, profile_name), and getting it wrong reads a
+        # setting that does not exist — which fails closed and so looks like
+        # it works, while the exemption silently never applies.
+        value = getter(
+            tool_name="schedule_task",
+            setting="approval_required",
+            profile_name=profile,
+            default=None,
+        )
+    except Exception:
+        return True
+    return True if value is None else bool(value)
+
+
+def _await_schedule_approval(ctx, *, task_type: str, when: str, about: str) -> tuple:
+    """Ask the person before anything enters the queue.
+
+    The point is not to guard execution — check_back runs the agent's own
+    words — but to make sure a human sees what was planned and for when,
+    before it is planned. Returns (approved, reason).
+    """
+    import threading
+    import uuid
+
+    import asyncio
+    from .shell import _approval_watchers as _shell_watchers
+
+    dpc_service = getattr(ctx, "dpc_service", None)
+    local_api = getattr(dpc_service, "local_api", None) if dpc_service else None
+    telegram_chat_id = getattr(ctx, "reply_telegram_chat_id", "") or ""
+    if dpc_service is None:
+        return False, "no service is available to ask for approval"
+    # Learned from the headless web-auth gate: broadcast_event drops the
+    # message when nobody is listening, so waiting on an absent UI can only
+    # end in a timeout that reads like a human refusal.
+    # has_clients is a property, not a method — calling it raised
+    # "'bool' object is not callable" and killed every check_back before it
+    # reached the gate. My own test stubbed it as a lambda, mirroring the
+    # wrong call, so the mistake validated itself.
+    #
+    # And the interface is not the only surface that can answer. Until
+    # 2026-08-29 it was the only one asked, so a check_back requested from
+    # Telegram was decided by a card on a desktop nobody was looking at and the
+    # sixty seconds could only run out — which the agent then reported as a
+    # refusal. The shell gate has counted all three surfaces since ADR-030 v2;
+    # this is the same list.
+    ui_attached = bool(getattr(local_api, "has_clients", False)) if local_api else False
+    if not ui_attached and not telegram_chat_id and not _shell_watchers:
+        return False, (
+            "no UI client is connected and this run did not come from Telegram, "
+            "so nobody could see the request"
+        )
+
+    request_id = str(uuid.uuid4())[:8]
+    event = threading.Event()
+    agent_id = getattr(getattr(ctx, "agent_root", None), "name", "") or ""
+    _pending_schedule_approvals[request_id] = {
+        "event": event,
+        "approved": False,
+        # Which agent asked, so the surfaces it was offered on can be found
+        # again when it is answered or expires.
+        "agent_id": agent_id,
+    }
+
+    # `conversation_id` used to be `ctx.current_task_id` — on this path that is
+    # the id of the task being scheduled, not the chat the request came from, so
+    # the one field shaped like an answer held the wrong quantity and the card
+    # rendered it nowhere. The task id is kept under its own name; the chat is
+    # now the chat, resolved to something a person recognises.
+    _origin_id, _origin_title = conversation_origin(ctx)
+    main_loop = getattr(ctx, "_event_loop", None)
+
+    def _on_main_loop(coro) -> bool:
+        """Hand a coroutine to the service loop from this executor thread."""
+        if main_loop is None or not main_loop.is_running():
+            coro.close()
+            return False
+        asyncio.run_coroutine_threadsafe(coro, main_loop)
+        return True
+
+    try:
+        offered = _on_main_loop(dpc_service.announce_schedule_approval_request(
+            request_id=request_id,
+            task_type=task_type,
+            when=when,
+            about=about,
+            agent_id=agent_id,
+            agent_name=agent_display_name(ctx),
+            task_id=getattr(ctx, "current_task_id", None),
+            timeout_seconds=_SCHEDULE_APPROVAL_TTL_SECONDS,
+            # Empty unless this run came from Telegram — the same field that
+            # decides where the agent's answer goes now decides where the
+            # question is asked. It was already in scope ten lines below this
+            # gate, injected into the task data, and never consulted here.
+            telegram_chat_id=telegram_chat_id,
+            conversation_id=_origin_id,
+            conversation_title=_origin_title,
+        ))
+        if not offered:
+            _pending_schedule_approvals.pop(request_id, None)
+            return False, "no running event loop to deliver the approval request"
+    except Exception as e:
+        _pending_schedule_approvals.pop(request_id, None)
+        return False, f"could not deliver the approval request: {e}"
+
+    log.info("check_back approval requested: %s (%s, %s)", request_id, task_type, when)
+
+    signaled = event.wait(timeout=_SCHEDULE_APPROVAL_TTL_SECONDS)
+    entry = _pending_schedule_approvals.pop(request_id, None)
+    if not signaled or entry is None:
+        log.info("check_back approval timed out (%ds): %s", _SCHEDULE_APPROVAL_TTL_SECONDS, request_id)
+        try:
+            _on_main_loop(dpc_service.announce_schedule_approval_closed(
+                request_id=request_id,
+                agent_id=agent_id,
+                outcome="⌛ Expired — the agent stopped waiting for this one.",
+                resolution="expired",
+            ))
+        except Exception as e:
+            log.warning("Failed to announce schedule_approval_closed: %s", e)
+        return False, f"nobody answered within {_SCHEDULE_APPROVAL_TTL_SECONDS}s"
+    if not entry.get("approved"):
+        return False, "the user declined"
+    return True, ""
+
+
+def pending_schedule_agent_id(request_id: str) -> str:
+    """Whose agent raised this request, read before the entry is consumed."""
+    entry = _pending_schedule_approvals.get(request_id)
+    return (entry or {}).get("agent_id", "") or ""
+
+
+def resolve_schedule_approval(request_id: str, approved: bool) -> bool:
+    """Answer a pending queue request. Called from the WebSocket API."""
+    entry = _pending_schedule_approvals.get(request_id)
+    if entry is None:
+        return False
+    entry["approved"] = bool(approved)
+    entry["event"].set()
+    return True
+
+
 def schedule_task(
     ctx: ToolContext,
     task_type: str,
@@ -954,7 +1227,7 @@ def schedule_task(
             return "⚠️ Task queue not available"
 
         # Check if task type can be handled
-        builtin_types = {"chat", "improvement", "review", "reminder"}
+        builtin_types = {"chat", "improvement", "review", "reminder", "check_back"}
         custom_handlers = getattr(ctx._agent, '_task_handlers', {})
         if task_type not in builtin_types and task_type not in custom_handlers:
             available = list(builtin_types) + list(custom_handlers.keys())
@@ -975,6 +1248,52 @@ def schedule_task(
             "low": TaskPriority.LOW,
         }
         task_priority = priority_map.get(priority.lower(), TaskPriority.NORMAL)
+
+        if task_type == "check_back":
+            conv = getattr(ctx, "current_task_id", None)
+            depth = int(getattr(ctx, "check_back_depth", 0) or 0)
+
+            # The cap is on the chain, not on the clock: a person asking again
+            # starts a fresh chain, an agent postponing itself continues one.
+            if depth >= _CHECK_BACK_MAX_DEPTH:
+                return (
+                    f"⚠️ Already came back {depth} time(s) on this chain — the limit is "
+                    f"{_CHECK_BACK_MAX_DEPTH}. Say what is still unfinished and ask the "
+                    f"user to trigger the next check."
+                )
+
+            # One pending wake-up per conversation. Ten queued "check the render"
+            # is the failure this prevents, and it is a different failure from an
+            # endless chain — hence a separate guard, not a bigger counter.
+            queue = getattr(ctx._agent, "queue", None)
+            existing = None
+            for task in getattr(queue, "_queue", []) or []:
+                if task.task_type != "check_back" or task.status != "pending":
+                    continue
+                if (task.data or {}).get("_reply_conversation_id") == conv:
+                    existing = task
+                    break
+            if existing is not None:
+                return (
+                    f"⚠️ A check_back is already queued for this conversation "
+                    f"({existing.id}, due {existing.scheduled_at or 'immediately'}). "
+                    f"Cancel it first if this one should replace it."
+                )
+
+            data["_check_back_depth"] = depth + 1
+
+            # Owner's rule, 2026-08-04: a person approves before anything
+            # enters the queue, so that what was scheduled — and for when — is
+            # visible to a human before it runs. Fail-closed: an unanswered or
+            # undeliverable request is a refusal, never a silent schedule.
+            if _schedule_needs_approval(ctx):
+                when = f"in {delay_seconds}s" if delay_seconds else "immediately"
+                about = str(data.get("text") or data.get("message") or "")[:200]
+                approved, reason = _await_schedule_approval(
+                    ctx, task_type=task_type, when=when, about=about,
+                )
+                if not approved:
+                    return f"⚠️ check_back was not scheduled — {reason}."
 
         # Inject reply routing so the executor knows where to send the result.
         # _reply_conversation_id: the conversation that triggered this schedule call,
@@ -1812,17 +2131,17 @@ def get_tools() -> List[ToolEntry]:
             name="schedule_task",
             schema={
                 "name": "schedule_task",
-                "description": "Schedule a task for future or background execution. For custom tasks: 1) First call register_task_type to define execution instructions, 2) Then call schedule_task. For 'chat' tasks: task_data must include 'text' field with the message to process. For reminders: use task_type='reminder' with task_data={\"message\": \"...\"} — this sends the message directly WITHOUT going through the LLM, preventing accidental re-scheduling loops.",
+                "description": "Schedule a task for future or background execution. To come back to your own work later — a render, a build, a long job — use task_type='check_back' with task_data={\"text\": \"what to check and how\"} and delay_seconds: it wakes you up so you can actually look, and answers in this same conversation. You may chain at most 3 of them; after that report what is unfinished and ask the user. Note that 'reminder' does NOT wake you — it only re-sends text, with no LLM, to avoid re-scheduling loops. For custom tasks: 1) First call register_task_type to define execution instructions, 2) Then call schedule_task. For 'chat' tasks: task_data must include 'text' field with the message to process.",
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "task_type": {
                             "type": "string",
-                            "description": "Type of task. Built-in: 'chat' (LLM conversation), 'reminder' (direct message delivery, no LLM — use for notifications/alerts), 'improvement' (self-improvement), 'review' (code review). Custom: any type registered via register_task_type."
+                            "description": "Type of task. Built-in: 'check_back' (wake yourself up later to check on something and answer here — this is the one for 'I'll look again in 20 minutes'), 'chat' (LLM conversation), 'reminder' (direct message delivery, NO LLM — a notification, it cannot check anything), 'improvement' (self-improvement), 'review' (code review). Custom: any type registered via register_task_type."
                         },
                         "task_data": {
                             "type": "string",
-                            "description": "JSON string with task payload. For 'chat' tasks: {\"text\": \"your message here\"}. For 'reminder' tasks: {\"message\": \"reminder text\"}. For custom types: match the input_schema defined in register_task_type."
+                            "description": "JSON string with task payload. For 'check_back' and 'chat' tasks: {\"text\": \"what to do when you wake up\"}. For 'reminder' tasks: {\"message\": \"reminder text\"}. For custom types: match the input_schema defined in register_task_type."
                         },
                         "delay_seconds": {
                             "type": "integer",
@@ -1841,7 +2160,13 @@ def get_tools() -> List[ToolEntry]:
                 }
             },
             handler=schedule_task,
-            timeout_sec=10,
+            # A check_back waits for a person, so the tool must outlive the
+            # wait it performs. At 10s it timed out before anyone could reach
+            # the card — the agent got TOOL_TIMEOUT while the approval was
+            # still on screen, and the task landed in the queue anyway because
+            # a timed-out tool keeps running in its thread. Derived, not typed,
+            # so the two cannot drift apart again.
+            timeout_sec=_SCHEDULE_APPROVAL_TTL_SECONDS + 30,
             default_enabled=False,
         ),
 

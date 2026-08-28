@@ -90,7 +90,10 @@ uv.lock
 
 # 11. AI assistant Editor-Specific Files
 # Prevents AI personal editor settings from being committed.
+# .mcp.json registers the local orbit code-graph MCP server; it carries an
+# absolute path to this machine's orbit.exe, so it is per-machine, not shared.
 .claude/
+.mcp.json
 
 # 12. Sensitive Legal & Compliance Documents
 # Personal legal analysis and compliance docs - keep private
@@ -133,6 +136,8 @@ dpc-client/core/ar_disc_test_iris.py
 # and WIP architecture decisions. See conversations/ for decision history.
 backlog.md
 backlog_closed.md
+backlog_reconciliation.md
+session_log.md
 
 # 19. Internal process protocol (CC + Ark + Mike operating agreement)
 # Triple-agent collaboration rules, workflow patterns, internal references.
@@ -156,3 +161,16 @@ security/
 # multiple in-flight responses without overwriting each other.
 cc_cron_prompt.md
 cc-out*.md
+
+# Generated views of the backlog — board, link graph, anything build.py grows next.
+# Their source (backlog.md) is itself ignored, so the whole shape is ignored, not a list
+# of filenames that has to be maintained every time a view is added.
+tools/backlog/*.html
+tools/backlog/*.json
+
+# GAIA run output. Every results JSON stores each task's `gold` in plaintext, so
+# committing one publishes the benchmark's answer key — and the logs beside it
+# print the same values. Nothing here has ever been tracked; this keeps a
+# `git add -A` from being the first time.
+eval/gaia/results/
+dpc-client/core/config.ini

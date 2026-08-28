@@ -128,6 +128,11 @@ not through a different tool. One allowlist entry covers both.
   invoked by the prompt
 - [`../../docs/agent/CC_INTEGRATION_GUIDE.md`](../../docs/agent/CC_INTEGRATION_GUIDE.md) —
   full integration guide (setup, authentication, troubleshooting)
+- [`../../docs/BACKLOG_FORMAT.md`](../../docs/BACKLOG_FORMAT.md) — **required reading before
+  writing a backlog entry.** An external agent working a project through this bridge writes
+  into the same backlog the internal agents read; the entry shape, the status vocabulary and
+  the rule for closing an entry are the same for everyone. Check your work with
+  `uv run python tools/backlog/build.py --check` — it reports and never rewrites.
 - `cc_cron_prompt.md` (at repo root, gitignored) — internal variant
   with Protocol 13 references and team-specific hard-coded paths
 
@@ -146,51 +151,3 @@ Add the matching permission pattern:
 ```json
 "Bash(uv run python cc_group_chat_bridge.py*)"
 ```
-
-## Version notes
-
-This template tracks the bridge CLI as of v5.3 of the internal prompt.
-
-Changes from v5.2:
-
-- All bridge invocations use `uv run python` instead of plain `python`
-  (poll, send, pre-check) and the allowlist patterns match
-  `uv run python …`. Reason: the send path imports `websockets`, which
-  lives in the project venv, not system Python — plain `python` fails
-  with `[ERROR] websockets not installed.` on a fresh machine (surfaced
-  after a PC migration where system Python had no `websockets`).
-  Standardizing on `uv run python` makes the cron send-capable on first
-  fire. Also aligns the pre-check example to the canonical `--last 10`
-  (was `--last 5`).
-
-Changes from v5.1:
-
-- Outbox is now per-target: `cc-out-{target}.md` instead of a single
-  shared `cc-out.md`. Prevents cross-chat stale content leaks when CC
-  participates in multiple conversations (agent 1:1 + group chat)
-  simultaneously. Target = the conversation-id or group-id value.
-
-Changes from v5.0 (v5.1 baseline):
-
-- Outbox location recommendation moved to `~/.dpc/.cc_outbox/`
-  (was `~/.dpc/`). Reason: agents with project-root in their
-  `sandbox_extensions.indexed_paths` were picking up `cc-out.md` from
-  the project root as knowledge, polluting Active Recall with the
-  outbox's own recent contents (feedback loop, top hit by similarity).
-  Putting it in `~/.dpc/.cc_outbox/` keeps it outside any typical
-  indexed scan.
-
-Changes from v4.1 (v5.0 baseline):
-
-- Added `--send-file <path>` instruction for markdown responses that
-  contain backticks or code blocks (rule-of-thumb: when in doubt, use
-  the file path — it sidesteps shell command substitution). The
-  existing `--send "text"` is still valid for plain-text replies.
-
-Earlier baseline (v4.1):
-
-- `--conversation-id` is required when more than one agent exists;
-  name resolution maps display names to folder ids.
-
-If the bridge CLI changes incompatibly, update this template alongside
-the internal one.

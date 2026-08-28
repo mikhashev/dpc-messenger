@@ -73,15 +73,26 @@ class Settings:
             'host': '127.0.0.1'
         }
 
+        # A fresh config ships with no TURN relay at all: empty here means the same
+        # thing the getters already return for a missing key, so "the default" has one
+        # answer instead of two. Relaying is opt-in by name — nobody's traffic should
+        # traverse a third party's server because a default was left populated.
+        # To use a relay, fill username/credential and servers with your provider's
+        # values; the public examples that used to be the default are below.
+        #   servers:           stun:stun.relay.metered.ca:80,turn:global.relay.metered.ca:80,
+        #                      turn:global.relay.metered.ca:80?transport=tcp,
+        #                      turn:global.relay.metered.ca:443,
+        #                      turns:global.relay.metered.ca:443?transport=tcp
+        #   fallback_servers:  turn:openrelay.metered.ca:80,turn:openrelay.metered.ca:443,
+        #                      turn:openrelay.metered.ca:443?transport=tcp
+        #   fallback_username / fallback_credential: openrelayproject / openrelayproject
         self._config['turn'] = {
             'username': '',  # Leave empty or set via environment variable DPC_TURN_USERNAME
             'credential': '',  # Leave empty or set via environment variable DPC_TURN_CREDENTIAL
-            # TURN server URLs (used only when username/credential are set)
-            'servers': 'stun:stun.relay.metered.ca:80,turn:global.relay.metered.ca:80,turn:global.relay.metered.ca:80?transport=tcp,turn:global.relay.metered.ca:443,turns:global.relay.metered.ca:443?transport=tcp',
-            # Fallback TURN servers (public, may be unreliable)
-            'fallback_servers': 'turn:openrelay.metered.ca:80,turn:openrelay.metered.ca:443,turn:openrelay.metered.ca:443?transport=tcp',
-            'fallback_username': 'openrelayproject',
-            'fallback_credential': 'openrelayproject'
+            'servers': '',  # Your provider's TURN/STUN URLs; used only when username/credential are set
+            'fallback_servers': '',  # A public relay, if you accept that your traffic passes through it
+            'fallback_username': '',
+            'fallback_credential': ''
         }
 
         self._config['webrtc'] = {
@@ -132,7 +143,10 @@ class Settings:
             'webrtc_timeout': '30',
             'hole_punch_timeout': '15',
             'relay_timeout': '20',
-            'gossip_timeout': '5'  # How long to wait before falling back to gossip
+            'gossip_timeout': '5',  # How long to wait before falling back to gossip
+            # Remote inference: the host budgets 900s for the work, so a
+            # requester that gives up sooner pays for tokens it never sees
+            'remote_inference_timeout': '1200'
         }
 
         self._config['hole_punch'] = {
@@ -171,7 +185,18 @@ class Settings:
         self._config['knowledge'] = {
             'token_warning_threshold': '0.8',  # Warn when context window reaches 80%
             'auto_extraction_enabled': 'true',  # Automatically suggest knowledge extraction
-            'cultural_perspectives_enabled': 'false'  # Include cultural perspective analysis in knowledge extraction
+            'cultural_perspectives_enabled': 'false',  # Include cultural perspective analysis in knowledge extraction
+            # Which provider extracts a conversation nobody has answered in yet.
+            # Empty means the first local provider in the registry; extraction
+            # refuses rather than reaching for the text default, which is a paid
+            # API and would send the transcript off the machine unasked.
+            'cold_fallback_provider': ''
+        }
+
+        self._config['history'] = {
+            # Off while history written before ADR-036 is still in circulation:
+            # it carries no signature, and a third of what is on disk is that old.
+            'reject_unsigned': 'false'  # Refuse a synced record whose signature this node cannot check (stored labelled `verification: legacy` either way)
         }
 
         self._config['file_transfer'] = {
@@ -367,11 +392,13 @@ class Settings:
 
     def get_p2p_listen_host(self) -> str:
         """Get the P2P server listen host."""
-        return self.get('p2p', 'listen_host', '0.0.0.0')
+        # Fallback must equal what _create_default_config writes, or "the default"
+        # is two different values depending on whether the key is in config.ini.
+        return self.get('p2p', 'listen_host', 'dual')
 
     def get_p2p_connection_timeout(self) -> float:
         """Get the P2P connection establishment timeout in seconds."""
-        return float(self.get('p2p', 'connection_timeout', '60'))
+        return float(self.get('p2p', 'connection_timeout', '30'))
 
     def get_p2p_auto_connect_node_groups(self) -> bool:
         """Auto-connect to all node IDs in firewall node groups on startup."""
@@ -436,6 +463,26 @@ class Settings:
         value = self.get('knowledge', 'cultural_perspectives_enabled', 'false')
         return value.lower() in ('true', '1', 'yes')
 
+    def get_reject_unsigned_history(self) -> bool:
+        """Whether a history record this node cannot check is refused.
+
+        Two classes, not one — the key names the first and gates both: a record
+        carrying no signature fields, and one signed over a `PREIMAGE_VERSION`
+        this node cannot recompute.
+
+        Off by default: records written before ADR-036 carry no signature, and
+        export_history ships none for them, so refusing would strand history
+        that already exists. Turn it on once those have aged out — with it off
+        such a record is stored labelled `verification: legacy`, the live
+        path's word for the same absence, never as a checked one.
+        """
+        value = self.get('history', 'reject_unsigned', 'false')
+        return value.lower() in ('true', '1', 'yes')
+
+    def get_knowledge_cold_fallback_provider(self) -> str:
+        """Alias that extracts a conversation with no provenance, or '' for auto."""
+        return self.get('knowledge', 'cold_fallback_provider', '').strip()
+
     def get_hf_offline_mode(self) -> bool:
         """Check if HuggingFace Hub offline mode is enabled (S144).
 
@@ -464,6 +511,29 @@ class Settings:
         """
         value = self.get('knowledge_graph', 'backend', 'sqlite').strip().lower()
         return value if value in ('sqlite', 'grafeo') else 'sqlite'
+
+    def get_gliner_device(self) -> str:
+        """Where the GLiNER entity model runs: "auto" (default), "cpu" or "cuda".
+
+        It sits beside the backend because it belongs to the same subsystem, and
+        it exists for the same reason `embedding_device` does: the card this
+        process shares is the binding constraint on the model the agents wait
+        for, and entity extraction is background work whose latency nobody
+        watches. "auto" is what every install had before this setting existed —
+        cuda when torch sees a card, cpu otherwise. An unknown value falls back
+        to "auto" rather than being obeyed: a typo must not decide what holds
+        VRAM.
+        """
+        value = self.get('knowledge_graph', 'gliner_device', 'auto').strip().lower()
+        if value in ('auto', 'cpu', 'cuda'):
+            return value
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.warning(
+            "[knowledge_graph] gliner_device=%r is not a device this build knows "
+            "(auto/cpu/cuda) — using auto", value,
+        )
+        return 'auto'
 
     def get_log_level(self) -> str:
         """Get global log level (DEBUG/INFO/WARNING/ERROR/CRITICAL)."""
@@ -651,8 +721,21 @@ class Settings:
         Args:
             strategy: One of: ipv6, ipv4, webrtc, hole_punch, relay, gossip
         """
+        # Per-strategy, matching _create_default_config. A single flat fallback made
+        # a config without a [connection] section wait 30s for gossip (written: 5)
+        # and 30s for hole punching (written: 15).
+        written = {'ipv6': '60', 'ipv4': '60', 'webrtc': '30',
+                   'hole_punch': '15', 'relay': '20', 'gossip': '5'}
         key = f'{strategy}_timeout'
-        return float(self.get('connection', key, '30'))
+        return float(self.get('connection', key, written.get(strategy, '30')))
+
+    def get_remote_inference_timeout(self) -> float:
+        """How long to wait for a peer to answer an inference request.
+
+        Named separately from the connection strategies because it bounds work,
+        not a handshake: the host's own ceiling is 900 s (ADR-040 D4-0).
+        """
+        return float(self.get('connection', 'remote_inference_timeout', '1200'))
 
     def get_hole_punch_port(self) -> int:
         """Get UDP port for hole punching."""
@@ -791,8 +874,11 @@ class Settings:
 
     def get_voice_transcription_provider_priority(self) -> list[str]:
         """Get ordered list of transcription provider aliases."""
-        # Fallback matches default config (aliases match HuggingFace model names)
-        priority_str = self.get('voice_transcription', 'provider_priority', 'whisper-large-v3,whisper-large-v3-turbo,whisper-medium,whisper-small,openai')
+        # Fallback matches default config (aliases match HuggingFace model names).
+        # It did not until 2026-08-10: the fallback led with whisper-large-v3, which
+        # _create_default_config never writes, so a config missing the key tried a
+        # different first provider than a fresh install.
+        priority_str = self.get('voice_transcription', 'provider_priority', 'whisper-large-v3-turbo,whisper-medium,whisper-small,openai')
         return [p.strip() for p in priority_str.split(',') if p.strip()]
 
     def get_voice_transcription_show_transcriber_name(self) -> bool:
@@ -1127,7 +1213,16 @@ class Settings:
             self._config.write(f)
 
     def reload(self):
-        """Reload configuration from file."""
+        """Reload configuration from file.
+
+        `read()` merges rather than replaces: a key **deleted** from the file on
+        disk keeps whatever this object already had for it. Every caller today
+        reloads after a value changed — the provider-alias cascade rewrites names
+        in place — so the merge is harmless. It stops being harmless the day
+        something removes a key and expects the reload to forget it; that needs a
+        fresh ConfigParser, not this call (Johnny, 2026-08-23 review of the alias
+        inventory).
+        """
         if self.config_file.exists():
             self._config.read(self.config_file)
 

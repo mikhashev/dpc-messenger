@@ -21,7 +21,7 @@ dependencies = [
     "httpx>=0.25.1",
     "itsdangerous>=2.1.2",
     "slowapi>=0.1.9",
-    "cryptography>=48.0.1",
+    "cryptography>=50.0.0",
 ]
 
 [dependency-groups]

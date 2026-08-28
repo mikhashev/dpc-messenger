@@ -19,7 +19,6 @@ Assembles LLM context from:
 from __future__ import annotations
 
 import asyncio
-import copy
 import json
 import logging
 import pathlib
@@ -30,6 +29,7 @@ from .utils import (
     utc_now_iso, read_text, clip_text, estimate_tokens, get_agent_root
 )
 from .memory import Memory
+from .tool_ledger import is_outcome
 
 log = logging.getLogger(__name__)
 
@@ -50,6 +50,24 @@ def _get_knowledge_graph(agent_root: pathlib.Path):
         except Exception:
             return None
     return _kg_cache[key]
+
+
+def task_query(task: Dict[str, Any]) -> str:
+    """What this task is asking, as one string, for whoever needs to search on it.
+
+    One function because two places were reading the same intent from two different
+    keys. The recall block is entered on `task["content"]` and then searches on
+    `task["text"]`, and the only producer — `Agent.process` — writes `text` and never
+    `content`. So the gate was always false unless conversation history existed, and
+    Active Recall was skipped in silence for every scheduled task (which carries no
+    history at all) and for the first message of every conversation. Measured on iris,
+    2026-08-12: a scheduled task and an opening message produced no recall line of any
+    kind; her second message in the same conversation produced all of them.
+
+    `content` stays accepted — callers outside this repository may set it, and it costs
+    one `or`.
+    """
+    return task.get("text", "") or task.get("content", "") or ""
 
 
 def _build_user_content(task: Dict[str, Any]) -> Any:
@@ -83,6 +101,43 @@ def _build_user_content(task: Dict[str, Any]) -> Any:
     return parts
 
 
+def _deferred_tasks_digest(agent_root: pathlib.Path, *, limit: int = 5) -> Optional[List[Dict[str, Any]]]:
+    """Pending wake-ups this agent has queued for itself, newest deadline first.
+
+    Reads the same file the task queue persists to, so a restart does not make
+    the agent forget what it is waiting on.
+    """
+    try:
+        path = agent_root / "state" / "task_queue.json"
+        if not path.exists():
+            return None
+        data = json.loads(read_text(path)) or {}
+    except Exception:
+        log.debug("Failed to read task queue for context digest", exc_info=True)
+        return None
+
+    pending = [
+        t for t in (data.get("tasks") or [])
+        if isinstance(t, dict) and t.get("status") == "pending"
+    ]
+    if not pending:
+        return None
+    pending.sort(key=lambda t: t.get("scheduled_at") or "")
+    digest = [
+        {
+            "id": t.get("id", ""),
+            "type": t.get("task_type", ""),
+            "due": t.get("scheduled_at") or "as soon as possible",
+            "about": ((t.get("data") or {}).get("text")
+                      or (t.get("data") or {}).get("message") or "")[:120],
+        }
+        for t in pending[:limit]
+    ]
+    if len(pending) > limit:
+        digest.append({"omitted_count": len(pending) - limit})
+    return digest
+
+
 def _build_runtime_section(
     agent_root: pathlib.Path,
     task: Dict[str, Any],
@@ -109,6 +164,14 @@ def _build_runtime_section(
         "agent_root": str(agent_root),
         "task": task_info,
     }
+
+    # What this agent has already asked to be woken up for. Without it the
+    # agent cannot tell that deferring is possible at all — schedule_task was
+    # enabled for a month and used once — and cannot see that the check it is
+    # about to schedule is already queued.
+    deferred = _deferred_tasks_digest(agent_root)
+    if deferred:
+        runtime_data["deferred_tasks"] = deferred
 
     # Budget info from agent state. Shape depends on billing model:
     #   subscription → {"billing": "subscription", "tokens_used_total": N}
@@ -218,7 +281,7 @@ def _build_recent_sections(memory: Memory, task_id: str = "") -> List[str]:
     if progress_summary:
         sections.append("## Recent progress\n\n" + progress_summary)
 
-    tools_entries = memory.read_jsonl_tail("tools.jsonl", 200)
+    tools_entries = [e for e in memory.read_jsonl_tail("tools.jsonl", 200) if is_outcome(e)]
     if task_id:
         tools_entries = [e for e in tools_entries if e.get("task_id") == task_id]
     tools_summary = memory.summarize_tools(tools_entries)
@@ -356,6 +419,22 @@ def derive_history_role(
     return "user"
 
 
+def history_prefix(record: Dict[str, Any]) -> str:
+    """`[#idx | HH:MM:SS | sender] ` — the marker every history line carries, and
+    since (F) the marker the current message carries too. One function so the two
+    renderings cannot drift apart: a byte of difference here is a cold prefill."""
+    msg_index = record.get("msg_index", "")
+    timestamp = record.get("timestamp", "") or ""
+    sender = record.get("sender_name", "") or ""
+    prefix_parts = [f"#{msg_index}" if msg_index else ""]
+    if timestamp:
+        ts_display = timestamp.split('T')[1][:8] if 'T' in timestamp else timestamp
+        prefix_parts.append(ts_display)
+    if sender:
+        prefix_parts.append(sender)
+    return f"[{' | '.join(p for p in prefix_parts if p)}] "
+
+
 def build_llm_messages(
     agent_root: pathlib.Path,
     memory: Memory,
@@ -372,6 +451,9 @@ def build_llm_messages(
     embedding_provider: Optional[Any] = None,
     billing_model: str = "subscription",
     reader_identity: Optional[Dict[str, str]] = None,
+    extended_read_enabled: bool = True,
+    shared_knowledge_enabled: bool = True,
+    sent_annotations: Optional[Dict[str, str]] = None,
 ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
     """
     Build the full LLM message context for a task.
@@ -394,11 +476,25 @@ def build_llm_messages(
         all_tools: Dict of all tool names → default enabled from firewall
         sandbox_read_only: Extended sandbox read-only paths from firewall
         sandbox_read_write: Extended sandbox read-write paths from firewall
+        extended_read_enabled: Whether the agent may read outside its sandbox. Decides
+                               whether an Active Recall hint for an external file can
+                               offer an address at all, or has to say it cannot.
+        shared_knowledge_enabled: Whether the agent may read the shared human layer
+                               right now. Revocation cannot reach the index, so a
+                               hint asks the gate here — and with it shut an L6
+                               document is dropped rather than quoted, because the
+                               index holds 500 characters of it.
+        sent_annotations: message id -> the turn-context tail that was appended to
+                          that user message when it was the current one. Replayed
+                          byte-identically behind the message so the prompt stays a
+                          pure append of the previous prompt (see sent_annotations.py).
 
     Returns:
         (messages, cap_info) tuple:
             - messages: List of message dicts ready for LLM
-            - cap_info: Dict with token trimming metadata
+            - cap_info: Dict with token trimming metadata; carries `turn_context`,
+              the tail appended to the current user message, for the caller to
+              record against the message id.
     """
     # --- Load memory ---
     memory.ensure_files()
@@ -436,18 +532,20 @@ def build_llm_messages(
         if kb_index.strip():
             semi_stable_parts.append("## Knowledge base\n\n" + clip_text(kb_index, 50000))
 
-    # Active Recall hints (ADR-010, WIRE-2)
+    # Active Recall hints (ADR-010, WIRE-2). Computed here, placed at the tail of the
+    # current user message below: it changes with every query, and anything that
+    # changes every turn must stand behind the history, not in front of it.
     # Q1 = current user message (from task), Q2 = recent context window.
+    recall_text: Optional[str] = None
     # conversation_history excludes current message (see agent.py:207 prior_history),
-    # so we use task["content"] as the primary query — fixes off-by-one (S79).
+    # so the task's own text is the primary query — fixes off-by-one (S79).
     _CONTEXT_MSGS = 10
-    if conversation_history or task.get("content"):
+    _human_text = task_query(task)
+    if conversation_history or _human_text:
         _recent = (conversation_history or [])[-_CONTEXT_MSGS:]
         _context_parts = [_h["content"] for _h in _recent
                           if _h.get("role") in ("user", "assistant") and _h.get("content")]
         _context_text = " ".join(_context_parts)
-
-        _human_text = task.get("text", "") or task.get("content", "")
 
         _query_text = _human_text or _context_text
         if _query_text:
@@ -497,22 +595,39 @@ def build_llm_messages(
                     if _seed_files and _kg:
                         _graph_results = _kg.graph_expand(_seed_files, max_hops=GRAPH_MAX_HOPS)
                         if _graph_results:
-                            log.debug("Active Recall Graph L7: %d results from %d seeds", len(_graph_results), len(_seed_files))
+                            # Named like the other two channels. Counting them told us
+                            # the channel ran and nothing about what it produced, so
+                            # "does a graph result carry a key and an address" could
+                            # only be answered by waiting for one to win a slot —
+                            # which, at the lowest layer weight, it kept not doing.
+                            log.debug(
+                                "Active Recall Graph L7: %d results from %d seeds — %s",
+                                len(_graph_results), len(_seed_files),
+                                [(m.get("source_file", "?"), bool(m.get("source_path")))
+                                 for m, _ in _graph_results],
+                            )
                 except Exception:
                     log.debug("Active Recall Graph L7: unavailable (cold start or no graph DB)")
 
                 _results = _backend.fuser.fuse(_faiss_results, _keyword_results, graph_results=_graph_results)
                 _ctx_ratio = (session_state or {}).get("context_usage_percent", 0) / 100.0
-                _recall = get_recall_block(_results, context_usage_ratio=_ctx_ratio, agent_root=agent_root)
+                _recall = get_recall_block(
+                    _results, context_usage_ratio=_ctx_ratio, agent_root=agent_root,
+                    extended_read_enabled=extended_read_enabled,
+                    shared_knowledge_enabled=shared_knowledge_enabled,
+                    # The identity tools.jsonl writes for the same turn — join key,
+                    # not decoration.
+                    task_id=str(task.get("id") or ""),
+                )
                 if _recall:
-                    _mode = "full" if _ctx_ratio < 0.5 else "hints"
-                    _summary = ", ".join(
-                        f"{r.chunk_meta.get('source_file', '?')}({r.score:.2f})"
-                        for r in _results
-                    )
-                    log.info("Active Recall injected %d hints (mode=%s): %s",
-                             len(_results), _mode, _summary)
-                    semi_stable_parts.append(_recall)
+                    # Reported by the code that made the choice, not reconstructed
+                    # here: the count is what went in rather than what was considered,
+                    # the order and scores are post-decay, and the mode is the one that
+                    # was acted on instead of a second reading of the threshold.
+                    log.info("Active Recall injected %d of %d candidates (mode=%s): %s",
+                             len(_recall.injected), len(_results), _recall.mode,
+                             _recall.summary())
+                    recall_text = _recall.text
                 else:
                     log.debug("Active Recall: no results matched query")
             except Exception:
@@ -530,21 +645,26 @@ def build_llm_messages(
     if skills_section:
         semi_stable_parts.append(skills_section)
 
+    semi_stable_parts.append(TURN_CONTEXT_NOTE)
     semi_stable_text = "\n\n".join(semi_stable_parts)
 
-    # Dynamic content: changes every request
-    dynamic_parts = [
-        _build_runtime_section(agent_root, task, session_state, billing_model=billing_model),
-    ]
-    dynamic_parts.extend(_build_recent_sections(memory, task_id=task.get("id", "")))
+    # Per-turn content: changes every request. It goes to the tail of the current
+    # user message, after everything that was already sent last turn, so the engine's
+    # longest common prefix runs through the whole history instead of stopping at
+    # the first byte of this block (measured: lcp 20150 of 111797, f_keep 0.18, on
+    # an agent's own next turn — the previous conversation was in the cache whole).
+    turn_parts: List[str] = []
+    if recall_text:
+        turn_parts.append(recall_text)
+    turn_parts.append(
+        _build_runtime_section(agent_root, task, session_state, billing_model=billing_model))
+    turn_parts.extend(_build_recent_sections(memory, task_id=task.get("id", "")))
 
     # DPC context (personal, device)
     if dpc_context:
         dpc_context_text = _build_dpc_context_section(dpc_context)
         if dpc_context_text:
-            dynamic_parts.append(dpc_context_text)
-
-    dynamic_text = "\n\n".join(dynamic_parts)
+            turn_parts.append(dpc_context_text)
 
     # Context breakdown for UI tooltip (token estimates per component)
     def _section_name(text: str) -> str:
@@ -553,17 +673,10 @@ def build_llm_messages(
 
     _context_breakdown = [{"name": "system_prompt", "tokens": estimate_tokens(static_text)}]
     for _p in semi_stable_parts:
-        name = _section_name(_p)
-        if "ACTIVE RECALL" in _p or "RECALL HINTS" in _p:
-            import re as _re
-            _files = _re.findall(r'\[(?:EXT|L\d+)\]\s*(\S+?)[:,]', _p)
-            if _files:
-                name = f"Active Recall ({', '.join(_files)})"
-        _context_breakdown.append({"name": name, "tokens": estimate_tokens(_p)})
-    for _p in dynamic_parts:
         _context_breakdown.append({"name": _section_name(_p), "tokens": estimate_tokens(_p)})
 
-    # System message with 3 content blocks for optimal caching
+    # System message: two cached blocks. Nothing here changes between one turn and
+    # the next unless the agent itself changed it (scratchpad, identity, skills).
     messages: List[Dict[str, Any]] = [
         {
             "role": "system",
@@ -578,15 +691,15 @@ def build_llm_messages(
                     "text": semi_stable_text,
                     "cache_control": {"type": "ephemeral"},
                 },
-                {
-                    "type": "text",
-                    "text": dynamic_text,
-                },
             ],
         },
     ]
 
-    # Insert previous conversation turns so the agent has continuity
+    # Insert previous conversation turns so the agent has continuity. A user message
+    # that once carried a turn-context tail gets the same tail back, byte for byte:
+    # the tail is what the engine saw, and only that shape is a prefix of this prompt.
+    _annotations = sent_annotations or {}
+    _replayed = 0
     if conversation_history:
         is_group = str(task.get("id") or "").startswith("group-")
         for hist_msg in conversation_history:
@@ -601,34 +714,154 @@ def build_llm_messages(
                 role = hist_msg.get("role", "")
                 if role not in ("user", "assistant"):
                     continue
-            msg_index = hist_msg.get("msg_index", "")
-            timestamp = hist_msg.get("timestamp", "")
-            sender = hist_msg.get("sender_name", "")
-            prefix_parts = [f"#{msg_index}" if msg_index else ""]
-            if timestamp:
-                ts_display = timestamp.split('T')[1][:8] if 'T' in timestamp else timestamp
-                prefix_parts.append(ts_display)
-            if sender:
-                prefix_parts.append(sender)
-            content = f"[{' | '.join(p for p in prefix_parts if p)}] {content}"
+            content = history_prefix(hist_msg) + content
+            if role == "user":
+                tail = _annotations.get(str(hist_msg.get("id") or ""))
+                if tail:
+                    content = content + tail
+                    _replayed += 1
             messages.append({"role": role, "content": content})
         if reader_identity is not None:
             _assistant_turns = sum(1 for m in messages[1:] if m["role"] == "assistant")
-            log.debug("History turns for reader %s: %d total, %d assistant",
-                      reader_identity.get("display_name"), len(messages) - 1, _assistant_turns)
+            log.debug("History turns for reader %s: %d total, %d assistant, %d with replayed tails",
+                      reader_identity.get("display_name"), len(messages) - 1, _assistant_turns,
+                      _replayed)
 
-    next_idx = max((m.get("msg_index", 0) for m in conversation_history), default=0) + 1 if conversation_history else 1
+    # The current message is rendered the way it will be rendered as history next
+    # turn — same index, time and sender — or the prefix breaks on this very message
+    # when it comes back. Callers that know the record pass it as task["trigger_record"].
+    trigger_record = task.get("trigger_record")
     user_content = _build_user_content(task)
-    if isinstance(user_content, str):
+    if isinstance(trigger_record, dict) and trigger_record.get("msg_index"):
+        # The body too, not only the marker: dispatchers hand the agent
+        # "[sender]: text" while the history keeps "text", so rendering the task
+        # text here would differ from the same message rendered as history next
+        # turn — found by Johnny running the shipped code, 2026-08-19.
+        body = trigger_record.get("content")
+        body = body if isinstance(body, str) and body.strip() else None
+        if isinstance(user_content, str):
+            user_content = history_prefix(trigger_record) + (body or user_content)
+        elif isinstance(user_content, list):
+            # An image message: the text part follows the record the same way. The
+            # image itself is not in the history, so this turn still breaks the
+            # prefix when it comes back — the text is aligned, the shape is not.
+            aligned = list(user_content)
+            for i, block in enumerate(aligned):
+                if isinstance(block, dict) and block.get("type") == "text":
+                    aligned[i] = dict(block, text=history_prefix(trigger_record)
+                                      + (body or str(block.get("text", ""))))
+                    break
+            user_content = aligned
+    elif isinstance(user_content, str):
+        next_idx = max((m.get("msg_index", 0) for m in conversation_history), default=0) + 1 if conversation_history else 1
         user_content = f"[#{next_idx}] {user_content}"
-    messages.append({"role": "user", "content": user_content})
 
-    # --- Soft-cap token trimming ---
+    # --- Soft cap: the only prunable content is in this turn's tail, and it is pruned
+    # before the tail is sealed, so what is recorded is what was sent.
     soft_cap = (session_state or {}).get("tokens_limit") or 204800
-    messages, cap_info = apply_message_token_soft_cap(messages, soft_cap)
+    turn_parts, cap_info = _prune_turn_parts_to_cap(messages, user_content, turn_parts, soft_cap)
+    for _p in turn_parts:
+        name = _section_name(_p)
+        if "ACTIVE RECALL" in _p or "RECALL HINTS" in _p:
+            import re as _re
+            _files = _re.findall(r'\[(?:EXT|L\d+)\]\s*(\S+?)[:,]', _p)
+            if _files:
+                name = f"Active Recall ({', '.join(_files)})"
+        _context_breakdown.append({"name": name, "tokens": estimate_tokens(_p)})
+
+    turn_context = format_turn_context(turn_parts)
+    messages.append({"role": "user", "content": append_turn_context(user_content, turn_context)})
     cap_info["context_breakdown"] = _context_breakdown
+    cap_info["turn_context"] = turn_context
+    cap_info["replayed_tails"] = _replayed
 
     return messages, cap_info
+
+
+TURN_CONTEXT_OPEN = "<turn_context>"
+TURN_CONTEXT_CLOSE = "</turn_context>"
+
+# Stable text, so it lives in the cached block. It has to exist because the runtime
+# block used to be a system section and is now appended to user messages: without
+# this line the model reads a clock and a budget as something the user typed.
+TURN_CONTEXT_NOTE = (
+    "## Turn context\n\n"
+    "Each user message may end with a block between " + TURN_CONTEXT_OPEN + " and "
+    + TURN_CONTEXT_CLOSE + ". The runtime appends it, not the user: recall hints, "
+    "runtime state (clock, budget, session counters) and recent activity as they were "
+    "when that message was sent. In earlier messages the block describes that moment, "
+    "not now; the block on the latest message is current."
+)
+
+
+def format_turn_context(parts: List[str]) -> str:
+    """The tail appended to the current user message. Empty when there is nothing
+    to append, so a turn without any per-turn content stays a plain message."""
+    body = "\n\n".join(p for p in parts if p and p.strip())
+    if not body:
+        return ""
+    return "\n\n" + TURN_CONTEXT_OPEN + "\n" + body + "\n" + TURN_CONTEXT_CLOSE
+
+
+def append_turn_context(user_content: Any, turn_context: str) -> Any:
+    """Attach the tail to a user message, whichever shape the message has."""
+    if not turn_context:
+        return user_content
+    if isinstance(user_content, str):
+        return user_content + turn_context
+    if isinstance(user_content, list):
+        out = list(user_content)
+        for i, block in enumerate(out):
+            if isinstance(block, dict) and block.get("type") == "text":
+                out[i] = dict(block, text=str(block.get("text", "")) + turn_context)
+                return out
+        out.insert(0, {"type": "text", "text": turn_context.lstrip("\n")})
+        return out
+    return user_content
+
+
+_PRUNABLE_TURN_SECTIONS = ("## Recent progress", "## Recent tools", "## Recent events")
+
+
+def _prune_turn_parts_to_cap(
+    messages: List[Dict[str, Any]],
+    user_content: Any,
+    turn_parts: List[str],
+    soft_cap_tokens: int,
+) -> Tuple[List[str], Dict[str, Any]]:
+    """Drop the log summaries from this turn's tail while the estimate is over the
+    cap. Same order and same targets as before the tail existed; only the place
+    changed. The estimate counts system, history, the user text and the tail."""
+    def _est(content: Any) -> int:
+        if isinstance(content, list):
+            return sum(estimate_tokens(str(b.get("text", ""))) for b in content
+                       if isinstance(b, dict) and b.get("type") == "text") + 6
+        return estimate_tokens(str(content)) + 6
+
+    def _total(parts: List[str]) -> int:
+        return (sum(_est(m.get("content", "")) for m in messages)
+                + _est(user_content) + sum(estimate_tokens(p) for p in parts))
+
+    parts = list(turn_parts)
+    estimated = _total(parts)
+    info: Dict[str, Any] = {
+        "estimated_tokens_before": estimated,
+        "estimated_tokens_after": estimated,
+        "soft_cap_tokens": soft_cap_tokens,
+        "trimmed_sections": [],
+    }
+    if soft_cap_tokens <= 0 or estimated <= soft_cap_tokens:
+        return parts, info
+    for prefix in _PRUNABLE_TURN_SECTIONS:
+        if estimated <= soft_cap_tokens:
+            break
+        kept = [p for p in parts if not p.startswith(prefix)]
+        if len(kept) != len(parts):
+            info["trimmed_sections"].append(prefix)
+            parts = kept
+            estimated = _total(parts)
+    info["estimated_tokens_after"] = estimated
+    return parts, info
 
 
 def _build_dpc_context_section(dpc_context: Dict[str, Any]) -> str:
@@ -804,74 +1037,6 @@ If you want user confirmation — ask and STOP. Do not answer your own question 
 """
 
 
-def apply_message_token_soft_cap(
-    messages: List[Dict[str, Any]],
-    soft_cap_tokens: int,
-) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
-    """
-    Trim prunable context sections if estimated tokens exceed soft cap.
-
-    Returns (pruned_messages, cap_info_dict).
-    """
-    def _estimate_message_tokens(msg: Dict[str, Any]) -> int:
-        """Estimate tokens for a message, handling multipart content."""
-        content = msg.get("content", "")
-        if isinstance(content, list):
-            total = 0
-            for block in content:
-                if isinstance(block, dict) and block.get("type") == "text":
-                    total += estimate_tokens(str(block.get("text", "")))
-            return total + 6
-        return estimate_tokens(str(content)) + 6
-
-    estimated = sum(_estimate_message_tokens(m) for m in messages)
-    info: Dict[str, Any] = {
-        "estimated_tokens_before": estimated,
-        "estimated_tokens_after": estimated,
-        "soft_cap_tokens": soft_cap_tokens,
-        "trimmed_sections": [],
-    }
-
-    if soft_cap_tokens <= 0 or estimated <= soft_cap_tokens:
-        return messages, info
-
-    # Prune log summaries from the dynamic text block
-    prunable = ["## Recent progress", "## Recent tools", "## Recent events"]
-    pruned = copy.deepcopy(messages)
-
-    for prefix in prunable:
-        if estimated <= soft_cap_tokens:
-            break
-        for msg in pruned:
-            content = msg.get("content")
-            if isinstance(content, list) and msg.get("role") == "system":
-                for block in content:
-                    if (isinstance(block, dict) and
-                        block.get("type") == "text" and
-                        "cache_control" not in block):
-                        text = block.get("text", "")
-                        if prefix in text:
-                            lines = text.split("\n\n")
-                            new_lines = []
-                            skip_section = False
-                            for line in lines:
-                                if line.startswith(prefix):
-                                    skip_section = True
-                                    info["trimmed_sections"].append(prefix)
-                                    continue
-                                if line.startswith("##"):
-                                    skip_section = False
-                                if not skip_section:
-                                    new_lines.append(line)
-                            block["text"] = "\n\n".join(new_lines)
-                            estimated = sum(_estimate_message_tokens(m) for m in pruned)
-                            break
-                break
-
-    info["estimated_tokens_after"] = estimated
-    return pruned, info
-
-
 # ---------------------------------------------------------------------------
 # Tool History Compaction (for long conversations)
 # ---------------------------------------------------------------------------
@@ -1003,6 +1168,13 @@ async def compact_tool_history_llm(
     return result
 
 
+# Above this share of the window a failed compaction stops being a data-integrity
+# problem and becomes a survival one: there is no room left to spend on keeping
+# more verbatim. Below it the opposite is true, which is why one number decides
+# the direction rather than a second mechanism.
+UNDER_PRESSURE = 0.85
+
+
 class CompactionState:
     """Per-run compaction settings + hysteresis/circuit-breaker state (ADR-033).
 
@@ -1085,7 +1257,21 @@ async def apply_compaction(
                     f"⚠️ Compaction failed ({state.fail_streak}/{state.max_fails}): "
                     f"{type(e).__name__}. Degrading to deterministic truncation."
                 )
-            keep = {1: 12, 2: 18}.get(state.fail_streak, state.keep_recent)
+            # The ladder runs in whichever direction the failure calls for, and
+            # until 2026-08-23 it only ran one way. Keeping MORE verbatim is the
+            # right answer when the model call failed and there is room: losing
+            # detail to a transient error is the worse trade. It is the wrong
+            # answer when the window itself is what is failing — that is the one
+            # moment the mechanism must shrink, and it was the moment it stopped.
+            if ratio >= UNDER_PRESSURE:
+                keep = {1: 4, 2: 2}.get(state.fail_streak, 2)
+                log.warning(
+                    "Compaction failed at %.1f%% of the window: keeping %d rounds "
+                    "verbatim, not more — the window is the thing failing",
+                    ratio * 100, keep,
+                )
+            else:
+                keep = {1: 12, 2: 18}.get(state.fail_streak, state.keep_recent)
             return compact_tool_history(messages, keep_recent=keep)
 
     # Circuit broken: stop calling the model; keep context bounded deterministically.

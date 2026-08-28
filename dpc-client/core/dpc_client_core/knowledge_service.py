@@ -66,6 +66,7 @@ class KnowledgeService:
         group_manager,
         instruction_set,
         *,
+        firewall=None,
         send_ai_query: Callable,
         broadcast_to_peers: Callable,
         broadcast_to_group: Callable,
@@ -90,6 +91,10 @@ class KnowledgeService:
         self.dpc_home_dir = dpc_home_dir
         self.group_manager = group_manager
         self.instruction_set = instruction_set
+        # Needed to honour human_knowledge_access when a commit is indexed into the
+        # agents. Nothing set it before, so the gate below read None and never fired:
+        # `L6 reindex skipped` has zero occurrences in any log against 175 reindexes.
+        self.firewall = firewall
         self._send_ai_query = send_ai_query
         self._broadcast_to_peers_func = broadcast_to_peers
         self._broadcast_to_group_func = broadcast_to_group
@@ -174,7 +179,11 @@ class KnowledgeService:
                         frontmatter, content = markdown_manager.parse_markdown_with_frontmatter(filepath)
                         if 'content_hash' in frontmatter:
                             actual_hash = hashlib.sha256(content.encode('utf-8')).hexdigest()[:16]
-                            if actual_hash != frontmatter['content_hash']:
+                            # str(): a 16-hex-digit hash that happens to contain no
+                            # letters is valid YAML for an integer, and the parser
+                            # obliges — so two of 265 commits compared str against int
+                            # and "mismatched" against their own unchanged content.
+                            if actual_hash != str(frontmatter['content_hash']):
                                 logger.warning("Content hash mismatch for %s: %s", topic_name, frontmatter['commit_id'])
                         entries = markdown_manager.markdown_to_entries(content)
                         topic.entries = entries
@@ -276,18 +285,109 @@ class KnowledgeService:
 
     def _get_agent_telegram_bridge(self, conversation_id: str):
         """Return the AgentTelegramBridge for an agent conversation, or None."""
-        if not conversation_id or not conversation_id.startswith("agent_"):
-            return None
-        dpc_agent_provider = self.llm_manager.providers.get("dpc_agent")
-        if dpc_agent_provider and hasattr(dpc_agent_provider, '_managers'):
-            mgr = dpc_agent_provider._managers.get(conversation_id)
-            if mgr:
-                return getattr(mgr, '_telegram_bridge', None)
-        return None
+        from .managers.agent_telegram_bridge import get_agent_telegram_bridge
+
+        return get_agent_telegram_bridge(self.llm_manager, conversation_id)
 
     # ─────────────────────────────────────────────────────────────
     # Conversation monitor management
     # ─────────────────────────────────────────────────────────────
+
+    def _build_participants(self, conversation_id: str) -> List[Dict[str, Any]]:
+        """Who is in this conversation, as of now.
+
+        Consensus counts votes against this list, so it has to describe the
+        conversation at the moment it is asked — not at the moment the monitor
+        happened to be constructed.
+        """
+        if conversation_id == "local_ai" or conversation_id.startswith("ai_"):
+            return [
+                {"node_id": self.p2p_manager.node_id, "name": "User", "context": "local"},
+                {"node_id": conversation_id, "name": "DPC Agent", "context": "ai_agent"},
+            ]
+
+        if conversation_id.startswith("group-"):
+            group = self.group_manager.get_group(conversation_id)
+            if not group:
+                return [
+                    {"node_id": self.p2p_manager.node_id, "name": "User", "context": "local"}
+                ]
+            participants = []
+            for member_id in group.members:
+                if member_id == self.p2p_manager.node_id:
+                    participants.append(
+                        {"node_id": member_id, "name": "User", "context": "local"}
+                    )
+                else:
+                    participants.append({
+                        "node_id": member_id,
+                        "name": self.peer_metadata.get(member_id, {}).get("name", member_id),
+                        "context": "peer",
+                    })
+            return participants
+
+        return [
+            {"node_id": self.p2p_manager.node_id, "name": "User", "context": "local"},
+            {
+                "node_id": conversation_id,
+                "name": self.peer_metadata.get(conversation_id, {}).get("name", conversation_id),
+                "context": "peer",
+            },
+        ]
+
+    def _announce_history_after_repair(self, group_id: str) -> None:
+        """Tell connected members that this node's copy of a group just changed.
+
+        Fires only when a consolidation actually recovered messages, so a node
+        with nothing to repair stays silent. The peers answer with their own
+        status, the existing author-digest comparison runs, and whatever either
+        side is missing is fetched — the same path a reconnect would take, just
+        without waiting for one.
+        """
+        monitor = self.conversation_monitors.get(group_id)
+        summary = getattr(monitor, "last_consolidation", None) or {}
+        if not summary.get("messages_added"):
+            return
+
+        group = self.group_manager.get_group(group_id)
+        members = [m for m in (group.members if group else []) if m != self.p2p_manager.node_id]
+        peers = [m for m in members if m in getattr(self.p2p_manager, "peers", {})]
+        if not peers:
+            logger.info(
+                "Group %s repaired (%d message(s) recovered); no member connected to tell yet",
+                group_id, summary["messages_added"],
+            )
+            return
+
+        payload = {
+            "group_id": group_id,
+            "history_hash": monitor.compute_history_hash(),
+            "message_count": len(monitor.message_history),
+            "history_digest": monitor.history_digest(),
+        }
+
+        async def _send():
+            for peer_id in peers:
+                try:
+                    await self.p2p_manager.send_message_to_peer(peer_id, {
+                        "command": "GROUP_HISTORY_STATUS",
+                        "payload": payload,
+                    })
+                except Exception as exc:
+                    logger.debug("Could not announce repaired history to %s: %s", peer_id[:20], exc)
+
+        try:
+            asyncio.get_running_loop().create_task(_send())
+            logger.info(
+                "Group %s repaired (%d message(s) recovered); announced to %d connected member(s)",
+                group_id, summary["messages_added"], len(peers),
+            )
+        except RuntimeError:
+            # No loop here — the reconnect exchange will carry it instead.
+            logger.info(
+                "Group %s repaired (%d message(s) recovered); no event loop to announce on",
+                group_id, summary["messages_added"],
+            )
 
     def _get_or_create_conversation_monitor(
         self,
@@ -303,108 +403,149 @@ class KnowledgeService:
         Returns:
             ConversationMonitor instance
         """
-        if conversation_id not in self.conversation_monitors:
-            participants = []
-
-            if conversation_id == "local_ai" or conversation_id.startswith("ai_"):
-                participants = [
-                    {"node_id": self.p2p_manager.node_id, "name": "User", "context": "local"},
-                    {"node_id": conversation_id, "name": "DPC Agent", "context": "ai_agent"},
-                ]
-            elif conversation_id.startswith("group-"):
-                group = self.group_manager.get_group(conversation_id)
-                if group:
-                    for member_id in group.members:
-                        if member_id == self.p2p_manager.node_id:
-                            participants.append(
-                                {"node_id": member_id, "name": "User", "context": "local"}
-                            )
-                        else:
-                            participants.append({
-                                "node_id": member_id,
-                                "name": self.peer_metadata.get(member_id, {}).get("name", member_id),
-                                "context": "peer",
-                            })
-                else:
-                    participants = [
-                        {"node_id": self.p2p_manager.node_id, "name": "User", "context": "local"}
-                    ]
-            else:
-                participants = [
-                    {"node_id": self.p2p_manager.node_id, "name": "User", "context": "local"},
-                    {
-                        "node_id": conversation_id,
-                        "name": self.peer_metadata.get(conversation_id, {}).get("name", conversation_id),
-                        "context": "peer",
-                    },
-                ]
-
-            # Determine display_name for readable folder suffix
+        if conversation_id in self.conversation_monitors:
+            monitor = self.conversation_monitors[conversation_id]
+            # A group roster changes after the monitor exists — someone is
+            # invited, someone leaves — but the list built at construction is
+            # what consensus counts votes against. A monitor born before the
+            # second node joined made every proposal claim one participant, so
+            # the proposer's own vote was unanimity and the other person's
+            # arrived too late to count. Re-read it; it is a dict lookup.
             if conversation_id.startswith("group-"):
-                display_name = group.name if group else None
-            elif not conversation_id.startswith(("local_ai", "ai_", "agent-")):
-                display_name = self.peer_metadata.get(conversation_id, {}).get("name") or None
-            else:
-                display_name = None
+                monitor.participants = self._build_participants(conversation_id)
+            return monitor
 
-            self.conversation_monitors[conversation_id] = ConversationMonitor(
-                conversation_id=conversation_id,
-                participants=participants,
-                llm_manager=self.llm_manager,
-                knowledge_threshold=0.7,
-                settings=self.settings,
-                ai_query_func=self._send_ai_query,
-                auto_detect=False,
-                instruction_set_name=instruction_set_name or self.instruction_set.default,
-                display_name=display_name,
-            )
+        participants = self._build_participants(conversation_id)
+        group = (
+            self.group_manager.get_group(conversation_id)
+            if conversation_id.startswith("group-")
+            else None
+        )
 
-            # Load persisted history from disk — only for group chats
-            if conversation_id.startswith("group-"):
-                if self.conversation_monitors[conversation_id].load_history():
-                    self.conversation_monitors[conversation_id].rebuild_extraction_buffers_from_history()
-                    logger.info(
-                        "Loaded persisted history for group %s (%d messages, extraction buffers rebuilt)",
-                        conversation_id,
-                        len(self.conversation_monitors[conversation_id].message_history),
-                    )
-                # Set token_limit to max context window among agents in the group
-                if group and self.llm_manager:
-                    max_ctx = 0
-                    node_id = getattr(self.p2p_manager, "node_id", None)
-                    for aid in group.agents.get(node_id, []):
-                        try:
-                            from .dpc_agent.utils import load_agent_config
-                            cfg = load_agent_config(aid) or {}
-                            ctx = cfg.get("context_window", 0)
-                            if not ctx:
-                                pa = cfg.get("provider_alias")
-                                if pa and pa in self.llm_manager.providers:
-                                    model = self.llm_manager.providers[pa].model
-                                    ctx = self.llm_manager.get_context_window(model) or 0
-                            max_ctx = max(max_ctx, ctx)
-                        except Exception:
-                            pass
-                    if not max_ctx:
-                        model = self.llm_manager.get_active_model_name()
-                        max_ctx = self.llm_manager.get_context_window(model) or 0
-                    if max_ctx > 0:
-                        self.conversation_monitors[conversation_id].set_token_limit(max_ctx)
-                        logger.info("Group %s token_limit set to %d (max agent context)", conversation_id, max_ctx)
+        # Determine display_name for readable folder suffix
+        if conversation_id.startswith("group-"):
+            display_name = group.name if group else None
+        elif not conversation_id.startswith(("local_ai", "ai_", "agent-")):
+            display_name = self.peer_metadata.get(conversation_id, {}).get("name") or None
+        else:
+            display_name = None
 
-            logger.info(
-                "Created conversation monitor for %s with %d participant(s) "
-                "(instruction_set=%s)",
-                conversation_id,
-                len(participants),
-                instruction_set_name or self.instruction_set.default,
-            )
+        self.conversation_monitors[conversation_id] = ConversationMonitor(
+            conversation_id=conversation_id,
+            participants=participants,
+            llm_manager=self.llm_manager,
+            knowledge_threshold=0.7,
+            settings=self.settings,
+            ai_query_func=self._send_ai_query,
+            auto_detect=False,
+            instruction_set_name=instruction_set_name or self.instruction_set.default,
+            display_name=display_name,
+        )
+
+        # Load persisted history from disk — only for group chats
+        if conversation_id.startswith("group-"):
+            if self.conversation_monitors[conversation_id].load_history():
+                self.conversation_monitors[conversation_id].rebuild_extraction_buffers_from_history()
+                logger.info(
+                    "Loaded persisted history for group %s (%d messages, extraction buffers rebuilt)",
+                    conversation_id,
+                    len(self.conversation_monitors[conversation_id].message_history),
+                )
+            # Loading may have folded a split store back together. Peers learn
+            # about it now rather than at the next reconnect, which on a pair
+            # that stays connected for days is the difference between "syncs
+            # automatically" and "syncs when something else happens".
+            self._announce_history_after_repair(conversation_id)
+            # Set token_limit to max context window among agents in the group
+            if group and self.llm_manager:
+                max_ctx = 0
+                node_id = getattr(self.p2p_manager, "node_id", None)
+                for aid in group.agents.get(node_id, []):
+                    try:
+                        from .dpc_agent.utils import load_agent_config
+                        cfg = load_agent_config(aid) or {}
+                        ctx = cfg.get("context_window", 0)
+                        if not ctx:
+                            pa = cfg.get("provider_alias")
+                            if pa and pa in self.llm_manager.providers:
+                                model = self.llm_manager.providers[pa].model
+                                ctx = self.llm_manager.get_context_window(model) or 0
+                        max_ctx = max(max_ctx, ctx)
+                    except Exception:
+                        pass
+                if not max_ctx:
+                    model = self.llm_manager.get_active_model_name()
+                    max_ctx = self.llm_manager.get_context_window(model) or 0
+                if max_ctx > 0:
+                    self.conversation_monitors[conversation_id].set_token_limit(max_ctx)
+                    logger.info("Group %s token_limit set to %d (max agent context)", conversation_id, max_ctx)
+
+        logger.info(
+            "Created conversation monitor for %s with %d participant(s) "
+            "(instruction_set=%s)",
+            conversation_id,
+            len(participants),
+            instruction_set_name or self.instruction_set.default,
+        )
 
         return self.conversation_monitors[conversation_id]
 
     # ─────────────────────────────────────────────────────────────
     # Knowledge commit voting flow
     # ─────────────────────────────────────────────────────────────
+
+    def _history_drift(self, proposal_id: str) -> Optional[Dict[str, Any]]:
+        """Refuse a vote cast on a different conversation than the proposal read.
+
+        The proposal names every message the extraction read, by `content_hash`.
+        A voter that holds all of them is judging the same text; one that is
+        missing any of them would be approving knowledge drawn from something
+        it has never seen.
+
+        The check used to compare `(msg_index, chain_hash)` and refused every
+        remote vote, because `chain_hash` is local by construction (ADR-037):
+        it covers `role`, which differs per reader. Measured across the three
+        nodes on 2026-08-07 — same messages, three chains, and both peers were
+        refused at index 3. A check that exists and always says no is worse
+        than none, because it looks like agreement.
+
+        Returns an error payload when messages are missing, None otherwise
+        (including when there is nothing to compare, which is not a mismatch).
+        """
+        session = self.consensus_manager.sessions.get(proposal_id)
+        if session is None:
+            return None
+        window = getattr(session.proposal, "based_on_content_hashes", None)
+        if not window:
+            return None  # proposer predates the window anchor — nothing to verify
+
+        monitor = self.conversation_monitors.get(session.proposal.conversation_id)
+        if monitor is None:
+            return None
+
+        held = {
+            m.get("content_hash") for m in monitor.message_history if m.get("content_hash")
+        }
+        missing = [h for h in window if h not in held]
+        if not missing:
+            return None
+
+        logger.warning(
+            "Refusing vote on %s: %d of %d messages in the extraction window are "
+            "missing from this history",
+            proposal_id, len(missing), len(window),
+        )
+        return {
+            "status": "error",
+            "reason": "history_drift",
+            "missing_messages": len(missing),
+            "window_size": len(window),
+            "message": (
+                f"This proposal was extracted from messages you do not have "
+                f"({len(missing)} of {len(window)} are missing here). Voting on it "
+                f"would approve text you are not looking at."
+            ),
+        }
 
     async def vote_knowledge_commit(
         self,
@@ -473,6 +614,11 @@ class KnowledgeService:
                 if summary is not None:
                     session.proposal.summary = summary
 
+
+            drift = self._history_drift(proposal_id)
+            if drift:
+                return drift
+
             success = await self.consensus_manager.cast_vote(
                 proposal_id=proposal_id,
                 vote=vote,
@@ -493,11 +639,26 @@ class KnowledgeService:
 
             if success:
                 return {"status": "success", "message": f"Vote cast: {vote}"}
-            else:
+
+            # "Not found or expired" was the answer to three different
+            # situations, and the common one — the session closed seconds ago
+            # because another node's vote already decided it — is the one a
+            # person needs named. Reading "expired" about a proposal that is
+            # still on screen explains nothing.
+            session = self.consensus_manager.sessions.get(proposal_id)
+            if session is None:
+                return {"status": "error", "message": "Proposal not found"}
+            if session.status != "voting":
                 return {
                     "status": "error",
-                    "message": "Proposal not found or voting session expired",
+                    "reason": "already_decided",
+                    "decided_as": session.status,
+                    "message": (
+                        f"Voting already closed ({session.status}) — your vote "
+                        f"was not counted"
+                    ),
                 }
+            return {"status": "error", "message": "Vote could not be cast"}
         except Exception as e:
             logger.error("Error voting on knowledge commit: %s", e, exc_info=True)
             return {"status": "error", "message": str(e)}
@@ -721,6 +882,34 @@ Respond in JSON format:
             if monitor is None:
                 monitor = self._get_or_create_conversation_monitor(conversation_id)
 
+            # `_extracting` on the monitor clears when the proposal is built,
+            # which is minutes before the vote on it closes. A second extraction
+            # started in that window produces two proposals over overlapping
+            # history, each anchored to a different position — not a stale
+            # proposal but two commits arguing over the same conversation.
+            open_session = next(
+                (
+                    s for s in self.consensus_manager.sessions.values()
+                    if s.proposal.conversation_id == conversation_id
+                    and s.status == "voting"
+                ),
+                None,
+            )
+            if open_session is not None:
+                logger.info(
+                    "Refusing extraction for %s — proposal %s is still being voted on",
+                    conversation_id, open_session.proposal.proposal_id,
+                )
+                return {
+                    "status": "error",
+                    "reason": "vote_in_progress",
+                    "proposal_id": open_session.proposal.proposal_id,
+                    "message": (
+                        "A knowledge commit for this conversation is still being "
+                        "voted on. Finish that vote before extracting again."
+                    ),
+                }
+
             logger.info("End Session - attempting manual extraction for %s", conversation_id)
             logger.info(
                 "Full conversation: %d messages (incremental buffer: %d), Score: %.2f",
@@ -729,26 +918,11 @@ Respond in JSON format:
                 monitor.knowledge_score,
             )
 
-            # For group conversations with no local AI: inject a compute peer so extraction works
-            if conversation_id.startswith("group-"):
-                host, _, _ = monitor._infer_inference_settings()
-                if host is None:
-                    group = self.group_manager.get_group(conversation_id)
-                    if group:
-                        for member_id in group.members:
-                            if member_id == self.p2p_manager.node_id:
-                                continue
-                            if member_id in self.p2p_manager.peers:
-                                monitor.set_inference_settings(
-                                    compute_host=member_id,
-                                    model=None,
-                                    provider=None,
-                                )
-                                logger.info(
-                                    "Group knowledge extraction: using compute from peer %s",
-                                    member_id[:20]
-                                )
-                                break
+            # A peer is not pre-injected here. It used to be, because the
+            # resolver returned no host for a group; now the group resolves
+            # through its own chain, and writing a peer in first would hand it
+            # the primary route — and wipe the provenance while doing it. The
+            # peer remains where it belongs: the `except` retry in the monitor.
 
             monitor.full_conversation = []
             monitor.message_buffer = []
@@ -885,6 +1059,70 @@ Respond in JSON format:
         except Exception as e:
             logger.error("Error in _on_vote_received: %s", e, exc_info=True)
 
+    async def _reindex_commit_into_agents(self, markdown_file: str) -> None:
+        """Add an approved commit to the index of each agent allowed the shared layer.
+
+        Lifted out of the approval handler so the gate can be tested. Inline, it sat
+        behind everything else that handler does, and the one branch whose whole job is
+        to refuse never ran: `L6 reindex skipped` has zero occurrences across every log
+        on this machine, against 175 reindexes.
+
+        Async because each agent's mutation now runs on that agent's index writer, and
+        this handler runs on the event loop: waiting on the writer here would stop
+        every other coroutine for as long as that agent's queue is busy, which can be
+        a full rebuild. Awaiting costs the same wall-clock for the commit and nothing
+        for anybody else.
+        """
+        firewall = self.firewall
+        commit_path = self.dpc_home_dir / markdown_file
+        if not commit_path.exists():
+            return
+        dpc_agent_provider = self.llm_manager.providers.get("dpc_agent")
+        if not (dpc_agent_provider and hasattr(dpc_agent_provider, "_managers")):
+            return
+        for agent_mgr in dpc_agent_provider._managers.values():
+            # Fail closed. The previous form was `if firewall and not …`, so a missing
+            # firewall disabled the gate instead of the indexing — a permission that
+            # silently stops being asked is worse than one that refuses.
+            if firewall is None:
+                logger.warning("MEM-3.7: L6 reindex skipped for %s — no firewall to ask",
+                               agent_mgr.agent_id)
+                continue
+            if not firewall.can_agent_access_context("knowledge", profile_name=agent_mgr.agent_id):
+                logger.info("MEM-3.7: L6 reindex skipped for %s (human_knowledge_access disabled)",
+                            agent_mgr.agent_id)
+                continue
+            agent = agent_mgr._agent
+            if not (agent and getattr(agent, "_embedding_provider", None)):
+                continue
+            index_dir = agent_mgr.agent_root / "state" / "memory_index"
+            if not index_dir.exists():
+                continue
+            from .dpc_agent.index_keys import l6_key
+            from .dpc_agent.index_writer import write_index_async
+            from .dpc_agent.indexing_pipeline import index_single_file
+            from .dpc_agent.retrieval import make_backend_for_agent
+            # Same key shape as the full rebuild, from the same helper, so this
+            # incremental add replaces the rebuilt entry instead of sitting beside it.
+            _l6_key = l6_key(commit_path, self.dpc_home_dir / "knowledge")
+
+            def _add_commit(agent_root=agent_mgr.agent_root, provider=agent._embedding_provider):
+                backend = make_backend_for_agent(agent_root)
+                if not backend.vector.load():
+                    return False
+                backend.text.load()
+                index_single_file(commit_path, provider, backend,
+                                  source_layer="L6", source_file_key=_l6_key)
+                backend.save()
+                return True
+
+            if await write_index_async(index_dir, _add_commit):
+                logger.info("MEM-3.7: reindexed L6 commit %s for agent %s",
+                            commit_path.name, agent_mgr.agent_id)
+            else:
+                logger.warning("MEM-3.7: L6 commit %s not indexed for %s — the index would not load",
+                               commit_path.name, agent_mgr.agent_id)
+
     async def _on_commit_approved(self, commit) -> None:
         """Notify the UI that consensus was reached and the commit was approved."""
         try:
@@ -920,31 +1158,7 @@ Respond in JSON format:
 
         # MEM-3.7 trigger #2: incremental reindex for Active Recall (L6)
         try:
-            firewall = getattr(self, '_firewall', None) or getattr(self.p2p_manager, '_service', None) and getattr(self.p2p_manager._service, 'firewall', None)
-            commit_path = self.dpc_home_dir / markdown_file
-            if commit_path.exists():
-                dpc_agent_provider = self.llm_manager.providers.get("dpc_agent")
-                if dpc_agent_provider and hasattr(dpc_agent_provider, '_managers'):
-                    for agent_mgr in dpc_agent_provider._managers.values():
-                        if firewall and not firewall.can_agent_access_context('knowledge', profile_name=agent_mgr.agent_id):
-                            logger.info("MEM-3.7: L6 reindex skipped for %s (human_knowledge_access disabled)", agent_mgr.agent_id)
-                            continue
-                        agent = agent_mgr._agent
-                        if agent and hasattr(agent, '_embedding_provider') and agent._embedding_provider:
-                            from .dpc_agent.indexing_pipeline import index_single_file
-                            from .dpc_agent.retrieval import make_backend_for_agent
-                            index_dir = agent_mgr.agent_root / "state" / "memory_index"
-                            if index_dir.exists():
-                                backend = make_backend_for_agent(agent_mgr.agent_root)
-                                if backend.vector.load():
-                                    backend.text.load()
-                                    # L6 key shape must match agent_manager._sync_index
-                                    # (l6_dir = dpc_home / "knowledge") so this incremental
-                                    # add doesn't collide with the full-rebuild path.
-                                    _l6_key = f"L6/{commit_path.relative_to(self.dpc_home_dir / 'knowledge').as_posix()}"
-                                    index_single_file(commit_path, agent._embedding_provider, backend, source_layer="L6", source_file_key=_l6_key)
-                                    backend.save()
-                                    logger.info("MEM-3.7: reindexed L6 commit %s for agent %s", commit_path.name, agent_mgr.agent_id)
+            await self._reindex_commit_into_agents(markdown_file)
         except Exception as e:
             logger.warning("MEM-3.7 L6 reindex failed for commit %s: %s", commit.commit_id, e)
 
@@ -994,9 +1208,13 @@ Respond in JSON format:
             if commit.conversation_id:
                 monitor = self._get_or_create_conversation_monitor(commit.conversation_id)
                 if monitor.message_buffer:
+                    # Name the buffer. "Clearing buffer for <conversation>" reads as
+                    # "your conversation was cleared", and it is not: message_history,
+                    # which the chat shows and syncs, is untouched here.
                     logger.info(
-                        "Clearing buffer for %s after commit approval",
-                        commit.conversation_id,
+                        "Knowledge auto-detect buffer reset for %s after commit approval "
+                        "(%d messages; chat history untouched)",
+                        commit.conversation_id, len(monitor.message_buffer),
                     )
                     monitor.message_buffer = []
                     monitor.knowledge_score = 0.0

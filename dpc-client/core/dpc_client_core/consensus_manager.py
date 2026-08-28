@@ -182,11 +182,29 @@ class ConsensusManager:
         # Record vote
         session.votes[self.node_id] = vote_obj
 
-        # Broadcast vote if function provided
+        # Broadcast vote if function provided. Signed and carrying its own
+        # conversation, for the reasons VOTE_NEW_SESSION is: the vote is relayed
+        # through whoever is connected, and a receiver reading identity off the
+        # socket credits the carrier. Here that would also put the wrong node
+        # inside the commit, because a vote on a commit becomes a signature on it.
+        from dpc_client_core.signing import sign_vote
+
+        vote_payload = asdict(vote_obj)
+        conversation_id = getattr(session.proposal, "conversation_id", None)
+        vote_payload["conversation_id"] = conversation_id
+        vote_payload.update(
+            sign_vote(
+                proposal_id=proposal_id,
+                conversation_id=conversation_id,
+                voter_node_id=self.node_id,
+                vote=vote,
+                timestamp=vote_obj.timestamp,
+            )
+        )
         if broadcast_func:
             await broadcast_func({
                 'command': 'VOTE_KNOWLEDGE_COMMIT',
-                'payload': asdict(vote_obj)
+                'payload': vote_payload
             })
 
         # Check if voting is complete
@@ -458,15 +476,14 @@ class ConsensusManager:
                 proposal.proposal_id, len(proposal.participants),
             )
 
-    async def _apply_commit(self, commit: KnowledgeCommit) -> bool:
-        """Apply approved commit to local PCM with cryptographic integrity
+    async def _apply_commit(self, commit: KnowledgeCommit, origin: str = "local") -> bool:
+        """Apply approved commit to local PCM; False on any error.
 
-        Args:
-            commit: KnowledgeCommit to apply
-
-        Returns:
-            True if commit was successfully written to disk, False on any error.
+        `origin` is "local" or the verdict `verify_provenance()` gave a received
+        commit: one from elsewhere keeps the hash it arrived with, and only a
+        hash we could check is signed with our key (ADR-036 §4).
         """
+        attested = origin in ("local", "verified")
         try:
             import hashlib
             from dpc_protocol.crypto import load_identity
@@ -478,26 +495,32 @@ class ConsensusManager:
             # 1. parent_commit_id is already set from the proposal (anchored by the proposer
             # at propose time so all nodes compute the same commit_hash). Only fall back to
             # local context.last_commit_id if the proposal pre-dates this fix.
-            if commit.parent_commit_id is None:
+            if commit.parent_commit_id is None and origin == "local":
                 commit.parent_commit_id = context.last_commit_id
 
             # 2. Compute hash-based commit ID
-            commit.compute_hash()  # Sets commit_hash and commit_id
-
-            logger.info("Created commit %s (hash: %s...)", commit.commit_id, commit.commit_hash[:16])
+            if origin == "local":
+                commit.compute_hash()  # Sets commit_hash and commit_id
+                logger.info("Created commit %s (hash: %s...)", commit.commit_id, commit.commit_hash[:16])
+            else:
+                logger.info(
+                    "Applying %s commit %s (hash: %s...) as received",
+                    origin, commit.commit_id, (commit.commit_hash or "")[:16],
+                )
 
             # 3. Sign commit with our private key
             node_id, key_path, cert_path = load_identity()
 
-            with open(key_path, 'rb') as f:
-                private_key = serialization.load_pem_private_key(
-                    f.read(),
-                    password=None
-                )
+            if attested:
+                with open(key_path, 'rb') as f:
+                    private_key = serialization.load_pem_private_key(
+                        f.read(),
+                        password=None
+                    )
 
-            commit.sign(node_id, private_key)
+                commit.sign(node_id, private_key)
 
-            logger.info("Signed commit with %s", node_id)
+                logger.info("Signed commit with %s", node_id)
 
             # 4. Add or update topic
             topic_name = commit.topic
@@ -535,7 +558,8 @@ class ConsensusManager:
                 'participants': commit.participants,
                 'consensus': commit.consensus_type,
                 'approved_by': commit.approved_by,
-                'signatures': commit.signatures
+                'signatures': commit.signatures,
+                'provenance': origin
             })
 
             # 7. Create versioned markdown file with frontmatter
@@ -570,7 +594,8 @@ class ConsensusManager:
                 'canonical_json': canonical_json_b64,
                 'timestamp': commit.timestamp,
                 'version': topic.version,
-                'author': node_id,
+                'author': node_id if origin == "local" else (commit.proposed_by or "peer"),
+                'provenance': origin,
                 'participants': commit.participants,
                 'approved_by': commit.approved_by,
                 'rejected_by': commit.rejected_by,
@@ -609,7 +634,7 @@ class ConsensusManager:
                 await self.on_commit_applied(commit)
 
             # 10. Let service sign our own copy and broadcast COMMIT_SIGNED to peers
-            if self.on_commit_signed:
+            if self.on_commit_signed and attested:
                 await self.on_commit_signed(commit)
 
             # 11. Broadcast COMMIT_ACK so peers know we successfully applied the commit
@@ -676,7 +701,9 @@ class ConsensusManager:
             frontmatter, content = markdown_manager.parse_markdown_with_frontmatter(markdown_path)
 
             # Confirm commit_hash matches what's in the file
-            stored_hash = frontmatter.get('commit_hash', '')
+            # str(): yaml turns an all-digit hash into an integer, and comparing
+            # that against the received string always mismatches (see S61).
+            stored_hash = str(frontmatter.get('commit_hash', ''))
             if stored_hash and stored_hash != commit_hash:
                 logger.warning(
                     "record_commit_signature: commit_hash mismatch for %s (stored=%s, received=%s)",
@@ -831,18 +858,27 @@ class ConsensusManager:
         except Exception as e:
             logger.error("Error handling proposal message from %s: %s", sender_node_id, e, exc_info=True)
 
-    async def handle_vote_message(self, sender_node_id: str, payload: Dict[str, Any]) -> None:
+    async def handle_vote_message(
+        self,
+        sender_node_id: str,
+        payload: Dict[str, Any],
+        voter_node_id: Optional[str] = None,
+    ) -> None:
         """Handle VOTE_KNOWLEDGE_COMMIT message from peer
 
         Args:
-            sender_node_id: Node ID of the voter
+            sender_node_id: the peer that handed us the message — the transport
+                hop, which in a star is usually not the voter
             payload: Vote payload (dict format)
+            voter_node_id: who actually cast it, as established by the handler's
+                signature check. Falls back to the transport peer only when the
+                caller could not establish it.
         """
         try:
             # Reconstruct vote from dict
             vote = CommitVote(
                 proposal_id=payload.get('proposal_id'),
-                voter_node_id=sender_node_id,
+                voter_node_id=voter_node_id or sender_node_id,
                 vote=payload.get('vote'),
                 comment=payload.get('comment'),
                 timestamp=payload.get('timestamp', datetime.now(timezone.utc).isoformat()),

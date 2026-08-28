@@ -48,18 +48,190 @@ if _hf_cfg_path.exists():
         _hf_cfg.read(_hf_cfg_path, encoding="utf-8")
     except _hf_configparser.Error:
         pass  # malformed config — proceed without the offline opt-in
+
+def _hf_required_models() -> set:
+    """Model ids this install loads through the HF cache.
+
+    Read from where each one is actually defined, never copied here. The
+    ordering constraint above bans importing huggingface_hub before the env
+    var is set — it does not ban importing our own modules, and none of
+    these pulls it in (asserted by test_hf_offline_autodetect, so the day
+    one of them grows a top-level `import huggingface_hub` the ban is not
+    quietly broken).
+
+    A source that cannot be read contributes nothing rather than raising:
+    a model that goes unlisted only keeps the process online, which is the
+    safe direction.
+    """
+    import json as _hf_json
+
+    wanted = set()
+
+    try:
+        from dpc_client_core.dpc_agent.memory_config import MemoryConfig
+        wanted.add(MemoryConfig.embedding_model)
+    except Exception:
+        pass
+
+    try:
+        from dpc_client_core.dpc_agent.knowledge_graph import GLINER_MODEL_NAME
+        wanted.add(GLINER_MODEL_NAME)
+    except Exception:
+        pass
+
+    # Agents may point memory at a different embedding model than the default.
+    agents_dir = _HFPath.home() / ".dpc" / "agents"
+    if agents_dir.is_dir():
+        for cfg in agents_dir.glob("*/config.json"):
+            try:
+                data = _hf_json.loads(cfg.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                continue
+            model = (data.get("memory") or {}).get("embedding_model")
+            if isinstance(model, str) and model:
+                wanted.add(model)
+
+    # The tokenizers the token counter loads for local models. They were the one
+    # source missing here, and the omission had a shape: everything else was
+    # cached, so the process went offline, and then the counter could not fetch
+    # the tokenizer it wanted even though the network was there. Falling back to
+    # one-token-per-four-characters costs about a fifth of the count on Russian
+    # (measured 315 against 382 on one page), so this is not cosmetic.
+    try:
+        from dpc_client_core.managers.token_count_manager import TokenCountManager
+
+        providers_path = _HFPath.home() / ".dpc" / "providers.json"
+        providers = _hf_json.loads(providers_path.read_text(encoding="utf-8"))
+        for entry in providers.get("providers", []):
+            if entry.get("type") != "ollama":
+                continue
+            family = str(entry.get("model") or "").split(":")[0].lower()
+            for prefix, repo in TokenCountManager.OLLAMA_TOKENIZER_MAP.items():
+                if family.startswith(prefix):
+                    wanted.add(repo)
+                    break
+    except Exception:
+        pass
+
+    # Whisper has no module constant — the id lives in providers.json, which
+    # is also the only place that knows whether this install has one at all.
+    try:
+        from dpc_client_core.dpc_agent.tools.transcribe import _WHISPER_PROVIDER_TYPE
+
+        providers_path = _HFPath.home() / ".dpc" / "providers.json"
+        providers = _hf_json.loads(providers_path.read_text(encoding="utf-8"))
+
+        def _walk(node):
+            if isinstance(node, dict):
+                if node.get("type") == _WHISPER_PROVIDER_TYPE:
+                    model = node.get("model")
+                    if isinstance(model, str) and model:
+                        yield model
+                for value in node.values():
+                    yield from _walk(value)
+            elif isinstance(node, list):
+                for item in node:
+                    yield from _walk(item)
+
+        wanted.update(_walk(providers))
+    except Exception:
+        pass
+
+    return wanted
+
+
+def _hf_cache_root() -> "_HFPath":
+    """Where huggingface_hub keeps model snapshots, honouring its own env vars."""
+    explicit = os.environ.get("HF_HUB_CACHE")
+    if explicit:
+        return _HFPath(explicit)
+    home = os.environ.get("HF_HOME")
+    if home:
+        return _HFPath(home) / "hub"
+    return _HFPath.home() / ".cache" / "huggingface" / "hub"
+
+
+def _hf_model_fully_cached(model_id: str, root: "_HFPath") -> bool:
+    """True when this model can be loaded with no network at all.
+
+    Presence of the directory is not the question — an interrupted download
+    leaves one behind that looks complete from the outside. What decides it
+    is a snapshot with files in it and no *.incomplete blob still parked in
+    the cache.
+    """
+    model_dir = root / ("models--" + model_id.replace("/", "--"))
+    snapshots = model_dir / "snapshots"
+    if not snapshots.is_dir():
+        return False
+    if not any(any(rev.iterdir()) for rev in snapshots.iterdir() if rev.is_dir()):
+        return False
+    blobs = model_dir / "blobs"
+    if blobs.is_dir() and any(blobs.glob("*.incomplete")):
+        return False
+    return True
+
+
+# Held for setup_logging() to repeat into the log — nothing here can log yet.
+_HF_STARTUP_NOTE = ""
+
+
+def _hf_announce(note: str) -> None:
+    global _HF_STARTUP_NOTE
+    _HF_STARTUP_NOTE = note
+    print("[startup] " + note)
+
+
 try:
+    _hf_offline_set = _hf_cfg.has_option("hf", "offline_mode")
     _hf_offline = _hf_cfg.getboolean("hf", "offline_mode", fallback=False)
 except (ValueError, _hf_configparser.Error):
-    _hf_offline = False
+    _hf_offline_set, _hf_offline = False, False
+
 if _hf_offline:
     # setdefault so an explicit HF_HUB_OFFLINE env var still wins.
     os.environ.setdefault("HF_HUB_OFFLINE", "1")
-    print(
-        "[startup] HF_HUB_OFFLINE=1 (from [hf] offline_mode=true) — "
+    _hf_announce(
+        "HF_HUB_OFFLINE=1 (from [hf] offline_mode=true) — "
         "transformers/sentence-transformers/gliner will skip HF Hub HEAD "
         "requests and read directly from ~/.cache/huggingface/"
     )
+elif not _hf_offline_set:
+    # No explicit answer in the config, so ask the disk instead of asking the
+    # user to remember. Everything needed already cached means a HEAD request
+    # to huggingface.co can only confirm what we have, so skip the network for
+    # this run. Anything missing and we stay online and it downloads normally
+    # — which is also what makes this safe to leave on: adding a model does not
+    # need anyone to go flip a flag back.
+    #
+    # Not covered: a model nothing declares — a provider added to a fallback
+    # chain but absent from providers.json, say. If one is ever needed and is
+    # not cached, offline turns a download into an error. The startup line
+    # below names exactly what was checked so that decision is never silent.
+    try:
+        _hf_root = _hf_cache_root()
+        _hf_wanted = sorted(_hf_required_models())
+        _hf_missing = [m for m in _hf_wanted if not _hf_model_fully_cached(m, _hf_root)]
+        if not _hf_wanted:
+            # Nothing could be sourced, so nothing was verified. An empty set
+            # trivially satisfies "all present" — going offline on it would be
+            # a decision made on no evidence.
+            _hf_announce(
+                "HF Hub stays online — could not determine which models this "
+                "install needs"
+            )
+        elif _hf_missing:
+            _hf_announce(
+                "HF Hub stays online — not fully cached: " + ", ".join(_hf_missing)
+            )
+        else:
+            os.environ.setdefault("HF_HUB_OFFLINE", "1")
+            _hf_announce(
+                "HF_HUB_OFFLINE=1 (auto) — all startup models cached locally, "
+                "skipping HF Hub HEAD requests: " + ", ".join(_hf_wanted)
+            )
+    except OSError as _hf_exc:
+        # An unreadable cache is not grounds to cut the network.
+        _hf_announce(f"HF cache check skipped ({_hf_exc}) — staying online")
 
 import argparse
 import platform  # Import the platform module to check the OS
@@ -69,6 +241,7 @@ import re
 import traceback
 from pathlib import Path
 from dpc_client_core.service import CoreService
+from dpc_client_core.dpc_agent.loop import shutdown_shared_executor
 from dpc_client_core.__version__ import __version__
 from dpc_client_core import single_instance
 
@@ -195,6 +368,12 @@ def setup_logging(settings):
     for ws_logger in ['websockets.server', 'websockets.protocol', 'websockets']:
         logging.getLogger(ws_logger).setLevel(logging.WARNING)
 
+    # The HF decision is taken at import time, before any of the above exists,
+    # so it could only be printed. Repeat it here: which mode a run started in
+    # is exactly the thing you want when reading the log days later.
+    if _HF_STARTUP_NOTE:
+        logger.info(_HF_STARTUP_NOTE)
+
 
 def dependency_setup():
     """Check GPU/torch status at startup (ADR-012).
@@ -300,6 +479,8 @@ async def main():
     except asyncio.CancelledError:
         pass # This is expected on shutdown
     finally:
+        global _shutting_down
+        _shutting_down = True
         logger.info("Shutdown initiated")
         await service.stop()
         # Ensure the main service task is also cancelled
@@ -308,16 +489,240 @@ async def main():
             await service_task
         except asyncio.CancelledError:
             pass # Expected
+        # Same disease as the default pool below, different pool: every agent
+        # tool call runs on the shared tool executor, which nobody stopped
+        # either. Bounded here rather than in the helper, so a tool that
+        # outran its own timeout cannot decide when the process exits — the
+        # thread dump names it instead.
+        try:
+            await asyncio.wait_for(
+                asyncio.to_thread(shutdown_shared_executor),
+                timeout=_TOOL_EXECUTOR_SHUTDOWN_SEC,
+            )
+        except asyncio.TimeoutError:
+            logger.warning(
+                "Agent tool executor still had a tool running after %.0fs — "
+                "see the thread dump below for which one",
+                _TOOL_EXECUTOR_SHUTDOWN_SEC,
+            )
+        except Exception as e:
+            logger.warning("Agent tool executor did not shut down cleanly: %s", e)
+        # run_in_executor(None, ...) parks work on asyncio's default pool,
+        # whose workers are non-daemon: nobody ever asked them to stop, so
+        # nine of them once held the interpreter open after every component
+        # had reported clean. Bounded, because the point is to exit.
+        try:
+            await loop.shutdown_default_executor(
+                timeout=_DEFAULT_EXECUTOR_SHUTDOWN_SEC,
+            )
+        except Exception as e:
+            logger.warning("Default executor did not shut down cleanly: %s", e)
+        # Named before the loop closes: after this point a stuck overlapped
+        # op parks the process inside IocpProactor.close and nothing else
+        # reaches the log.
+        log_live_non_daemon_threads()
 
-def _trace_pending_overlapped():
-    """Name whatever still holds a Windows overlapped op when the loop closes.
+# Set by the shutdown path so the proactor hook below can tell the final
+# loop close from the short-lived per-call loops agent tools open and close
+# constantly. Same facts either way — only the log level differs.
+_shutting_down = False
+
+
+# Enough of each stuck thread's stack to name the blocking call and who
+# asked for it, without turning a shutdown into a core dump.
+_STACK_FRAMES_PER_THREAD = 4
+
+# How long the default executor gets to drain before we stop waiting on it.
+# Long enough for a hash or an index write to land, short enough that a
+# thread parked on a two-minute wait does not decide when we exit.
+_DEFAULT_EXECUTOR_SHUTDOWN_SEC = 5.0
+
+# Same for the agent tool pool. Kept short deliberately: anything still
+# running here has already blown through its own tool timeout, so waiting
+# on it longer buys nothing that the thread dump does not report better.
+_TOOL_EXECUTOR_SHUTDOWN_SEC = 5.0
+
+
+def log_live_non_daemon_threads():
+    """Name the non-daemon threads that will hold the interpreter open.
+
+    The other half of a hung exit: even with every overlapped op settled,
+    Python waits at exit for each non-daemon thread to return. Daemon
+    threads are excluded because they are not what keeps it alive.
+    """
+    import threading
+
+    main = threading.main_thread()
+    alive = [
+        t for t in threading.enumerate()
+        if t.is_alive() and not t.daemon and t is not main
+    ]
+    if not alive:
+        return
+    logger.warning(
+        "Shutdown: %d non-daemon thread(s) still alive — the interpreter "
+        "waits for each before exiting", len(alive),
+    )
+    # Names alone say which pool is holding the process, never where it is
+    # stuck, so every such exit ended in a guess. The innermost frames say it.
+    frames = sys._current_frames()
+    for t in alive:
+        logger.warning("  thread %r (ident=%s)", t.name, t.ident)
+        frame = frames.get(t.ident)
+        if frame is None:
+            continue
+        for line in traceback.format_stack(frame)[-_STACK_FRAMES_PER_THREAD:]:
+            logger.warning("    %s", line.rstrip())
+
+
+def _should_report_pending(pending: int, shutting_down: bool) -> bool:
+    """Whether a loop closing with `pending` overlapped ops is worth a line.
+
+    Every proactor loop closes with exactly one outstanding: its own
+    self-pipe read, cancelled by close() a moment earlier and not yet
+    reaped. Agent tools open and close a loop per call, so reporting that
+    one is a line per tool call saying the same nothing.
+
+    Anything past it is the self-pipe plus something real. At shutdown
+    everything is named regardless — that is the close that can hang, and
+    there the self-pipe is a suspect like any other.
+    """
+    return pending > 0 and (shutting_down or pending > 1)
+
+
+# How long the drain is left alone before we hand it the packets it waits
+# for, and how long before we stop being careful about which. Both are
+# generous: a healthy close drains in milliseconds.
+_DRAIN_NUDGE_SECONDS = float(os.environ.get("DPC_SHUTDOWN_DRAIN_NUDGE", "5"))
+_DRAIN_GIVE_UP_SECONDS = float(os.environ.get("DPC_SHUTDOWN_DRAIN_GIVE_UP", "20"))
+
+
+def _post_missing_completions(proactor, done_only: bool) -> int:
+    """Hand `IocpProactor.close()` the completion packets it is waiting for.
+
+    Its drain is `while self._cache: self._poll(1)` (`windows_events.py:857`)
+    with no timeout at all — the comment above it says «don't exit with
+    running overlapped to prevent a crash». An entry leaves that cache only
+    when `_poll` dequeues a packet for its address, so one packet that never
+    arrives is a process that never exits.
+
+    Measured 2026-08-24: every component reported clean stop in 4.2 s, and
+    the loop then spun for the six minutes until Mike ended it by hand,
+    holding two entries whose futures read `finished result=548` and `549`
+    on already-closed sockets.
+
+    Those two are the shape `_register` documents at `:723-738` — an
+    operation that completes synchronously has its result set immediately
+    and is *still* cached, because «Even if GetOverlappedResult() was
+    called, we have to wait for the notification of the completion in
+    GetQueuedCompletionStatus()». Posting that notification ourselves is
+    not a trick played on the loop: `_poll` pops the entry and then skips
+    the callback, since its guard at `:801` is `elif not f.done()`. Nothing
+    is fabricated for a future still waiting on a real answer — that is what
+    `done_only` protects, and only the give-up pass drops it.
+
+    Returns the number of packets posted.
+    """
+    import _overlapped  # Windows-only C module; imported where it is used.
+
+    iocp = getattr(proactor, "_iocp", None)
+    cache = getattr(proactor, "_cache", None)
+    if iocp is None or not cache:
+        return 0
+
+    posted = 0
+    for address, entry in list(cache.items()):
+        fut = entry[0]
+        try:
+            settled = fut.done()
+        except Exception:  # a stub or a half-torn-down future
+            settled = False
+        if done_only and not settled:
+            continue
+        try:
+            # key=0 on purpose: _poll's KeyError branch closes a non-zero key
+            # as a pipe handle, and there is no handle here to close.
+            _overlapped.PostQueuedCompletionStatus(iocp, 0, 0, address)
+        except OSError as exc:
+            logger.debug("drain nudge failed for overlapped %s: %s", address, exc)
+        else:
+            posted += 1
+    return posted
+
+
+def _start_drain_watchdog(proactor):
+    """Let a loop close finish even when a completion packet never comes.
+
+    Runs beside `IocpProactor.close()`, which is blocking the calling thread
+    inside its own drain. `PostQueuedCompletionStatus` is a Win32 call on
+    the port handle and is safe to make from here; the packets are dequeued
+    by that same blocked `_poll`, so the close finishes through CPython's
+    own path rather than by force.
+    """
+    import threading
+    import time
+
+    def run():
+        started = time.monotonic()
+        nudge_at = started + _DRAIN_NUDGE_SECONDS
+        give_up_at = started + max(_DRAIN_GIVE_UP_SECONDS, _DRAIN_NUDGE_SECONDS)
+        nudged = False
+        while True:
+            if getattr(proactor, "_iocp", None) is None:
+                return  # close() returned on its own
+            cache = getattr(proactor, "_cache", None)
+            if not cache:
+                return
+            now = time.monotonic()
+            if not nudged and now >= nudge_at:
+                count = _post_missing_completions(proactor, done_only=True)
+                nudged = True
+                if count:
+                    logger.warning(
+                        "Shutdown: %d overlapped op(s) had already finished and "
+                        "their completion never arrived — posting it so the loop "
+                        "can close (waited %.0fs)", count, _DRAIN_NUDGE_SECONDS,
+                    )
+            elif now >= give_up_at:
+                count = _post_missing_completions(proactor, done_only=False)
+                if count:
+                    logger.warning(
+                        "Shutdown: %d overlapped op(s) still unfinished after "
+                        "%.0fs — abandoning the wait for them so the process can "
+                        "exit. Re-run with DPC_DEBUG_SHUTDOWN=1 to see where they "
+                        "were registered.", count, _DRAIN_GIVE_UP_SECONDS,
+                    )
+                return
+            time.sleep(0.25)
+
+    thread = threading.Thread(
+        target=run, name="shutdown-drain-watchdog", daemon=True,
+    )
+    thread.start()
+    return thread
+
+
+def _install_shutdown_diagnostics():
+    """Name whatever still holds a Windows overlapped op when a loop closes.
 
     IocpProactor.close() spins in `while self._cache` until every overlapped
-    completes, printing "is running after closing for N seconds" once a second
-    (windows_events.py:857). The log tells us one op is stuck but never which,
-    so every fix so far has been aimed at a guess. This prints the owner.
+    completes, printing "is running after closing for N seconds" once a
+    second. That message says one op is stuck and never which, so every fix
+    so far has been aimed at a guess.
 
-    Opt-in via DPC_DEBUG_SHUTDOWN=1; costs nothing when off.
+    Two halves with very different costs, so they are gated separately:
+
+    * listing what is pending runs once per loop close and costs nothing —
+      always on;
+    * recording where each op was registered means a formatted stack per
+      overlapped registration, i.e. per socket read and write in the
+      process — opt-in via DPC_DEBUG_SHUTDOWN=1.
+
+    Without the second half the object alone rarely identifies the op: a
+    stuck one leaves a closed socket (fd=-1) behind. The stack has to be
+    taken at registration — _OverlappedFuture._source_traceback exists only
+    under asyncio debug mode, and a cancelled-but-stuck future is pruned by
+    a done-callback before close() ever sees it.
     """
     if platform.system() != "Windows":
         return
@@ -326,34 +731,43 @@ def _trace_pending_overlapped():
     except ImportError:
         return
 
-    # A stuck op leaves a closed socket (fd=-1), so the object itself names
-    # nothing. _OverlappedFuture._source_traceback only exists under asyncio
-    # debug mode, and a cancelled-but-stuck future would be pruned by a
-    # done-callback before close() runs. So record the stack at registration
-    # and keep it until close() reads it, keyed by ov.address like _cache.
+    if getattr(IocpProactor.close, "_dpc_shutdown_diagnostics", False):
+        return
+
+    capture_origins = os.environ.get("DPC_DEBUG_SHUTDOWN") == "1"
     origins: dict[int, list[str]] = {}
-    original_register = IocpProactor._register
     original_close = IocpProactor.close
 
-    def register_with_origin(self, ov, obj, callback):
-        fut = original_register(self, ov, obj, callback)
-        address = getattr(ov, "address", None)
-        if address is not None:
-            origins[address] = traceback.format_stack(limit=14)[:-1]
-            if len(origins) > 1000:
-                # Addresses gone from _cache have completed; their stacks are dead weight.
-                for stale in origins.keys() - self._cache.keys():
-                    del origins[stale]
-        return fut
+    if capture_origins:
+        original_register = IocpProactor._register
+
+        def register_with_origin(self, ov, obj, callback):
+            fut = original_register(self, ov, obj, callback)
+            address = getattr(ov, "address", None)
+            if address is not None:
+                origins[address] = traceback.format_stack(limit=14)[:-1]
+                if len(origins) > 1000:
+                    # Addresses gone from _cache have completed; their
+                    # stacks are dead weight.
+                    for stale in origins.keys() - self._cache.keys():
+                        del origins[stale]
+            return fut
+
+        IocpProactor._register = register_with_origin
 
     def close_with_trace(self):
         cache = getattr(self, "_cache", None)
-        if cache:
-            logger.warning("Shutdown: %d overlapped op(s) still pending", len(cache))
+        worth_reporting = bool(cache) and _should_report_pending(
+            len(cache), _shutting_down
+        )
+        if worth_reporting:
+            level = logging.WARNING if _shutting_down else logging.DEBUG
+            logger.log(level, "%d overlapped op(s) still pending at loop close", len(cache))
             for address, entry in list(cache.items()):
-                # windows_events.py:743 — _cache[ov.address] = (fut, ov, obj, callback)
+                # windows_events.py — _cache[ov.address] = (fut, ov, obj, callback)
                 fut, _ov, obj, callback = entry
-                logger.warning(
+                logger.log(
+                    level,
                     "  pending overlapped %s: fut=%r cancelled=%s obj=%r callback=%r",
                     address,
                     fut,
@@ -362,18 +776,35 @@ def _trace_pending_overlapped():
                     getattr(callback, "__qualname__", callback),
                 )
                 for line in origins.get(address, []):
-                    logger.warning("    origin: %s", line.rstrip())
-        return original_close(self)
+                    logger.log(level, "    origin: %s", line.rstrip())
+            if not capture_origins and _shutting_down:
+                logger.warning(
+                    "  (start with DPC_DEBUG_SHUTDOWN=1 to also record where "
+                    "each op was registered)"
+                )
+        # The same predicate arms the watchdog: exactly the closes that can
+        # spin. A healthy one carries the self-pipe read alone and drains
+        # before the watchdog's first tick, so the thread costs one wakeup.
+        watchdog = _start_drain_watchdog(self) if worth_reporting else None
+        try:
+            return original_close(self)
+        finally:
+            if watchdog is not None:
+                # It exits on its own as soon as the cache empties; this only
+                # keeps a finished thread from outliving the call in the dump.
+                watchdog.join(timeout=0.5)
 
-    IocpProactor._register = register_with_origin
+    # Idempotent: a second install would wrap the wrapper, so every close
+    # would run the drain logic twice and a traceback would show the frame
+    # twice. Production calls this once; tests call it per case.
+    close_with_trace._dpc_shutdown_diagnostics = True
     IocpProactor.close = close_with_trace
 
 
 if __name__ == "__main__":
     try:
         single_instance.acquire()  # exits if another backend is already running
-        if os.environ.get("DPC_DEBUG_SHUTDOWN") == "1":
-            _trace_pending_overlapped()
+        _install_shutdown_diagnostics()
         print(f"D-PC Messenger v{__version__} - Starting Core Service (press Ctrl+C to stop)")
         asyncio.run(main())
     except KeyboardInterrupt:

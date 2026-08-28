@@ -490,13 +490,15 @@ class _FakeStateContext:
     us enough surface to drive AuthBrowser through _open/close without
     a real Camoufox binary."""
 
-    def __init__(self, on_storage_state=None):
+    def __init__(self, on_storage_state=None, cookies_payload=None):
         self.added: list[list[dict]] = []
         self.routes: list[tuple[str, object]] = []
         self.pages: list[object] = []
         self._on_storage_state = on_storage_state
+        self.cookies_payload: list[dict] = list(cookies_payload or [])
         self.closed = False
         self.storage_state_calls: list[str] = []
+        self.cookies_calls = 0
 
     def add_cookies(self, cookies: list[dict]) -> None:
         self.added.append(list(cookies))
@@ -510,13 +512,22 @@ class _FakeStateContext:
         return page
 
     def storage_state(self, path: str | None = None) -> dict | None:
+        """Kept so a test can assert it is NOT called.
+
+        Saving via storage_state() collects localStorage, and Firefox reads
+        that by opening a window on each origin — measured at one extra
+        visible window per origin, appearing and vanishing within a second,
+        after every navigate and at close. The save path uses cookies()
+        instead; the origins it stopped collecting were discarded on load
+        anyway."""
         self.storage_state_calls.append(path or "<no-path>")
         if self._on_storage_state is not None:
-            # Real Playwright returns the state dict; allow the test
-            # callback to return one too so we can exercise the
-            # return-value path that skips the read-back.
             return self._on_storage_state(path)
         return None
+
+    def cookies(self) -> list[dict]:
+        self.cookies_calls = getattr(self, "cookies_calls", 0) + 1
+        return list(self.cookies_payload)
 
     def close(self) -> None:
         self.closed = True
@@ -656,7 +667,10 @@ def test_save_storage_state_writes_atomically_and_syncs_vault(vault_home):
         Path(path).write_text(json.dumps(state_dict), encoding="utf-8")
         return state_dict
 
-    ab._context = _FakeStateContext(on_storage_state=_write_state)
+    ab._context = _FakeStateContext(
+        on_storage_state=_write_state,
+        cookies_payload=state_dict["cookies"],
+    )
     ab._save_storage_state()
 
     state_path = ab._state_path()
@@ -703,7 +717,10 @@ def test_save_storage_state_uses_return_value_not_disk_read(vault_home, monkeypa
 
     monkeypatch.setattr(Path, "read_text", _no_read)
     try:
-        ab._context = _FakeStateContext(on_storage_state=_write_state)
+        ab._context = _FakeStateContext(
+        on_storage_state=_write_state,
+        cookies_payload=state_dict["cookies"],
+    )
         ab._save_storage_state()
     finally:
         monkeypatch.setattr(Path, "read_text", original_read)
@@ -751,7 +768,10 @@ def test_save_storage_state_chmod_on_posix(vault_home, monkeypatch):
 
     _patch_browser_os(monkeypatch, "posix", _capture_chmod)
 
-    ab._context = _FakeStateContext(on_storage_state=_write_state)
+    ab._context = _FakeStateContext(
+        on_storage_state=_write_state,
+        cookies_payload=state_dict["cookies"],
+    )
     ab._save_storage_state()
 
     state_path = ab._state_path()
@@ -776,7 +796,10 @@ def test_save_storage_state_no_chmod_on_non_posix(vault_home, monkeypatch):
 
     _patch_browser_os(monkeypatch, "nt", _record_chmod)
 
-    ab._context = _FakeStateContext(on_storage_state=_write_state)
+    ab._context = _FakeStateContext(
+        on_storage_state=_write_state,
+        cookies_payload=[],
+    )
     ab._save_storage_state()
 
     assert chmod_called == []
@@ -808,7 +831,10 @@ def test_save_storage_state_swallows_chmod_oserror(vault_home, monkeypatch, capl
 
     _patch_browser_os(monkeypatch, "posix", _raise_chmod)
 
-    ab._context = _FakeStateContext(on_storage_state=_write_state)
+    ab._context = _FakeStateContext(
+        on_storage_state=_write_state,
+        cookies_payload=state_dict["cookies"],
+    )
     with caplog.at_level(_logging.WARNING):
         ab._save_storage_state()
 
@@ -1307,3 +1333,669 @@ def test_force_kill_process_noop_when_no_pids(vault_home):
     assert ab._browser_pids == set()
     ab._force_kill_process()  # must not raise
     assert ab._browser_pids == set()
+
+
+
+# ─────────────────────────────────────────────────────────────
+# navigate() must surface the HTTP status of an error page
+# ─────────────────────────────────────────────────────────────
+
+
+class _FakeResponsePage:
+    def __init__(self, status: int, url: str):
+        self.url = url
+        self._status = status
+
+    def goto(self, url, **kwargs):
+        self.url = url
+        return types.SimpleNamespace(status=self._status)
+
+
+def _browser_for_navigate(status: int, monkeypatch):
+    from dpc_client_core.dpc_agent.tools.browser import AuthBrowser
+
+    ab = AuthBrowser(agent_id="agent_a", domain=f"{TEST_DOMAIN}")
+    ab._page = _FakeResponsePage(status, TEST_DOMAIN_URL)
+    ab.audit: list = []
+    monkeypatch.setattr(ab, "_check_domain", lambda url: None)
+    monkeypatch.setattr(ab, "_wait_for_content_stable", lambda: None)
+    monkeypatch.setattr(ab, "a11y_snapshot", lambda: ("button 'Subscribe'", {"@e1": {}}))
+    monkeypatch.setattr(ab, "_save_storage_state", lambda: None)
+    monkeypatch.setattr(
+        ab, "_audit_action",
+        lambda action, url, result, **kw: ab.audit.append((action, result, kw)),
+    )
+    return ab
+
+
+def test_navigate_flags_http_error_page(vault_home, monkeypatch):
+    """A 404 renders as an ordinary page and used to be indistinguishable
+    from a real one, so the agent waited out full click timeouts on a
+    page that never existed."""
+    from dpc_client_core.dpc_agent.tools.browser import HTTP_ERROR_PREFIX
+
+    ab = _browser_for_navigate(404, monkeypatch)
+    out = ab.navigate(f"{TEST_DOMAIN_URL}/@nosuchchannel")
+    assert out.startswith(f"{HTTP_ERROR_PREFIX}404")
+    assert "Subscribe" in out
+    assert ab.audit[0][2]["status"] == 404
+
+
+def test_navigate_leaves_ok_page_unprefixed(vault_home, monkeypatch):
+    from dpc_client_core.dpc_agent.tools.browser import HTTP_ERROR_PREFIX
+
+    ab = _browser_for_navigate(200, monkeypatch)
+    out = ab.navigate(f"{TEST_DOMAIN_URL}/@real")
+    assert not out.startswith(HTTP_ERROR_PREFIX)
+    assert ab.audit[0][2]["status"] == 200
+
+
+# ─────────────────────────────────────────────────────────────
+# S17 browser-lifecycle fixes: a transient navigation failure must not
+# cost the browser; browse_page must stop launching one per call; the
+# auth path must honour the headless it asked approval for.
+# ─────────────────────────────────────────────────────────────
+
+
+class _FakeSession:
+    """Stands in for AuthBrowser on the `_run_in_session` contract:
+    a `_get_executor()` plus plain sync methods."""
+
+    def __init__(self, fail_with=None, fail_times=0):
+        self._last_activity = 0.0
+        self._page = object()
+        self._agent_id = "agent_a"
+        self.calls: list = []
+        self.closed = False
+        self._fail_with = fail_with
+        self._fail_times = fail_times
+
+    def _get_executor(self):
+        return None  # default loop executor is fine for a sync stub
+
+    def navigate(self, url):
+        self.calls.append(("navigate", url))
+        if self._fail_times > 0:
+            self._fail_times -= 1
+            raise self._fail_with
+        return "snapshot"
+
+    def fetch_html(self, url):
+        self.calls.append(("fetch_html", url))
+        return "<html><body><p>pooled</p></body></html>"
+
+    def close(self):
+        self.closed = True
+        self.calls.append(("close", None))
+
+
+_TRANSIENT = Exception(
+    "Page.goto: Navigation to https://a/x is interrupted by "
+    "another navigation to https://a/y"
+)
+_DEAD = Exception("Target page, context or browser has been closed")
+
+
+@pytest.mark.parametrize(
+    "exc,expected",
+    [
+        (_TRANSIENT, False),
+        (Exception("Timeout 60000ms exceeded"), False),
+        (Exception("net::ERR_ABORTED"), False),
+        (_DEAD, True),
+        (Exception("Browser closed"), True),
+        (Exception("Connection closed while reading from the driver"), True),
+    ],
+)
+def test_is_session_dead_classification(exc, expected):
+    from dpc_client_core.dpc_agent.tools.browser import _is_session_dead
+
+    assert _is_session_dead(exc) is expected
+
+
+def test_navigate_retries_in_place_on_transient_failure():
+    """A navigation that loses a race leaves a working browser. Recovery
+    must retry on the same page, not tear the session down."""
+    from dpc_client_core.dpc_agent.tools.browser import _navigate_with_recovery
+
+    session = _FakeSession(fail_with=_TRANSIENT, fail_times=1)
+    out = asyncio.run(
+        _navigate_with_recovery(session, "agent_a", "https://a/x", [])
+    )
+
+    assert out is session, "same session must keep serving"
+    assert session.closed is False, "a live browser must not be closed"
+    assert [c[0] for c in session.calls] == ["navigate", "navigate"]
+
+
+def test_navigate_recycles_when_session_is_dead(monkeypatch):
+    """The one case that does justify a relaunch: the browser is gone."""
+    import dpc_client_core.dpc_agent.tools.browser as mod
+
+    dead = _FakeSession(fail_with=_DEAD, fail_times=1)
+    fresh = _FakeSession()
+
+    async def _fake_create(agent_id, domains, headed):
+        return fresh
+
+    monkeypatch.setattr(mod, "_get_or_create_session_async", _fake_create)
+    out = asyncio.run(
+        mod._navigate_with_recovery(dead, "agent_a", "https://a/x", [])
+    )
+
+    assert out is fresh
+    assert dead.closed is True
+    assert [c[0] for c in fresh.calls] == ["navigate"]
+
+
+def test_fetch_session_is_invisible_to_interactive_tools(vault_home):
+    """The pooled fetch browser must never be handed to browser_* tools:
+    they resolve `_active_browser_sessions`, and a fetch navigating the
+    page an agent holds refs into would silently invalidate them."""
+    from dpc_client_core.dpc_agent.tools.browser import (
+        AuthBrowser,
+        _active_browser_sessions,
+        _fetch_sessions,
+        _get_session_or_error,
+    )
+
+    interactive = AuthBrowser(agent_id="agent_a", domains=[])
+    interactive._page = object()
+    fetch = AuthBrowser(agent_id="agent_a", domains=[])
+    fetch._page = object()
+    _active_browser_sessions["agent_a"] = interactive
+    _fetch_sessions["agent_a"] = fetch
+    try:
+        assert _get_session_or_error("agent_a") is interactive
+    finally:
+        _active_browser_sessions.pop("agent_a", None)
+        _fetch_sessions.pop("agent_a", None)
+
+
+def test_close_deregisters_only_its_own_entry(vault_home):
+    """Two browsers can share one agent_id. Closing one must not evict
+    the other's registration while that browser is still running."""
+    from dpc_client_core.dpc_agent.tools.browser import (
+        AuthBrowser,
+        _active_browser_sessions,
+        _fetch_sessions,
+    )
+
+    interactive = AuthBrowser(agent_id="agent_a", domains=[])
+    fetch = AuthBrowser(agent_id="agent_a", domains=[])
+    _active_browser_sessions["agent_a"] = interactive
+    _fetch_sessions["agent_a"] = fetch
+    try:
+        fetch.close()
+        assert _active_browser_sessions.get("agent_a") is interactive
+        assert "agent_a" not in _fetch_sessions
+        interactive.close()
+        assert "agent_a" not in _active_browser_sessions
+    finally:
+        _active_browser_sessions.pop("agent_a", None)
+        _fetch_sessions.pop("agent_a", None)
+
+
+def test_fetch_js_text_reuses_pooled_browser(monkeypatch):
+    """The JS fallback goes through the pooled browser, not a launch."""
+    import dpc_client_core.dpc_agent.tools.browser as mod
+
+    session = _FakeSession()
+    launched: list = []
+
+    async def _fake_pool(agent_id):
+        return session
+
+    monkeypatch.setattr(mod, "_get_or_create_fetch_session", _fake_pool)
+    monkeypatch.setattr(
+        mod, "_browse_with_camoufox",
+        lambda url, agent_id="<anonymous>": launched.append((url, agent_id)),
+    )
+    monkeypatch.setattr(mod, "_html_to_markdown", lambda html: "pooled")
+
+    out = asyncio.run(mod._fetch_js_text("https://a/x", "agent_a"))
+
+    assert out == "pooled"
+    assert session.calls == [("fetch_html", "https://a/x")]
+    assert launched == [], "no one-shot browser may be launched"
+
+
+def test_fetch_js_text_falls_back_to_one_shot(monkeypatch):
+    """If the pool fails the tool must not get worse than it was — and
+    the one-shot must carry the agent id, so its page console lines are
+    attributable instead of landing as <anonymous>."""
+    import dpc_client_core.dpc_agent.tools.browser as mod
+
+    launched: list = []
+
+    async def _boom(agent_id):
+        raise RuntimeError("Camoufox launch failed")
+
+    def _oneshot(url, agent_id="<anonymous>"):
+        launched.append((url, agent_id))
+        return "oneshot"
+
+    monkeypatch.setattr(mod, "_get_or_create_fetch_session", _boom)
+    monkeypatch.setattr(mod, "_browse_with_camoufox", _oneshot)
+
+    out = asyncio.run(mod._fetch_js_text("https://a/x", "agent_a"))
+
+    assert out == "oneshot"
+    assert launched == [("https://a/x", "agent_a")]
+
+
+def test_fetch_js_text_without_agent_uses_one_shot(monkeypatch):
+    import dpc_client_core.dpc_agent.tools.browser as mod
+
+    launched: list = []
+
+    def _oneshot(url, agent_id="<anonymous>"):
+        launched.append((url, agent_id))
+        return "oneshot"
+
+    monkeypatch.setattr(mod, "_browse_with_camoufox", _oneshot)
+
+    out = asyncio.run(mod._fetch_js_text("https://a/x", None))
+
+    assert out == "oneshot"
+    assert launched == [("https://a/x", "<anonymous>")]
+
+
+def test_browse_page_auth_without_keep_open_is_headless(vault_home):
+    """The gate above this call asks the user to approve *headless*
+    access and audits it as such; the browse must not be headed."""
+    import dpc_client_core.dpc_agent.tools.browser as mod
+    from dpc_client_core.dpc_agent.tools.browser import browse_page
+
+    agent_root = vault_home / "agents" / "agent_a"
+    agent_root.mkdir(parents=True, exist_ok=True)
+    ctx = _make_ctx(agent_root)
+
+    seen: dict = {}
+
+    def _capture(agent_id, domain, url, headed=True):
+        seen["headed"] = headed
+        return "<html><body><p>ok</p></body></html>"
+
+    original = mod._auth_browse_html
+    mod._auth_browse_html = _capture
+    try:
+        asyncio.run(
+            browse_page(
+                ctx,
+                url=f"https://{TEST_DOMAIN}/my/orders",
+                use_auth=f"{TEST_DOMAIN}",
+            )
+        )
+    finally:
+        mod._auth_browse_html = original
+
+    assert seen["headed"] is False
+
+
+def test_idle_cleanup_sweeps_fetch_browsers():
+    """Fetch browsers are reaped by the same idle sweep as sessions —
+    otherwise a headless browser would outlive every agent round."""
+    from dpc_client_core.dpc_agent.tools.browser import (
+        _fetch_sessions,
+        cleanup_idle_browser_sessions,
+    )
+
+    stale = _FakeSession()
+    stale._last_activity = time.monotonic() - 10_000
+    _fetch_sessions["agent_a"] = stale
+    try:
+        closed = asyncio.run(cleanup_idle_browser_sessions())
+        assert closed >= 1
+        assert stale.closed is True
+        assert "agent_a" not in _fetch_sessions
+    finally:
+        _fetch_sessions.pop("agent_a", None)
+
+
+
+# ─────────────────────────────────────────────────────────────
+# S17: refs address the element the snapshot walked, and the
+# summarizer may not eat the only things the agent can act on.
+# ─────────────────────────────────────────────────────────────
+
+
+class _RecordingPage:
+    """Captures what locator/get_by_role the resolver reaches for."""
+
+    def __init__(self, count=1):
+        self.locators: list = []
+        self.roles: list = []
+        self._count = count
+
+    def locator(self, selector):
+        self.locators.append(selector)
+        page = self
+
+        class _Loc:
+            def count(self_inner):
+                return page._count
+
+        return _Loc()
+
+    def get_by_role(self, role, name=None):
+        self.roles.append((role, name))
+        raise AssertionError("refs must not go through get_by_role any more")
+
+
+def _browser_with_refs(refs, count=1):
+    from dpc_client_core.dpc_agent.tools.browser import AuthBrowser
+
+    ab = AuthBrowser(agent_id="agent_a", domains=[])
+    ab._page = _RecordingPage(count=count)
+    ab._last_refs = refs
+    return ab
+
+
+def test_ref_resolves_to_the_marked_element(vault_home):
+    """The failure this replaces: a nameless icon button became
+    get_by_role("button") with no disambiguation, matched all 24 buttons
+    on the page and died instantly on strict mode."""
+    ab = _browser_with_refs({"@e7": {"role": "button", "name": "", "el": "3:41"}})
+    ab._resolve_ref("@e7")
+    assert ab._page.locators == ['[data-dpc-el="3:41"]']
+    assert ab._page.roles == []
+
+
+def test_named_ref_also_resolves_by_mark(vault_home):
+    """Names are not unique either, and the ordinal that disambiguated them
+    assumed the page had not re-rendered since the snapshot."""
+    ab = _browser_with_refs(
+        {"@e2": {"role": "link", "name": "Integrity and Authenticity", "el": "5:9"}}
+    )
+    ab._resolve_ref("@e2")
+    assert ab._page.locators == ['[data-dpc-el="5:9"]']
+
+
+def test_stale_ref_fails_immediately_with_a_useful_message(vault_home):
+    """A vanished element used to cost the full 30 s timeout and then be
+    reported as if it were merely slow."""
+    ab = _browser_with_refs(
+        {"@e2": {"role": "link", "name": "x", "el": "5:9"}}, count=0,
+    )
+    with pytest.raises(ValueError) as exc:
+        ab._resolve_ref("@e2")
+    assert "stale" in str(exc.value)
+    assert "a11y_snapshot" in str(exc.value)
+
+
+def test_unknown_ref_still_raises(vault_home):
+    ab = _browser_with_refs({})
+    with pytest.raises(ValueError) as exc:
+        ab._resolve_ref("@e1")
+    assert "unknown ref" in str(exc.value)
+
+
+def test_css_selector_passes_through(vault_home):
+    ab = _browser_with_refs({})
+    ab._resolve_ref("button.primary")
+    assert ab._page.locators == ["button.primary"]
+
+
+def test_snapshot_marks_are_scoped_per_snapshot(vault_home):
+    """Marks left on elements a later walk no longer reaches must not be
+    able to answer a current ref."""
+    from dpc_client_core.dpc_agent.tools.browser import _A11Y_DOM_SNAPSHOT_JS
+
+    assert _A11Y_DOM_SNAPSHOT_JS.lstrip().startswith("(serial)")
+    assert "data-dpc-el" in _A11Y_DOM_SNAPSHOT_JS
+    assert "serial + ':' + nodeCount" in _A11Y_DOM_SNAPSHOT_JS
+
+
+# ─────────────────────────────────────────────────────────────
+# Summarization keeps every ref
+# ─────────────────────────────────────────────────────────────
+
+
+_CALENDAR_SNAPSHOT = "\n".join(
+    ["- dialog \"Schedule\"", "  - text \"Select a date\""]
+    + [f'  - button "{d}" [@e{d}]' for d in range(1, 32)]
+    + ["  - text \"Time zone\""]
+)
+
+
+def test_ref_lines_are_split_out_of_the_prose():
+    from dpc_client_core.dpc_agent.tools.browser import _split_actionable_lines
+
+    actionable, prose = _split_actionable_lines(_CALENDAR_SNAPSHOT)
+    assert len(actionable) == 31
+    assert "@e" not in prose
+    assert "Select a date" in prose
+
+
+def test_summary_keeps_every_ref_verbatim():
+    """The observed loss: 31 day cells came back as one line of prose and the
+    agent had nothing to click."""
+    from dpc_client_core.dpc_agent.tools.browser import (
+        _rejoin_with_actionable,
+        _split_actionable_lines,
+    )
+
+    actionable, _prose = _split_actionable_lines(_CALENDAR_SNAPSHOT)
+    out = _rejoin_with_actionable("Calendar showing August 2026 (day grid 1-31)", actionable)
+    for d in range(1, 32):
+        assert f"[@e{d}]" in out
+
+
+def test_summarizer_is_only_shown_the_prose(monkeypatch):
+    """What the auxiliary model never sees, it cannot drop."""
+    import dpc_client_core.dpc_agent.tools.browser as mod
+
+    seen = {}
+
+    class _LLM:
+        async def query(self, prompt, provider_alias=None):
+            seen["prompt"] = prompt
+            return "short summary"
+
+    out = asyncio.run(
+        mod._llm_summarize_snapshot(_CALENDAR_SNAPSHOT, None, _LLM(), max_chars=10)
+    )
+    # The template names @e5 as an illustration, so assert on the snapshot's
+    # own refs rather than on the substring.
+    assert "[@e" not in seen["prompt"], "ref lines must not reach the summarizer"
+    assert out.count("[@e") == 31
+
+
+def test_duplicate_names_address_different_elements(vault_home):
+    """Kept from the earlier ordinal scheme, which existed because a card
+    exposes the same accessible name on its thumbnail and its title link.
+    Distinct marks answer it directly instead of by counting."""
+    ab = _browser_with_refs({
+        "@e1": {"role": "link", "name": "Deceased Flesh", "el": "2:10"},
+        "@e2": {"role": "link", "name": "Deceased Flesh", "el": "2:14"},
+    })
+    ab._resolve_ref("@e1")
+    ab._resolve_ref("@e2")
+    assert ab._page.locators == ['[data-dpc-el="2:10"]', '[data-dpc-el="2:14"]']
+
+
+def test_refs_survive_a_summarizer_timeout():
+    import dpc_client_core.dpc_agent.tools.browser as mod
+
+    class _HangingLLM:
+        async def query(self, prompt, provider_alias=None):
+            await asyncio.sleep(mod.SNAPSHOT_SUMMARIZE_TIMEOUT_SEC + 5)
+
+    out = asyncio.run(
+        mod._llm_summarize_snapshot(_CALENDAR_SNAPSHOT, None, _HangingLLM(), max_chars=10)
+    )
+    assert out.count("[@e") == 31
+
+
+def test_refs_survive_without_an_llm_at_all():
+    import dpc_client_core.dpc_agent.tools.browser as mod
+
+    out = asyncio.run(
+        mod._llm_summarize_snapshot(_CALENDAR_SNAPSHOT, None, None, max_chars=10)
+    )
+    assert out.count("[@e") == 31
+
+
+# ─────────────────────────────────────────────────────────────
+# The audit says why, not just that
+# ─────────────────────────────────────────────────────────────
+
+
+def test_audit_error_records_the_message():
+    """`Error` alone covered a strict-mode violation naming 24 buttons and
+    unrelated refusals; the record kept neither message."""
+    from dpc_client_core.dpc_agent.tools.browser import _audit_error
+
+    exc = RuntimeError(
+        "Locator.click: Error: strict mode violation: "
+        'get_by_role("button") resolved to 24 elements:\n'
+        "  1) <button ...>\n  2) <button ...>"
+    )
+    fields = _audit_error(exc)
+    assert fields["error"] == "RuntimeError"
+    assert "strict mode violation" in fields["error_message"]
+    assert "\n" not in fields["error_message"], "call log must not be inlined"
+    assert len(fields["error_message"]) <= 300
+
+
+def test_headless_gate_fails_fast_without_a_ui(vault_home):
+    """The gate broadcasts a request and waits 120s for an answer. When no UI
+    client is connected the broadcast is dropped, so the wait could only end
+    in a timeout — and the agent was told "not approved", as though a human
+    had refused. 19 requests across three agents expired that way before the
+    dialog existed."""
+    import time
+    import dpc_client_core.dpc_agent.tools.browser as mod
+    from dpc_client_core.dpc_agent.tools.browser import browse_page
+
+    agent_root = vault_home / "agents" / "agent_a"
+    agent_root.mkdir(parents=True, exist_ok=True)
+    ctx = _make_ctx(agent_root)
+
+    broadcasts = []
+
+    class _NoUiApi:
+        has_clients = False
+
+        async def broadcast_event(self, name, payload):
+            broadcasts.append(name)
+
+    ctx.dpc_service = types.SimpleNamespace(local_api=_NoUiApi())
+
+    started = time.monotonic()
+    out = asyncio.run(
+        browse_page(ctx, url=f"https://{TEST_DOMAIN}/x", use_auth=f"{TEST_DOMAIN}")
+    )
+    elapsed = time.monotonic() - started
+
+    assert "no UI client is connected" in out
+    assert elapsed < 5, "must not wait out the 120s approval window"
+    assert broadcasts == [], "no point broadcasting to nobody"
+
+
+def test_headless_gate_still_waits_when_a_ui_is_connected(vault_home):
+    """With a UI attached the request is real: broadcast, then wait for the
+    answer the dialog sends back."""
+    import dpc_client_core.dpc_agent.tools.browser as mod
+    from dpc_client_core.dpc_agent.tools.browser import browse_page
+
+    agent_root = vault_home / "agents" / "agent_a"
+    agent_root.mkdir(parents=True, exist_ok=True)
+    ctx = _make_ctx(agent_root)
+
+    broadcasts = []
+
+    class _LiveApi:
+        has_clients = True
+
+        async def broadcast_event(self, name, payload):
+            broadcasts.append(name)
+            # Answer immediately, the way the dialog does.
+            entry = mod.get_pending_auth_approvals()[payload["request_id"]]
+            entry["approved"] = True
+            entry["event"].set()
+
+    ctx.dpc_service = types.SimpleNamespace(local_api=_LiveApi())
+
+    def _html(agent_id, domain, url, headed=True):
+        return "<html><body><p>ok</p></body></html>"
+
+    original = mod._auth_browse_html
+    mod._auth_browse_html = _html
+    try:
+        out = asyncio.run(
+            browse_page(ctx, url=f"https://{TEST_DOMAIN}/x", use_auth=f"{TEST_DOMAIN}")
+        )
+    finally:
+        mod._auth_browse_html = original
+
+    assert broadcasts == ["web_auth_headless_approval_request"]
+    assert "not approved" not in out
+
+
+def test_fetch_browser_carries_no_login(vault_home):
+    """The regression this closes: the browse_page JS fallback opened with
+    the agent's whole saved login and ran as a second, concurrent browser
+    against the same account — two sessions, two fingerprints, one set of
+    Google/TikTok cookies. browse_page without use_auth is the
+    unauthenticated path; it must carry no identity at all."""
+    from dpc_client_core.dpc_agent.tools.browser import AuthBrowser
+
+    fetch = AuthBrowser(agent_id="agent_a", domains=[], anonymous=True)
+    assert fetch._anonymous is True
+
+    interactive = AuthBrowser(agent_id="agent_a", domains=[])
+    assert interactive._anonymous is False
+
+
+def test_anonymous_browser_never_writes_the_shared_state(vault_home):
+    """Second half of the same defect: both browsers resolve the same
+    ~/.dpc/agents/{id}/browser_state.json, so an anonymous one closing last
+    would overwrite the interactive session's login with a blank one."""
+    from dpc_client_core.dpc_agent.tools.browser import AuthBrowser
+
+    state = vault_home / "agents" / "agent_a" / "browser_state.json"
+    state.parent.mkdir(parents=True, exist_ok=True)
+    state.write_text('{"cookies": [{"name": "SID"}], "origins": []}', encoding="utf-8")
+
+    fetch = AuthBrowser(agent_id="agent_a", domains=[], anonymous=True)
+
+    class _Ctx:
+        def storage_state(self, **_kw):
+            raise AssertionError("anonymous browser must not read state out")
+
+    fetch._context = _Ctx()
+    fetch._save_storage_state()  # must be a no-op, not an exception
+
+    assert json.loads(state.read_text(encoding="utf-8"))["cookies"] == [{"name": "SID"}]
+
+
+def test_save_does_not_collect_origins(vault_home):
+    """Measured cause of the windows that opened and vanished: saving via
+    storage_state() collects localStorage, and Firefox reads it by opening a
+    window on each origin — a save with two origins peaked at two extra
+    visible windows. This runs after every navigate and at close.
+
+    Nothing is lost by skipping it: the load path strips origins before
+    handing state to new_context, for the same reason in reverse."""
+    from dpc_client_core.dpc_agent.tools.browser import AuthBrowser
+
+    ab = AuthBrowser(agent_id="agent_a", domains=[f"{TEST_DOMAIN}"])
+    cookies = [{
+        "name": "SID", "value": "v", "domain": f".{TEST_DOMAIN}",
+        "path": "/", "secure": True, "httpOnly": True,
+        "sameSite": "Lax", "expires": 1735689600,
+    }]
+    ctx = _FakeStateContext(cookies_payload=cookies)
+    ab._context = ctx
+    ab._save_storage_state()
+
+    assert ctx.storage_state_calls == [], (
+        "storage_state() opens a window per origin — the save must not call it"
+    )
+    assert ctx.cookies_calls == 1
+
+    saved = json.loads(ab._state_path().read_text(encoding="utf-8"))
+    assert saved["origins"] == []
+    assert [c["name"] for c in saved["cookies"]] == ["SID"], "the login must survive"

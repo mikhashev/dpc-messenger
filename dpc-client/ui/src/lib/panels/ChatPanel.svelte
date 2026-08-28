@@ -10,6 +10,7 @@
   import TokenWarningBanner from '$lib/components/TokenWarningBanner.svelte';
   import IntegrityWarningBanner from '$lib/components/IntegrityWarningBanner.svelte';
   import AgentTaskBoard from '$lib/components/AgentTaskBoard.svelte';
+  import { votingConversationId } from '$lib/services/knowledge';
   import {
     connectionStatus,
     nodeStatus,
@@ -77,6 +78,7 @@
     agentChatToAgentId,
     aiChats,
     chatProviders,
+    chatEfforts,
     selectedTextProvider,
     selectedVisionProvider,
     selectedVoiceProvider,
@@ -106,6 +108,7 @@
     agentChatToAgentId: Map<string, string>;
     aiChats: Writable<Map<string, AIChatMeta>>;
     chatProviders: Writable<Map<string, string>>;
+    chatEfforts: Writable<Map<string, string>>;
     selectedTextProvider: string;
     selectedVisionProvider: string;
     selectedVoiceProvider: string;
@@ -645,6 +648,13 @@
     };
     if (selectedPeerContexts.size > 0) payload.context_ids = Array.from(selectedPeerContexts);
 
+    // The header's Reasoning control for a chat with no agent behind it. An agent
+    // carries its own level in its config and the loop reads it there; this one has
+    // nowhere to be stored, so it rides the query. Empty means «Config» — the alias
+    // decides, which is what the selector's first option says.
+    const chatSpecificEffort = get(chatEfforts).get(activeChatId);
+    if (chatSpecificEffort) payload.reasoning_effort = chatSpecificEffort;
+
     const chatSpecificProvider = get(chatProviders).get(activeChatId);
     if (chatSpecificProvider) {
       payload.provider = chatSpecificProvider;
@@ -1093,6 +1103,13 @@
       />
     {/if}
 
+    {#if $votingConversationId && $votingConversationId === activeChatId}
+      <div class="voting-notice" role="status">
+        A knowledge commit is being voted on. Messages written now are not part
+        of it — they will go into the next one.
+      </div>
+    {/if}
+
     <textarea
       id="message-input"
       name="message-input"
@@ -1171,4 +1188,15 @@
 
 <style>
   @import "./panels.css";
+
+  .voting-notice {
+    margin: 0 0 0.5rem;
+    padding: 0.5rem 0.75rem;
+    border-radius: 6px;
+    background: rgba(255, 193, 7, 0.12);
+    border: 1px solid rgba(255, 193, 7, 0.4);
+    color: #b8860b;
+    font-size: 0.85rem;
+    line-height: 1.35;
+  }
 </style>

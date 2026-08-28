@@ -230,6 +230,7 @@ export interface KnowledgeEntry {
 // Full proposal payload (knowledge_commit_proposed event) — superset of KnowledgeCommit.
 // Used by KnowledgeCommitDialog.svelte for the commit review/vote UI.
 export interface KnowledgeCommitProposal extends KnowledgeCommit {
+    conversation_id?: string;
     summary: string;
     entries: KnowledgeEntry[];   // Override base entries?: unknown[]
     participants: string[];
@@ -263,6 +264,24 @@ export interface AgentProgressEvent {
     agent_name?: string;
     agent_id?: string;
     ts?: string;
+    // Per-round LLM speed from the llama.cpp provider (live counter beside Stop)
+    speed?: {
+        alias?: string;
+        model?: string;
+        round?: number;
+        prompt_tokens?: number;
+        completion_tokens?: number;
+        elapsed_s?: number;
+        total_tok_s?: number;
+        prefill_tok_s?: number;
+        decode_tok_s?: number;
+        // Window occupancy of the same round (loop.py: round_progress_payload).
+        // Present for every provider, since the window comes from the agent,
+        // not from the provider that filled the speed fields above.
+        context_used?: number;
+        context_window?: number;
+        context_reserve?: number;
+    } | null;
 }
 
 export interface AgentProgressClearEvent {
@@ -392,6 +411,8 @@ export interface GroupMessageEvent {
 export interface GroupFileEvent {
     group_id: string;
     message_id?: string;
+    /** Position of this message in the conversation, assigned when it was stored. */
+    msg_index?: number;
     sender_node_id?: string;
     sender_name?: string;
     filename: string;

@@ -47,15 +47,46 @@ def build_retrieval_backend(
 ) -> RetrievalBackend:
     """Compose a RetrievalBackend from an explicit config dict. See module docstring."""
     cfg = config or {}
-    vector = _build_vector(
-        cfg.get("retrieval_vector", "native"),
-        index_dir,
-        model_name,
-        dimensions,
-    )
-    text = _build_text(cfg.get("retrieval_text", "native"), index_dir)
+    vector_kind = cfg.get("retrieval_vector", "native")
+    text_kind = cfg.get("retrieval_text", "native")
+    vector = _build_vector(vector_kind, index_dir, model_name, dimensions)
+    text = _build_text(text_kind, index_dir)
     fuser = _build_fuser(cfg.get("retrieval_fusion", "custom"))
-    return RetrievalBackend(vector=vector, text=text, fuser=fuser)
+    return RetrievalBackend(
+        vector=vector, text=text, fuser=fuser,
+        backend_id=backend_id_from_config(cfg),
+    )
+
+
+def backend_id_from_config(cfg: dict) -> str:
+    """The pair of channel implementations, as one comparable string.
+
+    The fuser is deliberately not part of it: it does not write anything, so
+    changing it cannot make a stored index answer wrongly.
+    """
+    return "%s+%s" % (cfg.get("retrieval_vector", "native"), cfg.get("retrieval_text", "native"))
+
+
+def _read_agent_config(agent_root: pathlib.Path) -> dict:
+    config_path = agent_root / "config.json"
+    if not config_path.exists():
+        return {}
+    try:
+        cfg = json.loads(config_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as e:
+        log.debug("Could not read %s, using empty config: %s", config_path, e)
+        return {}
+    return cfg if isinstance(cfg, dict) else {}
+
+
+def resolve_backend_id(agent_root: pathlib.Path) -> str:
+    """What `make_backend_for_agent` would build for this agent, named.
+
+    Exists so a caller that needs the answer *before* the backend is built — the
+    rebuild decision runs first — reads it from the same place the factory does,
+    rather than growing a second opinion about what the config means.
+    """
+    return backend_id_from_config(_read_agent_config(agent_root))
 
 
 def make_backend_for_agent(
@@ -88,16 +119,7 @@ def make_backend_for_agent(
     explicit arg first, then `MemoryConfig.embedding_model` from the agent's
     effective config.
     """
-    config_path = agent_root / "config.json"
-    cfg: dict = {}
-    if config_path.exists():
-        try:
-            cfg = json.loads(config_path.read_text(encoding="utf-8"))
-            if not isinstance(cfg, dict):
-                cfg = {}
-        except (OSError, ValueError) as e:
-            log.debug("Could not read %s, using empty config: %s", config_path, e)
-            cfg = {}
+    cfg = _read_agent_config(agent_root)
     # Only pass through retrieval_* keys; everything else is unrelated.
     retrieval_cfg = {k: v for k, v in cfg.items() if k.startswith("retrieval_")}
 
@@ -139,6 +161,7 @@ def _derive_embedding_metadata(agent_config: dict) -> tuple[str, int]:
     provider = get_embedding_provider(
         model_name=mem_cfg.embedding_model,
         local_files_only=True,
+        device=mem_cfg.embedding_device,
     )
     return provider.model_name, provider.dimensions
 

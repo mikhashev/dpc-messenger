@@ -57,7 +57,8 @@ def test_kg_bulk_import_creates_nodes(kg, tmp_path):
     n = kg.bulk_import_knowledge_files(kdir)
     assert n == 2
     assert kg.backend.node_count() == 2
-    alpha = kg.backend.get_node("kf:alpha")
+    # Addressed by index key, the identity the index, the fuser and read_file all use.
+    alpha = kg.backend.get_node("kf:knowledge/alpha.md")
     assert alpha is not None
     assert alpha.node_type == NodeType.KNOWLEDGE_FILE
     assert alpha.label == "Alpha"
@@ -106,19 +107,114 @@ def test_kg_persist_extracted_entities_writes_mentions(kg, tmp_path):
 
 
 def test_kg_graph_expand_after_structural(kg, tmp_path):
+    """The channel speaks index keys, because that is what everything else calls identity.
+
+    It used to emit bare filenames. The fuser dedups on this string, so a graph hit for
+    a document the vector channel had already found could not merge with it — RRF split
+    the evidence instead of summing it — and no address could be built from the name.
+    """
     kdir = tmp_path / "knowledge"
     kdir.mkdir()
     _write_md(kdir, "alpha", "# Alpha\nReferences [Beta](beta.md) and [Gamma](gamma.md).")
     _write_md(kdir, "beta", "# Beta\nLinks to [Gamma](gamma.md).")
     _write_md(kdir, "gamma", "# Gamma\nLeaf.")
-    kg.bulk_import_knowledge_files(kdir)
+    kg.bulk_import_knowledge_files(kdir, source_layer="L5")
     kg.extract_structural_edges(kdir)
 
-    expanded = kg.graph_expand(["alpha.md"], max_hops=1)
+    expanded = kg.graph_expand(["knowledge/alpha.md"], max_hops=1)
     expanded_paths = {row[0]["source_file"] for row in expanded}
-    # 1-hop from alpha → both beta and gamma should appear
-    assert "beta.md" in expanded_paths
-    assert "gamma.md" in expanded_paths
+    # 1-hop from alpha → both beta and gamma should appear, spelled as keys
+    assert "knowledge/beta.md" in expanded_paths
+    assert "knowledge/gamma.md" in expanded_paths
+
+
+def test_kg_graph_expand_returns_an_addressable_meta(kg, tmp_path):
+    """Whatever the channel returns has to survive the trip to a printed address."""
+    from dpc_client_core.dpc_agent.active_recall import hint_address
+
+    kdir = tmp_path / "knowledge"
+    kdir.mkdir()
+    _write_md(kdir, "alpha", "# Alpha\nReferences [Beta](beta.md).")
+    _write_md(kdir, "beta", "# Beta\nLeaf.")
+    kg.bulk_import_knowledge_files(kdir, source_layer="L5")
+    kg.extract_structural_edges(kdir)
+
+    expanded = kg.graph_expand(["knowledge/alpha.md"], max_hops=1)
+    assert expanded, "expected at least one neighbour"
+    for meta, _score in expanded:
+        assert meta["source_file"].startswith("knowledge/"), meta
+        assert meta.get("source_path"), meta
+        assert hint_address(meta, extended_read_enabled=True) is not None, meta
+
+
+def test_kg_graph_expand_ignores_a_namesake(kg, tmp_path):
+    """A stem match is a claim about a name; the key is what settles which document."""
+    kdir = tmp_path / "knowledge"
+    kdir.mkdir()
+    _write_md(kdir, "alpha", "# Alpha\nReferences [Beta](beta.md).")
+    _write_md(kdir, "beta", "# Beta\nLeaf.")
+    kg.bulk_import_knowledge_files(kdir, source_layer="L5")
+    kg.extract_structural_edges(kdir)
+
+    # Same stem, different document: an external root holding its own alpha.md.
+    assert kg.graph_expand(["EXT/some-project/docs/alpha.md"], max_hops=1) == []
+
+
+def test_kg_two_layers_holding_one_stem_are_two_documents(kg, tmp_path):
+    """The collision the old scheme had to guard against does not exist under keys.
+
+    With `kf:<stem>` the second import silently overwrote the first document's node, so
+    the code carried a guard that refused it — and that guard, reading the layer label
+    to decide, refused the entire shared layer on its first run. The key carries the
+    layer, so the two documents simply have two ids and neither has to be sacrificed.
+    """
+    l5 = tmp_path / "knowledge"
+    l5.mkdir()
+    _write_md(l5, "shared", "# Shared\nagent layer")
+    l6 = tmp_path / "shared-knowledge"
+    l6.mkdir()
+    _write_md(l6, "shared", "# Shared\nhuman layer")
+
+    assert kg.bulk_import_knowledge_files(l5, source_layer="L5") == 1
+    assert kg.bulk_import_knowledge_files(l6, source_layer="L6") == 1
+
+    own = kg.backend.get_node("kf:knowledge/shared.md")
+    shared = kg.backend.get_node("kf:L6/shared.md")
+    assert own.source_layer == "L5" and own.properties["path"] == "knowledge/shared.md"
+    assert shared.source_layer == "L6" and shared.properties["path"] == "L6/shared.md"
+    assert own.properties["source_path"] != shared.properties["source_path"]
+
+
+def test_kg_a_node_written_before_keys_is_left_behind_not_mistaken_for_the_document(kg, tmp_path):
+    """Stem-addressed rows survive the scheme change; they must not be treated as current.
+
+    Under `kf:<stem>` a legacy row was the same id as the document, so an import either
+    upgraded it or — as happened in production — was refused by a guard reading its
+    stale label. Under keys it is a different id: the document gets its own node, and
+    the old row is inert, holding no edges after the next extraction pass.
+    """
+    l6 = tmp_path / "shared-knowledge"
+    l6.mkdir()
+    _write_md(l6, "commit-note", "# Commit\nhuman layer")
+
+    kg.backend.add_node(GraphNode(
+        node_id="kf:commit-note",               # the old scheme: a stem
+        node_type=NodeType.KNOWLEDGE_FILE,
+        label="Commit Note",
+        source_layer="L5",                      # what the old code wrote for every layer
+        properties={"path": "commit-note.md"},  # bare name, no source_path
+    ))
+
+    assert kg.bulk_import_knowledge_files(l6, source_layer="L6") == 1
+
+    current = kg.backend.get_node("kf:L6/commit-note.md")
+    assert current.source_layer == "L6"
+    assert current.properties["path"] == "L6/commit-note.md"
+    assert current.properties["source_path"]
+
+    stale = kg.backend.get_node("kf:commit-note")
+    assert stale is not None and stale.properties["path"] == "commit-note.md"
+    assert kg.graph_expand(["commit-note.md"], max_hops=1) == []  # unreachable as a seed
 
 
 def test_kg_invalidate_edges_bi_temporal(kg):

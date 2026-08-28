@@ -1,7 +1,7 @@
 # D-PC Messenger: Privacy-First Platform for Human-AI Co-Evolution
 
-> **Status:** Alpha | **License:** Multi-License (GPL/LGPL/AGPL/CC0) | **Version:** 0.28.0
-> **Platforms:** Windows | Linux | macOS | [**Discord**](https://discord.gg/BMbwPatd)
+> **Status:** Alpha | **License:** Multi-License (GPL/LGPL/AGPL/CC0) | **Version:** 0.29.0
+> **Runs on:** Windows | Linux | macOS
 
 ---
 
@@ -24,11 +24,11 @@ Your team connects directly — no servers, no cloud, peer-to-peer. Humans and A
 **What makes this different:**
 - **Amplifies, not replaces** — cognitive load for growth, not delegation
 - **Your data stays yours** — P2P, no servers, end-to-end encryption
-- **AI grows with you** — long-term memory, skills, evolution across sessions
+- **AI grows with you** — long-term memory, skills, sleep consolidation between sessions
 - **Knowledge you own** — git-like commits, signed, versioned, yours forever
-- **Works with any AI** — Ollama, Claude, Z.AI, and more — local or remote
+- **Works with any AI** — Ollama, Claude, DeepSeek, and more — local or remote
 - **Privacy on your terms** — granular firewall, field-level control
-- **Works everywhere** — 6 connection strategies, LAN to internet
+- **Direct by default** — IPv6/IPv4 peer-to-peer, LAN or open internet; relay and gossip fallbacks are experimental
 
 **[Read the full vision →](./VISION.md)** | **[Roadmap →](./ROADMAP.md)** | **[Quick Start →](./QUICK_START.md)** | **[Documentation →](./docs/)**
 
@@ -85,7 +85,7 @@ Your team connects directly — no servers, no cloud, peer-to-peer. Humans and A
 | Federation Hub | AGPL v3 |
 | Protocol Specs | CC0 |
 
-See [LICENSE.md](./LICENSE.md) for details.
+The repository declares **GPL v3** — the licence of the desktop client, which is what you install and run, and the one GitHub shows. That badge names one licence because GitHub only holds one per repository; the other three above are equally in force for their components. **[LICENSING.md](./LICENSING.md) is the authoritative statement** of which licence covers what, including the GPL section 7 exception for iOS distribution.
 
 ---
 
@@ -103,7 +103,6 @@ Built with [aiortc](https://github.com/aiortc/aiortc), [Tauri](https://tauri.app
 
 ## Community & Support
 
-- **Discord:** [Join our community](https://discord.gg/BMbwPatd) — chat with the team and Iris, our AI community agent
 - **Contributing:** We're not accepting external contributions yet. Questions? [Open an issue](https://github.com/mikhashev/dpc-messenger/issues) or [start a discussion](https://github.com/mikhashev/dpc-messenger/discussions).
 - **Issues:** [GitHub Issues](https://github.com/mikhashev/dpc-messenger/issues) | **Discussions:** [GitHub Discussions](https://github.com/mikhashev/dpc-messenger/discussions) | **Email:** legoogmiha@gmail.com
 - **Business:** Interested in partnerships or investment? [legoogmiha@gmail.com](mailto:legoogmiha@gmail.com)

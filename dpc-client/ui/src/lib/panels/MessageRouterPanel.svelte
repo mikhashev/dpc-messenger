@@ -7,6 +7,7 @@
 <script lang="ts">
   import type { Writable } from 'svelte/store';
   import { mapBackendMessage } from '$lib/utils/messageMapper';
+  import { liveBubbleId } from '$lib/utils/liveMessageIdentity';
   import {
     p2pMessages,
     groupTextReceived,
@@ -92,7 +93,10 @@
           const hist = newMap.get(chatId) || [];
 
           const messageData: any = {
-            id: crypto.randomUUID(),
+            // The id the backend gave this message, so the history backfill
+            // can recognise the bubble as the same message rather than
+            // drawing the conversation a second time.
+            id: liveBubbleId(msg),
             sender: msg.sender_node_id,
             senderName: msg.sender_name,
             text: msg.text,
@@ -209,10 +213,17 @@
           const newMap = new Map(h);
           const hist = newMap.get(msg.group_id) || [];
           const messageData: any = {
-            id: crypto.randomUUID(),
+            // The id the backend gave this message, so the history backfill
+            // can recognise the bubble as the same message rather than
+            // drawing the conversation a second time.
+            id: liveBubbleId(msg),
             sender: msg.sender_node_id,
             senderName: msg.sender_name,
             text: msg.text || "",
+            // The number the record already carries. Without it an image
+            // message showed no index until the page was reloaded and the
+            // history came back off disk with one.
+            msg_index: msg.msg_index,
             timestamp: Date.now()
           };
           if (msg.attachments && msg.attachments.length > 0) {

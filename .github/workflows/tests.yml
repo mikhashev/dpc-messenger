@@ -1,0 +1,68 @@
+# The gate the project did not have: until this runs, every "green" in a report means
+# "locally, on my toolchain, on the layer I touched". Deliberately minimal — one runner,
+# the two suites that exist, no auto-merge and no release job.
+# Backlog: NO-CI-SO-EVERY-GREEN-IS-A-LOCAL-CLAIM.
+
+name: tests
+
+on:
+  push:
+    branches: [main, dev]
+  pull_request:
+
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  core:
+    name: dpc-client/core
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      # Extras rather than skip-if-missing: 31 of the 35 failures on 2026-08-27
+      # were these two packages missing, and a skip would hide 31 tests that run
+      # here perfectly well. Both are pure wheels on manylinux x86_64 (grafeo
+      # 5.3 MB + solvor 0.4 MB); camoufox needs its Firefox build only for the
+      # browser-launching tests, which this suite does not contain. mlx stays
+      # out — Apple Silicon only.
+      - name: Sync (with the extras whose tests exist here)
+        working-directory: dpc-client/core
+        run: uv sync --extra graph-grafeo --extra browser
+      # Baseline measured on Windows 2026-08-20: 4 failed · 2086 passed · 3 skipped (160s).
+      # The four are deselected by name, not hidden by a bare `|| true`, and each one has a
+      # backlog entry (CI-BASELINE-FOUR-TESTS-FAIL-BEFORE-THE-FIRST-RUN). A gate that is red
+      # for reasons unrelated to the change teaches everyone to ignore it; a silent skip
+      # teaches that the suite is green. Neither — name them here and delete lines as they fix.
+      - name: Pytest
+        working-directory: dpc-client/core
+        run: >
+          uv run python -m pytest -q
+          --deselect tests/dht/test_manager.py::test_bootstrap_partial_failure
+          --deselect tests/test_turn.py::test_turn_connectivity
+          --deselect tests/test_web_audit.py::test_browse_page_audit_on_firewall_denied
+          --deselect tests/test_web_audit.py::test_browse_page_audit_on_auth_required
+
+  protocol:
+    name: dpc-protocol
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - name: Sync
+        working-directory: dpc-protocol
+        run: uv sync
+      # dpc-protocol declares no test dependency at all, so a bare `uv sync` leaves its six
+      # test files unrunnable. `--with pytest` supplies it for the run instead of editing a
+      # shared package's pyproject.toml from CI's side; move it into a dev group there when
+      # someone touches that file for its own reasons.
+      - name: Pytest
+        working-directory: dpc-protocol
+        run: uv run --with pytest python -m pytest -q

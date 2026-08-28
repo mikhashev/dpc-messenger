@@ -67,21 +67,57 @@ class VoteNewSessionHandler(MessageHandler):
         proposal_id = payload.get("proposal_id")
         vote = payload.get("vote")
 
+        voter_node_id, verdict = self._authenticate_voter(sender_node_id, payload)
+
         self.logger.info(
-            "Received VOTE_NEW_SESSION from %s: proposal=%s, vote=%s",
+            "Received VOTE_NEW_SESSION from %s: proposal=%s, vote=%s, voter=%s (%s)",
             sender_node_id[:20],
             proposal_id[:8] if proposal_id else "none",
-            "approve" if vote else "reject"
+            "approve" if vote else "reject",
+            str(voter_node_id)[:20],
+            verdict,
         )
 
-        # Forward to session manager
-        await self.service.session_manager.handle_vote_message(sender_node_id, payload)
+        if verdict == "rejected":
+            self.logger.warning(
+                "Discarding VOTE_NEW_SESSION relayed by %s: signature does not hold",
+                sender_node_id[:20],
+            )
+            return None
 
-        # Relay to group members that can't reach the voter directly (star topology)
+        # Counted only when we know whose it is. `unverified` means signed by a
+        # node whose certificate we do not hold — common on the far side of a
+        # star — and `legacy_relayed` means unsigned and second-hand, which is
+        # exactly the case that used to be credited to the relayer. Both are
+        # passed on so a node that can check them gets its chance.
+        if verdict in ("verified", "legacy"):
+            await self.service.session_manager.handle_vote_message(
+                sender_node_id, payload, voter_node_id=voter_node_id
+            )
+        else:
+            self.logger.info(
+                "Not counting %s vote from %s on %s — relaying it on",
+                verdict, str(voter_node_id)[:20], str(proposal_id)[:8]
+            )
+            if verdict == "unverified":
+                # The only thing between this vote and being counted is a
+                # certificate, and the peer that relayed it has one.
+                await self._ask_for_certificate(voter_node_id, sender_node_id)
+
+        # Relay to group members that can't reach the voter directly (star
+        # topology). The conversation comes from the payload so this no longer
+        # depends on holding a local session: a vote that overtakes its own
+        # proposal, or arrives after finalisation removed the session, still
+        # travels. Deduplicated per voter — keying it on the transport peer
+        # meant the same vote arriving by two paths was relayed twice and,
+        # worse, counted as two different people.
         session = self.service.session_manager.active_sessions.get(proposal_id)
-        conversation_id = session.proposal.conversation_id if session else ""
+        conversation_id = (
+            payload.get("conversation_id")
+            or (session.proposal.conversation_id if session else "")
+        )
         if conversation_id and conversation_id.startswith("group-"):
-            dedup_key = f"sev:{proposal_id}:{sender_node_id}"
+            dedup_key = f"sev:{proposal_id}:{voter_node_id}"
             if dedup_key not in self.service._processed_message_ids:
                 self.service._processed_message_ids.add(dedup_key)
                 await self._relay_to_group(
@@ -97,6 +133,26 @@ class NewSessionResultHandler(MessageHandler):
     @property
     def command_name(self) -> str:
         return "NEW_SESSION_RESULT"
+
+    @staticmethod
+    def _refuse_reason(session, sender_node_id: str, conversation_id: str) -> Optional[str]:
+        """Why this result may not be acted on, or None if it may.
+
+        Membership rather than "must be the initiator": in a star the far edge
+        hears the result **relayed** by the middle node, so demanding the
+        initiator would refuse the legitimate relay and break New Session
+        exactly where it works today.
+        """
+        if session is None:
+            return "no local voting session for that proposal"
+        proposal = getattr(session, "proposal", None)
+        if proposal is None:
+            return "session carries no proposal"
+        if conversation_id != getattr(proposal, "conversation_id", None):
+            return "names a different conversation than the vote it claims"
+        if sender_node_id not in (getattr(proposal, "participants", None) or set()):
+            return "sender did not take part in that vote"
+        return None
 
     async def handle(self, sender_node_id: str, payload: Dict[str, Any]) -> Optional[Any]:
         """
@@ -122,15 +178,38 @@ class NewSessionResultHandler(MessageHandler):
             clear_history
         )
 
+        # A result is an instruction to destroy history, so it has to be one we
+        # can place. This used to clear first and look for the session after,
+        # which meant any peer that could reach us erased any conversation it
+        # cared to name. The gate is made of what this node already knows, so it
+        # needs neither signatures nor the ADR-038 marker to stand up today.
+        session = self.service.session_manager.get_session(proposal_id)
+        refusal = self._refuse_reason(session, sender_node_id, conversation_id)
+        if refusal:
+            self.logger.warning(
+                "Refusing NEW_SESSION_RESULT from %s for %s: %s",
+                sender_node_id[:20], str(conversation_id)[:20], refusal
+            )
+            # Not passed to the UI and not relayed: a result we will not act on
+            # is not one we should repeat to anyone else.
+            return None
+
         # If approved and clear_history flag set: clear local conversation
         if result == "approved" and clear_history:
             self.logger.info("Clearing local conversation history for %s", conversation_id[:20])
             monitor = self.service._get_or_create_conversation_monitor(conversation_id)
-            monitor.reset_conversation()
+            # This node's own archive settings, the same ones the initiator
+            # applies to itself. Called bare, it used the defaults instead, so a
+            # node configured not to archive archived anyway and a node with a
+            # retention limit ignored it.
+            firewall = getattr(self.service, "firewall", None)
+            preserve, max_sessions = (
+                firewall.get_history_settings(conversation_id) if firewall else (True, 0)
+            )
+            monitor.reset_conversation(preserve=preserve, max_sessions=max_sessions)
             self.service._group_agent_context.pop(conversation_id, None)
 
         # Update session manager (if session exists)
-        session = self.service.session_manager.get_session(proposal_id)
         if session:
             # Remove from active sessions (finalized)
             if proposal_id in self.service.session_manager.active_sessions:

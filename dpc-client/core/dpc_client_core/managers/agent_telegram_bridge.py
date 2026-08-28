@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import inspect
 import logging
 import time
 from dataclasses import dataclass, field
@@ -78,6 +79,22 @@ def escape_markdown(text: str) -> str:
     """
     special_chars = r"_*[]()~`>#+-=|{}.!"
     return "".join(f"\\{c}" if c in special_chars else c for c in text)
+
+
+def get_agent_telegram_bridge(llm_manager, agent_id: str):
+    """Return the AgentTelegramBridge for an agent id, or None.
+
+    The bridge hangs off the per-agent manager held by the dpc_agent provider.
+    knowledge_service found it by this walk first; it lives here now so a second
+    caller cannot drift from a private copy of the same path.
+    """
+    if not agent_id or not str(agent_id).startswith("agent_"):
+        return None
+    providers = getattr(llm_manager, "providers", None) or {}
+    provider = providers.get("dpc_agent")
+    managers = getattr(provider, "_managers", None) or {}
+    manager = managers.get(agent_id)
+    return getattr(manager, "_telegram_bridge", None) if manager else None
 
 
 @dataclass
@@ -141,6 +158,11 @@ class AgentTelegramBridge:
         self._conflict_logged = False
         self._bot_username: Optional[str] = None
         self._session = None
+        self._retry_task = None  # background reconnect after a network failure at start
+        # Called once the bot is actually polling. The owner wires the event emitter to
+        # the bridge here rather than after start() returns, because a start that
+        # succeeds on a background retry has no return value anyone is waiting on.
+        self._on_started: Optional[Callable] = None
 
         # Rate limiting state
         self._event_times: Dict[str, List[float]] = {}  # event_type -> list of timestamps
@@ -153,6 +175,18 @@ class AgentTelegramBridge:
         # Pending knowledge commit proposals awaiting Telegram approval
         # Maps proposal_id -> chat_id so vote callbacks can identify who to respond to
         self._pending_proposals: Dict[str, str] = {}
+
+        # Tier-1 shell approvals shown here: request_id -> [(chat_id, message_id), ...].
+        # The desktop can answer the same request, so the messages have to be findable
+        # again to take their buttons away.
+        self._pending_shell: Dict[str, List[tuple]] = {}
+
+        # Queue approvals shown here, same shape and for the same reason. Until
+        # 2026-08-29 this map did not exist and neither did the message: a
+        # check_back asked for from Telegram was decided by a desktop card, so
+        # the gate could only end in the sixty-second timeout that reads like a
+        # refusal.
+        self._pending_schedule: Dict[str, List[tuple]] = {}
 
         # Semaphore to limit concurrent Telegram API calls (prevents pool exhaustion)
         self._send_semaphore = asyncio.Semaphore(3)  # Max 3 concurrent sends
@@ -194,8 +228,18 @@ class AgentTelegramBridge:
         """
         Start the Telegram bot with polling for incoming messages.
 
+        A network failure here is retried in the background rather than given up on.
+        The failure this guards against is not exotic: a machine that has just woken
+        up runs the service before its network is back, and one attempt at that moment
+        cost this bridge a whole session — 2026-08-14, down from 12:56 to 16:46, with
+        the operator finding out by writing to a bot nobody was listening to. The
+        conversation-level bot survived the same outage because it retries with
+        backoff (`telegram_manager.py`); this is the same policy, off the startup path
+        so a dead network delays nothing else.
+
         Returns:
-            True if started successfully, False otherwise
+            True if started successfully, False otherwise — False with a retry pending
+            is the normal outcome of a network failure, not a final answer.
         """
         if self._enabled:
             log.warning("AgentTelegramBridge already running")
@@ -217,6 +261,58 @@ class AgentTelegramBridge:
             return False
 
         try:
+            from telegram.error import NetworkError
+        except ImportError:
+            log.error("python-telegram-bot not installed. Install with: pip install python-telegram-bot")
+            return False
+
+        try:
+            return await self._start_once()
+        except NetworkError as e:
+            log.warning(
+                "Agent Telegram bridge could not reach Telegram at startup (%s) — "
+                "retrying in the background", e,
+            )
+            if self._retry_task is None or self._retry_task.done():
+                self._retry_task = asyncio.create_task(self._retry_start_until_up())
+            return False
+
+    async def _retry_start_until_up(self) -> None:
+        """Keep trying to start after a network failure, with the sibling's backoff."""
+        from telegram.error import NetworkError
+
+        base_delay, max_delay, attempt = 10, 1800, 0
+        while not self._enabled:
+            delay = min(base_delay * (2 ** attempt), max_delay)
+            if delay >= max_delay:
+                log.error(
+                    "Agent Telegram bridge giving up after backoff reached %ds — "
+                    "the channel stays down until the next restart", max_delay,
+                )
+                return
+            await asyncio.sleep(delay)
+            attempt += 1
+            try:
+                if await self._start_once():
+                    log.info("Agent Telegram bridge recovered on background attempt %d", attempt)
+                    return
+                log.warning("Agent Telegram bridge attempt %d refused to start; not retrying", attempt)
+                return
+            except NetworkError as e:
+                log.warning("Agent Telegram bridge attempt %d failed (%s), retrying", attempt, e)
+            except Exception as e:
+                log.error("Agent Telegram bridge attempt %d failed permanently: %s", attempt, e)
+                return
+
+    async def _start_once(self) -> bool:
+        """One start attempt. Raises NetworkError so the caller can decide to retry."""
+        try:
+            from telegram.error import NetworkError
+        except ImportError:
+            log.error("python-telegram-bot not installed. Install with: pip install python-telegram-bot")
+            return False
+
+        try:
             # Import telegram library
             from telegram import Bot
             from telegram.ext import Application, MessageHandler, filters, CommandHandler, CallbackQueryHandler
@@ -234,25 +330,7 @@ class AgentTelegramBridge:
             # Create application for polling (this manages the bot instance)
             self._application = Application.builder().token(self.bot_token).request(request).build()
 
-            # Add handlers for commands
-            self._application.add_handler(CommandHandler("start", self._handle_start_command))
-            self._application.add_handler(CommandHandler("help", self._handle_help_command))
-            self._application.add_handler(CommandHandler("status", self._handle_status_command))
-            self._application.add_handler(CommandHandler("newsession", self._handle_newsession_command))
-            self._application.add_handler(CommandHandler("extract_knowledge", self._handle_extract_knowledge_command))
-            self._application.add_handler(CommandHandler("sleep", self._handle_sleep_command))
-
-            # Add handler for inline keyboard votes on knowledge commit proposals
-            self._application.add_handler(CallbackQueryHandler(self._handle_vote_callback, pattern=r"^vote:"))
-
-            # Add handler for regular messages (non-commands)
-            self._application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self._handle_message))
-
-            # Add handler for voice messages
-            self._application.add_handler(MessageHandler(filters.VOICE, self._handle_voice_message))
-
-            # Add handler for photo messages (vision analysis)
-            self._application.add_handler(MessageHandler(filters.PHOTO, self._handle_photo_message))
+            self._register_handlers(self._application)
 
             async def _on_error(update, context):
                 from telegram.error import Conflict
@@ -288,19 +366,49 @@ class AgentTelegramBridge:
             self._enabled = True
             _ACTIVE_BOT_TOKENS.add(self.bot_token)
             log.info("Agent Telegram bridge polling started (two-way communication enabled)")
+            if self._on_started is not None:
+                try:
+                    result = self._on_started()
+                    if inspect.isawaitable(result):
+                        await result
+                except Exception as e:
+                    log.error("Telegram bridge started but its owner failed to wire it up: %s", e)
             return True
 
         except ImportError:
             log.error("python-telegram-bot not installed. Install with: pip install python-telegram-bot")
             return False
+        except NetworkError:
+            # Telegram is unreachable, which says nothing about this bridge being
+            # misconfigured. Hand it up so start() can schedule the retry; a partially
+            # built Application is dropped here rather than left holding its pool.
+            await self._discard_partial_application()
+            raise
         except Exception as e:
             log.error(f"Failed to start agent Telegram bridge: {e}", exc_info=True)
             return False
+
+    async def _discard_partial_application(self) -> None:
+        """Throw away an Application that failed mid-start, so a retry builds a fresh one."""
+        app, self._application = self._application, None
+        self._bot = None
+        if app is None:
+            return
+        try:
+            await app.shutdown()
+        except Exception as e:
+            log.debug("Discarding partially started Telegram application: %s", e)
 
     async def stop(self) -> None:
         """Stop the bridge and polling."""
         self._enabled = False
         _ACTIVE_BOT_TOKENS.discard(self.bot_token)
+
+        # A reconnect still waiting on its backoff must not outlive the bridge, or it
+        # comes back up minutes after someone asked for it to be down.
+        if self._retry_task is not None and not self._retry_task.done():
+            self._retry_task.cancel()
+        self._retry_task = None
 
         # Stop the application and updater
         if self._application:
@@ -644,6 +752,314 @@ Send a voice message and it will be transcribed and processed\\.
             log.error(f"Error handling vote callback: {e}", exc_info=True)
             await query.edit_message_text(f"❌ Error: {escape_markdown(str(e)[:200])}", parse_mode="MarkdownV2")
 
+    def _register_handlers(self, application) -> None:
+        """Attach every handler this bridge answers to.
+
+        Separate from start() so what the bot listens for can be checked without
+        a network round trip — an unregistered handler is otherwise invisible
+        until someone presses the button in production.
+        """
+        from telegram.ext import MessageHandler, filters, CommandHandler, CallbackQueryHandler
+
+        application.add_handler(CommandHandler("start", self._handle_start_command))
+        application.add_handler(CommandHandler("help", self._handle_help_command))
+        application.add_handler(CommandHandler("status", self._handle_status_command))
+        application.add_handler(CommandHandler("newsession", self._handle_newsession_command))
+        application.add_handler(CommandHandler("extract_knowledge", self._handle_extract_knowledge_command))
+        application.add_handler(CommandHandler("sleep", self._handle_sleep_command))
+
+        application.add_handler(CallbackQueryHandler(self._handle_vote_callback, pattern=r"^vote:"))
+        application.add_handler(CallbackQueryHandler(self._handle_shell_callback, pattern=r"^shell:"))
+        application.add_handler(CallbackQueryHandler(self._handle_schedule_callback, pattern=r"^schedule:"))
+
+        # block=False on the three handlers that await a whole agent run.
+        # Telegram gives this Application one update at a time; a handler that
+        # holds that slot for the length of a run is what left a shell approval
+        # unanswerable from the phone that raised it. Serialisation of the runs
+        # themselves now lives on the agent's run gate, not on this queue.
+        application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self._handle_message, block=False))
+        application.add_handler(MessageHandler(filters.VOICE, self._handle_voice_message, block=False))
+        application.add_handler(MessageHandler(filters.PHOTO, self._handle_photo_message, block=False))
+
+    async def _handle_shell_callback(self, update, context):
+        """Handle the Yes/No buttons on a tier-1 shell approval.
+
+        Callback data format: "shell:{request_id}:{approve|reject}"
+        """
+        query = update.callback_query
+        try:
+            await query.answer()
+        except Exception as e:
+            # A query Telegram considers too old still carries the decision, and
+            # the message can still be edited — losing the whole handler here is
+            # how a press ends up looking like nothing happened at all.
+            log.info("Could not acknowledge shell approval press: %s", e)
+
+        chat_id = str(query.message.chat.id)
+        if chat_id not in self.allowed_chat_ids:
+            await query.edit_message_text("⛔ Unauthorized.")
+            return
+
+        parts = (query.data or "").split(":", 2)
+        if len(parts) != 3:
+            await query.edit_message_text("❌ Invalid approval data.")
+            return
+
+        _, request_id, decision = parts
+        service = getattr(self._agent_manager, "service", None) if self._agent_manager else None
+        if not service:
+            await query.edit_message_text("⚠️ Service not available.")
+            return
+
+        # Forget the message before answering: the service withdraws the request
+        # from the other surfaces, and this one is about to write its own outcome.
+        self._pending_shell.pop(request_id, None)
+
+        try:
+            if decision == "approve":
+                result = await service.shell_approve_command(request_id)
+            else:
+                result = await service.shell_reject_command(request_id)
+
+            if result.get("status") == "ok":
+                label = "✅ Approved — running." if decision == "approve" else "❌ Rejected."
+            else:
+                # Either the desktop answered first or the 60s window closed.
+                label = "⌛ This request is already closed."
+            await query.edit_message_text(label)
+        except Exception as e:
+            log.error(f"Error handling shell approval callback: {e}", exc_info=True)
+            await query.edit_message_text(f"❌ Error: {str(e)[:200]}")
+
+    async def _handle_schedule_callback(self, update, context):
+        """Handle the Yes/No buttons on a queue approval.
+
+        Callback data format: "schedule:{request_id}:{approve|reject}" — the
+        shell shape, because a person answering both should not have to learn
+        two of anything.
+        """
+        query = update.callback_query
+        try:
+            await query.answer()
+        except Exception as e:
+            log.info("Could not acknowledge schedule approval press: %s", e)
+
+        chat_id = str(query.message.chat.id)
+        if chat_id not in self.allowed_chat_ids:
+            await query.edit_message_text("⛔ Unauthorized.")
+            return
+
+        parts = (query.data or "").split(":", 2)
+        if len(parts) != 3:
+            await query.edit_message_text("❌ Invalid approval data.")
+            return
+
+        _, request_id, decision = parts
+        service = getattr(self._agent_manager, "service", None) if self._agent_manager else None
+        if not service:
+            await query.edit_message_text("⚠️ Service not available.")
+            return
+
+        # Forget the message before answering, for the reason the shell twin
+        # gives: the service withdraws the request from the other surfaces and
+        # this one writes its own outcome.
+        self._pending_schedule.pop(request_id, None)
+
+        try:
+            result = await service.resolve_schedule_approval(request_id, decision == "approve")
+            # Two sibling APIs, two words for the same outcome: the shell
+            # command answers "ok" and this one "success". Accept both rather
+            # than change a shipped contract on the way past.
+            if result.get("status") in ("ok", "success"):
+                label = "✅ Scheduled." if decision == "approve" else "❌ Not scheduled."
+            else:
+                label = "⌛ This request is already closed."
+            await query.edit_message_text(label)
+        except Exception as e:
+            log.error(f"Error handling schedule approval callback: {e}", exc_info=True)
+            await query.edit_message_text(f"❌ Error: {str(e)[:200]}")
+
+    async def notify_schedule_approval(
+        self,
+        request_id: str,
+        task_type: str = "",
+        when: str = "",
+        about: str = "",
+        agent_name: str = "",
+        timeout_seconds: int = 0,
+        chat_id: str = "",
+    ) -> None:
+        """Show a queue request in the ONE chat the run came from, with buttons.
+
+        Same rule as the shell twin: the approval appears where the conversation
+        is happening and nowhere else, because the callback handler accepts a
+        press from any allowed chat and a fan-out would widen who can authorise.
+
+        Plain text — `about` is the agent's own sentence and MarkdownV2 would
+        have to escape it into something a reader has to decode before deciding.
+        """
+        if not self._enabled or not self._bot:
+            return
+
+        target = str(chat_id or "")
+        if not target:
+            log.debug(
+                "Schedule approval %s not offered on Telegram: the run did not come from there",
+                request_id,
+            )
+            return
+        if target not in self.allowed_chat_ids:
+            log.warning(
+                "Schedule approval %s not offered to chat %s: not an allowed chat",
+                request_id, target,
+            )
+            return
+
+        from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+
+        head = f"🕒 {agent_name or 'Agent'} wants to come back to this"
+        lines = [f"{head} {when}:" if when else f"{head}:", ""]
+        lines.append(about or task_type or "(no description)")
+        if timeout_seconds:
+            lines += ["", f"Expires in {timeout_seconds}s — after that it is not scheduled."]
+
+        keyboard = InlineKeyboardMarkup([[
+            InlineKeyboardButton("✅ Schedule it", callback_data=f"schedule:{request_id}:approve"),
+            InlineKeyboardButton("❌ Not now", callback_data=f"schedule:{request_id}:reject"),
+        ]])
+
+        try:
+            sent = await self._bot.send_message(
+                chat_id=target,
+                text="\n".join(lines),
+                reply_markup=keyboard,
+            )
+        except Exception as e:
+            log.warning(f"Failed to send schedule approval to chat {target}: {e}")
+            return
+
+        self._pending_schedule[request_id] = [(target, getattr(sent, "message_id", None))]
+
+    async def close_schedule_approval(self, request_id: str, outcome: str) -> int:
+        """Take the buttons off a queue request answered elsewhere or expired."""
+        delivered = self._pending_schedule.pop(request_id, None)
+        if not delivered or not self._bot:
+            return 0
+        closed = 0
+        for chat_id, message_id in delivered:
+            if message_id is None:
+                continue
+            try:
+                await self._bot.edit_message_text(
+                    chat_id=chat_id,
+                    message_id=message_id,
+                    text=outcome,
+                )
+                closed += 1
+            except Exception as e:
+                log.debug(f"Could not close schedule approval message in {chat_id}: {e}")
+        return closed
+
+    async def notify_shell_approval(
+        self,
+        request_id: str,
+        command: str,
+        reason: str = "",
+        agent_name: str = "",
+        timeout_seconds: int = 0,
+        chat_id: str = "",
+    ) -> None:
+        """Show a tier-1 shell command in ONE chat with Yes/No buttons.
+
+        `chat_id` is the chat the run came from; without it nothing is sent.
+        This used to loop over every allowed chat, and on this machine that
+        meant a prompt to run an arbitrary command *outside the sandbox*
+        reached four chats while the agent was working in the desktop group
+        chat and nobody had written to it on Telegram at all. Three of those
+        chats had no relation to the agent — and since the callback handler
+        accepts a press from any allowed chat, the fan-out was widening who
+        could authorise execution rather than merely making noise.
+
+        The rule is the one the ordinary reply path already follows
+        (`agent.py`, `reply_telegram_chat_id`): the approval appears where the
+        conversation is happening, and nowhere else.
+
+        Sent as plain text: the command is arbitrary shell and MarkdownV2 would
+        have to escape it back into something the reader has to decode before
+        deciding.
+        """
+        if not self._enabled or not self._bot:
+            return
+
+        target = str(chat_id or "")
+        if not target:
+            log.debug(
+                "Shell approval %s not offered on Telegram: the run did not come from there",
+                request_id,
+            )
+            return
+        if target not in self.allowed_chat_ids:
+            # Offering a button whose press would then be rejected is worse
+            # than not offering it.
+            log.warning(
+                "Shell approval %s not offered to chat %s: not an allowed chat",
+                request_id, target,
+            )
+            return
+
+        from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+
+        lines = [f"🔧 {agent_name or 'Agent'} wants to run a shell command:", "", command]
+        if reason:
+            lines += ["", reason]
+        if timeout_seconds:
+            lines += ["", f"Expires in {timeout_seconds}s — after that the agent gives up on it."]
+
+        keyboard = InlineKeyboardMarkup([[
+            InlineKeyboardButton("✅ Yes", callback_data=f"shell:{request_id}:approve"),
+            InlineKeyboardButton("❌ No", callback_data=f"shell:{request_id}:reject"),
+        ]])
+
+        try:
+            sent = await self._bot.send_message(
+                chat_id=target,
+                text="\n".join(lines),
+                reply_markup=keyboard,
+            )
+        except Exception as e:
+            log.warning(f"Failed to send shell approval to chat {target}: {e}")
+            return
+
+        # Still a list: close_shell_approval withdraws whatever was delivered,
+        # and one delivery is the shape that list now has.
+        self._pending_shell[request_id] = [(target, getattr(sent, "message_id", None))]
+
+    async def close_shell_approval(self, request_id: str, outcome: str) -> int:
+        """Take the buttons off a request answered elsewhere or expired.
+
+        Returns how many messages were actually rewritten, so the caller can
+        log what happened instead of what it attempted: this is a no-op
+        whenever the press came from here, and used to be logged as a
+        withdrawal anyway.
+        """
+        delivered = self._pending_shell.pop(request_id, None)
+        if not delivered or not self._bot:
+            return 0
+        closed = 0
+        for chat_id, message_id in delivered:
+            if message_id is None:
+                continue
+            try:
+                await self._bot.edit_message_text(
+                    chat_id=chat_id,
+                    message_id=message_id,
+                    text=outcome,
+                )
+                closed += 1
+            except Exception as e:
+                log.debug(f"Could not close shell approval message in {chat_id}: {e}")
+        return closed
+
     async def notify_knowledge_proposal(
         self,
         proposal_id: str,
@@ -746,6 +1162,21 @@ Send a voice message and it will be transcribed and processed\\.
         except Exception as e:
             log.error(f"notify_knowledge_result error: {e}", exc_info=True)
 
+    async def _show_chat_action(self, context, chat_id: str, action: str) -> None:
+        """Show a Telegram activity indicator, and never let it cost the message.
+
+        These calls are decoration — "typing…", "uploading voice". Three of the
+        four sites had one sitting outside any try, so an httpx timeout on the
+        indicator aborted the handler and the user's message was dropped with
+        nothing in the log to say so; the fourth threw away a transcription
+        that had already been computed. Best-effort by construction, so a new
+        call site cannot reintroduce it.
+        """
+        try:
+            await context.bot.send_chat_action(chat_id=chat_id, action=action)
+        except Exception as e:
+            log.debug(f"send_chat_action({action}) failed, continuing: {e}")
+
     async def _handle_message(self, update, context):
         """Handle incoming text message."""
         chat_id = str(update.effective_chat.id)
@@ -761,11 +1192,7 @@ Send a voice message and it will be transcribed and processed\\.
             await update.message.reply_text("⚠️ Message handler not configured. Cannot process message.")
             return
 
-        # Send "processing" indicator (best-effort — a failed typing action must not drop the message)
-        try:
-            await context.bot.send_chat_action(chat_id=chat_id, action="typing")
-        except Exception as e:
-            log.debug(f"send_chat_action(typing) failed, continuing: {e}")
+        await self._show_chat_action(context, chat_id, "typing")
 
         # Build sender attribution for history (shown in DPC chat UI)
         tg_user = update.effective_user
@@ -903,8 +1330,7 @@ Send a voice message and it will be transcribed and processed\\.
 
         log.info(f"Processing voice message from chat {chat_id} (duration: {duration}s, size: {file_size} bytes)")
 
-        # Send "recording audio" action
-        await context.bot.send_chat_action(chat_id=chat_id, action="upload_voice")
+        await self._show_chat_action(context, chat_id, "upload_voice")
 
         import tempfile
 
@@ -950,7 +1376,7 @@ Send a voice message and it will be transcribed and processed\\.
             )
 
             # Process transcription through agent
-            await context.bot.send_chat_action(chat_id=chat_id, action="typing")
+            await self._show_chat_action(context, chat_id, "typing")
 
             tg_user = update.effective_user
             tg_display_name = (tg_user.first_name or tg_user.username or "Telegram User") if tg_user else "Telegram User"
@@ -1016,7 +1442,7 @@ Send a voice message and it will be transcribed and processed\\.
         caption = update.message.caption or ""
 
         log.info(f"Processing photo from chat {chat_id} (file_id={photo.file_id}, caption={caption[:50]!r})")
-        await context.bot.send_chat_action(chat_id=chat_id, action="typing")
+        await self._show_chat_action(context, chat_id, "typing")
 
         try:
             # Download photo from Telegram
@@ -1034,6 +1460,10 @@ Send a voice message and it will be transcribed and processed\\.
 
             conversation_id = self._agent_id if self._unified_conversation and self._agent_id else f"telegram-{chat_id}"
 
+            attachment = self._keep_incoming_photo(
+                conversation_id, bytes(photo_bytes), update.message.message_id
+            )
+
             response = await self._message_handler(
                 message=message_text,
                 conversation_id=conversation_id,
@@ -1043,6 +1473,7 @@ Send a voice message and it will be transcribed and processed\\.
                 image_base64=image_base64,
                 image_mime="image/jpeg",
                 image_caption=caption or None,
+                attachments=[attachment] if attachment else None,
             )
 
             # Send response
@@ -1064,6 +1495,47 @@ Send a voice message and it will be transcribed and processed\\.
         except Exception as e:
             log.error(f"Error processing photo message: {e}", exc_info=True)
             await update.message.reply_text(f"❌ Error processing photo: {str(e)[:200]}")
+
+    def _keep_incoming_photo(
+        self, conversation_id: str, photo_bytes: bytes, message_id: int
+    ) -> Optional[Dict[str, Any]]:
+        """Write the photo beside its conversation and describe it as an attachment.
+
+        Location and shape are the conversation-level bridge's, not a second
+        convention invented here: `telegram_coordinator._handle_photo` already
+        saves into `<conversation>/files/telegram_photo_<id>.jpg` and hangs a
+        dict of the same keys on the message, which `add_message` persists and
+        the interface already renders.
+
+        Without it the record of the turn is the caption alone. The picture
+        still reaches the model — it travels separately as base64 — so the
+        conversation keeps a question about a screenshot with no screenshot,
+        and the vision description that answered it is not kept either.
+
+        A failure here must not cost the message: the model still receives the
+        image, so this logs and returns None rather than raising.
+        """
+        try:
+            files_dir = Path.home() / ".dpc" / "conversations" / conversation_id / "files"
+            files_dir.mkdir(parents=True, exist_ok=True)
+            filename = f"telegram_photo_{message_id}.jpg"
+            path = files_dir / filename
+            path.write_bytes(photo_bytes)
+            return {
+                "type": "image",
+                "filename": filename,
+                "file_path": str(path),
+                "size_bytes": len(photo_bytes),
+                "mime_type": "image/jpeg",
+                "source": "telegram",
+                "telegram_message_id": message_id,
+            }
+        except OSError as e:
+            log.warning(
+                "Could not keep the incoming photo for %s: %s — the model still sees it, the record will not",
+                conversation_id, e,
+            )
+            return None
 
     async def _broadcast_history_to_ui(self, conversation_id: str) -> None:
         """
@@ -1176,6 +1648,18 @@ Send a voice message and it will be transcribed and processed\\.
         # Rate limit check
         if not self._check_rate_limit(event.type.value):
             log.warning(f"Rate limited event: {event.type.value}")
+            return False
+
+        # Second line of defence, and the one that holds for events this bridge
+        # does not own: forward only what came from a conversation Telegram is
+        # actually bound to. A group has no binding, so its content has no
+        # business in a private chat.
+        origin = str((event.data or {}).get("conversation_id") or "")
+        if origin.startswith("group-"):
+            log.debug(
+                "Not forwarding %s from group %s — group chats have no Telegram binding",
+                event.type.value, origin,
+            )
             return False
 
         log.debug(f"Sending Telegram notification for event: {event.type.value}")

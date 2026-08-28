@@ -1,0 +1,79 @@
+{
+  "model": "qwen3.8:latest",
+  "tasks": 10,
+  "passed": 10,
+  "accuracy": 1.0,
+  "seconds": 43.8,
+  "results": [
+    {
+      "id": "read-a-value",
+      "passed": true,
+      "why": [],
+      "seconds": 18.3,
+      "answer": "8443"
+    },
+    {
+      "id": "read-a-second-value",
+      "passed": true,
+      "why": [],
+      "seconds": 3.2,
+      "answer": "`retries` is set to **7**."
+    },
+    {
+      "id": "find-a-fact-in-prose",
+      "passed": true,
+      "why": [],
+      "seconds": 2.6,
+      "answer": "The build number is **4172**."
+    },
+    {
+      "id": "count-lines",
+      "passed": true,
+      "why": [],
+      "seconds": 3.2,
+      "answer": "4"
+    },
+    {
+      "id": "list-a-directory",
+      "passed": true,
+      "why": [],
+      "seconds": 2.4,
+      "answer": "config.txt\nempty.log\nnotes.md"
+    },
+    {
+      "id": "an-empty-file-is-not-a-missing-one",
+      "passed": true,
+      "why": [],
+      "seconds": 3.4,
+      "answer": "EMPTY"
+    },
+    {
+      "id": "write-a-file",
+      "passed": true,
+      "why": [],
+      "seconds": 5.7,
+      "answer": "done"
+    },
+    {
+      "id": "a-file-that-is-not-there",
+      "passed": true,
+      "why": [],
+      "seconds": 1.4,
+      "answer": "NOT FOUND"
+    },
+    {
+      "id": "arithmetic-without-tools",
+      "passed": true,
+      "why": [],
+      "seconds": 1.5,
+      "answer": "391"
+    },
+    {
+      "id": "two-values-one-answer",
+      "passed": true,
+      "why": [],
+      "seconds": 2.1,
+      "answer": "`example.internal, strict`"
+    }
+  ]
+}

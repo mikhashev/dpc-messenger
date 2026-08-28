@@ -2,7 +2,7 @@
 
 > **Server-side infrastructure for peer discovery and WebRTC signaling**
 > 
-> **Status:** PoC / Experimental | **License:** AGPL v3 | **Version:** 0.28.0
+> **Status:** PoC / Experimental | **License:** AGPL v3 | **Version:** 0.29.0
 
 The D-PC Federation Hub is a minimalistic server application that provides essential services for the D-PC network: user authentication, peer discovery, and WebRTC signaling. It acts as a "phone book and matchmaker" while never storing or accessing users' private conversations.
 
@@ -640,7 +640,7 @@ Hub-specific areas:
 
 ## 📄 License
 
-This component is licensed under **AGPL v3**. See [LICENSE](../LICENSE.md) for details.
+This component is licensed under **AGPL v3** — its full text is [LICENSE-AGPL](../LICENSE-AGPL). The repository's root `LICENSE` declares GPL v3 for the desktop client; see [LICENSING.md](../LICENSING.md) for which licence covers what.
 
 **TL;DR:** You can run, modify, and distribute this software. If you run it as a network service and modify it, you must share your source code with your users.
 

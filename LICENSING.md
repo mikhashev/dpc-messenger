@@ -82,8 +82,11 @@ D-PC Messenger Project
 
 ### Components
 - `dpc-hub/` - Federation hub server
-- `dpc-discovery/` - Peer discovery service
-- `dpc-resource-broker/` - Compute resource management
+- `dpc-discovery/` - Peer discovery service — **planned, not present in this repository**
+- `dpc-resource-broker/` - Compute resource management — **planned, not present in this repository**
+
+Components marked planned are licensed in advance so the terms are settled before the
+code exists; today this licence covers `dpc-hub/`.
 
 ### Key Terms
 
@@ -110,8 +113,11 @@ The AGPL's network clause prevents cloud providers from creating proprietary "D-
 
 ### Components
 - `dpc-client/` - Desktop messenger application
-- `dpc-mobile/` - Mobile applications (Android, iOS*)
-- `dpc-cli/` - Command-line interface
+- `dpc-mobile/` - Mobile applications (Android, iOS*) — **planned, not present in this repository**
+- `dpc-cli/` - Command-line interface — **planned, not present in this repository**
+
+The two components marked planned are licensed in advance so the terms are settled
+before the code exists; today the repository ships only `dpc-client/`.
 
 *iOS distribution subject to special handling (see App Store section below)
 
@@ -153,17 +159,18 @@ The AGPL's network clause prevents cloud providers from creating proprietary "D-
    - VLC (3B+ downloads) is GPL
    - Success depends on product quality, not permissive licensing
 
-**Full License:** See [LICENSE-GPL](./LICENSE-GPL) or https://www.gnu.org/licenses/gpl-3.0.html
+**Full License:** See [LICENSE](./LICENSE) or https://www.gnu.org/licenses/gpl-3.0.html
 
 ---
 
 ## 3. Protocol Libraries: GNU Lesser General Public License v3 (LGPL-3.0)
 
 ### Components
-- `dpc-protocol/` - DPTP implementation
-- `dpc-crypto/` - Cryptographic primitives
-- `dpc-p2p/` - Peer-to-peer networking
-- `dpc-context/` - Context management
+- `dpc-protocol/` - DPTP implementation, cryptographic primitives, P2P framing and
+  the personal-context model — all of it lives in this one package today
+- `dpc-crypto/` - Cryptographic primitives — **planned, not present in this repository**
+- `dpc-p2p/` - Peer-to-peer networking — **planned, not present in this repository**
+- `dpc-context/` - Context management — **planned, not present in this repository**
 
 ### Key Terms
 
@@ -211,9 +218,11 @@ class MyProprietaryAI:
 ## 4. Protocol Specifications: CC0 (Public Domain)
 
 ### Components
-- `specs/dptp.md` - DPTP protocol specification
-- `specs/dpc_access.md` - .dpc_access file format
-- `specs/federation_api.md` - Hub API specification
+- `specs/dptp_v1.md` - DPTP protocol specification
+- `specs/hub_api_v1.md` - Hub API specification
+
+The firewall rules file (`privacy_rules.json`, formerly `.dpc_access`) has no published
+spec; `dpc-client/privacy_rules.example.json` is the working reference.
 
 ### Terms
 
@@ -269,9 +278,9 @@ Can purchase a **Commercial License**.
 
 ## Compute Sharing Liability
 
-**IMPORTANT:** When using D-PC Messenger's compute sharing features, please read:
-- [COMPUTE_DISCLAIMER.md](./COMPUTE_DISCLAIMER.md) - Full liability terms
-- [docs/compute-sharing-safety.md](./docs/compute-sharing-safety.md) - Safety guidelines
+**IMPORTANT:** When using D-PC Messenger's compute sharing features, please read
+[LEGAL_DISCLAIMER.md](./LEGAL_DISCLAIMER.md) — the liability terms. A separate
+compute-sharing safety guide does not exist yet; the summary below is what there is.
 
 **Summary:**
 - Platform is a tool/conduit (not liable for compute jobs)
@@ -404,7 +413,7 @@ Contact: legoogmiha@gmail.com
 ## Full License Texts
 
 - **AGPL v3:** [LICENSE-AGPL](./LICENSE-AGPL)
-- **GPL v3:** [LICENSE-GPL](./LICENSE-GPL)
+- **GPL v3:** [LICENSE](./LICENSE) — also the file GitHub reads as this repository's declared licence
 - **LGPL v3:** [LICENSE-LGPL](./LICENSE-LGPL)
 - **CC0:** [LICENSE-CC0](./LICENSE-CC0)
 
@@ -417,7 +426,6 @@ Contact: legoogmiha@gmail.com
 
 **License Questions:**
 - Email: legoogmiha@gmail.com
-- See: [LICENSE_FAQ.md](./LICENSE_FAQ.md)
 
 **Commercial Licensing:**
 - Email: legoogmiha@gmail.com

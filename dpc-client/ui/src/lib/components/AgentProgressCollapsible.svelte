@@ -5,6 +5,8 @@
      * Unified for 1:1 and group chats. Drift-style categories + human-readable labels.
      */
     import { getToolLabel, getToolArgPreview } from '$lib/utils/toolDisplay';
+    import { occupancyFromSpeed, occupancyLabel, occupancyTitle } from '$lib/utils/contextOccupancy';
+    import { clampDetail, formatToolInput } from '$lib/utils/toolDetail';
     import { sendCommand } from '$lib/coreService';
 
     interface ToolCall {
@@ -26,6 +28,7 @@
         streamingText = '',
         conversationId = '',
         agentId = '',
+        speed = null,
     }: {
         toolCalls: ToolCall[];
         agentName?: string;
@@ -35,6 +38,7 @@
         streamingText?: string;
         conversationId?: string;
         agentId?: string;
+        speed?: Record<string, any> | null;
     } = $props();
 
     let expanded = $state(isLive);
@@ -60,16 +64,67 @@
         collapsedRounds = next;
     }
 
-    // One-line result preview shown in the collapsed tool row (full output on expand).
+    // Stop used to be fire-and-forget: the envelope said OK while the payload
+    // could say error/no_active_loop, and a miss looked identical to a hit.
+    // The handler answers {status: stopped | no_active_loop | error}.
+    let stopState = $state<'idle' | 'stopping' | 'miss' | 'error'>('idle');
+    let stopNote = $state('');
+    // A new round invalidates a stale 'miss' from the previous one: the loop
+    // is demonstrably running again, so the button returns to a live Stop.
+    let lastRoundSeen: number | undefined;
+    $effect(() => {
+        const r = currentRound;
+        if (lastRoundSeen === undefined) {
+            lastRoundSeen = r;
+            return;
+        }
+        if (r !== lastRoundSeen) {
+            lastRoundSeen = r;
+            if (stopState === 'miss' || stopState === 'error') {
+                stopState = 'idle';
+                stopNote = '';
+            }
+        }
+    });
+    async function requestStop(e: Event) {
+        e.stopPropagation();
+        if (stopState === 'stopping') return;
+        stopState = 'stopping';
+        try {
+            const res: any = await sendCommand('interrupt_agent', {
+                agent_id: agentId, conversation_id: conversationId,
+            });
+            const st = res?.status || res?.payload?.status;
+            if (st === 'stopped') {
+                stopNote = 'stopping…';
+            } else if (st === 'no_active_loop') {
+                stopState = 'miss';
+                stopNote = 'no active loop';
+            } else {
+                stopState = 'error';
+                stopNote = res?.message || 'error';
+            }
+        } catch (err: any) {
+            stopState = 'error';
+            stopNote = err?.message || 'send failed';
+        }
+    }
+
+    // The occupancy half of the strip rides the same payload as the speed
+    // (loop.py: round_progress_payload) but reads differently — the denominator
+    // is the raw window and the reserve is a colour, not a subtraction. That
+    // reasoning lives in contextOccupancy.ts, where it can be tested.
+    let ctx = $derived(occupancyFromSpeed(speed));
+    let ctxTitle = $derived(
+        ctx ? occupancyTitle(ctx, { round: speed?.round, median: !!speed?.median }) : '',
+    );
+
+    // One-line result preview shown in the collapsed tool row; the expanded
+    // block below carries the arguments and the output.
     function outputPreview(output: string, maxLen: number = 100): string {
         if (!output) return '';
         const oneLine = output.replace(/\s+/g, ' ').trim();
         return oneLine.length > maxLen ? oneLine.slice(0, maxLen) + '...' : oneLine;
-    }
-
-    function truncateOutput(output: string, maxLen: number = 500): string {
-        if (!output || output.length <= maxLen) return output || '';
-        return output.slice(0, maxLen) + '...';
     }
 
     interface GroupedRound {
@@ -110,14 +165,37 @@
             <span class="action-count">
                 {roundCount} {roundCount === 1 ? 'round' : 'rounds'} · {toolCalls.length} {toolCalls.length === 1 ? 'action' : 'actions'}{isLive ? '...' : ''}
             </span>
+            {#if speed && (isLive || speed.median)}
+                <span class="speed-counter" title={speed.elapsed_s ? `model ${speed.model || speed.alias || ''}, round ${speed.round ?? '?'}, ${speed.prompt_tokens ?? 0} in / ${speed.completion_tokens ?? 0} out, ${speed.elapsed_s}s` : ''}>
+                    {#if speed.prefill_tok_s}
+                        <span class="speed-part">{speed.median ? 'median ' : ''}prefill: {speed.prefill_tok_s} tok/s | decode: {speed.decode_tok_s} tok/s</span>
+                    {:else if speed.total_tok_s}
+                        <span class="speed-part">{speed.median ? 'median ' : ''}{speed.total_tok_s} tok/s</span>
+                    {/if}
+                    {#if ctx}
+                        <span
+                            class="speed-part context"
+                            class:warn={ctx.warn}
+                            class:blocked={ctx.blocked}
+                            title={ctxTitle}
+                        >{occupancyLabel(ctx)}</span>
+                    {/if}
+                    {#if speed.model || speed.alias}
+                        <span class="speed-model">{speed.model || speed.alias}</span>
+                    {/if}
+                </span>
+            {/if}
             <span class="expand-icon">{expanded ? '▾' : '▸'}</span>
         </button>
-        {#if isLive && conversationId}
+        <!-- Expanded, the sticky footer Stop owns the control; the header one
+             serves the collapsed state, where the block is short. -->
+        {#if isLive && conversationId && !expanded}
             <button
                 class="stop-btn"
-                title="Stop agent"
-                onclick={(e) => { e.stopPropagation(); sendCommand('interrupt_agent', { agent_id: agentId, conversation_id: conversationId }); }}
-            >Stop</button>
+                title={stopNote || 'Stop agent'}
+                disabled={stopState === 'stopping'}
+                onclick={requestStop}
+            >{stopState === 'stopping' ? 'Stopping…' : stopState === 'miss' ? 'No active loop' : 'Stop'}</button>
         {/if}
 
         {#if expanded}
@@ -143,27 +221,33 @@
                             {/if}
                             {#each group.tools as tc, i}
                                 {@const globalIdx = toolCalls.indexOf(tc)}
+                                {@const hasDetail = !!(tc.input || tc.output)}
                                 <div class="tool-call-wrapper">
                                     <button
                                         class="tool-call-item"
                                         class:error={tc.is_error}
-                                        class:has-output={!!tc.output}
-                                        onclick={() => tc.output && toggleTool(globalIdx)}
+                                        class:has-output={hasDetail}
+                                        onclick={() => hasDetail && toggleTool(globalIdx)}
                                     >
                                         <span class="tool-status">{tc.is_error ? '✗' : '✓'}</span>
                                         <span class="tool-name">{getToolLabel(tc.tool)}</span>
                                         {#if getToolArgPreview(tc.tool, tc.input)}
                                             <span class="tool-arg"> — {getToolArgPreview(tc.tool, tc.input)}</span>
                                         {/if}
-                                        {#if tc.output}
+                                        {#if hasDetail}
                                             <span class="tool-expand-icon">{expandedTools.has(globalIdx) ? '▾' : '▸'}</span>
                                         {/if}
                                     </button>
                                     {#if tc.output && !expandedTools.has(globalIdx)}
                                         <div class="tool-output-preview">{outputPreview(tc.output)}</div>
                                     {/if}
-                                    {#if expandedTools.has(globalIdx) && tc.output}
-                                        <pre class="tool-output">{truncateOutput(tc.output)}</pre>
+                                    {#if expandedTools.has(globalIdx)}
+                                        {#if tc.input}
+                                            <pre class="tool-input">{clampDetail(formatToolInput(tc.input))}</pre>
+                                        {/if}
+                                        {#if tc.output}
+                                            <pre class="tool-output">{clampDetail(tc.output)}</pre>
+                                        {/if}
                                     {/if}
                                 </div>
                             {/each}
@@ -174,6 +258,23 @@
                     <div class="tool-call-item current">
                         <span class="spinner-small"></span>
                         <span class="tool-name">{getToolLabel(currentTool)}</span>
+                    </div>
+                {/if}
+                {#if isLive && conversationId}
+                    <!-- The run grows downward and autoscroll keeps the bottom in
+                         view, so the one control that ends the run must live at the
+                         bottom too — sticky, so it survives the user scrolling up
+                         mid-run. The top Stop stays for the collapsed state. -->
+                    <div class="stop-footer">
+                        <button
+                            class="stop-btn"
+                            title={stopNote || 'Stop agent'}
+                            disabled={stopState === 'stopping'}
+                            onclick={requestStop}
+                        >{stopState === 'stopping' ? 'Stopping…' : stopState === 'miss' ? 'No active loop' : 'Stop'}</button>
+                        {#if stopState === 'error'}
+                            <span class="stop-note error">{stopNote}</span>
+                        {/if}
                     </div>
                 {/if}
             </div>
@@ -198,6 +299,55 @@
         border-radius: 0 6px 6px 0;
     }
 
+    .stop-footer {
+        position: sticky;
+        bottom: 0;
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        justify-content: center;
+        padding: 10px 0 8px;
+        background: linear-gradient(to top, var(--bg-primary, #111) 75%, transparent);
+    }
+    .stop-footer .stop-btn {
+        font-size: 1em;
+        padding: 8px 28px;
+        min-width: 120px;
+    }
+    .stop-note.error {
+        color: #f87171;
+        font-size: 0.85em;
+    }
+    .speed-counter {
+        display: inline-flex;
+        gap: 8px;
+        align-items: baseline;
+        margin-left: 8px;
+        font-size: 0.85em;
+        opacity: 0.85;
+    }
+    .speed-part {
+        font-variant-numeric: tabular-nums;
+        color: var(--text-secondary, #9ca3af);
+        white-space: nowrap;
+    }
+    /* Amber at the backend's own >80% warning line, red once the round guard
+       would refuse the next call — the colour is the reserve made visible. */
+    .speed-part.context.warn {
+        color: var(--warning, #f59e0b);
+    }
+    .speed-part.context.blocked {
+        color: var(--danger, #ef4444);
+        font-weight: 600;
+    }
+    .speed-model {
+        font-size: 0.9em;
+        color: var(--text-tertiary, #6b7280);
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        max-width: 160px;
+    }
     .tool-calls-collapsible.live {
         border-left-color: #34d399;
     }
@@ -419,6 +569,22 @@
         margin-left: auto;
         font-size: 0.7em;
         color: #64748b;
+    }
+
+    /* The arguments, above the output and marked apart from it: the same block
+       now answers both "what did it run" and "what came back". */
+    .tool-input {
+        margin: 2px 0 2px 20px;
+        padding: 6px 8px;
+        background: #0f172a;
+        border-radius: 4px;
+        font-size: 0.8em;
+        color: #cbd5e1;
+        white-space: pre-wrap;
+        word-wrap: break-word;
+        max-height: 200px;
+        overflow-y: auto;
+        border-left: 2px solid #475569;
     }
 
     .tool-output {

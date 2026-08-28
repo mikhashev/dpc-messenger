@@ -509,9 +509,9 @@ class TelegramBridge:
             # Download from Telegram
             from telegram import Bot
             bot: Bot = self.telegram.application.bot
-            file = await bot.get_file(file_id)
-
-            await file.download_to_drive(voice_path)
+            file = await self._fetch_voice_with_retry(bot, file_id, voice_path, message)
+            if file is None:
+                return
             logger.info(f"Downloaded voice file to {voice_path}")
 
             # Transcribe if enabled
@@ -654,6 +654,66 @@ class TelegramBridge:
 
         except Exception as e:
             logger.error(f"Error handling Telegram voice message: {e}", exc_info=True)
+
+
+    # python-telegram-bot defaults to a 5 s connect timeout and 5 s read. A
+    # voice message arrived at 22:46:07 on 2026-08-24 and `get_file` gave up at
+    # 22:46:13 with a TLS handshake that never completed — six seconds, one
+    # failed connection, nothing else wrong on the wire that minute: the
+    # getUpdates poll had delivered the message seconds earlier and no other
+    # request failed in the whole window. The box was pinned at the time. Five
+    # seconds is simply not enough headroom on a busy machine, and the person
+    # who recorded the voice got silence.
+    VOICE_FETCH_TIMEOUT = 30.0
+    VOICE_FETCH_ATTEMPTS = 3
+
+    async def _fetch_voice_with_retry(self, bot, file_id, voice_path, message):
+        """Get the voice file, with headroom and a retry — and tell the sender if not.
+
+        Returns the telegram File on success and None when it gave up, having
+        already said so in the chat. Silence was the old behaviour: the failure
+        went to a log line nobody was reading and the sender waited for a
+        transcription that was never coming.
+        """
+        import asyncio as _asyncio
+
+        last_error = None
+        for attempt in range(1, self.VOICE_FETCH_ATTEMPTS + 1):
+            try:
+                file = await bot.get_file(
+                    file_id,
+                    read_timeout=self.VOICE_FETCH_TIMEOUT,
+                    connect_timeout=self.VOICE_FETCH_TIMEOUT,
+                )
+                await file.download_to_drive(
+                    voice_path,
+                    read_timeout=self.VOICE_FETCH_TIMEOUT,
+                    connect_timeout=self.VOICE_FETCH_TIMEOUT,
+                )
+                if attempt > 1:
+                    logger.info("Voice file fetched on attempt %d", attempt)
+                return file
+            except Exception as exc:
+                last_error = exc
+                logger.warning(
+                    "Voice fetch attempt %d of %d failed: %s: %s",
+                    attempt, self.VOICE_FETCH_ATTEMPTS, type(exc).__name__, exc,
+                )
+                if attempt < self.VOICE_FETCH_ATTEMPTS:
+                    await _asyncio.sleep(2 * attempt)
+
+        logger.error(
+            "Could not fetch the voice file after %d attempts: %s",
+            self.VOICE_FETCH_ATTEMPTS, last_error,
+        )
+        try:
+            await message.reply_text(
+                "Не смог забрать голосовое из Telegram — соединение не установилось. "
+                "Отправь ещё раз, пожалуйста."
+            )
+        except Exception as reply_error:
+            logger.warning("Could not tell the sender the fetch failed: %s", reply_error)
+        return None
 
     async def handle_photo_message(self, update, context):
         """

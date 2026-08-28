@@ -125,10 +125,10 @@ import { availableProviders, defaultProviders, providersList, peerProviders, aiR
 import { showNotificationIfBackground } from './notificationService';
 import { fileTransferOffer, fileTransferProgress, fileTransferComplete, fileTransferCancelled, activeFileTransfers, filePreparationStarted, filePreparationProgress, filePreparationCompleted } from './services/fileTransfer';
 import { voiceOfferReceived, voiceTranscriptionReceived, voiceTranscriptionComplete, voiceTranscriptionConfig, whisperModelLoadingStarted, whisperModelLoaded, whisperModelLoadingFailed, whisperModelUnloaded, whisperModelDownloadRequired, whisperModelDownloadStarted, whisperModelDownloadCompleted, whisperModelDownloadFailed } from './services/voice';
-import { groupChats, groupTextReceived, groupFileReceived, groupInviteReceived, groupUpdated, groupMemberLeft, groupDeleted, groupHistorySynced, groupMessageDeleted, tokenUsageUpdated } from './services/groups';
+import { groupChats, groupTextReceived, groupFileReceived, groupInviteReceived, groupUpdated, groupMemberLeft, groupDeleted, groupHistorySynced, groupAccessDenied, groupMessageDeleted, tokenUsageUpdated } from './services/groups';
 import { agentsList, agentCreated, agentUpdated, agentDeleted, agentProfiles, agentProgress, agentProgressClear, agentLiveTools, agentTextChunk, agentChatMessage, userMessageConfirmed, sleepStateChanged, sleepProgress, sleepAgentStates } from './services/agents';
 import { telegramEnabled, telegramConnected, telegramStatus, telegramError, telegramLinkedChats, telegramMessages, telegramMessageReceived, telegramVoiceReceived, telegramImageReceived, telegramFileReceived, agentTelegramLinked, agentTelegramUnlinked, agentHistoryUpdated } from './services/telegram';
-import { personalContext, contextUpdated, peerContextUpdated, knowledgeCommitProposal, knowledgeCommitResult, extractionFailure, tokenWarning, integrityWarnings } from './services/knowledge';
+import { personalContext, contextUpdated, peerContextUpdated, knowledgeCommitProposal, knowledgeCommitResult, extractionFailure, tokenWarning, integrityWarnings, votingConversationId } from './services/knowledge';
 import { historyRestored, newSessionProposal, newSessionResult, conversationReset, conversationSettings, conversationSettingsChanged, conversationDeleted } from './services/session';
 
 // Re-export all service stores for backward compatibility.
@@ -139,10 +139,10 @@ export { p2pMessages, unreadMessageCounts };
 export { availableProviders, defaultProviders, providersList, peerProviders, aiResponseWithImage, firewallRulesUpdated, providerBalance };
 export { fileTransferOffer, fileTransferProgress, fileTransferComplete, fileTransferCancelled, activeFileTransfers, filePreparationStarted, filePreparationProgress, filePreparationCompleted };
 export { voiceOfferReceived, voiceTranscriptionReceived, voiceTranscriptionComplete, voiceTranscriptionConfig, whisperModelLoadingStarted, whisperModelLoaded, whisperModelLoadingFailed, whisperModelUnloaded, whisperModelDownloadRequired, whisperModelDownloadStarted, whisperModelDownloadCompleted, whisperModelDownloadFailed };
-export { groupChats, groupTextReceived, groupFileReceived, groupInviteReceived, groupUpdated, groupMemberLeft, groupDeleted, groupHistorySynced, groupMessageDeleted, tokenUsageUpdated };
+export { groupChats, groupTextReceived, groupFileReceived, groupInviteReceived, groupUpdated, groupMemberLeft, groupDeleted, groupHistorySynced, groupAccessDenied, groupMessageDeleted, tokenUsageUpdated };
 export { agentsList, agentCreated, agentUpdated, agentDeleted, agentProfiles, agentProgress, agentProgressClear, agentLiveTools, agentTextChunk, agentChatMessage, userMessageConfirmed, sleepStateChanged, sleepProgress, sleepAgentStates };
 export { telegramEnabled, telegramConnected, telegramStatus, telegramError, telegramLinkedChats, telegramMessages, telegramMessageReceived, telegramVoiceReceived, telegramImageReceived, telegramFileReceived, agentTelegramLinked, agentTelegramUnlinked, agentHistoryUpdated };
-export { personalContext, contextUpdated, peerContextUpdated, knowledgeCommitProposal, knowledgeCommitResult, extractionFailure, tokenWarning, integrityWarnings };
+export { personalContext, contextUpdated, peerContextUpdated, knowledgeCommitProposal, knowledgeCommitResult, extractionFailure, tokenWarning, integrityWarnings, votingConversationId };
 export { historyRestored, newSessionProposal, newSessionResult, conversationReset, conversationSettings, conversationSettingsChanged, conversationDeleted };
 
 // Track currently active chat to prevent unread badges on open chats
@@ -154,6 +154,11 @@ let reconnectAttempts = 0;
 let pollingInterval: ReturnType<typeof setInterval> | null = null;
 const MAX_RECONNECT_ATTEMPTS = 5;
 const RECONNECT_DELAY = 3000;
+// Auth rejections are retried only while the token file keeps changing under
+// us, and only a few times: a backend restarting in a loop must not turn into
+// a reconnect loop here.
+let authRetries = 0;
+const MAX_AUTH_RETRIES = 3;
 const API_URL = "ws://127.0.0.1:9999";
 
 // Map to track pending command responses
@@ -266,33 +271,51 @@ export async function connectToCoreService() {
             // See local_api.py:_authenticate.
             socket!.send(JSON.stringify({ command: 'auth', token: authToken, id: 'auth-init' }));
 
-            connectionStatus.set('connected');
-            reconnectAttempts = 0;
-
-            // Wire the frontend logger to relay messages to ui.log via the backend.
-            setLogSender((level, context, message) => {
-                sendCommand('ui_log', { level, context, message });
-            });
-
-            sendCommand("get_status");
-            sendCommand("list_providers");
-            sendCommand("get_default_providers");  // Fetch default text/vision providers
-            sendCommand("get_providers_list");     // Fetch full provider list with vision flags
-            sendCommand("get_telegram_status");    // Fetch Telegram status including conversation links
-            loadGroups();                             // Fetch group chats (v0.19.0)
-            startBalancePolling();                    // DeepSeek balance poll + low-balance alerts (Phase 2b)
-
-            // Stop polling
-            if (pollingInterval) {
-                clearInterval(pollingInterval);
-                pollingInterval = null;
-            }
+            // Nothing else goes out until the backend answers that auth. An open
+            // socket used to count as connected and the whole startup batch left
+            // immediately: on 2026-08-23 the backend rejected a stale token 0.4s
+            // after rewriting it, closed the socket, and get_groups,
+            // get_instructions and get_conversation_transcription sat in
+            // pendingCommands until their 60s timeouts — after which nobody
+            // re-sent them, so the UI stayed without groups and without history.
         });
 
         socket.addEventListener('message', async (event) => {
             try {
                 const message = JSON.parse(event.data);
                 coreMessages.set(message);
+
+                // The backend answers the auth frame before anything else
+                // (local_api.py:_authenticate). This — not the socket opening —
+                // is the moment the connection is usable, and the moment the
+                // startup batch may go out.
+                if (message.id === 'auth-init' && message.command === 'auth') {
+                    if (message.status === 'OK') {
+                        connectionStatus.set('connected');
+                        reconnectAttempts = 0;
+                        authRetries = 0;
+
+                        // Wire the frontend logger to relay messages to ui.log via the backend.
+                        setLogSender((level, context, message) => {
+                            sendCommand('ui_log', { level, context, message });
+                        });
+
+                        sendCommand("get_status");
+                        sendCommand("list_providers");
+                        sendCommand("get_default_providers");  // Fetch default text/vision providers
+                        sendCommand("get_providers_list");     // Fetch full provider list with vision flags
+                        sendCommand("get_telegram_status");    // Fetch Telegram status including conversation links
+                        loadGroups();                             // Fetch group chats (v0.19.0)
+                        startBalancePolling();                    // DeepSeek balance poll + low-balance alerts (Phase 2b)
+
+                        // Stop polling
+                        if (pollingInterval) {
+                            clearInterval(pollingInterval);
+                            pollingInterval = null;
+                        }
+                    }
+                    return;
+                }
 
                 // Check if this is a response to a pending command
                 if (message.id && pendingCommands.has(message.id)) {
@@ -355,6 +378,7 @@ export async function connectToCoreService() {
                 else if (message.event === "knowledge_commit_proposed") {
                     console.log("Knowledge commit proposal received:", message.payload);
                     knowledgeCommitProposal.set(message.payload);
+                    votingConversationId.set(message.payload?.conversation_id ?? null);
                 } else if (message.event === "knowledge_commit_approved") {
                     console.log("Knowledge commit approved:", message.payload);
                     // Refresh personal context after approval
@@ -362,6 +386,7 @@ export async function connectToCoreService() {
                 } else if (message.event === "knowledge_commit_result") {
                     console.log("Knowledge commit result received:", message.payload);
                     knowledgeCommitResult.set(message.payload);
+                    votingConversationId.set(null);
                 }
                 // New session proposal handlers (v0.11.3)
                 else if (message.event === "new_session_proposed") {
@@ -781,6 +806,20 @@ export async function connectToCoreService() {
                     console.error(`[ERROR TOAST] ${title}: ${toastMessage}`);
                 }
 
+                else if (message.event === "schedule_approval_request") {
+                    console.log("Schedule approval request:", message.payload);
+                    const { noteScheduleApproval } = await import("$lib/services/scheduleApproval");
+                    noteScheduleApproval(message.payload);
+                }
+                // Answered on the other surface, or expired. Telegram can now
+                // answer the same request, so whichever surface did not has to
+                // stop offering a button that resolves to nothing.
+                else if (message.event === "schedule_approval_resolved") {
+                    const { resolution, outcome, request_id } = message.payload ?? {};
+                    console.log(`Schedule approval ${resolution}: ${request_id} — ${outcome ?? ""}`);
+                    const { dropScheduleApproval } = await import("$lib/services/scheduleApproval");
+                    dropScheduleApproval(request_id);
+                }
                 // Shell approval events (ADR-030 v2)
                 else if (message.event === "shell_approval_request") {
                     console.log("Shell approval request:", message.payload);
@@ -795,12 +834,38 @@ export async function connectToCoreService() {
                     );
                     shellExecutionResults.update((list: any[]) => [...list, message.payload]);
                 }
-                else if (message.event === "shell_approval_expired") {
-                    console.log("Shell approval expired:", message.payload);
+                // The truthful one. Its predecessor below says «expired» for
+                // every closure — approved, rejected and timed out alike — so
+                // ui.log, the only surface a person opens, was wrong about 30
+                // of 35 events on 2026-08-25, always in the direction that
+                // makes the approval gate look like a wall. Log from here.
+                else if (message.event === "shell_approval_resolved") {
+                    const { resolution, outcome, request_id } = message.payload ?? {};
+                    console.log(`Shell approval ${resolution}: ${request_id} — ${outcome ?? ""}`);
                     const { pendingShellApprovals } = await import("$lib/services/shellApproval");
                     pendingShellApprovals.update((list: any[]) =>
                         list.filter((r: any) => r.request_id !== message.payload.request_id)
                     );
+                }
+                // Kept so a backend older than shell_approval_resolved still
+                // withdraws the card. It makes no claim about the outcome, so
+                // it no longer writes one into the log — the line it used to
+                // write is what sent an hour of reading in the wrong
+                // direction. Delete once no shipped backend sends it alone.
+                else if (message.event === "shell_approval_expired") {
+                    const { pendingShellApprovals } = await import("$lib/services/shellApproval");
+                    pendingShellApprovals.update((list: any[]) =>
+                        list.filter((r: any) => r.request_id !== message.payload.request_id)
+                    );
+                }
+
+                // Headless web-auth approval (ADR-029 Task 008). Nothing had
+                // ever listened to this event, so every request expired after
+                // its 120s wait — 19 of them, none approved.
+                else if (message.event === "web_auth_headless_approval_request") {
+                    console.log("Web auth headless approval request:", message.payload);
+                    const { pendingWebAuthApprovals } = await import("$lib/services/webAuthApproval");
+                    pendingWebAuthApprovals.update((list: any[]) => [...list, message.payload]);
                 }
 
                 // Whisper model loading events (v0.13.3+ model pre-loading)
@@ -978,6 +1043,10 @@ export async function connectToCoreService() {
                     console.log("Group history synced:", message.payload);
                     groupHistorySynced.set(message.payload);
                 }
+                else if (message.event === "group_access_denied") {
+                    console.warn("Group access refused by peer:", message.payload);
+                    groupAccessDenied.set(message.payload);
+                }
                 else if (message.event === "group_message_deleted") {
                     // Backend removed a message from group history (e.g. stale morning
                     // brief replaced on Sleep). +page.svelte removes from chatHistories.
@@ -1092,11 +1161,42 @@ export async function connectToCoreService() {
             socket = null;
 
             // Code 1008 = policy violation. The backend uses this exclusively for
-            // local API auth failures (missing/invalid token, timeout). The token
-            // won't change until the backend restarts, so retrying with the same
-            // stale token would just spin forever.
+            // local API auth failures (missing/invalid token, timeout).
+            //
+            // Giving up here was right for the case it was written for — the same
+            // token will keep being rejected — and wrong for the one that happens:
+            // the backend rewrites ~/.dpc/.ws_token on every start, and this
+            // client reads the file *before* opening the socket, so a restart in
+            // that window sends a token that was current when it was read and
+            // stale by the time it arrived. Measured 2026-08-23: token written at
+            // 16:14:10,388, rejected at 16:14:10,814, and the UI then sat in
+            // 'error' with no groups and no history. So: read the file again, and
+            // retry only if it now holds something different — if it does not,
+            // the original reasoning stands and we stop.
             if (event.code === 1008) {
                 console.error(`❌ Local API auth rejected: ${event.reason}`);
+                if (authRetries < MAX_AUTH_RETRIES) {
+                    import('@tauri-apps/api/core').then(({ invoke }) =>
+                        invoke<string>('get_ws_token')
+                    ).then((fresh) => {
+                        if (fresh && fresh !== authToken) {
+                            authRetries++;
+                            console.log(`[auth] token on disk changed since we read it — reconnecting (${authRetries}/${MAX_AUTH_RETRIES})`);
+                            connectionStatus.set('disconnected');
+                            reconnectAttempts = 0;
+                            reconnectTimeout = setTimeout(() => connectToCoreService(), 200);
+                        } else {
+                            console.error('[auth] token on disk is the one we sent — not retrying');
+                            connectionStatus.set('error');
+                            reconnectAttempts = MAX_RECONNECT_ATTEMPTS;
+                        }
+                    }).catch((e) => {
+                        console.error('[auth] could not re-read the token:', e);
+                        connectionStatus.set('error');
+                        reconnectAttempts = MAX_RECONNECT_ATTEMPTS;
+                    });
+                    return;
+                }
                 connectionStatus.set('error');
                 reconnectAttempts = MAX_RECONNECT_ATTEMPTS;
                 return;

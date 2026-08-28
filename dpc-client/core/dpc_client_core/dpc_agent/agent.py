@@ -31,7 +31,8 @@ from .memory import Memory, generate_smart_index
 from .skill_store import SkillStore
 from .skill_reflection import SkillReflector, REFLECTION_ROUNDS_THRESHOLD
 from .context import build_llm_messages
-from .loop import run_llm_loop
+from .sent_annotations import SentAnnotationStore
+from .loop import run_llm_loop, RECORDED_USAGE_FIELDS
 from .utils import (
     get_agent_root, ensure_agent_dirs, utc_now_iso, append_jsonl
 )
@@ -45,6 +46,30 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 CONTEXT_ROUND_RESERVE_TOKENS = 16384
+
+
+def tokens_block(usage: Dict[str, Any]) -> Dict[str, Any]:
+    """What a finished task cost in tokens, for the record that outlives the log.
+
+    The task result has carried a `tokens` field since it was written and it
+    has been `{}` in all 133 files on this machine, because it asks
+    `usage.get("tokens", {})` while the loop keeps its counters flat and
+    creates no such key. The numbers were one name away the whole time.
+
+    Provider-shaped fields (`RECORDED_USAGE_FIELDS`) are copied only when the
+    provider reported them. Absent, not zero: the only reason this field went
+    unnoticed for a year is that an empty value reads as a measurement.
+    """
+    block = {
+        "prompt_tokens": usage.get("prompt_tokens", 0),
+        "completion_tokens": usage.get("completion_tokens", 0),
+        "total_tokens": usage.get("total_tokens", 0),
+    }
+    for field in RECORDED_USAGE_FIELDS:
+        value = usage.get(field)
+        if value is not None:
+            block[field] = value
+    return block
 
 
 def select_prior_history(
@@ -76,6 +101,13 @@ class AgentConfig:
     # Budget settings
     billing_model: str = "subscription"  # or "pay_per_use"
 
+    # Device and name of the embedding model, carried here because the agent builds
+    # the per-process singleton before the manager's index pass runs — a value that
+    # only reached the index pass would apply to nothing on the live path. None on
+    # either means "whatever get_embedding_provider defaults to".
+    embedding_device: Optional[str] = None
+    embedding_model: Optional[str] = None
+
 
 class DpcAgent:
     """
@@ -96,6 +128,7 @@ class DpcAgent:
         firewall_profile: Optional[str] = None,  # Per-agent permission profile (Phase 2)
         service: Optional[Any] = None,  # CoreService reference for commit proposals
         compute_host: str = "",  # Optional remote peer node_id for LLM inference
+        run_gate: Optional[Any] = None,  # Per-agent run gate, shared with the manager
     ):
         """
         Initialize the agent.
@@ -114,6 +147,10 @@ class DpcAgent:
         self._provider_alias = provider_alias  # Store for LLM adapter
         self._firewall_profile = firewall_profile  # Store for tool permission lookups
         self._service = service  # CoreService — used by tools that need firewall access
+        # The queue is the second door into a run. It takes the manager's gate,
+        # so a scheduled task cannot land in a conversation mid-chat; a bare
+        # agent gets its own, which serialises nothing but keeps the code honest.
+        self._run_gate = run_gate if run_gate is not None else asyncio.Lock()
         # Note: ensure_agent_dirs() is already called by DpcAgentManager, so we don't call it here
 
         # Initialize components
@@ -132,7 +169,13 @@ class DpcAgent:
         )
 
         from .memory import get_embedding_provider
-        self._embedding_provider = get_embedding_provider(local_files_only=True)
+        _embedding_kwargs = {
+            "local_files_only": True,
+            "device": self.config.embedding_device,
+        }
+        if self.config.embedding_model:
+            _embedding_kwargs["model_name"] = self.config.embedding_model
+        self._embedding_provider = get_embedding_provider(**_embedding_kwargs)
 
         # Task queue for background execution
         self.queue = TaskQueue(self.agent_root)
@@ -182,6 +225,9 @@ class DpcAgent:
         on_stream_chunk: Optional[Callable[[str, str], None]] = None,
         session_state: Optional[Dict[str, Any]] = None,
         conversation_monitor: Optional[Any] = None,
+        # How many check_back wake-ups deep this run already is. Only the task
+        # executor sets it; a default of 0 makes an ordinary turn the first.
+        check_back_depth: int = 0,
         # Image parameters for vision queries
         image_base64: Optional[str] = None,
         image_mime: str = "image/png",
@@ -231,10 +277,32 @@ class DpcAgent:
             task["chat_context"] = chat_context
 
         prior_history = None
+        full_history: List[Dict[str, Any]] = []
         if conversation_monitor is not None:
-            prior_history = select_prior_history(
-                conversation_monitor.get_message_history(), trigger_message_id
-            )
+            full_history = conversation_monitor.get_message_history()
+            prior_history = select_prior_history(full_history, trigger_message_id)
+
+        # The record this turn answers. Group paths name it; the 1:1 path adds the
+        # user message to the monitor just before calling us, so it is the last
+        # record. Without an id the tail is still sent, only not remembered — the
+        # next turn pays one cold prefill instead of failing.
+        current_message_id = trigger_message_id
+        if not current_message_id and full_history and prior_history is not None:
+            last = full_history[-1]
+            if last.get("role") == "user" and last.get("id"):
+                current_message_id = str(last["id"])
+        if current_message_id:
+            for _rec in reversed(full_history):
+                if str(_rec.get("id") or "") == current_message_id:
+                    task["trigger_record"] = {
+                        "msg_index": _rec.get("msg_index"),
+                        "timestamp": _rec.get("timestamp"),
+                        "sender_name": _rec.get("sender_name"),
+                        "content": _rec.get("content"),
+                    }
+                    break
+        annotation_store = SentAnnotationStore(self.agent_root)
+        sent_annotations = annotation_store.load(conversation_id) if prior_history else None
 
         # Get firewall-controlled tool access (needed for both context and tool registry)
         allowed_tools = self._get_allowed_tools(message_source=message_source,
@@ -244,10 +312,19 @@ class DpcAgent:
         all_tools_map = None
         sandbox_ro = None
         sandbox_rw = None
+        extended_read = True
+        shared_knowledge = True
         if self._firewall is not None:
             all_tools_map = self._firewall.get_agent_tools_map(self._firewall_profile)
             sandbox_ro = self._firewall.get_sandbox_read_only_paths(self._firewall_profile)
             sandbox_rw = self._firewall.get_sandbox_read_write_paths(self._firewall_profile)
+            # Read the same gates read_file will apply, so a recall hint either offers
+            # an address that works or admits it has none. Both layers outside the
+            # sandbox are asked, and asked now: a gate revoked since indexing does not
+            # remove the row, so nothing else would notice.
+            extended_read = self._firewall.get_extended_read_enabled(self._firewall_profile)
+            shared_knowledge = self._firewall.can_agent_access_context(
+                "knowledge", profile_name=self._firewall_profile)
 
         messages, cap_info = build_llm_messages(
             agent_root=self.agent_root,
@@ -265,7 +342,27 @@ class DpcAgent:
             embedding_provider=self._embedding_provider,
             billing_model=self.config.billing_model,
             reader_identity=reader_identity,
+            extended_read_enabled=extended_read,
+            shared_knowledge_enabled=shared_knowledge,
+            sent_annotations=sent_annotations,
         )
+
+        # Remember the tail exactly as it went out, keyed by the message it went out
+        # on; prune ids the history no longer holds while at it. This is what makes
+        # the next prompt a pure append of this one (see sent_annotations.py).
+        _tail = cap_info.get("turn_context") or ""
+        if current_message_id and _tail:
+            try:
+                annotation_store.record(
+                    conversation_id, current_message_id, _tail,
+                    live_message_ids=[m.get("id") for m in full_history],
+                )
+            except Exception:
+                log.warning("sent_annotations: could not record tail for %s", conversation_id,
+                            exc_info=True)
+        elif _tail:
+            log.debug("sent_annotations: no message id for this turn in %s; tail not recorded",
+                      conversation_id)
 
         # Store cap_info for agent_manager to include in next request's session_state
         self._last_cap_info = cap_info
@@ -316,11 +413,18 @@ class DpcAgent:
             agent_root=self.agent_root,
             current_task_id=conversation_id,
             current_task_type="chat",
+            check_back_depth=check_back_depth,
             tool_whitelist=allowed_tools,
-            emit_progress_fn=emit_progress or (lambda msg, tool=None, rnd=None, tool_calls=None: None),
+            emit_progress_fn=emit_progress or (lambda msg, tool=None, rnd=None, tool_calls=None, speed=None: None),
             firewall=self._firewall,  # For extended sandbox paths
             conversation_monitor=conversation_monitor,  # For knowledge extraction tool
             reply_telegram_chat_id=reply_telegram_chat_id,
+            # Where this run came from, for anything that has to ask a person
+            # something (tier-1 shell approval today). The title is whatever the
+            # caller already resolved — group chats carry it in chat_context;
+            # for the rest the service names the conversation from its id.
+            conversation_id=conversation_id,
+            conversation_title=(chat_context or {}).get("chat_name") or None,
             skill_store=self.skill_store,  # For execute_skill tool
             dpc_service=self._service,  # For firewall checks
         )
@@ -351,7 +455,7 @@ class DpcAgent:
             tools=self.tools,
             llm=self.llm,
             agent_root=self.agent_root,
-            emit_progress=emit_progress or (lambda msg, tool=None, rnd=None, tool_calls=None: None),
+            emit_progress=emit_progress or (lambda msg, tool=None, rnd=None, tool_calls=None, speed=None: None),
             task_id=conversation_id,
             budget_remaining_usd=None if self.config.billing_model == "subscription" else self.config.budget_usd,
             max_rounds=self.config.max_rounds,
@@ -359,6 +463,12 @@ class DpcAgent:
             conversation_id=conversation_id,
             stop_event=stop_event,
             reasoning_effort=reasoning_effort,
+            # The live strip carries the same pair this guard has just decided
+            # on: the window every round is measured against, and the headroom
+            # below which the next round is refused. Until now those two numbers
+            # existed only in a DEBUG line nobody watching the agent can see.
+            context_window=_ctx_window,
+            context_reserve=_reserve,
         )
 
         # Store last usage and trace for session state access by agent_manager
@@ -388,6 +498,10 @@ class DpcAgent:
             "response_preview": response[:200] if response else "",
             "rounds": usage.get("rounds", 0),
             "cost_usd": usage.get("cost", 0),
+            # The same block as the task result, under the same names: this is
+            # the series a burn rate is computed from, and it has carried a
+            # cost with no decomposition since it was written.
+            "tokens": tokens_block(usage),
             "tokens_estimated_total": cap_info.get("estimated_tokens_before", 0),
             "tokens_context_window": _ctx_window,
             "context_trimmed": bool(_trimmed),
@@ -407,7 +521,7 @@ class DpcAgent:
                 "response": response or "",
                 "rounds": usage.get("rounds", 0),
                 "cost_usd": usage.get("cost", 0),
-                "tokens": usage.get("tokens", {}),
+                "tokens": tokens_block(usage),
             }
             (results_dir / f"{event_task_id}.json").write_text(
                 _json.dumps(result_data, ensure_ascii=False, indent=2),
@@ -507,17 +621,16 @@ class DpcAgent:
 
         is_group = conversation_id and conversation_id.startswith("group-")
         if is_group:
-            profile_tools = {}
-            if self._firewall_profile:
-                profile = self._firewall.get_agent_profile_settings(self._firewall_profile)
-                if profile:
-                    profile_tools = profile.get("tools", {})
             group_restricted = set()
             for tool_name in allowed:
-                key = f"{tool_name}_group_allowed"
-                if key in profile_tools and not profile_tools[key]:
-                    group_restricted.add(tool_name)
-                elif key not in profile_tools and tool_name == "run_shell":
+                # Unset means "not allowed in groups" for run_shell only; every
+                # other tool keeps its permission until the setting says no.
+                group_allowed = self._firewall.get_tool_setting(
+                    tool_name, "group_allowed",
+                    profile_name=self._firewall_profile,
+                    default=(tool_name != "run_shell"),
+                )
+                if not group_allowed:
                     group_restricted.add(tool_name)
             if group_restricted:
                 allowed = allowed - group_restricted
@@ -900,6 +1013,16 @@ class DpcAgent:
             return f"Execute the following scheduled task: {json.dumps(task_data, ensure_ascii=False)}"
 
     async def _execute_task(self, task: Task) -> str:
+        """Execute a queued task, one run at a time for this agent.
+
+        This is the second door into a run. A check_back deliberately replies
+        into the conversation it came from, so without the gate a scheduled task
+        lands its turn in the middle of a live chat.
+        """
+        async with self._run_gate:
+            return await self._execute_task_guarded(task)
+
+    async def _execute_task_guarded(self, task: Task) -> str:
         """
         Execute a queued task.
 
@@ -953,6 +1076,57 @@ class DpcAgent:
                     except Exception as e:
                         log.warning("Failed to deliver task result to Telegram: %s", e)
 
+            return result
+        elif task.task_type == "check_back":
+            # A deferred wake-up: unlike `reminder` this runs the model, so the
+            # agent can actually look at what it came back for. The depth rides
+            # on the task record — the tool reads it off the context and refuses
+            # past the cap, which is why the model is never asked for it.
+            text = task.data.get("text") or self._convert_task_data_to_prompt(task.data)
+            reply_conversation_id = task.data.get("_reply_conversation_id") or task.id
+            depth = int(task.data.get("_check_back_depth") or 0)
+
+            result = await self.process(
+                text,
+                conversation_id=reply_conversation_id,
+                dpc_context=task.data.get("dpc_context"),
+                reply_telegram_chat_id=task.data.get("_reply_telegram_chat_id"),
+                check_back_depth=depth,
+            )
+
+            # Waking up is only half of coming back: the answer has to land in
+            # the conversation that scheduled it. process() returns the text, it
+            # does not publish it, and in a group there is no other path — the
+            # first live run woke correctly, produced its line, and the agent's
+            # own send_user_message delivered it to Telegram instead, so the
+            # group saw nothing.
+            if reply_conversation_id.startswith("group-") and result:
+                service = getattr(self, "_service", None)
+                sender = getattr(self, "display_name", None) or self.agent_root.name
+                if service is not None:
+                    try:
+                        await service.send_group_agent_message(
+                            group_id=reply_conversation_id,
+                            agent_name=sender,
+                            text=result,
+                        )
+                    except Exception as e:
+                        log.warning("Failed to publish check_back result to %s: %s",
+                                    reply_conversation_id, e)
+                else:
+                    log.warning(
+                        "check_back finished for %s with no service to publish through",
+                        reply_conversation_id,
+                    )
+
+            reply_telegram_chat_id = task.data.get("_reply_telegram_chat_id")
+            if reply_telegram_chat_id:
+                send_fn = getattr(self, "_telegram_send_fn", None)
+                if send_fn:
+                    try:
+                        await send_fn(reply_telegram_chat_id, result)
+                    except Exception as e:
+                        log.warning("Failed to deliver check_back result to Telegram: %s", e)
             return result
         elif task.task_type == "reminder":
             # Deliver reminder message directly — no LLM call to prevent scheduling loops

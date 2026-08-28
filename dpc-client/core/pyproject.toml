@@ -1,6 +1,6 @@
 [project]
 name = "dpc-client-core"
-version = "0.28.0"
+version = "0.29.0"
 description = ""
 authors = [{name = "Mike Shevchenko", email = "legoogmiha@gmail.com"}]
 readme = "README.md"
@@ -37,7 +37,15 @@ dependencies = [
     "stopwordsiso>=0.6",
     "discord.py>=2.7.0,<3.0.0",
     "keyring>=24.0",
-    "cryptography>=42.0",
+    "cryptography>=50.0.0",
+    # PDF text, page geometry and per-character font attribution for
+    # read_document. One self-contained wheel bundling PDFium, no transitive
+    # dependencies, BSD-3-Clause OR Apache-2.0 — the licence matters because
+    # the client is GPL-3.0-or-later and pymupdf's AGPL would carry §13 into
+    # every node. In the base set rather than an extra on purpose: an extra is
+    # one more name to remember on every `uv sync`, and forgetting it here
+    # takes document reading away silently.
+    "pypdfium2>=5.0,<6.0",
 ]
 
 [project.optional-dependencies]

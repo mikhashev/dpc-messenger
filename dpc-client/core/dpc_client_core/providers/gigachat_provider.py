@@ -78,7 +78,11 @@ class GigaChatProvider(AIProvider):
         prompt: str,
         on_chunk: callable,
         conversation_id: str = None,
+        reasoning_effort: str = None,
     ) -> str:
+        # Accepted so every provider answers the same call, and not forwarded:
+        # whether this API has an equivalent has not been checked. Named rather
+        # than swallowed by **kwargs, so the next reader sees it is a decision.
         try:
             full_text = ""
             async with self._GigaChat(**self._client_kwargs) as client:

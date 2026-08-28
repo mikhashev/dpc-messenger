@@ -113,14 +113,37 @@ class VoteKnowledgeCommitHandler(MessageHandler):
             sender_node_id: Node ID of voter
             payload: Contains vote data (commit_id, vote)
         """
-        await self.service.consensus_manager.handle_vote_message(sender_node_id, payload)
+        proposal_id = payload.get("proposal_id", "")
+        voter_node_id, verdict = self._authenticate_voter(sender_node_id, payload)
+
+        if verdict == "rejected":
+            self.logger.warning(
+                "Discarding VOTE_KNOWLEDGE_COMMIT relayed by %s: signature does not hold",
+                sender_node_id[:20],
+            )
+            return None
+
+        # Same policy as VOTE_NEW_SESSION, and for the same reason: a vote on a
+        # commit becomes a signature on that commit, so crediting it to whoever
+        # carried it would put the wrong node's name inside the record.
+        if verdict in ("verified", "legacy"):
+            await self.service.consensus_manager.handle_vote_message(
+                sender_node_id, payload, voter_node_id=voter_node_id
+            )
+        else:
+            self.logger.info(
+                "Not counting %s knowledge vote from %s on %s — relaying it on",
+                verdict, str(voter_node_id)[:20], str(proposal_id)[:8]
+            )
 
         # Relay to group members that can't reach the voter directly (star topology)
-        proposal_id = payload.get("proposal_id", "")
         session = self.service.consensus_manager.sessions.get(proposal_id)
-        conversation_id = session.proposal.conversation_id if session else ""
+        conversation_id = (
+            payload.get("conversation_id")
+            or (session.proposal.conversation_id if session else "")
+        )
         if conversation_id and conversation_id.startswith("group-"):
-            dedup_key = f"kv:{proposal_id}:{sender_node_id}"
+            dedup_key = f"kv:{proposal_id}:{voter_node_id}"
             if dedup_key not in self.service._processed_message_ids:
                 self.service._processed_message_ids.add(dedup_key)
                 await self._relay_to_group(
@@ -335,10 +358,25 @@ class ApplyKnowledgeCommitHandler(MessageHandler):
 
         try:
             commit = KnowledgeCommit.from_dict(payload)
-            await self.service.consensus_manager._apply_commit(commit)
-            self.logger.info(
-                "Applied commit %s via APPLY_KNOWLEDGE_COMMIT recovery path (sent by %s)",
-                commit_id[:12], sender_node_id[:20]
+            provenance = commit.verify_provenance()
+
+            if provenance.is_rejected:
+                self.logger.warning(
+                    "Refused APPLY_KNOWLEDGE_COMMIT %s from %s: %s",
+                    commit_id[:12], sender_node_id[:20], provenance.detail
+                )
+                return None
+
+            for signer in provenance.unverifiable_signers:
+                await self._ask_for_certificate(signer, sender_node_id)
+
+            await self.service.consensus_manager._apply_commit(
+                commit, origin=provenance.verdict
+            )
+            say = self.logger.info if provenance.verdict == "verified" else self.logger.warning
+            say(
+                "Applied commit %s from %s as %s — %s",
+                commit_id[:12], sender_node_id[:20], provenance.verdict, provenance.detail
             )
         except Exception as e:
             self.logger.error(

@@ -20,8 +20,10 @@ import json
 import logging
 import os
 import pathlib
+import re
 import threading
 from dataclasses import dataclass, field, asdict
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from .utils import (
@@ -38,14 +40,50 @@ log = logging.getLogger(__name__)
 
 @dataclass
 class FileMeta:
+    # Reads. Until now these were bumped by writes, because update_access had exactly
+    # one caller and it sat in write_file — so a document written once and read fifty
+    # times counted as accessed once, and consolidation offered to archive it.
     last_accessed: str = ""
     access_count: int = 0
+    # Writes, kept separately rather than folded in. Consolidation needs both: a
+    # document nobody has read yet is not stale if it was written this morning, and
+    # without a write date the only way to know it is fresh is to miscount it as read.
+    last_written: str = ""
+    write_count: int = 0
     last_verified: str = ""
     tags: List[str] = field(default_factory=list)
     summary: str = ""
     source_layer: str = "L5"
     project: str = ""
     stale: bool = False
+
+
+_FRONT_MATTER = re.compile(r"\A---\s*\n.*?\n---\s*(\n|$)", re.DOTALL)
+_LINE_MARKERS = re.compile(r"(?m)^[ 	]*(?:#{1,6}[ 	]+|[-*+][ 	]+|>[ 	]*)")
+
+
+def one_line_summary(text: str, limit: int = 300) -> str:
+    """Flatten a document head into a single line fit for a list entry.
+
+    `summary` is stored and rendered as one bullet in _index.md, but it was filled
+    with the first thousand characters of the document verbatim - headings, blank
+    lines and all. Clipping that by length cut through the middle of markdown, so
+    a foreign `## Executive Summary` landed in the index as if it were a section of
+    the index itself. Everything that puts a summary into a flat context goes
+    through here.
+    """
+    if not text:
+        return ""
+    text = _FRONT_MATTER.sub("", text)
+    text = _LINE_MARKERS.sub("", text)
+    text = " ".join(text.split())
+    if len(text) <= limit:
+        return text
+    cut = text[:limit]
+    space = cut.rfind(" ")
+    if space > limit // 2:
+        cut = cut[:space]
+    return cut.rstrip(" ,.;:-") + "..."
 
 
 def _meta_path_for(knowledge_file: pathlib.Path) -> pathlib.Path:
@@ -68,7 +106,7 @@ def backfill_meta(knowledge_dir: pathlib.Path) -> Dict[str, dict]:
         except OSError:
             content = ""
         tags = [t for t in f.stem.replace("_", "-").split("-") if len(t) > 2]
-        meta = FileMeta(summary=content.strip(), tags=tags, source_layer="L5")
+        meta = FileMeta(summary=one_line_summary(content), tags=tags, source_layer="L5")
         data[f.name] = asdict(meta)
     if data:
         write_all_meta(knowledge_dir, data)
@@ -76,15 +114,75 @@ def backfill_meta(knowledge_dir: pathlib.Path) -> Dict[str, dict]:
     return data
 
 
+def _parse_stamp(ts: str):
+    """Read a stored stamp as an aware time, whatever shape it was written in.
+
+    Everything downstream compares these against an aware `now`, and a stamp
+    without an offset — a bare `2026-08-17`, which a hand-written entry may
+    carry — parses naive and makes that comparison raise. This is the one
+    place every reader of these stamps goes through, so treating an offsetless
+    value as UTC here is what keeps a single malformed line in one agent's
+    `_meta.json` from reaching the agent constructor.
+    """
+    from datetime import datetime, timezone
+    try:
+        parsed = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+    except (ValueError, TypeError, AttributeError):
+        return None
+    return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=timezone.utc)
+
+
+def last_touched(entry: dict):
+    """The most recent time anyone wanted this document, by reading or by writing.
+
+    Everything that asks how current a document is — the index sections, staleness,
+    archive proposals — has to ask this and not either half alone. Reads alone would
+    call every newly written document stale; writes alone is what the code did while
+    calling the number reads.
+    """
+    stamps = [t for t in (_parse_stamp(entry.get("last_accessed", "")),
+                          _parse_stamp(entry.get("last_written", ""))) if t]
+    return max(stamps) if stamps else None
+
+
+def _migrate_legacy_access(data: Dict[str, dict]) -> bool:
+    """Move the old access numbers to the column they always described.
+
+    Every one of them was produced by a write: update_access had a single caller and
+    it lived in write_file. So this is not a guess about which events were which — it
+    is the whole history moving to its correct name. Entries already carrying a write
+    date have been through this and are left alone.
+
+    Returns whether anything moved, so the caller knows to persist it.
+    """
+    moved = False
+    for entry in data.values():
+        if not isinstance(entry, dict) or "last_written" in entry:
+            continue
+        entry["last_written"] = entry.get("last_accessed", "")
+        entry["write_count"] = entry.get("access_count", 0)
+        entry["last_accessed"] = ""
+        entry["access_count"] = 0
+        moved = True
+    return moved
+
+
 def read_all_meta(knowledge_dir: pathlib.Path) -> Dict[str, dict]:
     meta_path = knowledge_dir / "_meta.json"
     if not meta_path.exists():
         return backfill_meta(knowledge_dir)
     try:
-        return json.loads(meta_path.read_text(encoding="utf-8"))
+        data = json.loads(meta_path.read_text(encoding="utf-8"))
     except (json.JSONDecodeError, OSError):
         log.warning("Corrupt _meta.json, returning empty")
         return {}
+    if isinstance(data, dict) and _migrate_legacy_access(data):
+        log.info("Moved legacy access counts to write counts in %s", meta_path)
+        try:
+            write_all_meta(knowledge_dir, data)
+        except OSError:
+            pass  # in-memory result is still correct; next write persists it
+    return data
 
 
 def write_all_meta(knowledge_dir: pathlib.Path, data: Dict[str, dict]) -> None:
@@ -105,9 +203,29 @@ def write_file_meta(knowledge_dir: pathlib.Path, filename: str, meta: FileMeta) 
 
 
 def update_access(knowledge_dir: pathlib.Path, filename: str) -> None:
+    """Record that this document was read. Called from read_file, and only from there."""
     meta = read_file_meta(knowledge_dir, filename)
     meta.last_accessed = utc_now_iso()
     meta.access_count += 1
+    write_file_meta(knowledge_dir, filename, meta)
+    # The index is deliberately not regenerated here. A read is not a change to the
+    # knowledge, but it does move the file into the newest bucket, and regenerating
+    # on every read reordered the block sitting ahead of the history - three reads
+    # in one turn rewrote it three times. Rebuilding belongs to writes and to
+    # consolidation (ADR-010 Tier 1).
+
+
+def record_write(knowledge_dir: pathlib.Path, filename: str) -> None:
+    """Record that this document was written.
+
+    Separate from update_access because the two answer different questions.
+    Consolidation asks "has anyone wanted this lately", and a write is the author
+    saying so while a read is a reader saying so — but only the write used to be
+    counted, under the reader's name.
+    """
+    meta = read_file_meta(knowledge_dir, filename)
+    meta.last_written = utc_now_iso()
+    meta.write_count += 1
     write_file_meta(knowledge_dir, filename, meta)
     try:
         generate_smart_index(knowledge_dir)
@@ -117,28 +235,32 @@ def update_access(knowledge_dir: pathlib.Path, filename: str) -> None:
 
 def generate_smart_index(knowledge_dir: pathlib.Path) -> str:
     """Generate _index.md with Active/Recent/Reference/Stale sections from _meta.json."""
-    from datetime import datetime, timezone
-
     all_meta = read_all_meta(knowledge_dir)
     if not all_meta:
         return ""
 
-    now = datetime.now(timezone.utc)
+    # The reference is the newest thing in the base, not the wall clock. This file
+    # sits in the cached system block ahead of the whole conversation history, so
+    # bucketing against `now` meant the same knowledge rendered differently once a
+    # day boundary passed - a changed prefix, a cold turn for every agent, and no
+    # knowledge changed. Deriving it from the data makes the bytes a function of
+    # _meta.json alone: two starts on unchanged knowledge produce the same file.
+    touch_times = [t for t in (last_touched(e) for e in all_meta.values()) if t]
+    reference_time = max(touch_times) if touch_times else None
     active, recent, reference, stale = [], [], [], []
 
     for fname, entry in all_meta.items():
-        ts = entry.get("last_accessed", "")
-        summary = entry.get("summary", "")[:160]
+        # Normalised on the way out too: the stores written before this existed
+        # still hold raw document heads, and they are only rewritten when an
+        # agent's _meta.json is rebuilt from scratch.
+        summary = one_line_summary(entry.get("summary", ""), 160)
         title = fname.replace(".md", "").replace("_", " ").replace("-", " ").title()
-        if not ts:
+        touched = last_touched(entry)
+        if touched is None or reference_time is None:
             reference.append((fname, title, summary, ""))
             continue
-        try:
-            accessed = datetime.fromisoformat(ts.replace("Z", "+00:00"))
-            days = (now - accessed).days
-        except (ValueError, TypeError):
-            reference.append((fname, title, summary, ""))
-            continue
+        ts = touched.isoformat()
+        days = (reference_time - touched).days
         line_data = (fname, title, summary, ts)
         if days == 0:
             active.append(line_data)
@@ -148,6 +270,12 @@ def generate_smart_index(knowledge_dir: pathlib.Path) -> str:
             stale.append(line_data)
         else:
             reference.append(line_data)
+
+    # Within a section the order is the file name, not the order of keys in
+    # _meta.json. That file is rewritten on every read, so leaning on its key order
+    # would leave one more way for these bytes to move without the knowledge moving.
+    for bucket in (active, recent, reference, stale):
+        bucket.sort(key=lambda item: item[0])
 
     lines = ["# Knowledge Index", ""]
     for section, items, show_summary in [
@@ -165,8 +293,7 @@ def generate_smart_index(knowledge_dir: pathlib.Path) -> str:
             elif not show_summary and ts:
                 try:
                     accessed = datetime.fromisoformat(ts.replace("Z", "+00:00"))
-                    days = (now - accessed).days
-                    lines.append(f"- {title} (stale, last: {days} days)")
+                    lines.append(f"- {title} (stale, last: {accessed.date().isoformat()})")
                 except (ValueError, TypeError):
                     lines.append(f"- {title}")
             else:
@@ -188,11 +315,38 @@ _singleton_lock = threading.Lock()
 
 
 def get_embedding_provider(model_name: str = "BAAI/bge-m3", **kwargs) -> "EmbeddingProvider":
-    """Return a singleton EmbeddingProvider per model_name to avoid duplicate GPU loads."""
+    """Return a singleton EmbeddingProvider per model_name to avoid duplicate GPU loads.
+
+    Because it is a singleton, whoever asks first decides the settings and everyone
+    after gets an object configured for someone else. max_tokens is the one setting
+    where that silently matters — it decides where documents are cut — so a caller
+    that states it is honoured on the shared instance rather than ignored. Queries and
+    documents then pass through the same window, which is the only way their vectors
+    are comparable.
+    """
     with _singleton_lock:
         if model_name not in _singleton_providers:
             _singleton_providers[model_name] = EmbeddingProvider(model_name=model_name, **kwargs)
-        return _singleton_providers[model_name]
+            return _singleton_providers[model_name]
+        provider = _singleton_providers[model_name]
+        requested = kwargs.get("max_tokens")
+        if requested is not None and int(requested) != provider.max_tokens:
+            provider.max_tokens = int(requested)
+            if provider._model is not None:
+                provider._apply_token_limit()
+        wanted_device = kwargs.get("device")
+        if wanted_device is not None and wanted_device != provider.device:
+            # Unlike max_tokens, this one cannot be reconciled after the fact: the
+            # weights are already on a device and moving them is not what a caller
+            # asking for a provider expects to trigger. Saying so is the point —
+            # the setting is per agent and the model is per process, so a second
+            # agent asking for something else must not read as if it were obeyed.
+            log.warning(
+                "Embedding model %s already loaded on %s; request for %s ignored "
+                "(one model per process, first caller decides)",
+                model_name, provider.device, wanted_device,
+            )
+        return provider
 
 
 class _EmbeddingDiskCache:
@@ -248,6 +402,46 @@ def _get_disk_cache() -> "_EmbeddingDiskCache":
     return _disk_cache
 
 
+_OOM_MARKERS = ("out of memory", "outofmemory", "cuda error", "cublas_status_alloc_failed")
+
+
+def _is_out_of_memory(exc: Exception) -> bool:
+    """Recognise an allocation failure without importing torch just to ask.
+
+    Matched on the message rather than the type because the same condition surfaces as
+    torch.cuda.OutOfMemoryError, a bare RuntimeError, or a MemoryError depending on
+    backend and platform.
+    """
+    if isinstance(exc, MemoryError):
+        return True
+    text = f"{type(exc).__name__} {exc}".lower()
+    return any(marker in text for marker in _OOM_MARKERS)
+
+
+def _release_device_memory() -> None:
+    """Hand freed blocks back before retrying, or the retry meets the same ceiling.
+
+    Both accelerators keep a caching allocator, so a block we stopped using is still
+    held by the process until the cache is emptied. On Apple Silicon that memory is
+    shared with the system rather than a separate pool, which makes returning it
+    matter more, not less. ROCm answers to torch.cuda, so it needs no branch of its
+    own. Every call is optional: an older torch without torch.mps, or no torch at
+    all, only costs us the retry we were going to attempt anyway.
+    """
+    try:
+        import torch
+    except Exception:
+        return
+    for release in (
+        lambda: torch.cuda.is_available() and torch.cuda.empty_cache(),
+        lambda: torch.backends.mps.is_available() and torch.mps.empty_cache(),
+    ):
+        try:
+            release()
+        except Exception:
+            pass
+
+
 class EmbeddingProvider:
     """Lazy-loading embedding provider. BGE-M3 via sentence-transformers + PyTorch."""
 
@@ -277,6 +471,49 @@ class EmbeddingProvider:
             pass
         return "cpu"
 
+    def _cpu_supports_bfloat16(self) -> bool:
+        """Whether this CPU computes bfloat16 natively rather than emulating it.
+
+        Both probes are private APIs and either may vanish; a missing probe means
+        "assume not" rather than a failed load, because the wrong answer here costs
+        speed and the wrong exception costs the index.
+        """
+        try:
+            import torch
+        except ImportError:
+            return False
+        for probe in (
+            lambda: torch.cpu._is_avx512_bf16_supported(),
+            lambda: torch.ops.mkldnn._is_mkldnn_bf16_supported(),
+        ):
+            try:
+                if probe():
+                    return True
+            except Exception:
+                continue
+        return False
+
+    def _torch_dtype(self):
+        """The dtype to load in, per device, measured rather than assumed.
+
+        On this box, bge-m3 on CPU: fp32 100 ms/chunk, **fp16 626** — six times
+        slower, because x86 has no native fp16 compute and emulates it — and
+        **bfloat16 37**, which the CPU does execute natively. So half precision is a
+        penalty on CPU unless it is the half the hardware understands. Cosine between
+        fp32 and bf16 vectors measured at 0.998-1.000 with retrieval order unchanged.
+
+        cuda keeps fp16, which is what it has always used and what its kernels want.
+        """
+        try:
+            import torch
+        except ImportError:
+            return None
+        if self.device == "cuda":
+            return torch.float16
+        if self.device == "cpu" and self._cpu_supports_bfloat16():
+            return torch.bfloat16
+        return None
+
     def _load_model(self):
         if self._model is not None:
             return
@@ -286,8 +523,9 @@ class EmbeddingProvider:
             from sentence_transformers import SentenceTransformer
             import torch
             kwargs = {"device": self.device}
-            if self.device == "cuda":
-                kwargs["model_kwargs"] = {"torch_dtype": torch.float16}
+            dtype = self._torch_dtype()
+            if dtype is not None:
+                kwargs["model_kwargs"] = {"dtype": dtype}
             if self._local_files_only:
                 kwargs["local_files_only"] = True
                 try:
@@ -298,8 +536,35 @@ class EmbeddingProvider:
                     self._model = SentenceTransformer(self.model_name, **kwargs)
             else:
                 self._model = SentenceTransformer(self.model_name, **kwargs)
-            precision = "FP16" if self.device == "cuda" else "FP32"
-            log.info("Loaded embedding model %s on %s (%s)", self.model_name, self.device, precision)
+            self._apply_token_limit()
+            precision = str(dtype).replace("torch.", "").upper() if dtype is not None else "FP32"
+            log.info("Loaded embedding model %s on %s (%s, max %d tokens)",
+                     self.model_name, self.device, precision, self.max_tokens)
+
+    def _apply_token_limit(self) -> None:
+        """Hold the model to the configured window instead of its own.
+
+        max_tokens was accepted, stored and never used, so every document was cut at
+        bge-m3's own 8192 and the setting said one thing while the model did another.
+        It is also the half of peak memory the batch size cannot reach: cost is batch
+        times sequence length, and a single 400 KB file fills the window on its own —
+        no batch small enough to help. Lowering it truncates long documents earlier,
+        which is why changing it needs a reindex: the vectors move.
+
+        A model that does not expose the attribute keeps its own limit; that is worth
+        a warning, not a failed load.
+        """
+        limit = int(self.max_tokens)
+        if limit <= 0:
+            return
+        current = getattr(self._model, "max_seq_length", None)
+        if current is None:
+            log.warning("Embedding model %s exposes no max_seq_length; max_tokens=%d not applied",
+                        self.model_name, limit)
+            return
+        # Never raise it: above what the model was trained for, positions it has never
+        # seen produce embeddings that are worse, not longer.
+        self._model.max_seq_length = min(limit, current)
 
     def embed(self, text: str) -> List[float]:
         self._load_model()
@@ -311,6 +576,30 @@ class EmbeddingProvider:
             result = self._model.encode(text, normalize_embeddings=True).tolist()
         cache.put(text, result)
         return result
+
+    def _encode_within_memory(self, texts: List[str]) -> List[List[float]]:
+        """Encode, halving the batch whenever the device says it cannot hold it.
+
+        Peak memory here is batch size times sequence length, and neither is under our
+        control: documents arrive whole and the model truncates at its own ceiling, so a
+        batch that is comfortable on a 32 GB card can be impossible on a laptop sharing
+        its VRAM with a resident speech or chat model. Rather than pick a number that is
+        safe everywhere and slow everywhere, back off on the machine that says no. A
+        single text that still does not fit is re-raised: halving cannot rescue it, and
+        silently dropping a document would leave a hole in the index nobody would notice.
+        """
+        try:
+            return self._model.encode(texts, normalize_embeddings=True).tolist()
+        except Exception as e:
+            if not _is_out_of_memory(e) or len(texts) == 1:
+                raise
+            half = len(texts) // 2
+            log.warning(
+                "Embedding batch of %d did not fit in memory (%s) — retrying as two halves",
+                len(texts), type(e).__name__,
+            )
+            _release_device_memory()
+            return self._encode_within_memory(texts[:half]) + self._encode_within_memory(texts[half:])
 
     def embed_batch(self, texts: List[str]) -> List[List[float]]:
         self._load_model()
@@ -327,7 +616,7 @@ class EmbeddingProvider:
         if misses:
             miss_texts = [t for _, t in misses]
             with self._gpu_semaphore:
-                vectors = self._model.encode(miss_texts, normalize_embeddings=True).tolist()
+                vectors = self._encode_within_memory(miss_texts)
             for (idx, text), vec in zip(misses, vectors):
                 cache.put(text, vec)
                 results[idx] = vec

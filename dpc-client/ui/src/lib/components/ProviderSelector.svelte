@@ -36,6 +36,11 @@
     selectedTextProvider = $bindable(""),
     selectedVisionProvider = $bindable(""),
     selectedVoiceProvider = $bindable(""),  // v0.13.0+
+    // Called only when a person changes the Text dropdown. `bind:` alone cannot
+    // tell a choice from a restore — both are assignments — and the difference is
+    // the whole of RETURNING-TO-A-CHAT-SILENTLY-PUTS-YOU-BACK-ON-THE-DEFAULT-PROVIDER:
+    // what has to be remembered is the choice.
+    onTextProviderChange = undefined,
 
     // Display control
     showForChatId,
@@ -52,6 +57,7 @@
   }: {
     selectedComputeHost?: string;
     selectedTextProvider?: string;
+    onTextProviderChange?: (uniqueId: string) => void;
     selectedVisionProvider?: string;
     selectedVoiceProvider?: string;
     showForChatId: string;
@@ -162,7 +168,11 @@
     <!-- Text Provider Selector (Phase 2.3: uses uniqueId for local/remote tracking) -->
     <div class="provider-row-header">
       <label for="text-provider-header">Text:</label>
-      <select id="text-provider-header" bind:value={selectedTextProvider}>
+      <select
+        id="text-provider-header"
+        bind:value={selectedTextProvider}
+        onchange={(e) => onTextProviderChange?.((e.currentTarget as HTMLSelectElement).value)}
+      >
         {#each mergedTextProviders() as provider}
           <option value={provider.uniqueId}>
             {provider.displayText}

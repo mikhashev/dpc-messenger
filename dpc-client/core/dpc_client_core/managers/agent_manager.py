@@ -31,6 +31,25 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 
+# One run at a time per agent, across every surface that can start one.
+#
+# Keyed by agent identity rather than held on an object, because neither object
+# is unique per agent: the manager builds a second DpcAgent per provider alias
+# over the same agent_root, and a second provider instance would build a second
+# manager. A gate on either would be two gates over one set of files.
+_RUN_GATES: Dict[str, asyncio.Lock] = {}
+
+
+def get_run_gate(agent_id: Optional[str]) -> asyncio.Lock:
+    """Return the run gate for an agent identity, creating it on first ask."""
+    key = agent_id or "__singleton__"
+    gate = _RUN_GATES.get(key)
+    if gate is None:
+        gate = asyncio.Lock()
+        _RUN_GATES[key] = gate
+    return gate
+
+
 class DpcAgentManager:
     """
     Manages the embedded agent within DPC Messenger.
@@ -57,6 +76,10 @@ class DpcAgentManager:
         self.service = service
         self.config = config
         self.agent_id = agent_id  # Store agent_id for per-agent configuration
+        # One run at a time per agent identity, not per manager object: a second
+        # provider instance would otherwise hand the same agent a second gate,
+        # which is the failure that disqualified putting this on the agent.
+        self._run_gate = get_run_gate(agent_id)
         self._agent_display_name: str | None = None  # Cached display name from config.json
         self._stop_event = threading.Event()
         self._interrupt_events: Dict[str, asyncio.Event] = {}
@@ -163,6 +186,7 @@ class DpcAgentManager:
             firewall_profile=self.agent_id,  # Per-agent profile key for per-agent permissions
             service=self.service,            # For tools that need service access
             compute_host=self.config.get("compute_host", ""),  # Remote peer for LLM inference
+            run_gate=self._run_gate,          # Same gate as process_message — the queue is the second door
         )
 
         # Cache for reuse
@@ -198,11 +222,15 @@ class DpcAgentManager:
             else None
         )
 
+        from dpc_client_core.dpc_agent.memory_config import get_memory_config
+        _mem_cfg_for_agent = get_memory_config(_per_agent_profile or self.config)
         agent_config = AgentConfig(
             budget_usd=self.config.get("budget_usd"),
             max_rounds=self.config.get("max_rounds", 200),
             enable_task_queue=self.config.get("enable_task_queue", True),
             billing_model=self.config.get("billing_model", "subscription"),
+            embedding_device=_mem_cfg_for_agent.embedding_device,
+            embedding_model=_mem_cfg_for_agent.embedding_model,
         )
 
         # Get LLMManager from CoreService
@@ -220,6 +248,7 @@ class DpcAgentManager:
             service=self.service,             # For tools that need firewall access
             provider_alias=self.config.get("provider_alias"),  # Per-agent Main LLM for inference
             compute_host=self.config.get("compute_host", ""),  # Remote peer for LLM inference
+            run_gate=self._run_gate,          # Same gate as process_message — the queue is the second door
         )
 
         # Start task processor if enabled
@@ -293,25 +322,28 @@ class DpcAgentManager:
                     _provider_ref = self._agent._embedding_provider if self._agent else None
                     _actual_model = _provider_ref.model_name if _provider_ref else mem_cfg.embedding_model
 
+                    # Once per start, not per message: the counter reads this log on
+                    # every user turn and it is the one log with no rotation.
+                    try:
+                        from dpc_client_core.dpc_agent.active_recall import compact_access_log
+                        compact_access_log(agent_root)
+                    except Exception:
+                        log.debug("access log compaction skipped for %s", self.agent_id, exc_info=True)
+
                     index_dir = agent_root / "state" / "memory_index"
-                    needs_full_rebuild = not (index_dir / "index_meta.json").exists()
-                    if not needs_full_rebuild:
-                        try:
-                            import json as _json
-                            _meta = _json.loads((index_dir / "index_meta.json").read_text(encoding="utf-8"))
-                            _stored_model = _meta.get("header", {}).get("model_name", "")
-                            if _stored_model != _actual_model:
-                                log.info("Memory index model changed (%s -> %s), forcing rebuild", _stored_model, _actual_model)
-                                needs_full_rebuild = True
-                            # Key format migration: pre-fix metas used basenames; new
-                            # format uses per-layer relative posix keys. Force rebuild
-                            # once when an older meta lacks the version marker.
-                            _stored_key_fmt = _meta.get("header", {}).get("key_format", "")
-                            if _stored_key_fmt != "layer_relative_posix_v1":
-                                log.info("Memory index key format outdated (%r), forcing rebuild", _stored_key_fmt)
-                                needs_full_rebuild = True
-                        except Exception:
-                            needs_full_rebuild = True
+                    # Model change and key-format change both mean the stored rows
+                    # answer to names nothing asks for any more, and neither is
+                    # repairable incrementally — an incremental pass only revisits
+                    # documents whose hash moved. The decision lives in
+                    # indexing_pipeline so it can be tested against the state older
+                    # versions actually wrote.
+                    from dpc_client_core.dpc_agent.indexing_pipeline import rebuild_decision
+                    from dpc_client_core.dpc_agent.retrieval import resolve_backend_id
+                    _backend_id = resolve_backend_id(agent_root)
+                    _decision = rebuild_decision(index_dir, _actual_model, _backend_id)
+                    needs_full_rebuild = _decision.needed
+                    if _decision.message:
+                        log.info("%s", _decision.message)
 
                     def _sync_index():
                         """Per-file hash incremental indexing in thread executor."""
@@ -328,9 +360,23 @@ class DpcAgentManager:
                             )
                             from dpc_client_core.dpc_agent.text_extract import extract_text, is_binary
                             from dpc_client_core.dpc_agent.indexing_pipeline import (
-                                _extract_heading, _build_doc_text, _BACKFILL_SKIP, read_file_meta,
+                                document_fields, _BACKFILL_SKIP, read_file_meta,
                             )
-                            provider = _provider_ref or get_embedding_provider(model_name=_actual_model)
+                            from dpc_client_core.dpc_agent.index_keys import (
+                                KEY_FORMAT, build_ext_roots, ext_key, l5_key, l6_key,
+                            )
+                            provider = get_embedding_provider(
+                                model_name=_actual_model,
+                                max_tokens=int(mem_cfg.max_tokens),
+                                device=mem_cfg.embedding_device,
+                            ) if _provider_ref is None else _provider_ref
+                            # The agent built its provider before this config was read, so
+                            # state the window here too — otherwise the setting applies only
+                            # on the path where the agent happens not to have one yet.
+                            if int(provider.max_tokens) != int(mem_cfg.max_tokens):
+                                provider.max_tokens = int(mem_cfg.max_tokens)
+                                if provider._model is not None:
+                                    provider._apply_token_limit()
                             backend = make_backend_for_agent(
                                 agent_root,
                                 model_name=_actual_model,
@@ -341,6 +387,13 @@ class DpcAgentManager:
 
                             collected: list = []
                             l5_count = l6_count = ext_count = 0
+                            # A directory can be both an implicit layer source and an
+                            # extended path; without this the same file lands in the
+                            # index twice under two keys and splits its own ranking.
+                            claimed_paths: set = set()
+
+                            def _claim(p) -> None:
+                                claimed_paths.add(os.path.normcase(os.path.normpath(str(p))))
 
                             if knowledge_dir.is_dir():
                                 for f in sorted(knowledge_dir.iterdir()):
@@ -351,17 +404,18 @@ class DpcAgentManager:
                                     text = extract_text(f)
                                     if not text:
                                         continue
-                                    heading = _extract_heading(text)
                                     file_meta = read_file_meta(knowledge_dir, f.name)
-                                    key = f.relative_to(knowledge_dir).as_posix()
-                                    doc_text = _build_doc_text(key, heading, text)
+                                    key = l5_key(f, knowledge_dir)
+                                    heading, doc_text, excerpt = document_fields(key, text)
                                     collected.append((
                                         key, doc_text,
                                         {"source_file": key, "heading": heading,
                                          "source_layer": file_meta.source_layer,
-                                         "char_count": len(text), "text": text[:500]},
+                                         "source_path": str(f),
+                                         "char_count": len(text), "text": excerpt},
                                         "L5",
                                     ))
+                                    _claim(f)
                                     l5_count += 1
 
                             if self.firewall and self.firewall.can_agent_access_context('knowledge', profile_name=self.agent_id):
@@ -375,51 +429,50 @@ class DpcAgentManager:
                                         text = extract_text(f)
                                         if not text:
                                             continue
-                                        heading = _extract_heading(text)
-                                        key = f"L6/{f.relative_to(l6_dir).as_posix()}"
-                                        doc_text = _build_doc_text(key, heading, text)
+                                        key = l6_key(f, l6_dir)
+                                        heading, doc_text, excerpt = document_fields(key, text)
                                         collected.append((
                                             key, doc_text,
                                             {"source_file": key, "heading": heading,
                                              "source_layer": "L6", "char_count": len(text),
-                                             "text": text[:500]},
+                                             "source_path": str(f), "text": excerpt},
                                             "L6",
                                         ))
+                                        _claim(f)
                                         l6_count += 1
 
                             if self.firewall:
                                 try:
-                                    from dpc_client_core.dpc_agent.extended_paths_index import collect_extended_files, RECALL_EXTENSIONS
+                                    from dpc_client_core.dpc_agent.extended_paths_index import collect_extended_files, reconcile_indexed_paths, summarise_repairs, RECALL_EXTENSIONS
                                     ext_paths = self.firewall.get_extended_paths(profile_name=self.agent_id) if hasattr(self.firewall, 'get_extended_paths') else {}
                                     indexed_list = self.firewall._get_profile_or_global(self.agent_id, 'sandbox_extensions', 'indexed_paths', default=[]) if self.agent_id else []
                                     excluded_dirs = self.firewall._get_profile_or_global(self.agent_id, 'sandbox_extensions', 'excluded_dirs', default=None) if self.agent_id else None
-                                    ext_files = collect_extended_files(ext_paths, indexed_paths=indexed_list, excluded_dirs=excluded_dirs, allowed_extensions=RECALL_EXTENSIONS) if indexed_list else []
-                                    indexed_path_objs = [Path(ip) for ip in indexed_list]
+                                    # Repair before use: the key below is built relative to one of
+                                    # these roots, so a stale entry here costs the key its path and
+                                    # collapses it onto a bare filename.
+                                    if indexed_list:
+                                        _before = len(indexed_list)
+                                        indexed_list, repairs = reconcile_indexed_paths(ext_paths, indexed_list)
+                                        if repairs:
+                                            log.info("[%s] indexed_paths: %s", self.agent_id,
+                                                     summarise_repairs(_before, repairs))
+                                            for repair in repairs:
+                                                log.debug("[%s] indexed_paths: %s", self.agent_id, repair)
+                                    ext_files = collect_extended_files(ext_paths, indexed_paths=indexed_list, excluded_dirs=excluded_dirs, allowed_extensions=RECALL_EXTENSIONS, already_indexed=claimed_paths) if indexed_list else []
+                                    ext_roots = build_ext_roots(indexed_list)
                                     for f in ext_files:
                                         if self._stop_event.is_set():
                                             return
                                         text = extract_text(f)
                                         if not text:
                                             continue
-                                        heading = _extract_heading(text)
-                                        # Find longest matching indexed_path so relative_to gives the
-                                        # shortest portable suffix. Fallback to bare name if no match
-                                        # (shouldn't happen — collect_extended_files only yields files
-                                        # inside indexed_paths — but defends against config drift).
-                                        rel = None
-                                        for ip in sorted(indexed_path_objs, key=lambda p: len(p.parts), reverse=True):
-                                            try:
-                                                rel = f.relative_to(ip).as_posix()
-                                                break
-                                            except ValueError:
-                                                continue
-                                        key = f"EXT/{rel}" if rel else f"EXT/{f.name}"
-                                        doc_text = _build_doc_text(key, heading, text)
+                                        key = ext_key(f, ext_roots)
+                                        heading, doc_text, excerpt = document_fields(key, text)
                                         collected.append((
                                             key, doc_text,
                                             {"source_file": key, "heading": heading,
                                              "source_layer": "EXT", "char_count": len(text),
-                                             "text": text[:500]},
+                                             "source_path": str(f), "text": excerpt},
                                             "EXT",
                                         ))
                                         ext_count += 1
@@ -437,16 +490,61 @@ class DpcAgentManager:
                                 except Exception:
                                     old_meta = {}
                             old_hashes: dict = old_meta.get("file_hashes", {}) if isinstance(old_meta, dict) else {}
+                            # An index written before the backend marker existed carries
+                            # no opinion about who built it. Stamp it once, without a
+                            # rebuild, so the next backend change is detectable — and
+                            # make that stamp reason enough to write the file, or a pass
+                            # with nothing else to do would never get round to it.
+                            _needs_backend_stamp = not (
+                                old_meta.get("header", {}) if isinstance(old_meta, dict) else {}
+                            ).get("backend")
 
                             # Legacy pool-hash meta: no per-file map, force clear to avoid duplicates
                             if not old_hashes and ("extra_hash" in old_meta or meta_path.exists()):
                                 needs_full_rebuild = True
+
+                            # The staleness map only means anything against the index it
+                            # was written for. A backend switch, a state directory removed
+                            # by hand, or an index that refuses to load leaves an empty
+                            # index behind a map saying every document is present — the
+                            # pass then finds nothing to do, and the emptiness is
+                            # permanent, because every later start reads the same agreeing
+                            # pair. Loaded here rather than after the hash loop so the
+                            # answer can still change what that loop decides.
+                            if not needs_full_rebuild:
+                                from dpc_client_core.dpc_agent.indexing_pipeline import map_outlives_index
+                                _loaded = backend.load()
+                                if map_outlives_index(_loaded, backend.vector.total_items, len(old_hashes)):
+                                    log.warning(
+                                        "[%s] memory index is empty but its file map lists %d documents "
+                                        "— rebuilding rather than trusting the map",
+                                        self.agent_id, len(old_hashes),
+                                    )
+                                    needs_full_rebuild = True
+                                    # Drop the half-loaded state here, where the decision
+                                    # is made, rather than leaving it live until the
+                                    # clear() further down: the two are separated by the
+                                    # whole hash comparison, and anything inserted between
+                                    # them would be reading an index we have just declared
+                                    # unusable.
+                                    backend.vector.clear()
+                                    backend.text.clear()
 
                             new_hashes: dict = {}
                             to_embed: list = []   # (source_file, doc_text, meta)
                             unchanged: list = []
                             for source_file, doc_text, meta, _layer in collected:
                                 h = hashlib.sha256(doc_text.encode()).hexdigest()[:16]
+                                # Two files under one key is not a duplicate, it is a
+                                # disappearance: the second overwrites the first here and
+                                # deletes both from the index on the next remove_by_source.
+                                # The scheme is supposed to make this impossible; say so
+                                # out loud if it ever stops being.
+                                if source_file in new_hashes:
+                                    log.warning(
+                                        "[%s] index key collision: %s is claimed by more than one file (%s)",
+                                        self.agent_id, source_file, meta.get("source_path", "?"),
+                                    )
                                 new_hashes[source_file] = h
                                 if not needs_full_rebuild and old_hashes.get(source_file) == h:
                                     unchanged.append(source_file)
@@ -460,15 +558,18 @@ class DpcAgentManager:
                                 backend.vector.clear()
                                 backend.text.clear()
                             else:
-                                backend.load()
+                                # already loaded above, before the hash comparison
                                 # remove_by_source kills all rows for source_file, must precede add for modified entries
                                 modified_or_removed = [f for f, _, _ in to_embed if f in old_hashes] + removed_files
                                 if modified_or_removed:
-                                    for sf in modified_or_removed:
-                                        backend.vector.remove_by_source(sf)
-                                        backend.text.remove_by_source(sf)
+                                    # One call, one rebuild per index. Per source this
+                                    # rebuilt the whole index each time, and a pass that
+                                    # dropped 298 sources spent 505.9 s doing it while
+                                    # embedding 73 documents.
+                                    backend.vector.remove_by_sources(modified_or_removed)
+                                    backend.text.remove_by_sources(modified_or_removed)
 
-                            BATCH_SIZE = 8
+                            BATCH_SIZE = max(1, int(mem_cfg.batch_size))
                             embedded = 0
                             if to_embed:
                                 if hasattr(backend.text, "begin_batch"):
@@ -495,25 +596,49 @@ class DpcAgentManager:
                                     if hasattr(backend.text, "end_batch"):
                                         backend.text.end_batch()
 
+                            # The map may only claim what was actually embedded. The loop
+                            # above `break`s on shutdown, and everything below it still
+                            # runs — so a pass cut in the middle used to commit a hash for
+                            # every document it had *collected*, including the batches it
+                            # never reached. The next start then found every hash current,
+                            # re-embedded nothing, and the missing documents stayed missing
+                            # for good: not the torn file that `load()` refuses, nor the
+                            # empty index that `map_outlives_index` rebuilds, but a short
+                            # index behind a full map, which nothing was looking for.
+                            # Found by both external reviewers, independently, in the same
+                            # place.
+                            from dpc_client_core.dpc_agent.indexing_pipeline import keep_only_what_landed
+                            keep_only_what_landed(new_hashes, to_embed, embedded)
+                            if len(to_embed) != embedded:
+                                log.warning(
+                                    "[%s] indexing stopped after %d of %d documents — "
+                                    "the file map keeps the rest stale so the next start re-embeds them",
+                                    self.agent_id, embedded, len(to_embed),
+                                )
+
                             # meta save last = commit point for crash safety
-                            if to_embed or removed_files or needs_full_rebuild:
+                            if to_embed or removed_files or needs_full_rebuild or _needs_backend_stamp:
                                 backend.save()
                                 try:
-                                    _md = old_meta if isinstance(old_meta, dict) else {}
+                                    from ..dpc_agent.index_meta import read_meta, write_meta
+                                    # Re-read rather than reuse the snapshot taken at the
+                                    # top of this run: backend.save() has just written a
+                                    # fresh chunks list into the same file, and writing
+                                    # the old picture back over it is what left the native
+                                    # agent with 328 vectors and 23 chunks.
+                                    _md = read_meta(meta_path)
                                     # header.model_name is read at startup to detect
                                     # model swap → forced full rebuild. Must persist on
                                     # save or every restart trips the mismatch check.
-                                    # header.key_format pins the file_hashes key schema
-                                    # (per-layer relative posix). Bump when key shape changes.
+                                    # header.key_format pins the file_hashes key schema.
+                                    # Bump KEY_FORMAT in index_keys when the shape changes.
                                     _hdr = _md.setdefault("header", {})
                                     _hdr["model_name"] = _actual_model
-                                    _hdr["key_format"] = "layer_relative_posix_v1"
+                                    _hdr["key_format"] = KEY_FORMAT
+                                    _hdr["backend"] = backend.backend_id or _backend_id
                                     _md["file_hashes"] = new_hashes
                                     _md.pop("extra_hash", None)
-                                    meta_path.write_text(
-                                        _json.dumps(_md, ensure_ascii=False, indent=2),
-                                        encoding="utf-8",
-                                    )
+                                    write_meta(meta_path, _md)
                                 except Exception as _e:
                                     log.debug("Failed to save file_hashes meta: %s", _e)
 
@@ -528,13 +653,23 @@ class DpcAgentManager:
                             try:
                                 from dpc_client_core.dpc_agent.knowledge_graph import KnowledgeGraph
                                 _kg = KnowledgeGraph(agent_root)
-                                _kg.bulk_import_knowledge_files(knowledge_dir)
+                                _kg.bulk_import_knowledge_files(knowledge_dir, source_layer="L5")
                                 if self.firewall and self.firewall.can_agent_access_context('knowledge', profile_name=self.agent_id):
                                     _l6_dir = Path(os.environ.get("DPC_HOME", Path.home() / ".dpc")) / "knowledge"
-                                    _kg.bulk_import_knowledge_files(_l6_dir)
+                                    _kg.bulk_import_knowledge_files(_l6_dir, source_layer="L6")
                                 _archive_dir = Path(os.environ.get("DPC_HOME", Path.home() / ".dpc")) / "conversations" / (self.agent_id or "agent_001") / "archive"
                                 _kg.extract_structural_edges(knowledge_dir, _archive_dir if _archive_dir.exists() else None)
                                 log.info("Knowledge graph built: %d nodes, %d edges", _kg.backend.node_count(), _kg.backend.edge_count())
+                                # The other half of the pair: this is what the pass left
+                                # behind, by writer. Compared against the same breakdown
+                                # logged at the next open, it says whether anything was
+                                # actually lost in between and — the part that matters —
+                                # whether it was a class that rebuilds itself.
+                                try:
+                                    log.info("Knowledge graph after pass: edges_by_source=%s wal=%s",
+                                             _kg.backend.snapshot().get("edges_by_source"), _kg.backend.wal_info())
+                                except Exception as _e:
+                                    log.debug("post-pass graph breakdown unavailable: %s", _e)
                             except Exception as e:
                                 log.warning("Knowledge graph build failed (non-fatal): %s", e)
 
@@ -549,10 +684,22 @@ class DpcAgentManager:
                         except Exception as e:
                             log.warning("Background memory indexing failed: %s", e)
 
-                    loop = asyncio.get_event_loop()
-                    loop.run_in_executor(None, _sync_index)
+                    # On this agent's index writer rather than an arbitrary pool worker:
+                    # it is the longest mutation there is, and while it runs the tools,
+                    # the L6 reindex and the purge must queue behind it instead of
+                    # writing the same files underneath it. Still fire-and-forget —
+                    # startup does not wait for the corpus.
+                    from dpc_client_core.dpc_agent.index_writer import writer_for
+                    _pass = writer_for(index_dir).submit(_sync_index)
+                    # Nobody waits for this future, so without a callback a failure lands
+                    # on a garbage-collected future and the only line in the log is the
+                    # one below saying the pass started. Intention is not outcome.
+                    _pass.add_done_callback(lambda f: (
+                        f.exception() is not None
+                        and log.warning("[%s] memory index pass failed: %s", self.agent_id, f.exception())
+                    ))
                     log.info(
-                        "Memory: %s index update started in thread",
+                        "Memory: %s index update started on the index writer",
                         "first-use" if needs_full_rebuild else "per-file",
                     )
                 log.info("Memory system initialized (model=%s, active_recall=%s)", _actual_model, mem_cfg.active_recall)
@@ -701,24 +848,33 @@ class DpcAgentManager:
                 agent_manager=self,
             )
 
+            # Wiring runs when the bot is actually polling, which is not necessarily
+            # when start() returns: a start that failed on the network comes up later
+            # from the bridge's own retry, and an emitter that was never connected
+            # would leave a live bot that reports nothing.
+            agent_desc = self.agent_id if self.agent_id else "singleton"
+
+            def _wire_to_emitter():
+                emitter = get_event_emitter()
+                emitter.add_listener(
+                    create_telegram_bridge_callback(self._telegram_bridge, agent_id=self.agent_id))
+                log.info(
+                    f"Telegram bridge started for agent {agent_desc}, "
+                    f"connected to event emitter (filter={len(self._telegram_bridge.event_filter)} events, "
+                    f"chat_ids={chat_ids})"
+                )
+
+            self._telegram_bridge._on_started = _wire_to_emitter
+
             # Start bridge
             success = await self._telegram_bridge.start()
             if not success:
-                agent_desc = self.agent_id if self.agent_id else "singleton"
                 log.warning(f"Failed to start Telegram bridge for agent {agent_desc}")
-                self._telegram_bridge = None
+                if getattr(self._telegram_bridge, "_retry_task", None) is None:
+                    self._telegram_bridge = None
+                else:
+                    log.info(f"Telegram bridge for agent {agent_desc} is retrying in the background")
                 return
-
-            # Connect to event emitter, scoped to this agent's conversation_id
-            emitter = get_event_emitter()
-            emitter.add_listener(create_telegram_bridge_callback(self._telegram_bridge, agent_id=self.agent_id))
-
-            agent_desc = self.agent_id if self.agent_id else "singleton"
-            log.info(
-                f"Telegram bridge started for agent {agent_desc}, "
-                f"connected to event emitter (filter={len(self._telegram_bridge.event_filter)} events, "
-                f"chat_ids={chat_ids})"
-            )
 
         except ImportError as e:
             log.warning(f"Telegram bridge not available: {e}")
@@ -764,7 +920,53 @@ class DpcAgentManager:
         log.warning("No active agent loop for conversation %s", conversation_id)
         return False
 
-    async def process_message(
+    def _resolve_reasoning_effort(self, conversation_id: Optional[str]) -> tuple:
+        """The effort this call should ask for, and which branch decided it.
+
+        The source is returned rather than logged here because it is the whole
+        point: an unresolved effort reaches the provider as None and becomes
+        whatever the alias config carries — `high` on both DeepSeek aliases
+        since the evening of 2026-08-16, `max` before that, and whatever the
+        next edit makes it. Silence is answered by a value nobody chose for this
+        call. A room billed at max for twelve minutes while its own metadata read
+        high, and the transition log built for that window could not fire — it
+        watches the file, and the file never moved. Only this step can say
+        whether the room answered, the agent config answered, something raised,
+        or nobody answered at all; a conversation id that is not a room never
+        consults the first branch, which is why the id is logged beside it.
+        """
+        try:
+            if conversation_id and conversation_id.startswith("group-"):
+                gm = getattr(self.service, "group_manager", None)
+                grp = gm.get_group(conversation_id) if gm else None
+                if grp is not None:
+                    effort = getattr(grp, "reasoning_effort", None)
+                    if effort:
+                        return effort, "group"
+            if self.agent_id:
+                from dpc_client_core.dpc_agent.utils import load_agent_config
+                effort = (load_agent_config(self.agent_id) or {}).get("reasoning_effort")
+                if effort:
+                    return effort, "agent-config"
+        except Exception as e:
+            log.warning("Reasoning effort could not be resolved: %s", e)
+            return None, "exception"
+        return None, "none"
+
+    async def process_message(self, *args, **kwargs) -> str:
+        """Run a message through the agent, one run at a time for this agent.
+
+        The gate is held across the run *and* the reads that follow it: the
+        agent publishes usage, trace and cap info on itself and this method
+        reads them after `process` returns, so a second run finishing in that
+        window writes its thinking and tool calls into the first one's history.
+        Both doors into a run take this same gate — see `DpcAgent._execute_task`
+        for the other one.
+        """
+        async with self._run_gate:
+            return await self._process_message_guarded(*args, **kwargs)
+
+    async def _process_message_guarded(
         self,
         message: str,
         conversation_id: str,
@@ -774,6 +976,8 @@ class DpcAgentManager:
         image_base64: Optional[str] = None,
         image_mime: str = "image/png",
         image_caption: Optional[str] = None,
+        # Attachment metadata for the history record (the image itself travels in image_base64)
+        attachments: Optional[List[Dict[str, Any]]] = None,
         # Phase 3: Per-agent provider selection
         agent_llm_provider: Optional[str] = None,
         # Sender attribution (e.g. "mike (Telegram)" vs "User")
@@ -845,6 +1049,7 @@ class DpcAgentManager:
             monitor.add_message(
                 role="user",
                 content=message,
+                attachments=attachments,
                 timestamp=utc_now_iso(),
                 sender_node_id=node_id,
                 sender_name=sender_name
@@ -871,8 +1076,8 @@ class DpcAgentManager:
 
         try:
             # Process through agent with progress callback that includes conversation_id
-            def emit_progress_with_context(msg: str, tool: str = None, round: int = None, tool_calls=None):
-                self._emit_progress(msg, conversation_id, tool, round, tool_calls)
+            def emit_progress_with_context(msg: str, tool: str = None, round: int = None, tool_calls=None, speed=None):
+                self._emit_progress(msg, conversation_id, tool, round, tool_calls, speed)
 
             # Accumulate streaming chunks for persistence to history.json
             _stream_chunks: list = []
@@ -913,18 +1118,12 @@ class DpcAgentManager:
                 if self._daily_tokens_used >= quota_limit:
                     return f"⚠️ Agent quota exceeded ({self._daily_tokens_used:,}/{quota_limit:,} tokens today). Reset at midnight UTC."
 
-            reasoning_effort = None
-            try:
-                if conversation_id and conversation_id.startswith("group-"):
-                    gm = getattr(self.service, "group_manager", None)
-                    grp = gm.get_group(conversation_id) if gm else None
-                    if grp is not None:
-                        reasoning_effort = getattr(grp, "reasoning_effort", None)
-                if not reasoning_effort and self.agent_id:
-                    from dpc_client_core.dpc_agent.utils import load_agent_config
-                    reasoning_effort = (load_agent_config(self.agent_id) or {}).get("reasoning_effort")
-            except Exception:
-                reasoning_effort = None
+            reasoning_effort, effort_source = self._resolve_reasoning_effort(conversation_id)
+            log.info(
+                "Reasoning effort for %s: %s (source=%s, agent_id=%s)",
+                conversation_id, reasoning_effort or "unresolved",
+                effort_source, self.agent_id or "unset",
+            )
 
             try:
                 interrupt_ev = asyncio.Event()
@@ -1043,7 +1242,14 @@ class DpcAgentManager:
                     monitor.set_token_limit(context_window)
                 monitor.set_token_count(conversation_tokens)
 
-            agent_token_limit = monitor.get_token_usage().get("token_limit") or 0
+            # The group counter shows one row per agent, so each row carries its
+            # own window — the shared monitor limit would print the group's
+            # largest against every agent's usage.
+            agent_token_limit = (
+                self._resolve_context_window()
+                or monitor.get_token_usage().get("token_limit")
+                or 0
+            )
             if (conversation_id.startswith("group-") and new_token_count
                     and agent_token_limit and self.agent_id and self.service):
                 try:
@@ -1247,16 +1453,26 @@ class DpcAgentManager:
         """
         monitor = self._agent_monitors.get(conversation_id)
         config_cw = int(self.config.get("context_window", 0)) or 0
+        # This agent's own window is the authority for this agent's rounds, and
+        # it is resolved BEFORE the monitor is consulted. The monitor's
+        # token_limit is shared state: a group monitor is set to the LARGEST
+        # window among the group's agents, and history.json persists that number
+        # for every monitor that later loads the file. Trusting it gave a local
+        # 262 144-token agent a 1 000 000-token limit in a group — which is not
+        # only a wrong figure on screen: the same number calibrates the overflow
+        # guard (agent.py, AGENT-CTX-1) and its reserve, so the guard stopped
+        # refusing anything long before the model itself ran out.
+        own_window = self._resolve_context_window() or 0
         if not monitor:
             return {
                 "tokens_used": 0,
-                "tokens_limit": config_cw or 204800,
+                "tokens_limit": own_window or config_cw or 204800,
                 "usage_percent": 0,
                 "messages_count": 0,
             }
 
         usage = monitor.get_token_usage()
-        token_limit = usage.get("token_limit") or config_cw or 204800
+        token_limit = own_window or usage.get("token_limit") or config_cw or 204800
         history_tokens = usage.get("tokens_used", 0)
         tokens_after_last_response = monitor._tokens_after_last_response
         tokens_after_last_response_at = monitor._tokens_after_last_response_at
@@ -1345,6 +1561,7 @@ class DpcAgentManager:
         tool_name: str = None,
         round: int = None,
         tool_calls=None,
+        speed=None,
     ) -> None:
         """Emit progress message to DPC UI (if available)."""
         try:
@@ -1359,6 +1576,7 @@ class DpcAgentManager:
                     "conversation_id": conversation_id,
                     "tool_name": tool_name,
                     "round": round,
+                    "speed": speed,
                     # Full per-round tool snapshot (set on tool completion) so the UI renders
                     # the authoritative list per-conversation instead of accumulating a lossy
                     # event stream — fixes dropped results + chat-switch gaps.

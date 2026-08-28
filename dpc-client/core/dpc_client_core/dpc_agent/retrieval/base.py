@@ -11,12 +11,14 @@ Contract invariants common to VectorIndex and TextIndex:
 - Lifecycle: __init__ -> load() -> (add | search | remove)* -> save()
 - Empty index: load() returns False when nothing on disk; search() returns []
   (never raises) when the index is empty.
-- Thread-safety: implementations are NOT required to be thread-safe. Caller
-  owns synchronization (asyncio / threading lock) if concurrent access is
-  needed. FAISS and bm25s are single-threaded today and no production
-  call-site dispatches them concurrently.
-- Concurrent writers: last writer wins. Caller serializes if precise
-  ordering matters.
+- Thread-safety: implementations are NOT required to be thread-safe, and that has
+  not changed. What changed on 2026-08-12 is who owns the coordination: every
+  production mutation now runs on one serial writer per index directory
+  (`dpc_agent/index_writer.py`), so callers no longer serialise themselves and
+  "last writer wins" no longer describes this system. Readers are deliberately
+  outside that queue and rely on saves being atomic instead.
+- Concurrent writers: one per directory per process, by construction. Across
+  processes nothing coordinates — see `index_writer`'s docstring.
 - save() semantics: file-based backends persist to disk; self-persistent
   backends (Grafeo) may make this a no-op since state is already durable.
 """
@@ -25,7 +27,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import List, Optional, Tuple
+from typing import Iterable, List, Optional, Tuple
 
 import numpy as np
 
@@ -69,6 +71,20 @@ class VectorIndex(ABC):
     @abstractmethod
     def remove_by_source(self, source_file: str) -> int:
         """Remove items where meta['source_file'] == source_file. Returns removed count."""
+
+    def remove_by_sources(self, source_files: Iterable[str]) -> int:
+        """Remove several sources, rebuilding whatever needs rebuilding once.
+
+        Removal is the expensive half of an incremental pass, and it is expensive per
+        call rather than per item: every backend here has to put its structure back
+        together afterwards. Measured on a live pass, one agent removed 298 sources in
+        505.9 s while another embedded twice as many documents in 4.0 s and removed
+        none. So the count that matters is rebuilds, and there should be one.
+
+        This default is correct and is not the point — it rebuilds N times. Backends
+        override it.
+        """
+        return sum(self.remove_by_source(s) for s in dict.fromkeys(source_files))
 
     @abstractmethod
     def save(self) -> None:
@@ -114,6 +130,10 @@ class TextIndex(ABC):
     @abstractmethod
     def remove_by_source(self, source_file: str) -> int:
         """Remove docs where meta['source_file'] == source_file. Returns removed count."""
+
+    def remove_by_sources(self, source_files: Iterable[str]) -> int:
+        """Remove several sources with one corpus rebuild. See VectorIndex."""
+        return sum(self.remove_by_source(s) for s in dict.fromkeys(source_files))
 
     @abstractmethod
     def save(self) -> None:
@@ -163,6 +183,10 @@ class RetrievalBackend:
     vector: VectorIndex
     text: TextIndex
     fuser: HybridFuser
+    # Which implementations these are, as one string. Stored in the index meta so a
+    # later run can tell that the index it found was built by a different backend —
+    # the hashes alone cannot, they describe the corpus and not who indexed it.
+    backend_id: str = ""
 
     def load(self) -> bool:
         """Load both indexes. True only if BOTH loaded successfully."""

@@ -1,0 +1,94 @@
+{
+  "tier": "hard",
+  "model": "qwen3.8:latest",
+  "tasks": 12,
+  "passed": 12,
+  "accuracy": 1.0,
+  "seconds": 61.3,
+  "results": [
+    {
+      "id": "hard-two-hops",
+      "passed": true,
+      "why": [],
+      "seconds": 19.7,
+      "answer": "2314"
+    },
+    {
+      "id": "hard-arithmetic-across-two-files",
+      "passed": true,
+      "why": [],
+      "seconds": 4.7,
+      "answer": "8443 + 4172 = 12615"
+    },
+    {
+      "id": "hard-which-file-holds-it",
+      "passed": true,
+      "why": [],
+      "seconds": 2.6,
+      "answer": "config.txt"
+    },
+    {
+      "id": "hard-aggregate-over-files",
+      "passed": true,
+      "why": [],
+      "seconds": 3.4,
+      "answer": "9"
+    },
+    {
+      "id": "hard-edit-in-place",
+      "passed": true,
+      "why": [],
+      "seconds": 4.6,
+      "answer": "Done. `retries` is now `9`; all other lines are unchanged."
+    },
+    {
+      "id": "hard-derive-a-written-file",
+      "passed": true,
+      "why": [],
+      "seconds": 5.1,
+      "answer": "done"
+    },
+    {
+      "id": "hard-the-one-that-is-missing",
+      "passed": true,
+      "why": [],
+      "seconds": 3.7,
+      "answer": "changelog.md"
+    },
+    {
+      "id": "hard-two-files-disagree",
+      "passed": true,
+      "why": [],
+      "seconds": 5.1,
+      "answer": "- **limits-old.ini**: `max_users=50`\n- **limits-new.ini**: `max_users=200`\n\n**DISAGREE** — old is 50, new is 200."
+    },
+    {
+      "id": "hard-refuse-to-invent",
+      "passed": true,
+      "why": [],
+      "seconds": 2.3,
+      "answer": "NOT PRESENT"
+    },
+    {
+      "id": "hard-order-by-size",
+      "passed": true,
+      "why": [],
+      "seconds": 4.2,
+      "answer": "empty.log, config.txt, notes.md"
+    },
+    {
+      "id": "hard-nested-json-field",
+      "passed": true,
+      "why": [],
+      "seconds": 2.4,
+      "answer": "Stable."
+    },
+    {
+      "id": "hard-count-with-a-filter",
+      "passed": true,
+      "why": [],
+      "seconds": 3.5,
+      "answer": "3"
+    }
+  ]
+}

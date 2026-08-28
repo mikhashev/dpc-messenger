@@ -2,6 +2,8 @@
 <!-- Displays token counter, new session button, end session button, and markdown toggle -->
 
 <script lang="ts">
+  import { nonDialogTokens, hasComponentBreakdown, nonDialogLabel } from '$lib/utils/nonDialogTokens';
+
   // Props (Svelte 5 runes mode)
   let {
     showForChatId,
@@ -79,7 +81,9 @@
   let effectiveHistoryTokens = $derived(
     showThreeMetrics ? Math.min(historyTokens, tokensAfterLastResponse) : historyTokens
   );
-  let staticMemory = $derived(showThreeMetrics ? tokensAfterLastResponse - effectiveHistoryTokens : 0);
+  // A remainder, not a measurement — `nonDialogTokens.ts` carries what that costs
+  // and the zero-floor bias the screen cannot show.
+  let staticMemory = $derived(showThreeMetrics ? nonDialogTokens(tokensAfterLastResponse, historyTokens) : 0);
   let dialogAvailable = $derived(showThreeMetrics ? effectiveLimit - staticMemory : effectiveLimit);
   let dialogPercent = $derived(dialogAvailable > 0 ? effectiveHistoryTokens / dialogAvailable : 0);
   let totalContextPercent = $derived(effectiveLimit > 0 ? tokensAfterLastResponse / effectiveLimit : 0);
@@ -110,9 +114,12 @@
   );
 
   let staticTitle = $derived(
-    contextBreakdown && contextBreakdown.length > 0
+    hasComponentBreakdown(contextBreakdown)
       ? contextBreakdown.map((c: {name: string, tokens: number}) => `${c.name}: ~${c.tokens.toLocaleString()}`).join('\n')
-      : "System prompt + contexts + tool schemas"
+      // Without a breakdown there is nothing to name, and the old text named
+      // three things — system prompt, contexts, tool schemas — that a chat
+      // without an agent does not have. What the number actually is, instead:
+      : "Everything in the prompt that is not the dialogue.\nNot a measurement: the API's count of the whole prompt minus a 4-chars-per-token estimate of the dialogue, floored at zero — so in a small chat it is mostly the estimate's error, and 0 means the estimate came out larger than the measurement."
   );
 
   let agentsTooltip = $derived(
@@ -136,7 +143,7 @@
         <span class="token-percentage" class:warning={totalContextPercentWithInput >= 0.8}>({Math.round(totalContextPercentWithInput * 100)}%)</span>
       </div>
       <div class="token-row token-row--muted" title={staticTitle}>
-        <span class="token-label">{contextAgent ? 'Agent ctx' : 'Static'}</span>
+        <span class="token-label">{nonDialogLabel(contextAgent, contextBreakdown)}</span>
         <span class="token-value">≈{staticMemory.toLocaleString()}</span>
         <span class="token-percentage"></span>
       </div>

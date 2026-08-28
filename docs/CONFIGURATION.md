@@ -1,7 +1,8 @@
 # DPC-Client Configuration Guide
 
-> **Version:** 0.28.0
-> **Last Updated:** 2026-03-22
+> **Version:** 0.29.0
+> **Last Updated:** 2026-08-10 — reconciled against `settings.py`; the key
+> reference below that date line is generated, not hand-maintained
 
 ## Overview
 
@@ -38,33 +39,37 @@ The main configuration file is located at:
 - `privacy_rules.json` - Firewall access control (previously `.dpc_access.json`)
 - `providers.json` - AI provider settings (previously `providers.toml`)
 
-**Migration:** The client automatically migrates old filenames to new ones on startup. Both formats work for backwards compatibility, but documentation uses current standard names.
+**There is no automatic migration, and the old names no longer work.** The filenames
+are hardcoded (`service.py`: `PRIVACY_RULES = "privacy_rules.json"`,
+`PROVIDERS_CONFIG = "providers.json"`) with no fallback, and nothing in the client
+reads `.dpc_access.json` or `providers.toml` — there is no TOML parser in the
+dependency tree at all.
 
-**Example Migration:**
+**What happens if you still have the old files:** the client does not see them. Missing
+`privacy_rules.json` is not an error — the firewall writes a fresh default file instead,
+so a pre-v0.6 `.dpc_access.json` full of access rules becomes **silently inert** and
+your firewall runs wide-open defaults without saying so.
+
+**Rename them yourself before first run:**
 ```bash
-# Old (pre-v0.6) - still works
-~/.dpc/.dpc_access.json  → migrated to → ~/.dpc/privacy_rules.json
-~/.dpc/providers.toml    → migrated to → ~/.dpc/providers.json
-
-# New (v0.6+) - recommended
-~/.dpc/privacy_rules.json  # Use this
-~/.dpc/providers.json      # Use this
+mv ~/.dpc/.dpc_access.json ~/.dpc/privacy_rules.json
+# providers.toml has no automatic equivalent: re-enter the providers in the UI,
+# or hand-write ~/.dpc/providers.json (see providers.example.json in the repo).
 ```
 
 ---
 
 ## Default Configuration
 
-On first run, DPC-Client creates a default configuration file:
+On first run the client writes **24 sections and 147 keys** into `~/.dpc/config.ini`.
+The four below are the ones most people touch; the rest are in
+[the complete reference](#complete-reference-every-key-the-code-writes), which is
+generated from the code rather than maintained by hand.
 
 ```ini
-# D-PC Client Configuration
-# You can override these settings with environment variables:
-# DPC_HUB_URL, DPC_OAUTH_CALLBACK_PORT, etc.
-
 [hub]
 url = http://localhost:8000
-auto_connect = true
+auto_connect = false
 
 [oauth]
 callback_port = 8080
@@ -72,7 +77,7 @@ callback_host = 127.0.0.1
 
 [p2p]
 listen_port = 8888
-listen_host = 0.0.0.0
+listen_host = dual
 
 [api]
 port = 9999
@@ -103,7 +108,7 @@ host = 127.0.0.1
 
 #### `auto_connect`
 - **Description:** Automatically connect to Hub on startup
-- **Default:** `true`
+- **Default:** `false` — the client starts offline and you click a login button
 - **Environment Variable:** `DPC_HUB_AUTO_CONNECT`
 - **Valid Values:** `true`, `false`, `yes`, `no`, `1`, `0`
 
@@ -135,10 +140,11 @@ host = 127.0.0.1
 
 #### `listen_host`
 - **Description:** Host address to bind P2P server
-- **Default:** `0.0.0.0` (all interfaces)
+- **Default:** `dual` — dual-stack, binds both IPv4 and IPv6
 - **Environment Variable:** `DPC_P2P_LISTEN_HOST`
 - **Common Values:**
-  - `0.0.0.0` - Listen on all interfaces (recommended)
+  - `dual` - both stacks (the default; IPv6 direct is connection Priority 1)
+  - `0.0.0.0` - IPv4 only. Setting this **disables IPv6 direct connections**
   - `127.0.0.1` - Local connections only
   - Specific IP - Bind to specific interface
 
@@ -216,6 +222,291 @@ As of schema version **1.1**, device context includes a `special_instructions` b
 - Staleness detection: If context is >7 days old, AI suggests restarting client to refresh
 
 ---
+
+## Complete Reference: every key the code writes
+
+<!-- BEGIN GENERATED CONFIG REFERENCE -->
+
+Every section and key `_create_default_config` writes into a fresh `~/.dpc/config.ini`: **25 sections, 150 keys**. Generated from `settings.py` by `tools/config_reference.py` — edit the code, then re-run it; do not hand-edit between the markers.
+
+An empty default means the key is written blank and the feature stays off until you fill it in. Every key also accepts an environment variable named `DPC_<SECTION>_<KEY>` in upper case.
+
+#### `[agent_telegram]`
+
+| Key | Default | Notes |
+|---|---|---|
+| `auto_link_on_create` | `false` | Auto-link Telegram chat when creating agents |
+| `require_confirmation` | `true` | Require user confirmation before linking |
+| `default_enabled` | `false` | Default telegram_enabled state for new agents |
+
+#### `[api]`
+
+| Key | Default | Notes |
+|---|---|---|
+| `port` | `9999` |  |
+| `host` | `127.0.0.1` |  |
+
+#### `[connection]`
+
+| Key | Default | Notes |
+|---|---|---|
+| `enable_ipv6` | `true` | Try IPv6 direct connections (Priority 1) |
+| `enable_ipv4` | `true` | Try IPv4 direct connections (Priority 2) |
+| `enable_hub_webrtc` | `false` | Try Hub WebRTC with STUN/TURN (Priority 3) - requires Hub connection |
+| `enable_hole_punching` | `false` | Try DHT-coordinated UDP hole punching (Priority 4) - DISABLED: lacks DTLS encryption (v0.10.0) |
+| `enable_relays` | `true` | Try volunteer relay nodes (Priority 5) |
+| `enable_gossip` | `true` | Use gossip store-and-forward fallback (Priority 6) |
+| `ipv6_timeout` | `60` | Includes 30s pre-flight check + 30s SSL handshake |
+| `ipv4_timeout` | `60` | Includes 30s pre-flight check + 30s SSL handshake |
+| `webrtc_timeout` | `30` |  |
+| `hole_punch_timeout` | `15` |  |
+| `relay_timeout` | `20` |  |
+| `gossip_timeout` | `5` | How long to wait before falling back to gossip |
+| `remote_inference_timeout` | `1200` |  |
+
+#### `[conversations]`
+
+| Key | Default | Notes |
+|---|---|---|
+| `default_persist_p2p_history` | `false` | Persist P2P chat history by default (false = ephemeral, synced from peer) |
+| `default_persist_telegram_history` | `true` | Persist Telegram chat history by default |
+| `storage_version` | `2` | Storage schema version (1 = legacy groups/, 2 = unified conversations/) |
+
+#### `[dht]`
+
+| Key | Default | Notes |
+|---|---|---|
+| `enabled` | `true` | Enable DHT peer discovery |
+| `port` | `8889` | UDP port for DHT RPCs (TLS port + 1) |
+| `k` | `20` | Kademlia k parameter (nodes per bucket) |
+| `alpha` | `3` | Parallelism factor for iterative lookups |
+| `bootstrap_timeout` | `30` | Bootstrap timeout in seconds |
+| `lookup_timeout` | `10` | Lookup timeout in seconds |
+| `bucket_refresh_interval` | `3600` | Bucket refresh interval (1 hour) |
+| `announce_interval` | `3600` | Re-announce interval (1 hour) |
+| `seed_nodes` | *(empty)* | Comma-separated list of seed nodes (ip:port) |
+
+#### `[dpc_agent]`
+
+| Key | Default | Notes |
+|---|---|---|
+| `budget_usd` | `50` | Maximum budget per task in USD |
+| `max_rounds` | `200` | Maximum LLM rounds before stopping |
+| `context_window` | `200000` | Agent context window size (tokens) |
+| `enable_task_queue` | `true` | Enable background task scheduling |
+| `billing_model` | `subscription` | 'subscription' or 'pay_per_use' |
+
+#### `[file_transfer]`
+
+| Key | Default | Notes |
+|---|---|---|
+| `chunk_size` | `65536` | Chunk size in bytes (64KB) |
+| `background_threshold_mb` | `50` | Background transfer threshold in MB |
+| `direct_tls_only_threshold_mb` | `100` | Direct TLS preference threshold in MB |
+| `max_concurrent_transfers` | `3` | Max concurrent file transfers |
+| `verify_hash` | `true` | Verify file hash after transfer (SHA256) |
+| `preparation_timeout_base` | `60` | Base timeout in seconds (for small files) |
+| `preparation_timeout_per_gb` | `40` | Additional timeout per GB (40s/GB) |
+| `preparation_progress_interval_mb` | `100` | Emit progress every N MB during SHA256 |
+| `preparation_progress_interval_chunks` | `10000` | Emit progress every N chunks during CRC32 |
+
+#### `[gossip]`
+
+| Key | Default | Notes |
+|---|---|---|
+| `enabled` | `true` | Enable gossip protocol |
+| `max_hops` | `5` | Maximum hops for message forwarding |
+| `fanout` | `3` | Number of random peers to forward to |
+| `ttl_seconds` | `86400` | Message TTL (24 hours) |
+| `sync_interval` | `300` | Anti-entropy sync interval (5 minutes) |
+| `cleanup_interval` | `600` | Expired message cleanup interval (10 minutes) |
+| `priority` | `normal` | Default message priority: low, normal, high |
+
+#### `[history]`
+
+| Key | Default | Notes |
+|---|---|---|
+| `reject_unsigned` | `false` | Refuse a synced record whose signature this node cannot check (stored labelled `verification: legacy` either way) |
+
+#### `[hole_punch]`
+
+| Key | Default | Notes |
+|---|---|---|
+| `udp_punch_port` | `8890` | UDP port for hole punching |
+| `nat_detection_enabled` | `true` | Detect NAT type (cone vs symmetric) |
+| `stun_timeout` | `5` | Endpoint discovery timeout (seconds) |
+| `punch_attempts` | `3` | Number of punch attempts before giving up |
+| `enable_dtls` | `true` | Enable DTLS encryption for hole-punched connections |
+| `dtls_handshake_timeout` | `3` | DTLS handshake timeout (seconds) |
+| `dtls_version` | `1.2` | DTLS protocol version (1.2 or 1.3) |
+
+#### `[hub]`
+
+| Key | Default | Notes |
+|---|---|---|
+| `url` | `http://localhost:8000` |  |
+| `auto_connect` | `false` |  |
+
+#### `[knowledge]`
+
+| Key | Default | Notes |
+|---|---|---|
+| `token_warning_threshold` | `0.8` | Warn when context window reaches 80% |
+| `auto_extraction_enabled` | `true` | Automatically suggest knowledge extraction |
+| `cultural_perspectives_enabled` | `false` | Include cultural perspective analysis in knowledge extraction |
+| `cold_fallback_provider` | *(empty)* |  |
+
+#### `[local_transcription]`
+
+| Key | Default | Notes |
+|---|---|---|
+| `enabled` | `true` | Enable local Whisper transcription (v0.13.1+) |
+| `model` | `openai/whisper-large-v3-turbo` | Model name (HuggingFace) |
+| `device` | `auto` | Device: 'cuda', 'cpu', or 'auto' (auto-detects CUDA) |
+| `compile_model` | `true` | Use torch.compile for 4.5x speedup (PyTorch 2.4+) |
+| `use_flash_attention` | `false` | Use Flash Attention 2 (requires flash-attn package) |
+| `chunk_length_s` | `30` | Chunk length for long-form transcription (speed vs accuracy) |
+| `batch_size` | `16` | Batch size for chunked transcription (higher = faster, more VRAM) |
+| `language` | `auto` | Language: 'auto' (detect) or ISO 639-1 code (e.g., 'en', 'es') |
+| `task` | `transcribe` | Task: 'transcribe' or 'translate' (to English) |
+| `fallback_to_openai` | `true` | Fallback to OpenAI API if local fails |
+| `max_file_size_mb` | `25` | Max audio file size for local transcription (VRAM limit) |
+| `lazy_loading` | `true` | Load model on first use (faster startup) |
+
+#### `[logging]`
+
+| Key | Default | Notes |
+|---|---|---|
+| `level` | `INFO` | Log level: DEBUG, INFO, WARNING, ERROR, CRITICAL |
+| `console` | `true` | Enable console output |
+| `console_level` | `INFO` | Console log level (can differ from file) |
+| `file` | `~/.dpc/logs/dpc-client.log` | Log file path |
+| `max_bytes` | `10485760` | Max bytes per log file before rotation (10MB) |
+| `backup_count` | `5` | Number of backup log files to keep |
+
+#### `[logging.modules]`
+
+| Key | Default | Notes |
+|---|---|---|
+| `httpcore` | `WARNING` |  |
+| `httpx` | `WARNING` |  |
+| `anthropic` | `WARNING` |  |
+| `telegram.ext.Application` | `INFO` |  |
+| `openai` | `WARNING` |  |
+
+#### `[oauth]`
+
+| Key | Default | Notes |
+|---|---|---|
+| `callback_port` | `8080` |  |
+| `callback_host` | `127.0.0.1` |  |
+| `default_provider` | `google` |  |
+
+#### `[p2p]`
+
+| Key | Default | Notes |
+|---|---|---|
+| `listen_port` | `8888` |  |
+| `listen_host` | `dual` | dual-stack (IPv4 + IPv6), can be "0.0.0.0" (IPv4 only) or "::" (IPv6 only) |
+| `connection_timeout` | `30` | Connection establishment timeout in seconds |
+| `auto_connect_node_groups` | `true` | Auto-connect to firewall node group members on startup |
+| `auto_connect_delay` | `5` | Seconds to wait before attempting (let DHT bootstrap) |
+
+#### `[relay]`
+
+| Key | Default | Notes |
+|---|---|---|
+| `enabled` | `true` | Enable relay client mode |
+| `prefer_region` | `global` | Preferred region: us-west, eu-central, global, etc. |
+| `cache_timeout` | `300` | Relay discovery cache timeout (5 minutes) |
+| `volunteer` | `false` | Volunteer this node as relay (opt-in) |
+| `max_peers` | `10` | Max concurrent relay sessions (server mode) |
+| `bandwidth_limit_mbps` | `10.0` | Bandwidth limit for relaying |
+| `region` | `global` | Geographic region for relay announcements |
+
+#### `[system]`
+
+| Key | Default | Notes |
+|---|---|---|
+| `auto_collect_device_info` | `true` | Automatically collect device/system info for AI context |
+| `collect_hardware_specs` | `true` | Collect hardware tiers (RAM, CPU, disk, GPU) |
+| `collect_dev_tools` | `true` | Collect installed dev tools and versions |
+| `collect_ai_models` | `false` | Collect locally available AI models (opt-in for compute-sharing) |
+
+#### `[telegram]`
+
+| Key | Default | Notes |
+|---|---|---|
+| `enabled` | `false` | Enable Telegram bot integration (v0.14.0+) |
+| `bot_token` | *(empty)* | Bot token from @BotFather |
+| `allowed_chat_ids` | `[]` | JSON array of whitelisted chat IDs (private access) |
+| `use_webhook` | `false` | Use webhook mode (true) or polling mode (false) |
+| `webhook_url` | *(empty)* | Public URL for webhook (production) |
+| `webhook_port` | `8443` | Local port for webhook server |
+| `owner_contact` | *(empty)* | Bot owner contact info (shown to unauthorized users) |
+| `access_denied_message` | *(empty)* | Custom access denied message (optional) |
+| `transcription_enabled` | `true` | Auto-transcribe Telegram voice messages (uses default voice provider) |
+| `bridge_to_p2p` | `false` | Forward Telegram messages to P2P peers (see NOTE below) |
+| `conversation_links` | `{}` | JSON map of telegram_chat_id -> conversation_id |
+| `fetch_history_on_startup` | `true` | Fetch historical messages on bot startup |
+| `history_fetch_limit` | `100` | Max messages to fetch per chat (Telegram limit: 100) |
+| `history_max_age_hours` | `24` | Maximum age of messages to fetch (Telegram limit: 24 hours) |
+| `history_message_types` | `text,voice,photo,document,video` | Comma-separated message types |
+| `drop_pending_updates` | `false` | Drop pending updates on startup |
+| `last_update_id` | `{}` | Track last processed update_id per chat (JSON object) |
+
+#### `[turn]`
+
+| Key | Default | Notes |
+|---|---|---|
+| `username` | *(empty)* | Leave empty or set via environment variable DPC_TURN_USERNAME |
+| `credential` | *(empty)* | Leave empty or set via environment variable DPC_TURN_CREDENTIAL |
+| `servers` | *(empty)* | Your provider's TURN/STUN URLs; used only when username/credential are set |
+| `fallback_servers` | *(empty)* | A public relay, if you accept that your traffic passes through it |
+| `fallback_username` | *(empty)* |  |
+| `fallback_credential` | *(empty)* |  |
+
+#### `[vision]`
+
+| Key | Default | Notes |
+|---|---|---|
+| `enabled` | `true` | Enable vision API features (screenshot paste, image analysis) |
+| `default_provider` | `openai` | Default AI provider for vision: 'openai' or 'anthropic' |
+| `max_image_size_mb` | `5` | Maximum image size in MB (clipboard paste and uploads) |
+| `thumbnail_quality` | `85` | Thumbnail JPEG quality (0-100) |
+
+#### `[voice_messages]`
+
+| Key | Default | Notes |
+|---|---|---|
+| `enabled` | `true` | Enable voice message recording and playback (v0.13.0+) |
+| `max_duration_seconds` | `300` | Maximum recording duration in seconds (5 minutes) |
+| `max_size_mb` | `10` | Maximum voice message file size in MB |
+| `mime_types` | `audio/webm,audio/opus,audio/ogg,audio/mp4,audio/mpeg,audio/wav` | Supported audio formats (includes WAV for Tauri/Rust backend) |
+| `default_sample_rate` | `48000` | Default sample rate in Hz (48kHz for quality) |
+| `default_channels` | `1` | Default audio channels (1 = mono, 2 = stereo) |
+| `default_codec` | `opus` | Default audio codec (opus for web compatibility) |
+
+#### `[voice_transcription]`
+
+| Key | Default | Notes |
+|---|---|---|
+| `enabled` | `true` | Enable auto-transcription of received voice messages (v0.13.2+) |
+| `sender_transcribes` | `false` | Should sender transcribe their own voice messages |
+| `recipient_delay_seconds` | `3` | Wait N seconds before recipients attempt transcription (coordination) |
+| `timeout_seconds` | `240` | Max wait time for peer's transcription before trying locally (increased to 240s for cold model loads that take 180+s) |
+| `provider_priority` | `whisper-large-v3-turbo,whisper-medium,whisper-small,openai` | Comma-separated provider priority (aliases from providers.json) |
+| `show_transcriber_name` | `false` | Show who transcribed the message in UI |
+| `cache_transcriptions` | `true` | Cache transcriptions in memory |
+| `fallback_to_openai` | `true` | Fallback to OpenAI API if local Whisper unavailable |
+
+#### `[webrtc]`
+
+| Key | Default | Notes |
+|---|---|---|
+| `stun_servers` | `stun:stun.l.google.com:19302,stun:stun1.l.google.com:19302,stun:global.stun.twilio.com:3478,stun:stun.rtc.yandex.net:3478,stun:74.125.250.129:19302,stun:74.125.250.127:19302` |  |
+
+<!-- END GENERATED CONFIG REFERENCE -->
 
 ## Using Environment Variables
 
@@ -395,12 +686,19 @@ auto_connect = true
 ...
 ```
 
-### Migration Process
+### What actually happens
 
-1. **Backup:** Old config saved to `config.ini.bak`
-2. **Extraction:** Hub URL extracted from old format
-3. **Recreation:** New config created with proper sections
-4. **Preservation:** Original Hub URL preserved
+1. **Backup:** the old file is copied to `config.ini.bak`
+2. **Recreation:** a fresh config is written from the built-in defaults
+
+That is the whole of it (`settings.py`, `_recreate_config_with_backup` →
+`_create_default_config`). **Nothing is carried over.** In particular your Hub URL is
+*not* extracted and *not* preserved — the new file gets `url = http://localhost:8000`
+like any fresh install.
+
+**Copy your Hub URL out of `config.ini.bak` and put it back by hand** after the client
+recreates the file. Same for anything else you had customised: the backup is the only
+copy.
 
 ---
 
@@ -408,8 +706,10 @@ auto_connect = true
 
 ### Issue: "File contains no section headers"
 
-**Cause:** Old configuration format
-**Solution:** Automatic migration on next run. Manual fix:
+**Cause:** old configuration format (no `[section]` headers)
+**Solution:** the client backs the file up to `config.ini.bak` and writes a fresh
+default — it does not migrate your values. Recover them from the backup, or fix the
+file by hand first:
 
 ```ini
 # Add [hub] section header
@@ -520,18 +820,116 @@ chmod 600 ~/.dpc/config.ini
 
 ---
 
-## Reference: All Environment Variables
+## Reference: Environment Variables
 
-| Variable | Section | Key | Default | Description |
-|----------|---------|-----|---------|-------------|
-| `DPC_HUB_URL` | hub | url | `http://localhost:8000` | Federation Hub URL |
-| `DPC_HUB_AUTO_CONNECT` | hub | auto_connect | `true` | Auto-connect to Hub |
-| `DPC_OAUTH_CALLBACK_PORT` | oauth | callback_port | `8080` | OAuth callback port |
-| `DPC_OAUTH_CALLBACK_HOST` | oauth | callback_host | `127.0.0.1` | OAuth callback host |
-| `DPC_P2P_LISTEN_PORT` | p2p | listen_port | `8888` | P2P server port |
-| `DPC_P2P_LISTEN_HOST` | p2p | listen_host | `0.0.0.0` | P2P server host |
-| `DPC_API_PORT` | api | port | `9999` | Local API port |
-| `DPC_API_HOST` | api | host | `127.0.0.1` | Local API host |
+**Every key in every section has one.** The name is built mechanically —
+`DPC_<SECTION>_<KEY>`, upper case — so all 147 keys in the reference above can be set
+from the environment without appearing in any list. That includes the secrets this page
+tells you to keep out of version control: `DPC_TELEGRAM_BOT_TOKEN`, `DPC_TURN_USERNAME`,
+`DPC_TURN_CREDENTIAL`.
+
+An environment variable wins over the config file (see the hierarchy at the top).
+
+The eight most commonly used:
+
+| Variable | Section | Key | Default |
+|----------|---------|-----|---------|
+| `DPC_HUB_URL` | hub | url | `http://localhost:8000` |
+| `DPC_HUB_AUTO_CONNECT` | hub | auto_connect | `false` |
+| `DPC_OAUTH_CALLBACK_PORT` | oauth | callback_port | `8080` |
+| `DPC_OAUTH_CALLBACK_HOST` | oauth | callback_host | `127.0.0.1` |
+| `DPC_P2P_LISTEN_PORT` | p2p | listen_port | `8888` |
+| `DPC_P2P_LISTEN_HOST` | p2p | listen_host | `dual` |
+| `DPC_API_PORT` | api | port | `9999` |
+| `DPC_API_HOST` | api | host | `127.0.0.1` |
+
+---
+
+## The Ollama daemon's own environment (not DPC's, and DPC cannot set it)
+
+If you run local models through Ollama, three settings that live **outside DPC entirely**
+change how long your agents wait. DPC does not write them, does not read them, and cannot
+tell you they are missing — they belong to the Ollama service, and every user sets them by
+hand, once, per machine. They are listed here because the numbers below were measured on a
+working install and are the difference between a four-second turn and a four-minute one.
+
+| Variable | Suggested value | What it does |
+|----------|-----------------|--------------|
+| `LLAMA_ARG_CACHE_RAM` | see the table below | Prompt-cache ceiling **in MiB** (`-1` unlimited, `0` disabled). Default is `8192`. |
+| `OLLAMA_FLASH_ATTENTION` | `1` | Flash attention; required before the KV cache can be quantised. |
+| `OLLAMA_KV_CACHE_TYPE` | `q8_0` | KV cache type. Halves KV memory against the `f16` default. |
+
+**Why `LLAMA_ARG_CACHE_RAM` matters most.** `llama-server` keeps the KV state of past
+conversations so a request whose prefix it has already seen skips the prefill. One agent's
+entry measures 1.8–7.2 GiB (median 5.2), so the 8 GiB default holds about **one and a
+half** of them: on a machine running several agents the cache evicts constantly — 36
+evictions in 26 hours on the reference box — and each eviction costs that agent a full
+re-prefill on its next turn: 60–100 s at 60K tokens, 293 s measured at 164K. The cost is
+**system RAM, not VRAM**, and it is a ceiling rather than a reservation — memory is used
+only as entries accumulate.
+
+### How large to make it
+
+The value is not "as much as possible". Everything else on the machine has to fit
+alongside it: the OS, a browser or IDE, DPC itself with its agents, `bge-m3` when memory
+indexing runs, and Whisper when a voice message arrives. Whisper is the one that catches
+people out — it appears only while transcribing, which is exactly when the cache is
+already full.
+
+| Installed RAM | `LLAMA_ARG_CACHE_RAM` | Roughly holds |
+|---------------|----------------------|---------------|
+| 8 GB          | `0` (disable)        | nothing — the cache would push the machine into swap |
+| 16 GB         | `4096`               | less than one long conversation |
+| 24 GB         | `6144`               | about one |
+| 32 GB         | `10240`              | two |
+| 48 GB         | `16384`              | three |
+| 64 GB         | `24576`              | four to five (the reference box) |
+| 96 GB or more | `32768`              | six or more |
+
+The table is a quarter of installed RAM at the small end and rises to about a third on
+large machines, so a small node gets the *smaller* share — the opposite of what a flat
+percentage or a fixed reserve produces. If the machine starts swapping after a heavy
+session, halve the value; **slow is cheaper than swapping**, and `0` is a legitimate
+setting on a machine that cannot spare the memory.
+
+Two caveats worth reading before quoting the "holds N conversations" column:
+
+- **It depends on the KV cache type.** Entry sizes above were measured with
+  `OLLAMA_KV_CACHE_TYPE=q8_0`. A smaller KV type halves the entries, so the same ceiling
+  holds twice as many; a larger one does the reverse.
+- **Nothing measures this for you.** DPC's device context records how much RAM is
+  *installed* (`hardware.memory.ram_gb`) and not how much is free — the `free_gb` in that
+  file is disk. The variable is also read only when Ollama starts, so there is no runtime
+  adjustment to be had: pick a value for the machine, set it once, and watch for swapping.
+
+**Setting it (Windows).** Ollama passes its own environment to the `llama-server` child, so
+a user-scope variable is enough — but the tray app inherits the environment it was
+*started* with, so a new terminal will not do: quit Ollama from the tray and start it
+again.
+
+```powershell
+[Environment]::SetEnvironmentVariable('LLAMA_ARG_CACHE_RAM','24576','User')
+# then: Ollama tray icon → Quit → launch Ollama again
+```
+
+On Linux/macOS put it where the service reads its environment
+(`systemctl edit ollama.service` → `Environment="LLAMA_ARG_CACHE_RAM=24576"`, or
+`launchctl setenv`), then restart the service.
+
+**Checking that it took.** In the Ollama server log
+(`%LOCALAPPDATA%\Ollama\server.log` on Windows, `journalctl -u ollama` on Linux):
+
+```
+srv    load_model: prompt cache is enabled, size limit: 24576 MiB
+```
+
+If it still says `8192`, the variable did not reach the child — the value format is not the
+suspect, it is a plain integer. The second signal, over the following day, is the count of
+`making room for prompt cache entry, removing oldest entry` lines, which should fall.
+
+> These are stopgaps for the Ollama path. When DPC runs its own inference server
+> (ADR-040 Stage 2) it passes the equivalent flags itself and this section stops being
+> the user's problem.
 
 ---
 
@@ -652,15 +1050,19 @@ Configure which connection strategies are enabled and their timeouts.
 
 #### `enable_hub_webrtc`
 - **Description:** Try Hub WebRTC with STUN/TURN (Priority 3)
-- **Default:** `true`
+- **Default:** `false` — shipped off since 2026-06-01
 - **Values:** `true`, `false`
-- **Note:** Requires Hub connection
+- **Note:** Requires a Hub connection. Turning it on also means WebRTC will look for a
+  TURN relay, and `[turn]` is empty by default — supply your own credentials rather
+  than relying on a public relay
 
 #### `enable_hole_punching`
 - **Description:** Try DHT-coordinated UDP hole punching (Priority 4)
-- **Default:** `true`
+- **Default:** `false` — experimental, opt-in
 - **Values:** `true`, `false`
 - **Success Rate:** 60-70% for cone NAT (fails gracefully for symmetric NAT)
+- **Note:** discovery runs over the DHT, and `[dht] seed_nodes` is empty by default, so
+  turning this on alone is not enough — give the DHT something to bootstrap from first
 
 #### `enable_relays`
 - **Description:** Try volunteer relay nodes (Priority 5)
@@ -680,27 +1082,26 @@ Per-strategy timeout configuration in seconds:
 
 ```ini
 [connection]
-ipv6_timeout = 10          # IPv6 direct connection timeout
-ipv4_timeout = 10          # IPv4 direct connection timeout
+ipv6_timeout = 60          # IPv6 direct: 30s pre-flight + 30s TLS handshake
+ipv4_timeout = 60          # IPv4 direct: 30s pre-flight + 30s TLS handshake
 webrtc_timeout = 30        # Hub WebRTC timeout
 hole_punch_timeout = 15    # UDP hole punching timeout
 relay_timeout = 20         # Volunteer relay timeout
 gossip_timeout = 5         # Gossip fallback timeout
 ```
 
-**Example Configuration:**
+**Example Configuration** — this is what a fresh install writes, so copying it changes
+nothing. Two strategies ship off; turn them on deliberately, not by pasting a block.
 ```ini
 [connection]
-# Enable all strategies (default)
 enable_ipv6 = true
 enable_ipv4 = true
-enable_hub_webrtc = true
-enable_hole_punching = true
+enable_hub_webrtc = false     # off by default
+enable_hole_punching = false  # off by default, experimental
 enable_relays = true
 enable_gossip = true
 
-# Customize timeouts
-ipv6_timeout = 10
+ipv6_timeout = 60
 webrtc_timeout = 30
 relay_timeout = 20
 ```
@@ -754,31 +1155,21 @@ stun_timeout = 5
 punch_attempts = 3
 ```
 
-#### ⚠️ Security Warning: DTLS Encryption (v0.10.0)
+#### DTLS encryption
 
-**Current Status:** UDP hole punching establishes **unencrypted** UDP connections.
+Hole-punched UDP connections are encrypted with DTLS. This shipped in v0.10.1; an
+earlier version of this page still warned that the transport was unencrypted and told
+you to switch the strategy off for that reason — that reason is gone.
 
-**DTLS (Datagram Transport Layer Security)** upgrade is deferred to **v0.11.0+**.
-
-**Recommendation for v0.10.0:**
 ```ini
-[connection]
-enable_hole_punching = false  # Disable unencrypted UDP (recommended)
+[hole_punch]
+enable_dtls = true            # default
+dtls_handshake_timeout = 3    # seconds
+dtls_version = 1.2            # 1.2 or 1.3
 ```
 
-**Why disable hole punching in v0.10.0?**
-- UDP connections lack encryption layer (privacy violation)
-- Better encrypted alternatives exist:
-  - Priority 3 (Hub WebRTC) - Has built-in DTLS encryption
-  - Priority 5 (Volunteer Relays) - Uses TLS encryption
-- Implementation planned for v0.11.0
-
-**Current Workarounds:**
-1. **Disable hole punching** (recommended) - Use Priority 3 or 5 instead
-2. **Use only for testing** - Don't send sensitive data
-3. **Local network only** - Use UDP hole punching only on trusted networks
-
-See [FALLBACK_LOGIC.md](./FALLBACK_LOGIC.md#security-warning-dtls-encryption-v0100) for detailed explanation.
+Hole punching itself is still **off by default** (`[connection] enable_hole_punching`),
+but because it is experimental and DHT-dependent, not because it is in the clear.
 
 ---
 
@@ -930,11 +1321,12 @@ sync_interval = 600          # Sync every 10 minutes
 
 ## See Also
 
-- [Quick Start Guide](./QUICK_START.md)
+- [Quick Start Guide](../QUICK_START.md) — at the repository root, not in `docs/`
 - [WebRTC Setup Guide](./WEBRTC_SETUP_GUIDE.md)
 - [GitHub OAuth Setup](./GITHUB_AUTH_SETUP.md)
 - [Firewall Configuration](../dpc-client/privacy_rules.example.json)
-- [Changelog](../CHANGELOG.md)
+
+There is no changelog: the project keeps its history in git and in the backlog instead.
 
 ---
 

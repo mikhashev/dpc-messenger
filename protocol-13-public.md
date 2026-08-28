@@ -238,20 +238,35 @@ Each participant maintains their own persistent knowledge store. During every se
 - Ideas folder — backlog and proposals
 - Protocol document — this operating agreement
 
+### Backlog format
+Every project keeps its task list as a plain markdown backlog, and every agent that writes
+to one — internal or external — follows the same shape: one task per `###` heading, the
+envelope `(PRIORITY, STATUS, DATE — origin)` on the heading line, free prose below it, and
+a closure line carrying a resolution when the entry leaves. The standard, the status
+vocabulary and the checker are in **[docs/BACKLOG_FORMAT.md](docs/BACKLOG_FORMAT.md)**;
+`build.py --check` reports violations and never rewrites a file.
+
 ---
 
-## 7. Consciousness & Evolution
+## 7. Between sessions
 
-### Background Consciousness
-- Runs between user messages (configurable interval)
-- Types: explore curiosity, review recent actions, consolidate memory, plan improvements
-- Budget-capped (default: 10% of agent budget)
+### Sleep consolidation
+- Runs on demand — the coordinator triggers it, or the agent is asked directly. Not on a timer.
+- Reads the previous sessions' archives, extracts findings, writes them into the knowledge graph
+- Produces a morning brief that the next session loads as context
 
-### Evolution System
-- Periodic self-improvement cycles (configurable interval)
-- Proposes changes to: scratchpad, identity, knowledge, skills
-- `auto_apply: false` (recommended) → proposals require Human approval
-- Pending changes persist across restarts
+### Two mechanisms this replaced, and why
+Both are gone; the reasons are the part worth carrying to anyone adopting this protocol.
+
+- A **background "consciousness" worker** that ran between user messages on a timer. Superseded
+  by the pipeline above: the same job — consolidate, review, plan — done once against a whole
+  session instead of continuously against fragments.
+- An **autonomous evolution loop** that proposed edits to the agent's own identity, skills and
+  notes for human approval. Removed after roughly forty proposals produced no measurable
+  improvement across twenty-plus sessions. It cost tokens and review attention and returned
+  nothing, and the review queue itself became a source of stale state.
+
+If you are adopting Protocol 13, treat both as tried and rejected rather than as gaps to fill.
 
 ---
 
@@ -360,7 +375,7 @@ To adopt Protocol 13 for your own project:
 3. **Define territories:** Which agent handles code vs documentation
 4. **Start with Pattern B** for simple tasks, graduate to Pattern A for complex decisions
 5. **Add @mention routing** when agents can communicate directly
-6. **Enable consciousness/evolution** when agent persistence is available
+6. **Enable sleep consolidation** once agents persist between sessions — see §7
 
 ---
 

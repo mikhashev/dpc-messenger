@@ -95,10 +95,22 @@ def test_backfill_extracts_tags_from_filename(tmp_path):
     assert "architecture" in entry["tags"]
 
 
-def test_backfill_summary_truncates(tmp_path):
-    (tmp_path / "long.md").write_text("A" * 500, encoding="utf-8")
+def test_backfill_summary_is_bounded_and_flat(tmp_path):
+    """This used to assert the stored summary was the first 1000 characters.
+
+    That head carried the document's own markdown, and _index.md renders the field
+    as one bullet - so a heading from inside a document arrived looking like a
+    section of the index. The summary is now normalised to a single line and cut
+    much shorter. See tests/test_knowledge_index_stability.py.
+    """
+    (tmp_path / "long.md").write_text("A" * 5000, encoding="utf-8")
+    (tmp_path / "marked.md").write_text("# Title\n\n## Section\n\nbody", encoding="utf-8")
     data = backfill_meta(tmp_path)
-    assert len(data["long.md"]["summary"]) == 200
+
+    assert len(data["long.md"]["summary"]) <= 310
+    assert data["long.md"]["summary"].endswith("...")
+    flat = data["marked.md"]["summary"]
+    assert "\n" not in flat and "#" not in flat
 
 
 def test_read_all_meta_triggers_backfill(tmp_path):
@@ -112,12 +124,20 @@ def test_read_all_meta_triggers_backfill(tmp_path):
 
 
 def test_generate_smart_index_sections(tmp_path):
+    """Written with both stamps: a legacy entry carrying only `last_accessed` is
+    migrated to `last_written` on load, so writing one here would test the migration
+    rather than the sections."""
     now = datetime.now(timezone.utc)
+
+    def _seen(days_ago):
+        ts = (now - timedelta(days=days_ago)).isoformat()
+        return {"last_accessed": ts, "last_written": ts}
+
     data = {
-        "today.md": {"last_accessed": now.isoformat(), "summary": "Fresh topic"},
-        "recent.md": {"last_accessed": (now - timedelta(days=3)).isoformat(), "summary": "Recent topic"},
-        "old.md": {"last_accessed": (now - timedelta(days=15)).isoformat(), "summary": "Old topic"},
-        "stale.md": {"last_accessed": (now - timedelta(days=45)).isoformat(), "summary": "Stale topic"},
+        "today.md": {**_seen(0), "summary": "Fresh topic"},
+        "recent.md": {**_seen(3), "summary": "Recent topic"},
+        "old.md": {**_seen(15), "summary": "Old topic"},
+        "stale.md": {**_seen(45), "summary": "Stale topic"},
     }
     (tmp_path / "_meta.json").write_text(json.dumps(data), encoding="utf-8")
     content = generate_smart_index(tmp_path)
@@ -126,7 +146,8 @@ def test_generate_smart_index_sections(tmp_path):
     assert "## Reference" in content
     assert "## Stale (30+ days)" in content
     assert "Fresh topic" in content
-    assert "stale, last: 45 days" in content
+    stale_date = (now - timedelta(days=45)).date().isoformat()
+    assert f"stale, last: {stale_date}" in content  # an absolute date, not a moving count
     assert (tmp_path / "_index.md").exists()
 
 
@@ -135,13 +156,25 @@ def test_generate_smart_index_empty(tmp_path):
     assert content == ""
 
 
-def test_update_access_triggers_index_refresh(tmp_path):
+def test_update_access_records_the_read_without_touching_the_index(tmp_path):
+    """This test used to require the opposite - that a read refreshes the index.
+
+    The index sits in the cached system block ahead of the conversation history, so
+    rebuilding it on every read reordered that block under the agent mid-turn. A read
+    now records the access and nothing else; rebuilding belongs to writes and to
+    consolidation. See tests/test_knowledge_index_stability.py.
+    """
     (tmp_path / "topic.md").write_text("content", encoding="utf-8")
     write_file_meta(tmp_path, "topic.md", FileMeta(summary="test"))
+    generate_smart_index(tmp_path)
+    before = (tmp_path / "_index.md").read_text(encoding="utf-8")
+
     update_access(tmp_path, "topic.md")
-    assert (tmp_path / "_index.md").exists()
-    index_text = (tmp_path / "_index.md").read_text(encoding="utf-8")
-    assert "Topic" in index_text
+
+    assert (tmp_path / "_index.md").read_text(encoding="utf-8") == before
+    meta = read_file_meta(tmp_path, "topic.md")
+    assert meta.access_count == 1
+    assert meta.last_accessed
 
 
 # --- MEM-3.1: EmbeddingProvider tests ---
@@ -149,8 +182,8 @@ def test_update_access_triggers_index_refresh(tmp_path):
 
 def test_embedding_provider_defaults():
     p = EmbeddingProvider()
-    assert p.model_name == "intfloat/multilingual-e5-small"
-    assert p.max_tokens == 512
+    assert p.model_name == "BAAI/bge-m3"
+    assert p.max_tokens == 4096
     assert p._model is None
 
 
@@ -161,8 +194,22 @@ def test_embedding_provider_custom_config():
     assert p.max_tokens == 256
 
 
-def test_embedding_provider_embed_returns_list():
+def test_embedding_provider_embed_returns_list(monkeypatch):
+    """The cache is bypassed on purpose: without this the assertion depends on whether
+    a previous run left this text in the user's on-disk cache, so `encode` may never be
+    called and the test passes or fails by accident of machine state."""
     import numpy as np
+
+    class _NeverCached:
+        def get(self, text):
+            return None
+
+        def put(self, text, vec):
+            pass
+
+    monkeypatch.setattr(
+        "dpc_client_core.dpc_agent.memory._get_disk_cache", lambda: _NeverCached()
+    )
     mock_model = MagicMock()
     mock_model.encode.return_value = np.array([0.1, 0.2, 0.3])
     p = EmbeddingProvider()
@@ -189,3 +236,53 @@ def test_embedding_provider_unload():
     p._model = MagicMock()
     p.unload()
     assert p._model is None
+
+
+# --- max_tokens: the setting that was stored and never used ---
+
+
+class _Model:
+    def __init__(self, max_seq_length=8192):
+        self.max_seq_length = max_seq_length
+
+
+def test_token_limit_reaches_the_model():
+    p = EmbeddingProvider(max_tokens=4096)
+    p._model = _Model(8192)
+    p._apply_token_limit()
+    assert p._model.max_seq_length == 4096
+
+
+def test_token_limit_is_never_raised_above_the_model():
+    """Positions the model never trained on give worse embeddings, not longer ones."""
+    p = EmbeddingProvider(max_tokens=32768)
+    p._model = _Model(8192)
+    p._apply_token_limit()
+    assert p._model.max_seq_length == 8192
+
+
+def test_model_without_the_attribute_keeps_its_own_limit():
+    p = EmbeddingProvider(max_tokens=4096)
+    p._model = object()
+    p._apply_token_limit()  # a warning, not a failed load
+
+
+def test_zero_means_leave_it_alone():
+    p = EmbeddingProvider(max_tokens=0)
+    p._model = _Model(8192)
+    p._apply_token_limit()
+    assert p._model.max_seq_length == 8192
+
+
+def test_shared_provider_honours_a_stated_window(monkeypatch):
+    """The singleton hands the same object to everyone; the window must not be
+    decided by whichever caller happened to be first."""
+    import dpc_client_core.dpc_agent.memory as memory
+
+    monkeypatch.setattr(memory, "_singleton_providers", {})
+    first = memory.get_embedding_provider(model_name="test/model")
+    first._model = _Model(8192)
+    second = memory.get_embedding_provider(model_name="test/model", max_tokens=2048)
+    assert second is first
+    assert first.max_tokens == 2048
+    assert first._model.max_seq_length == 2048

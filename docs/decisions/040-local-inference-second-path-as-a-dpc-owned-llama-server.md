@@ -1,0 +1,1030 @@
+---
+adr: 040
+title: "Add the second local inference path as a DPC-owned llama-server child, not an in-process binding — and fix residency before adding an engine"
+status: accepted
+date: 2026-08-18
+deciders: [Mike]
+consulted: [Ark, Johnny, Warren, CC, Fable 5, GLM 5.3]
+informed: []
+depends_on: [ADR-002]
+related: [ADR-012, ADR-018, ADR-021, ADR-022]
+supersedes: []
+session: "two review rounds 2026-08-17/18 — DPC Project #42–#54 and the round-2 re-review; independent reviews by Fable 5 and GLM 5.3"
+---
+
+# ADR-040: Add the second local inference path as a DPC-owned llama-server child, not an in-process binding — and fix residency before adding an engine
+
+> **Status note (accepted, 2026-08-18).** Drafted from two independent reviews
+> (`ideas/dpc-research/llamacpp-local-provider-review-fable-5.md`, `…-review-glm5.3.md`), the round-1
+> prompt and the thread #42–#54; both reviews were read in full and were written without reading each
+> other. Every figure is marked `Observed` (measured on this box, location given), `Inferred`, or
+> `Not verified`, and the decisions left to Mike are in **Open Questions**, not buried in the text.
+>
+> **A second review round followed the draft** (`…-round2-fable-5.md`, `…-round2-glm5.3.md`, prompt
+> `…-server-provider-prompt-round2.md`), asked to break the decision rather than the premise. The
+> engine choice survived; **the order did not**, and three figures in the draft were superseded. Those
+> corrections are marked **`Round 2, 2026-08-18`** where they land. The two premises that fell were the
+> ones nobody had measured: that `keep_alive` pins a model, and that "sharing is implemented and
+> working" meant the shared path was fit for the role the frame gives it.
+
+## Context and Problem Statement
+
+DPC Messenger runs local inference through Ollama only. Backlog entry `LLAMACPP-LOCAL-PROVIDER`
+(HIGH, 2026-07-06) proposes a second local path — a provider type using **in-process
+`llama-cpp-python`** — on the argument that Ollama does not expose two levers: micro-scaling 4-bit
+weights (NVFP4/MXFP4) and KV-cache quantisation, and that brainbake's in-process backend (its
+inference-backend ADR, `C:\Users\mikha\Documents\brainbake\docs\decisions\014-inference-backend.md`)
+"solved KV cache, weights and load/unload" and can be ported. Mike's framing (2026-08-17): the main
+production model is **Qwen3.8-27B, multimodal**, rotated from a list of **NVFP4** checkpoints; agents
+need **262 144 tokens of context as a floor**.
+
+Two independent adversarial reviews (Fable 5, GLM 5.3) and a five-voice thread measured the premises on
+this machine (RTX PRO 4500 Blackwell, 32 623 MiB; Ollama 0.32.14; one process, nine agents) and found:
+
+1. **The main model has no sliding-window layers** — `n_swa = 0` in the loader log and no
+   `sliding_window` key in the GGUF (both reviews, two instruments, `Observed`). Brainbake's ~9× KV
+   lever (`swa_full=false` on Gemma-4) is **zero** for qwen3.8, and `llama-server` already defaults
+   `swa_full=false`; the 9× corrected a C-API default that only in-process bindings inherit
+   (`common/common.h:562` vs `llama-context.cpp:3546`, `Observed`).
+2. **The KV cache accepts nine types** (`f32 f16 bf16 q8_0 q4_0 q4_1 iq4_nl q5_0 q5_1`, `--help`,
+   `Observed`); **MXFP4/NVFP4 are weight types**, absent from `ggml-cuda/cpy.cu` and `fattn.cu`. The
+   "28 `KvCacheType` variants including MXFP4" premise that conditionally retired
+   `OLLAMA-CUSTOM-BUILD-NVFP4` is false as a KV lever.
+3. **NVFP4 artefacts are larger than the Q4_K_M we run**, not smaller: the vault's
+   `nvidia--Qwen3.6-27B-NVFP4` is 20.42 GiB `MIXED_PRECISION`, `unsloth/Qwen3.8-27B-NVFP4` 21.81 GiB
+   (vLLM-only), against the Ollama blob's 15.65 GiB (`Observed`). Community NVFP4-GGUF re-quantisations
+   save 0.2–2.1 GiB depending on tier — a saving `IQ4_XS` (14.63 GiB) also delivers with no new engine.
+   Metal has no NVFP4 kernels at llama.cpp `4df29be` (`Observed`), so NVFP4 cannot be a fleet format.
+4. **In-process `llama-cpp-python` has no CUDA wheel** as of 0.3.35 (released 2026-08-17): sdist plus
+   CPU-only wheels; the CUDA index stops at 0.3.4/cu124 (`Observed`). Route (a) is a source build into
+   the live core venv — the exact class of operation that caused the four-day
+   `ACTIVE-RECALL-TORCH-METADATA-EMPTY` outage — and it loses `draft-mtp` and crash isolation.
+5. **What agents actually wait on is re-prefill after cache loss, not VRAM.** One day of the Ollama
+   log: 233 requests, 3 235 s of prompt-eval, of which 45 prefills >10K tokens took 2 734 s (84 %);
+   23 of those 45 were the first three requests after a `llama-server` relaunch (26 launches/day —
+   5-minute keep-alive expiry, plus `qwen3-vl:8b` loads for image pre-analysis via
+   `vision_provider=ollama_vision`); a single 164 494-token prefill took 293 s (`Observed`,
+   Fable 5 §1.5). The 27B itself loads in 4.0–4.8 s.
+   **Errata 2026-08-18, first D4-T line in production: 9.5 s, not 4.0–4.8.** `load_ms=9472` on a
+   `qwen3.8:latest` load, and the daemon's own log names the two reasons the earlier figure did not
+   carry: the multimodal projector (888 MiB) loads with it, and `disabling mmap for llama-server load
+   by default … reason=windows_cuda` means the weights are read rather than mapped (`Observed`). The
+   direction of the argument is unchanged — a load is seconds and a cold prefill is minutes — but the
+   ratio is 12:1, not 25:1.
+6. **The daemon's residency arithmetic is 10 GiB short.** `ollama ps` reports 18 GB for a load whose
+   own buffers sum to 27.1 GiB; on that estimate the scheduler co-schedules `qwen3-vl` "alongside" a
+   card with ~0.4 GiB free (`Observed`, Fable 5 §1.4). Per-process WDDM counters partition the card:
+   `llama-server` 28.1–28.7 GiB, the DPC backend (`bge-m3` FP16 + CUDA context) **1.58–1.70 GiB**
+   (two independent measurements), desktop ≈2 GiB (`Observed`, both reviews). Mike's "3–4 GB" for
+   `bge-m3` is retired.
+   **`Round 2, 2026-08-18`: the backend figure is not stable and is not one tenant.** Re-measured at
+   **2 788 MiB** — the process holds `bge-m3`, a GLiNER singleton pinned to cuda
+   (`knowledge_graph.py:148`) and the sleep pass. So 0d banks what `bge-m3` itself costs, not the whole
+   1.6–2.8 GiB, and the spread between the two measurements is a second tenant appearing, not noise.
+   Whoever reads the 0d falsifier must expect a drop smaller than the process total.
+7. **The shipped `llama-server.exe` (Ollama's build) already does what the provider needs**, exercised
+   standalone, CPU-only, on the exact production blob + projector: OpenAI `/v1/chat/completions` with
+   native `tool_calls`, `modalities.vision = true`, `chat_template_caps.supports_reasoning_effort`,
+   per-request `enable_thinking`, `--spec-type draft-mtp` accepted, `usage` + `timings`, `/slots`,
+   `/metrics`, `/props` (`Observed`, both reviews). Its router mode is compiled out
+   (`subprocess is not enabled on this build`).
+8. **This box is one of three nodes** (`ROADMAP.md:82`: Windows, Linux, macOS); the Linux node has no
+   GPU (`backlog.md`, `AN-AGENT-CANNOT-BE-GIVEN-ITS-OWN-EYES`), macOS has no CUDA. A local provider is a
+   three-OS product feature, and "the binary is already on disk" is true only where Ollama installed
+   it.
+
+The question this ADR answers: **what is the second local inference path — an in-process binding, our
+own llama-server, vLLM, or ExLlama — in what order relative to the levers that need no engine, and who
+owns residency on one card shared by nine agents and remote peers.**
+
+## Decision Drivers
+
+- **262 144-token context is a floor** for agents (Mike, 2026-08-17); no lever may shrink it.
+- **Rivalrous compute under transparent, opt-in governance** is a stated value (`VISION.md` C8, C10,
+  "Compute Commons"): allocation must be governable by DPC, visible, and never silent — today a
+  peer's `describe_image` can page the resident 27B out without anyone seeing it.
+- **One process, many agents**: the DPC backend already holds torch-CUDA (cu128), Whisper and
+  `bge-m3`; a crash in an in-process engine takes every agent, every P2P connection and the API server
+  with it.
+- **Parity the agent loop needs**: native tool calling (`generate_with_tools`), vision (`mtmd`),
+  streaming, thinking on/off + the accepted effort ordinal, MTP/speculative parity with today's
+  Ollama launch (`draft-mtp`, mean accepted length 2.73, `Observed`), and per-call usage.
+- **The live venv is a hard constraint**: no native CUDA build is installed into
+  `dpc-client/core/.venv` (backlog `ACTIVE-RECALL-TORCH-METADATA-EMPTY`; ADR-012's pinned-index
+  approach is the durable answer if a wheel ever has to be owned).
+- **Three OSes, heterogeneous hardware**: distribution and install cost per OS is a selection
+  criterion, not a caveat.
+- **Resilience**: DeepSeek is the only paid provider and its runway is measured in days
+  (Warren, estimate, re-measure pending); a second *working* local path with tools has value only if it
+  carries tools.
+
+## Decision
+
+**Do not build the in-process `llama-cpp-python` provider. Add the second local path as a
+DPC-owned `llama-server` child process behind a new provider type, and only after four
+configuration levers that remove today's measured wall without any engine.**
+
+In order:
+
+### D1 — Stage 0: one atomic configuration bundle (no engine, ~30 lines)
+
+Applied as **one commit** and read from the log afterwards (Johnny #45: applied singly, the first
+lever's falsifier gives a false negative):
+
+- **0a** — `keep_alive` per Ollama alias, sent on the plain and tools paths as it already is on the
+  vision path (`ollama_provider.py:489`); the 27B alias set to `-1`.
+  **`Round 2, 2026-08-18`: `-1` is not a pin, and the word "pinned" is withdrawn.** Ollama v0.32.14
+  `server/sched.go`: `findRunnerToUnload` sorts runners by `uint64(sessionDuration)` — `-1` merely sorts
+  last — and then returns the first idle runner; the pending path sets `sessionDuration = 0` and expires
+  it (`Observed`, Fable 5 read the sources). So `keep_alive` protects against the **TTL** and against
+  nothing else: under memory pressure the "pinned" 27B is still evicted. That answers Q3, and it demotes
+  0a: it stops the five-minute unload, and what protects residency is removing the second tenant (0b) —
+  not the flag.
+- **0b** — `vision_provider` on this box → `qwen3.8:latest` (already vision-capable and resident);
+  and the durable form, because `_ensure_config_exists` (`:171`) seeds `ollama_vision` into every fresh
+  `providers.json` and a small separate vision model remains the right default for a node without a 27B.
+  **`Round 2 answers, 2026-08-18`: the durable form belongs to the caller, not to `query`.** The draft
+  put it in `llm_manager.query` auto-selection (`:591-593`), and two facts refuse that: `query(prompt,
+  provider_alias=None, return_metadata, images, **kwargs)` carries **no caller identity** — every call
+  site passes `None` (`llm_adapter.py:846`, sleep pipeline, tools) — and **resident-detection does not
+  exist** anywhere in core (`/api/ps` is called nowhere) (`Observed`, Johnny round 2, re-read by CC).
+  Making `query` prefer "the requesting agent's own provider when resident" therefore means adding an
+  identity parameter to a contract every caller uses, plus a residency probe that has no
+  implementation — not the ~30 lines the draft assumed. **The vision pre-analysis call site passes the
+  requesting agent's own `provider_alias` instead of `None`;** `query` and its other callers are
+  untouched. The config change above is what works on this box today; the durable form is for a node
+  that has no 27B.
+- **0d** — `bge-m3` off the GPU: an `embedding_device` field on `MemoryConfig`
+  (`memory_config.py:14-30`, none today) passed to `get_embedding_provider(device=…)` at its call
+  sites. **Errata 2026-08-18: six, not five.** The count in the draft came from an earlier reading; a
+  repo-wide enumeration while implementing it found `managers/agent_manager.py:364` as well — the eager
+  index pass, the heaviest of the six. And the field could not live only there: the agent builds the
+  per-process singleton in its own constructor (`agent.py:164`), which runs before the manager reads
+  `MemoryConfig` at all, so the device travels on `AgentConfig` too or it applies to nothing on the live
+  path. Shipped in `6c021771`. Banks ~1.6–1.7 GiB; CPU cost measured at 55 ms per sentence, 537 ms per ~800-token chunk
+  (`Observed`, Fable 5 §1.10). Also expected to give Step-3 the headroom a second slot needs.
+- **0e** — the host prompt cache above its 8 192 MiB default, via `LLAMA_ARG_CACHE_RAM` in the Ollama
+  service environment. **`Round 2, 2026-08-18`: no longer a hypothesis, and it is the lever of the
+  bundle.** `llm/llama_server.go:446` sets `cmd.Env = os.Environ()` and the launch line carries no
+  `--cache-ram`, so the variable reaches the child; the binary's `--help` names it (`Observed`).
+  Measured today: cache 8 192 MiB, entries 1.8–7.2 GiB (median 5.2), **36 evictions in 26 h**. With 0a
+  demoted, this is what decides whether the card can carry the fleet on a given day — zero code, one
+  environment variable, and it is Mike's action on the box.
+  **Size: start at 24 GiB, not 40.** System RAM is 61.7 GiB with ~51 free (`Observed`, round 1); 40 GiB
+  is 65 % of the machine and leaves ~11 GiB for the OS, the browser and `bge-m3` once 0d moves it to
+  CPU. Fable's own round-1 figure — «≥ 24 GiB holds five agents' entries» — is the right first step
+  (Johnny, round 2); 40 GiB belongs to the day the fleet actually migrates.
+  **Value format (`Round 2 answers, 2026-08-18`), read from the shipped binary's own `--help` rather
+  than assumed:** `-cram, --cache-ram N — set the maximum cache size in MiB (default: 8192, -1 - no
+  limit, 0 - disable) (env: LLAMA_ARG_CACHE_RAM)`. The value is a **plain integer in MiB**, so 24 GiB
+  is `LLAMA_ARG_CACHE_RAM=24576` — not `24GiB`, not `24G` (`Observed`). This mattered because a wrong
+  format shows the default 8 GiB in the "prompt cache … size limit" line and would be misread as "the
+  variable never reached the child", which Q7 has already answered. One neighbouring flag is worth
+  recording with it: `--cache-idle-slots` is **on by default and requires `cache-ram`**, so raising the
+  ceiling also gives idle-slot saving somewhere to work for the first time.
+
+Falsifier for the bundle: if request-#1-to-#3-after-launch prefills persist at the same rate after
+the bundle, the residual cost is cross-agent cache eviction and the cache size (0e, or per-alias
+slots under D3) is the lever — not the TTL.
+
+**What Stage 0 does not fix, said here so the bundle is not read as the cure.** The measured root of
+the residency wall is the daemon's own accounting: Ollama budgets a model's footprint about **10 GiB
+below the truth** and co-schedules a second model on that estimate with ~0.4 GiB actually free
+(Fable 5 §1.4, `Observed`). The bundle removes the *source of pressure* — 0b takes the second model
+out of the picture on this box — and leaves the estimate exactly as wrong as it was. Any future load
+that Ollama decides to co-schedule meets the same arithmetic. The permanent fix is **D4** (a
+single-resident governor in DPC that owns what is loaded), not Stage 0.
+
+> **`Round 2, 2026-08-18` — the order changed, and this is the round's main finding.** Stage 0 no
+> longer goes first. **D4-0 and the telemetry line go before it**, for two reasons the draft could not
+> see: the shared path routes a peer onto the paid provider (D4-0 below), and the bundle's falsifier as
+> written is a hand-run `awk` over `server.log` — a falsifier nobody will run twice is not a falsifier.
+> The honest size of the first package is therefore **D4-0 + telemetry + the bundle ≈ 200–300 lines
+> plus a restart**, not "~30 lines"; it is still cheap and still right, but it is a small project rather
+> than a one-liner, and it should be chosen as one.
+
+### D2 — Stage 1: NVFP4 is measured through Ollama itself, not built for (0 code)
+
+Ollama's shipped `ggml-base.dll` registers the `nvfp4` type name (`Observed`), so `ollama create` from
+a community NVFP4-GGUF (`esatapedico/…-MEDIUM` 15.25 GiB or `williamliao/…-Quality-v2` 14.96 GiB, plus
+the projector) is a one-Modelfile test. Compared at 262 144 context against Q4_K_M **and IQ4_XS**
+(14.63 GiB): loader model-buffer MiB, `predicted_per_second` at ≥60K depth, and a quality probe. This
+closes `OLLAMA-CUSTOM-BUILD-NVFP4` either way and settles the FP4 premise on the production model
+before any provider code exists. **NVFP4 is not the driver of this task**; the target artefact is
+Qwen3.8-27B as a GGUF chosen per node, not a format.
+
+### D3 — Stage 2: route (b) — a DPC-owned `llama-server` behind `llamacpp_server`
+
+- **Engine binary, two forms with different roles.** *(b1)* Ollama's private `llama-server.exe` is the
+  measurement rig on this box (zero download, the exact production blob and flags) — and if the
+  DeepSeek runway makes Stage 2 a race, the first working provider may run on it as a bridge.
+  *(b2)* the **shipped mechanism** is a **pinned mainline llama.cpp release per OS**, fetched on
+  first use by tag + sha256 into `~/.dpc/bin/llama.cpp/<tag>/<os-arch>/` the way Whisper models are
+  fetched today (`voice_service.download_whisper_model`, `ModelDownloadPanel.svelte`): release
+  `b10472` (2026-08-17) carries `win-cuda-13.3-x64` (139.9 MiB + cudart 372.9 MiB), `macos-arm64`
+  (Metal, 10.6 MiB), `ubuntu-x64` CPU (15.9 MiB) and Vulkan; no Linux-CUDA asset (`Observed`). We own
+  three *downloads* of upstream builds, not three builds; a build only if a needed flag or patch is
+  missing upstream (none identified). Never hard-code Ollama's install layout: `binary_path` in
+  configuration with auto-discovery as a fallback.
+  *(**Amendment, 2026-08-23 — the pin moves to `b10566`, and stops being ours to guess.** Mike:
+  «Да, давай пересядем». On 2026-08-21 upstream began publishing `vX.Y.Z` releases beside the
+  `b[NUM]` ones and stated which is for whom: `vX.Y.Z` is «stable, slower release cadence,
+  recommended for downstream distribution», `b[NUM]` is «bleeding edge … recommended for developers».
+  We are downstream and had been sitting on a nightly tag chosen by hand.
+
+  The versioned release carries no binaries — its only asset is `nightly-tag.txt`, holding the build
+  tag it corresponds to; `v0.2.0` names **`b10566`**. So D3's mechanism is unchanged (fetch by tag +
+  sha256 into `~/.dpc/bin/llama.cpp/<tag>/<os-arch>/`) and only the choice of tag is now read rather
+  than picked: take `nightly-tag.txt` from the newest `vX.Y.Z`, then that tag's `digest` and `size`
+  from the release API. **Do not follow `releases/latest`** — it now returns the versioned release,
+  whose only asset is that text file.
+
+  What the move buys, from a full read of the 115 commits between the two (nothing sampled):
+  `--mmproj-device` (#23255), which can take the 884 MiB vision projector off the card, and mtmd
+  chunks stored as placeholders (#27278). What it does not buy, and this is the useful half: **zero
+  commits touching CUDA attention kernels** — `iq4_nl`, `q4_1`, `q5_0`, `q5_1` and `f32` still have
+  none, so the KV menu's labels stand — and **zero touching `cache_reuse`**. DFlash2 remains
+  unavailable: PR 27342 is still open, so `b10566` builds the same 58 of the 81 tensors `b10472` did.
+  Measurements in this document taken on `b10472` stay as they are: they are dated observations, not
+  claims about the current pin.)*
+
+  *(Post-acceptance, 2026-08-19: the pin was fetched and verified, gates G1/G2 closed, steps 1–4
+  of the implementation plan shipped, and the provider answered its first live calls. The
+  chronicle of that day — every measurement, error and fix — lives in
+  `ideas/dpc-research/llamacpp-server-provider-build-log-2026-08-19.md`, not here: this record is
+  a decision, and it stays frozen as accepted. The two facts that changed what this decision
+  means in practice are one line each, in Consequences below.)*
+- **A per-request thinking budget — a route (b) capability, added `2026-08-18` at Mike's word.** The
+  server accepts a reasoning-token budget **in the request body**, so the depth of thinking becomes a
+  per-call knob instead of a per-alias one. Read from `master` today,
+  `tools/server/server-common.cpp` ~1041–1045:
+
+  ```cpp
+  int reasoning_budget = json_value(body, "reasoning_budget_tokens",
+                         json_value(body, "thinking_budget_tokens", -1));
+  if (reasoning_budget == -1) {
+      reasoning_budget = opt.reasoning_budget;
+  }
+  ```
+
+  Three things follow, and the third contradicts what the thread concluded.
+  **(i) Both field names work** — `reasoning_budget_tokens` is read first and `thinking_budget_tokens`
+  is its fallback; the round of «one of us has the wrong name» ended with a correct name being
+  withdrawn.
+  **(ii) The request wins over the command line**, not the other way round: the CLI value is the
+  *default* used when the body omits the field. The constraint discussed in the thread — «set
+  `--reasoning-budget` globally and per-request overrides die» — is **not** what this code does, and a
+  supervisor design that avoids the CLI flag for that reason would be avoiding a hazard that master
+  does not have. The maintainer's remark that produced it predates a fix whose own changelog says
+  per-request budgets *were* silently discarded, so it was probably true of an older build. `[NV]` on
+  our pinned `b10472` — one grep before D3 encodes anything either way.
+  **(iii) Ollama cannot reach it.** Its API takes `think` as a flag or a level, not a token budget, so
+  this is one more line in the ledger of what route (b) buys that the daemon cannot.
+
+  **Why it matters here, in our own numbers:** a turn measured tonight generated 16 332 tokens with
+  57 567 characters of reasoning and spent **429 s** of its 433 in decode. Thinking depth is the
+  largest latency lever we have, it is currently a property of the alias every agent shares, and a
+  per-request budget makes it a property of the *turn* — Johnny may think for minutes; Iris answering
+  a person may not.
+
+  **The falsifier must score the trace, not only the answer.** A budget sweep that measures accuracy
+  alone can conclude «shorter is free» while the visible reasoning stops showing the step that
+  produced the answer — the monitorability concern Johnny raised (arXiv 2607.09786). For this fleet the
+  trace is a work product: it is what a person reads to decide whether to trust the turn. So the sweep
+  scores **readability of the chain at each budget**, beside accuracy, and a budget that keeps the
+  score while hiding the reasoning fails.
+- **Model source for (b2): HF GGUFs** (`unsloth/…`, `ggml-org/…` with `mmproj` and, on mainline, a
+  separate `mtp-*.gguf`); whether the mainline loader takes Ollama's blob (in-blob MTP, 866 tensors) is
+  `Not verified` and is not to be counted on. On this box, (b1) uses the blob directly.
+- **Provider** `providers/llamacpp_server_provider.py`, a 13th `PROVIDER_MAP` type, **derived from
+  `deepseek_provider.py`** (the OpenAI-compatible sibling that already has `generate_with_tools`,
+  `generate_response_stream`, usage, retry, effort mapping) — not from the bare `openai_compatible`
+  type, which requires an API key, has a hard-coded vision list and neither tools nor streaming.
+  Capabilities come from `/props` (`modalities`, `chat_template_caps`), not a name list. Thinking:
+  per-request `chat_template_kwargs.enable_thinking` and `reasoning_effort` mapped from the accepted
+  ordinal `off/low/medium/high/max`, with the room-may-spend-less-never-more precedence Ollama already
+  enforces; `--reasoning-budget N` per alias as the instrument for the empty-answer record (flag
+  accepted `Observed`, effect `Not verified`). Precondition: the usage contract moves onto
+  `providers/base.py` — a convergence of three existing shapes rather than a lift from one.
+  DeepSeek keeps a stateful accessor (`get_last_usage`, `deepseek_provider.py:116`); Ollama and
+  `zai_coding` each build a `usage` dict, return it inline from the tools path and log it, and
+  expose no accessor at all. The single reader, `llm_adapter.py:283` inside `DpcLlmAdapter.chat`,
+  reaches for it through `hasattr`, so today only DeepSeek is priced by what it reported and every
+  other provider is priced by an estimate the loop computes for itself — filed as
+  `THE-COST-A-PROVIDER-REPORTS-IS-READ-FROM-ONE-PROVIDER-AND-GUESSED-FOR-THE-REST`. A fourth
+  private copy is therefore not the risk; a second unread one is.
+- **Supervisor** `managers/llama_server_supervisor.py`: spawn with per-alias flags (`-c`, `-ctk/-ctv`,
+  `--mmproj`, `--spec-type draft-mtp`, `-np`/`--kv-unified`, `--reasoning-*`, `--cache-ram`,
+  `-fit off`), `/health` wait, drain, stop; `/slots` and `/metrics` read through to the UI.
+- **UI:** `ProviderType` union + add-form defaults + render branches in `ProvidersEditor.svelte`
+  (4–6 places; the union is already one type behind the backend — `remote_peer`).
+- **Volume:** provider ~350–450 lines, supervisor ~200–300, binary fetcher ~120–180, base.py contract
+  ~30, UI ~40, tests ~400 → **~1 300–1 500 lines across ~10 files**, no native build, no venv change.
+
+### D4 — Residency and arbitration live in DPC, not in the engine
+
+**`Round 2, 2026-08-18`: D4 splits, and its first half moves to the front of the whole plan.**
+
+#### D4-0 — before Stage 0. No engine, ~60–100 lines
+
+The shared path is not a future concern; it is wired, gated, and mis-routed today. Measured on this box:
+it has carried **two** requests ever (`dpc-client.log.4` 2026-08-07 02:18, `.3` 2026-08-10 12:05, same
+peer), and **both were relayed to `deepseek_flash`** — the paid provider (`Observed`, both reviewers,
+confirmed independently by Ark and by CC on the logs). Four defects, each closed by a few lines:
+
+- **The gate and the router speak different vocabularies.** `handle_inference_request` calls
+  `firewall.can_request_inference(peer_id, model)` (`p2p_coordinator.py:172`) — the firewall is handed
+  `model` and **never `provider`** — and four lines later routes on `provider_alias_to_use = provider`
+  (`:187`, `:196`), the alias the *peer* named. A peer that sends `provider` and omits `model` passes a
+  check that examined nothing. Filling `compute.allowed_models` does not close it: with `model=None`
+  that branch never runs. (An empty `allowed_models` meaning *all models* is intended and the UI says
+  so — that is not the defect.) With both fields omitted the alias falls to `default_provider`, which
+  on this box is paid.
+  **`Round 2 answers, 2026-08-18`: the draft's fix — "the shared alias is never `default_provider`" —
+  is withdrawn; it is a fix that looks like a fix.** It closes only the both-fields-empty fallback.
+  `providers.json` on this box holds 16 aliases, **two** of them DeepSeek, and `default_provider` is
+  `deepseek_flash` (`Observed`); a peer naming `deepseek_pro` is not the default and passes (Johnny,
+  round 2). **Fix as decided (Mike, 2026-08-18): the peer does not name the alias at all.** The host
+  designates what it serves — a single `compute.serving_alias` in `privacy_rules.json`; the request's
+  `provider` field is ignored, and when `serving_alias` is unset the request is refused with a stated
+  reason rather than served by whatever the router would have picked. `model` still travels and the
+  existing `allowed_models` gate is unchanged. A list (`compute.allowed_providers`) was considered and
+  rejected: `allowed_models` already means *all* when empty and the UI declares it, so a second list
+  with the opposite empty-semantics is a trap that re-opens this same hole the first time someone
+  leaves it blank. One named alias has one reading. This is also what D4 means by governable — the
+  host allocates, not the caller.
+  **Review finding, 2026-08-18 (Ark, sharpened by Johnny): the two settings interact, and the shipped
+  default was a trap.** With the alias designating what runs, the peer's `model` no longer reaches the
+  router at all — so `allowed_models` can only *refuse*, never choose. A non-empty list that does not
+  contain the serving alias's own model makes the node advertise nothing and refuse everything, and the
+  rules template shipped `["llama3.1:8b", "llama3:70b"]` — two models nobody here serves. The template
+  now ships an empty list, and both the UI help text and the rules comment say what the list can and
+  cannot do. (On this box the live value was already `[]`, so nothing was broken here; the trap was
+  waiting for the next fresh install.)
+- **A peer's request is billed to nobody.** It belongs to no agent, so it writes no row in
+  `events.jsonl` and appears in no cost series. One log line in `handle_inference_request` closes the
+  record.
+- **A late response is dropped in silence.** `inference_handler.py:73-93` — `if request_id in
+  _pending_inference_requests:` with **no `else`**. The requester has already given up; the host has
+  already paid.
+- **The three remote ceilings are all below the host's own budget.** 240 s (UI door, not reachable from
+  configuration), 60 s (`remote_peer`), 180 s (`dpc_agent`) against `DEFAULT_TIMEOUT_SECONDS = 900.0`
+  (`ollama_provider.py:69`). Anything that runs longer than the requester's ceiling and shorter than the
+  host's is abandoned mid-flight while the host keeps generating for nobody — the wire edition of
+  `A-TIMED-OUT-VISION-CALL-KEEPS-GENERATING-AND-THE-NEXT-ONE-PAYS-FOR-IT`. **Fix: 1200 s on all three
+  doors** — the host's budget plus overhead (Mike, 2026-08-18: «900 +300… с учётом того как долго может
+  работать vision»), and the UI door gains a configurable value at the same time.
+
+A semaphore on the shared alias belongs here too. Everything else — the full queue with priorities and
+a remote-share cap — is **D4-β** and stays in Stage 2.
+
+Two more facts about the shared path, recorded because they bound what D4-0 can promise. The
+`remote_peer` provider type is **broken as a type**: it reports `supports_vision() → True`
+(`remote_peer_provider.py:110-112`) with no `generate_with_vision`, and returns a dict from a method
+annotated `-> str`; there are no aliases of it and no tests. And the sharing path has **no streaming**
+(`REMOTE_INFERENCE.md`), so a remote consumer waits on a spinner where a local caller on route (b)
+would stream. Today the path therefore works for the UI compute-host door and not for an agent.
+
+#### D4-β — Stage 2, with the engine
+
+- **One resident large model at a time** on this class of card, declared per alias
+  (`resident: pinned | on-demand`, a co-residency budget); a request for a second ≥15 GiB model queues
+  behind a policy decision and never silently pages the first out.
+- **The eviction unit for the agents' model is the cache entry, not the model.** `load → infer →
+  unload` per turn is refused for the agent-loop model: weights reload in 4–5 s but a cold cache costs
+  60–100 s at 60K tokens and ~5 min at 160K (`Observed` prefill rates). Rotation of a *cold* model into
+  a slot is legitimate only for batch jobs (sleep synthesis) whose cache is not needed again.
+- **The queue is DPC's**, keyed by identity (local agent id / peer node id) with priorities
+  (human-facing turn > agent tool loop > sleep > remote peer), a remote-share cap, and the rule that a
+  remote request never triggers a model swap. `dpc_agent/budget.py`'s `ProviderLimits`
+  (`max_concurrent`, per-minute/day) is the existing primitive, applied to local aliases for the first
+  time; the engine's slots (`-np`, `--kv-unified`) are the enforcement mechanism, `/slots` and
+  `/metrics` the visibility `VISION.md` C10 asks for. This is what makes allocation governable rather
+  than accidental (§Q0 of both reviews) — and it applies whichever engine serves the request.
+
+### D4-T — Telemetry ships with the first package, not after it (`Round 2, 2026-08-18`)
+
+Every lever in this document is justified by a number, and after the bundle lands nothing records
+tokens/s at depth, queue wait, swap counts or VRAM headroom per alias. The bundle's falsifier as drafted
+is a hand-run `awk` over `server.log`, and a falsifier that needs a person will not run twice. A
+collector of ~100 lines on the existing `_log_usage` line closes it; the Ollama SDK's `ChatResponse`
+already carries `load_duration`, `prompt_eval_duration` and `eval_duration` and DPC reads none of them
+(`Observed`), so the cheapest first series costs one line. A per-agent cost series already exists
+(`~/.dpc/agents/<id>/logs/events.jsonl`, tariffed by `dpc_agent/pricing.py`) — the gap is the four
+series above, and the peer requests that belong to no agent (D4-0). Filed as
+`THE-LEVERS-WE-ARE-ABOUT-TO-PULL-CANNOT-BE-TOLD-APART-IN-PRODUCTION`.
+
+**`Round 2 answers, 2026-08-18`: what D4-T actually ships, because "~100 lines" bought one row of four.**
+Of the four series named above, exactly one is reachable from what DPC already receives: `load_duration`,
+`prompt_eval_duration` and `eval_duration` on `ChatResponse` → **tokens/s at depth**, one line added to
+`_log_usage` (`ollama_provider.py:364-383`). The other three have no source in the process: **queue wait**
+does not exist until there is a queue (D4-β); **swap counts and evictions** live in Ollama's `server.log`,
+which DPC does not read anywhere — 0 matches for `server.log` across core (`Observed`, Johnny round 2);
+**VRAM headroom** lives in the WDDM per-process counters, outside the SDK entirely. So **D4-T = the
+tokens/s row plus the peer-request accounting line from D4-0**, and nothing else is promised here. A
+`server.log` reader (who reads, what it greps, where it writes — AP-11) is its own entry with its own
+size; without it the bundle's falsifier stays a hand-run `awk`, which is exactly the deficiency named
+above and is hereby carried forward rather than quietly declared closed.
+
+### D5 — Fleet: the provider is a per-node capability, not a fleet uniform
+
+On a node whose GPU cannot hold an alias's model, the alias reports itself unavailable (and the UI
+refuses it as an agent's main model) rather than falling to CPU — a CPU 27B prefills at ~40 tok/s
+(`Observed`), i.e. 25 minutes for a 60K agent context. The GPU-less Linux node is a **consumer** of
+the compute commons through the existing sharing path (`p2p_coordinator.py:166-196`, text and
+images), which is exactly what that path is for; macOS runs the Metal build with models its unified
+memory holds (`Not verified` for the 27B); the format common to all three nodes is Q4_K_M/IQ4_XS-class
+GGUF, so configuration names a **GGUF path per node**.
+
+### D6 — Refused
+
+- **In-process `llama-cpp-python`** as the provider: no CUDA wheel (build into the venv, or we own a
+  wheel), no MTP, no crash isolation, a second CUDA runtime beside torch's cu128 DLLs, a process-wide
+  lock around a non-thread-safe object called from a `ThreadPoolExecutor` — and nothing on the lever
+  list that the server does not already expose. Reopened only by a maintained sm_120 wheel *and* a
+  feature that needs per-token Python control.
+- **vLLM/SGLang**: Linux-only (WSL2 on Windows), pre-reserves the card, owns residency on its own
+  terms, would carry the *larger* NVFP4 artefacts; usable on 0 of 3 nodes.
+- **ExLlamaV3 as a provider**: a matching wheel exists for this venv (`cu128 · torch2.11 · cp312 ·
+  win_amd64`) and it supports the Qwen3.5 architecture with vision, but it is EXL3 (a third artefact),
+  in-process torch (route (a)'s safety gate), CUDA-only (1 of 3 OSes). Kept as a quality-per-GiB
+  *experiment* in a throw-away venv (turboderp 3.5–4.5 bpw vs Q4_K_M/IQ4_XS/NVFP4-GGUF at 262K), not a
+  route.
+- **An NVFP4 conversion pipeline** (no lossless import path exists: `convert_hf_to_gguf.py` has no
+  NVFP4/ModelOpt support and `llama-quantize` has no NVFP4 target, `Observed`), **per-turn
+  load/unload for the agent model**, **more than one large engine child at a time**, and **any native
+  build into the live core venv**.
+
+### Rationale
+
+- **The premises were inherited, not measured, and three of four fell on this box** (Context 1–4);
+  the fourth (FP4 memory) narrowed to a rounding error a standard quant also delivers. A provider
+  justified by those premises would have been built for levers it cannot pull.
+- **The wall agents feel is time, and its cause is residency policy** (Context 5–6): a 5-minute TTL
+  and a per-process prompt cache on a model whose *cache* is worth minutes and whose *weights* reload
+  in seconds, plus a daemon that co-schedules a second model on a wrong estimate. Both are configuration
+  and policy, not engine capability — which is why Stage 0 precedes everything and is atomic.
+- **Route (b) is the only one of four that satisfies the governance clause and the parity list at
+  once**: DPC owns the child (policy point = blast-radius boundary), the engine exposes per-alias
+  flags, `/slots`/`/metrics` make allocation visible, and tools/vision/MTP/usage are `Observed` on the
+  exact production blob. Brainbake's requirement — orchestrator-owned residency — is adopted whole;
+  its *means* (in-process FFI) was the answer for a Rust core whose alternative was an opaque daemon.
+  DPC's alternative is a controlled child.
+- **(b2) over (b1) as the shipped mechanism** because Ollama's private binary is an internal of an
+  auto-updating installer whose layout on Linux/macOS is unverified and whose router mode is compiled
+  out; upstream publishes the three OS builds we need, so ownership costs three downloads, not the
+  six-condition Windows/CUDA build recipe brainbake accepted.
+- **Derive from DeepSeek's provider, not `openai_compatible`**: the sibling with tools, streaming,
+  usage and effort already exists next door; the bare type would reproduce the "control that renders
+  and does nothing" defect this project spent a month on.
+
+## Considered Options
+
+- **Option 0 — status quo (Ollama only, env-level levers).** Zero work; residency accidental,
+  per-alias engine flags impossible, second-tenant paging invisible.
+- **Option A — in-process `llama-cpp-python`** (the backlog entry as filed).
+- **Option B1 — spawn Ollama's private `llama-server`** behind a provider.
+- **Option B2 — DPC-owned `llama-server` from pinned mainline releases per OS** behind a provider
+  (chosen; B1 as rig/bridge).
+- **Option C — vLLM / SGLang.**
+- **Option D — ExLlamaV3.**
+
+### Pros and Cons of the Options
+
+#### Option 0 — status quo
+- Good: nothing to build; capability discovery via `/api/show` just rebuilt.
+- Bad: residency owned by a daemon whose footprint estimate is 10 GiB short (`Observed`); TTL unload
+  costs ~26 min/day of re-prefill (`Observed`); no per-alias KV/slots/budget; no streaming on the
+  local path; governance only at the firewall boolean.
+
+#### Option A — in-process binding
+- Good: full Python-level control; the vendored llama.cpp (0.3.35 → `4df29be`) knows `qwen35` and has
+  an `MTMDChatHandler` (`Observed`).
+- Bad: no CUDA wheel (`Observed`) → source build into the venv or an owned wheel; no MTP/draft
+  (`LlamaPromptLookupDecoding` only, `Observed`); crash kills the whole backend; two CUDA runtimes and
+  two allocators in one process; GIL/thread-safety around a shared object; worst exactly on the
+  Windows node.
+
+#### Option B1 — Ollama's private binary
+- Good: on disk, proven on the production blob with every flag (`Observed`); zero download.
+- Bad: couples DPC to an unversioned, auto-updated private layout on three OSes (`Not verified`
+  beyond Windows); router mode compiled out; Ollama chooses per model between its Go engine and
+  llama-server.
+
+#### Option B2 — pinned mainline release per OS (chosen)
+- Good: native on all three OSes from upstream builds (`Observed` b10472 assets); flags and version
+  under DPC's control; same provider code as B1; MTP via separate `mtp-*.gguf` on ggml-org's repo.
+- Neutral: HF GGUF download per GPU node (~16 GiB + 0.87 GiB projector); a fetcher (~150 lines).
+- Bad: ~~`sm_120` in the win-cuda-13.3 artefact `Not verified`~~ — **verified 2026-08-19, G1
+  passes**: native `sm_120a` cubins, no PTX payload (see Q4); no Linux-CUDA asset if a Linux GPU
+  node ever appears.
+
+#### Option C — vLLM / SGLang
+- Good: the only native reader of NVFP4 safetensors; throughput serving.
+- Bad: Linux-only (WSL2 on Windows, `Observed` docs); own scheduler = foreign arbitration; reserves
+  the card; the NVFP4 artefacts it would carry are 4.8 GiB *larger* than Q4_K_M; 0 of 3 nodes.
+
+#### Option D — ExLlamaV3
+- Good: prebuilt wheel exactly matching the venv; Qwen3.5 arch with vision; EXL3 quality per bpw.
+- Bad: EXL3 only; in-process torch (route A's safety gate); CUDA-only → Windows-only in this fleet;
+  `sm_120` kernels `Not verified`.
+
+## Consequences
+
+- **Positive:** the measured wall (re-prefill after cache loss; second-tenant paging) is removed by
+  Stage 0 in any world; NVFP4 is settled by one Modelfile; the second local path, when built, carries
+  tools, vision, streaming, usage, per-alias KV/slots and a reasoning budget; residency becomes a
+  DPC policy with identity and visibility; the provider works on three OSes from upstream binaries.
+- **Negative / accepted:** DPC learns an install layout for the first time (its own, under
+  `~/.dpc/bin`); a GGUF download per GPU node; a supervisor to maintain; Stage 2's two measurement
+  phases are **production windows** on this box (the five qwen3.8 agents have no model while the card
+  is used), merged into one window: (27B in) Step-3 → KV cell; (27B out) NVFP4 cell; return.
+- **Neutral:** Ollama stays for the long tail of small aliases; `LLAMACPP-LOCAL-PROVIDER` is
+  re-titled to *server*, `OLLAMA-CUSTOM-BUILD-NVFP4` closes on Stage 1's result, and the two measured
+  production defects (TTL re-prefill; the daemon's footprint estimate) get entries of their own.
+- **Post-acceptance (2026-08-19), one line each:** the KV-cache default is **computed against the
+  card's free VRAM** (a ladder f16 → q8_0 → q4_0 with a memoised fit), because an f16 default
+  cannot even start on the card this fleet owns; and the effort vocabulary is **the model's own
+  template dictionary** (`low/medium/xhigh`; the fleet's `high`/`max` map onto `xhigh`, thinking
+  is capped per request via `reasoning_budget_tokens`). The day's chronicle behind both:
+  `ideas/dpc-research/llamacpp-server-provider-build-log-2026-08-19.md`.
+
+## Confirmation
+
+Compliance, not progress — each item is a measurement with a stated failing result:
+
+- [ ] **D4-0 (`Round 2 answers, 2026-08-18`; the draft had no cell for it, Johnny round 2)** — three
+      measurements, each with its failing result. **(1)** A peer request naming a provider that is not
+      `compute.serving_alias` is **refused — including when it carries no `model`**, which is Johnny's
+      exact case (`provider: "deepseek_pro"`, no model, today passes a check that examined nothing); and
+      when `serving_alias` is unset, every peer request is refused rather than served by the router's
+      pick. A test for this does not exist today (`test_p2p_coordinator.py` covers only deny/allow by
+      model) and it must be red before the change (fail: it passes on the unchanged code → the test is
+      asserting the old behaviour, not the new rule). **(2)** An allowed peer
+      request writes one accounting line naming the peer, the serving alias and the token counts (fail:
+      the shared path is still billed to nobody, which is the defect this item exists for). **(3)** A
+      response arriving after its `request_id` has been discarded produces a log line rather than
+      silence (fail: `inference_handler.py` still returns on the `if` with no `else`). The prod signal
+      is deliberately *not* the falsifier: the shared path carried two requests in eleven days, so
+      waiting on production here would be waiting on nothing.
+- [ ] **D4-T** — after the first agent turn, one line carries tokens/s at depth derived from
+      `load_duration`/`prompt_eval_duration`/`eval_duration` (fail: the fields are absent from the row →
+      the SDK's durations are not being read, and every later comparison of the levers is unmeasurable).
+      The other three series named in D4-T are explicitly **not** part of this cell.
+- [ ] **Stage 0 bundle** — after one day: request-#1-to-#3-after-launch prefills >10K tokens are gone
+      from the Ollama log (fail: same rate → cross-agent eviction, cache size is the lever);
+      `qwen3-vl` launches are zero on this box; `python.exe` dedicated usage by the WDDM counter drops
+      by ≈1.6 GiB (fail: attribution wrong); the "prompt cache … size limit" line reflects the
+      configured size (fail: env not passed → per-alias cache belongs to Stage 2).
+- [ ] **Stage 1 NVFP4 cell** — an NVFP4-GGUF loads through Ollama at 262K (fail: `GGML_ASSERT` on the
+      type → the custom-build entry stays open); model buffer within 1 GiB of Q4_K_M and
+      `predicted_per_second` within noise at ≥60K depth **kill** the FP4 memory and speed stories.
+- [ ] **Step-3 (route b on the card, one production window, after 0d)** — the shipped binary serves
+      the 27B at `-c 262144 -np 2 --kv-unified` within the free VRAM (`common_memory_breakdown_print`
+      line recorded; **read the second load, not the first** — the cuda_v13 build is PTX-only and JITs
+      on first load), tools parsed on the real template, MTP acceptance ≥ Ollama's 0.69/pos, and a
+      20-token turn overlapping a 60K prefill returns without waiting for it (fail on any → `-np 1`;
+      fail on all → mainline build; fail on both → route (a) is back).
+      **Rewritten `2026-08-18` after round 3: the bench as first written cannot fail the way production
+      will.** 60K + 20 tokens exercises 80K of a 262K pool, so pool exhaustion — the actual failure mode —
+      is unreachable, and the cell would go green while teaching nothing (GLM). Run it with **two
+      conversations of at least 120K each**, which is tonight's real shape (138 028 + 123 574), and record
+      which of eviction, shift or erasure the unified pool performs when the second prefill needs cells the
+      first holds. Note also that `-np 2 --kv-unified` shares one 262 144 pool rather than giving each slot
+      one, so a green run at these flags is a fleet context of 131 072 under concurrency — passing this cell
+      as written would shrink the floor the Decision Drivers declare.
+- [ ] **KV cell at 262K** — KV **total ≈ 4 608 MiB** at q4_0 (per side 2 304; a saving of 4 096 MiB
+      against the logged 8 704 MiB at q8_0, whose own per-side figure is 4 352);
+      **the baseline is re-confirmed live 2026-08-18** — `llama_kv_cache: size = 8704.00 MiB (262144
+      cells, 16 layers, 1/1 seqs), K (q8_0): 4352.00 MiB, V (q8_0): 4352.00 MiB` — and two facts the
+      draft did not carry surfaced with it. **The MTP draft model keeps its own cache and it is not
+      quantised**: `size = 1024.00 MiB (262144 cells, 1 layers), K (f16): 512.00 MiB, V (f16): 512.00
+      MiB`, so 1 GiB sits outside whatever `OLLAMA_KV_CACHE_TYPE` is set to. And that variable is
+      **daemon-wide**: under Ollama the KV type cannot be chosen per alias, so this cell is a fleet-wide
+      change while it is measured — one more thing route (b) makes per-server rather than per-machine; paired
+      runs on five real agent transcripts (47–76K tokens) at q8_0 vs q4_0: next-action agreement
+      ≥ 90 % and a 20-question recall probe within 10 points (fail → q4_0 dead for the main model).
+      **Amended `2026-08-18` — the cell was written as a *fit* question and needs three corrections.**
+      (i) **The corpus is too shallow**: 47–76K predates the growth; run it at the depths we actually
+      serve, 110–140K. (ii) **A reasoning probe is mandatory** — a `think=high` task at ≥110K scored
+      against the **f16** run, because the specific damage attributed to naive low-bit KV is error
+      accumulation across long reasoning, and both the recall and next-action probes would pass a model
+      that has quietly become worse at thinking. (iii) **The asymmetric variant is the interesting one,
+      and its direction is the reverse of the folklore**: on 500 deterministic ARC-Challenge questions
+      `q4_0` on **K alone** reproduced the full collapse while `q4_0` on **V alone** changed 1/500, so
+      `K q8_0 / V q4_0` is what to measure (llama.cpp discussion #23470, external, unverified here).
+      The same source measures this model as among the least affected — Qwen3.8-27B **3/500** at
+      `q4_0` K+V, against Qwen2.5-7B's 375/500 — which is where `q4_0`'s reputation comes from.
+      Two operational notes: `OLLAMA_KV_CACHE_TYPE` is **daemon-wide**, so measuring it changes the KV
+      type for every model at once and each variant costs a restart (the prompt cache goes with it);
+      and the MTP draft keeps its own **f16** 1 024 MiB cache that no KV setting touches. The plan is
+      `ideas/dpc-research/kv-quantisation-test-plan.md`.
+- [ ] **Provider parity** — `generate_with_tools`, vision via `image_url`, `generate_response_stream`,
+      the effort ordinal with the "less, never more" precedence, `get_last_usage` via the base
+      contract; a silently ignored `reasoning_effort` fails this item.
+- [ ] **Governance** — a remote peer's request is queued behind local human-facing turns and never
+      causes a model swap (test: peer request while a local turn holds the slot); allocation state is
+      readable from `/slots` in the UI.
+- [ ] **Fleet** — on a node without a usable GPU the alias reports unavailable rather than falling to
+      CPU; on macOS the Metal binary serves a GGUF the node's memory holds.
+- [ ] **Venv discipline** — `uv sync --dry-run` shows no change to `dpc-client/core/.venv` after
+      Stage 2 lands.
+
+## Scope
+
+- `dpc-client/core/dpc_client_core/providers/ollama_provider.py` — `keep_alive` on plain and tools
+  paths (0a).
+- `dpc-client/core/dpc_client_core/llm_manager.py` — auto-selection prefers the agent's own
+  vision-capable resident provider (0b); `PROVIDER_MAP` entry (Stage 2).
+- `dpc-client/core/dpc_client_core/dpc_agent/memory_config.py`, `dpc_agent/memory.py`, `dpc_agent/agent.py`
+  and the six `get_embedding_provider` call sites — `embedding_device` (0d, shipped `6c021771`).
+- `~/.dpc/providers.json` (this box) — `vision_provider`, `keep_alive` on the 27B alias (0a/0b).
+- `dpc-client/core/dpc_client_core/providers/base.py` — usage contract (Stage 2 precondition).
+- `dpc-client/core/dpc_client_core/providers/llamacpp_server_provider.py` — new (Stage 2).
+- `dpc-client/core/dpc_client_core/managers/llama_server_supervisor.py` — new: spawn/health/drain,
+  residency policy, binary fetcher (Stage 2).
+- `dpc-client/core/dpc_client_core/p2p_coordinator.py` — the peer's `provider` field is ignored and the
+  host's `compute.serving_alias` is used instead, refusing with a stated reason when it is unset;
+  provider alias into the firewall call, semaphore, peer-request log line, ceiling 240 → 1200 (D4-0).
+- `dpc-client/core/dpc_client_core/firewall.py` — `can_request_inference` takes the provider, and
+  `compute.serving_alias` joins the compute block (unset = share nothing, never "share anything") (D4-0).
+- `dpc-client/core/dpc_client_core/message_handlers/inference_handler.py` — the missing `else`: a late
+  response is logged rather than dropped in silence (D4-0).
+- `dpc-client/core/dpc_client_core/providers/remote_peer_provider.py`,
+  `providers/dpc_agent_provider.py` — ceilings 60 and 180 → 1200 (D4-0).
+- `docs/REMOTE_INFERENCE.md` — the timeout it documents in four places is one of three and none of them
+  is 60 any more; the doc is corrected in the same change (D4-0).
+- the telemetry line on `_log_usage` — the SDK's three durations, tokens/s at depth (D4-T; the other
+  three series need a `server.log` reader, filed separately).
+- `dpc-client/core/dpc_client_core/dpc_agent/budget.py` + `llm_manager.query` — `ProviderLimits`
+  applied to local aliases (Stage 2 / D4-β).
+- `dpc-client/ui/src/lib/components/ProvidersEditor.svelte` — provider type (Stage 2).
+- `backlog.md` — done 2026-08-18 (CC, board owner): `LLAMACPP-LOCAL-PROVIDER` re-titled
+  `LLAMACPP-SERVER-PROVIDER` and rewritten against these measurements;
+  `OLLAMA-CUSTOM-BUILD-NVFP4` amended to close on Stage 1's result either way; four new entries —
+  the TTL re-prefill cost, the daemon's footprint estimate, the telemetry harness of Q8, and the
+  cost door read through `hasattr`.
+
+## Implementation Status
+
+| Task | Status | Commit |
+|------|--------|--------|
+| D4-0: provider in the gate, host-designated `compute.serving_alias` (the peer's `provider` ignored), only the serving alias advertised, peer-request log line, orphan-drop log, three ceilings → 1200, semaphore, `serving_alias` field in the firewall UI | Shipped 2026-08-18 — awaiting prod observation | `2d540eae` |
+| D4-T: the tokens/s row on `_log_usage` (one line; the other three series are not in scope) | **Observed in production 2026-08-18 19:48** — see below | `2d540eae` |
+| Stage 0 bundle: 0a `keep_alive` on plain and tools + `keep_alive: -1` on the 27B alias; 0b `vision_provider` → `qwen3.8:latest`; 0d shipped `6c021771` | Shipped 2026-08-18 — awaiting the restart that loads it | `6901f184` |
+| Stage 0 bundle 0a+0b+0d, one commit; **0e** is Mike's environment variable on the box (24 GiB) | Pending — after D4-0 + D4-T | — |
+| Stage 1 NVFP4-GGUF via `ollama create`, measured vs Q4_K_M/IQ4_XS at 262K | Pending — production window (27B out) | — |
+| Step-3: route (b) on the card at 262K, 2 unified slots (after 0d) | Pending — production window (27B in), read second load | — |
+| KV cell q8_0 vs q4_0 at 262K with quality probe | Pending — same window as Step-3 | — |
+| `base.py` usage contract | Pending | — |
+| `llamacpp_server` provider + supervisor + fetcher + UI | Pending — timing depends on Open Question 1 | — |
+| `ProviderLimits` on local aliases; remote-share rule | Pending | — |
+| Backlog: re-title, two amendments, four new entries | Done 2026-08-18 — CC (the board is gitignored) | — |
+| Round 3 (Fable 5, GLM 5.3) on the allocation section; the section rewritten, (F) added and put first, (A) demoted to throughput, the second-conversation reading retracted | Done 2026-08-18 — CC | this commit |
+| (F) prefix-stable prompt — F2 in `context.py` + `sent_annotations.py`, three falsifiers | Shipped 2026-08-19 — CC; awaiting the restart and the cache-hit reading | this commit |
+| Demand division: `events.jsonl` → engine-seconds/day against 86 400 (no GPU) | Before any hardware decision | — |
+
+## First production reading (`2026-08-18 19:48`)
+
+The first `_log_usage` line carrying the D4-T fields, on a live agent turn (Johnny, moved to
+`qwen3.8:latest` the same hour):
+
+```
+Ollama usage: alias=qwen3.8:latest model=qwen3.8:latest prompt=107508 completion=5090
+              thinking_chars=17576 done=stop prompt_tps=906.8 eval_tps=36.3 load_ms=9472 path=tools
+```
+
+Read out: a **107 508-token** prompt prefilled at 906.8 tok/s = **118.6 s**; 5 090 tokens generated at
+36.3 tok/s = **140.2 s**; the model loaded in **9.5 s**. Sum **268.2 s** against **268.7 s** of wall
+clock (19:44:05.4 → 19:48:34.1) — the three durations reconstruct the whole call to within half a
+second, which is as much a check of the telemetry line as of the engine.
+
+Three things this fixes in the document:
+
+1. **The cost of the TTL is now a number on this box, not a reconstruction.** `ollama ps` showed
+   `until` five minutes out on the same model, because 0a had not shipped yet: had Johnny paused, his
+   next turn would have paid that 118 s again for a prompt already computed. This is the wall D1 is
+   about, measured on one agent in one turn.
+2. **The load figure is corrected** — 9.5 s, see the errata in Context §5.
+3. **Q9 gets its first data point.** At `think=high` the turn produced 17 576 characters of reasoning
+   alongside 5 090 answer tokens, so a large share of the generation time is the think tax the vision
+   move (0b) now takes on by default.
+
+Also confirmed in the same window, closing the 0e cell of the bundle falsifier:
+`srv load_model: prompt cache is enabled, size limit: 24576 MiB` — the environment variable reaches
+the child and the value format (a plain integer in MiB) is right.
+
+## What 0e bought, and what it cannot buy (`2026-08-18 20:10`)
+
+The prompt cache went in and was measured the same evening, on one agent moved to
+`qwen3.8:latest`. Both halves are worth recording, because only one of them is the half the
+lever was argued for.
+
+**What it bought, on consecutive turns of one conversation.** Seven turns in a row, same
+~110K prompt: `prompt_tps` 906.8 (cold) → 18 098 → 131 153 → 131 551 → 181 116 → 72 963 →
+209 949. A prefill of **118.6 s became 0.5–1.5 s**, and the engine names the mechanism —
+`restored context checkpoint (n_past = 110715, size = 584.218 MiB)`. Evictions for space,
+36 in the 26 h before, are **zero** since (`Observed`).
+
+**What it cannot buy: a second conversation.** The variable is not set in this environment; the daemon
+resolves it to `OLLAMA_NUM_PARALLEL:1` in its startup dump, and the server accordingly runs
+`n_slots = 1` (`srv load_model: initializing, n_slots = 1`), and a turn from a different conversation does not queue behind the first — it
+**erases** the first's checkpoints:
+
+```
+slot operator(): task 7777 | new prompt, task.n_tokens = 102306
+  checking checkpoint with [111651, 111651] against 1...
+  forcing full prompt re-processing due to lack of cache data
+  erased invalidated context checkpoint (… n_swa = 0 … size = 587.896 MiB)   ×3
+  cached n_tokens = 0, memory_seq_rm [0, end)
+```
+
+1.7 GiB of usable state discarded on a **prefix mismatch, not for room** — so no cache size
+would have saved it, and when the first conversation returned it ran cold at 895 tok/s
+(`Observed`). Two facts follow. The engine's own hint blames SWA or hybrid memory while
+printing `n_swa = 0` on the same lines, which is this document's Context §1 again: the hint
+does not apply to this model. And **the binding constraint for a fleet is slots, not cache
+RAM** — which is exactly what Step-3 measures (`-np 2 --kv-unified` at 262 144), and on this
+card two slots do not fit beside a 28.3 GiB resident model at q8_0 without the KV cell
+passing first. Filed as `TWO-CONVERSATIONS-ON-ONE-SLOT-DESTROY-EACH-OTHERS-CACHE`.
+
+## Allocation is not a configuration problem (`2026-08-18, evening`)
+
+Three observations from the day the bundle shipped, each measured on this box, converge on one
+statement — **allocation is not fixed by configuration** (Mike, 2026-08-18):
+
+1. ~~**Checkpoints are erased on a prefix change** by a second conversation.~~ **Retracted the same
+   evening — the reading was wrong, and the correct one is worse.** The engine's slot-selection lines
+   for that exact task say `prompt with length 111797, lcp = 20150, f_keep = 0.180`: the previous
+   conversation sat in the cache **whole** (6 047 MiB), the other conversation sat beside it
+   untouched (`lcp = 1`), and what arrived was **the same agent's next turn**, sharing 20 150 of
+   113 487 tokens — refused by the `f_keep < 0.25` rule. The cause is DPC's own prompt layout:
+   `context.py` puts Active Recall and a runtime block (`utc_now`, `spent_usd`, counters) **in front
+   of the history**, so the common prefix ends at ~20K every turn, with or without neighbours. Filed
+   as `THE-PROMPT-CHANGES-IN-FRONT-OF-THE-HISTORY-SO-EVERY-TURN-IS-A-CACHE-MISS` and as option (F)
+   below. (Fable 5 and GLM 5.3, round 3, independently; verified in the raw log by CC.)
+   The `n_swa = 0` remark made in passing was half wrong too: it rules out SWA and **confirms**
+   hybrid/recurrent — qwen3.8 is 16 attention layers plus 48 Gated-DeltaNet
+   (`llama_memory_recurrent: 748.13 MiB`), and a recurrent state cannot be rolled back to an
+   arbitrary position, which is why the reuse rule is strict here.
+2. **The model is evicted when a second one is asked for**, `keep_alive: -1` notwithstanding:
+   `sched.go:551 — predicted to exceed available memory, evicting` at 20:17:21, two full loads in two
+   minutes between one agent on `qwen3.8` and another on `muse-glimmer`.
+3. **The daemon's numbers cannot be borrowed as a budget**: `ollama ps` reported 17.27 GiB for a model
+   holding 28.3 GiB by the per-process counter, and the pre-load path predicted 69.7 GiB for a load
+   that then measured 26.1 GiB by the engine's own breakdown at the same `n_ctx = 262144`.
+
+Every lever in Stage 0 was worth pulling and each did what it promised. None of them touches the
+above, because all three are decisions about **who holds the card and in what order** — and nothing in
+DPC makes that decision today.
+
+### The directions, ordered by what round 3 measured (`rewritten 2026-08-18 after both reviews`)
+
+The list below replaces the five unordered candidates this section first carried. Both reviewers read
+the same logs and the same sources independently; where they differ it is said so.
+
+- **(F) A prefix-stable prompt within an agent — first, and the precondition for the rest.** Per-turn
+  content (Active Recall, the runtime block) moves **inside the last user message** as a pure append,
+  replayed byte-identically as history next turn (**F2**). Merely relocating the block behind the
+  history (**F1**) does not work on this model: the divergence moves to end-of-history while the
+  previous turn's checkpoints sit at `n-517` / `n-5` of the *previous* prompt — inside the old dynamic
+  tail, after the divergence — so the recurrent state cannot be rolled back and the engine re-prefills
+  from 0. Under route (b), upstream's user-boundary checkpoints (`message_delimiters`, needs `--jinja`)
+  make even F1 cheap; Ollama launches `--no-jinja` and never sees messages.
+  **Requirement, and it is a contract change:** history must store what was *sent*, not what the user
+  typed. **Two falsifiers, not one** — a returning turn's `prompt_tps` leaves the 850-950 band, *and*
+  the conversation behaves the same (tool loop intact, per-turn content honestly reproduced). The first
+  measures speed; what would break is correctness.
+  **It pays on the paid path too:** on DeepSeek the same layout produces a constant per-agent cache hit
+  (Warren 28 928, Ark 32 768 — the block-aligned [static + memory + KB] prefix) and a miss equal to the
+  whole history, about **$0.7-1.4 of a $5.3 day, 15-30 %** (Fable §1.4, `Observed` counts, `Inferred`
+  price). ~50-100 lines in `context.py` plus one `cache_control` on the last user message.
+  **Shipped 2026-08-19 (F2, side store).** The tail rides inside `<turn_context>…</turn_context>` at
+  the end of the current user message; the system message keeps two cached blocks and a stable
+  sentence naming the block as the runtime's. History keeps what the human wrote; what was sent is
+  recorded per message id in `state/sent_annotations/<conversation>.json` and replayed on the way
+  back in — the storage contract is met beside the history, not inside it, so the UI and every other
+  reader of history.json are untouched. Two things the diagnosis had not named: the current message
+  was rendered `[#N] text` while its history rendering was `[#N | time | sender] text`, so the prefix
+  broke on the very message it introduced (one `history_prefix` for both now); and the soft-cap
+  pruning has to run before the tail is sealed, or the recorded tail is not the sent one. A third
+  falsifier joins the two above: the side store must shrink with its history (it prunes on write).
+  Not observed yet — the reading is `prompt_cache_hit_tokens` in every DeepSeek agent's
+  `events.jsonl` leaving 28 928 / 32 768 within a day of the restart, and `prompt_tps` on the first
+  returning qwen3.8 turn.
+- **(E) One local model — second, and decided by arithmetic rather than preference.** `qwen3.8` at
+  262 144 is **28.0 GiB** by the loader's own buffers and `muse-glimmer` at 131 072 is **16.5 GiB**;
+  44.5 GiB against a 32.6 GiB card. They cannot co-reside **at any context**, so a two-model local fleet
+  evicts by construction and no governor can co-schedule them — only refuse or delay. Three of nine
+  agents already share `qwen3.8`; seven of nine already share one remote alias. Per-agent model choice
+  was never free on one card; it was free while one agent used the card. This is the only direction that
+  removes a **class** rather than reducing a cost.
+- **(B) A residency governor — third, and cheaper than it looked.** The worst case does **not** need the
+  daemon's estimate: KV, the recurrent state, the draft context and the compute buffers are allocated
+  **in full at load**, so the per-process committed figure a few seconds after `model loaded` *is* the
+  worst case for that (model, `n_ctx`, KV type, `np`) tuple (Fable §2.2). The actual-vs-worst-case split
+  is real only for engines that grow KV lazily; llama.cpp is not one. A second source exists for the
+  no-load case: `common/fit.cpp` computes model+context+compute+overhead from GGUF metadata with
+  `LLAMA_LOAD_MODE_NONE` and `no_alloc` — and **D3's flag list contains `-fit off`, which discards it**
+  (GLM). The right shape: compute the verdict *before* spawn, refuse in DPC, then launch with `-fit off`
+  so nothing is silently shrunk. Two holes to write down: the governor owns only the children it spawns,
+  so the Ollama path it does not own can still thrash (GLM); and the budget it must hold is **host RAM**
+  as much as VRAM — 6-7 GiB per parked 110K conversation today, 10-15 GiB under (b) with boundary
+  checkpoints, against 31.8 GiB free.
+- **(A) Slots — a throughput lever, not what decides what fits.** This section previously called it the
+  binding constraint; both reviewers refuted that. Two shapes, and the ADR had conflated them:
+  **two slots at 262 144 each** is ~38.5 GiB at `q8_0` — not reachable; at `q4_0` KV ~30.3 GiB, on
+  paper, with ~2 GiB of margin and nothing left for a second model or a vision batch. **`-np 2
+  --kv-unified -c 262144`** costs ~+0.75 GiB and fits trivially — but the pool is **shared**, so two
+  conversations have 262 144 *between* them, which shrinks the Decision Drivers' floor by construction
+  the moment it succeeds; and tonight's own numbers (138 028 + 123 574) already exceed it, turning a
+  load-time refusal into a **mid-conversation failure**. What (A) genuinely buys, once two or more local
+  agents are active, is **concurrent decode** — 140-430 s of a turn is decode, and one slot serves one
+  agent's 36 tok/s at a time. Prefill is compute-bound and gains nothing.
+- **(C) A shared prompt prefix across agents — declined, with the mechanism.** The honest shared
+  preamble is ~1-3K tokens of a 107K prompt, so cross-agent reuse is **at most 5 % of what (F)
+  recovers** (Fable), and the valuable half — keeping a parked conversation's checkpoints across an
+  interleave — is destroyed by an erasure rule that does not look at prefixes at all:
+  `server-context.cpp:3293-3302` erases every checkpoint with `pos_max > pos_next` on lineage
+  divergence (GLM, source). On this model it also cannot be cashed without a checkpoint at the
+  preamble's end, which the Ollama build never creates. The failure nobody had named: a shared block is
+  a shared asset — one edit invalidates every agent's cache on both paths at once.
+- **(D) Temporal locality — declined as posed.** Within one model the interleave now costs the
+  returning agent **8.5 s**, measured, not 118; the ~120 s per new turn is layout, which is (F). Across
+  models it has a payload, but that payload *is* (E)'s premise paid in latency instead of in model
+  choice. And the human-facing version breaks at the moment of maximum pressure: a lever that must be
+  switched off when a person is waiting is not a lever.
+
+### What round 3 overturned in this document
+
+1. **«The binding constraint is slots, not cache RAM» is withdrawn.** The binding constraint is the
+   prompt layout, then host RAM per parked conversation, then two-model residency. Slots are throughput.
+2. **The cache is not lost to a second conversation.** It was lost to the agent's own next turn, and
+   the interleave described here as fatal was **survived fifteen minutes earlier at 8.5 s**:
+   `lcp = 107842, f_keep = 0.949`, checkpoint restored, 4 856 tokens re-prefilled (Fable §1.2,
+   `Observed`). The «seven consecutive turns» quoted above were tool rounds **inside one turn**.
+3. **The 28.3 GiB is fully accounted for by the child.** model 15 339 + KV 8 704 + RS 748 + compute
+   1 360 + draft KV 1 024 + draft compute 324 + projector ~888 + 248 = about **28 636 MiB**; the WDDM
+   counter reads 28 934 and the residual ~300 MiB is the CUDA context. `common_memory_breakdown_print`'s
+   26 151 omits the draft context and the projector. Only two numbers are wrong, and both are the
+   daemon's: `ollama ps` 17.27 and `sched.go` 69.7.
+4. **The log's «SWA or hybrid/recurrent memory» hint is boilerplate** baked into the call site
+   (`server-context.cpp:3286`, GLM) — it prints on any prefix mismatch and diagnoses nothing. The model
+   *is* hybrid (16 attention + 48 Gated-DeltaNet, `llama_memory_recurrent: 748.13 MiB`), and that is
+   what makes rollback impossible — but the loader lines prove it, not the hint.
+5. **The 20:17 eviction was arithmetic, not a broken pin.** The card was empty at 20:15:06 (the
+   five-minute TTL had expired before the restart that sends `keep_alive: -1` landed); `muse-glimmer`
+   loaded, then `qwen3.8` was asked for and evicted it. With the correct footprint (28.0) the decision
+   is the same: 28.0 > 15.0 available.
+
+### The framing question, answered
+
+Not by fewer agents. The card's own volume is **4-6 h/day with a stable prefix and 10-12 h/day without**
+(Fable, from `events.jsonl` against tonight's rates), so throughput is not what blocks nine agents. What
+blocks them is **residency** (two 27B-class models), **latency** (serial 36 tok/s decode with
+`think=high`) and **host RAM for parked state** (6-7 GiB per 110K conversation — three fit in the 24 GiB
+cache, not nine). GLM reaches the neighbouring conclusion from the capacity side — the card holds ~1.1
+full-depth conversations at `q8_0`, ~2.1 at `q4_0`, an operating point of 2-3 interactive agents plus
+night batch — and proposes the demand division (`events.jsonl` to engine-seconds/day against 86 400) as
+the measurement that decides between an operating point, renting, and a second card. **Both are right
+and they are not the same question:** one prices what is wasted now, the other sizes what is needed. Do
+(F) first; run the demand division before any hardware decision.
+
+**The demand division, run 2026-08-19 over `events.jsonl` of all nine agents** (`task_complete` rows;
+`completion_tokens` exist only from 2026-08-16, when durable accounting landed, so three days carry the
+decode half). Rates as measured on this card at depth: prefill 900 tok/s, decode 36 tok/s. Three
+readings per day — *warm* (every turn's prefix cached, ~2K new tokens a round), *cold-first* (the first
+round of every turn re-prefills its whole context, later rounds cached — today's shape before (F)),
+*all-cold* (every round from zero — the old layout's worst case, and what `prompt_tokens` bills):
+
+| day | turns | warm h | cold-first h | all-cold h | of which decode h | avg ctx at turn start |
+|---|---|---|---|---|---|---|
+| 08-16 | 105 | 4.8 | 6.2 | 10.6 | 4.5 | 52K |
+| 08-17 | 135 | 11.1 | 12.6 | 26.6 | 10.7 | 47K |
+| 08-18 | 74 | 5.4 | 6.8 | 19.9 | 5.2 | 73K |
+
+So on the busiest day the fleet asks this card for **11–13 engine-hours of 24 with (F)**, and would have
+asked 27 without it — more than the day has, which is the arithmetic form of «the old layout could not
+carry the fleet». Two things the numbers say that the plan did not: **decode is the larger half** —
+10.7 of the 12.6 hours on 08-17 are generation, i.e. 1.4M completion tokens with reasoning at `high`,
+and (F) does not touch decode; the lever there is thinking depth per turn (Q9, the per-request budget of
+route (b)), not the cache. And the day total is not what a second card would relieve: the card is idle
+half the day and saturated at the hour when three agents answer at once — that is concurrency at the
+peak, the throughput question Step-3 measures, not capacity. Read against the two frames above: GLM's
+operating point («2–3 interactive agents plus night batch») is what these days already are; a second
+card would buy peak concurrency, not hours. Not a decision — the measurement the ADR asked for.
+
+### Route (c) re-examined at Mike's request, and refused again
+
+Both reviewers re-opened vLLM against the round-3 findings and both closed it, with two of the original
+three objections corrected. What kills it here is arithmetic, not taste: the lightest vLLM-loadable
+4-bit of this model is **18.21 GiB** against our GGUF's 15.65 (every safetensors quant on the Hub is
+2.6-6 GiB heavier), which leaves ~6 GiB of KV pool on this card — under one Johnny-sized conversation at
+bf16, and `--max-model-len 262144` does not start at all. Windows means Docker Desktop over WSL2 and a
+second CUDA stack. What is genuinely corrected: a declared hard reservation is the residency contract
+(B) is trying to rebuild, and vLLM's paged KV with LRU eviction is a scheduler under whose terms
+findings 1 and 3 cannot occur. **Reopen conditions, named:** a headless Linux GPU host, or a product
+decision to serve many peers from one host, or a sub-16 GiB vLLM-loadable artefact measured equal to
+Q4_K_M at 262K. `KVarN` (a vLLM 0.23.0 fork with 4-bit-key / 2-bit-value KV, validated on the previous
+release of this very architecture) removes the capacity half of that arithmetic — ~13-16 KiB per token
+against our 34 — and leaves platform, artefact, fork-risk (last commit 2026-06-22) and start-up in
+place. Its transferable lesson belongs to the KV cell below, not to route (c): naive low-bit KV is
+claimed to cost accuracy specifically as **error accumulation in long reasoning**, which is the regime
+these agents live in and which no fit test can see.
+
+## Open Questions
+
+- **Q1 — DeepSeek top-up: yes / no / how much. `Round 2, 2026-08-18`: the threshold has fired and the
+  question is no longer hypothetical.** Balance **$25.64** (Mike, live), against $36.68 on 08-15 —
+  a balance-derived burn of ~$5.3/day, above the $2.7–4.5 projection this ADR was drafted under.
+  Events-attributed burn over the same window is ~$3.45/day, and the ~$1.9/day gap between the two is
+  itself a finding, not an explanation (peer requests and the plain path belong to no agent, so they
+  reach no series). Runway to the $12 floor: **2.6–4.0 days**. And the fleet leans on DeepSeek harder
+  than the draft assumed: **7 of 9 agents run `deepseek_flash` as their main provider** (Ark, Forge,
+  Johnny, Muse, Pulse, Scout, Warren; Iris and Kotler on `qwen3.8:latest`) — measured
+  **2026-08-18 by CC**, and the figure is dated because the field moves: the same three agents read
+  `qwen3.8:latest` the evening before and their configs were rewritten at 03:01. So a top-up is not a
+  bridge over Stage 2; it is a running cost until those seven migrate, which Stages 0–2 do not by
+  themselves accomplish. Stages 0–1 still do not wait on this. — Mike
+- **Q2 — The production window** for Step-3 + KV cell (27B in) and the NVFP4 cell (27B out): when
+  may the five qwen3.8 agents be without a model, and for how long. — Mike
+- **Q3 — ~~Does `keep_alive=-1` protect a model from Ollama's own eviction under memory pressure~~ —
+  CLOSED `Round 2, 2026-08-18`: only from the TTL.** Read in Ollama v0.32.14 `server/sched.go`:
+  `findRunnerToUnload` sorts by `uint64(sessionDuration)` and returns the first idle runner; the pending
+  path sets `sessionDuration = 0` and expires it. `-1` sorts last and nothing more. 0a alone would never
+  have been enough; see D1/0a and 0e.
+- **Q4 — Does the mainline `win-cuda-13.3` artefact carry `sm_120`?** `cuobjdump --list-ptx` on its
+  `ggml-cuda.dll` (two minutes). If not, the cuda-12.4 asset or an owned build. — CC
+  **CLOSED `2026-08-19`, measured on the fetched pin:** `cuobjdump --list-elf` shows native cubins
+  for `sm_86`, `sm_89`, `sm_120a`, `sm_121a` — 141 kernels each — and `--list-ptx` shows **no PTX
+  payload at all**: the artefact ships compiled cubins only, with no JIT fallback for architectures
+  outside that set. For this box (RTX PRO 4500, cc 12.0) `sm_120a` is the exact-match native
+  binary — **G1 passes**. The set is narrower than Ollama's banner
+  (`750,800,860,890,1000,1200`): the pin does not serve 7.5/8.0/10.0-class cards. Acceptable while
+  this is the only GPU node; it is also why G2 (the cuBLAS-fallback probe) must still run on this
+  exact binary before any speed number transfers — the check does not transfer between builds.
+- **Q5 — Does the mainline loader take the HF Qwen3.8 GGUF with the separate `mtp-*.gguf` at 262K,
+  keeping MTP parity on (b2)?** If not, measure decode without MTP before accepting (b2) for this
+  model. — CC
+- **Q6 — macOS node memory. Reframed by Mike 2026-08-18, and it is no longer an input to Q1.**
+  The original wording — below ~30 GB the provider is "a one-node feature" — measured the wrong
+  thing. The purpose of this box is to host models *and to share inference with the other nodes*,
+  and that sharing is implemented and running (`p2p_coordinator.py:166-196`, D5). So the three-OS
+  criterion reads on **consumers** of inference, not on every node hosting a 27B, and a macOS node
+  that cannot hold the model is the case D5 already covers rather than a reduction in scope. The
+  unified-memory figure is still worth having — it closes the `Not verified` cell in D5 and answers
+  whether macOS would ever *also* host — but it gates nothing, and Q1 is decided on runway against
+  the cost of a DeepSeek outage alone. — Mike
+- **Q7 — ~~Ollama environment pass-through~~ — CLOSED `Round 2, 2026-08-18`: it passes.**
+  `llm/llama_server.go:446` sets `cmd.Env = os.Environ()` and the launch line carries no `--cache-ram`,
+  so `LLAMA_ARG_CACHE_RAM` reaches the child; the binary's `--help` names it. The remaining check is the
+  "prompt cache … size limit" line after the restart, which now reads as confirmation rather than as
+  the question. **The value format was still unrecorded and is now measured** (`Round 2 answers`,
+  Johnny's point 5): an integer in MiB, `24576` for 24 GiB — see 0e.
+- **Q8 — ~~Telemetry harness: own entry?~~ — DECIDED `Round 2, 2026-08-18`: yes, and it ships with the
+  first package rather than after it.** See D4-T; filed as
+  `THE-LEVERS-WE-ARE-ABOUT-TO-PULL-CANNOT-BE-TOLD-APART-IN-PRODUCTION`.
+- **Q9 — What the vision move costs when the target model thinks (`Round 2`, new).** 0b survived its
+  first measurement — at n=2 pages `qwen3.8:latest` beat `qwen3-vl:8b` on both (0 errors vs 2 on a
+  scan; 0.8 % vs 1.3 % CER born-digital; 4–11 s vs 24–140 s, the 8b returning empty at 139.6 s on
+  `done_reason=length`). But the `qwen3.8` alias carries `think: True` and `read_document` passes only
+  `temperature`, so every page moved onto the 27B may carry a thinking tax in time and GPU. The full
+  R4 run is a **confirmation item, not a precondition**, and it must record the think state and its
+  cost — otherwise a "2× slower" result fires for the wrong reason. — CC
+
+## Authors
+
+- **Mike** — Decision (top-up, production window, verbs on Stages 0–2 pending).
+- **Fable 5** — independent review (`…-review-fable-5.md`, §§1–7), this ADR draft.
+- **GLM 5.3** — independent review (`…-review-glm5.3.md`, M1–M4, Q0–Q8, per-OS section).
+- **CC** — review prompt, prompt amendments (fleet, per-OS criterion, measured `bge-m3`), code checks
+  (`keep_alive` paths, seed at `:171`, `memory_config` fields), board ownership.
+- **Ark** — synthesis (#42, #54), the top-up framing, the production-window correction.
+- **Johnny** — differential-test framing, atomic-bundle rule, 0d-before-Step-3, the two-phase window,
+  the cross-platform question.
+- **Warren** — ROI gate, runway arithmetic, the bge-m3 correction across instruments.
+
+## References
+
+- `ideas/dpc-research/llamacpp-local-provider-prompt.md` — the review prompt (amended 2026-08-18).
+- `ideas/dpc-research/llamacpp-local-provider-review-fable-5.md` — Fable 5 review (§1 measurements,
+  §6 per-OS addendum, §7 thread responses).
+- `ideas/dpc-research/llamacpp-local-provider-review-glm5.3.md` — GLM 5.3 review (M1 GGUF metadata
+  parse, M2 server probe, M3 partition, M4 supply chain, per-OS section).
+- `ideas/dpc-research/llamacpp-server-provider-prompt-round2.md` — the round-2 prompt, and
+  `…-round2-fable-5.md` / `…-round2-glm5.3.md` — the two round-2 reviews that produced the corrections
+  marked `Round 2` above; `…-round2-findings-2026-08-18.md` — the findings that outlive them.
+- `C:\Users\mikha\Documents\brainbake\docs\decisions\014-inference-backend.md` — brainbake's
+  inference-backend decision (in-process `llama-cpp-2`, `swa_full`, 128K gate, FP4 measurement).
+- `backlog.md` — `LLAMACPP-LOCAL-PROVIDER`, `OLLAMA-CUSTOM-BUILD-NVFP4`,
+  `AN-AGENT-CANNOT-BE-GIVEN-ITS-OWN-EYES`, `ACTIVE-RECALL-TORCH-METADATA-EMPTY`,
+  `A-MODEL-CAN-SPEND-ITS-WHOLE-BUDGET-THINKING-AND-RETURN-AN-EMPTY-ANSWER`.
+- `VISION.md` — C8 "Compute respects agency", C10 "Shared infrastructure is regulated commons",
+  "Compute Commons"; `ROADMAP.md:82, :211`.
+- `%LOCALAPPDATA%\Ollama\server.log` (2026-08-17) — launch lines, loader buffers, prefill/decode
+  timings, `common_memory_breakdown_print`, `common_params_fit_impl`.
+- llama.cpp release `b10472` (2026-08-17) asset list; llama-cpp-python 0.3.35 (PyPI, GitHub release
+  assets, wheel index); Hugging Face repos `unsloth/Qwen3.8-27B-{NVFP4,GGUF}`,
+  `williamliao/Qwen3.8-27B-NVFP4-GGUF`, `esatapedico/Qwen3.8-27B-NVFP4-MTP-GGUF`,
+  `ggml-org/Qwen3.8-27B-GGUF`, `turboderp/Qwen3.8-27B-exl3`; ExLlamaV3 v1.4.2 release; vLLM GPU
+  installation docs.

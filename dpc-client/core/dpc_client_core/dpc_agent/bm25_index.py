@@ -11,8 +11,11 @@ import json
 import logging
 import pathlib
 import re
+import shutil
 import unicodedata
 from typing import List, Optional, Tuple
+
+from .index_meta import atomic_write_text, replace_when_the_readers_let_go
 
 log = logging.getLogger(__name__)
 
@@ -179,18 +182,63 @@ class BM25Index:
         log.info("Removed %d BM25 docs for %s, %d remaining", removed, source_file, len(self._chunk_metas))
         return removed
 
+    def remove_by_sources(self, source_files) -> int:
+        """One pass over the corpus, one build. See FaissIndex.remove_by_sources."""
+        drop = {s for s in source_files if s}
+        if not drop or not self._chunk_metas:
+            return 0
+        keep_texts, keep_metas, removed = [], [], 0
+        for meta in self._chunk_metas:
+            if meta.get("source_file") in drop:
+                removed += 1
+            else:
+                keep_texts.append(meta.get("text", ""))
+                keep_metas.append(meta)
+        if removed == 0:
+            return 0
+        if keep_texts:
+            self.build(keep_texts, keep_metas)
+        else:
+            self._retriever = None
+            self._chunk_metas = []
+        log.info("Removed %d BM25 docs for %d sources, %d remaining",
+                 removed, len(drop), len(self._chunk_metas))
+        return removed
+
     def save(self) -> None:
+        """Persist the index without ever leaving a half-written one on disk.
+
+        Readers are not serialised against writers — `load()` answers a truncated file
+        by returning False, which is not an error anybody sees but one turn of recall
+        returning nothing. The two side files are replaced in one step. The index
+        itself is a *directory*, which cannot be replaced in one step on Windows, so it
+        is built beside the live one and swapped: the window shrinks from "a reader may
+        parse half a file" to "a reader may find no directory for a moment", and the
+        second is a case `load()` already handles by name.
+        """
         if self.index_dir is None or self._retriever is None:
             return
         self.index_dir.mkdir(parents=True, exist_ok=True)
-        self._retriever.save(str(self.index_dir / "bm25"))
-        (self.index_dir / "bm25_chunks.json").write_text(
-            json.dumps(self._chunk_metas, ensure_ascii=False), encoding="utf-8"
-        )
-        if self._corpus_stop_words:
-            (self.index_dir / "bm25_corpus_stops.json").write_text(
-                json.dumps(sorted(self._corpus_stop_words), ensure_ascii=False), encoding="utf-8"
-            )
+        live = self.index_dir / "bm25"
+        staged = self.index_dir / "bm25.new"
+        previous = self.index_dir / "bm25.old"
+        shutil.rmtree(staged, ignore_errors=True)
+        self._retriever.save(str(staged))
+        shutil.rmtree(previous, ignore_errors=True)
+        # Both renames go through the same patient replace as the files: Windows
+        # refuses to rename a directory while anything inside it is open, and a reader
+        # is inside it for the length of three `np.load` calls.
+        if live.exists():
+            replace_when_the_readers_let_go(live, previous)
+        replace_when_the_readers_let_go(staged, live)
+        shutil.rmtree(previous, ignore_errors=True)
+
+        atomic_write_text(self.index_dir / "bm25_chunks.json",
+                          json.dumps(self._chunk_metas, ensure_ascii=False))
+        # Written even when empty: skipping it left the previous corpus's stop words on
+        # disk, and the next load would tokenise this corpus through them.
+        atomic_write_text(self.index_dir / "bm25_corpus_stops.json",
+                          json.dumps(sorted(self._corpus_stop_words), ensure_ascii=False))
         log.info("Saved BM25 index: %d documents, %d corpus stops", len(self._chunk_metas), len(self._corpus_stop_words))
 
     def load(self) -> bool:
@@ -204,6 +252,22 @@ class BM25Index:
             import bm25s
             self._retriever = bm25s.BM25.load(str(bm25_dir))
             self._chunk_metas = json.loads(chunks_path.read_text(encoding="utf-8"))
+            # The same refusal the vector channel makes, for the same reason: `search`
+            # maps a retrieved row number into `_chunk_metas`, so a list that disagrees
+            # with the corpus does not fail — it answers, with another document's name.
+            # The directory and the chunk list are two files written one after the other,
+            # so a process cut between them leaves exactly that. Reproduced by an external
+            # reviewer in three lines: three rows against a two-item list returned f2 for
+            # "kotler" and f0 for "warren".
+            rows = (self._retriever.scores or {}).get("num_docs")
+            if rows is not None and rows != len(self._chunk_metas):
+                log.warning(
+                    "BM25 index and chunk list disagree (%s rows, %d metas) — refusing to load",
+                    rows, len(self._chunk_metas),
+                )
+                self._retriever = None
+                self._chunk_metas = []
+                return False
             stops_path = self.index_dir / "bm25_corpus_stops.json"
             if stops_path.exists():
                 self._corpus_stop_words = frozenset(json.loads(stops_path.read_text(encoding="utf-8")))

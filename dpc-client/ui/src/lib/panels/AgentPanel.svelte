@@ -8,6 +8,12 @@
   import { type Writable, get } from 'svelte/store';
   import { untrack } from 'svelte';
   import { mapBackendMessage, resolveSenderIdentity } from '$lib/utils/messageMapper';
+  import { nextStrip, clearedStrip } from '$lib/utils/speedStripOwner';
+  import {
+    historyUpdateApplies,
+    mayDropLiveTextAfterHistoryUpdate,
+    mayDropLiveTextOnCompletion,
+  } from '$lib/utils/liveTextHandover';
   import { showNotificationIfBackground } from '$lib/notificationService';
   import {
     agentProgress,
@@ -41,6 +47,10 @@
     agentProgressTool = $bindable<string | null>(null),
     agentProgressRound = $bindable<number>(0),
     agentProgressName = $bindable<string>(''),
+    agentProgressSpeed = $bindable<Record<string, unknown> | null>(null),
+    // UI-side per-turn speed samples; aggregated into the finished message on
+    // clear. Not persisted to history — a live-session view.
+    liveSpeedSamples = [],
     agentProgressAgentId = $bindable<string>(''),
     agentStreamingText = $bindable<string>(''),
   }: {
@@ -56,9 +66,23 @@
     agentProgressTool?: string | null;
     agentProgressRound?: number;
     agentProgressName?: string;
+    agentProgressSpeed?: Record<string, unknown> | null;
+    liveSpeedSamples?: Array<Record<string, any>>;
     agentProgressAgentId?: string;
     agentStreamingText?: string;
   } = $props();
+
+  // Which agent the strip's speed and samples belong to. `null` is nobody;
+  // `''` is the singleton agent, whose backend id really is the empty string.
+  //
+  // `speedOwnerSpeed` mirrors what was last shown, and it exists to keep the
+  // progress effect from reading `agentProgressSpeed`. That prop is $bindable
+  // and bound to page-level $state, so an effect that both reads and writes it
+  // is a loop — `effect_update_depth_exceeded`, which is exactly what the first
+  // version of this fix shipped. The effect writes the prop and reads only
+  // these two plain `let`s, which are not reactive and cannot re-trigger it.
+  let speedOwnerAgentId: string | null = null;
+  let speedOwnerSpeed: Record<string, unknown> | null = null;
 
   // ---------------------------------------------------------------------------
   // Internal state (non-reactive — not exposed)
@@ -164,6 +188,9 @@
                 const localHistory: any[] = newMap.get(conv_id) || [];
                 const localById = new Map(localHistory.map((m: any) => [m.id, m]));
 
+                // See messageMapper: an undated record takes the time of the
+                // one before it rather than the clock at load.
+                let previousTimestamp: number | undefined;
                 const msgs = histResult.messages.map((msg: any, index: number) => {
                   const { sender, senderName } = mapMessageSender(msg, conv_id, agent.name || conv_id);
                   const stableId = msg.id || `${conv_id}-${msg.timestamp ? new Date(msg.timestamp).getTime() : index}`;
@@ -173,7 +200,9 @@
                     fallbackSenderName: senderName,
                     index,
                     totalCount: histResult.messages.length,
+                    previousTimestamp,
                   });
+                  previousTimestamp = mapped.timestamp;
                   mapped.id = stableId;
                   mapped.text = msg.content;
                   mapped.thinking = msg.thinking || local?.thinking;
@@ -209,6 +238,36 @@
         agentProgressMessage = message || null;
         agentProgressTool = tool_name || null;
         agentProgressRound = round || 0;
+        // Per-round LLM speed (llama.cpp provider only): rides the narration
+        // emits so the live counter beside Stop updates once per round.
+        //
+        // UPDATE-ONLY, and keyed by agent. The burst after a speed event carries
+        // tool-args and per-tool events WITHOUT speed — nulling on every event
+        // made the counter flash for milliseconds and die. But "keep the last
+        // non-empty value" has no idea whose value it is holding, and only the
+        // llama.cpp provider ever sends one: two agents in a room meant the one
+        // on a paid API was painted with the local engine's tokens per second,
+        // name and window. `speedStripOwner` holds both rules in one place, with
+        // the tests that keep them from being tidied apart.
+        const upd = nextStrip(speedOwnerAgentId, speedOwnerSpeed, $agentProgress as any);
+        speedOwnerAgentId = upd.ownerAgentId;
+        speedOwnerSpeed = upd.speed;
+        agentProgressSpeed = upd.speed;
+        if (upd.resetSamples) liveSpeedSamples.length = 0;
+        // Per-round samples for the medians shown beside the finished round
+        // count. Median, not mean: one cold first round would drag a mean down
+        // and misreport the model's speed.
+        if (upd.appendSample) liveSpeedSamples.push(upd.appendSample);
+        // The name belongs to the run, not to the room. It is update-only for
+        // the same reason the speed is, and `agent_name` can arrive empty
+        // (`_current_agent_display_name` defaults to ''), so without this a new
+        // agent's first events leave the previous agent's name standing over
+        // its answer. The id follows the owner for the same reason — the test
+        // below it skips '', which is the singleton's real id.
+        if (upd.resetSamples) {
+          agentProgressName = '';
+          agentProgressAgentId = upd.ownerAgentId ?? '';
+        }
         if ($agentProgress.agent_name) agentProgressName = $agentProgress.agent_name;
         if ($agentProgress.agent_id) agentProgressAgentId = $agentProgress.agent_id;
 
@@ -228,6 +287,25 @@
       agentProgressMessage = null;
       agentProgressTool = null;
       agentProgressRound = 0;
+      // These four are page-level state bound in from `+page.svelte`, so one
+      // value paints every surface that renders it. This effect used to clear
+      // the round count and not them, while the completion effect below cleared
+      // all of them — two resets disagreeing about what a reset is, and the
+      // shorter list ran on every chat switch. On screen that was one room
+      // showing another room's agent name and `197,235 / 1,000,000`, two lines
+      // under its own header saying `53,960 / 1,000,000`.
+      //
+      // A run in progress that the user steps away from and back to loses the
+      // samples it had collected, and shows only what arrives after the return.
+      // That is the intended trade: a partial number about this agent beats a
+      // complete one about a different agent.
+      const cleared = clearedStrip();
+      agentProgressName = '';
+      agentProgressAgentId = '';
+      agentProgressSpeed = cleared.speed;
+      speedOwnerAgentId = cleared.ownerAgentId;
+      speedOwnerSpeed = cleared.speed;
+      liveSpeedSamples.length = 0;
       clearAgentStreaming();
       lastActiveChatId = activeChatId;
     }
@@ -244,10 +322,83 @@
       agentProgressRound = 0;
       agentProgressName = '';
       agentProgressAgentId = '';
+      agentProgressSpeed = null;
+      // The run is over, so the strip describes nobody: the next agent's first
+      // event must not read as a continuation of this one.
+      speedOwnerAgentId = null;
+      speedOwnerSpeed = null;
+      // Aggregate the turn's per-round speeds onto the last agent message so
+      // the finished header (N rounds · M actions) carries medians. Client-side
+      // only — history on disk keeps its shape.
+      if (liveSpeedSamples.length > 0) {
+        const median = (key: string): number | null => {
+          const vals = liveSpeedSamples
+            .map((s) => Number(s[key]))
+            .filter((v) => Number.isFinite(v) && v > 0)
+            .sort((a, b) => a - b);
+          if (!vals.length) return null;
+          return vals[Math.floor(vals.length / 2)];
+        };
+        // Context occupancy is the one number here that must NOT be a median:
+        // it grows through the turn, so the last round is the peak the next
+        // turn starts from, and an average would understate exactly the case
+        // the user needs to see. The window and the reserve travel with it so
+        // the finished header colours by the same rule as the live one.
+        const last = liveSpeedSamples[liveSpeedSamples.length - 1] || {};
+        const lastNum = (key: string): number | null => {
+          const v = Number(last[key]);
+          return Number.isFinite(v) && v > 0 ? v : null;
+        };
+        const summary: Record<string, any> = {
+          rounds: liveSpeedSamples.length,
+          prefill_tok_s: median('prefill_tok_s'),
+          decode_tok_s: median('decode_tok_s'),
+          total_tok_s: median('total_tok_s'),
+          context_used: lastNum('context_used'),
+          context_window: lastNum('context_window'),
+          context_reserve: lastNum('context_reserve'),
+          round: Number(last.round) || null,
+          model: last.model || '',
+          median: true,
+        };
+        liveSpeedSamples.length = 0;
+        // The clear can land before the final agent message reaches the
+        // history, so attach on the next ticks too; and rebuild the Map and
+        // the array — mutating in place and setting the same reference does
+        // not notify subscribers.
+        const attach = () => {
+          const histories = get(chatHistories);
+          const hist = [...(histories.get(conversation_id) || [])];
+          for (let i = hist.length - 1; i >= 0; i--) {
+            const m: any = hist[i];
+            if (m && m.sender !== 'user' && (m.tool_calls?.length || m.senderName)) {
+              hist[i] = { ...m, speed_summary: summary };
+              const next = new Map(histories);
+              next.set(conversation_id, hist);
+              chatHistories.set(next);
+              return true;
+            }
+          }
+          return false;
+        };
+        if (!attach()) {
+          setTimeout(attach, 400);
+          setTimeout(attach, 1200);
+        }
+      }
       if (isActiveChatConv(conversation_id)) {
+        // The second way the answer used to disappear, and the one the backlog entry
+        // never named: completion fires at exactly the moment the user described —
+        // «когда ответ закончен» — and this used to wipe the live text without asking
+        // whether the reply had reached the history at all. If the history event is
+        // late, or was refused above, this discarded the only copy of the answer.
         const hist = get(chatHistories).get(conversation_id) || [];
         const hasPendingCommand = hist.some((m: any) => m.commandId);
-        if (!hasPendingCommand) {
+        const last: any = hist.length ? hist[hist.length - 1] : null;
+        if (mayDropLiveTextOnCompletion({
+          lastMessageSender: last?.sender ?? null,
+          hasPendingCommand,
+        })) {
           clearAgentStreaming();
         }
       }
@@ -293,16 +444,20 @@
       const { conversation_id, messages, tokens_used, token_limit, thinking, tokens_after_last_response, tokens_after_last_response_at, context_breakdown } = $agentHistoryUpdated;
 
       untrack(() => {
-        // Flush pending buffer and capture accumulated streaming text before overwriting history
+        // Flush the pending buffer and capture the accumulated streaming text — but do
+        // NOT clear it yet. The update below can decline (see the B1 guard), and clearing
+        // before knowing that is what made a finished reply vanish until the user left
+        // the chat: text wiped, replacement never applied, nothing left on screen.
+        // The clear now happens after, and only if the replacement landed.
         let capturedAgentStreaming = '';
-        if (isActiveChatConv(conversation_id)) {
+        const liveTextIsOurs = isActiveChatConv(conversation_id);
+        if (liveTextIsOurs) {
           if (streamingBuffer) {
             agentStreamingText += streamingBuffer;
             streamingBuffer = '';
             if (streamingFlushTimeout) { clearTimeout(streamingFlushTimeout); streamingFlushTimeout = null; }
           }
           capturedAgentStreaming = agentStreamingText;
-          if (capturedAgentStreaming) clearAgentStreaming();
         }
 
         // Notify parent to update token usage map (include tokensAfterLastResponse for Total counter)
@@ -317,15 +472,25 @@
           });
         }
 
+        let historyApplied = false;
         chatHistories.update(map => {
           const newMap = new Map(map);
           const existing = map.get(conversation_id) || [];
 
           // Defence-in-depth: never overwrite UI history with a shorter backend payload (B1 guard).
           const nonPendingExisting = existing.filter((m: any) => !m.commandId);
-          if ((messages || []).length < nonPendingExisting.length) {
+          if (!historyUpdateApplies((messages || []).length, nonPendingExisting.length)) {
+            // Logged because whether this fires at all was an open question on
+            // AGENT-REPLY-VANISHES-UNTIL-YOU-LEAVE-THE-CHAT for two weeks, and one
+            // line answers it the next time the symptom is reported.
+            console.warn(
+              `[Agents] history update refused for ${conversation_id}: backend sent ` +
+              `${(messages || []).length} messages, UI holds ${nonPendingExisting.length} — ` +
+              `live text kept`
+            );
             return map; // skip — backend has fewer messages than UI
           }
+          historyApplied = true;
 
           // Preserve any pending DPC execute_ai_query placeholders
           const pendingMsgs = existing.filter((m: any) => m.commandId);
@@ -361,6 +526,13 @@
           newMap.set(conversation_id, merged);
           return newMap;
         });
+
+        // The handover: the reply is durable now, so the live copy can go. On the
+        // refused path it stays on screen, which is the whole point.
+        if (liveTextIsOurs && capturedAgentStreaming
+            && mayDropLiveTextAfterHistoryUpdate(historyApplied)) {
+          clearAgentStreaming();
+        }
 
         // Scroll to bottom if this is the active chat (two rAF calls for layout accuracy)
         if (isActiveChatConv(conversation_id)) {

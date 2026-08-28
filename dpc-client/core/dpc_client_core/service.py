@@ -10,7 +10,7 @@ import websockets
 import socket
 import sys
 from pathlib import Path
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, Set, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -35,7 +35,9 @@ from .firewall import ContextFirewall
 from .hub_client import HubClient
 from .p2p_manager import P2PManager
 from .llm_manager import LLMManager, PROVIDER_MAP
-from .local_api import LocalApiServer
+from . import provider_alias_refs
+from .providers.base import REASONING_EFFORTS, REASONING_OFF
+from .local_api import LocalApiServer, sends_own_response, slow_command
 from .file_server import FileServer
 from .context_cache import ContextCache
 from .settings import Settings
@@ -44,13 +46,15 @@ from .token_cache import TokenCache
 from .connection_status import ConnectionStatus, OperationMode
 from .consensus_manager import ConsensusManager
 from .conversation_monitor import ConversationMonitor, Message as ConvMessage
+from .conversation_monitor import digest_for as conversation_monitor_digest_for
+from . import conversation_paths
 from .stun_discovery import discover_external_ip
 from .inference_orchestrator import InferenceOrchestrator
 from .context_coordinator import ContextCoordinator
 from .skill_coordinator import SkillCoordinator
 from .p2p_coordinator import P2PCoordinator
 from .coordinators.connection_orchestrator import ConnectionOrchestrator, ConnectionFailedError
-from .message_router import MessageRouter
+from .message_router import BULK_COMMANDS, MessageRouter
 from .managers.hole_punch_manager import HolePunchManager
 from .managers.relay_manager import RelayManager
 from .managers.gossip_manager import GossipManager
@@ -89,11 +93,16 @@ from .message_handlers.session_handler import (
     ProposeNewSessionHandler, VoteNewSessionHandler, NewSessionResultHandler
 )
 from .message_handlers.telegram_handler import TelegramIncomingHandler  # v0.14.0+ Telegram integration
+from .message_handlers.certificate_handler import (  # ADR-036: certs reach the far edge
+    CertificateRequestHandler,
+    CertificateResponseHandler,
+)
 from .message_handlers.group_handler import (  # v0.19.0+ Group chat
     GroupCreateHandler, GroupTextHandler, GroupLeaveHandler, GroupDeleteHandler,
     GroupSyncHandler, GroupHistoryRequestHandler, GroupHistoryResponseHandler,
     GroupHistoryStatusHandler,  # v0.20.0 hash-based sync
     GroupDeletedStatusHandler,  # v0.20.0 offline deletion notification
+    GroupAccessDeniedHandler,  # the refusal a removed node learns from
 )
 from .message_handlers.skill_handler import (  # v0.21.0+ P2P skill sharing
     SkillSearchHandler, SkillsCatalogHandler, SkillRequestHandler,
@@ -359,6 +368,7 @@ class CoreService:
                 peer_metadata=self.peer_metadata,
                 group_manager=self.group_manager,
                 instruction_set=self.instruction_set,
+                firewall=self.firewall,
                 send_ai_query=self.send_ai_query,
                 broadcast_to_peers=self._broadcast_to_peers,
                 broadcast_to_group=self._broadcast_to_group,
@@ -399,8 +409,22 @@ class CoreService:
         self.p2p_manager.set_on_message_received(self.on_p2p_message_received)
         self.p2p_manager.set_on_peer_disconnected(self._handle_peer_disconnected)
         self._processed_message_ids = set()  # Track processed messages
+        # Certificates we have asked a neighbour for and not yet received.
+        # Without it a busy group turns one missing certificate into a
+        # request per message.
+        self.pending_certificate_requests = set()
         self._max_processed_ids = 1000  # Limit set size
         self._history_requested_peers = set()  # Track peers we've requested history from (prevents infinite loops)
+        # Which history we actually asked for, and of whom. A response replaces
+        # a whole conversation, so an unclaimed one is an assertion, not a reply.
+        from .message_handlers.chat_history_handlers import HistoryRequestRegistry
+        self.history_requests = HistoryRequestRegistry()
+        # (peer, group) pairs a peer has refused us this session. Our roster is
+        # what makes us ask, and removal never reaches the node being removed,
+        # so without this every reconnect earns another refusal for the same
+        # group. Session-scoped on purpose: it is a memory of one conversation,
+        # not a decision about the roster.
+        self._group_access_denied: Set[Tuple[str, str]] = set()
         # Note: _group_history_requested removed in v0.20.0 - now using hash-based sync
 
         # Initialize message router and register handlers
@@ -505,10 +529,13 @@ class CoreService:
         self.message_router.register_handler(GroupLeaveHandler(self))
         self.message_router.register_handler(GroupDeleteHandler(self))
         self.message_router.register_handler(GroupSyncHandler(self))
+        self.message_router.register_handler(CertificateRequestHandler(self))
+        self.message_router.register_handler(CertificateResponseHandler(self))
         self.message_router.register_handler(GroupHistoryRequestHandler(self))
         self.message_router.register_handler(GroupHistoryResponseHandler(self))
         self.message_router.register_handler(GroupHistoryStatusHandler(self))  # v0.20.0 hash-based sync
         self.message_router.register_handler(GroupDeletedStatusHandler(self))  # v0.20.0 offline deletion notification
+        self.message_router.register_handler(GroupAccessDeniedHandler(self))
 
         # P2P skill sharing (v0.21.0+ Phase 5a Memento-Skills)
         self.message_router.register_handler(SkillSearchHandler(self))
@@ -621,7 +648,9 @@ class CoreService:
             try:
                 from dpc_protocol.commit_integrity import parse_markdown_with_frontmatter as _parse_fm
                 md_frontmatter, _ = _parse_fm(candidates[0])
-                md_commit_hash = md_frontmatter.get('commit_hash', '')
+                # str(): an all-digit hash comes back from yaml as an integer,
+                # and the mismatch it produces is reported as tampering (S61).
+                md_commit_hash = str(md_frontmatter.get('commit_hash', ''))
                 if md_commit_hash and md_commit_hash != entry_commit_hash:
                     warnings.append({
                         'type': 'history_hash_mismatch',
@@ -691,6 +720,23 @@ class CoreService:
             except Exception as e:
                 logger.warning("Eager index rebuild failed for %s: %s", agent_dir.name, e)
 
+    async def _warm_tokenizers(self) -> None:
+        """Ask the token counter to load what the configured Ollama models need."""
+        try:
+            counter = getattr(self.llm_manager, "token_count_manager", None)
+            if counter is None or not hasattr(counter, "warm_tokenizers"):
+                return
+            # The live provider objects, not the file: whatever the manager
+            # actually built is what will be counting tokens.
+            models = [
+                getattr(provider, "model", None)
+                for provider in self.llm_manager.providers.values()
+                if type(provider).__name__ == "OllamaProvider"
+            ]
+            await counter.warm_tokenizers(models)
+        except Exception as exc:
+            logger.debug("Tokenizer warm-up skipped: %s", exc)
+
     async def start(self):
         """Starts all background services and runs indefinitely."""
         if self._is_running:
@@ -704,6 +750,17 @@ class CoreService:
         # Run knowledge integrity check
         logger.info("Running knowledge integrity check")
         await self._startup_integrity_check()
+
+        # The tokenizers for the local models, if any are missing. Counting
+        # happens while answering somebody, which is on the loop, and fetching
+        # there is refused on purpose — so without this a missing tokenizer
+        # stays missing for the life of the process and every count is the
+        # four-characters guess. Backgrounded: nothing waits on it, and it is
+        # silent when they are already cached.
+        warm_task = asyncio.create_task(self._warm_tokenizers())
+        warm_task.set_name("warm_tokenizers")
+        self._background_tasks.add(warm_task)
+        warm_task.add_done_callback(self._background_tasks.discard)
 
         # Start all background tasks
         listen_host = self.settings.get_p2p_listen_host()
@@ -906,6 +963,14 @@ class CoreService:
             status = "available" if available else "unavailable"
             logger.info("  %s: %s", feature, status)
 
+        # The firewall was built before logging existed, so anything it said
+        # about compute sharing at construction was thrown away (ADR-040 D4-0).
+        # The registry is handed over so the serving alias can be checked against
+        # it: the firewall owns the rule, not the list of providers.
+        self.firewall.log_compute_sharing_state(
+            self.llm_manager.providers.keys() if self.llm_manager else None
+        )
+
         # Start hub connection monitor (only if initially connected)
         if hub_connected:
             monitor_task = asyncio.create_task(self._monitor_hub_connection())
@@ -933,11 +998,32 @@ class CoreService:
         self._shutdown_event.set()
 
     async def _browser_idle_cleanup_loop(self) -> None:
-        """Periodically close idle Camoufox browser sessions (CAMOUFOX-IDLE-LEAK fix)."""
-        from .dpc_agent.tools.browser import cleanup_idle_browser_sessions
+        """Release Camoufox browser sessions nobody is using any more.
+
+        Two rhythms, one loop. Every tick asks each headed session whether
+        its window is still there, because a window the person closed
+        cannot announce itself and should not outlive them by minutes.
+        Every tenth tick runs the idle sweep at its original cadence, which
+        answers a different question and can afford to be slow.
+        """
+        from .dpc_agent.tools.browser import (
+            IDLE_SWEEP_EVERY_N_PROBES,
+            WINDOW_PROBE_INTERVAL_SECONDS,
+            cleanup_idle_browser_sessions,
+            sweep_closed_windows,
+        )
+        tick = 0
         while not self._shutdown_event.is_set():
             try:
-                await asyncio.sleep(300)
+                await asyncio.sleep(WINDOW_PROBE_INTERVAL_SECONDS)
+                tick += 1
+                released = await sweep_closed_windows()
+                if released:
+                    logger.info(
+                        "Browser window sweep: released %d session(s)", released
+                    )
+                if tick % IDLE_SWEEP_EVERY_N_PROBES:
+                    continue
                 closed = await cleanup_idle_browser_sessions()
                 if closed:
                     logger.info("Browser idle cleanup: closed %d session(s)", closed)
@@ -950,6 +1036,15 @@ class CoreService:
         """Performs a clean shutdown of all components."""
         self._is_running = False
         logger.info("Shutting down components")
+
+        # Tools run on a pool the interpreter joins at exit, and a tool waiting for its
+        # turn on an index writer would hold that join. Nothing queued now is worth
+        # waiting for — the next start rebuilds whatever this one drops.
+        try:
+            from dpc_client_core.dpc_agent.index_writer import begin_shutdown
+            begin_shutdown()
+        except Exception:
+            logger.debug("index writer shutdown flag not set", exc_info=True)
 
         # Cancel all background tasks first
         logger.debug("Cancelling %d background tasks", len(self._background_tasks))
@@ -1231,17 +1326,25 @@ class CoreService:
             except Exception as e:
                 logger.error("Error in hub connection monitor: %s", e, exc_info=True)
 
-    async def _auto_connect_node_groups(self):
-        """Auto-connect to all node IDs listed in firewall node groups on startup."""
-        delay = self.settings.get_p2p_auto_connect_delay()
-        await asyncio.sleep(delay)
-
+    def _peers_to_auto_connect(self) -> set:
+        """Peer IDs eligible for auto-connect and reconnect: firewall node groups plus group-chat rosters."""
         node_ids = {
             nid
             for group_ids in self.firewall.node_groups.values()
             for nid in group_ids
-            if nid != self.p2p_manager.node_id
         }
+        if self.group_manager:
+            for group in self.group_manager.get_all_groups():
+                node_ids.update(group.members)
+        node_ids.discard(self.p2p_manager.node_id)
+        return node_ids
+
+    async def _auto_connect_node_groups(self):
+        """Auto-connect on startup to every peer we keep a connection to."""
+        delay = self.settings.get_p2p_auto_connect_delay()
+        await asyncio.sleep(delay)
+
+        node_ids = self._peers_to_auto_connect()
 
         if not node_ids:
             logger.debug("No node group peers to auto-connect")
@@ -1334,6 +1437,7 @@ class CoreService:
                     import uuid
                     request_id = str(uuid.uuid4())
                     try:
+                        self.history_requests.note(peer_id, peer_id, request_id)
                         await self.p2p_manager.send_message_to_peer(peer_id, {
                             "command": "REQUEST_CHAT_HISTORY",
                             "payload": {
@@ -1350,6 +1454,16 @@ class CoreService:
         for peer_id in self.p2p_manager.peers:
             shared_groups = self.group_manager.get_groups_for_peer(peer_id)
             for group in shared_groups:
+                # A peer that has already told us we are not in this group is not
+                # asked again this session. Our roster is stale — that is the
+                # whole reason we are here — and re-asking would earn one refusal
+                # per reconnect for ever.
+                if (peer_id, group.group_id) in self._group_access_denied:
+                    logger.debug(
+                        "Skipping group %s with %s: access refused earlier this session",
+                        group.group_id, peer_id[:20],
+                    )
+                    continue
                 try:
                     await self.p2p_manager.send_message_to_peer(peer_id, {
                         "command": "GROUP_SYNC",
@@ -1364,17 +1478,32 @@ class CoreService:
                 if monitor and hasattr(monitor, "compute_history_hash"):
                     local_hash = monitor.compute_history_hash()
                     local_count = len(monitor.message_history)
+                    local_digest = monitor.history_digest()
                 else:
-                    local_count, local_hash = ConversationMonitor.peek_group_history_stats(group.group_id)
+                    # Monitors are created lazily, so on connect the usual case
+                    # is that this group has none — and the digest used to be
+                    # omitted exactly then, dropping both sides onto the
+                    # chain-tip comparison that never matches between two
+                    # honest nodes. Reading the file costs one open.
+                    disk_messages = ConversationMonitor.peek_group_messages(group.group_id)
+                    local_count = len(disk_messages)
+                    local_hash = ConversationMonitor.history_hash_for(disk_messages)
+                    local_digest = conversation_monitor_digest_for(disk_messages)
+
+                status_payload = {
+                    "group_id": group.group_id,
+                    "history_hash": local_hash,
+                    "message_count": local_count,
+                    # The order-independent comparison. history_hash stays for
+                    # peers that predate it, and is the reason two honest nodes
+                    # reported divergence on every connection.
+                    "history_digest": local_digest,
+                }
 
                 try:
                     await self.p2p_manager.send_message_to_peer(peer_id, {
                         "command": "GROUP_HISTORY_STATUS",
-                        "payload": {
-                            "group_id": group.group_id,
-                            "history_hash": local_hash,
-                            "message_count": local_count
-                        }
+                        "payload": status_payload,
                     })
                     logger.debug("Sent GROUP_HISTORY_STATUS for %s to %s (hash=%s, count=%d)",
                                group.group_id, peer_id[:20], local_hash[:16], local_count)
@@ -1403,7 +1532,11 @@ class CoreService:
         Routes messages to appropriate handlers via message router.
         """
         command = message.get("command")
-        logger.debug("Received message from %s: %s", sender_node_id, command)
+        # A bulk command says the same thing here and one layer down, and at
+        # 131 211 chunks in a single transfer that is two floods rather than
+        # one. The router keeps the heartbeat; this layer stays quiet.
+        if command not in BULK_COMMANDS:
+            logger.debug("Received message from %s: %s", sender_node_id, command)
 
         # Route message to registered handler
         await self.message_router.route_message(sender_node_id, message)
@@ -1445,12 +1578,12 @@ class CoreService:
         # Clear history request tracking for this peer
         # This allows us to request history again when they reconnect
         self._history_requested_peers.discard(peer_id)
+        # A question asked of a peer that has gone does not stay answerable.
+        self.history_requests.forget_peer(peer_id)
 
-        # Schedule auto-reconnect if peer is in a node group (known peer)
+        # Schedule auto-reconnect if this is a peer we keep a connection to
         if hasattr(self, 'connection_orchestrator') and self.connection_orchestrator:
-            node_groups = getattr(self.firewall, 'node_groups', {})
-            is_known = any(peer_id in ids for ids in node_groups.values())
-            if is_known:
+            if peer_id in self._peers_to_auto_connect():
                 task = asyncio.create_task(self._auto_reconnect_peer(peer_id))
                 task.set_name(f"reconnect_{peer_id[:16]}")
                 self._background_tasks.add(task)
@@ -1673,6 +1806,7 @@ class CoreService:
 
         return local_ips
 
+    @sends_own_response
     async def get_status(self, command_id: str = None, _websocket = None) -> Dict[str, Any]:
         """
         Aggregates status from all components.
@@ -1878,6 +2012,7 @@ class CoreService:
                 "message": str(e)
             }
 
+    @slow_command
     async def get_provider_balance(self, alias: Optional[str] = None) -> Dict[str, Any]:
         """
         Query a pay-per-use provider's account balance (e.g. DeepSeek /user/balance).
@@ -1932,7 +2067,8 @@ class CoreService:
             "default_provider": self.llm_manager.default_provider or "",
             "vision_provider": self.llm_manager.vision_provider or "",
             "voice_provider": self.llm_manager.voice_provider or "",  # v0.13.0+
-            "agent_provider": getattr(self.llm_manager, 'agent_provider', None) or ""  # v0.18.0+
+            "agent_provider": getattr(self.llm_manager, 'agent_provider', None) or "",  # v0.18.0+
+            "knowledge_provider": getattr(self.llm_manager, 'knowledge_provider', None) or ""
         }
 
     async def get_providers_list(self) -> Dict[str, Any]:
@@ -1947,8 +2083,25 @@ class CoreService:
             - voice_provider: Default voice transcription provider alias v0.13.0+
             - agent_provider: AI agent provider alias v0.18.0+
         """
+        # Snapshot on the loop, ask off it: supports_vision() reaches the
+        # Ollama daemon, and a host that is not answering costs seconds that
+        # every other command would otherwise wait through.
+        snapshot = list(self.llm_manager.providers.items())
+        providers_info = await asyncio.to_thread(self._provider_rows, snapshot)
+
+        return {
+            "providers": providers_info,
+            "default_provider": self.llm_manager.default_provider or "",
+            "vision_provider": self.llm_manager.vision_provider or "",
+            "voice_provider": self.llm_manager.voice_provider or "",  # v0.13.0+
+            "agent_provider": getattr(self.llm_manager, 'agent_provider', None) or ""  # v0.18.0+
+        }
+
+    def _provider_rows(self, snapshot: List[Any]) -> List[Dict[str, Any]]:
+        """The provider rows the UI reads. Synchronous, and called off the
+        event loop — supports_vision() may reach a daemon over the network."""
         providers_info = []
-        for alias, provider in self.llm_manager.providers.items():
+        for alias, provider in snapshot:
             provider_dict = {
                 "alias": alias,
                 "model": provider.model,
@@ -1966,14 +2119,7 @@ class CoreService:
                 provider_dict["remote_provider"] = getattr(provider, 'remote_provider', None)
 
             providers_info.append(provider_dict)
-
-        return {
-            "providers": providers_info,
-            "default_provider": self.llm_manager.default_provider or "",
-            "vision_provider": self.llm_manager.vision_provider or "",
-            "voice_provider": self.llm_manager.voice_provider or "",  # v0.13.0+
-            "agent_provider": getattr(self.llm_manager, 'agent_provider', None) or ""  # v0.18.0+
-        }
+        return providers_info
 
     def _provider_supports_voice(self, provider: Any) -> bool:
         """Delegated to VoiceService."""
@@ -2004,17 +2150,12 @@ class CoreService:
             return {"status": "error", "message": "Agent service not available"}
         return await self.agent_service.prepare_agent()
 
-    async def save_providers_config(self, config_dict: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        Save and validate providers configuration.
-
-        Args:
-            config_dict: Full providers configuration dictionary
-
-        Returns:
-            Dictionary with status and message/errors
-        """
-        # Validate structure
+    async def save_providers_config(
+        self,
+        config_dict: Dict[str, Any],
+        alias_renames: Optional[Dict[str, str]] = None,
+    ) -> Dict[str, Any]:
+        """Save providers, carry any alias rename into everything that names it, and report what no longer resolves."""
         errors = self._validate_providers_config(config_dict)
         if errors:
             return {
@@ -2023,23 +2164,110 @@ class CoreService:
             }
 
         try:
-            # Save to JSON and reload providers
             self.llm_manager.save_config(config_dict)
 
-            # Broadcast event
+            renamed = await self._follow_alias_renames(config_dict, alias_renames)
+
             await self.local_api.broadcast_event("providers_updated", {
                 "message": "AI providers configuration updated"
             })
 
-            return {
+            message = "Providers saved successfully"
+            if renamed:
+                message += " — " + "; ".join(renamed)
+
+            home = self.llm_manager.config_path.parent
+            known = [p.get("alias") for p in config_dict.get("providers", [])]
+            dangling = provider_alias_refs.unresolved_references(known, home)
+            if dangling:
+                logger.warning(
+                    "Provider aliases named by configuration but not present in providers.json: %s",
+                    "; ".join(dangling),
+                )
+
+            result = {
                 "status": "success",
-                "message": "Providers saved successfully"
+                "message": message
             }
+            if dangling:
+                result["warnings"] = dangling
+            return result
         except Exception as e:
             return {
                 "status": "error",
                 "message": str(e)
             }
+
+    async def _follow_alias_renames(
+        self,
+        config_dict: Dict[str, Any],
+        alias_renames: Optional[Dict[str, str]],
+    ) -> List[str]:
+        """Rewrite agent configs, the registry, the firewall and the voice list for each rename, then refresh live agents."""
+        if not alias_renames:
+            return []
+
+        home = self.llm_manager.config_path.parent
+        known = {p.get("alias") for p in config_dict.get("providers", [])}
+        summary: List[str] = []
+
+        for old, new in alias_renames.items():
+            if not old or not new or old == new:
+                continue
+            if old in known or new not in known:
+                continue
+
+            counts = provider_alias_refs.rename_references(old, new, home)
+            # Summed over the inventory rather than over four names typed here:
+            # a place added to `PLACES` used to be invisible to this line, so a
+            # rename that reached only the new place read as «nothing changed»
+            # and was neither logged nor reported.
+            by_place = counts["by_place"]
+            touched = sum(by_place.values())
+            if not touched:
+                continue
+
+            logger.info(
+                "Provider alias '%s' renamed to '%s' in %d place(s): %s",
+                old, new, touched,
+                ", ".join(f"{key} ×{n}" for key, n in sorted(by_place.items()) if n),
+            )
+            summary.append(
+                f"'{old}' → '{new}' followed in {touched} place(s) "
+                f"across {len(counts['agent_ids'])} agent(s)"
+            )
+
+            if counts["firewall"]:
+                try:
+                    self.firewall.reload()
+                except Exception as exc:
+                    logger.warning("Firewall reload after an alias rename failed: %s", exc)
+
+            # The settings object is built once at startup, so a rename that
+            # rewrote config.ini left the new name on disk and the old one in
+            # every reader until the next restart — for a change the commit
+            # message said needed none. Reload when a config.ini place moved.
+            if any(n for key, n in by_place.items() if key.startswith("config.ini:")):
+                try:
+                    self.settings.reload()
+                    logger.info("Settings reloaded after the alias rename touched config.ini")
+                except Exception as exc:
+                    logger.warning("Settings reload after an alias rename failed: %s", exc)
+
+            if self.agent_service:
+                from .dpc_agent.utils import load_agent_config
+                for agent_id in counts["agent_ids"]:
+                    try:
+                        await self.agent_service._refresh_live_agent_manager(
+                            agent_id, load_agent_config(agent_id)
+                        )
+                    except Exception as exc:
+                        logger.warning(
+                            "Live refresh of agent %s after an alias rename failed: %s",
+                            agent_id, exc,
+                        )
+
+        return summary
 
     async def query_ollama_model_info(self, provider_alias: str) -> Dict[str, Any]:
         """
@@ -3681,7 +3909,14 @@ class CoreService:
                     "default_enabled": entry.default_enabled,
                 })
             tools.sort(key=lambda t: t["name"])
-            return {"status": "success", "tools": tools}
+            # A tool module that fails to import removes its tools from this
+            # list without anything visible happening. Hand the failure to the
+            # panel so the gap is shown where the tools would have been.
+            failures = [
+                {"module": name, "error": err}
+                for name, err in sorted(registry.load_failures.items())
+            ]
+            return {"status": "success", "tools": tools, "load_failures": failures}
         except Exception as e:
             logger.error("Error listing all tools: %s", e, exc_info=True)
             return {"status": "error", "message": str(e)}
@@ -3838,6 +4073,269 @@ class CoreService:
 
     # --- Shell approval (ADR-030 v2) ---
 
+    async def resolve_schedule_approval(self, request_id: str, approved: bool) -> Dict[str, Any]:
+        """Answer an agent's request to queue a deferred wake-up.
+
+        The decision is taken before anything enters the queue, so the person
+        sees what was planned and for when rather than discovering it later.
+        """
+        from .dpc_agent.tools.core import resolve_schedule_approval as _resolve, pending_schedule_agent_id
+
+        agent_id = pending_schedule_agent_id(request_id)
+        if _resolve(request_id, approved):
+            # The other surface is still showing a button that now resolves to
+            # nothing — the same reason the shell path withdraws.
+            await self.announce_schedule_approval_closed(
+                request_id=request_id,
+                agent_id=agent_id,
+                outcome="✅ Scheduled." if approved else "❌ Not scheduled.",
+                resolution="approved" if approved else "rejected",
+            )
+            return {"status": "success", "request_id": request_id, "approved": bool(approved)}
+        return {"status": "error", "message": f"Unknown or expired request_id: {request_id}"}
+
+    def _conversation_display_name(self, conversation_id: str) -> str:
+        """A name a person recognises for the chat a run came from.
+
+        Three shapes reach here: a group id, an agent id (a 1:1 with that
+        agent), and a peer node id. Anything unknown returns the id itself —
+        an id in front of the operator beats an empty line, because the id is
+        still enough to tell two simultaneous requests apart.
+        """
+        if not conversation_id:
+            return ""
+        try:
+            group = self.group_manager.get_group(conversation_id) if self.group_manager else None
+            if group is not None:
+                return getattr(group, "name", "") or conversation_id
+        except Exception:
+            pass
+        if conversation_id.startswith("agent_"):
+            try:
+                name = self._get_agent_display_name(conversation_id)
+                if name and name != conversation_id:
+                    return f"{name} (1:1)"
+            except Exception:
+                pass
+        meta = self.peer_metadata.get(conversation_id) or {}
+        return meta.get("name") or conversation_id
+
+    async def announce_schedule_approval_request(
+        self,
+        request_id: str,
+        task_type: str,
+        when: str,
+        about: str,
+        agent_id: str,
+        agent_name: str,
+        task_id: str = "",
+        timeout_seconds: int = 0,
+        telegram_chat_id: str = "",
+        conversation_id: str = "",
+        conversation_title: str = "",
+    ) -> None:
+        """Put a queue request in front of every surface that can answer it.
+
+        The shell twin below has done this since ADR-030 v2; this one broadcast
+        to the interface and nothing else, so a `check_back` asked for from
+        Telegram was decided by a card on a desktop nobody was looking at, and
+        the only possible end was the sixty-second timeout. The field that
+        decides where the *result* goes — `reply_telegram_chat_id` — was already
+        in scope ten lines below the gate that never consulted it.
+        """
+        origin = conversation_title or self._conversation_display_name(conversation_id)
+        if self.local_api:
+            await self.local_api.broadcast_event("schedule_approval_request", {
+                "request_id": request_id,
+                "task_type": task_type,
+                "when": when,
+                "about": about,
+                "agent_name": agent_name,
+                # The task being scheduled — an id, not a chat. It used to
+                # arrive under `conversation_id`, which is why the card could
+                # never name the chat; both are carried now, each under its own
+                # name.
+                "task_id": task_id,
+                "conversation_id": conversation_id,
+                "conversation_title": origin,
+                # The card had no deadline to retire on, so it stayed on screen
+                # long after the agent had given up on it.
+                "timeout_seconds": timeout_seconds,
+            })
+
+        bridge = self._get_agent_telegram_bridge(agent_id) if telegram_chat_id else None
+        if bridge:
+            try:
+                await bridge.notify_schedule_approval(
+                    request_id=request_id,
+                    task_type=task_type,
+                    when=when,
+                    about=about,
+                    agent_name=agent_name,
+                    timeout_seconds=timeout_seconds,
+                    chat_id=telegram_chat_id,
+                )
+                logger.info(
+                    "Schedule approval %s offered in Telegram chat %s for %s",
+                    request_id, telegram_chat_id, agent_id,
+                )
+            except Exception as e:
+                logger.warning("Failed to offer schedule approval %s in Telegram: %s", request_id, e)
+
+            # Posting takes about a second and the desktop can answer inside it —
+            # the shell twin was caught leaving a live button on a decision
+            # already made. Withdraw what was just posted instead.
+            from .dpc_agent.tools.core import _pending_schedule_approvals
+
+            if _pending_schedule_approvals.get(request_id) is None:
+                await self.announce_schedule_approval_closed(
+                    request_id=request_id,
+                    agent_id=agent_id,
+                    outcome="⌛ Answered before this arrived.",
+                    resolution="superseded",
+                )
+        else:
+            logger.info("Schedule approval %s offered on the interface only (no bridge for %s)",
+                        request_id, agent_id or "<unknown agent>")
+
+    async def announce_schedule_approval_closed(
+        self,
+        request_id: str,
+        agent_id: str,
+        outcome: str,
+        resolution: str = "expired",
+    ) -> None:
+        """Withdraw a queue request from the surfaces still showing it."""
+        if self.local_api:
+            await self.local_api.broadcast_event("schedule_approval_resolved", {
+                "request_id": request_id,
+                "resolution": resolution,
+                "outcome": outcome,
+            })
+
+        bridge = self._get_agent_telegram_bridge(agent_id)
+        if bridge:
+            try:
+                closed = await bridge.close_schedule_approval(request_id, outcome)
+                if closed:
+                    logger.info("Schedule approval %s withdrawn from Telegram: %s", request_id, outcome)
+            except Exception as e:
+                logger.debug("Could not withdraw schedule approval %s from Telegram: %s", request_id, e)
+
+    async def announce_shell_approval_request(
+        self,
+        request_id: str,
+        command: str,
+        reason: str,
+        agent_id: str,
+        agent_name: str,
+        timeout_seconds: int = 0,
+        telegram_chat_id: str = "",
+        conversation_id: str = "",
+        conversation_title: str = "",
+    ) -> None:
+        """Put a tier-1 approval request in front of every surface that can answer it.
+
+        The tool that raises the request knows nothing about transports; this is
+        where the list of them lives.
+
+        `telegram_chat_id` is the chat the run came from, empty when it did not
+        come from Telegram at all. Telegram is offered the request only then and
+        only there: the interface is always shown it, because the interface is
+        where the operator who started a desktop run is sitting.
+
+        `conversation_id` is the chat the agent was working in, and the title is
+        whatever the caller could already name. A prompt that says only which
+        agent asks cannot be answered when four agents work in four chats, so
+        anything the caller left unnamed is resolved here.
+        """
+        origin = conversation_title or self._conversation_display_name(conversation_id)
+        if self.local_api:
+            await self.local_api.broadcast_event("shell_approval_request", {
+                "request_id": request_id,
+                "command": command,
+                "reason": reason,
+                "agent_name": agent_name,
+                "conversation_id": conversation_id,
+                "conversation_title": origin,
+            })
+
+        bridge = self._get_agent_telegram_bridge(agent_id) if telegram_chat_id else None
+        if bridge:
+            try:
+                await bridge.notify_shell_approval(
+                    request_id=request_id,
+                    command=command,
+                    reason=reason,
+                    agent_name=agent_name,
+                    timeout_seconds=timeout_seconds,
+                    chat_id=telegram_chat_id,
+                )
+                logger.info(
+                    "Shell approval %s offered in Telegram chat %s for %s",
+                    request_id, telegram_chat_id, agent_id,
+                )
+            except Exception as e:
+                logger.warning("Failed to offer shell approval %s in Telegram: %s", request_id, e)
+
+            # Posting to Telegram takes about a second, and the desktop can
+            # answer inside it — observed 2026-08-15, where the withdrawal ran
+            # before the message existed and left a live button on a decision
+            # already made. Withdraw what was just posted instead.
+            from .dpc_agent.tools.shell import _pending_approvals
+
+            entry = _pending_approvals.get(request_id)
+            if entry is None or entry.get("decision"):
+                await self.announce_shell_approval_closed(
+                    request_id=request_id,
+                    agent_id=agent_id,
+                    outcome="⌛ Answered before this arrived.",
+                    resolution="superseded",
+                )
+        else:
+            logger.info("Shell approval %s offered on the interface only (no bridge for %s)",
+                        request_id, agent_id or "<unknown agent>")
+
+    async def announce_shell_approval_closed(
+        self,
+        request_id: str,
+        agent_id: str,
+        outcome: str,
+        resolution: str = "expired",
+    ) -> None:
+        """Withdraw a request from the surfaces still showing it, and say
+        which of the four things happened to it.
+
+        Two surfaces can answer the same request, so whichever one did not has
+        to stop offering a button that resolves to nothing. `resolution` is the
+        machine-readable half — `approved`, `rejected`, `expired`,
+        `superseded`; this used to broadcast `shell_approval_expired` for all
+        of them, so the UI log called every closure a timeout.
+
+        That event is still sent, unconditionally, so a UI older than this
+        change still withdraws the card. It claims nothing beyond «stop
+        showing this»; the truth is in `shell_approval_resolved`, and the UI
+        logs from that one. Drop it once no shipped UI reads it.
+        """
+        if self.local_api:
+            await self.local_api.broadcast_event("shell_approval_resolved", {
+                "request_id": request_id,
+                "resolution": resolution,
+                "outcome": outcome,
+            })
+            await self.local_api.broadcast_event("shell_approval_expired", {
+                "request_id": request_id,
+            })
+
+        bridge = self._get_agent_telegram_bridge(agent_id)
+        if bridge:
+            try:
+                closed = await bridge.close_shell_approval(request_id, outcome)
+                if closed:
+                    logger.info("Shell approval %s withdrawn from Telegram: %s", request_id, outcome)
+            except Exception as e:
+                logger.debug("Could not withdraw shell approval %s from Telegram: %s", request_id, e)
+
     async def shell_approve_command(self, request_id: str, add_to_whitelist: bool = False) -> Dict[str, Any]:
         """Approve a Tier 1 shell command.
 
@@ -3861,6 +4359,13 @@ class CoreService:
         if event:
             event.set()
 
+        await self.announce_shell_approval_closed(
+            request_id=request_id,
+            agent_id=entry.get("agent_id", ""),
+            outcome="✅ Approved elsewhere.",
+            resolution="approved",
+        )
+
         if add_to_whitelist:
             tokens = command.strip().split()
             cmd_prefix = " ".join(tokens[:2]) if len(tokens) >= 2 else tokens[0] if tokens else command
@@ -3883,20 +4388,31 @@ class CoreService:
         if event:
             event.set()
 
+        await self.announce_shell_approval_closed(
+            request_id=request_id,
+            agent_id=entry.get("agent_id", ""),
+            outcome="❌ Rejected elsewhere.",
+            resolution="rejected",
+        )
+
         logger.info("Shell command rejected: %s", request_id)
         return {"status": "ok", "request_id": request_id}
 
     async def shell_add_to_whitelist(self, agent_id: str, command_prefix: str) -> Dict[str, Any]:
         """Add a command prefix to an agent's Tier 1 whitelist."""
         try:
+            from .firewall import TOOL_SETTINGS_KEY
+
             rules = self.firewall.rules
             profiles = rules.setdefault("agent_profiles", {})
             profile = profiles.setdefault(agent_id, {})
-            tools = profile.setdefault("tools", {})
-            whitelist = tools.setdefault("run_shell_tier1_whitelist", [])
+            # Tool settings live beside `tools`, not inside it (see the
+            # migration in firewall.py) — `tools` holds tool names only.
+            shell_settings = profile.setdefault(TOOL_SETTINGS_KEY, {}).setdefault("run_shell", {})
+            whitelist = shell_settings.setdefault("tier1_whitelist", [])
             if not isinstance(whitelist, list):
                 whitelist = []
-                tools["run_shell_tier1_whitelist"] = whitelist
+                shell_settings["tier1_whitelist"] = whitelist
             if command_prefix not in whitelist:
                 whitelist.append(command_prefix)
             ok, msg, errs = self.firewall.save_rules_from_dict(rules)
@@ -3974,6 +4490,14 @@ class CoreService:
         """
         await self.p2p_coordinator.broadcast_to_peers(message)
 
+    def note_group_access_denied(self, peer_id: str, group_id: str) -> None:
+        """Remember that this peer says we have no part in this group."""
+        self._group_access_denied.add((peer_id, group_id))
+
+    def clear_group_access_denied(self, peer_id: str, group_id: str) -> None:
+        """Forget a refusal — the same peer has just synced us a roster we are in."""
+        self._group_access_denied.discard((peer_id, group_id))
+
     async def _broadcast_to_group(self, group_id: str, message: Dict[str, Any]) -> None:
         """Broadcast message to all connected members of a group (except self).
 
@@ -3997,6 +4521,7 @@ class CoreService:
         """Delegated to KnowledgeService."""
         return self.knowledge_service._get_or_create_conversation_monitor(conversation_id, instruction_set_name)
 
+    @slow_command
     async def end_conversation_session(
         self,
         conversation_id: str,
@@ -4325,11 +4850,23 @@ class CoreService:
                     return result
 
                 participants = set(group.members)
-                # Check at least one other member is online
+                # Everyone has to be reachable, not just somebody. A reset needs
+                # every member's yes, and a member who cannot answer cannot give
+                # one — so refuse here with the names rather than let the vote
+                # run its full minute and come back "rejected" for no stated
+                # reason. An absent member is also the one that hands its
+                # history back at the next sync and undoes the reset.
                 connected = self.p2p_coordinator.get_connected_peers()
-                online_members = [m for m in other_members if m in connected]
-                if not online_members:
-                    return {"status": "error", "message": "No group members are online"}
+                offline_members = [m for m in other_members if m not in connected]
+                if offline_members:
+                    names = ", ".join(m[:20] for m in offline_members)
+                    return {
+                        "status": "error",
+                        "message": (
+                            f"All members must be online to start a new session. "
+                            f"Offline: {names}"
+                        ),
+                    }
             else:
                 # P2P chats: use proposal flow
                 # For now, conversation_id is the peer_id in P2P mode
@@ -4475,6 +5012,32 @@ class CoreService:
 
         return mentions
 
+    @staticmethod
+    def _signature_fields_for(monitor, message_id: str) -> Dict[str, Any]:
+        """The signature the monitor just made, for the wire.
+
+        Nothing is signed here: the author's own monitor already signed the
+        record on the way in, and for our own message the local key is the
+        author's key. What was missing was carrying it out — so a peer had
+        nothing to check and minted its own, and the signature ended up
+        attesting storage rather than authorship.
+        """
+        try:
+            history = monitor.get_message_history()
+        except Exception:
+            return {}
+        if not history or history[-1].get("id") != message_id:
+            return {}
+        record = history[-1]
+        fields = {
+            key: record[key]
+            for key in ("content_hash", "signature", "signer_node_id", "preimage_version")
+            if record.get(key)
+        }
+        # All four or none: a partial set proves nothing and invites a receiver
+        # to improvise the rest.
+        return fields if len(fields) == 4 else {}
+
     async def send_group_message(self, group_id: str, text: str) -> Dict[str, Any]:
         """Send a text message to all group members.
 
@@ -4487,7 +5050,12 @@ class CoreService:
             if not group:
                 return {"status": "error", "message": f"Group {group_id} not found"}
 
-            sender_name = "User"
+            # A literal here meant a human's name never left the machine: every
+            # peer rendered "User" because that is what arrived. Fourteen other
+            # call sites in this file already resolve it this way. And the field
+            # is inside the signing preimage, so the literal would shortly have
+            # become a cryptographically attested wrong name.
+            sender_name = self.p2p_manager.get_display_name() or "User"
 
             # Parse @mentions in the message text
             mentions = self.parse_mentions(text, group.members)
@@ -4523,6 +5091,7 @@ class CoreService:
                 "sender_type": "human",
                 "sender_node_id": node_id,
                 "agent_owner": None,
+                **self._signature_fields_for(monitor, message_id),
                 "mentions": mentions,
                 "message_id": message_id,
                 "timestamp": timestamp,
@@ -4795,12 +5364,18 @@ class CoreService:
             "sender_node_id": node_id,
             "sender_name": agent_name,
             "sender_type": "agent",
-            "agent_owner": self.p2p_manager.get_display_name() or node_id,
+            # node_id, matching what the monitor stored above. A display name
+            # here and a node_id there is two values for one field, and the
+            # field is inside the signing preimage: the author would sign one
+            # and store the other, then export a history that fails against its
+            # own signature. The UI already renders a node_id here.
+            "agent_owner": node_id,
             "message_id": message_id,
             "timestamp": timestamp,
             "mentions": [],
             "is_agent": True,
             "msg_index": msg_index,
+            **self._signature_fields_for(monitor, message_id),
             # tool_calls in the live broadcast so the collapsible renders immediately
             # on the finalized message, not only after a history reload.
             "tool_calls": tool_calls or [],
@@ -4983,11 +5558,31 @@ class CoreService:
             if not group:
                 return {"status": "error", "message": f"Group {group_id} not found"}
 
-            # Notify all members (including the removed one)
-            await self._broadcast_to_group(group_id, {
-                "command": "GROUP_SYNC",
-                "payload": group.to_dict()
-            })
+            sync = {"command": "GROUP_SYNC", "payload": group.to_dict()}
+
+            # Notify the members that remain.
+            await self._broadcast_to_group(group_id, sync)
+
+            # And the one that does not. `_broadcast_to_group` walks
+            # `group.members`, which `remove_member` emptied of this node one
+            # statement ago — so the comment that used to sit here, "including
+            # the removed one", was false by construction and the only node that
+            # needed the news was the only one excluded from it. Its own
+            # GroupSyncHandler accepts this: we are still a member of *its* copy
+            # and the version is higher, so `apply_sync` writes the roster that
+            # leaves it out. Nothing is deleted on its side — it learns, and its
+            # own gate then refuses what it used to be served.
+            if node_id in self.p2p_manager.peers:
+                try:
+                    await self.p2p_manager.send_message_to_peer(node_id, sync)
+                    logger.info("Told %s it was removed from group %s", node_id[:20], group_id)
+                except Exception as e:
+                    logger.warning("Could not tell %s it was removed from %s: %s", node_id[:20], group_id, e)
+            else:
+                logger.info(
+                    "Removed %s from group %s while it was offline; it will find out by refusal",
+                    node_id[:20], group_id,
+                )
 
             # Notify local UI to refresh group settings
             await self.local_api.broadcast_event("group_updated", {
@@ -5028,15 +5623,25 @@ class CoreService:
 
     async def set_group_reasoning_effort(self, group_id: str, reasoning_effort: Optional[str] = None) -> Dict[str, Any]:
         """Set a local, group-scoped reasoning_effort override for this node's agents
-        (low/medium/high/max, or 'auto'/empty to clear -> fall back to provider config).
-        Local operational knob — applies only to this node's agents, not synced to peers."""
+        (off/low/medium/high/max, or 'auto'/empty to clear -> fall back to provider config).
+        Local operational knob — applies only to this node's agents, not synced to peers.
+
+        `off` is a position of the control and not one of the levels, which is
+        why it is named separately: the header has drawn it since the control
+        was built and this validator knew four words, so the one setting that
+        spends *less* was the only one a room could not choose. The refusal
+        came back as `{"status": "error"}` — reported as OK by the envelope
+        today — so the header showed the choice as taken and nothing was
+        stored. The vocabulary is imported rather than spelled again here,
+        because `providers.base` is what every provider translates from and a
+        second copy is how the two came to disagree in the first place."""
         group = self.group_manager.get_group(group_id)
         if not group:
             return {"status": "error", "message": f"Group {group_id} not found"}
         effort = (reasoning_effort or "").strip().lower() or None
         if effort in ("auto", "default"):
             effort = None
-        if effort is not None and effort not in ("low", "medium", "high", "max"):
+        if effort is not None and effort != REASONING_OFF and effort not in REASONING_EFFORTS:
             return {"status": "error", "message": f"Invalid reasoning_effort: {reasoning_effort}"}
         updated = self.group_manager.set_group_reasoning_effort(group_id, effort)
         if not updated:
@@ -5275,14 +5880,12 @@ class CoreService:
             ui_dedup_key = f"group_image_ui:{group_id}:{filename}"
             if ui_dedup_key not in self._processed_message_ids:
                 self._processed_message_ids.add(ui_dedup_key)
-                await self.local_api.broadcast_event("group_file_received", {
-                    "sender_node_id": "user",
-                    "sender_name": "You",
-                    "text": full_text,
-                    "message_id": image_msg_id,
-                    "attachments": [attachment],
-                    "group_id": group_id,
-                })
+                # Stored before the broadcast, because the index is assigned on
+                # the way in and the interface has nothing to show without it.
+                # The other order left every image message on screen without the
+                # number its record on disk already carried. Same shape as the
+                # text path above: store, then read the index, then announce.
+                msg_index = None
                 if _group_monitor:
                     _group_monitor.add_message(
                         "user", full_text, [attachment],
@@ -5292,6 +5895,16 @@ class CoreService:
                         sender_type="human",
                     )
                     _group_monitor.save_history()
+                    msg_index = _group_monitor.get_last_msg_index()
+                await self.local_api.broadcast_event("group_file_received", {
+                    "sender_node_id": "user",
+                    "sender_name": "You",
+                    "text": full_text,
+                    "message_id": image_msg_id,
+                    "msg_index": msg_index,
+                    "attachments": [attachment],
+                    "group_id": group_id,
+                })
 
             # Fan-out to connected members
             connected_peers = self.p2p_coordinator.get_connected_peers()
@@ -5449,20 +6062,23 @@ class CoreService:
                 message_id = hashlib.sha256(
                     f"{self.p2p_manager.node_id}:group-voice-send:{group_id}:{final_filename}".encode()
                 ).hexdigest()[:16]
-                await self.local_api.broadcast_event("group_file_received", {
-                    "sender_node_id": "user",
-                    "sender_name": "You",
-                    "text": "",
-                    "message_id": message_id,
-                    "attachments": [attachment],
-                    "group_id": group_id,
-                })
+                msg_index = None
                 if _group_monitor:
                     _group_monitor.add_message(
                         "user",
                         f"Sent voice message: {final_filename} ({size_mb} MB)",
                         [attachment],
                     )
+                    msg_index = _group_monitor.get_last_msg_index()
+                await self.local_api.broadcast_event("group_file_received", {
+                    "sender_node_id": "user",
+                    "sender_name": "You",
+                    "text": "",
+                    "message_id": message_id,
+                    "msg_index": msg_index,
+                    "attachments": [attachment],
+                    "group_id": group_id,
+                })
 
             # Fan-out to connected members
             connected_peers = self.p2p_coordinator.get_connected_peers()
@@ -5629,18 +6245,39 @@ class CoreService:
 
             proposal = session.proposal
 
-            # Record local vote
-            await self.session_manager.record_vote(proposal_id, self.p2p_manager.node_id, vote)
+            # Send VOTE_NEW_SESSION to all other participants.
+            # Signed, because a vote is relayed through whoever is connected and
+            # the receiver has no other way to tell whose it is — the identity
+            # used to be read off the socket, so a reject relayed by the middle
+            # node was recorded as the middle node's. `conversation_id` travels
+            # too, so relaying does not depend on the receiver already holding
+            # the proposal.
+            from dpc_client_core.signing import sign_vote
 
-            # Send VOTE_NEW_SESSION to all other participants
-            message = {
-                "command": "VOTE_NEW_SESSION",
-                "payload": {
-                    "proposal_id": proposal_id,
-                    "vote": vote,
-                    "voter_node_id": self.p2p_manager.node_id
-                }
+            cast_at = datetime.now(timezone.utc).isoformat()
+            vote_payload = {
+                "proposal_id": proposal_id,
+                "vote": vote,
+                "voter_node_id": self.p2p_manager.node_id,
+                "conversation_id": proposal.conversation_id,
             }
+            vote_payload.update(
+                sign_vote(
+                    proposal_id=proposal_id,
+                    conversation_id=proposal.conversation_id,
+                    voter_node_id=self.p2p_manager.node_id,
+                    vote=vote,
+                    timestamp=cast_at,
+                )
+            )
+            message = {"command": "VOTE_NEW_SESSION", "payload": vote_payload}
+
+            # Record our own vote from the same signed payload the peers get,
+            # so the evidence a session marker carries is one set of bytes and
+            # not a local paraphrase of it.
+            await self.session_manager.record_vote(
+                proposal_id, self.p2p_manager.node_id, vote, signed_payload=vote_payload
+            )
 
             for node_id in proposal.participants:
                 if node_id == self.p2p_manager.node_id:
@@ -6006,7 +6643,7 @@ class CoreService:
         """Delegated to P2PCoordinator."""
         return await self.p2p_coordinator.cancel_file_transfer(transfer_id, reason)
 
-    async def send_ai_query(self, prompt: str, compute_host: str = None, model: str = None, provider: str = None, conversation_id: str = None, agent_llm_provider: str = None):
+    async def send_ai_query(self, prompt: str, compute_host: str = None, model: str = None, provider: str = None, conversation_id: str = None, agent_llm_provider: str = None, reasoning_effort: str = None):
         """
         Send an AI query, either to local LLM or to a remote peer for inference.
 
@@ -6019,6 +6656,8 @@ class CoreService:
             provider: Optional provider alias to use
             conversation_id: Optional conversation ID for progress tracking (DPC Agent)
             agent_llm_provider: Optional underlying LLM provider for DPC Agent (Phase 3)
+            reasoning_effort: Optional level from the shared scale (off/low/medium/high/max);
+                None leaves the provider alias's own configuration deciding
 
         Returns:
             Dict with 'response', 'model', 'provider', and 'compute_host' keys
@@ -6033,7 +6672,8 @@ class CoreService:
             model=model,
             provider=provider,
             conversation_id=conversation_id,
-            agent_llm_provider=agent_llm_provider  # Phase 3: per-agent provider selection
+            agent_llm_provider=agent_llm_provider,  # Phase 3: per-agent provider selection
+            reasoning_effort=reasoning_effort,
         )
 
     # --- Context Request Methods ---
@@ -6079,8 +6719,15 @@ class CoreService:
         await self.knowledge_service._on_proposal_received_from_peer(proposal)
 
     def _get_agent_telegram_bridge(self, conversation_id: str):
-        """Delegated to KnowledgeService."""
-        return self.knowledge_service._get_agent_telegram_bridge(conversation_id)
+        """Return the AgentTelegramBridge for an agent conversation, or None.
+
+        Goes straight to the lookup rather than through KnowledgeService: a
+        shell approval can be raised before that service exists, and the walk
+        it was delegating to is the same one.
+        """
+        from .managers.agent_telegram_bridge import get_agent_telegram_bridge
+
+        return get_agent_telegram_bridge(getattr(self, "llm_manager", None), conversation_id)
 
     async def _on_vote_received(self, vote) -> None:
         """Delegated to KnowledgeService."""
@@ -6161,10 +6808,14 @@ class CoreService:
                     # Filter providers based on firewall allowed_models setting
                     allowed_models = self.firewall.get_available_models_for_peer(peer_id, all_models)
 
-                    # Only include providers with allowed models
+                    # Only include providers with allowed models, and only the one
+                    # alias this node designates for peers (ADR-040 D4-0) — the
+                    # same rule the GET_PROVIDERS path applies, so a peer is told
+                    # the same thing whether it asked or was notified.
                     filtered_providers = [
                         p for p in all_providers
                         if p["model"] in allowed_models
+                        and p["alias"] == self.firewall.compute_serving_alias
                     ]
 
                     logger.debug("Filtered to %d providers (from %d total)", len(filtered_providers), len(all_providers))
@@ -6307,8 +6958,15 @@ class CoreService:
             logger.error("request_skill_from_peer error: %s", e, exc_info=True)
             return {"status": "error", "message": str(e)}
 
-    async def _request_inference_from_peer(self, peer_id: str, prompt: str, model: str = None, provider: str = None, images: list = None, timeout: float = 240.0) -> str:
-        """Delegated to P2PCoordinator."""
+    async def _request_inference_from_peer(self, peer_id: str, prompt: str, model: str = None, provider: str = None, images: list = None, timeout: float = None) -> str:
+        """Delegated to P2PCoordinator.
+
+        The UI door used to carry a hardcoded 240 s that no configuration could
+        reach, while the host it calls budgets 900 s for the same work (ADR-040
+        D4-0). The caller still wins when it names a timeout.
+        """
+        if timeout is None:
+            timeout = self.settings.get_remote_inference_timeout()
         return await self.p2p_coordinator.request_inference_from_peer(peer_id, prompt, model, provider, images, timeout)
 
     async def _request_transcription_from_peer(
@@ -6809,7 +7467,8 @@ class CoreService:
         except Exception as e:
             logger.error("Ark response to CC's @Ark mention failed: %s", e, exc_info=True)
 
-    async def execute_ai_query(self, command_id: str, prompt: str, context_ids: list = None, compute_host: str = None, model: str = None, provider: str = None, include_context: bool = True, ai_scope: str = None, instruction_set_name: str = None, agent_llm_provider: str = None, **kwargs):
+    @sends_own_response
+    async def execute_ai_query(self, command_id: str, prompt: str, context_ids: list = None, compute_host: str = None, model: str = None, provider: str = None, include_context: bool = True, ai_scope: str = None, instruction_set_name: str = None, agent_llm_provider: str = None, reasoning_effort: str = None, **kwargs):
         """
         Orchestrates an AI query and sends the response back to the UI.
 
@@ -7035,7 +7694,12 @@ class CoreService:
                 model=model,
                 provider=provider,
                 conversation_id=conversation_id,
-                agent_llm_provider=agent_llm_provider  # Phase 3: per-agent provider selection
+                agent_llm_provider=agent_llm_provider,  # Phase 3: per-agent provider selection
+                # The header's Reasoning control on a chat that has no agent. It used
+                # to write to `updateAgentConfig("local_ai")`, which answers «Agent not
+                # found» inside an envelope that says OK — so the value was neither
+                # stored nor carried. It travels with the query instead.
+                reasoning_effort=reasoning_effort,
             )
             # result is a dict with 'response', 'model', 'provider', 'compute_host'
             # and potentially 'tokens_used', 'model_max_tokens' for local inference
@@ -7358,13 +8022,248 @@ class CoreService:
         except Exception as e:
             return {"status": "error", "message": str(e)}
 
+    async def get_graph_snapshot(self, agent_id: str = None) -> Dict[str, Any]:
+        """Counts from the knowledge graph the running system has open.
+
+        The store is held with an exclusive lock — a second process cannot open it,
+        and on Windows cannot even copy it — so the only readable graph outside this
+        process is whatever stale file happens to be lying next to it. That is what
+        three analyses in a row measured while calling it the live graph. The answer
+        has to be asked of the process holding the database.
+
+        Deliberately the same instance Active Recall queries, not a fresh one: a
+        second handle would answer for a different open file and reintroduce the whole
+        problem in miniature.
+        """
+        if agent_id is None:
+            agent_id = self._get_default_agent_id()
+        try:
+            from dpc_client_core.dpc_agent.context import _get_knowledge_graph
+            agent_root = DPC_HOME_DIR / "agents" / agent_id
+            if not agent_root.is_dir():
+                return {"status": "error", "message": f"No such agent: {agent_id}"}
+            kg = _get_knowledge_graph(agent_root)
+            if kg is None:
+                return {"status": "error", "message": "Knowledge graph unavailable"}
+            return {"status": "ok", "agent_id": agent_id, **kg.snapshot()}
+        except Exception as e:
+            logger.error("get_graph_snapshot failed for %s: %s", agent_id, e, exc_info=True)
+            return {"status": "error", "message": str(e)}
+
+    async def export_knowledge_graph(self, agent_id: str = None, out_path: str = None) -> Dict[str, Any]:
+        """Write an agent's whole graph to a JSONL dump, from inside this process.
+
+        The only place it can be done from. A second process cannot open a live
+        `.grafeo` at all — measured on this box: copying it fails with PermissionError
+        and leaves a torn zero-byte file, opening it fails GRAFEO-X003, opening it
+        read-only fails GRAFEO-X001. So the dump has to come from the handle the
+        service already holds, which is what `_get_knowledge_graph` returns: the same
+        instance Active Recall queries, not a fresh one.
+
+        This is what makes the export real rather than laboratory. Until it existed
+        the only graph anyone could read from outside was the stale file lying next to
+        the live one — the mistake three analyses in a row made. It is also the
+        measurement: every share of `llm_relation` quoted so far is arithmetic over
+        totals, and a dump counts it edge by edge.
+
+        Defaults to `<agent_root>/knowledge_graph_export/<timestamp>.jsonl`. Takes
+        seconds on the largest agent here, but it iterates the live store, so a pass
+        writing at the same moment can leave the header disagreeing with the body —
+        the import refuses that, which is the right answer: run it again.
+        """
+        if agent_id is None:
+            agent_id = self._get_default_agent_id()
+        try:
+            from dpc_client_core.dpc_agent.context import _get_knowledge_graph
+            agent_root = DPC_HOME_DIR / "agents" / agent_id
+            if not agent_root.is_dir():
+                return {"status": "error", "message": f"No such agent: {agent_id}"}
+            kg = _get_knowledge_graph(agent_root)
+            if kg is None:
+                return {"status": "error", "message": "Knowledge graph unavailable"}
+            if out_path:
+                target = Path(out_path)
+            else:
+                stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+                target = agent_root / "knowledge_graph_export" / f"{stamp}.jsonl"
+            result = kg.export_to(target)
+            return {"status": "ok", "agent_id": agent_id, **result,
+                    "bytes": target.stat().st_size}
+        except Exception as e:
+            logger.error("export_knowledge_graph failed for %s: %s", agent_id, e, exc_info=True)
+            return {"status": "error", "message": str(e)}
+
+    async def get_corpus_stats(self, agent_id: str = None) -> Dict[str, Any]:
+        """What each indexed corpus contributes and what the agent does with it.
+
+        For the question of what belongs in the index, which was about to be answered
+        from a scratch script and one day of data. A first-class command instead, so
+        the evidence accumulates where anyone can look at it and the decision waits for
+        a sample worth deciding on.
+
+        `agent_id=None` reports every agent that has an index, because the answer
+        differs per agent — the shared layer is read constantly by one and never by
+        four others.
+        """
+        try:
+            from dpc_client_core.dpc_agent.corpus_stats import corpus_stats
+            agents_dir = DPC_HOME_DIR / "agents"
+            if agent_id:
+                roots = [agents_dir / agent_id]
+            else:
+                roots = sorted(p for p in agents_dir.iterdir() if p.is_dir())
+            reports = [
+                corpus_stats(root, self.firewall, root.name, dpc_home=DPC_HOME_DIR)
+                for root in roots
+                if (root / "state" / "memory_index" / "index_meta.json").exists()
+            ]
+            return {"status": "ok", "agents": reports}
+        except Exception as e:
+            logger.error("get_corpus_stats failed: %s", e, exc_info=True)
+            return {"status": "error", "message": str(e)}
+
+    async def purge_denied_shared_knowledge(self) -> Dict[str, Any]:
+        """Drop shared-layer documents from the stores of agents denied that layer.
+
+        The gate is asked when a hint is printed and when a commit is indexed, but
+        nothing ever asked it about what the broken gate had already written: the fix
+        stopped the leak and did not undo it. The sources offered for removal are the
+        shared layer itself, so the match cannot reach a document outside it, and an
+        agent whose gate cannot be asked counts as denied — the same fail-closed
+        reading the indexing path uses.
+
+        Returns what each store actually gave up, which is also the only way to count
+        it: the rows are visible to the process holding the database and to nothing
+        else.
+        """
+        try:
+            from dpc_client_core.dpc_agent.index_keys import l6_key
+            from dpc_client_core.dpc_agent.index_writer import write_index_async
+            from dpc_client_core.dpc_agent.retrieval import make_backend_for_agent
+            l6_dir = DPC_HOME_DIR / "knowledge"
+            keys = [l6_key(p, l6_dir) for p in sorted(l6_dir.glob("*.md")) if p.is_file()]
+            if not keys:
+                return {"status": "error", "message": "shared layer is empty"}
+            report = []
+            for root in sorted(p for p in (DPC_HOME_DIR / "agents").iterdir() if p.is_dir()):
+                if not (root / "state" / "memory_index").is_dir():
+                    continue
+                allowed = self.firewall is not None and self.firewall.can_agent_access_context(
+                    "knowledge", profile_name=root.name)
+                if allowed:
+                    report.append({"agent_id": root.name, "gate": "open"})
+                    continue
+                def _purge(root=root):
+                    backend = make_backend_for_agent(root)
+                    if not backend.vector.load():
+                        return None
+                    backend.text.load()
+                    removed_vectors = backend.vector.remove_by_sources(keys)
+                    removed_text = backend.text.remove_by_sources(keys)
+                    backend.save()
+                    return removed_vectors, removed_text
+
+                # Awaited on that agent's index writer: this coroutine runs on the loop,
+                # and waiting for a queue that may be draining a full rebuild would stop
+                # everything else for its length.
+                removed = await write_index_async(root / "state" / "memory_index", _purge)
+                if removed is None:
+                    report.append({"agent_id": root.name, "gate": "closed",
+                                   "skipped": "no vector index"})
+                    continue
+                removed_vectors, removed_text = removed
+                logger.info("Shared layer purged from %s: %d vectors, %d text rows",
+                            root.name, removed_vectors, removed_text)
+                report.append({"agent_id": root.name, "gate": "closed",
+                               "removed_vectors": removed_vectors,
+                               "removed_text": removed_text})
+            return {"status": "ok", "shared_documents": len(keys), "agents": report}
+        except Exception as e:
+            logger.error("purge_denied_shared_knowledge failed: %s", e, exc_info=True)
+            return {"status": "error", "message": str(e)}
+
+    async def check_paths_exist(self, paths: List[str] = None) -> Dict[str, Any]:
+        """Which of these paths are reachable right now.
+
+        The UI cannot stat the filesystem, so a configured root on an external drive
+        looks exactly like one that was deleted. Reporting reachability lets the panel
+        mark it "not available now" — which is what it is. Removing it stays the
+        user's action: the drive comes back.
+        """
+        import os
+        try:
+            return {
+                "status": "ok",
+                "exists": {p: os.path.exists(p) for p in (paths or []) if isinstance(p, str)},
+            }
+        except Exception as e:
+            return {"status": "error", "message": str(e)}
+
+    async def get_indexed_path_drift(self) -> Dict[str, Any]:
+        """How many index flags in privacy_rules.json point at nothing, per scope.
+
+        The flag is stored as a copy of the access-path string, so editing a path
+        strands the old spelling. Reconcile repairs it in memory on every read, which
+        is why indexing is correct while the file is not — and the file is what the
+        user reads. Reporting is separate from repairing on purpose: one branch of the
+        repair is "drop", and a root that is merely unmounted today would be dropped
+        for good. That decision belongs to a person (P13 §11).
+        """
+        if not self.firewall:
+            return {"status": "error", "message": "Firewall not initialized"}
+        try:
+            import copy
+
+            from dpc_client_core.dpc_agent.extended_paths_index import REPAIR_DROPPED
+            rules = copy.deepcopy(self.firewall.get_rules_as_dict())
+            report = self.firewall._repair_indexed_paths(rules, guess_renames=True)
+            scopes: Dict[str, Dict[str, int]] = {}
+            for scope, line in report:
+                bucket = scopes.setdefault(scope, {"re_pointed": 0, "dropped": 0})
+                key = "dropped" if line.startswith(REPAIR_DROPPED) else "re_pointed"
+                bucket[key] += 1
+            return {
+                "status": "ok",
+                "total": sum(v["re_pointed"] + v["dropped"] for v in scopes.values()),
+                "scopes": [{"scope": s, **v} for s, v in sorted(scopes.items())],
+                "details": [f"{s}: {line}" for s, line in report],
+            }
+        except Exception as e:
+            logger.error("get_indexed_path_drift failed: %s", e, exc_info=True)
+            return {"status": "error", "message": str(e)}
+
+    async def repair_indexed_paths(self) -> Dict[str, Any]:
+        """Write the repair the reader already applies, on the user's word.
+
+        Saving is what persists it — `save_rules_from_dict` reconciles on the way in —
+        so this is the same path the UI takes when a user edits rules, minus the edit.
+        """
+        if not self.firewall:
+            return {"status": "error", "message": "Firewall not initialized"}
+        try:
+            import copy
+            rules = copy.deepcopy(self.firewall.get_rules_as_dict())
+            report = self.firewall._repair_indexed_paths(rules, guess_renames=True)
+            if not report:
+                return {"status": "ok", "repaired": 0, "message": "Nothing to repair"}
+            ok, message, errors = self.firewall.save_rules_from_dict(rules)
+            if not ok:
+                return {"status": "error", "message": message, "errors": errors}
+            logger.info("Indexed paths repaired on request: %d changes", len(report))
+            return {"status": "ok", "repaired": len(report),
+                    "details": [f"{s}: {line}" for s, line in report]}
+        except Exception as e:
+            logger.error("repair_indexed_paths failed: %s", e, exc_info=True)
+            return {"status": "error", "message": str(e)}
+
     async def get_agent_model_config(self, agent_id: str = None) -> Dict[str, Any]:
         """Delegated to AgentService."""
         if not self.agent_service:
             return {"status": "error", "message": "Agent service not available"}
         if agent_id is None:
             agent_id = self._get_default_agent_id()
-        return await self.agent_service.get_agent_model_config(agent_id, self.get_providers_list)
+        return await self.agent_service.get_agent_model_config(
+            agent_id, self.get_providers_list, self.settings)
 
     async def save_agent_model_config(
         self, agent_id: str = None,
@@ -7461,6 +8360,13 @@ class CoreService:
         logger.info("interrupt_agent called: agent_id=%r, conversation_id=%r", agent_id, conversation_id)
         if not agent_id and conversation_id.startswith("agent_"):
             agent_id = conversation_id
+        if not agent_id:
+            # Defense-in-depth: group-chat Stop button can arrive with empty agent_id
+            # (frontend ChatMessageList.svelte only injects conversation_id fallback for
+            # agent_* chats, not group-*). Resolve to the default agent instead of
+            # erroring out — the Stop should still reach the active loop.
+            agent_id = self._get_default_agent_id()
+            logger.info("interrupt_agent: empty agent_id resolved to default %r", agent_id)
         if not agent_id:
             logger.warning("interrupt_agent: no agent_id provided")
             return {"status": "error", "message": "agent_id required"}
@@ -7601,15 +8507,33 @@ class CoreService:
 
     @staticmethod
     def _find_group_dir(group_id: str) -> Optional[Path]:
-        """Find group conversation directory by ID. Tries exact match first, then prefix."""
+        """Find a group's conversation directory by id, or None if it has none.
+
+        Preferring the bare id here while `GroupManager` preferred the slugged
+        one is how two code paths came to read two different histories of the
+        same group. Both now go through `conversation_paths`.
+        """
         conversations_dir = Path.home() / ".dpc" / "conversations"
-        exact = conversations_dir / group_id
-        if exact.is_dir():
-            return exact
-        for d in conversations_dir.iterdir():
-            if d.is_dir() and d.name.startswith(group_id + "-"):
-                return d
-        return None
+        dirs = conversation_paths.existing_store_dirs(conversations_dir, group_id)
+        return conversation_paths.canonical_store_dir(dirs)
+
+    @staticmethod
+    def _local_group_agents(metadata: Dict[str, Any], local_node_id: str) -> list:
+        """The agents this node is responsible for, and only those.
+
+        Sleep runs a pipeline and then posts a morning brief into the group
+        under the agent's display name. Doing that for an agent belonging to
+        another node spends our compute on their work and signs their words
+        with our key, so the roster is read strictly per node.
+
+        There used to be a fallback — no agents for me, take everyone's — behind
+        a guard that never held: it asked `hasattr(self, "node_id")`, and the id
+        lives on `p2p_manager`, so the local list was always empty and the
+        fallback always ran. Both logs show it: `Group sleep: found N agents …
+        (node=None)`, and on 2026-05-11 the Linux node twice ran `agent_001`,
+        which is ours.
+        """
+        return list((metadata.get("agents") or {}).get(local_node_id) or [])
 
     async def trigger_group_sleep(self, group_id: str) -> Dict[str, Any]:
         """Trigger sleep pipeline for all agents in a group, using group archives only."""
@@ -7623,11 +8547,8 @@ class CoreService:
             return {"status": "error", "message": "Group metadata not found"}
 
         metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
-        local_node_id = self.node_id if hasattr(self, "node_id") else None
-        local_agents = metadata.get("agents", {}).get(local_node_id, []) if local_node_id else []
-        if not local_agents:
-            for node_agents in metadata.get("agents", {}).values():
-                local_agents.extend(node_agents)
+        local_node_id = self.p2p_manager.node_id
+        local_agents = self._local_group_agents(metadata, local_node_id)
 
         if not local_agents:
             return {"status": "error", "message": "No agents in group"}

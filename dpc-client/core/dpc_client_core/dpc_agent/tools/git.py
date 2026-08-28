@@ -13,10 +13,10 @@ from __future__ import annotations
 
 import logging
 import re
-import subprocess
 from typing import Any, Dict, List, Optional
 
 from .registry import ToolEntry, ToolContext
+from .process import run_supervised
 
 # Conventional commits: type(optional-scope): description
 # Types: feat fix docs style refactor perf test chore build ci revert
@@ -64,14 +64,28 @@ def _run_git(ctx: ToolContext, args: List[str], cwd: Optional[str] = None) -> Di
         return {"success": False, "error": f"Invalid path: {e}"}
 
     try:
-        result = subprocess.run(
+        # `subprocess.run(timeout=...)` was here, and on Windows that call is
+        # the defect: on TimeoutExpired it kills the direct child only, then
+        # calls communicate() again with NO timeout. git detaches `gc --auto`,
+        # a credential helper and LFS, all holding the inherited pipe, so EOF
+        # never arrives. run_supervised kills the tree, bounds the drain, and
+        # applies the memory ceiling this path never had.
+        result = run_supervised(
             ["git"] + args,
+            launcher="git_tool(sandbox)",
             cwd=str(work_dir),
-            capture_output=True,
-            encoding="utf-8",
-            errors="replace",
             timeout=30,
         )
+
+        if result.exceeded_mb:
+            # Without this the caller sees a non-zero exit and an empty stderr:
+            # the tree was killed under it, and nothing said so.
+            return {"success": False,
+                    "error": f"Git and its children reached {result.exceeded_mb} MB, "
+                             f"over the ceiling, and were killed - {result.killed}"}
+        if result.timed_out:
+            return {"success": False,
+                    "error": f"Git command timed out (30s) - {result.killed}"}
 
         return {
             "success": result.returncode == 0,
@@ -80,8 +94,6 @@ def _run_git(ctx: ToolContext, args: List[str], cwd: Optional[str] = None) -> Di
             "return_code": result.returncode,
         }
 
-    except subprocess.TimeoutExpired:
-        return {"success": False, "error": "Git command timed out (30s)"}
     except FileNotFoundError:
         return {"success": False, "error": "Git not found. Please install git."}
     except Exception as e:
@@ -123,22 +135,29 @@ def _run_git_external(repo_path: str, args: List[str], timeout: int = 30) -> Dic
         return {"success": False, "error": f"Not a git repository (no .git found): {resolved}"}
 
     try:
-        result = subprocess.run(
+        # Same reason as the sandbox variant above; this is the one git_push
+        # runs on, where a credential prompt is not hypothetical.
+        result = run_supervised(
             ["git"] + args,
+            launcher="git_tool(external)",
             cwd=str(resolved),
-            capture_output=True,
-            encoding="utf-8",
-            errors="replace",
             timeout=timeout,
         )
+        if result.exceeded_mb:
+            # Without this the caller sees a non-zero exit and an empty stderr:
+            # the tree was killed under it, and nothing said so.
+            return {"success": False,
+                    "error": f"Git and its children reached {result.exceeded_mb} MB, "
+                             f"over the ceiling, and were killed - {result.killed}"}
+        if result.timed_out:
+            return {"success": False,
+                    "error": f"Git command timed out ({timeout}s) - {result.killed}"}
         return {
             "success": result.returncode == 0,
             "output": result.stdout.strip() if result.stdout else "",
             "error": result.stderr.strip() if result.stderr else None,
             "return_code": result.returncode,
         }
-    except subprocess.TimeoutExpired:
-        return {"success": False, "error": f"Git command timed out ({timeout}s)"}
     except FileNotFoundError:
         return {"success": False, "error": "Git not found. Please install git."}
     except Exception as e:

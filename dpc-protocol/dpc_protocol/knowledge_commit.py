@@ -6,9 +6,10 @@ Inspired by Personal Context Manager and cognitive bias research.
 """
 
 import logging
-from dataclasses import dataclass, field, asdict
-from typing import List, Dict, Any, Optional, Literal
+from dataclasses import dataclass, field, asdict, fields as dataclass_fields
+from typing import List, Dict, Any, Optional, Literal, Tuple
 from datetime import datetime, timezone
+from pathlib import Path
 import uuid
 
 from cryptography.hazmat.primitives.asymmetric import rsa
@@ -16,6 +17,27 @@ from cryptography.hazmat.primitives.asymmetric import rsa
 logger = logging.getLogger(__name__)
 
 from .pcm_core import KnowledgeEntry, KnowledgeSource
+
+
+def _rebuild(cls, data: Optional[Dict[str, Any]]):
+    """Rebuild a dataclass from a dict, keeping every field it actually has.
+
+    The old code listed the fields by hand and got both halves wrong: it passed
+    `alternatives` and `flagged_assumptions`, which belong to the *proposal* and
+    not to `KnowledgeEntry`, so every commit carrying an entry raised TypeError;
+    and it named four of the thirteen fields, so the nine it did not name came
+    back as defaults. Two of those nine - `cultural_specific` and
+    `alternative_viewpoints` - are hash inputs (`commit_integrity.py:77-78`),
+    which means a commit that crossed the wire recomputed to a different hash
+    and would read as tampered.
+
+    Filtering on the declared fields is the idiom already used by
+    `Preferences.from_dict` in `pcm_core`, and it degrades the right way: a
+    field a peer sends that we do not know is dropped rather than fatal, and a
+    field we know that the peer omits keeps its default.
+    """
+    known = {f.name for f in dataclass_fields(cls)}
+    return cls(**{k: v for k, v in (data or {}).items() if k in known})
 
 
 @dataclass
@@ -58,6 +80,26 @@ class KnowledgeCommitProposal:
     # anchor the same parent (prevents divergent chains from concurrent proposals)
     parent_commit_id: Optional[str] = None
 
+    # The history this proposal was read from. Voting takes up to ten minutes,
+    # during which the conversation keeps moving, so without an anchor each
+    # voter judges whatever its own history happens to say — and a divergence
+    # is indistinguishable from agreement.
+    #
+    # The window, named by the `content_hash` of every message the extraction
+    # actually read. A voter checks that it holds all of them: that is the
+    # question worth asking, because knowledge extracted from text a voter has
+    # never seen is what the anchor exists to refuse.
+    based_on_content_hashes: Optional[List[str]] = None
+
+    # The first form of the anchor, kept only so old proposals still parse.
+    # `chain_hash` is a local artefact by ADR-037 — it covers `role`, which is
+    # a rendering ("mine" vs "theirs"), so three honest nodes holding identical
+    # messages produce three different values. Measured 2026-08-07 on the same
+    # five messages: 855c…, 1a05…, 903d…. Anchoring a cross-node proposal on it
+    # meant every remote vote was refused; these fields are no longer read.
+    based_on_msg_index: Optional[int] = None
+    based_on_chain_hash: Optional[str] = None
+
     # Extraction metadata (tracking which model extracted this knowledge)
     extraction_model: Optional[str] = None  # Model used for extraction (e.g., "claude-haiku-4-5", "llama3.1:8b")
     extraction_host: Optional[str] = None  # Compute host ("local" or node_id for remote)
@@ -78,8 +120,10 @@ class KnowledgeCommitProposal:
         entries_data = data.get('entries', [])
         entries = []
         for entry_data in entries_data:
+            # `_rebuild` rather than `KnowledgeSource(**...)`: the splat raises on
+            # a field a newer peer added, and this path takes peer input too.
             source_data = entry_data.get('source')
-            source = KnowledgeSource(**source_data) if source_data else None
+            source = _rebuild(KnowledgeSource, source_data) if source_data else None
             entries.append(KnowledgeEntry(
                 content=entry_data.get('content', ''),
                 tags=entry_data.get('tags', []),
@@ -114,6 +158,13 @@ class KnowledgeCommitProposal:
             dissenting_opinions=data.get('dissenting_opinions', []),
             avg_confidence=data.get('avg_confidence', 1.0),
             extraction_model=data.get('extraction_model'),
+            based_on_content_hashes=data.get('based_on_content_hashes'),
+            based_on_msg_index=data.get('based_on_msg_index'),
+            based_on_chain_hash=data.get('based_on_chain_hash'),
+            # parent_commit_id was set by the proposer and then dropped here, so
+            # every receiver anchored the commit to its own local HEAD instead —
+            # the exact divergence the field was added to prevent.
+            parent_commit_id=data.get('parent_commit_id'),
             extraction_host=data.get('extraction_host'),
             status=data.get('status', 'proposed'),
             votes=data.get('votes', {}),
@@ -133,6 +184,26 @@ class CommitVote:
 
     # Dissent tracking (if this voter was assigned as devil's advocate)
     is_required_dissent: bool = False
+
+
+@dataclass(frozen=True)
+class CommitProvenance:
+    """The verdict on a received commit, and the one line that says why.
+
+    verified   — content hashes to the hash it carries and a signature over it held.
+    unverified — hash holds, signatures present, not one certificate is cached here.
+    legacy     — hash holds, no signature at all (every commit older than signing).
+    rejected   — the content does not hash to its own hash, or a signature is wrong.
+                 This is the only verdict that means tampering; ADR-036 §6.
+    """
+
+    verdict: Literal["verified", "unverified", "legacy", "rejected"]
+    detail: str
+    unverifiable_signers: Tuple[str, ...] = ()
+
+    @property
+    def is_rejected(self) -> bool:
+        return self.verdict == "rejected"
 
 
 @dataclass
@@ -191,24 +262,22 @@ class KnowledgeCommit:
         """Reconstruct a KnowledgeCommit from a serialized dict (e.g. received over DPTP)."""
         entries = []
         for e in data.get('entries', []):
-            source_data = e.get('source', {})
-            source = KnowledgeSource(
-                type=source_data.get('type', 'ai_summary'),
-                conversation_id=source_data.get('conversation_id'),
-                timestamp=source_data.get('timestamp', datetime.now(timezone.utc).isoformat()),
-                participants=source_data.get('participants', [])
-            )
-            entries.append(KnowledgeEntry(
-                content=e.get('content', ''),
-                confidence=e.get('confidence', 1.0),
-                source=source,
-                tags=e.get('tags', []),
-                alternatives=e.get('alternatives', []),
-                flagged_assumptions=e.get('flagged_assumptions', [])
-            ))
+            entry = _rebuild(KnowledgeEntry, e)
+            # `source` arrives as a nested dict and must not stay one; a None
+            # source used to raise here rather than fall back to an empty one.
+            source_data = dict(e.get('source') or {})
+            # A commit reaching us over the wire came from extraction, so an
+            # absent type is `ai_summary` — the default this path has always
+            # used. The dataclass default is `manual_edit`, and letting it
+            # through would print "Manual Edit" as the provenance of a peer's
+            # commit in `markdown_manager.py:195`.
+            source_data.setdefault('type', 'ai_summary')
+            entry.source = _rebuild(KnowledgeSource, source_data)
+            entries.append(entry)
         return cls(
             commit_id=data.get('commit_id', f"commit-{uuid.uuid4().hex[:8]}"),
             parent_commit_id=data.get('parent_commit_id'),
+            proposal_id=data.get('proposal_id'),
             summary=data.get('summary', ''),
             description=data.get('description', ''),
             topic=data.get('topic', ''),
@@ -273,25 +342,57 @@ class KnowledgeCommit:
         signer = CommitSigner(node_id, private_key)
         self.signatures[node_id] = signer.sign_commit(self.commit_hash)
 
-    def verify_signatures(self) -> bool:
-        """
-        Verify all signatures in this commit.
+    def verify_provenance(self, peers_dir: Optional[Path] = None) -> 'CommitProvenance':
+        """What this commit proves about itself — the four values of ADR-036 §6.
 
-        Returns:
-            True if all signatures are valid, False otherwise
+        The hash is checked first because it needs no certificate: the canonical
+        JSON is recomputed from the content and must equal the hash the commit
+        carries. Only then are the signatures over that hash considered.
         """
-        from .commit_integrity import CommitSigner
+        from .commit_integrity import CommitSigner, compute_commit_hash
 
         if not self.commit_hash:
-            return False
+            return CommitProvenance("rejected", "commit carries no hash to verify")
 
+        recomputed = compute_commit_hash(self)
+        if recomputed != self.commit_hash:
+            return CommitProvenance(
+                "rejected",
+                f"content hashes to {recomputed[:16]}, commit claims {self.commit_hash[:16]}",
+            )
+
+        if not self.signatures:
+            return CommitProvenance("legacy", "hash holds; the commit carries no signature")
+
+        checked: List[str] = []
+        uncached: List[str] = []
         for node_id, signature in self.signatures.items():
-            result = CommitSigner.verify_signature(node_id, self.commit_hash, signature)
+            result = CommitSigner.verify_signature(node_id, self.commit_hash, signature, peers_dir)
             if result is False:
-                return False
-            # result is None: cert not cached, skip (cannot verify but not evidence of tampering)
+                return CommitProvenance(
+                    "rejected", f"signature of {node_id} does not hold over this hash"
+                )
+            (uncached if result is None else checked).append(node_id)
 
-        return True
+        total = len(self.signatures)
+        if checked:
+            return CommitProvenance(
+                "verified", f"hash holds; {len(checked)} of {total} signatures verified",
+                tuple(uncached),
+            )
+        return CommitProvenance(
+            "unverified", f"hash holds; no certificate cached for any of {total} signers",
+            tuple(uncached),
+        )
+
+    def verify_signatures(self, peers_dir: Optional[Path] = None) -> bool:
+        """True only when a signature was actually checked and held.
+
+        It used to return True for an empty signature dict and for a signer
+        whose certificate is not cached — a pass nothing had earned. Callers
+        that need to tell those apart from a real check use verify_provenance.
+        """
+        return self.verify_provenance(peers_dir).verdict == "verified"
 
     def verify_hash(self) -> bool:
         """

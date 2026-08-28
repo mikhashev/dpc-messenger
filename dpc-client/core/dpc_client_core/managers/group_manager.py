@@ -16,7 +16,19 @@ from typing import Optional, List, Dict, Any
 from datetime import datetime, timezone
 from dataclasses import dataclass, asdict, field
 
+from dpc_client_core import conversation_paths
+
 logger = logging.getLogger(__name__)
+
+
+def _note_effort(group_id: str, old: Optional[str], new: Optional[str], source: str) -> None:
+    """A transition. Call only where `new` is the value the room ends up holding."""
+    if old == new:
+        return
+    logger.info(
+        "Group %s reasoning_effort %s -> %s (%s)",
+        group_id, old or "none", new or "none", source,
+    )
 
 
 @dataclass
@@ -33,6 +45,18 @@ class GroupMetadata:
     version: int = 1
     is_discord_bridge: bool = False
     reasoning_effort: Optional[str] = None
+
+    # When the group last agreed to start over, and the votes that agreed it.
+    # ADR-038 Q3: a reset used to be a message, and a node that missed the
+    # message kept its history and handed it back at the next sync, undoing the
+    # reset with nobody noticing. As a field it is a fact about the group — a
+    # returning node reads the boundary and clears what predates it.
+    #
+    # The evidence travels inside the marker rather than beside it, because the
+    # votes that authorised the reset live in the history the reset destroys.
+    # Anyone can therefore check the marker while holding nothing older than it.
+    session_started_at: Optional[str] = None
+    session_reset_evidence: Optional[Dict[str, Any]] = None
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -51,6 +75,8 @@ class GroupMetadata:
             version=data.get("version", 1),
             is_discord_bridge=data.get("is_discord_bridge", False),
             reasoning_effort=data.get("reasoning_effort"),
+            session_started_at=data.get("session_started_at"),
+            session_reset_evidence=data.get("session_reset_evidence"),
         )
 
 
@@ -76,13 +102,12 @@ class GroupManager:
 
     @staticmethod
     def _slugify(name: str) -> str:
-        """Convert a display name to a filesystem-safe slug (matches conversation_monitor)."""
-        import re
-        slug = name.lower()
-        slug = re.sub(r'[^a-z0-9\s-]', '', slug)
-        slug = re.sub(r'\s+', '-', slug)
-        slug = re.sub(r'-+', '-', slug).strip('-')
-        return slug[:20]
+        """Convert a display name to a filesystem-safe slug.
+
+        Delegates to `conversation_paths`, which is now the only definition —
+        this used to be a second copy kept in step by a comment.
+        """
+        return conversation_paths.slugify(name)
 
     def _get_conversation_dir(self, group_id: str) -> Path:
         """Get the conversation folder path for a group.
@@ -95,13 +120,18 @@ class GroupManager:
 
         Returns:
             Path to ~/.dpc/conversations/{group_id}-{slug}/ or ~/.dpc/conversations/{group_id}/
+
+        The name only decides where a *new* store goes. An existing one wins,
+        whatever it is called — this method used to return the slugged path the
+        moment a name appeared, and `_save_group` then created that folder,
+        which is precisely how one group ended up with its history in a folder
+        nothing wrote to again.
         """
         group = self._groups.get(group_id)
-        if group and group.name:
-            slug = self._slugify(group.name)
-            if slug:
-                return self.conversations_dir / f"{group_id}-{slug}"
-        return self.conversations_dir / group_id
+        display_name = group.name if group else None
+        return conversation_paths.resolve_store_dir(
+            self.conversations_dir, group_id, display_name
+        )
 
     def _get_group_metadata_path(self, group_id: str) -> Path:
         """Get path to group metadata file.
@@ -190,6 +220,7 @@ class GroupManager:
                         )
                         continue
                     group = GroupMetadata.from_dict(data)
+                    _note_effort(group.group_id, None, group.reasoning_effort, "read from disk at startup")
                     self._groups[group.group_id] = group
                     loaded += 1
                 except Exception as e:
@@ -227,11 +258,20 @@ class GroupManager:
         This removes metadata, history, and all files received in this group.
         """
         try:
-            # Delete entire conversation folder (v0.21.0)
-            conv_dir = self._get_conversation_dir(group_id)
-            if conv_dir.exists():
+            # Every store folder, not just the canonical one: a group split
+            # across two by the old name-dependent path would otherwise leave
+            # half of itself behind, and that half would become the store again
+            # the next time the group was re-created. Folders already retired by
+            # a consolidation (`…merged-<date>`) are deliberately left: they are
+            # named as backups, not as the group, and they exist to survive
+            # exactly this kind of sweep.
+            for conv_dir in conversation_paths.existing_store_dirs(
+                self.conversations_dir, group_id
+            ):
                 shutil.rmtree(conv_dir)
-                logger.info("Deleted conversation folder for group %s", group_id)
+                logger.info(
+                    "Deleted conversation folder %s for group %s", conv_dir.name, group_id
+                )
 
             # Also clean up legacy files if they still exist (shouldn't after migration)
             legacy_file = self._get_legacy_group_path(group_id)
@@ -373,6 +413,7 @@ class GroupManager:
         group = self._groups.get(group_id)
         if not group:
             return None
+        _note_effort(group_id, group.reasoning_effort, effort, "set by command")
         group.reasoning_effort = effort
         group.version += 1
         self._save_group(group_id)
@@ -387,8 +428,18 @@ class GroupManager:
         return list(self._groups.values())
 
     def get_groups_for_peer(self, node_id: str) -> List[GroupMetadata]:
-        """Get all groups that contain the given peer."""
-        return [g for g in self._groups.values() if node_id in g.members]
+        """The groups this node and that peer are both in.
+
+        "Both" is the part that was missing, and it is what a removed node needs:
+        after it learns the roster that leaves it out, the creator is still in the
+        group and the group would still be advertised to it — one refusal per
+        reconnect, for ever. Its only caller is the on-connect sync loop, which
+        has always meant *shared* rather than *theirs*.
+        """
+        return [
+            g for g in self._groups.values()
+            if node_id in g.members and self.node_id in g.members
+        ]
 
     def add_member(self, group_id: str, node_id: str) -> Optional[GroupMetadata]:
         """
@@ -504,6 +555,51 @@ class GroupManager:
         ))
         return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
 
+    def set_session_marker(
+        self, group_id: str, started_at: str, evidence: Optional[Dict[str, Any]] = None
+    ) -> Optional[GroupMetadata]:
+        """Record that the group agreed to start over at `started_at`.
+
+        Any participant may set it — ADR-038 authority table — because the fact
+        is the quorum, not the announcement. That is what closes the liveness
+        hole the ADR describes: the initiator can die between the last vote and
+        `NEW_SESSION_RESULT`, and any node that saw the quorum still writes the
+        same boundary.
+
+        Idempotent, and that is the property doing the work: two nodes writing
+        the same reset produce the same marker, so there is nothing to reconcile.
+        An older marker never displaces a newer one.
+        """
+        group = self._groups.get(group_id)
+        if not group:
+            return None
+        if group.session_started_at and group.session_started_at >= started_at:
+            return None
+
+        group.session_started_at = started_at
+        group.session_reset_evidence = evidence
+        group.version += 1
+        self._save_group(group_id)
+        logger.info(
+            "Session marker for %s set to %s (v%d)", group_id, started_at, group.version
+        )
+        return group
+
+    def _marker_survives_sync(self, local: Optional[GroupMetadata], remote: GroupMetadata) -> None:
+        """Keep whichever session boundary is later, whatever the version says.
+
+        Version ordering answers "who wrote last", which is not the same
+        question. A peer that has not heard about the reset syncs a record with
+        no marker at all and, on a higher version, would erase ours — and with
+        it the only thing telling a returning node what to clear.
+        """
+        if not local or not local.session_started_at:
+            return
+        if remote.session_started_at and remote.session_started_at >= local.session_started_at:
+            return
+        remote.session_started_at = local.session_started_at
+        remote.session_reset_evidence = local.session_reset_evidence
+
     def apply_sync(self, remote_group: Dict[str, Any]) -> Optional[GroupMetadata]:
         """
         Apply a GROUP_SYNC from a remote peer. Highest version wins; equal
@@ -520,7 +616,23 @@ class GroupManager:
         remote = GroupMetadata.from_dict(remote_group)
 
         local = self._groups.get(remote.group_id)
+        # Not an arrow. What a sync does here is discard the value it carried and
+        # keep the local one, so a transition would name a state the room never
+        # entered — the first version of this line did exactly that, and its own
+        # test asserted the opposite value two lines further down.
+        carried = remote.reasoning_effort
         remote.reasoning_effort = local.reasoning_effort if local else None
+        if carried != remote.reasoning_effort:
+            logger.info(
+                "Group %s: a sync carried reasoning_effort %s, kept %s",
+                remote.group_id, carried or "none", remote.reasoning_effort or "none",
+            )
+        if local is None and remote.reasoning_effort is None:
+            logger.info(
+                "Group %s arrived by sync with no local copy — reasoning_effort starts empty",
+                remote.group_id,
+            )
+        self._marker_survives_sync(local, remote)
         if local and local.version > remote.version:
             logger.debug(
                 "Ignoring GROUP_SYNC for %s: local v%d > remote v%d",

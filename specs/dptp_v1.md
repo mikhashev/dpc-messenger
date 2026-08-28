@@ -1,8 +1,8 @@
-# DPTP Specification: D-PC Transfer Protocol v1.5
+# DPTP Specification: D-PC Transfer Protocol v1.6
 
-**Version:** 1.5
+**Version:** 1.6
 **Status:** Draft / PoC
-**Date:** February 2026
+**Date:** August 2026
 **License:** CC0 1.0 Universal (Public Domain)
 
 ## 1. Overview
@@ -1754,6 +1754,114 @@ Per-node identity files stored in `~/.dpc/`:
 - `node.key` - RSA private key (2048-bit, PEM format)
 - `node.crt` - X.509 self-signed certificate (PEM format)
 - `node.id` - Node identifier (text file)
+- `peers/<node_id>.crt` - certificates of peers this node has completed a handshake with (PEM format)
+
+A peer certificate is written only after its public key has been re-hashed and
+found to equal the claimed `node_id`. Because `node_id` **is** that hash, a
+certificate that passes is that peer's by construction, and a re-issued
+certificate for the same key may replace a stored one safely. No certificate
+authority participates.
+
+**Implementation:** `P2PManager._persist_peer_certificate`
+
+### 4.1 Message Signing
+
+A message signature covers a **canonical preimage**, never the message dict
+and never a locally rebuilt string.
+
+**Version tag:** `dptp-msg-v1` (constant `PREIMAGE_VERSION`)
+
+**Covered fields, in this order — the order is part of the format:**
+
+| # | Field | Empty when |
+|---|---|---|
+| 1 | `PREIMAGE_VERSION` | never |
+| 2 | `conversation_id` (group id or peer conversation) | never |
+| 3 | `message_id` | never |
+| 4 | `sender_node_id` | never |
+| 5 | `sender_name` | no display name known |
+| 6 | `sender_type` (`human` / `agent`) | unset |
+| 7 | `agent_owner` | not an agent message |
+| 8 | `timestamp`, canonicalised | absent |
+| 9 | `content` | empty message |
+| 10 | `tool_calls`, canonical JSON | not an agent message |
+
+**Encoding.** Each field is UTF-8 encoded and emitted as
+`<byte-length>":"<bytes>`, concatenated in the order above:
+
+```
+11:dptp-msg-v1 21:group-b88b65076b85 36:c0ffee00-… …
+```
+(spaces shown for readability only; the wire form has none)
+
+Length prefixes rather than a separator character: a separator is unambiguous
+only while the field count is fixed, so the first optional field would silently
+end that property. Length prefixes hold on their own terms, which is what makes
+extending the field set safe.
+
+**Canonical timestamp.** Parsed as ISO-8601, converted to UTC and re-emitted as
+`%Y-%m-%dT%H:%M:%S.%fZ`. `2026-08-05T10:00:00Z`, `…+00:00` and
+`2026-08-05T13:00:00+03:00` are therefore the same instant and the same
+preimage — platforms disagree about how to spell UTC, and an honest message
+must not reject because it crossed an operating system. An unparseable value is
+covered verbatim rather than dropped.
+
+**Canonical JSON.** `sort_keys=True`, separators `(",", ":")`,
+`ensure_ascii=False`.
+
+**Signature.** `content_hash = SHA256(preimage)` as lowercase hex;
+`signature = RSA-PSS(SHA256, MAX_LENGTH salt)` over that hex string, by the
+**author's** key. `signer_node_id` is the author, so `signer_node_id` must
+equal `sender_node_id`.
+
+**Extending.** Append only, and a new field set requires a new
+`PREIMAGE_VERSION`. The version tag opens the preimage so a signature can never
+be read against a field set other than the one it was made over.
+
+**Implementation:** `dpc-protocol/dpc_protocol/message_signing.py`
+
+### 4.2 Verdicts on receipt
+
+§4.1 fixes what a signature is made over. This fixes what a receiver may
+conclude, because the format alone does not stop an implementation from
+treating "no signature" as "nothing to object to".
+
+Every arriving record leaves verification carrying exactly one verdict:
+
+| Verdict | Meaning |
+|---|---|
+| `verified` | recomputed hash matches, `signer_node_id == sender_node_id`, signature checks against a cached certificate |
+| `unverified` | all of the above except that no certificate for the author is cached yet; kept and re-checked when one arrives |
+| `legacy` | no signature this receiver can recompute — fields absent, or a `PREIMAGE_VERSION` it does not implement |
+| `rejected` | a signature is present and wrong: hash mismatch, signer ≠ sender, or a failed check |
+
+**Rules that follow, and none of them is optional:**
+
+1. **The verdict is the receiver's.** A `verification` field arriving on the
+   wire is ignored and overwritten. A sender that can label its own record
+   `verified` has defeated the check by filling it in.
+2. **Absence is never acceptance.** A record with no signature is `legacy`, not
+   `verified`. An implementation MAY refuse `legacy` outright; it MUST NOT
+   store one indistinguishably from a checked record.
+3. **A `legacy` record's claimed author is not established.** On a live message
+   a receiver SHOULD attribute it to the transport peer instead. On a
+   history transfer there is no such fallback — the peer handing over a history
+   did not write it — so the claimed author stands with nothing behind it, and
+   that is the reason to be able to refuse `legacy` at all.
+4. **An unimplementable `PREIMAGE_VERSION` is `legacy`, not `rejected`.** That
+   is what a node one version ahead looks like; refusing it is an outage, not a
+   security decision.
+5. **`conversation_id` is recomputed from the receiver's own state**, never
+   read from the message — otherwise a record signed for one room verifies in
+   another. In a 1:1 conversation the two sides do not agree on the name: each
+   keys the conversation by the *other* node, so a verifier recomputes against
+   both its own conversation id and its own node id, both of which are its own.
+6. **A transfer that replaces a whole conversation and survives nothing is
+   refused whole.** Otherwise a peer empties a conversation by answering a
+   history request with records that fail.
+
+**Implementation:** `conversation_monitor._verify_incoming`,
+`message_handlers/group_handler._authenticate_author`
 
 ## 5. Connection Flow
 
@@ -1975,6 +2083,16 @@ DPTP is designed to be extensible. New commands can be added by:
 - **Privacy Rules Format**: Firewall configuration - See `~/.dpc/privacy_rules.json`
 
 ## 9. Changelog
+
+### v1.6 (August 2026)
+- **§4.1 Message Signing** — the canonical preimage (`dptp-msg-v1`), added with
+  the implementation in `d92f5012` and listed here only now
+- **§4.2 Verdicts on receipt (new)** — the four verdicts and the rules that
+  follow: the verdict belongs to the receiver, absence of a signature is
+  `legacy` rather than acceptance, an unimplementable preimage version is
+  `legacy` rather than a forgery, `conversation_id` is recomputed from the
+  receiver's own state (and a 1:1 has two such names), and a whole-conversation
+  replace that survives nothing is refused whole
 
 ### v1.5 (March 2026)
 - **New message types: P2P Skill Sharing (v0.21.0 Phase 5a Memento-Skills)**

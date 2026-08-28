@@ -2,27 +2,47 @@ version: 2
 
 # Python deps are managed by uv; uv.lock is gitignored (platform-specific,
 # ADR-012), so Dependabot resolves the graph from each pyproject.toml.
+#
+# target-branch is dev because that is where the work is. Without it these
+# pull requests land on main, which trails dev by a hundred commits — the
+# dependency change and the code it has to build against end up on different
+# branches, and reconciling that costs more than the update is worth.
+#
+# open-pull-requests-limit is 0: alerts yes, pull requests no. There is no CI
+# in this repository, so a dependency pull request arrives carrying no
+# evidence — 1442 tests unrun, no build, three platforms unchecked — and the
+# green "mergeable" badge only means git can apply the diff. The batch this
+# was decided on contained a two-major jump of vite into the frontend build,
+# wearing that badge.
+#
+# The mechanism is not the problem; the thing that would make it safe is
+# missing. Revisit once CI runs the suite on all three platforms — a bump that
+# arrives already proven is worth having.
 updates:
   - package-ecosystem: "pip"
     directory: "/dpc-hub"
+    target-branch: "dev"
     schedule:
       interval: "weekly"
-    open-pull-requests-limit: 5
+    open-pull-requests-limit: 0
 
   - package-ecosystem: "pip"
     directory: "/dpc-client/core"
+    target-branch: "dev"
     schedule:
       interval: "weekly"
-    open-pull-requests-limit: 5
+    open-pull-requests-limit: 0
 
   - package-ecosystem: "pip"
     directory: "/dpc-protocol"
+    target-branch: "dev"
     schedule:
       interval: "weekly"
-    open-pull-requests-limit: 5
+    open-pull-requests-limit: 0
 
   - package-ecosystem: "npm"
     directory: "/dpc-client/ui"
+    target-branch: "dev"
     schedule:
       interval: "weekly"
-    open-pull-requests-limit: 5
+    open-pull-requests-limit: 0

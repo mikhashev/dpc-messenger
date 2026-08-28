@@ -21,6 +21,18 @@ SLEEP_STATE_FILE = "sleep_state.json"
 MORNING_BRIEF_FILE = "morning_brief.json"
 SLEEP_FINDINGS_FILE = "sleep_findings.json"
 
+# One sleep pipeline at a time, process-wide (= per device: one backend per
+# machine). Two consolidations running together carry 92-170K-token prompts
+# against llama-server's unified 262 144-token KV pool, and the second
+# prefill eats the pool out from under the first — the server then kills
+# both with "Context size has been exceeded" (2026-08-19: three failure
+# waves, two agents lost their briefs). Chat turns don't take this lock:
+# a chat alongside a sleep stays well inside the pool; only sleep+sleep
+# overflows it. An asyncio lock serializes one event loop — both triggers
+# (agent sleep and group sleep) enter through service.py's create_task on
+# the backend's single loop; a second loop would silently un-serialize this.
+_SLEEP_PIPELINE_LOCK = asyncio.Lock()
+
 PER_SESSION_PROMPT = """\
 Analyze this single conversation session and extract key information. \
 Respond with ONLY a JSON object, no markdown fences.
@@ -114,7 +126,100 @@ Rules:
 
 
 SYNTHESIS_BUDGET_FACTOR = 0.85
-SYNTHESIS_OUTPUT_RESERVE_TOKENS = 4000
+# The room reserved for the answer, and — since 2026-08-20 — the ceiling the call
+# actually asks for. One quantity, used at both ends on purpose: it used to be
+# two, 4000 subtracted from the input budget and never sent, while the request
+# went out at the provider default of 8192.
+#
+# Measured on the run that produced no brief (local model, 124 sessions): prompt
+# 178 731 of a 262 144 window, completion 8 192 of 8 192, `finish=length`, of
+# which 4 921 tokens were the think block and 3 271 the answer — a real,
+# well-formed brief cut mid-array. The brief needs more than 3 271 and ~83 K of
+# window sat unused.
+#
+# A fraction rather than a flat number because the fleet's windows differ by two
+# orders of magnitude: a flat 16 384 would leave a 16 000-token alias with a
+# negative input budget, which is not a reserve but a refusal.
+SYNTHESIS_OUTPUT_RESERVE_FRACTION = 0.10
+SYNTHESIS_OUTPUT_RESERVE_MIN = 4000
+SYNTHESIS_OUTPUT_RESERVE_MAX = 16384
+# What the think block may take of that room. The ceiling is the deterministic
+# half — it gives the brief space whatever the model does; this is the other
+# half, because the run above spent 60 % of its ceiling thinking and a larger
+# ceiling alone would have been partly eaten again. Three quarters stay with the
+# answer. Providers that do not read a per-request budget ignore it; they are
+# also the ones whose alias already carries a 65 536-token ceiling.
+SYNTHESIS_THINKING_SHARE = 0.25
+
+# The word, not only the budget. A clamp keeps the think block inside the output
+# window; it cannot stop a model from ending its answer early, and on 2026-08-21
+# one did exactly that — a well-formed brief cut mid-string at `finish=stop`
+# with 11 217 tokens of its ceiling unused. Nothing but an effort word reaches
+# that mode. Until then every sleep call carried no effort at all and ran on the
+# chat template's own default, which on the local model is its deepest rung.
+#
+# Synthesis reasons across a hundred sessions and keeps a middle rung. A
+# per-session summary into a fixed schema is not a reasoning task and takes the
+# lowest one.
+SYNTHESIS_EFFORT = "medium"
+ANALYSIS_EFFORT = "low"
+
+# The same quarter-share the synthesis gives its think block, against the ceiling
+# the analysis call actually has. That call asked for nothing at all, so it ran on
+# the provider default of 8 192 and, on 2026-08-21, spent 4 010 of them thinking
+# and had its JSON cut at the ceiling. Absolute rather than a share because this
+# call site does not know the window; a provider with less room clamps it down
+# itself before the request is built.
+ANALYSIS_THINKING_BUDGET_TOKENS = 2048
+
+# How long a sleep may hold its own lock before a later trigger calls it stuck
+# and starts over the top of it.
+SLEEP_TIMEOUT_MINUTES = 30
+
+# One unattended call over the whole archive, sized against the provider default
+# of 300s that is meant as headroom for a model's first VRAM load. A local
+# thinking model reading a hundred archives exceeded that and took the entire
+# morning brief with it, because nothing here retries. Nobody is waiting on this
+# call, so the cost of it being generous is only that a genuinely stuck daemon is
+# noticed later; the cost of it being short is a night with no brief.
+#
+# Derived from the lock window rather than chosen beside it. The first version of
+# this constant was 1800.0 — exactly the window — so a synthesis that spent its
+# whole budget would cross the stuck threshold at the same instant, and the next
+# trigger would reset a run that was still working. One step of the pipeline
+# cannot be allowed to consume the whole allowance the pipeline is given.
+SYNTHESIS_TIMEOUT_SECONDS = SLEEP_TIMEOUT_MINUTES * 60 / 2
+
+
+def _synthesis_output_reserve(context_window: int) -> int:
+    """Room for the answer: a tenth of the window, floored and capped.
+
+    Single source of truth — the input budget subtracts this and the request
+    asks for exactly this, so the two cannot drift into different numbers again.
+    """
+    return min(
+        SYNTHESIS_OUTPUT_RESERVE_MAX,
+        max(SYNTHESIS_OUTPUT_RESERVE_MIN, int(context_window * SYNTHESIS_OUTPUT_RESERVE_FRACTION)),
+    )
+
+
+def _synthesis_request_limits(context_window: int) -> Dict[str, Any]:
+    """What the synthesis call asks the provider for, on this window."""
+    reserve = _synthesis_output_reserve(context_window)
+    return {
+        "max_tokens": reserve,
+        "reasoning_budget_tokens": max(1, int(reserve * SYNTHESIS_THINKING_SHARE)),
+        "reasoning_effort": SYNTHESIS_EFFORT,
+    }
+
+
+def _analysis_request_limits() -> Dict[str, Any]:
+    """What one session's analysis asks for. No ceiling: the provider's own is
+    the ceiling, and this call's failure was the think block inside it."""
+    return {
+        "reasoning_budget_tokens": ANALYSIS_THINKING_BUDGET_TOKENS,
+        "reasoning_effort": ANALYSIS_EFFORT,
+    }
 
 
 def _compute_synthesis_budget(context_window: int, template_overhead_tokens: int) -> int:
@@ -124,7 +229,9 @@ def _compute_synthesis_budget(context_window: int, template_overhead_tokens: int
     helper and the observability site read from this. If the factor or
     reserve change, only this function needs editing.
     """
-    return int(context_window * SYNTHESIS_BUDGET_FACTOR) - SYNTHESIS_OUTPUT_RESERVE_TOKENS - template_overhead_tokens
+    return (int(context_window * SYNTHESIS_BUDGET_FACTOR)
+            - _synthesis_output_reserve(context_window)
+            - template_overhead_tokens)
 
 
 def _render_finding_block(seq_index: int, finding: Dict[str, Any]) -> str:
@@ -188,6 +295,94 @@ def _read_sleep_state(conversation_dir: Path) -> Dict[str, Any]:
 def _write_sleep_state(conversation_dir: Path, state: Dict[str, Any]) -> None:
     path = conversation_dir / SLEEP_STATE_FILE
     path.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+#: How many automatic dumps to keep per agent — seven **sleeps**, not seven nights.
+#: Nothing in this system schedules sleep: a human runs it, from `/sleep` in the 1:1
+#: chat or the UI button, and only on an empty chat. So the backup cadence is exactly
+#: the cadence of that ritual, and a quiet week takes no copies at all. Seven is enough
+#: to reach back past a bad run nobody noticed the same day, and costs about 18 MB on
+#: the largest agent. Hand-taken dumps are kept by naming them something other than the
+#: pattern below — rotation only ever touches its own.
+#: (The first version of this comment said "every night on its own". Ark and GLM 5.2
+#: caught it independently: there is no night in the code.)
+GRAPH_EXPORT_KEEP = 7
+GRAPH_EXPORT_DIR = "knowledge_graph_export"
+_NIGHTLY_SUFFIX = "-nightly.jsonl"
+
+
+def _export_graph_snapshot(agent_id: Optional[str], conversation_dir: Path) -> Optional[Path]:
+    """Write the agent's graph out, and keep the last few nights of them.
+
+    Returns the dump path, or None when there is no graph to dump. Called from the
+    tail of a completed sleep — see the call site for why there and not elsewhere.
+    """
+    from .knowledge_graph import KnowledgeGraph
+    from .utils import get_agent_root
+
+    if agent_id:
+        agent_root = get_agent_root(agent_id)
+    else:
+        agent_root = conversation_dir.parent.parent / "agents" / conversation_dir.name
+    if not agent_root.is_dir():
+        return None
+
+    # This builds its own facade rather than borrowing the service's, and that is safe
+    # only because the grafeo backend keys a singleton on the resolved store path — both
+    # end up on one handle. A *second process* cannot open a live `.grafeo` at all, and
+    # a second handle in this one would hit the same wall. Two consequences worth
+    # stating rather than inheriting: never call `close()` on this facade (it would shut
+    # the store the service is still serving from), and if that singleton ever goes
+    # away, this line has to become the cached lookup instead. Ark asked whether this
+    # path was ever measured; `test_two_facades_on_one_root_share_the_live_handle` now
+    # holds it.
+    kg = KnowledgeGraph(agent_root)
+    if kg.backend.node_count() == 0:
+        return None
+
+    previous = sorted((agent_root / GRAPH_EXPORT_DIR).glob(f"*{_NIGHTLY_SUFFIX}"))
+    irreplaceable_before = _llm_relation_count(previous[-1]) if previous else 0
+
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    target = agent_root / GRAPH_EXPORT_DIR / f"{stamp}{_NIGHTLY_SUFFIX}"
+    written = kg.export_to(target)
+
+    # Rotation must never be the thing that finishes off a damaged graph. The standing
+    # symptom on this fleet is a store that reopens smaller; if that ever reaches the
+    # class nothing rebuilds, the graph is damaged-but-not-empty, sleep still completes,
+    # and seven more successful backups would quietly evict the last copy that still
+    # had those edges in it. So: a shrink means keep everything and say so. Raised by
+    # Fable 5 in review as the thing to fix here before anything else.
+    irreplaceable_now = kg.snapshot().get("edges_by_source", {}).get("llm_relation", 0)
+    if previous and irreplaceable_now < irreplaceable_before:
+        log.warning(
+            "Sleep: knowledge graph backed up, but llm_relation fell from %d to %d — "
+            "keeping every previous dump instead of rotating, because one of them is "
+            "the last copy that still has those edges",
+            irreplaceable_before, irreplaceable_now,
+        )
+    else:
+        nightly = sorted(target.parent.glob(f"*{_NIGHTLY_SUFFIX}"))
+        for old in nightly[:-GRAPH_EXPORT_KEEP]:
+            try:
+                old.unlink()
+            except OSError as e:
+                log.debug("Could not rotate out %s: %s", old.name, e)
+
+    log.info("Sleep: knowledge graph backed up — %d nodes, %d edges, %d irreplaceable → %s",
+             written["nodes"], written["edges"], irreplaceable_now, target.name)
+    return target
+
+
+def _llm_relation_count(dump: Path) -> int:
+    """How many irreplaceable edges a previous dump holds, read from its own header."""
+    try:
+        with dump.open(encoding="utf-8") as fh:
+            first = fh.readline()
+        header = json.loads(first) if first.strip() else {}
+    except (OSError, json.JSONDecodeError):
+        return 0
+    return ((header.get("snapshot") or {}).get("edges_by_source") or {}).get("llm_relation", 0)
 
 
 def _collect_group_archive_digests(group_dir: Path, agent_id: str) -> List[Dict[str, Any]]:
@@ -290,6 +485,77 @@ def _parse_llm_json(response: str) -> Dict[str, Any]:
         if cleaned.startswith("```"):
             cleaned = cleaned.split("\n", 1)[-1].rsplit("```", 1)[0]
         return json.loads(cleaned)
+
+
+def _last_usage_of(llm_manager, provider_alias: Optional[str]) -> Dict[str, Any]:
+    """What the provider reported for its most recent call, or nothing.
+
+    Best-effort on every step: this feeds a diagnostic, and a diagnostic that
+    can raise turns one failure into two.
+    """
+    try:
+        providers = getattr(llm_manager, "providers", None) or {}
+        alias = provider_alias or getattr(llm_manager, "default_provider", None)
+        provider = providers.get(alias) if alias else None
+        if provider is None or not hasattr(provider, "get_last_usage"):
+            return {}
+        return provider.get_last_usage() or {}
+    except Exception:
+        return {}
+
+
+def _capture_unparsable(
+    response: str,
+    err: json.JSONDecodeError,
+    *,
+    label: str,
+    usage: Optional[Dict[str, Any]] = None,
+    dump_dir: Optional[Path] = None,
+) -> Optional[Path]:
+    """Record what could not be parsed, before the exception leaves.
+
+    The 2026-08-20 synthesis failure destroyed its own evidence: the
+    exception carried a position and nothing else, so «the model wrote a
+    brief and was cut» and «the model wrote a stub and then prose» stayed
+    indistinguishable — and those two need opposite repairs. The head tells
+    which of the two it was; the tail tells whether the text stops
+    mid-word; `finish_reason` and the completion count say whether the
+    ceiling was reached. The full body goes to disk because this log
+    rotates by size, so a noisy day can delete the evidence within hours.
+    """
+    usage = usage or {}
+    head = response[:500]
+    tail = response[-200:] if len(response) > 500 else "(shorter than the head window)"
+
+    dump_path: Optional[Path] = None
+    if dump_dir is not None:
+        try:
+            dump_dir.mkdir(parents=True, exist_ok=True)
+            stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+            dump_path = dump_dir / f"failed_{label}_{stamp}.txt"
+            # errors="replace", and the guard catches ValueError beside OSError:
+            # a lone surrogate makes strict encoding raise UnicodeEncodeError,
+            # which is a ValueError — so a narrow guard would let the instrument
+            # destroy the very evidence it exists to keep, and mask the parse
+            # error on the way out.
+            dump_path.write_text(response, encoding="utf-8", errors="replace")
+        except (OSError, ValueError) as dump_err:
+            log.warning("Unparsable %s: the dump could not be written: %s", label, dump_err)
+            dump_path = None
+
+    log.error(
+        "Unparsable %s response: %s at char %d | chars=%d completion_tokens=%s/%s "
+        "finish=%s | dump=%s\n--- first 500 ---\n%s\n--- last 200 ---\n%s",
+        label, err.msg, err.pos, len(response),
+        # The ceiling beside the count: `completion_tokens=8192` only means
+        # "cut at the cap" to a reader who already knows the cap is 8192, and
+        # this is the fallback signal for the day `finish_reason` comes back
+        # empty from the pinned server.
+        usage.get("completion_tokens", "?"), usage.get("max_tokens", "?"),
+        usage.get("finish_reason", "?"),
+        dump_path or "-", head, tail,
+    )
+    return dump_path
 
 
 def _build_session_source_id(archive: str) -> tuple[str, str]:
@@ -442,12 +708,23 @@ async def _analyze_single_session(
         messages=messages_text,
     )
 
-    response = await llm_manager.query(prompt, provider_alias=provider_alias)
+    response = await llm_manager.query(
+        prompt, provider_alias=provider_alias, **_analysis_request_limits()
+    )
     if not response or not response.strip():
         raise ValueError(
             "LLM returned empty response (extended thinking may have consumed all output tokens)"
         )
-    finding = _parse_llm_json(response)
+    try:
+        finding = _parse_llm_json(response)
+    except json.JSONDecodeError as err:
+        _capture_unparsable(
+            response, err,
+            label="session-analysis",
+            usage=_last_usage_of(llm_manager, provider_alias),
+            dump_dir=conversation_dir / "sleep_results",
+        )
+        raise
     finding["archive_file"] = archive_file
     finding["digest_date"] = digest.get("date", "")
     finding["source"] = digest.get("source", "1:1")
@@ -459,7 +736,6 @@ async def run_sleep(
     force: bool = False, provider_alias: Optional[str] = None,
     progress_callback=None, group_id: Optional[str] = None,
 ) -> Dict[str, Any]:
-    SLEEP_TIMEOUT_MINUTES = 30
     state = _read_sleep_state(conversation_dir)
     if state.get("status") == "sleeping":
         started = state.get("started_at")
@@ -483,6 +759,19 @@ async def run_sleep(
         "started_at": datetime.now(timezone.utc).isoformat(),
     })
 
+    # State is already "sleeping", so a duplicate trigger for THIS agent is
+    # still deduplicated while we wait; the queue is only ever between
+    # different agents. The "queued" report is advisory — checked before
+    # acquire, so a race can miss it; the lock itself is the guarantee.
+    if _SLEEP_PIPELINE_LOCK.locked():
+        log.info("Sleep pipeline for %s queued behind a running one",
+                 agent_id or conversation_dir.name)
+        if progress_callback:
+            try:
+                await progress_callback(0, 0, "queued", "")
+            except Exception:
+                pass
+    await _SLEEP_PIPELINE_LOCK.acquire()
     try:
         results_dir = conversation_dir / "sleep_results"
         results_dir.mkdir(exist_ok=True)
@@ -719,12 +1008,30 @@ async def run_sleep(
             entity_section=entity_section,
         )
 
-        response = await llm_manager.query(synthesis_prompt, provider_alias=provider_alias)
+        response = await llm_manager.query(
+            synthesis_prompt,
+            provider_alias=provider_alias,
+            timeout=SYNTHESIS_TIMEOUT_SECONDS,
+            # The ceiling this call reserved for itself, and the cap that keeps the
+            # think block from spending it. A provider that does not read either
+            # ignores them; the local one reads both, and it is the one that was
+            # writing half a brief.
+            **_synthesis_request_limits(context_window),
+        )
         if not response or not response.strip():
             raise ValueError(
                 "LLM returned empty response (extended thinking may have consumed all output tokens)"
             )
-        result = _parse_llm_json(response)
+        try:
+            result = _parse_llm_json(response)
+        except json.JSONDecodeError as err:
+            _capture_unparsable(
+                response, err,
+                label="synthesis",
+                usage=_last_usage_of(llm_manager, provider_alias),
+                dump_dir=results_dir,
+            )
+            raise
 
         morning_brief = result.get("morning_brief", {})
         sleep_findings = result.get("sleep_findings", {})
@@ -757,12 +1064,21 @@ async def run_sleep(
                     props = {"source": "llm_relation"}
                     if rel.get("needs_review"):
                         props["needs_review"] = True
-                    _kg._add_edge_safe(src_id, tgt_id, edge_type, justification, now, props)
-                    added += 1
-                if added:
-                    log.info("Sleep pipeline: LLM extracted %d relations (from %d candidates)", added, len(extracted_relations))
+                    if _kg._add_edge_safe(src_id, tgt_id, edge_type, justification, now, props):
+                        added += 1
+                if added or extracted_relations:
+                    log.info("Sleep pipeline: LLM relations — %d new of %d proposed", added, len(extracted_relations))
             except Exception as e:
-                log.debug("Sleep pipeline: LLM relation extraction failed: %s", e)
+                # WARNING, not debug. This is the only writer of the only edge class
+                # with no source outside the graph — 40.8% of the fleet's edges and
+                # growing. If it dies (a provider alias rots, the response shape
+                # changes) everything around it still reports success: sleep completes,
+                # the brief renders, the backup dumps a graph that has quietly stopped
+                # growing. GLM 5.2 called this the single point where this whole
+                # architecture can fail invisibly forever.
+                log.warning("Sleep pipeline: LLM relation extraction failed — the "
+                            "irreplaceable edge class gained nothing this cycle: %s", e,
+                            exc_info=True)
 
         morning_brief["generated_at"] = datetime.now(timezone.utc).isoformat()
         morning_brief["consumed"] = False
@@ -793,6 +1109,19 @@ async def run_sleep(
         except Exception as e:
             log.warning("Sleep: tier1 consolidation failed (non-fatal): %s", e)
 
+        # The graph's backup, taken where it belongs: right after the one writer that
+        # produces edges nothing can rebuild. A dump only ever taken by hand is a dump
+        # that exists until someone forgets, and this class is 40.8% of the fleet's
+        # edges — 57.2% on warren — with no source outside the store.
+        #
+        # Sleep is the moment: the run has just finished writing, no pass is clearing
+        # structural edges underneath, and the agent is by definition not busy.
+        # Non-fatal by construction — a failed backup must never cost a night's work.
+        try:
+            _export_graph_snapshot(agent_id, conversation_dir)
+        except Exception as e:
+            log.warning("Sleep: knowledge graph export failed (non-fatal): %s", e)
+
         log.info("Sleep pipeline complete: %d sessions analyzed, morning_brief.json written", len(digests))
 
         return {
@@ -810,3 +1139,5 @@ async def run_sleep(
             "error_at": datetime.now(timezone.utc).isoformat(),
         })
         return {"status": "error", "error": err_desc}
+    finally:
+        _SLEEP_PIPELINE_LOCK.release()

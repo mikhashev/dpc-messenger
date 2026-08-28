@@ -27,6 +27,10 @@ class P2PCoordinator:
         self.service = service
         self.p2p_manager = service.p2p_manager
         self.hub_client = service.hub_client
+        # One peer generation at a time on the shared alias. The full queue with
+        # priorities and a remote-share cap is D4-β of ADR-040; this is the half
+        # that keeps two peers from paging the resident model out between them.
+        self._peer_inference_lock = asyncio.Semaphore(1)
 
     async def connect_via_uri(self, uri: str):
         """
@@ -169,11 +173,34 @@ class P2PCoordinator:
 
         logger.debug("Handling inference request from %s (request_id: %s, images: %s)", peer_id, request_id, "yes" if images else "no")
 
-        if not self.service.firewall.can_request_inference(peer_id, model):
-            logger.warning("Access denied: %s cannot request inference%s", peer_id, f" for model {model}" if model else "")
+        # The alias the peer named is evidence for the gate, never an instruction
+        # to the router (ADR-040 D4-0).
+        if not self.service.firewall.can_request_inference(peer_id, model, provider=provider):
+            denied_for = " for model {}".format(model) if model else ""
+            denied_for += " via provider {}".format(provider) if provider else ""
+            logger.warning("Access denied: %s cannot request inference%s", peer_id, denied_for)
             error_response = create_remote_inference_response(
                 request_id=request_id,
-                error=f"Access denied: You are not authorized to request inference" + (f" for model {model}" if model else "")
+                error="Access denied: You are not authorized to request inference" + denied_for
+            )
+            try:
+                await self.p2p_manager.send_message_to_peer(peer_id, error_response)
+            except Exception as e:
+                logger.error("Error sending inference error response to %s: %s", peer_id, e, exc_info=True)
+            return
+
+        # What this node serves peers from is the host's choice and nobody else's.
+        # Unset means we serve nobody: refused out loud, rather than falling back
+        # to whatever the router would have picked — which on a box with a paid
+        # default_provider means the host pays for a stranger's tokens.
+        serving_alias = self.service.firewall.compute_serving_alias
+        if not serving_alias:
+            logger.warning(
+                "Peer inference refused for %s: this node designates no compute.serving_alias", peer_id
+            )
+            error_response = create_remote_inference_response(
+                request_id=request_id,
+                error="This node shares no compute: no serving alias is configured",
             )
             try:
                 await self.p2p_manager.send_message_to_peer(peer_id, error_response)
@@ -182,21 +209,27 @@ class P2PCoordinator:
             return
 
         try:
-            logger.info("Running inference for %s (model: %s, provider: %s)", peer_id, model or 'default', provider or 'default')
+            logger.info("Running inference for %s (requested model: %s, requested provider: %s, serving alias: %s)",
+                        peer_id, model or 'default', provider or 'default', serving_alias)
 
-            provider_alias_to_use = provider
-            if model and not provider:
-                found_alias = self.service.llm_manager.find_provider_by_model(model)
-                if found_alias:
-                    provider_alias_to_use = found_alias
-                    logger.debug("Found provider '%s' for model '%s'", found_alias, model)
-                else:
-                    raise ValueError(f"No provider found for model '{model}'")
-
-            result = await self.service.llm_manager.query(prompt, provider_alias=provider_alias_to_use, images=images, return_metadata=True)
+            async with self._peer_inference_lock:
+                result = await self.service.llm_manager.query(prompt, provider_alias=serving_alias, images=images, return_metadata=True)
             logger.info("Inference completed successfully for %s", peer_id)
 
             actual_model = result.get("model", model)
+            # A peer's request belongs to no agent, so it writes no row in any
+            # events.jsonl and appears in no cost series. This line is the record.
+            # The counts are named `_est` because they are ours: llm_manager fills
+            # them with its own count_tokens over the prompt and the answer, not
+            # with what the engine reported. On an Ollama alias the daemon's own
+            # figures for the same call are on the neighbouring "Ollama usage:"
+            # line; whoever compares the two will find them close and different,
+            # and should not have to discover that from the numbers.
+            logger.info(
+                "Peer inference served: peer=%s alias=%s model=%s prompt_tokens_est=%s response_tokens_est=%s",
+                peer_id, serving_alias, actual_model,
+                result.get("prompt_tokens"), result.get("response_tokens"),
+            )
             success_response = create_remote_inference_response(
                 request_id=request_id,
                 response=result["response"],
@@ -331,11 +364,30 @@ class P2PCoordinator:
                 if has_transcription_access and self.service.firewall.can_request_transcription(peer_id, model):
                     filtered_providers.append(provider_info)
             else:
-                if has_compute_access and self.service.firewall.can_request_inference(peer_id, model):
+                # Offer only what we will actually serve (ADR-040 D4-0). Offering
+                # the rest both invites a request the gate now refuses and tells a
+                # peer which paid accounts this node holds.
+                if (has_compute_access
+                        and provider_info["alias"] == self.service.firewall.compute_serving_alias
+                        and self.service.firewall.can_request_inference(peer_id, model)):
                     filtered_providers.append(provider_info)
 
         logger.debug("Sending %d providers to %s (filtered from %d total)",
                     len(filtered_providers), peer_id[:20], len(all_providers))
+
+        # Say the quiet part once. Compute sharing on, the peer allowed, and the
+        # answer still carries no inference provider — because `serving_alias`
+        # is what designates one and it is empty by default (D4-0: the host
+        # allocates, not the caller). Until this line the only trace was the
+        # DEBUG count above, so a person who had switched sharing on and added
+        # the peer to a group saw a peer offering nothing and no reason for it.
+        if has_compute_access and not self.service.firewall.compute_serving_alias:
+            logger.info(
+                "Compute sharing is enabled and %s is allowed, but no compute.serving_alias "
+                "is designated — no inference provider is offered. Set it in the firewall "
+                "rules (Compute Sharing) to name the one alias peers are served from.",
+                peer_id[:20],
+            )
 
         response = create_providers_response(filtered_providers)
         try:
@@ -417,7 +469,7 @@ class P2PCoordinator:
     # Outgoing P2P requests (Phase C Step 5 Batch 3)
     # ─────────────────────────────────────────────────────────────
 
-    async def request_inference_from_peer(self, peer_id: str, prompt: str, model: str = None, provider: str = None, images: list = None, timeout: float = 240.0) -> str:
+    async def request_inference_from_peer(self, peer_id: str, prompt: str, model: str = None, provider: str = None, images: list = None, timeout: float = 1200.0) -> str:
         """Request remote inference from a specific peer."""
         import uuid
         from dpc_protocol.protocol import create_remote_inference_request

@@ -11,8 +11,9 @@ from .providers import (
     AIProvider, ModelNotCachedError, parse_thinking_tags,
     OPENAI_THINKING_MODELS, ANTHROPIC_THINKING_MODELS,
     OllamaProvider, OLLAMA_VISION_MODELS, OLLAMA_THINKING_MODELS,
-    OpenAICompatibleProvider, AnthropicProvider, ZaiProvider, ZaiCodingProvider,
+    OpenAICompatibleProvider, AnthropicProvider, ZaiProvider,
     DeepSeekProvider,
+    LlamaServerProvider,
     LocalWhisperProvider, RemotePeerProvider, DpcAgentProvider,
     GeminiProvider, GitHubModelsProvider, GigaChatProvider,
 )
@@ -41,9 +42,15 @@ PROVIDER_MAP = {
     "ollama": OllamaProvider,
     "openai_compatible": OpenAICompatibleProvider,
     "anthropic": AnthropicProvider,
+    # One Z.AI type, on the prepaid platform API (api/paas/v4). The two it replaces
+    # both drew the GLM Coding Plan subscription — `zai` through api/anthropic and
+    # `zai_coding` through api/coding/paas/v4 — which the vendor licenses only to its
+    # own list of supported tools, and this product is not on it. A config still
+    # naming `zai_coding` fails to load loudly rather than silently falling back,
+    # which is the behaviour we want: the alias has to be repointed, not inherited.
     "zai": ZaiProvider,
-    "zai_coding": ZaiCodingProvider,  # Z.AI GLM Coding Plan (OpenAI-compatible coding/paas/v4)
     "deepseek": DeepSeekProvider,  # DeepSeek pay-per-token (OpenAI-compatible, V4 thinking)
+    "llamacpp_server": LlamaServerProvider,  # DPC-owned llama-server child (ADR-040 route b2)
     "local_whisper": LocalWhisperProvider,  # v0.13.1+: Local Whisper transcription
     "dpc_agent": DpcAgentProvider,  # Embedded autonomous AI agent
     "remote_peer": RemotePeerProvider,  # v0.18.0+: Remote peer inference
@@ -135,6 +142,7 @@ class LLMManager:
         self.default_provider: str | None = None
         self.vision_provider: str | None = None  # Vision-specific provider for auto-selection
         self.voice_provider: str | None = None  # v0.13.0+: Voice transcription provider for auto-selection
+        self.knowledge_provider: str | None = None  # Extracts knowledge; unset means the conversation's own model
 
         # Callback for re-injecting CoreService after providers reload (v0.18.0+)
         self._on_providers_reload_callback: Optional[Callable[[], None]] = None
@@ -337,6 +345,9 @@ class LLMManager:
             self.vision_provider = config.get("vision_provider")  # Load vision provider for auto-selection
             self.voice_provider = config.get("voice_provider")  # v0.13.0+: Load voice provider for auto-selection
             self.agent_provider = config.get("agent_provider")  # v0.18.0+: Load agent provider for AI agent
+            # Absent means «walk the chain», not «use the text default» —
+            # the extraction prompt carries the whole conversation.
+            self.knowledge_provider = config.get("knowledge_provider")
 
             for provider_config in config.get("providers", []):
                 alias = provider_config.get("alias")
@@ -363,6 +374,10 @@ class LLMManager:
             if self.agent_provider and self.agent_provider not in self.providers:
                 logger.warning("Agent provider '%s' not found in loaded providers", self.agent_provider)
                 self.agent_provider = None
+
+            if self.knowledge_provider and self.knowledge_provider not in self.providers:
+                logger.warning("Knowledge provider '%s' not found in loaded providers", self.knowledge_provider)
+                self.knowledge_provider = None
 
         except Exception as e:
             logger.error("Error parsing provider config file: %s", e, exc_info=True)
@@ -404,6 +419,11 @@ class LLMManager:
             # Reload providers
             self.providers.clear()
             self._load_providers_from_config()
+
+            # A dropped alias takes its provider object with it; the child it started
+            # is only reachable through the supervisor registry after that.
+            from .providers.llamacpp_server_provider import retire_absent
+            retire_absent(self.providers.keys())
 
             for alias, managers in preserved_managers.items():
                 new_provider = self.providers.get(alias)
@@ -649,7 +669,25 @@ class LLMManager:
                     logger.info("Parsed thinking tags from response (%d chars)", len(thinking_content))
 
             if thinking_content:
-                thinking_tokens = self.count_tokens(thinking_content, provider.model)
+                # Prefer the number the provider was given by the API over one we
+                # compute again from the text. DeepSeek reports
+                # `completion_tokens_details.reasoning_tokens` — the count it bills
+                # — and this used to ignore it and re-count with `count_tokens`,
+                # which for a model name carrying no `gpt`/`claude` and no colon
+                # falls through to `len(text) // 4`. On a measured call that read
+                # 190 on screen where the API had said 168: an estimate displayed
+                # beside a measurement we already held.
+                #
+                # `get_last_usage()` is on `AIProvider`, so this needs no guard and
+                # no knowledge of which provider answered. Providers that estimate
+                # the split themselves (llama-server, when the server reports none)
+                # put their estimate in the same field — still their own number over
+                # the same text, and better than a second opinion computed here.
+                reported = (provider.get_last_usage() or {}).get("reasoning_tokens")
+                if isinstance(reported, int) and reported > 0:
+                    thinking_tokens = reported
+                else:
+                    thinking_tokens = self.count_tokens(thinking_content, provider.model)
         else:
             logger.debug("Provider '%s' does not support thinking mode", provider.model)
 
@@ -695,6 +733,17 @@ class LLMManager:
                     await provider.shutdown()
                 except Exception as e:
                     logger.warning(f"Error shutting down provider '{alias}': {e}")
+
+        # A llama-server child can outlive the provider that started it — a config
+        # reload drops provider objects without closing them — so the last word on
+        # what is still running belongs to the supervisor registry, not to this dict.
+        from .providers.llamacpp_server_provider import stop_all_supervisors
+        orphaned = await stop_all_supervisors()
+        if orphaned:
+            logger.warning(
+                "Stopped %d llama-server child(ren) no provider was holding any more: %s",
+                len(orphaned), ", ".join(orphaned),
+            )
         logger.info("LLMManager shutdown complete")
 
 # --- Self-testing block ---

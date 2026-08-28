@@ -1,0 +1,35 @@
+{
+  "agent": "agent_001",
+  "backend_id": "native+native",
+  "both_indexes_loaded": true,
+  "queries": 189,
+  "seconds": 1.0,
+  "top_k": 20,
+  "channels": {
+    "text": {
+      "recall@1": 0.873015873015873,
+      "recall@5": 0.9682539682539683,
+      "recall@10": 0.9841269841269841,
+      "mrr": 0.9188940248464059,
+      "found": 188,
+      "queries": 189
+    },
+    "vector": {
+      "recall@1": 0.9470899470899471,
+      "recall@5": 0.9947089947089947,
+      "recall@10": 0.9947089947089947,
+      "mrr": 0.9687349687349688,
+      "found": 189,
+      "queries": 189
+    },
+    "fused": {
+      "recall@1": 0.9682539682539683,
+      "recall@5": 0.9947089947089947,
+      "recall@10": 1.0,
+      "mrr": 0.9821428571428571,
+      "found": 189,
+      "queries": 189
+    }
+  },
+  "misses_fused": []
+}

@@ -18,6 +18,24 @@ class MemoryConfig:
     max_recall_results: int = 3
     memory_provider: Optional[str] = None
     auto_index: bool = True
+    # Texts per embedding call. Kept modest on purpose: indexing shares the GPU with
+    # whatever else the client has resident (a Whisper model, a local LLM), and a
+    # batch large enough to spill into shared memory turns a fast pass into paging.
+    batch_size: int = 16
+    # Where a document is cut before embedding. The other half of peak memory —
+    # cost is batch_size times this — and the half batch_size cannot reach, since one
+    # long file fills the window alone. Below bge-m3's own 8192 so a 400 KB file does
+    # not decide how much memory an indexing pass needs. Changing it moves the vectors
+    # of every document longer than the limit, so it wants a reindex, not a restart.
+    max_tokens: int = 4096
+    # Where the embedding model runs. None keeps the automatic choice — cuda, then
+    # mps, then cpu — which is what every install had before this field existed.
+    # "cpu" is the reason it exists: the card this process shares is the binding
+    # constraint on the model the agents wait for, and embeddings are background
+    # work (indexing, Active Recall) whose latency nobody watches. The model is a
+    # per-process singleton, so the first agent to build it decides for all of
+    # them; a later disagreement is logged rather than silently honoured.
+    embedding_device: Optional[str] = None
 
     @classmethod
     def from_dict(cls, data: dict) -> "MemoryConfig":

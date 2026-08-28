@@ -14,6 +14,8 @@ from typing import List, Optional, Tuple
 
 import numpy as np
 
+from .index_meta import atomic_write_bytes, read_meta, write_meta
+
 log = logging.getLogger(__name__)
 
 
@@ -90,15 +92,49 @@ class FaissIndex:
         log.info("Removed %d chunks for %s, %d remaining", removed, source_file, self._header.chunk_count)
         return removed
 
+    def remove_by_sources(self, source_files) -> int:
+        """One pass over the chunks, one index rebuilt, however many sources go.
+
+        Per source this reconstructed every surviving vector one at a time and built a
+        fresh IndexFlatIP from them — O(sources x index size), which for a few hundred
+        deletions over a couple of thousand chunks is hundreds of thousands of single
+        reconstructions to delete a few hundred rows.
+        """
+        drop = {s for s in source_files if s}
+        if not drop or self._index is None or not self._chunks:
+            return 0
+        keep = [(i, c) for i, c in enumerate(self._chunks) if c.get("source_file") not in drop]
+        removed = len(self._chunks) - len(keep)
+        if removed == 0:
+            return 0
+        import faiss
+        new_index = faiss.IndexFlatIP(self._header.dimensions)
+        if keep:
+            new_index.add(np.vstack([self._index.reconstruct(i).reshape(1, -1) for i, _ in keep]))
+        self._index = new_index
+        self._chunks = [c for _, c in keep]
+        self._header.chunk_count = self._index.ntotal
+        log.info("Removed %d chunks for %d sources, %d remaining",
+                 removed, len(drop), self._header.chunk_count)
+        return removed
+
     def save(self) -> None:
         self.index_dir.mkdir(parents=True, exist_ok=True)
         if self._index is not None:
             import faiss
-            faiss.write_index(self._index, str(self._index_path))
-        self._meta_path.write_text(json.dumps({
-            "header": asdict(self._header),
-            "chunks": self._chunks,
-        }, ensure_ascii=False, indent=2), encoding="utf-8")
+            # Written beside and moved into place: a reader arriving mid-write would
+            # otherwise meet a truncated index, and `load()` answers that with False —
+            # one turn of recall returning nothing, with no line anywhere saying why.
+            atomic_write_bytes(self._index_path, lambda p: faiss.write_index(self._index, p))
+        # This file is shared with agent_manager, which keeps file_hashes and
+        # header.key_format in it. Writing the document whole dropped both.
+        doc = read_meta(self._meta_path)
+        stored_header = doc.get("header") or {}
+        foreign = {k: v for k, v in stored_header.items()
+                   if k not in IndexHeader.__dataclass_fields__}
+        doc["header"] = {**foreign, **asdict(self._header)}
+        doc["chunks"] = self._chunks
+        write_meta(self._meta_path, doc)
         log.info("Saved FAISS index: %d vectors", self._header.chunk_count)
 
     def load(self) -> bool:
@@ -112,6 +148,20 @@ class FaissIndex:
             if self._index_path.exists():
                 import faiss
                 self._index = faiss.read_index(str(self._index_path))
+            # A row number is only meaningful against the chunk list: `search` maps
+            # `idx` into it, so a list shorter than the index makes later rows
+            # unreachable and earlier rows answer for other documents. That state has
+            # happened — 328 vectors against 23 chunks — and it looked like a healthy
+            # index from every angle except this comparison. Refusing here is the same
+            # answer as a missing file, which the caller already handles by rebuilding.
+            stored_rows = self._index.ntotal if self._index is not None else 0
+            if stored_rows != len(self._chunks):
+                log.warning(
+                    "Index and chunk list disagree (%d vectors, %d chunks) — refusing to load",
+                    stored_rows, len(self._chunks),
+                )
+                self.clear()
+                return False
             return True
         except Exception as e:
             log.warning("Failed to load FAISS index: %s", e)

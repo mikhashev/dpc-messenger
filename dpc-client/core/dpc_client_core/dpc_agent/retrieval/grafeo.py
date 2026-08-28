@@ -123,6 +123,7 @@ def _chunk_meta_from_node(db, node_id) -> Optional[dict]:
         return None
     return {
         "source_file": _node_str(node, "source_file"),
+        "source_path": _node_str(node, "source_path"),
         "source_layer": _node_str(node, "source_layer") or "L5",
         "heading": _node_str(node, "heading"),
         "char_count": _node_int(node, "char_count"),
@@ -206,6 +207,9 @@ class GrafeoVectorIndex(VectorIndex):
                 properties={
                     VECTOR_PROPERTY: vec.astype(np.float32).tolist(),
                     "source_file": item.meta.get("source_file", ""),
+                    # The key names the document; only this locates it. A search
+                    # result without it cannot be turned into a read_file argument.
+                    "source_path": str(item.meta.get("source_path", "")),
                     "source_layer": item.meta.get("source_layer", "L5"),
                     "heading": item.meta.get("heading", ""),
                     "char_count": int(item.meta.get("char_count", 0)),
@@ -301,6 +305,36 @@ class GrafeoVectorIndex(VectorIndex):
                 log.debug("rebuild after remove failed: %s", e)
         return removed
 
+    def remove_by_sources(self, source_files) -> int:
+        """One match, one HNSW rebuild, however many sources are being dropped.
+
+        Per source this did four full node counts and an HNSW rebuild; the deletes
+        themselves were never the cost. An incremental pass that dropped 298 sources
+        therefore paid 298 rebuilds of the whole index — 505.9 s on agent_001, against
+        4.0 s for another agent embedding twice as many documents and removing none.
+        """
+        sources = list(dict.fromkeys(s for s in source_files if s))
+        if not sources:
+            return 0
+        db = self._get_db()
+        before = _node_count(db, VECTOR_LABEL)
+        try:
+            db.execute_cypher(
+                f"MATCH (n:{VECTOR_LABEL}) WHERE n.source_file IN $sf DETACH DELETE n",
+                {"sf": sources},
+            )
+        except Exception as e:
+            log.warning("Grafeo remove_by_sources failed: %s", e)
+            return 0
+        removed = max(0, before - _node_count(db, VECTOR_LABEL))
+        if removed:
+            try:
+                db.rebuild_vector_index(label=VECTOR_LABEL, property=VECTOR_PROPERTY)
+            except Exception as e:
+                log.debug("rebuild after remove failed: %s", e)
+        log.debug("Grafeo removed %d vectors for %d sources", removed, len(sources))
+        return removed
+
     def save(self) -> None:
         # Grafeo is self-persistent — no-op per ABC contract.
         return
@@ -380,6 +414,7 @@ class GrafeoTextIndex(TextIndex):
                     TEXT_PROPERTY: preprocessed,
                     RAW_TEXT_PROPERTY: item.text[:500],
                     "source_file": item.meta.get("source_file", ""),
+                    "source_path": str(item.meta.get("source_path", "")),
                     "source_layer": item.meta.get("source_layer", "L5"),
                     "heading": item.meta.get("heading", ""),
                     "char_count": int(item.meta.get("char_count", 0)),
@@ -441,6 +476,30 @@ class GrafeoTextIndex(TextIndex):
                 db.rebuild_text_index(label=TEXT_LABEL, property=TEXT_PROPERTY)
             except Exception as e:
                 log.debug("rebuild after remove failed: %s", e)
+        return removed
+
+    def remove_by_sources(self, source_files) -> int:
+        """One match, one BM25 rebuild. See GrafeoVectorIndex.remove_by_sources."""
+        sources = list(dict.fromkeys(s for s in source_files if s))
+        if not sources:
+            return 0
+        db = self._get_db()
+        before = _node_count(db, TEXT_LABEL)
+        try:
+            db.execute_cypher(
+                f"MATCH (n:{TEXT_LABEL}) WHERE n.source_file IN $sf DETACH DELETE n",
+                {"sf": sources},
+            )
+        except Exception as e:
+            log.warning("Grafeo remove_by_sources failed: %s", e)
+            return 0
+        removed = max(0, before - _node_count(db, TEXT_LABEL))
+        if removed:
+            try:
+                db.rebuild_text_index(label=TEXT_LABEL, property=TEXT_PROPERTY)
+            except Exception as e:
+                log.debug("rebuild after remove failed: %s", e)
+        log.debug("Grafeo removed %d text docs for %d sources", removed, len(sources))
         return removed
 
     def save(self) -> None:

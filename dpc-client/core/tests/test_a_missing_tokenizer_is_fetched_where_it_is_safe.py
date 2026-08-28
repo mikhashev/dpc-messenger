@@ -1,0 +1,151 @@
+"""A tokenizer is metadata, and metadata may be fetched — but not anywhere.
+
+The counter falls back to one token per four characters, which measured 18%
+low on a page of Russian. Fetching the real tokenizer is a few megabytes and
+fixes that permanently; doing it on the event loop would stop Telegram, the
+WebSocket and P2P for the duration, and doing it in offline mode would
+overrule a decision somebody made on purpose.
+"""
+
+from __future__ import annotations
+
+import asyncio
+
+import pytest
+
+from dpc_client_core.managers.token_count_manager import TokenCountManager
+
+
+@pytest.fixture
+def counter(monkeypatch):
+    monkeypatch.delenv("HF_HUB_OFFLINE", raising=False)
+    return TokenCountManager()
+
+
+def test_off_the_loop_and_online_it_fetches(counter, monkeypatch):
+    fetched = []
+
+    class _Fake:
+        @staticmethod
+        def from_pretrained(repo, **kw):
+            fetched.append((repo, kw))
+            return "tokenizer"
+
+    import transformers
+
+    monkeypatch.setattr(transformers, "AutoTokenizer", _Fake)
+    assert counter._fetch_tokenizer("Qwen/Qwen2.5-7B", "qwen3-vl:8b") == "tokenizer"
+    assert fetched == [("Qwen/Qwen2.5-7B", {})], "a fetch must not be local-only"
+
+
+def test_on_the_loop_it_refuses_and_says_why(counter, monkeypatch, caplog):
+    def _boom(*a, **kw):
+        raise AssertionError("the fetch should not have been attempted")
+
+    import transformers
+
+    monkeypatch.setattr(transformers, "AutoTokenizer", type("F", (), {"from_pretrained": _boom}))
+
+    async def on_loop():
+        with caplog.at_level("WARNING"):
+            return counter._fetch_tokenizer("Qwen/Qwen2.5-7B", "qwen3-vl:8b")
+
+    assert asyncio.run(on_loop()) is None
+    assert "Not fetching it here: this call is on the event loop" in caplog.text
+    assert "could not be fetched" not in caplog.text, "it tried anyway"
+
+
+def test_offline_mode_is_not_overruled(counter, monkeypatch, caplog):
+    monkeypatch.setenv("HF_HUB_OFFLINE", "1")
+
+    def _boom(*a, **kw):
+        raise AssertionError("the fetch should not have been attempted")
+
+    import transformers
+
+    monkeypatch.setattr(transformers, "AutoTokenizer", type("F", (), {"from_pretrained": _boom}))
+    with caplog.at_level("WARNING"):
+        assert counter._fetch_tokenizer("Qwen/Qwen2.5-7B", "qwen3-vl:8b") is None
+    assert "Not fetching it here: the process is in offline mode" in caplog.text
+    assert "could not be fetched" not in caplog.text, "it tried anyway"
+
+
+def test_a_failed_fetch_costs_the_count_and_not_the_call(counter, monkeypatch, caplog):
+    import transformers
+
+    monkeypatch.setattr(
+        transformers, "AutoTokenizer",
+        type("F", (), {"from_pretrained": staticmethod(lambda *a, **kw: (_ for _ in ()).throw(OSError("no route to host")))}),
+    )
+    with caplog.at_level("WARNING"):
+        assert counter._fetch_tokenizer("Qwen/Qwen2.5-7B", "qwen3-vl:8b") is None
+    assert "could not be fetched" in caplog.text
+
+
+def test_a_repo_that_failed_once_is_not_asked_again(counter, monkeypatch, caplog):
+    """Before the negative cache, every count retried the load and printed the
+    same warning — three times in one millisecond in the log of 2026-08-14
+    01:46:12. With a fetch behind that retry it would also mean a download
+    attempt per call."""
+    monkeypatch.setenv("HF_HUB_OFFLINE", "1")
+    attempts = []
+
+    import transformers
+
+    def _record(repo, **kw):
+        attempts.append(repo)
+        raise OSError("not in cache")
+
+    monkeypatch.setattr(transformers, "AutoTokenizer",
+                        type("F", (), {"from_pretrained": staticmethod(_record)}))
+    with caplog.at_level("WARNING"):
+        for _ in range(3):
+            counter.count_tokens("пример текста", "qwen3-vl:8b")
+
+    assert len(attempts) == 1, f"the load was retried: {attempts}"
+    assert caplog.text.count("is not cached") == 1
+
+
+def test_the_warm_up_runs_off_the_loop_and_covers_the_models_it_was_given(counter, monkeypatch):
+    """Everything that counts tokens does so while answering somebody, which is
+    on the loop, where fetching is refused. Without a moment off the loop a
+    missing tokenizer stays missing for the life of the process."""
+    import asyncio
+
+    loops = []
+    fetched = []
+
+    class _Fake:
+        @staticmethod
+        def from_pretrained(repo, **kw):
+            try:
+                asyncio.get_running_loop()
+                loops.append(repo)
+            except RuntimeError:
+                pass
+            if kw.get("local_files_only"):
+                raise OSError("not cached")
+            fetched.append(repo)
+            return f"tok:{repo}"
+
+    import transformers
+
+    monkeypatch.setattr(transformers, "AutoTokenizer", _Fake)
+    asyncio.run(counter.warm_tokenizers(["qwen3-vl:8b", "llama3.1:8b"]))
+
+    assert loops == [], "a load ran on the event loop"
+    assert set(fetched) == {"Qwen/Qwen2.5-7B", "gpt2"}
+    assert counter._hf_tokenizer_cache["gpt2"] == "tok:gpt2"
+
+
+def test_the_warm_up_asks_for_nothing_when_there_are_no_local_models(counter, monkeypatch):
+    import asyncio
+
+    import transformers
+
+    monkeypatch.setattr(
+        transformers, "AutoTokenizer",
+        type("F", (), {"from_pretrained": staticmethod(lambda *a, **k: (_ for _ in ()).throw(AssertionError("asked anyway")))}),
+    )
+    asyncio.run(counter.warm_tokenizers([]))
+    asyncio.run(counter.warm_tokenizers(["deepseek-v4-pro"]))

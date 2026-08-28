@@ -42,6 +42,12 @@ interface MapOptions {
     totalCount?: number;
     identity?: SenderIdentityOptions;
     local?: LocalCachedFields;
+    /**
+     * Timestamp of the message stored before this one, used only when this one
+     * carries none. Records arrive in index order, so the previous message is
+     * the closest thing to a true time an undated record has.
+     */
+    previousTimestamp?: number;
 }
 
 /**
@@ -78,9 +84,16 @@ export function resolveSenderIdentity(
 }
 
 export function mapBackendMessage(msg: any, opts: MapOptions = {}): MappedMessage {
+    // An undated record borrows the time of the one before it. Deriving it from
+    // the clock instead put it later than every real message in an old history,
+    // so it sorted to the bottom — and to a different place on every reload,
+    // which is what a group history "breaking" on sync actually looked like.
+    // The clock is kept only for the first message, where there is no
+    // neighbour and no stable order to preserve.
     const ts = msg.timestamp
         ? new Date(msg.timestamp).getTime()
-        : Date.now() - ((opts.totalCount || 1) - (opts.index || 0)) * 1000;
+        : (opts.previousTimestamp
+            ?? Date.now() - ((opts.totalCount || 1) - (opts.index || 0)) * 1000);
     const id = msg.message_id || msg.id || `msg-${ts}-${opts.index || 0}`;
     const resolved = opts.identity ? resolveSenderIdentity(msg, opts.identity) : null;
 

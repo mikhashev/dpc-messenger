@@ -16,7 +16,7 @@ import json
 import logging
 import uuid
 from dataclasses import dataclass, field, asdict
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from enum import Enum
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional
@@ -27,6 +27,35 @@ if TYPE_CHECKING:
     pass
 
 log = logging.getLogger(__name__)
+
+# First retry waits this long, each further one doubles it. Long enough for a
+# rate limit or a flapping provider to clear, short enough that a transient
+# failure does not park a task for the evening.
+RETRY_BACKOFF_BASE_SEC = 30
+
+
+def _task_type_def(task_type: str):
+    """The registered definition for a type, or None if it is custom/unknown."""
+    try:
+        from .task_types import BUILTIN_TASK_TYPES
+        return BUILTIN_TASK_TYPES.get(task_type)
+    except Exception:  # pragma: no cover — import cycle guard
+        return None
+
+
+def _restart_safe(task_type: str) -> bool:
+    """Whether a type may be repeated after a restart. Unknown types: no."""
+    definition = _task_type_def(task_type)
+    return bool(getattr(definition, "restart_safe", False))
+
+
+def _task_timeout(task_type: str) -> int:
+    definition = _task_type_def(task_type)
+    return int(getattr(definition, "timeout_sec", 0) or DEFAULT_TASK_TIMEOUT_SEC)
+
+
+# Ceiling for a task whose type declares none.
+DEFAULT_TASK_TIMEOUT_SEC = 900
 
 
 class TaskPriority(Enum):
@@ -89,14 +118,33 @@ class TaskQueue:
     - Retry logic with configurable max retries
     """
 
-    def __init__(self, agent_root: Path):
+    # How many tasks may wait at once. Nothing bounded this until 2026-08-24:
+    # `schedule` appended, sorted and saved, and no caller counted. The queue is
+    # persisted and reloaded, so a runaway did not even need one long session to
+    # accumulate — it survived restarts.
+    #
+    # The number is chosen from the logs rather than from taste. Across 382
+    # process starts in the two most recent log files the line
+    # «TaskQueue initialized with N pending tasks» read 0 three hundred and
+    # seventy-seven times and 1 five times. It has never read more. Fifty is two
+    # orders of magnitude above anything observed, which is the point: a ceiling
+    # that ordinary use cannot reach, and a runaway cannot pass.
+    DEFAULT_MAX_PENDING = 50
+
+    def __init__(self, agent_root: Path, max_pending: Optional[int] = None):
         """
         Initialize task queue.
 
         Args:
             agent_root: Root directory for agent storage (~/.dpc/agent/)
+            max_pending: Ceiling on tasks waiting to run. None takes
+                DEFAULT_MAX_PENDING; a value <= 0 means no ceiling, which is what
+                a test that wants the old behaviour asks for explicitly.
         """
         self.agent_root = agent_root
+        self.max_pending = (
+            self.DEFAULT_MAX_PENDING if max_pending is None else int(max_pending)
+        )
         self.queue_file = agent_root / "state" / "task_queue.json"
         self.queue_file.parent.mkdir(parents=True, exist_ok=True)
 
@@ -120,15 +168,54 @@ class TaskQueue:
 
         try:
             data = json.loads(self.queue_file.read_text(encoding="utf-8"))
+            recovered = 0
+            abandoned = 0
             for item in data.get("tasks", []):
                 try:
                     task = Task(**item)
-                    # Only load pending tasks
+                    # A task caught mid-execution by a restart used to vanish:
+                    # mark_running persists status="running", and only "pending"
+                    # was re-admitted here — no retry, no failure record, no
+                    # trace on the board. With check_back that means a restart
+                    # between the person's approval and the wake-up silently
+                    # eats a commitment they agreed to.
+                    if task.status == "running":
+                        # Only a type that declared itself safe to repeat comes
+                        # back. Everything else reached an unknown point before
+                        # the crash — a message may already be posted, a command
+                        # already run — so replaying it silently would trade a
+                        # lost task for a duplicated side effect. Fail it loudly
+                        # instead; that is a worse outcome to nobody and a
+                        # visible one to everybody.
+                        if _restart_safe(task.task_type):
+                            task.status = "pending"
+                            task.retry_count += 1
+                            task.started_at = None
+                            recovered += 1
+                        else:
+                            task.status = "failed"
+                            task.error = (
+                                "interrupted by a restart; this task type is not "
+                                "declared restart_safe, so it was not repeated"
+                            )
+                            task.completed_at = utc_now_iso()
+                            abandoned += 1
                     if task.status == "pending":
                         self._queue.append(task)
                 except Exception as e:
                     log.warning(f"Failed to load task: {e}")
 
+            if abandoned:
+                log.warning(
+                    "%d task(s) were running when the process last stopped and "
+                    "are not restart_safe — marked failed rather than repeated",
+                    abandoned,
+                )
+            if recovered:
+                log.warning(
+                    "Re-queued %d task(s) that were running when the process last "
+                    "stopped — they are retried, not lost", recovered,
+                )
             log.info(f"Loaded {len(self._queue)} pending tasks from disk")
         except Exception as e:
             log.error(f"Failed to load task queue: {e}")
@@ -182,7 +269,24 @@ class TaskQueue:
 
         Returns:
             Created task
+
+        Raises:
+            RuntimeError: when the queue already holds `max_pending` waiting
+                tasks. Refusing is the point: both callers turn an exception into
+                a readable message — the tool answers «Error scheduling task: …»
+                and the WebSocket command answers `{"status": "error"}` — so the
+                agent that asked is told, rather than a task quietly joining a
+                pile nobody is watching.
         """
+        if self.max_pending > 0:
+            pending = sum(1 for t in self._queue if t.status == "pending")
+            if pending >= self.max_pending:
+                raise RuntimeError(
+                    f"Task queue is full: {pending} tasks already waiting "
+                    f"(limit {self.max_pending}). Let some run or cancel a few "
+                    f"before scheduling more."
+                )
+
         task = Task(
             id=task_id or f"task-{uuid.uuid4().hex[:8]}",
             task_type=task_type,
@@ -295,7 +399,18 @@ class TaskQueue:
 
         if task.retry_count < task.max_retries:
             task.status = "pending"
-            log.warning(f"Task {task.id} failed, will retry ({task.retry_count}/{task.max_retries}): {error[:200]}")
+            # The module docstring promised exponential backoff and there was
+            # none: the one-second poll picked the task straight back up, three
+            # times, then dropped it. A failure that needs a moment to clear
+            # never got one.
+            delay = RETRY_BACKOFF_BASE_SEC * (2 ** (task.retry_count - 1))
+            task.scheduled_at = (
+                datetime.now(timezone.utc) + timedelta(seconds=delay)
+            ).isoformat()
+            log.warning(
+                f"Task {task.id} failed, retry {task.retry_count}/{task.max_retries} "
+                f"in {delay}s: {error[:200]}"
+            )
         else:
             task.status = "failed"
             task.completed_at = utc_now_iso()
@@ -343,8 +458,16 @@ class TaskQueue:
                         self.mark_running(task)
 
                         try:
-                            result = await executor(task)
+                            # Without a ceiling one stuck task holds the whole
+                            # processor forever, and every wake-up behind it
+                            # never fires — with nothing in the log to say so.
+                            limit = _task_timeout(task.task_type)
+                            result = await asyncio.wait_for(executor(task), timeout=limit)
                             self.mark_complete(task, str(result) if result else "")
+                        except asyncio.TimeoutError:
+                            log.error("Task %s exceeded %ds and was abandoned",
+                                      task.id, limit)
+                            self.mark_failed(task, f"timed out after {limit}s")
                         except asyncio.CancelledError:
                             log.info(f"Task {task.id} cancelled during execution")
                             self.mark_failed(task, "Cancelled")

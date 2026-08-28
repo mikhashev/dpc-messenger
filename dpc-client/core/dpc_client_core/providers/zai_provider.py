@@ -1,319 +1,476 @@
 # dpc_client_core/providers/zai_provider.py
 
 import os
+import re
+import json
 import base64
 import asyncio
 import logging
+from types import SimpleNamespace
 from typing import Dict, Any, Optional, List, Union
 
-from anthropic import AsyncAnthropic
+from openai import AsyncOpenAI
 
 from .base import AIProvider
 
 logger = logging.getLogger(__name__)
 
+# The Z.AI **open platform** endpoint — prepaid pay-per-token, and the only route
+# this product is licensed to take. The vendor's own words, read 2026-08-23 at
+# docs.z.ai/api-reference/introduction: "Z.ai Platform's general API endpoint is
+# as follows: https://api.z.ai/api/paas/v4".
+ZAI_DEFAULT_BASE_URL = "https://api.z.ai/api/paas/v4"
+
+# The three base URLs that draw a GLM Coding Plan **subscription** rather than the
+# prepaid balance. They are listed together in the vendor's own protocol table at
+# docs.z.ai/devpack/tool/others, under a heading that names the Coding Plan.
+#
+# We are not allowed to use any of them. The same page says: "The GLM Coding Plan
+# is limited to use within the following officially supported tools and product
+# environments; users may not use their subscription benefits for tools or
+# scenarios outside of this scope" — and lists 19 products (16 coding agents plus
+# OpenClaw, Hermes Agent and SillyTavern). D-PC Messenger is not one of them.
+#
+# This is not a preference. docs.z.ai/devpack/usage-policy: "Violations of the
+# Usage Rules may trigger risk control measures, including rate limiting, account
+# freezing, or other restrictions. Accounts with more than three violations may
+# be banned." This account has already been banned for a month once, and the same
+# account is the one the owner's ZCode subscription runs on — ZCode *is* on the
+# supported list, so his own use is legitimate and ours is what puts it at risk.
+_SUBSCRIPTION_BASE_URLS = (
+    "api.z.ai/api/anthropic",          # Anthropic Messages
+    "api.z.ai/api/coding/paas/v4",     # OpenAI Chat Completions
+    "api.z.ai/api/v1",                 # OpenAI Responses
+)
+
+
+# The vision models on the vendor's list, 2026-08-23: glm-5v-turbo, glm-4.6v,
+# glm-4.6v-flashx, glm-4.6v-flash, glm-4.5v, glm-ocr. Matched by the naming rule
+# rather than enumerated, because the rule is what the vendor keeps stable — a
+# version number followed by `v` — and a hard list goes stale one release later
+# while a text model never accidentally grows a `v`.
+_ZAI_VISION_RE = re.compile(r"glm-\d+(?:\.\d+)?v\b|glm-ocr", re.I)
+
+
+def _is_subscription_url(base_url: str) -> bool:
+    """True when a base URL draws the Coding Plan subscription instead of prepaid.
+
+    Compared on the path rather than the whole string so a trailing slash, a
+    scheme difference or a proxy host in front cannot slip one through.
+    """
+    normalised = (base_url or "").rstrip("/").lower()
+    return any(marker in normalised for marker in _SUBSCRIPTION_BASE_URLS)
+
 
 class ZaiProvider(AIProvider):
-    """
-    Z.AI provider for GLM models (GLM-4.7, GLM-4.6, GLM-4.5, etc.)
+    """Z.AI GLM provider over the prepaid pay-per-token platform API.
 
-    Uses Anthropic-compatible endpoint (https://api.z.ai/api/anthropic)
-    instead of PaaS endpoint to avoid prepaid balance requirements.
+    One provider, one route: `https://api.z.ai/api/paas/v4`, billed against the
+    platform account's balance. The two providers this replaces both drew the
+    GLM Coding Plan subscription — one through the Anthropic-compatible endpoint,
+    one through the coding endpoint — and both were outside the vendor's terms
+    for a product like this one. See the constants above for the quotations.
 
-    All GLM models support extended thinking via API parameter.
+    The agent layer (`llm_adapter._chat_native_tools`) speaks Anthropic shapes to
+    providers, so `generate_with_tools` converts Anthropic -> OpenAI on the way in
+    and OpenAI `tool_calls` -> Anthropic-style `tool_use` objects on the way out.
+    That conversion is inherited unchanged from the provider this replaces; what
+    changed is the endpoint it points at and the fact that every path now records
+    what it spent, because a prepaid route whose spend is invisible is worse than
+    no route at all.
     """
+
     def __init__(self, alias: str, config: Dict[str, Any]):
         super().__init__(alias, config)
 
-        # API key handling (supports both plaintext and env var)
         api_key = config.get("api_key")
         if not api_key:
             api_key_env = config.get("api_key_env", "ZAI_API_KEY")
             if api_key_env:
                 api_key = os.getenv(api_key_env)
-
         if not api_key:
             raise ValueError(f"API key not found for Z.AI provider '{self.alias}'")
 
-        # Use Anthropic-compatible endpoint (same as law7-services)
-        base_url = config.get("base_url", "https://api.z.ai/api/anthropic")
-        self.client = AsyncAnthropic(api_key=api_key, base_url=base_url)
+        base_url = config.get("base_url", ZAI_DEFAULT_BASE_URL)
 
-        # Read max_tokens from config (optional, defaults to 8192 if not specified)
-        # Matches law7-services default for GLM models
+        # Refuse rather than warn. A warning here would be a line in a log nobody
+        # reads while the account accumulates violations toward a ban, and the
+        # operator who typed the subscription URL would have no idea. The failure
+        # has to be at construction, where it is attributable to the config that
+        # caused it.
+        if _is_subscription_url(base_url):
+            raise ValueError(
+                f"Z.AI provider '{self.alias}' is configured with a GLM Coding Plan "
+                f"subscription endpoint ({base_url}). The Coding Plan may only be used "
+                f"from the vendor's officially supported tools, and this product is not "
+                f"one of them; calling it from here is a terms violation that counts "
+                f"against the whole account. Use the prepaid platform API instead: "
+                f"{ZAI_DEFAULT_BASE_URL}"
+            )
+
+        self.client = AsyncOpenAI(api_key=api_key, base_url=base_url)
+        self.base_url = base_url
+
         self.max_tokens = config.get("max_tokens", 8192)
 
-        # Thinking/reasoning configuration (GLM Extended Thinking)
-        # All GLM models support extended thinking with budget_tokens
+        # GLM extended thinking (enabled by default; reasoning arrives in
+        # `reasoning_content`).
         self.thinking_enabled = config.get("thinking", {}).get("enabled", True)
-        self.thinking_budget_tokens = config.get("thinking", {}).get("budget_tokens", 10000)
 
-        # Sampling parameters
-        self.top_p = config.get("top_p")  # None = use API default; 0.9 reduces unlikely token tails (language mixing)
+        self.top_p = config.get("top_p")  # None => API default
+        self._temperature_explicit = config.get("temperature")  # None unless user set it
 
-        # Retry configuration: exponential backoff with time budget (default 10 min)
+        # Exponential backoff with a time budget (default 10 min)
         self.max_retry_seconds = config.get("max_retry_seconds", 600)
 
-        # Store last thinking content for retrieval by LLMManager
         self._last_thinking: Optional[str] = None
 
     def supports_vision(self) -> bool:
-        """All GLM models support vision via Z.AI's Anthropic-compatible endpoint."""
-        return True
+        """Only the V models and the OCR model, not every GLM.
+
+        This used to return an unconditional True while the docstring already named
+        the V models — the sentence was right and the code did not implement it. It
+        is not cosmetic: `llm_manager` picks the **first** provider whose
+        `supports_vision()` is true when an image query has no configured vision
+        provider (`:617-620`), so a `glm-4.7` alias would volunteer for image work
+        and fail at the API instead of being passed over here.
+        """
+        return bool(_ZAI_VISION_RE.search(self.model or ""))
 
     def supports_thinking(self) -> bool:
-        """All GLM models support extended thinking."""
         return True
 
     def get_thinking_params(self) -> Dict[str, Any]:
-        """Return GLM-specific thinking parameters."""
         if self.thinking_enabled:
-            return {
-                "thinking": {
-                    "type": "enabled",
-                    "budget_tokens": self.thinking_budget_tokens
-                }
-            }
+            return {"thinking": {"type": "enabled"}}
         return {}
 
     def get_last_thinking(self) -> Optional[str]:
-        """Get the thinking content from the last response."""
         return self._last_thinking
+
+    # --- retry helpers ---
 
     @staticmethod
     def _is_retryable(error: Exception) -> bool:
-        """Check if error is transient and worth retrying."""
         err_str = str(error).lower()
+        # 1313 is the Coding Plan's Fair-Usage code. On the prepaid platform API it
+        # should be unreachable, so seeing it does not mean "retry later" — it means
+        # this call reached the subscription, which is the thing this provider exists
+        # to stop. Kept non-retryable, and shouted about at the call sites, because a
+        # retry would spend a second violation on the same mistake.
+        if "1313" in err_str:
+            return False
         return any(indicator in err_str for indicator in [
             "429", "500", "502", "503",
             "bad gateway", "service unavailable", "internal server error",
             "timed out", "timeout", "connection reset", "connection error",
-            "connect() failed", "interrupted",
-            "1234", "1302", "1303", "1305", "1312",
             "overloaded", "rate limit", "internal network failure",
             "high traffic", "high concurrency", "high frequency",
-        ]) or isinstance(error, (ConnectionError, OSError)) or type(error).__name__ in ("ReadError", "WriteError", "ConnectError")
+        ]) or isinstance(error, (ConnectionError, OSError)) or type(error).__name__ in (
+            "APIConnectionError", "APITimeoutError", "InternalServerError",
+        )
+
+    def _note_if_subscription_error(self, error: Exception) -> None:
+        """A 1313 from here is a canary, not a hiccup — say so at ERROR."""
+        if "1313" in str(error).lower():
+            logger.error(
+                "Z.AI provider '%s' received Fair-Usage 1313 from %s. That code belongs "
+                "to the GLM Coding Plan subscription, which this product may not use — "
+                "the call should not have been able to reach it. Check base_url and the "
+                "API key's plan before retrying anything.",
+                self.alias, self.base_url,
+            )
 
     async def _retry_with_backoff(self, fn, last_error: Exception):
-        """Exponential backoff retry with time budget. First attempt already failed."""
         delay = 3
         elapsed = 0
         attempt = 0
         while elapsed < self.max_retry_seconds:
             attempt += 1
-            logger.warning(f"Z.AI retry {attempt}, waiting {delay}s (elapsed {elapsed}s/{self.max_retry_seconds}s): {last_error}")
+            logger.warning(
+                "Z.AI retry %d, waiting %ds (elapsed %ds/%ds): %s",
+                attempt, delay, elapsed, self.max_retry_seconds, last_error,
+            )
             await asyncio.sleep(delay)
             elapsed += delay
             try:
                 return await fn()
             except Exception as e:
                 if not self._is_retryable(e):
+                    self._note_if_subscription_error(e)
                     raise
                 last_error = e
                 delay = min(delay * 2, 192)
         raise RuntimeError(
-            f"Z.AI provider '{self.alias}' failed after {attempt} retries ({elapsed}s elapsed): {last_error}"
+            f"Z.AI provider '{self.alias}' failed after {attempt} retries "
+            f"({elapsed}s elapsed): {last_error}"
         ) from last_error
 
-    async def generate_response(self, prompt: str, **kwargs) -> str:
-        """Generate text response using Z.AI GLM model with extended thinking"""
-        self._last_thinking = None
-        try:
-            # Determine max_tokens value
-            # When thinking is enabled, max_tokens must be > budget_tokens
-            effective_max_tokens = self.max_tokens if self.max_tokens else 8192
+    def _build_extra_body(self, reasoning_effort: Optional[str] = None) -> Optional[Dict[str, Any]]:
+        """GLM's thinking is a switch, not a level — there is no `reasoning_effort`
+        on this API. One word of the caller's vocabulary still maps onto it: `off`
+        means «do not think», which is exactly what `{"type": "disabled"}` says.
+        Every other level is accepted and has nowhere to go, which is the truth
+        about this provider rather than a gap in the wiring."""
+        if (reasoning_effort or "").strip().lower() == "off":
+            return {"thinking": {"type": "disabled"}}
+        if self.thinking_enabled:
+            return {"thinking": {"type": "enabled"}}
+        return None
 
-            # Build API parameters
-            api_params = {
+    def _effective_temperature(self, override: Optional[float] = None) -> float:
+        if override is not None:
+            return override
+        if self._temperature_explicit is not None:
+            return self._temperature_explicit
+        return 1.0
+
+    def _usage_from(self, resp) -> Dict[str, int]:
+        """Normalise the SDK's usage object into the shape the cost meter reads.
+
+        Every path calls this, not only the tool path. This is a prepaid provider:
+        a call whose tokens are not recorded is money the burn digest, the alert
+        thresholds and the runway cannot see — the exact hole this project already
+        paid for once on the DeepSeek plain path.
+        """
+        u = getattr(resp, "usage", None)
+        if u is None:
+            return {}
+        details = getattr(u, "prompt_tokens_details", None)
+        cached = getattr(details, "cached_tokens", 0) if details else 0
+        return {
+            "prompt_tokens": getattr(u, "prompt_tokens", 0) or 0,
+            "completion_tokens": getattr(u, "completion_tokens", 0) or 0,
+            "total_tokens": getattr(u, "total_tokens", 0) or 0,
+            "cache_read_input_tokens": cached or 0,
+        }
+
+    def _log_usage(self, usage: Dict[str, int], path: str, tool_calls: int = 0) -> None:
+        if not usage:
+            return
+        self._record_last_usage(usage)
+        logger.info(
+            "Z.AI usage: alias=%s model=%s prompt=%d (cache_read=%d), completion=%d, "
+            "tool_calls=%d, path=%s",
+            self.alias, self.model,
+            usage.get("prompt_tokens", 0), usage.get("cache_read_input_tokens", 0),
+            usage.get("completion_tokens", 0), tool_calls, path,
+        )
+
+    # --- plain text generation ---
+
+    async def generate_response(self, prompt: str, **kwargs) -> str:
+        """Non-streaming text generation."""
+        self._last_thinking = None
+
+        async def _call():
+            params: Dict[str, Any] = {
                 "model": self.model,
-                "max_tokens": effective_max_tokens,
+                "max_tokens": kwargs.get("max_tokens", self.max_tokens),
                 "messages": [{"role": "user", "content": prompt}],
-                "temperature": kwargs.get("temperature", self.temperature),
+                "temperature": self._effective_temperature(kwargs.get("temperature")),
             }
             if self.top_p is not None:
-                api_params["top_p"] = self.top_p
+                params["top_p"] = self.top_p
+            extra = self._build_extra_body(kwargs.get("reasoning_effort"))
+            if extra:
+                params["extra_body"] = extra
+            resp = await self.client.chat.completions.create(**params)
+            msg = resp.choices[0].message
+            self._last_thinking = getattr(msg, "reasoning_content", None)
+            self._log_usage(self._usage_from(resp), path="plain")
+            return msg.content or ""
 
-            # Add extended thinking if enabled (all GLM models support it)
-            if self.thinking_enabled:
-                # Ensure max_tokens > budget_tokens (API requirement)
-                if effective_max_tokens <= self.thinking_budget_tokens:
-                    # Set max_tokens to budget + buffer for actual response
-                    effective_max_tokens = self.thinking_budget_tokens + 4096
-                    api_params["max_tokens"] = effective_max_tokens
-                    logger.info(f"Adjusted max_tokens to {effective_max_tokens} to exceed budget_tokens ({self.thinking_budget_tokens})")
-
-                api_params["thinking"] = {
-                    "type": "enabled",
-                    "budget_tokens": self.thinking_budget_tokens
-                }
-                logger.info(f"GLM extended thinking enabled (budget={self.thinking_budget_tokens} tokens)")
-            else:
-                logger.debug(f"GLM extended thinking disabled for {self.model}")
-
-            # Use streaming to avoid Anthropic SDK timeout for long operations
-            # (SDK requires streaming for operations >10 minutes)
-            thinking_text = None
-            final_text = ""
-
-            async with self.client.messages.stream(**api_params) as stream:
-                async for text in stream.text_stream:
-                    final_text += text
-
-                # Extract thinking blocks from final message
-                if self.thinking_enabled:
-                    try:
-                        final_message = await stream.get_final_message()
-                        for block in final_message.content:
-                            if hasattr(block, 'type') and block.type == "thinking":
-                                thinking_text = getattr(block, 'thinking', None)
-                    except Exception as e:
-                        logger.debug(f"Could not get final message for thinking: {e}")
-
-            # Store thinking for retrieval by LLMManager
-            self._last_thinking = thinking_text
-
-            if thinking_text:
-                logger.info(f"GLM extended thinking: {len(thinking_text)} chars")
-
-            if final_text:
-                return final_text
-            else:
-                logger.warning(f"No text produced in response")
-                return ""
-
+        try:
+            return await _call()
         except Exception as e:
             if self._is_retryable(e):
-                _captured_thinking = None
-
-                async def _retry_generate():
-                    nonlocal _captured_thinking
-                    retry_text = ""
-                    _captured_thinking = None
-                    async with self.client.messages.stream(**api_params) as stream:
-                        async for text in stream.text_stream:
-                            retry_text += text
-                        if self.thinking_enabled:
-                            try:
-                                final_msg = await stream.get_final_message()
-                                for block in final_msg.content:
-                                    if hasattr(block, 'type') and block.type == "thinking":
-                                        _captured_thinking = getattr(block, 'thinking', None)
-                            except Exception:
-                                pass
-                    return retry_text or ""
-
-                result = await self._retry_with_backoff(_retry_generate, e)
-                self._last_thinking = _captured_thinking
-                return result
-            raise RuntimeError(f"Z.AI provider '{self.alias}' failed: {type(e).__name__}: {e}") from e
+                return await self._retry_with_backoff(_call, e)
+            self._note_if_subscription_error(e)
+            raise RuntimeError(
+                f"Z.AI provider '{self.alias}' failed: {type(e).__name__}: {e}"
+            ) from e
 
     async def generate_response_stream(
         self,
         prompt: str,
         on_chunk: callable,
-        conversation_id: str = None
+        conversation_id: str = None,
+        reasoning_effort: str = None,
     ) -> str:
-        """
-        Generate text response with streaming.
+        """Streaming text generation. Calls on_chunk(text, conversation_id) per token."""
+        self._last_thinking = None
 
-        Args:
-            prompt: User message text
-            on_chunk: Async callback for each text chunk: await on_chunk(chunk, conversation_id)
-            conversation_id: Optional conversation ID for chunk callbacks
-
-        Returns:
-            Full response text (accumulated from all chunks)
-        """
-        try:
-            # Determine max_tokens value
-            effective_max_tokens = self.max_tokens if self.max_tokens else 8192
-
-            # Build API parameters
-            api_params = {
+        async def _call():
+            params: Dict[str, Any] = {
                 "model": self.model,
-                "max_tokens": effective_max_tokens,
+                "max_tokens": self.max_tokens,
                 "messages": [{"role": "user", "content": prompt}],
-                "temperature": self.temperature,
+                "temperature": self._effective_temperature(),
+                "stream": True,
+                # Without this a stream reports no usage at all, and the whole call
+                # is invisible to the cost meter. The chunk that carries it has an
+                # empty `choices`, which is why the loop below reads usage before it
+                # tests for choices rather than after.
+                "stream_options": {"include_usage": True},
             }
             if self.top_p is not None:
-                api_params["top_p"] = self.top_p
+                params["top_p"] = self.top_p
+            extra = self._build_extra_body(reasoning_effort)
+            if extra:
+                params["extra_body"] = extra
 
-            # Add extended thinking if enabled (all GLM models support it)
-            if self.thinking_enabled:
-                if effective_max_tokens <= self.thinking_budget_tokens:
-                    effective_max_tokens = self.thinking_budget_tokens + 4096
-                    api_params["max_tokens"] = effective_max_tokens
-
-                api_params["thinking"] = {
-                    "type": "enabled",
-                    "budget_tokens": self.thinking_budget_tokens
-                }
-                logger.info(f"GLM streaming with thinking enabled (budget={self.thinking_budget_tokens} tokens)")
-            else:
-                logger.debug(f"GLM streaming without thinking for {self.model}")
-
-            # Note: Do NOT add stream=True - messages.stream() is already a streaming method
-
-            # Reset thinking at the start of each call (prevent stale values)
-            self._last_thinking = None
-
-            # Stream response
             full_text = ""
             thinking_text = ""
-
-            async with self.client.messages.stream(**api_params) as stream:
-                async for text in stream.text_stream:
+            usage: Dict[str, int] = {}
+            stream = await self.client.chat.completions.create(**params)
+            async for chunk in stream:
+                chunk_usage = self._usage_from(chunk)
+                if chunk_usage:
+                    usage = chunk_usage
+                if not chunk.choices:
+                    continue
+                delta = chunk.choices[0].delta
+                reasoning = getattr(delta, "reasoning_content", None)
+                if reasoning:
+                    thinking_text += reasoning
+                text = getattr(delta, "content", None)
+                if text:
                     full_text += text
-                    # Call the chunk callback
                     if on_chunk:
                         await on_chunk(text, conversation_id)
-
-                # After streaming, always check final message for thinking blocks.
-                # text_stream only yields text tokens; thinking blocks are separate
-                # and must be read from the final message.
-                if self.thinking_enabled:
-                    try:
-                        final_message = await stream.get_final_message()
-                        for block in final_message.content:
-                            if hasattr(block, 'type') and block.type == "thinking":
-                                thinking_text = getattr(block, 'thinking', "")
-                                if thinking_text:
-                                    self._last_thinking = thinking_text
-                                    logger.info(f"GLM streaming thinking: {len(thinking_text)} chars")
-                    except Exception as e:
-                        logger.debug(f"Could not get final message for thinking: {e}")
-
-            # If no text produced but thinking was done, return empty string so the
-            # agent loop can detect and retry with a re-prompt instead of sending
-            # the useless placeholder to the user.
-            if not full_text and thinking_text:
-                logger.warning("GLM extended thinking produced no text output, will retry for text response")
-                full_text = ""
-            elif not full_text:
-                logger.warning("GLM streaming produced no output")
-
-            logger.info(f"GLM streaming completed: {len(full_text)} chars")
+            if thinking_text:
+                self._last_thinking = thinking_text
+                logger.info("Z.AI streaming thinking: %d chars", len(thinking_text))
+            self._log_usage(usage, path="plain-stream")
             return full_text
 
-        except RuntimeError as e:
-            # Handle "Event loop is closed" during shutdown gracefully
-            if "Event loop is closed" in str(e):
-                logger.debug(f"Z.AI streaming cleanup skipped (event loop closed)")
-                return full_text  # Return what we have
-            raise
+        try:
+            return await _call()
         except Exception as e:
             if self._is_retryable(e):
-                logger.warning(f"Z.AI streaming transient error, falling back to generate_response with backoff: {e}")
-                # Fallback to non-streaming generate_response which resets+captures
-                # _last_thinking cleanly (thinking from failed stream attempt is discarded)
-                async def _retry_stream_fallback():
-                    return await self.generate_response(prompt)
-                result = await self._retry_with_backoff(_retry_stream_fallback, e)
-                if on_chunk and result:
-                    await on_chunk(result, conversation_id)
-                return result
-            logger.error(f"Z.AI streaming failed: {e}", exc_info=True)
-            raise RuntimeError(f"Z.AI streaming provider '{self.alias}' failed: {type(e).__name__}: {e}") from e
+                # `_call` is the whole stream: the retry re-runs it, and it delivers
+                # every token through `on_chunk` on its way to returning `full_text`.
+                # Sending that return value to `on_chunk` as well — which is what this
+                # branch used to do — put the entire answer on the wire a second time,
+                # after the reader had already received it token by token.
+                #
+                # Traced 2026-08-23 rather than assumed: `on_chunk` is
+                # `agent_manager.emit_stream_chunk`, which appends to `_stream_chunks`
+                # and broadcasts one WebSocket event — no usage, no cost, so this does
+                # *not* double-bill. It does something more durable. `_raw` becomes the
+                # answer twice, which makes `_streaming_raw` differ from `response`
+                # (`agent_manager.py:1168-1169`) where it is normally None, so the
+                # doubled text is persisted into conversation history and read back as
+                # context by every later turn. (Ark, code review 2026-08-23; the same
+                # three lines live in `deepseek_provider.py:461` and
+                # `llamacpp_server_provider.py:729`.)
+                return await self._retry_with_backoff(_call, e)
+            self._note_if_subscription_error(e)
+            logger.error("Z.AI streaming failed: %s", e, exc_info=True)
+            raise RuntimeError(
+                f"Z.AI streaming provider '{self.alias}' failed: {type(e).__name__}: {e}"
+            ) from e
+
+    # --- native tool calling (Anthropic-shape in, OpenAI on the wire, Anthropic-shape out) ---
+
+    @staticmethod
+    def _anthropic_to_openai_tools(tools: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        out = []
+        for t in tools:
+            # Accept Anthropic shape {name, description, input_schema}; tolerate OpenAI passthrough.
+            if "function" in t:
+                out.append(t)
+                continue
+            out.append({
+                "type": "function",
+                "function": {
+                    "name": t.get("name"),
+                    "description": t.get("description", ""),
+                    "parameters": t.get("input_schema") or {"type": "object", "properties": {}},
+                },
+            })
+        return out
+
+    @staticmethod
+    def _anthropic_to_openai_messages(
+        system: Union[str, List[Dict[str, Any]]],
+        messages: List[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        out: List[Dict[str, Any]] = []
+        if system:
+            sys_text = system if isinstance(system, str) else "".join(
+                b.get("text", "") for b in system if isinstance(b, dict)
+            )
+            if sys_text:
+                out.append({"role": "system", "content": sys_text})
+
+        for m in messages:
+            role = m.get("role")
+            content = m.get("content")
+
+            if isinstance(content, str):
+                out.append({"role": role, "content": content})
+                continue
+
+            blocks = content if isinstance(content, list) else []
+
+            if role == "assistant":
+                text_parts: List[str] = []
+                tool_calls: List[Dict[str, Any]] = []
+                for b in blocks:
+                    if not isinstance(b, dict):
+                        continue
+                    bt = b.get("type")
+                    if bt == "text":
+                        text_parts.append(b.get("text", ""))
+                    elif bt == "tool_use":
+                        tool_calls.append({
+                            "id": b.get("id", ""),
+                            "type": "function",
+                            "function": {
+                                "name": b.get("name", ""),
+                                "arguments": json.dumps(b.get("input", {})),
+                            },
+                        })
+                msg: Dict[str, Any] = {"role": "assistant", "content": "".join(text_parts) or None}
+                if tool_calls:
+                    msg["tool_calls"] = tool_calls
+                out.append(msg)
+                continue
+
+            if role == "user":
+                tool_results = [
+                    b for b in blocks
+                    if isinstance(b, dict) and b.get("type") == "tool_result"
+                ]
+                if tool_results:
+                    for tr in tool_results:
+                        # Anthropic tool_result.content may be a string or a list
+                        # of content blocks; flatten the list form to text.
+                        tr_content = tr.get("content", "")
+                        if isinstance(tr_content, list):
+                            tr_content = "".join(
+                                b.get("text", "") for b in tr_content
+                                if isinstance(b, dict)
+                            )
+                        out.append({
+                            "role": "tool",
+                            "tool_call_id": tr.get("tool_use_id", ""),
+                            "content": str(tr_content),
+                        })
+                else:
+                    text_parts = [
+                        b.get("text", "") for b in blocks
+                        if isinstance(b, dict) and b.get("type") == "text"
+                    ]
+                    out.append({"role": "user", "content": "".join(text_parts)})
+                continue
+
+            # Fallback: stringify unknown block content
+            out.append({"role": role or "user", "content": json.dumps(blocks)})
+
+        return out
 
     async def generate_with_tools(
         self,
@@ -324,153 +481,107 @@ class ZaiProvider(AIProvider):
         conversation_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
-        Native Anthropic SDK tool calling for GLM-4.7.
-
-        Accepts Anthropic-format messages and tools directly.
-        Returns dict: {content, tool_calls_raw, thinking, usage}
+        Native tool calling. Returns {content, tool_calls_raw, thinking, usage}
+        where tool_calls_raw items expose .id/.name/.input (Anthropic tool_use shape)
+        as consumed by llm_adapter._chat_native_tools.
         """
-        effective_max_tokens = max(self.max_tokens or 8192, 8192)
-
-        api_params: Dict[str, Any] = {
-            "model": self.model,
-            "max_tokens": effective_max_tokens,
-            "messages": messages,
-            "tools": tools,
-        }
-        if system:
-            api_params["system"] = system
-            if isinstance(system, list):
-                logger.info("Z.AI system param: list of %d blocks (cache_control present)", len(system))
-            else:
-                logger.info("Z.AI system param: plain str (%d chars, no cache_control)", len(system))
-
-        # Enable extended thinking if configured (test: Z.AI may support interleaved thinking + tools)
-        if self.thinking_enabled:
-            if effective_max_tokens <= self.thinking_budget_tokens:
-                effective_max_tokens = self.thinking_budget_tokens + 4096
-                api_params["max_tokens"] = effective_max_tokens
-            api_params["thinking"] = {
-                "type": "enabled",
-                "budget_tokens": self.thinking_budget_tokens,
-            }
-            logger.info(f"GLM tool calling with thinking enabled (budget={self.thinking_budget_tokens} tokens)")
-
         self._last_thinking = None
+        openai_messages = self._anthropic_to_openai_messages(system, messages)
+        openai_tools = self._anthropic_to_openai_tools(tools)
 
-        def _extract_blocks(content_blocks):
-            """Extract text, tool_use, and thinking blocks from content."""
-            full_text = ""
+        async def _call():
+            params: Dict[str, Any] = {
+                "model": self.model,
+                "max_tokens": self.max_tokens,
+                "messages": openai_messages,
+                "tools": openai_tools,
+                "tool_choice": "auto",
+                "temperature": self._effective_temperature(),
+            }
+            if self.top_p is not None:
+                params["top_p"] = self.top_p
+            extra = self._build_extra_body()
+            if extra:
+                params["extra_body"] = extra
+
+            resp = await self.client.chat.completions.create(**params)
+            msg = resp.choices[0].message
+
+            content = msg.content or ""
+            thinking = getattr(msg, "reasoning_content", None)
+            self._last_thinking = thinking
+
             tool_calls_raw = []
-            for block in content_blocks:
-                if not hasattr(block, "type"):
-                    continue
-                if block.type == "text":
-                    full_text += getattr(block, "text", "")
-                elif block.type == "tool_use":
-                    tool_calls_raw.append(block)
-                elif block.type == "thinking":
-                    thinking_val = getattr(block, "thinking", "")
-                    if thinking_val:
-                        self._last_thinking = thinking_val
-                        logger.info(f"GLM tool calling thinking: {len(thinking_val)} chars")
-            return full_text, tool_calls_raw
+            for tc in (msg.tool_calls or []):
+                try:
+                    input_data = json.loads(tc.function.arguments) if tc.function.arguments else {}
+                except (json.JSONDecodeError, TypeError):
+                    input_data = {}
+                tool_calls_raw.append(
+                    SimpleNamespace(id=tc.id, name=tc.function.name, input=input_data)
+                )
+
+            if on_chunk and content:
+                await on_chunk(content, conversation_id)
+
+            usage = self._usage_from(resp)
+            self._log_usage(usage, path="tools", tool_calls=len(tool_calls_raw))
+            return {
+                "content": content,
+                "tool_calls_raw": tool_calls_raw,
+                "thinking": thinking,
+                "usage": usage,
+            }
 
         try:
-            if on_chunk:
-                full_text = ""
-                tool_calls_raw = []
-                async with self.client.messages.stream(**api_params) as stream:
-                    async for text in stream.text_stream:
-                        full_text += text
-                        await on_chunk(text, conversation_id)
-                    final_message = await stream.get_final_message()
-                full_text, tool_calls_raw = _extract_blocks(final_message.content)
-                usage_obj = final_message.usage
-            else:
-                async with self.client.messages.stream(**api_params) as stream:
-                    final_message = await stream.get_final_message()
-                full_text, tool_calls_raw = _extract_blocks(final_message.content)
-                usage_obj = final_message.usage
-
-            _cache_create = getattr(usage_obj, "cache_creation_input_tokens", 0) or 0
-            _cache_read = getattr(usage_obj, "cache_read_input_tokens", 0) or 0
-            logger.info("Z.AI usage: prompt=%d, completion=%d, cache_create=%d, cache_read=%d",
-                        usage_obj.input_tokens, usage_obj.output_tokens, _cache_create, _cache_read)
-
-            return {
-                "content": full_text,
-                "tool_calls_raw": tool_calls_raw,
-                "thinking": self._last_thinking,
-                "usage": {
-                    "prompt_tokens": usage_obj.input_tokens,
-                    "completion_tokens": usage_obj.output_tokens,
-                    "total_tokens": usage_obj.input_tokens + usage_obj.output_tokens,
-                    "cache_creation_input_tokens": getattr(usage_obj, "cache_creation_input_tokens", 0) or 0,
-                    "cache_read_input_tokens": getattr(usage_obj, "cache_read_input_tokens", 0) or 0,
-                },
-            }
-
+            return await _call()
         except Exception as e:
             if self._is_retryable(e):
-                async def _retry_tools():
-                    async with self.client.messages.stream(**api_params) as stream:
-                        final_message = await stream.get_final_message()
-                    full_text, tool_calls_raw = _extract_blocks(final_message.content)
-                    usage_obj = final_message.usage
-                    return {
-                        "content": full_text,
-                        "tool_calls_raw": tool_calls_raw,
-                        "thinking": self._last_thinking,
-                        "usage": {
-                            "prompt_tokens": usage_obj.input_tokens,
-                            "completion_tokens": usage_obj.output_tokens,
-                            "total_tokens": usage_obj.input_tokens + usage_obj.output_tokens,
-                        },
-                    }
-                return await self._retry_with_backoff(_retry_tools, e)
-            raise RuntimeError(f"Z.AI native tool calling failed for '{self.alias}': {type(e).__name__}: {e}") from e
+                return await self._retry_with_backoff(_call, e)
+            self._note_if_subscription_error(e)
+            raise RuntimeError(
+                f"Z.AI native tool calling failed for '{self.alias}': "
+                f"{type(e).__name__}: {e}"
+            ) from e
 
     async def generate_with_vision(self, prompt: str, images: List[Dict[str, Any]], **kwargs) -> str:
-        """
-        Z.AI vision API for GLM-V models (glm-4.6v-flash, glm-4.5v, glm-4.0v)
-        Uses Anthropic-compatible image format.
-        """
-        try:
-            # Build multimodal message content (Anthropic format)
-            content = [{"type": "text", "text": prompt}]
+        """OpenAI-format vision (image_url data URLs) for GLM-V models."""
+        content: List[Dict[str, Any]] = [{"type": "text", "text": prompt}]
+        for img in images:
+            if "base64" in img:
+                base64_data = img["base64"]
+                if base64_data.startswith("data:"):
+                    base64_data = base64_data.split(",", 1)[1]
+            else:
+                with open(img["path"], "rb") as f:
+                    base64_data = base64.b64encode(f.read()).decode("utf-8")
+            mime_type = img.get("mime_type", "image/png")
+            content.append({
+                "type": "image_url",
+                "image_url": {"url": f"data:{mime_type};base64,{base64_data}"},
+            })
 
-            for img in images:
-                # Encode image to base64 if not already
-                if "base64" in img:
-                    base64_data = img["base64"]
-                    if base64_data.startswith("data:"):
-                        base64_data = base64_data.split(",", 1)[1]
-                else:
-                    with open(img["path"], "rb") as f:
-                        base64_data = base64.b64encode(f.read()).decode("utf-8")
-
-                mime_type = img.get("mime_type", "image/png")
-                content.append({
-                    "type": "image",
-                    "source": {
-                        "type": "base64",
-                        "media_type": mime_type,
-                        "data": base64_data
-                    }
-                })
-
-            async with self.client.messages.stream(
+        async def _call():
+            resp = await self.client.chat.completions.create(
                 model=self.model,
-                max_tokens=kwargs.get("max_tokens", 8192),
-                messages=[{"role": "user", "content": content}]
-            ) as stream:
-                final_message = await stream.get_final_message()
-            return final_message.content[0].text
+                max_tokens=kwargs.get("max_tokens", self.max_tokens),
+                messages=[{"role": "user", "content": content}],
+                temperature=self._effective_temperature(kwargs.get("temperature")),
+            )
+            self._log_usage(self._usage_from(resp), path="vision")
+            return resp.choices[0].message.content or ""
+
+        try:
+            return await _call()
         except Exception as e:
-            raise RuntimeError(f"Z.AI vision API failed for '{self.alias}': {type(e).__name__}: {e}") from e
+            if self._is_retryable(e):
+                return await self._retry_with_backoff(_call, e)
+            self._note_if_subscription_error(e)
+            raise RuntimeError(
+                f"Z.AI vision failed for '{self.alias}': {type(e).__name__}: {e}"
+            ) from e
 
     async def close(self) -> None:
-        """Close the AsyncAnthropic client connection."""
-        if hasattr(self.client, 'close'):
+        if hasattr(self.client, "close"):
             await self.client.close()
-            logger.debug(f"ZaiProvider '{self.alias}': Client closed")
+            logger.debug("ZaiProvider '%s': Client closed", self.alias)
