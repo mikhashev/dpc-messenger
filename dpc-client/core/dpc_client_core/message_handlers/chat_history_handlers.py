@@ -30,6 +30,21 @@ class HistoryRequestRegistry:
         self._outstanding.discard(key)
         return True
 
+    def claim_any(self, peer_node_id: str, conversation_id: str) -> bool:
+        """Consume any outstanding question to this peer about this conversation.
+
+        The group path gained request ids after the 1:1 path did, so a peer on
+        the older build answers without echoing one. Refusing those outright
+        would break sync across a mixed pair for no gain: what has to hold is
+        «we asked this peer about this conversation», and that is exactly what
+        this consumes. A peer we never asked is still refused.
+        """
+        for key in tuple(self._outstanding):
+            if key[0] == peer_node_id and key[1] == conversation_id:
+                self._outstanding.discard(key)
+                return True
+        return False
+
     def forget_peer(self, peer_node_id: str) -> None:
         """Drop a disconnected peer's outstanding questions."""
         self._outstanding = {k for k in self._outstanding if k[0] != peer_node_id}

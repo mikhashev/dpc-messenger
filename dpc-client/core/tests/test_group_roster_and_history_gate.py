@@ -258,7 +258,7 @@ def served(group_manager):
     monitor.export_history = lambda authors=None: [{"id": "m-1", "content": "ours"}]
     monitor.merge_history = lambda messages: len(messages)
     monitor.compute_history_hash = lambda: "sha256:ours"
-    monitor.history_digest = lambda: {MEMBER: "digest"}
+    monitor.history_digest = lambda: {"authors": {MEMBER: "digest"}}
     service.conversation_monitors[group.group_id] = monitor
     service._get_or_create_conversation_monitor = lambda gid: monitor
     return service, group, monitor
@@ -442,3 +442,95 @@ def test_a_removed_node_stops_advertising_the_group(tmp_path):
     manager.apply_sync(removed)
 
     assert manager.get_groups_for_peer(MEMBER) == []
+
+
+# --- door 4: an answer is only an answer if we asked ----------------------
+#
+# `4d3b7442` gave CHAT_HISTORY_RESPONSE a claim against a recorded question:
+# «Unclaimed, it lets any connected peer overwrite a conversation it was never
+# part of». The group twin arrived with the v0.20.0 hash sync and got none, so a
+# member could push a history nobody asked for — and a member is exactly who is
+# in a position to.
+
+
+@pytest.mark.asyncio
+async def test_an_unasked_group_history_is_discarded_even_from_a_member(served):
+    service, group, monitor = served
+    merged = []
+    monitor.merge_history = lambda messages: merged.extend(messages) or len(messages)
+
+    await GroupHistoryResponseHandler(service).handle(
+        MEMBER,
+        {"group_id": group.group_id, "history": [{"id": "x", "content": "unasked"}],
+         "request_id": "never-issued"},
+    )
+
+    assert merged == []
+
+
+@pytest.mark.asyncio
+async def test_the_answer_to_our_own_question_is_merged(served):
+    service, group, monitor = served
+    merged = []
+    monitor.merge_history = lambda messages: merged.extend(messages) or len(messages)
+    service.history_requests.note(MEMBER, group.group_id, "r-1")
+
+    await GroupHistoryResponseHandler(service).handle(
+        MEMBER,
+        {"group_id": group.group_id, "history": [{"id": "x", "content": "asked for"}],
+         "request_id": "r-1"},
+    )
+
+    assert [m["id"] for m in merged] == ["x"]
+
+
+@pytest.mark.asyncio
+async def test_one_question_earns_one_answer(served):
+    """A peer cannot keep rewriting by replaying the id we handed it."""
+    service, group, monitor = served
+    merged = []
+    monitor.merge_history = lambda messages: merged.extend(messages) or len(messages)
+    service.history_requests.note(MEMBER, group.group_id, "r-1")
+    reply = {"group_id": group.group_id, "history": [{"id": "x", "content": "again"}],
+             "request_id": "r-1"}
+
+    await GroupHistoryResponseHandler(service).handle(MEMBER, reply)
+    await GroupHistoryResponseHandler(service).handle(MEMBER, reply)
+
+    assert len(merged) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_peer_on_the_older_build_is_still_understood(served):
+    """It answers without echoing the id; what must hold is that we asked."""
+    service, group, monitor = served
+    merged = []
+    monitor.merge_history = lambda messages: merged.extend(messages) or len(messages)
+    service.history_requests.note(MEMBER, group.group_id, "r-1")
+
+    await GroupHistoryResponseHandler(service).handle(
+        MEMBER,
+        {"group_id": group.group_id, "history": [{"id": "x", "content": "no id echoed"}]},
+    )
+
+    assert [m["id"] for m in merged] == ["x"]
+
+
+@pytest.mark.asyncio
+async def test_the_request_we_send_carries_an_id_and_is_recorded(served):
+    """The other half of the claim: a question nobody wrote down cannot be met."""
+    service, group, monitor = served
+    monitor.history_digest = lambda: {"authors": {MEMBER: "ours"}}
+
+    await GroupHistoryStatusHandler(service).handle(
+        MEMBER,
+        {"group_id": group.group_id, "history_hash": "sha256:theirs",
+         "message_count": 2, "history_digest": {"authors": {MEMBER: "theirs"}},
+         "is_reply": True},
+    )
+
+    asked = [m for _, m in service.p2p_manager.sent if m["command"] == "GROUP_HISTORY_REQUEST"]
+    assert len(asked) == 1
+    request_id = asked[0]["payload"]["request_id"]
+    assert request_id
+    assert service.history_requests.claim(MEMBER, group.group_id, request_id)

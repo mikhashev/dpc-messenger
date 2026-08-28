@@ -43,6 +43,10 @@ class _Service:
         self.p2p_manager = _P2P()
         self.conversation_monitors = {GROUP: monitor}
         self.group_manager = _Roster([ALICE, BOB])
+        from dpc_client_core.message_handlers.chat_history_handlers import (
+            HistoryRequestRegistry,
+        )
+        self.history_requests = HistoryRequestRegistry()
 
 
 def _monitor(rows):

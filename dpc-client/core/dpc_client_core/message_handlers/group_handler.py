@@ -2,6 +2,7 @@
 
 import hashlib
 import time
+import uuid
 from typing import Dict, Any, Optional
 from datetime import datetime, timezone
 from . import MessageHandler
@@ -662,6 +663,10 @@ class GroupHistoryRequestHandler(MessageHandler):
             "group_id": group_id,
             "history": history,
         }
+        # Echoed so the asker can tell this answer from an assertion.
+        request_id = payload.get("request_id")
+        if request_id:
+            response["request_id"] = request_id
         # Say what the answer covers. Without it a filtered reply is
         # indistinguishable from a complete one that happens to be short.
         if authors is not None:
@@ -710,6 +715,25 @@ class GroupHistoryResponseHandler(MessageHandler):
                 "Discarding GROUP_HISTORY_RESPONSE from %s for group %s: "
                 "unknown group or sender is not a member",
                 sender_node_id[:20], group_id,
+            )
+            return None
+
+        # A GROUP_HISTORY_RESPONSE merges into a conversation, so an unclaimed
+        # one is an assertion rather than a reply. The 1:1 twin has refused
+        # unclaimed answers since `4d3b7442`; the group path was added by the
+        # v0.20.0 hash sync and never got it, so any connected member could push
+        # a history nobody asked for. `claim_any` tolerates a peer on the older
+        # build that answers without echoing the id.
+        request_id = payload.get("request_id")
+        claimed = (
+            self.service.history_requests.claim(sender_node_id, group_id, request_id)
+            if request_id
+            else self.service.history_requests.claim_any(sender_node_id, group_id)
+        )
+        if not claimed:
+            self.logger.warning(
+                "Discarding unsolicited group history from %s for %s (request_id %s)",
+                sender_node_id[:20], group_id, request_id,
             )
             return None
 
@@ -824,9 +848,12 @@ class GroupHistoryStatusHandler(MessageHandler):
                 "Requesting history sync for group %s: differs for %d author(s)",
                 group_id, len(differing)
             )
+            request_id = uuid.uuid4().hex[:8]
+            self.service.history_requests.note(sender_node_id, group_id, request_id)
             await self.service.p2p_manager.send_message_to_peer(sender_node_id, {
                 "command": "GROUP_HISTORY_REQUEST",
-                "payload": {"group_id": group_id, "authors": differing},
+                "payload": {"group_id": group_id, "authors": differing,
+                            "request_id": request_id},
             })
             return None
 
@@ -837,9 +864,11 @@ class GroupHistoryStatusHandler(MessageHandler):
                 "Requesting history sync for group %s (local: %d, remote: %d)",
                 group_id, local_count, remote_count
             )
+            request_id = uuid.uuid4().hex[:8]
+            self.service.history_requests.note(sender_node_id, group_id, request_id)
             await self.service.p2p_manager.send_message_to_peer(sender_node_id, {
                 "command": "GROUP_HISTORY_REQUEST",
-                "payload": {"group_id": group_id}
+                "payload": {"group_id": group_id, "request_id": request_id}
             })
 
         return None

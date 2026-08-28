@@ -241,6 +241,10 @@ class _Service:
         # Both doors now ask the roster first; these tests are about the delta,
         # so the sender is a member and the question is what travels.
         self.group_manager = _GroupManager(_Group(list(members or [ALICE, BOB])))
+        from dpc_client_core.message_handlers.chat_history_handlers import (
+            HistoryRequestRegistry,
+        )
+        self.history_requests = HistoryRequestRegistry()
 
     def _get_or_create_conversation_monitor(self, conversation_id):
         return self.conversation_monitors.get(conversation_id)
@@ -325,6 +329,12 @@ class _Node:
         # Both nodes are in the group; this file is about convergence, and the
         # roster gate that now guards these doors has its own tests.
         self.group_manager = _GroupManager(_Group([ALICE, BOB]))
+        # A response merges into a conversation, so it is only believed against
+        # a question this node asked.
+        from dpc_client_core.message_handlers.chat_history_handlers import (
+            HistoryRequestRegistry,
+        )
+        self.history_requests = HistoryRequestRegistry()
 
     def _get_or_create_conversation_monitor(self, conversation_id):
         if conversation_id not in self.conversation_monitors:
@@ -455,8 +465,11 @@ async def test_the_merge_path_itself_restores_order(tmp_path, monkeypatch):
     b = _Node(BOB, home, [recent])
     b._get_or_create_conversation_monitor(GROUP)
 
+    # The answer to a question B asked; without the question it is an
+    # assertion, and the handler is right to drop it.
+    b.history_requests.note(ALICE, GROUP, "r-1")
     await GroupHistoryResponseHandler(b).handle(
-        ALICE, {"group_id": GROUP, "history": [ancient]}
+        ALICE, {"group_id": GROUP, "history": [ancient], "request_id": "r-1"}
     )
 
     stored = json.loads(
