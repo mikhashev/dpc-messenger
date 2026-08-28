@@ -2,6 +2,7 @@
 
 from typing import Dict, Any, Optional, Set, Tuple
 from . import MessageHandler
+from .group_access import may_share_group, refuse_group_access
 
 
 class HistoryRequestRegistry:
@@ -59,6 +60,17 @@ class RequestChatHistoryHandler(MessageHandler):
         request_id = payload.get("request_id")
 
         self.logger.info(f"Chat history request from {sender_node_id} for {conversation_id} (request_id: {request_id})")
+
+        # A group's history has a roster; a 1:1 conversation's other end is the
+        # sender by construction. Only the first needs asking. Same predicate as
+        # the three GROUP_HISTORY_* doors — this one exports the very same file.
+        if conversation_id and conversation_id.startswith("group-"):
+            if not may_share_group(self.service.group_manager, conversation_id, sender_node_id):
+                await refuse_group_access(
+                    self.service.p2p_manager, sender_node_id, conversation_id,
+                    "REQUEST_CHAT_HISTORY", self.logger,
+                )
+                return None
 
         # For group chats, use conversation_id; for 1:1, use sender_node_id
         monitor_key = conversation_id if conversation_id and conversation_id.startswith("group-") else sender_node_id

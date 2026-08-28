@@ -8,6 +8,8 @@ alarm that is always on is an alarm nobody reads.
 
 import pytest
 
+from types import SimpleNamespace
+
 from dpc_client_core.conversation_monitor import ConversationMonitor
 from dpc_client_core.message_handlers.group_handler import GroupHistoryStatusHandler
 
@@ -25,10 +27,22 @@ class _P2P:
         self.sent.append((node_id, message))
 
 
+class _Roster:
+    """The door asks who is in the group before it answers. This file is about
+    what the digest comparison says, so both nodes are members."""
+
+    def __init__(self, members):
+        self._members = members
+
+    def get_group(self, group_id):
+        return SimpleNamespace(members=self._members) if group_id == GROUP else None
+
+
 class _Service:
     def __init__(self, monitor):
         self.p2p_manager = _P2P()
         self.conversation_monitors = {GROUP: monitor}
+        self.group_manager = _Roster([ALICE, BOB])
 
 
 def _monitor(rows):

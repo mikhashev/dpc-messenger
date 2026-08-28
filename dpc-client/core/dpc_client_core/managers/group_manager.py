@@ -428,8 +428,18 @@ class GroupManager:
         return list(self._groups.values())
 
     def get_groups_for_peer(self, node_id: str) -> List[GroupMetadata]:
-        """Get all groups that contain the given peer."""
-        return [g for g in self._groups.values() if node_id in g.members]
+        """The groups this node and that peer are both in.
+
+        "Both" is the part that was missing, and it is what a removed node needs:
+        after it learns the roster that leaves it out, the creator is still in the
+        group and the group would still be advertised to it — one refusal per
+        reconnect, for ever. Its only caller is the on-connect sync loop, which
+        has always meant *shared* rather than *theirs*.
+        """
+        return [
+            g for g in self._groups.values()
+            if node_id in g.members and self.node_id in g.members
+        ]
 
     def add_member(self, group_id: str, node_id: str) -> Optional[GroupMetadata]:
         """

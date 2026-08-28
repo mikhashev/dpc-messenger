@@ -10,7 +10,7 @@ import websockets
 import socket
 import sys
 from pathlib import Path
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, Set, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -102,6 +102,7 @@ from .message_handlers.group_handler import (  # v0.19.0+ Group chat
     GroupSyncHandler, GroupHistoryRequestHandler, GroupHistoryResponseHandler,
     GroupHistoryStatusHandler,  # v0.20.0 hash-based sync
     GroupDeletedStatusHandler,  # v0.20.0 offline deletion notification
+    GroupAccessDeniedHandler,  # the refusal a removed node learns from
 )
 from .message_handlers.skill_handler import (  # v0.21.0+ P2P skill sharing
     SkillSearchHandler, SkillsCatalogHandler, SkillRequestHandler,
@@ -418,6 +419,12 @@ class CoreService:
         # a whole conversation, so an unclaimed one is an assertion, not a reply.
         from .message_handlers.chat_history_handlers import HistoryRequestRegistry
         self.history_requests = HistoryRequestRegistry()
+        # (peer, group) pairs a peer has refused us this session. Our roster is
+        # what makes us ask, and removal never reaches the node being removed,
+        # so without this every reconnect earns another refusal for the same
+        # group. Session-scoped on purpose: it is a memory of one conversation,
+        # not a decision about the roster.
+        self._group_access_denied: Set[Tuple[str, str]] = set()
         # Note: _group_history_requested removed in v0.20.0 - now using hash-based sync
 
         # Initialize message router and register handlers
@@ -528,6 +535,7 @@ class CoreService:
         self.message_router.register_handler(GroupHistoryResponseHandler(self))
         self.message_router.register_handler(GroupHistoryStatusHandler(self))  # v0.20.0 hash-based sync
         self.message_router.register_handler(GroupDeletedStatusHandler(self))  # v0.20.0 offline deletion notification
+        self.message_router.register_handler(GroupAccessDeniedHandler(self))
 
         # P2P skill sharing (v0.21.0+ Phase 5a Memento-Skills)
         self.message_router.register_handler(SkillSearchHandler(self))
@@ -1446,6 +1454,16 @@ class CoreService:
         for peer_id in self.p2p_manager.peers:
             shared_groups = self.group_manager.get_groups_for_peer(peer_id)
             for group in shared_groups:
+                # A peer that has already told us we are not in this group is not
+                # asked again this session. Our roster is stale — that is the
+                # whole reason we are here — and re-asking would earn one refusal
+                # per reconnect for ever.
+                if (peer_id, group.group_id) in self._group_access_denied:
+                    logger.debug(
+                        "Skipping group %s with %s: access refused earlier this session",
+                        group.group_id, peer_id[:20],
+                    )
+                    continue
                 try:
                     await self.p2p_manager.send_message_to_peer(peer_id, {
                         "command": "GROUP_SYNC",
@@ -4361,6 +4379,14 @@ class CoreService:
         """
         await self.p2p_coordinator.broadcast_to_peers(message)
 
+    def note_group_access_denied(self, peer_id: str, group_id: str) -> None:
+        """Remember that this peer says we have no part in this group."""
+        self._group_access_denied.add((peer_id, group_id))
+
+    def clear_group_access_denied(self, peer_id: str, group_id: str) -> None:
+        """Forget a refusal — the same peer has just synced us a roster we are in."""
+        self._group_access_denied.discard((peer_id, group_id))
+
     async def _broadcast_to_group(self, group_id: str, message: Dict[str, Any]) -> None:
         """Broadcast message to all connected members of a group (except self).
 
@@ -5421,11 +5447,31 @@ class CoreService:
             if not group:
                 return {"status": "error", "message": f"Group {group_id} not found"}
 
-            # Notify all members (including the removed one)
-            await self._broadcast_to_group(group_id, {
-                "command": "GROUP_SYNC",
-                "payload": group.to_dict()
-            })
+            sync = {"command": "GROUP_SYNC", "payload": group.to_dict()}
+
+            # Notify the members that remain.
+            await self._broadcast_to_group(group_id, sync)
+
+            # And the one that does not. `_broadcast_to_group` walks
+            # `group.members`, which `remove_member` emptied of this node one
+            # statement ago — so the comment that used to sit here, "including
+            # the removed one", was false by construction and the only node that
+            # needed the news was the only one excluded from it. Its own
+            # GroupSyncHandler accepts this: we are still a member of *its* copy
+            # and the version is higher, so `apply_sync` writes the roster that
+            # leaves it out. Nothing is deleted on its side — it learns, and its
+            # own gate then refuses what it used to be served.
+            if node_id in self.p2p_manager.peers:
+                try:
+                    await self.p2p_manager.send_message_to_peer(node_id, sync)
+                    logger.info("Told %s it was removed from group %s", node_id[:20], group_id)
+                except Exception as e:
+                    logger.warning("Could not tell %s it was removed from %s: %s", node_id[:20], group_id, e)
+            else:
+                logger.info(
+                    "Removed %s from group %s while it was offline; it will find out by refusal",
+                    node_id[:20], group_id,
+                )
 
             # Notify local UI to refresh group settings
             await self.local_api.broadcast_event("group_updated", {

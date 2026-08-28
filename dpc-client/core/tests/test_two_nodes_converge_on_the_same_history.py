@@ -235,9 +235,12 @@ async def test_a_member_that_is_not_connected_is_not_written_to():
 class _Service:
     """Only what GroupHistoryStatusHandler touches."""
 
-    def __init__(self, p2p, monitors):
+    def __init__(self, p2p, monitors, members=None):
         self.p2p_manager = p2p
         self.conversation_monitors = monitors
+        # Both doors now ask the roster first; these tests are about the delta,
+        # so the sender is a member and the question is what travels.
+        self.group_manager = _GroupManager(_Group(list(members or [ALICE, BOB])))
 
     def _get_or_create_conversation_monitor(self, conversation_id):
         return self.conversation_monitors.get(conversation_id)
@@ -319,6 +322,9 @@ class _Node:
         self.conversation_monitors = {}
         self.outbox = self.p2p_manager.sent
         self.local_api = _LocalApi()
+        # Both nodes are in the group; this file is about convergence, and the
+        # roster gate that now guards these doors has its own tests.
+        self.group_manager = _GroupManager(_Group([ALICE, BOB]))
 
     def _get_or_create_conversation_monitor(self, conversation_id):
         if conversation_id not in self.conversation_monitors:

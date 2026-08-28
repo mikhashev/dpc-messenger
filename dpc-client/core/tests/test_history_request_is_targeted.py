@@ -49,6 +49,11 @@ def _handler(monitor, sent):
         conversation_monitors={GROUP: monitor},
         _get_or_create_conversation_monitor=lambda gid: monitor,
         p2p_manager=SimpleNamespace(send_message_to_peer=_collect(sent)),
+        # The door asks the roster before it answers; this file is about which
+        # authors travel, so BOB asks as the member he is.
+        group_manager=SimpleNamespace(
+            get_group=lambda gid: SimpleNamespace(members=[ALICE, BOB]) if gid == GROUP else None
+        ),
     )
     return GroupHistoryRequestHandler(service)
 

@@ -12,6 +12,7 @@ from ..conversation_monitor import (
     authors_that_differ_between,
     digest_for,
 )
+from .group_access import may_share_group, refuse_group_access
 
 
 class GroupCreateHandler(MessageHandler):
@@ -563,6 +564,10 @@ class GroupSyncHandler(MessageHandler):
 
         result = self.service.group_manager.apply_sync(payload)
         await self._honour_session_marker(local, marker_before, result)
+        # Re-added by the same peer that refused us: the standing refusal is
+        # spent, and without this the group would stay unasked until a restart.
+        if result and self.service.p2p_manager.node_id in getattr(result, "members", ()):
+            self.service.clear_group_access_denied(sender_node_id, group_id)
         if result:
             # Notify UI of updated group
             await self.service.local_api.broadcast_event("group_updated", {
@@ -636,6 +641,13 @@ class GroupHistoryRequestHandler(MessageHandler):
             "whole history" if authors is None else f"{len(authors)} author(s)",
         )
 
+        if not may_share_group(self.service.group_manager, group_id, sender_node_id):
+            await refuse_group_access(
+                self.service.p2p_manager, sender_node_id, group_id,
+                "GROUP_HISTORY_REQUEST", self.logger,
+            )
+            return None
+
         # Get conversation monitor for this group; load from disk if not in memory
         monitor = self.service.conversation_monitors.get(group_id)
         if not monitor:
@@ -691,6 +703,16 @@ class GroupHistoryResponseHandler(MessageHandler):
             "whole history" if authors is None else f"limited to {len(authors)} author(s)",
         )
 
+        # An answer, not a request — so it is dropped rather than refused out
+        # loud. Sending a denial here would answer a message we never invited.
+        if not may_share_group(self.service.group_manager, group_id, sender_node_id):
+            self.logger.warning(
+                "Discarding GROUP_HISTORY_RESPONSE from %s for group %s: "
+                "unknown group or sender is not a member",
+                sender_node_id[:20], group_id,
+            )
+            return None
+
         if not history:
             return None
 
@@ -743,6 +765,15 @@ class GroupHistoryStatusHandler(MessageHandler):
             "Received GROUP_HISTORY_STATUS from %s for group %s (hash=%s, count=%d)",
             sender_node_id[:20], group_id, remote_hash[:16], remote_count
         )
+
+        # Before the reply, which would otherwise disclose our count and digest
+        # for a group this peer has no part in.
+        if not may_share_group(self.service.group_manager, group_id, sender_node_id):
+            await refuse_group_access(
+                self.service.p2p_manager, sender_node_id, group_id,
+                "GROUP_HISTORY_STATUS", self.logger,
+            )
+            return None
 
         # Get local monitor
         monitor = self.service.conversation_monitors.get(group_id)
@@ -875,4 +906,41 @@ class GroupDeletedStatusHandler(MessageHandler):
         if removed_count > 0:
             self.logger.info("Removed %d groups based on deleted status from %s", removed_count, sender_node_id[:20])
 
+        return None
+
+
+class GroupAccessDeniedHandler(MessageHandler):
+    """A peer answers that we are not in a group our own roster still lists.
+
+    Removal is never announced to the node being removed, so this refusal is
+    how it finds out — see THE-REMOVED-MEMBER-IS-THE-ONE-NODE-NOT-TOLD. What it
+    is *not* is authority over our roster: a peer cannot delete a group by
+    saying no, so nothing is erased here. It stops us asking this peer about
+    this group, and it tells the person. Undone the moment that same peer syncs
+    a roster we are in again.
+    """
+
+    @property
+    def command_name(self) -> str:
+        return "GROUP_ACCESS_DENIED"
+
+    async def handle(self, sender_node_id: str, payload: Dict[str, Any]) -> Optional[Any]:
+        group_id = payload.get("group_id")
+        reason = payload.get("reason", "unspecified")
+        self.logger.warning(
+            "Access to group %s refused by %s (%s) — our roster still lists it",
+            group_id, sender_node_id[:20], reason,
+        )
+        if not group_id:
+            return None
+
+        self.service.note_group_access_denied(sender_node_id, group_id)
+
+        group = self.service.group_manager.get_group(group_id)
+        await self.service.local_api.broadcast_event("group_access_denied", {
+            "group_id": group_id,
+            "group_name": getattr(group, "name", None),
+            "peer_id": sender_node_id,
+            "reason": reason,
+        })
         return None
