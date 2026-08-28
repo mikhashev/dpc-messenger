@@ -96,7 +96,10 @@ RESOLUTIONS = {"fixed", "disproved", "moot", "superseded", "duplicate", "wontfix
 # twenty-seven honest entries on the shelf say "not yet observed in production", which
 # contains the phrase this looks for, so a match is only a match when nothing negates it in
 # the run-up to it.
-OBSERVED_RE = re.compile(r"observed in production|confirmed in production|"
+# And the boundary is load-bearing: without it "still unobserved in production" —
+# the sentence an honest shelf entry ends on — matched as its own opposite, and the
+# checker asked a reader to close three entries that each say they are not observed.
+OBSERVED_RE = re.compile(r"\bobserved in production|\bconfirmed in production|"
                          r"наблюдено в проде|наблюдалось в проде|подтверждено в проде|"
                          r"live-verif\w* passed", re.I)
 NOT_OBSERVED_RE = re.compile(r"not yet|never|pending|awaiting|ещё не|еще не|"
