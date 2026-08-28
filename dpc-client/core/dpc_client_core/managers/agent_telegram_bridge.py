@@ -181,6 +181,13 @@ class AgentTelegramBridge:
         # again to take their buttons away.
         self._pending_shell: Dict[str, List[tuple]] = {}
 
+        # Queue approvals shown here, same shape and for the same reason. Until
+        # 2026-08-29 this map did not exist and neither did the message: a
+        # check_back asked for from Telegram was decided by a desktop card, so
+        # the gate could only end in the sixty-second timeout that reads like a
+        # refusal.
+        self._pending_schedule: Dict[str, List[tuple]] = {}
+
         # Semaphore to limit concurrent Telegram API calls (prevents pool exhaustion)
         self._send_semaphore = asyncio.Semaphore(3)  # Max 3 concurrent sends
 
@@ -763,6 +770,7 @@ Send a voice message and it will be transcribed and processed\\.
 
         application.add_handler(CallbackQueryHandler(self._handle_vote_callback, pattern=r"^vote:"))
         application.add_handler(CallbackQueryHandler(self._handle_shell_callback, pattern=r"^shell:"))
+        application.add_handler(CallbackQueryHandler(self._handle_schedule_callback, pattern=r"^schedule:"))
 
         # block=False on the three handlers that await a whole agent run.
         # Telegram gives this Application one update at a time; a handler that
@@ -822,6 +830,135 @@ Send a voice message and it will be transcribed and processed\\.
         except Exception as e:
             log.error(f"Error handling shell approval callback: {e}", exc_info=True)
             await query.edit_message_text(f"❌ Error: {str(e)[:200]}")
+
+    async def _handle_schedule_callback(self, update, context):
+        """Handle the Yes/No buttons on a queue approval.
+
+        Callback data format: "schedule:{request_id}:{approve|reject}" — the
+        shell shape, because a person answering both should not have to learn
+        two of anything.
+        """
+        query = update.callback_query
+        try:
+            await query.answer()
+        except Exception as e:
+            log.info("Could not acknowledge schedule approval press: %s", e)
+
+        chat_id = str(query.message.chat.id)
+        if chat_id not in self.allowed_chat_ids:
+            await query.edit_message_text("⛔ Unauthorized.")
+            return
+
+        parts = (query.data or "").split(":", 2)
+        if len(parts) != 3:
+            await query.edit_message_text("❌ Invalid approval data.")
+            return
+
+        _, request_id, decision = parts
+        service = getattr(self._agent_manager, "service", None) if self._agent_manager else None
+        if not service:
+            await query.edit_message_text("⚠️ Service not available.")
+            return
+
+        # Forget the message before answering, for the reason the shell twin
+        # gives: the service withdraws the request from the other surfaces and
+        # this one writes its own outcome.
+        self._pending_schedule.pop(request_id, None)
+
+        try:
+            result = await service.resolve_schedule_approval(request_id, decision == "approve")
+            # Two sibling APIs, two words for the same outcome: the shell
+            # command answers "ok" and this one "success". Accept both rather
+            # than change a shipped contract on the way past.
+            if result.get("status") in ("ok", "success"):
+                label = "✅ Scheduled." if decision == "approve" else "❌ Not scheduled."
+            else:
+                label = "⌛ This request is already closed."
+            await query.edit_message_text(label)
+        except Exception as e:
+            log.error(f"Error handling schedule approval callback: {e}", exc_info=True)
+            await query.edit_message_text(f"❌ Error: {str(e)[:200]}")
+
+    async def notify_schedule_approval(
+        self,
+        request_id: str,
+        task_type: str = "",
+        when: str = "",
+        about: str = "",
+        agent_name: str = "",
+        timeout_seconds: int = 0,
+        chat_id: str = "",
+    ) -> None:
+        """Show a queue request in the ONE chat the run came from, with buttons.
+
+        Same rule as the shell twin: the approval appears where the conversation
+        is happening and nowhere else, because the callback handler accepts a
+        press from any allowed chat and a fan-out would widen who can authorise.
+
+        Plain text — `about` is the agent's own sentence and MarkdownV2 would
+        have to escape it into something a reader has to decode before deciding.
+        """
+        if not self._enabled or not self._bot:
+            return
+
+        target = str(chat_id or "")
+        if not target:
+            log.debug(
+                "Schedule approval %s not offered on Telegram: the run did not come from there",
+                request_id,
+            )
+            return
+        if target not in self.allowed_chat_ids:
+            log.warning(
+                "Schedule approval %s not offered to chat %s: not an allowed chat",
+                request_id, target,
+            )
+            return
+
+        from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+
+        head = f"🕒 {agent_name or 'Agent'} wants to come back to this"
+        lines = [f"{head} {when}:" if when else f"{head}:", ""]
+        lines.append(about or task_type or "(no description)")
+        if timeout_seconds:
+            lines += ["", f"Expires in {timeout_seconds}s — after that it is not scheduled."]
+
+        keyboard = InlineKeyboardMarkup([[
+            InlineKeyboardButton("✅ Schedule it", callback_data=f"schedule:{request_id}:approve"),
+            InlineKeyboardButton("❌ Not now", callback_data=f"schedule:{request_id}:reject"),
+        ]])
+
+        try:
+            sent = await self._bot.send_message(
+                chat_id=target,
+                text="\n".join(lines),
+                reply_markup=keyboard,
+            )
+        except Exception as e:
+            log.warning(f"Failed to send schedule approval to chat {target}: {e}")
+            return
+
+        self._pending_schedule[request_id] = [(target, getattr(sent, "message_id", None))]
+
+    async def close_schedule_approval(self, request_id: str, outcome: str) -> int:
+        """Take the buttons off a queue request answered elsewhere or expired."""
+        delivered = self._pending_schedule.pop(request_id, None)
+        if not delivered or not self._bot:
+            return 0
+        closed = 0
+        for chat_id, message_id in delivered:
+            if message_id is None:
+                continue
+            try:
+                await self._bot.edit_message_text(
+                    chat_id=chat_id,
+                    message_id=message_id,
+                    text=outcome,
+                )
+                closed += 1
+            except Exception as e:
+                log.debug(f"Could not close schedule approval message in {chat_id}: {e}")
+        return closed
 
     async def notify_shell_approval(
         self,

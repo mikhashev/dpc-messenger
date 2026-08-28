@@ -268,6 +268,31 @@ class TestTheSharedOriginHelper:
         assert conversation_origin(ctx) == ("group-x", "")
 
 
+def _service_with(api):
+    """A service double that runs the real announcement.
+
+    The gate stopped broadcasting for itself on 2026-08-29 — the list of
+    surfaces a question is offered on belongs to the service, which is the only
+    thing that knows about Telegram. Binding the production method here keeps
+    these assertions about the payload the product sends rather than about a
+    stub's idea of it.
+    """
+    from dpc_client_core.service import CoreService
+
+    service = types.SimpleNamespace(
+        local_api=api,
+        _conversation_display_name=lambda cid: cid or "",
+        _get_agent_telegram_bridge=lambda agent_id: None,
+    )
+    service.announce_schedule_approval_request = types.MethodType(
+        CoreService.announce_schedule_approval_request, service
+    )
+    service.announce_schedule_approval_closed = types.MethodType(
+        CoreService.announce_schedule_approval_closed, service
+    )
+    return service
+
+
 class TestTheScheduleCard:
     """The second of the three surfaces. Its payload did carry a
     `conversation_id` — `ctx.current_task_id`, the id of the task being
@@ -310,7 +335,7 @@ class TestTheScheduleCard:
         ctx = types.SimpleNamespace(
             agent_root=tmp_path / "agent_johnny_f309700d",
             _agent=types.SimpleNamespace(display_name="Johnny"),
-            dpc_service=types.SimpleNamespace(local_api=FakeApi()),
+            dpc_service=_service_with(FakeApi()),
             _event_loop=asyncio.get_running_loop(),
             current_task_id="task-42",
             conversation_id="group-b88b65076b85",
@@ -340,7 +365,7 @@ class TestTheScheduleCard:
         ctx = types.SimpleNamespace(
             agent_root=tmp_path / "agent_johnny_f309700d",
             _agent=None,
-            dpc_service=types.SimpleNamespace(local_api=FakeApi()),
+            dpc_service=_service_with(FakeApi()),
             _event_loop=asyncio.get_running_loop(),
         )
 

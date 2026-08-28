@@ -1083,10 +1083,14 @@ def _await_schedule_approval(ctx, *, task_type: str, when: str, about: str) -> t
     import threading
     import uuid
 
+    import asyncio
+    from .shell import _approval_watchers as _shell_watchers
+
     dpc_service = getattr(ctx, "dpc_service", None)
     local_api = getattr(dpc_service, "local_api", None) if dpc_service else None
-    if local_api is None:
-        return False, "no UI channel is available to ask for approval"
+    telegram_chat_id = getattr(ctx, "reply_telegram_chat_id", "") or ""
+    if dpc_service is None:
+        return False, "no service is available to ask for approval"
     # Learned from the headless web-auth gate: broadcast_event drops the
     # message when nobody is listening, so waiting on an absent UI can only
     # end in a timeout that reads like a human refusal.
@@ -1094,12 +1098,30 @@ def _await_schedule_approval(ctx, *, task_type: str, when: str, about: str) -> t
     # "'bool' object is not callable" and killed every check_back before it
     # reached the gate. My own test stubbed it as a lambda, mirroring the
     # wrong call, so the mistake validated itself.
-    if not local_api.has_clients:
-        return False, "no UI client is connected, so nobody could see the request"
+    #
+    # And the interface is not the only surface that can answer. Until
+    # 2026-08-29 it was the only one asked, so a check_back requested from
+    # Telegram was decided by a card on a desktop nobody was looking at and the
+    # sixty seconds could only run out — which the agent then reported as a
+    # refusal. The shell gate has counted all three surfaces since ADR-030 v2;
+    # this is the same list.
+    ui_attached = bool(getattr(local_api, "has_clients", False)) if local_api else False
+    if not ui_attached and not telegram_chat_id and not _shell_watchers:
+        return False, (
+            "no UI client is connected and this run did not come from Telegram, "
+            "so nobody could see the request"
+        )
 
     request_id = str(uuid.uuid4())[:8]
     event = threading.Event()
-    _pending_schedule_approvals[request_id] = {"event": event, "approved": False}
+    agent_id = getattr(getattr(ctx, "agent_root", None), "name", "") or ""
+    _pending_schedule_approvals[request_id] = {
+        "event": event,
+        "approved": False,
+        # Which agent asked, so the surfaces it was offered on can be found
+        # again when it is answered or expires.
+        "agent_id": agent_id,
+    }
 
     # `conversation_id` used to be `ctx.current_task_id` — on this path that is
     # the id of the task being scheduled, not the chat the request came from, so
@@ -1107,36 +1129,66 @@ def _await_schedule_approval(ctx, *, task_type: str, when: str, about: str) -> t
     # rendered it nowhere. The task id is kept under its own name; the chat is
     # now the chat, resolved to something a person recognises.
     _origin_id, _origin_title = conversation_origin(ctx)
-    payload = {
-        "request_id": request_id,
-        "task_type": task_type,
-        "when": when,
-        "about": about,
-        "task_id": getattr(ctx, "current_task_id", None),
-        "conversation_id": _origin_id,
-        "conversation_title": _origin_title,
-        "agent_name": agent_display_name(ctx),
-    }
+    main_loop = getattr(ctx, "_event_loop", None)
+
+    def _on_main_loop(coro) -> bool:
+        """Hand a coroutine to the service loop from this executor thread."""
+        if main_loop is None or not main_loop.is_running():
+            coro.close()
+            return False
+        asyncio.run_coroutine_threadsafe(coro, main_loop)
+        return True
+
     try:
-        import asyncio
-        coro = local_api.broadcast_event("schedule_approval_request", payload)
-        main_loop = getattr(ctx, "_event_loop", None)
-        if main_loop and main_loop.is_running():
-            asyncio.run_coroutine_threadsafe(coro, main_loop)
-        else:
+        offered = _on_main_loop(dpc_service.announce_schedule_approval_request(
+            request_id=request_id,
+            task_type=task_type,
+            when=when,
+            about=about,
+            agent_id=agent_id,
+            agent_name=agent_display_name(ctx),
+            task_id=getattr(ctx, "current_task_id", None),
+            timeout_seconds=_SCHEDULE_APPROVAL_TTL_SECONDS,
+            # Empty unless this run came from Telegram — the same field that
+            # decides where the agent's answer goes now decides where the
+            # question is asked. It was already in scope ten lines below this
+            # gate, injected into the task data, and never consulted here.
+            telegram_chat_id=telegram_chat_id,
+            conversation_id=_origin_id,
+            conversation_title=_origin_title,
+        ))
+        if not offered:
             _pending_schedule_approvals.pop(request_id, None)
             return False, "no running event loop to deliver the approval request"
     except Exception as e:
         _pending_schedule_approvals.pop(request_id, None)
         return False, f"could not deliver the approval request: {e}"
 
+    log.info("check_back approval requested: %s (%s, %s)", request_id, task_type, when)
+
     signaled = event.wait(timeout=_SCHEDULE_APPROVAL_TTL_SECONDS)
     entry = _pending_schedule_approvals.pop(request_id, None)
     if not signaled or entry is None:
+        log.info("check_back approval timed out (%ds): %s", _SCHEDULE_APPROVAL_TTL_SECONDS, request_id)
+        try:
+            _on_main_loop(dpc_service.announce_schedule_approval_closed(
+                request_id=request_id,
+                agent_id=agent_id,
+                outcome="⌛ Expired — the agent stopped waiting for this one.",
+                resolution="expired",
+            ))
+        except Exception as e:
+            log.warning("Failed to announce schedule_approval_closed: %s", e)
         return False, f"nobody answered within {_SCHEDULE_APPROVAL_TTL_SECONDS}s"
     if not entry.get("approved"):
         return False, "the user declined"
     return True, ""
+
+
+def pending_schedule_agent_id(request_id: str) -> str:
+    """Whose agent raised this request, read before the entry is consumed."""
+    entry = _pending_schedule_approvals.get(request_id)
+    return (entry or {}).get("agent_id", "") or ""
 
 
 def resolve_schedule_approval(request_id: str, approved: bool) -> bool:

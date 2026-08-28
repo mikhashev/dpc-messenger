@@ -4079,9 +4079,18 @@ class CoreService:
         The decision is taken before anything enters the queue, so the person
         sees what was planned and for when rather than discovering it later.
         """
-        from .dpc_agent.tools.core import resolve_schedule_approval as _resolve
+        from .dpc_agent.tools.core import resolve_schedule_approval as _resolve, pending_schedule_agent_id
 
+        agent_id = pending_schedule_agent_id(request_id)
         if _resolve(request_id, approved):
+            # The other surface is still showing a button that now resolves to
+            # nothing — the same reason the shell path withdraws.
+            await self.announce_schedule_approval_closed(
+                request_id=request_id,
+                agent_id=agent_id,
+                outcome="✅ Scheduled." if approved else "❌ Not scheduled.",
+                resolution="approved" if approved else "rejected",
+            )
             return {"status": "success", "request_id": request_id, "approved": bool(approved)}
         return {"status": "error", "message": f"Unknown or expired request_id: {request_id}"}
 
@@ -4110,6 +4119,108 @@ class CoreService:
                 pass
         meta = self.peer_metadata.get(conversation_id) or {}
         return meta.get("name") or conversation_id
+
+    async def announce_schedule_approval_request(
+        self,
+        request_id: str,
+        task_type: str,
+        when: str,
+        about: str,
+        agent_id: str,
+        agent_name: str,
+        task_id: str = "",
+        timeout_seconds: int = 0,
+        telegram_chat_id: str = "",
+        conversation_id: str = "",
+        conversation_title: str = "",
+    ) -> None:
+        """Put a queue request in front of every surface that can answer it.
+
+        The shell twin below has done this since ADR-030 v2; this one broadcast
+        to the interface and nothing else, so a `check_back` asked for from
+        Telegram was decided by a card on a desktop nobody was looking at, and
+        the only possible end was the sixty-second timeout. The field that
+        decides where the *result* goes — `reply_telegram_chat_id` — was already
+        in scope ten lines below the gate that never consulted it.
+        """
+        origin = conversation_title or self._conversation_display_name(conversation_id)
+        if self.local_api:
+            await self.local_api.broadcast_event("schedule_approval_request", {
+                "request_id": request_id,
+                "task_type": task_type,
+                "when": when,
+                "about": about,
+                "agent_name": agent_name,
+                # The task being scheduled — an id, not a chat. It used to
+                # arrive under `conversation_id`, which is why the card could
+                # never name the chat; both are carried now, each under its own
+                # name.
+                "task_id": task_id,
+                "conversation_id": conversation_id,
+                "conversation_title": origin,
+                # The card had no deadline to retire on, so it stayed on screen
+                # long after the agent had given up on it.
+                "timeout_seconds": timeout_seconds,
+            })
+
+        bridge = self._get_agent_telegram_bridge(agent_id) if telegram_chat_id else None
+        if bridge:
+            try:
+                await bridge.notify_schedule_approval(
+                    request_id=request_id,
+                    task_type=task_type,
+                    when=when,
+                    about=about,
+                    agent_name=agent_name,
+                    timeout_seconds=timeout_seconds,
+                    chat_id=telegram_chat_id,
+                )
+                logger.info(
+                    "Schedule approval %s offered in Telegram chat %s for %s",
+                    request_id, telegram_chat_id, agent_id,
+                )
+            except Exception as e:
+                logger.warning("Failed to offer schedule approval %s in Telegram: %s", request_id, e)
+
+            # Posting takes about a second and the desktop can answer inside it —
+            # the shell twin was caught leaving a live button on a decision
+            # already made. Withdraw what was just posted instead.
+            from .dpc_agent.tools.core import _pending_schedule_approvals
+
+            if _pending_schedule_approvals.get(request_id) is None:
+                await self.announce_schedule_approval_closed(
+                    request_id=request_id,
+                    agent_id=agent_id,
+                    outcome="⌛ Answered before this arrived.",
+                    resolution="superseded",
+                )
+        else:
+            logger.info("Schedule approval %s offered on the interface only (no bridge for %s)",
+                        request_id, agent_id or "<unknown agent>")
+
+    async def announce_schedule_approval_closed(
+        self,
+        request_id: str,
+        agent_id: str,
+        outcome: str,
+        resolution: str = "expired",
+    ) -> None:
+        """Withdraw a queue request from the surfaces still showing it."""
+        if self.local_api:
+            await self.local_api.broadcast_event("schedule_approval_resolved", {
+                "request_id": request_id,
+                "resolution": resolution,
+                "outcome": outcome,
+            })
+
+        bridge = self._get_agent_telegram_bridge(agent_id)
+        if bridge:
+            try:
+                closed = await bridge.close_schedule_approval(request_id, outcome)
+                if closed:
+                    logger.info("Schedule approval %s withdrawn from Telegram: %s", request_id, outcome)
+            except Exception as e:
+                logger.debug("Could not withdraw schedule approval %s from Telegram: %s", request_id, e)
 
     async def announce_shell_approval_request(
         self,
