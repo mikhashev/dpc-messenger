@@ -3,7 +3,7 @@
 
 <script lang="ts">
   import { createEventDispatcher } from 'svelte';
-  import { sendCommand } from '$lib/coreService';
+  import { sendCommand, providersList } from '$lib/coreService';
   import AgentPermissionsPanel from './AgentPermissionsPanel.svelte';
   import { confirmAsync } from '$lib/utils/dialog';
 
@@ -172,7 +172,6 @@
   // Intermediate string variables for textarea editing (compute sharing)
   let allowNodesText: string = '';
   let allowGroupsText: string = '';
-  let allowedModelsText: string = '';
 
   // Intermediate string variables for textarea editing (transcription sharing)
   let transcriptionAllowNodesText: string = '';
@@ -226,11 +225,17 @@
     }
   }
 
+  // The aliases that can serve a peer's inference. Whisper is left out: it is
+  // reached through Transcription Sharing, which has a gate of its own.
+  $: servingAliasChoices = ($providersList || []).filter((entry) => entry.type !== 'local_whisper');
+  $: servingAliasMissing =
+    !!displayRules?.compute?.serving_alias &&
+    !servingAliasChoices.some((entry) => entry.alias === displayRules?.compute?.serving_alias);
+
   // Sync string variables with arrays when entering edit mode
   $: if (editMode && editedRules?.compute) {
     allowNodesText = editedRules.compute.allow_nodes.join('\n');
     allowGroupsText = editedRules.compute.allow_groups.join('\n');
-    allowedModelsText = editedRules.compute.allowed_models.join('\n');
   }
 
   // Sync transcription string variables with arrays when entering edit mode
@@ -1347,25 +1352,37 @@
                     <h4>Serving Alias</h4>
                     <p class="help-text-small">
                       The one provider alias peers are served from. Peers cannot choose:
-                      a request naming any other provider is refused. Leave empty to share
-                      no compute at all &mdash; unlike Allowed Models, empty here means
-                      <em>nothing</em>, not everything.
+                      a request naming any other provider is refused, and choosing nothing
+                      shares no compute at all. This is the only control here &mdash;
+                      <code>compute.allowed_models</code> is still read from the rules file
+                      for compatibility, but once an alias decides what runs, a list of
+                      models can only refuse, never choose (ADR-040 D4-0).
                     </p>
                     {#if editMode && editedRules}
-                      <input
+                      <select
                         id="compute-serving-alias"
                         name="compute-serving-alias"
                         class="inline-input"
-                        type="text"
-                        placeholder="e.g. ollama_local (empty = share nothing)"
                         value={editedRules.compute?.serving_alias ?? ''}
-                        on:blur={(e) => {
+                        on:change={(e) => {
                           if (editedRules?.compute) {
-                            const v = (e.currentTarget as HTMLInputElement).value.trim();
+                            const v = (e.currentTarget as HTMLSelectElement).value;
                             editedRules.compute.serving_alias = v.length > 0 ? v : null;
                           }
                         }}
-                      />
+                      >
+                        <option value="">&mdash; share no compute &mdash;</option>
+                        {#each servingAliasChoices as choice (choice.alias)}
+                          <option value={choice.alias}>{choice.alias} ({choice.model})</option>
+                        {/each}
+                        <!-- An alias no longer in providers.json would otherwise vanish from
+                             the list and be cleared by the next save without a word. It stays
+                             selectable, and says what happened to it. -->
+                        {#if servingAliasMissing}
+                          <option value={displayRules.compute.serving_alias}
+                            >{displayRules.compute.serving_alias} (not in providers.json)</option>
+                        {/if}
+                      </select>
                     {:else}
                       <div class="tags">
                         {#if displayRules.compute.serving_alias}
@@ -1373,43 +1390,6 @@
                         {:else}
                           <span class="empty-small">No alias designated &mdash; peer inference is refused</span>
                         {/if}
-                      </div>
-                    {/if}
-                  </div>
-
-                  <div class="subsection">
-                    <h4>Allowed Models</h4>
-                    <p class="help-text-small">
-                      Leave empty to allow all models. Since the Serving Alias above decides
-                      what actually runs, this list can only <em>refuse</em> a peer that names
-                      a model &mdash; it never chooses one. A list that does not contain the
-                      serving alias&rsquo;s own model makes this node advertise nothing.
-                    </p>
-                    {#if editMode && editedRules}
-                      <textarea
-                        id="compute-allowed-models"
-                        name="compute-allowed-models"
-                        class="edit-textarea"
-                        rows="3"
-                        placeholder="Enter model names (one per line)"
-                        bind:value={allowedModelsText}
-                        on:blur={() => {
-                          if (editedRules?.compute) {
-                            // Remove duplicates using Set
-                            const models = allowedModelsText.split('\n').map(s => s.trim()).filter(s => s.length > 0);
-                            editedRules.compute.allowed_models = [...new Set(models)];
-                            // Update textarea to show deduplicated list
-                            allowedModelsText = editedRules.compute.allowed_models.join('\n');
-                          }
-                        }}
-                      ></textarea>
-                    {:else}
-                      <div class="tags">
-                        {#each displayRules.compute.allowed_models as model}
-                          <span class="tag">{model}</span>
-                        {:else}
-                          <span class="empty-small">All models allowed</span>
-                        {/each}
                       </div>
                     {/if}
                   </div>
