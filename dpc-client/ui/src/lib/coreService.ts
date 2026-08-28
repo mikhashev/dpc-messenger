@@ -808,8 +808,17 @@ export async function connectToCoreService() {
 
                 else if (message.event === "schedule_approval_request") {
                     console.log("Schedule approval request:", message.payload);
-                    const { pendingScheduleApprovals } = await import("$lib/services/scheduleApproval");
-                    pendingScheduleApprovals.update((list: any[]) => [...list, message.payload]);
+                    const { noteScheduleApproval } = await import("$lib/services/scheduleApproval");
+                    noteScheduleApproval(message.payload);
+                }
+                // Answered on the other surface, or expired. Telegram can now
+                // answer the same request, so whichever surface did not has to
+                // stop offering a button that resolves to nothing.
+                else if (message.event === "schedule_approval_resolved") {
+                    const { resolution, outcome, request_id } = message.payload ?? {};
+                    console.log(`Schedule approval ${resolution}: ${request_id} — ${outcome ?? ""}`);
+                    const { dropScheduleApproval } = await import("$lib/services/scheduleApproval");
+                    dropScheduleApproval(request_id);
                 }
                 // Shell approval events (ADR-030 v2)
                 else if (message.event === "shell_approval_request") {
