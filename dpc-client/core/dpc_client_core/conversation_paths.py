@@ -80,6 +80,38 @@ def slugify(name: str) -> str:
     return slug[:SLUG_MAX_LEN]
 
 
+# A conversation id becomes a directory name, and one of them arrives in a
+# payload: `GROUP_HISTORY_RESPONSE` carries the group id it wants merged. Shown
+# 2026-08-28 in a substituted HOME — `group-../../../escaped` resolved outside
+# `conversations/` and `merge_history` wrote `history.json` there, parents and
+# all; an absolute id discards the base outright, because that is what
+# `Path.__truediv__` does. The roster gate refuses such an id before this point
+# (no group has that name), but the boundary belongs where the path is built,
+# not only at each of the four callers that reach it.
+_UNSAFE = ("/", "\\", chr(0))
+
+
+def is_safe_conversation_id(conversation_id: str) -> bool:
+    """Whether this id may be used as a directory name at all."""
+    if not conversation_id or not isinstance(conversation_id, str):
+        return False
+    if any(ch in conversation_id for ch in _UNSAFE):
+        return False
+    # `..` anywhere, not just at the front: Windows strips a trailing dot from a
+    # path component, so a folder asked for as `group-..` is created as `group-`
+    # there and as `group-..` everywhere else — the same id, two stores, which is
+    # the defect this module was written to end.
+    if ".." in conversation_id or conversation_id in (".",):
+        return False
+    if conversation_id != conversation_id.rstrip(". "):
+        return False
+    # `C:` and `\host` never reach the branches above on POSIX, so ask the
+    # library rather than the string.
+    if Path(conversation_id).is_absolute() or Path(conversation_id).drive:
+        return False
+    return True
+
+
 def preferred_folder_name(conversation_id: str, display_name: Optional[str] = None) -> str:
     """The folder name a *new* store for this conversation would be given."""
     if display_name:
@@ -155,11 +187,18 @@ def resolve_store_dir(
     An existing store always wins over a preferred-but-absent one — that single
     rule is what keeps a display name from moving a live store.
     """
+    if not is_safe_conversation_id(conversation_id):
+        raise ValueError(f"unsafe conversation id for a store path: {conversation_id!r}")
     dirs = existing_store_dirs(base, conversation_id)
     chosen = canonical_store_dir(dirs)
     if chosen is not None:
         return chosen
-    return base / preferred_folder_name(conversation_id, display_name)
+    chosen = base / preferred_folder_name(conversation_id, display_name)
+    # Belt as well as braces: whatever the id looked like, the answer stays
+    # under the base this function was given.
+    if base.resolve() not in chosen.resolve().parents:
+        raise ValueError(f"store path for {conversation_id!r} would leave {base}")
+    return chosen
 
 
 def split_stores(
