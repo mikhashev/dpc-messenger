@@ -375,6 +375,20 @@ class P2PCoordinator:
         logger.debug("Sending %d providers to %s (filtered from %d total)",
                     len(filtered_providers), peer_id[:20], len(all_providers))
 
+        # Say the quiet part once. Compute sharing on, the peer allowed, and the
+        # answer still carries no inference provider — because `serving_alias`
+        # is what designates one and it is empty by default (D4-0: the host
+        # allocates, not the caller). Until this line the only trace was the
+        # DEBUG count above, so a person who had switched sharing on and added
+        # the peer to a group saw a peer offering nothing and no reason for it.
+        if has_compute_access and not self.service.firewall.compute_serving_alias:
+            logger.info(
+                "Compute sharing is enabled and %s is allowed, but no compute.serving_alias "
+                "is designated — no inference provider is offered. Set it in the firewall "
+                "rules (Compute Sharing) to name the one alias peers are served from.",
+                peer_id[:20],
+            )
+
         response = create_providers_response(filtered_providers)
         try:
             await self.p2p_manager.send_message_to_peer(peer_id, response)
