@@ -2,6 +2,9 @@
 
 # Shell scripts MUST be LF (Linux + macOS compatibility)
 *.sh text eol=lf
+# Git hooks have no extension and are read by /bin/sh: a CRLF checkout on a
+# Linux clone makes the shebang unreadable and the hook silently absent.
+tools/git-hooks/* text eol=lf
 
 # Python, TypeScript, Svelte (LF preferred)
 *.py text eol=lf
