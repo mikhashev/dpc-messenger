@@ -7,6 +7,7 @@
   import type { Writable } from 'svelte/store';
   import { connectionStatus, sendCommand } from '$lib/coreService';
   import { mapBackendMessage } from '$lib/utils/messageMapper';
+  import { mergeBackfillWithLive } from '$lib/utils/liveMessageIdentity';
   import { onMount, untrack } from 'svelte';
 
   // ---------------------------------------------------------------------------
@@ -132,13 +133,11 @@
                 // while this fetch was in flight, or before the chat was opened.
                 // Replacing outright would drop it, which never happened before
                 // only because a chat with messages was never backfilled at all.
-                const loadedIds = new Set(loadedMessages.map((m: any) => m.id).filter(Boolean));
-                const live = (map.get(reqChatId) || []).filter(
-                  (m: any) => !m.id || !loadedIds.has(m.id)
-                );
-                newMap.set(reqChatId, live.length ? [...loadedMessages, ...live] : loadedMessages);
+                const merged = mergeBackfillWithLive(loadedMessages, map.get(reqChatId) || []);
+                newMap.set(reqChatId, merged);
+                const kept = merged.length - loadedMessages.length;
                 console.log(`[ChatHistory] Updated chatHistories with ${loadedMessages.length} messages` +
-                            (live.length ? ` + ${live.length} kept from the live stream` : ''));
+                            (kept ? ` + ${kept} kept from the live stream` : ''));
                 return newMap;
               });
               loadedHistory.add(reqChatId);

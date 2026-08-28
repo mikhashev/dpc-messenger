@@ -865,6 +865,11 @@ class FileTransferManager:
                     timestamp=datetime.now(timezone.utc).isoformat(),
                     sender_node_id=node_id,
                     sender_name=sender_name,
+                    # The same id the broadcast above carried. Without it the
+                    # stored record and the bubble already on screen are two
+                    # messages to anything that joins them by id, and the
+                    # history backfill drew the file a second time.
+                    message_id=message_id,
                 )
                 logger.debug(f"Added received {attachment['type']} to conversation history: {transfer.filename}")
 
