@@ -125,7 +125,7 @@ import { availableProviders, defaultProviders, providersList, peerProviders, aiR
 import { showNotificationIfBackground } from './notificationService';
 import { fileTransferOffer, fileTransferProgress, fileTransferComplete, fileTransferCancelled, activeFileTransfers, filePreparationStarted, filePreparationProgress, filePreparationCompleted } from './services/fileTransfer';
 import { voiceOfferReceived, voiceTranscriptionReceived, voiceTranscriptionComplete, voiceTranscriptionConfig, whisperModelLoadingStarted, whisperModelLoaded, whisperModelLoadingFailed, whisperModelUnloaded, whisperModelDownloadRequired, whisperModelDownloadStarted, whisperModelDownloadCompleted, whisperModelDownloadFailed } from './services/voice';
-import { groupChats, groupTextReceived, groupFileReceived, groupInviteReceived, groupUpdated, groupMemberLeft, groupDeleted, groupHistorySynced, groupMessageDeleted, tokenUsageUpdated } from './services/groups';
+import { groupChats, groupTextReceived, groupFileReceived, groupInviteReceived, groupUpdated, groupMemberLeft, groupDeleted, groupHistorySynced, groupAccessDenied, groupMessageDeleted, tokenUsageUpdated } from './services/groups';
 import { agentsList, agentCreated, agentUpdated, agentDeleted, agentProfiles, agentProgress, agentProgressClear, agentLiveTools, agentTextChunk, agentChatMessage, userMessageConfirmed, sleepStateChanged, sleepProgress, sleepAgentStates } from './services/agents';
 import { telegramEnabled, telegramConnected, telegramStatus, telegramError, telegramLinkedChats, telegramMessages, telegramMessageReceived, telegramVoiceReceived, telegramImageReceived, telegramFileReceived, agentTelegramLinked, agentTelegramUnlinked, agentHistoryUpdated } from './services/telegram';
 import { personalContext, contextUpdated, peerContextUpdated, knowledgeCommitProposal, knowledgeCommitResult, extractionFailure, tokenWarning, integrityWarnings, votingConversationId } from './services/knowledge';
@@ -139,7 +139,7 @@ export { p2pMessages, unreadMessageCounts };
 export { availableProviders, defaultProviders, providersList, peerProviders, aiResponseWithImage, firewallRulesUpdated, providerBalance };
 export { fileTransferOffer, fileTransferProgress, fileTransferComplete, fileTransferCancelled, activeFileTransfers, filePreparationStarted, filePreparationProgress, filePreparationCompleted };
 export { voiceOfferReceived, voiceTranscriptionReceived, voiceTranscriptionComplete, voiceTranscriptionConfig, whisperModelLoadingStarted, whisperModelLoaded, whisperModelLoadingFailed, whisperModelUnloaded, whisperModelDownloadRequired, whisperModelDownloadStarted, whisperModelDownloadCompleted, whisperModelDownloadFailed };
-export { groupChats, groupTextReceived, groupFileReceived, groupInviteReceived, groupUpdated, groupMemberLeft, groupDeleted, groupHistorySynced, groupMessageDeleted, tokenUsageUpdated };
+export { groupChats, groupTextReceived, groupFileReceived, groupInviteReceived, groupUpdated, groupMemberLeft, groupDeleted, groupHistorySynced, groupAccessDenied, groupMessageDeleted, tokenUsageUpdated };
 export { agentsList, agentCreated, agentUpdated, agentDeleted, agentProfiles, agentProgress, agentProgressClear, agentLiveTools, agentTextChunk, agentChatMessage, userMessageConfirmed, sleepStateChanged, sleepProgress, sleepAgentStates };
 export { telegramEnabled, telegramConnected, telegramStatus, telegramError, telegramLinkedChats, telegramMessages, telegramMessageReceived, telegramVoiceReceived, telegramImageReceived, telegramFileReceived, agentTelegramLinked, agentTelegramUnlinked, agentHistoryUpdated };
 export { personalContext, contextUpdated, peerContextUpdated, knowledgeCommitProposal, knowledgeCommitResult, extractionFailure, tokenWarning, integrityWarnings, votingConversationId };
@@ -1033,6 +1033,10 @@ export async function connectToCoreService() {
                 else if (message.event === "group_history_synced") {
                     console.log("Group history synced:", message.payload);
                     groupHistorySynced.set(message.payload);
+                }
+                else if (message.event === "group_access_denied") {
+                    console.warn("Group access refused by peer:", message.payload);
+                    groupAccessDenied.set(message.payload);
                 }
                 else if (message.event === "group_message_deleted") {
                     // Backend removed a message from group history (e.g. stale morning

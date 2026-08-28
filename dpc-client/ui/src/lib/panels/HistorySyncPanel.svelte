@@ -10,6 +10,7 @@
   import {
     historyRestored,
     groupHistorySynced,
+    groupAccessDenied,
     sendCommand,
   } from '$lib/coreService';
 
@@ -37,6 +38,22 @@
   // ---------------------------------------------------------------------------
   // Effects
   // ---------------------------------------------------------------------------
+
+  // A peer says we are not in a group our roster still lists. Removal is never
+  // announced to the node being removed, so this refusal is how a person finds
+  // out — and the handler that raises it deliberately erases nothing, so saying
+  // it is the whole of the user-facing half. Without this the backend stopped
+  // asking and nobody was told, which is the shape we keep catching: built,
+  // wired to a store, and never read.
+  $effect(() => {
+    const denial = $groupAccessDenied;
+    if (!denial?.group_id) return;
+    const name = denial.group_name || denial.group_id;
+    onAgentToast(
+      `⚠ You are no longer a member of "${name}" — its history is no longer shared with this node`,
+      'warning',
+    );
+  });
 
   // Handle chat history restored from backend (v0.11.2)
   $effect(() => {

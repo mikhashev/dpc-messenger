@@ -22,6 +22,16 @@ export const groupUpdated = writable<GroupChat | null>(null);
 export const groupMemberLeft = writable<GroupMemberLeftEvent | null>(null);
 export const groupDeleted = writable<GroupDeletedEvent | null>(null);
 export const groupHistorySynced = writable<GroupHistorySyncedEvent | null>(null);
+// A peer answered that we have no part in a group our own roster still lists —
+// which is how a removed node finds out, since removal is never announced to it.
+// The backend stops asking that peer about that group after the first refusal, so
+// this fires once per pair per session rather than on every reconnect.
+export const groupAccessDenied = writable<{
+    group_id: string;
+    group_name: string | null;
+    peer_id: string;
+    reason: string;
+} | null>(null);
 // Emitted when backend removes a message from group history (e.g. stale morning brief
 // being replaced on Sleep button press). MessageRouterPanel reacts and removes from chatHistories.
 // `sender_name` + `content_prefix` are optional pattern-match hints for legacy messages

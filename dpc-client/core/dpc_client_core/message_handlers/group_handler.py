@@ -945,8 +945,11 @@ class GroupAccessDeniedHandler(MessageHandler):
     how it finds out — see THE-REMOVED-MEMBER-IS-THE-ONE-NODE-NOT-TOLD. What it
     is *not* is authority over our roster: a peer cannot delete a group by
     saying no, so nothing is erased here. It stops us asking this peer about
-    this group, and it tells the person. Undone the moment that same peer syncs
-    a roster we are in again.
+    this group, and it tells the person — `group_access_denied` reaches the UI
+    through `services/groups.ts` and `HistorySyncPanel` raises a warning, which
+    is the whole of the user-facing half and was missing until Johnny and Ark
+    grepped for a listener and found none. Undone the moment that same peer
+    syncs a roster we are in again.
     """
 
     @property
