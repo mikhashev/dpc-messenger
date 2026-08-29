@@ -62,6 +62,7 @@
     checkpoint_min_step?: number; // unset = the build's 8192
     kv_unified?: boolean;       // unset = true; only meaningful above one slot
     cache_ram_mib?: number;     // host RAM prompt cache, not VRAM
+    vram_overhead_mib?: number; // what a loaded context costs beyond weights and KV
     slot_save_path?: string;    // where slot state is persisted
     jinja?: boolean;            // unset = true
     start_timeout_s?: number;   // unset = 300
@@ -1661,6 +1662,33 @@
                             System RAM, <strong>not</strong> VRAM — it holds whole conversations
                             outside the card so a returning slot need not re-read its prompt.
                             Raising it costs nothing on the GPU.
+                          </p>
+                        </div>
+
+                        <div class="form-group">
+                          <label for="vram-overhead-{i}">VRAM overhead, MiB (vram_overhead_mib)</label>
+                          <input
+                            id="vram-overhead-{i}"
+                            type="number"
+                            min="0"
+                            value={editedConfig.providers[i].vram_overhead_mib ?? ''}
+                            on:input={(e) => setNum(i, 'vram_overhead_mib', (e.target as HTMLInputElement).value)}
+                            placeholder="empty — use the measured default"
+                          />
+                          <p class="help-text">
+                            What a loaded context costs on the card <strong>beyond</strong> the
+                            weights and the attention KV: compute buffers, a draft context if
+                            the model has an MTP head, the recurrent state of hybrid blocks,
+                            the CUDA context. The admission arithmetic adds it before deciding
+                            whether a KV rung fits, so a wrong figure either refuses a
+                            configuration that would have run or admits one that does not.
+                            Empty uses 4608 MiB, measured on qwen3.8-27B at 262 144 — every
+                            term in that sum belongs to that model, so a different one should
+                            carry its own. Measure it the same way: load, read the process's
+                            VRAM, subtract weights and KV. The start line prints which figure
+                            was used and whether it came from here. It is not a flag the child is
+                            started with, so a running server keeps the figure it began
+                            with until it next starts.
                           </p>
                         </div>
 

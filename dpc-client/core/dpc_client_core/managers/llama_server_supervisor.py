@@ -98,6 +98,10 @@ DEFAULTS: Dict[str, Any] = {
     # 0 is expressible and means off, which is why the guard tests None.
     "cache_reuse": None,
     "cache_ram_mib": None,
+    # What a loaded context costs beyond weights and attention-KV, in MiB. None
+    # uses the figure below, which was measured on one model: every term in it
+    # is model-shaped, so an alias serving a different model owns its own.
+    "vram_overhead_mib": None,
     "slot_save_path": None,
     "jinja": True,
     "start_timeout_s": 300.0,
@@ -190,7 +194,7 @@ _KV_BYTES_PER_ELEM = {"f16": 2.0, "bf16": 2.0, "q8_0": 34 / 32, "q4_0": 18 / 32}
 # buffers, MTP draft contexts, the hybrid blocks' recurrent state, CUDA
 # context. Measured on qwen3.8-27B @ 262 144 on b10472 (ADR-040 table):
 # 748 + 1360 + 1024 + 324 + 1136 = 4592, rounded up.
-_FIXED_OVERHEAD_MIB = 4608
+_DEFAULT_OVERHEAD_MIB = 4608
 
 # The card is shared with the desktop; a load that consumes it all is the
 # paging regime measured 2026-08-17 ("card busy computing nothing, window
@@ -554,6 +558,19 @@ class LlamaServerSupervisor:
         except (OSError, ValueError):
             logger.debug("llama-server[%s]: could not write the KV fit memo", self.alias, exc_info=True)
 
+    def _overhead_mib(self) -> int:
+        """The alias's own overhead when it names one, the measured default
+        otherwise. Whichever it is, the arithmetic below prints it."""
+        configured = self.config.get("vram_overhead_mib")
+        try:
+            return int(configured) if configured is not None else _DEFAULT_OVERHEAD_MIB
+        except (TypeError, ValueError):
+            logger.warning(
+                "llama-server[%s]: vram_overhead_mib %r is not a number — using %d",
+                self.alias, configured, _DEFAULT_OVERHEAD_MIB,
+            )
+            return _DEFAULT_OVERHEAD_MIB
+
     def _admission(self) -> Optional[Tuple[int, int, int]]:
         """(budget_mib, weights_mib, kv_dims) for the arithmetic, or None when
         the card or the model cannot be sized and the ladder must fall back to
@@ -571,7 +588,7 @@ class LlamaServerSupervisor:
 
     def _predicted_total_mib(self, admission: Tuple[int, int, int], cache_type: str) -> int:
         _, weights, (layers, width) = admission
-        return weights + _kv_cache_mib(layers, width, self.config["n_ctx"], cache_type) + _FIXED_OVERHEAD_MIB
+        return weights + _kv_cache_mib(layers, width, self.config["n_ctx"], cache_type) + self._overhead_mib()
 
     def _warn_if_explicit_type_exceeds_budget(self) -> None:
         """An alias that names a KV type owns the consequence — the arithmetic
@@ -631,7 +648,8 @@ class LlamaServerSupervisor:
                         "llama-server[%s]: KV %s refused by arithmetic — predicted %d MiB "
                         "(weights %d + kv %d + overhead %d) against a %d MiB budget",
                         self.alias, rung, predicted, weights,
-                        predicted - weights - _FIXED_OVERHEAD_MIB, _FIXED_OVERHEAD_MIB, budget,
+                        predicted - weights - self._overhead_mib(), self._overhead_mib(),
+                        budget,
                     )
                     candidates.remove(rung)
                     memo_hit = memo_hit and rung != memo.get("type")
@@ -697,7 +715,8 @@ class LlamaServerSupervisor:
         logger.info(
             "llama-server[%s] starting on :%s (binary=%s, n_ctx=%s, context_window=%s, "
             "kv=%s, cache_ram=%s, ctx_checkpoints=%s, checkpoint_min_step=%s, "
-            "n_ubatch=%s, cache_reuse=%s, spec_type=%s, spec_draft_n_max=%s)",
+            "n_ubatch=%s, cache_reuse=%s, spec_type=%s, spec_draft_n_max=%s, "
+            "vram_overhead=%s)",
             self.alias, self.port, binary if binary is not None else "unknown",
             n_ctx, _fmt_knob(window),
             cache_type or "configured", _cache,
@@ -707,6 +726,8 @@ class LlamaServerSupervisor:
             _fmt_knob(self.config.get("cache_reuse")),
             _fmt_knob(self.config.get("spec_type")),
             _fmt_knob(self.config.get("spec_draft_n_max")),
+            f"{self._overhead_mib()} MiB"
+            + ("" if self.config.get("vram_overhead_mib") else " (measured elsewhere)"),
         )
         if window_outgrows_pool(window, n_ctx):
             # The direction that fails without a word: the agent fills to a
