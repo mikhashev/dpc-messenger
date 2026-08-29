@@ -280,11 +280,18 @@ def gguf_effort_dictionary(path: str) -> Optional[Tuple[Tuple[str, ...], Optiona
                 else:
                     return None
     except Exception as e:
-        logger.debug("effort dictionary unreadable in %s: %s", path, e)
+        logger.warning("effort dictionary unreadable in %s: %s", path, e)
         return None
     if not template:
+        logger.warning("no chat template in %s — effort words fall back to the table", path)
         return None
-    return effort_dictionary_of(template)
+    words = effort_dictionary_of(template)
+    if words is None:
+        logger.warning(
+            "the chat template in %s does not guard reasoning_effort — "
+            "effort words fall back to the table", path,
+        )
+    return words
 
 
 _EFFORT_GUARD = re.compile(r"reasoning_effort\s+not\s+in\s*\(([^)]*)\)")
