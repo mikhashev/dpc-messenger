@@ -38,6 +38,27 @@
   let modelConfigSaving = $state(false);
   let modelConfigReasoningEffort = $state('');
   // The words belong to the model picked above, so the sentence follows the dropdown.
+  const FLEET_EFFORTS = ['low', 'medium', 'high', 'max'];
+
+  // The words the model picked above will actually take. A level already stored
+  // for this agent stays on the list even when the model does not know it, so
+  // opening the dialog cannot silently clear a setting.
+  let modelConfigEffortOptions = $derived.by(() => {
+    const known = modelConfigEffortWords?.words;
+    const base = known ?? FLEET_EFFORTS;
+    const current = modelConfigReasoningEffort;
+    const words = current && current !== 'off' && !base.includes(current)
+      ? [...base, current]
+      : base;
+    return words.map((w) => ({
+      value: w,
+      label:
+        w.charAt(0).toUpperCase() + w.slice(1) +
+        (known && w === modelConfigEffortWords?.default ? ' — default for this model' : '') +
+        (known && !known.includes(w) ? ' — not in this model' : ''),
+    }));
+  });
+
   let modelConfigEffortWords = $derived.by(() => {
     const row: any = modelConfigProvidersList.find(p => p.alias === modelConfigProviderAlias);
     return row?.reasoning_words
@@ -906,10 +927,9 @@
         <select id="agent-reasoning" class="dialog-input" bind:value={modelConfigReasoningEffort}>
           <option value="">Not set — the model decides</option>
           <option value="off">Off</option>
-          <option value="low">Low</option>
-          <option value="medium">Medium</option>
-          <option value="high">High</option>
-          <option value="max">Max</option>
+          {#each modelConfigEffortOptions as w}
+            <option value={w.value}>{w.label}</option>
+          {/each}
         </select>
         <p class="dialog-hint">
           How hard this agent thinks before answering. This is the level a chat header

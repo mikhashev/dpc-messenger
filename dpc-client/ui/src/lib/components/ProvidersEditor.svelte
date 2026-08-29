@@ -352,6 +352,26 @@
 
   let effortWords: Record<string, { words: string[]; default: string | null }> = {};
 
+  const FLEET_EFFORTS = ['low', 'medium', 'high', 'max'];
+
+  /** The words this alias may be given: the model's own when they were read
+   *  from it, the fleet scale otherwise. A stored value the model does not
+   *  know stays on the list so opening the form cannot silently clear it. */
+  function effortOptions(alias: string, current?: string) {
+    const known = effortWords[alias]?.words;
+    const base = known ?? FLEET_EFFORTS;
+    const words = current && current !== 'off' && !base.includes(current)
+      ? [...base, current]
+      : base;
+    return words.map((w) => ({
+      value: w,
+      label:
+        w.charAt(0).toUpperCase() + w.slice(1) +
+        (known && w === effortWords[alias]?.default ? ' — default for this model' : '') +
+        (known && !known.includes(w) ? ' — not in this model' : ''),
+    }));
+  }
+
   // Load config when modal opens
   $: if (open && !config) {
     loadConfig();
@@ -1401,10 +1421,9 @@
                         >
                           <option value="">Not set — the model decides</option>
                           <option value="off">Off</option>
-                          <option value="low">Low</option>
-                          <option value="medium">Medium</option>
-                          <option value="high">High</option>
-                          <option value="max">Max</option>
+                          {#each effortOptions(editedConfig.providers[i].alias, editedConfig.providers[i].reasoning_effort) as w}
+                            <option value={w.value}>{w.label}</option>
+                          {/each}
                         </select>
                         <p class="help-text">
                           The level this alias asks for when neither the chat nor the agent
