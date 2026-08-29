@@ -39,6 +39,7 @@
     // child serves, the per-request thinking cap (ADR-040 route b2), and the
     // supervisor knobs the form exposes doors to
     gguf_path?: string;
+    reasoning_effort?: string;
     reasoning_budget_tokens?: number;
     mmproj?: string;         // vision projector; absent = text-only child
     n_ctx?: number;          // KV cells the child allocates (-c); unset = 262144
@@ -1374,6 +1375,41 @@
                           <code>n_slots = 4</code> in its startup line, so the figure is one you
                           can check rather than one this form promises. An explicit value is
                           always sent — set 1 to serialize every request through one slot.
+                        </p>
+                      </div>
+
+                      <div class="form-group">
+                        <label for="reasoning-effort-{i}">Reasoning effort (optional)</label>
+                        <select
+                          id="reasoning-effort-{i}"
+                          value={editedConfig.providers[i].reasoning_effort ?? ''}
+                          on:change={(e) => {
+                            if (!editedConfig) return;
+                            const v = (e.target as HTMLSelectElement).value;
+                            if (v) {
+                              editedConfig.providers[i].reasoning_effort = v;
+                            } else {
+                              delete editedConfig.providers[i].reasoning_effort;
+                            }
+                            editedConfig = editedConfig;
+                          }}
+                        >
+                          <option value="">Not set — the model decides</option>
+                          <option value="off">Off</option>
+                          <option value="low">Low</option>
+                          <option value="medium">Medium</option>
+                          <option value="high">High</option>
+                          <option value="max">Max</option>
+                        </select>
+                        <p class="help-text">
+                          The level this alias asks for when neither the chat nor the agent
+                          named one — the last say before the model's own default. Leave it
+                          unset and nothing is sent: a local llama.cpp model then applies its
+                          chat template's default, which on qwen3.8 is <code>xhigh</code>, the
+                          deepest and slowest rung. The words are the fleet's scale and each
+                          provider folds them onto its own model: this template knows
+                          <code>low</code>, <code>medium</code> and <code>xhigh</code>, so
+                          High and Max both arrive as <code>xhigh</code>.
                         </p>
                       </div>
 
