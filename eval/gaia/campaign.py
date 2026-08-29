@@ -60,12 +60,14 @@ CORE = HERE.parent.parent / "dpc-client" / "core"
 QUEUE = [
     {"name": "t0-xhigh", "temperature": 0.0, "reasoning_effort": "xhigh",
      "why": "greedy reference — a second run of this returns the same number"},
-    {"name": "t1-xhigh-b", "temperature": 1.0, "reasoning_effort": "xhigh",
-     "why": "second sample at the production setting, for a spread"},
-    {"name": "t1-xhigh-c", "temperature": 1.0, "reasoning_effort": "xhigh",
-     "why": "third sample — three points is the least that says anything"},
-    {"name": "t0-high", "temperature": 0.0, "reasoning_effort": "high",
-     "why": "does less thinking cost accuracy, measured against the greedy reference"},
+    {"name": "t0-low", "temperature": 0.0, "reasoning_effort": "low",
+     "why": "the effort question, asked where the noise is smallest: this pair "
+            "differs in one word and both runs are greedy"},
+    {"name": "t1-xhigh", "temperature": 1.0, "reasoning_effort": "xhigh",
+     "why": "the production setting, one draw from a spread measured at 9.4 points"},
+    {"name": "t1-low", "temperature": 1.0, "reasoning_effort": "low",
+     "why": "the same question at the production temperature — a second reading, "
+            "weaker than the greedy pair and not a substitute for it"},
 ]
 
 # What one run actually occupies: the 16 GB model plus its KV cache. The gate
