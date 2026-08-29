@@ -8,6 +8,10 @@ name: tests
 on:
   push:
     branches: [main, dev]
+    # A release is a claim about one commit, and the run that backs it should be
+    # findable by the name of the tag rather than by knowing which branch push
+    # happened to carry the same sha.
+    tags: ['v*']
   pull_request:
 
 concurrency:
