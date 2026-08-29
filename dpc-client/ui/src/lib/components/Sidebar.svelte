@@ -936,9 +936,9 @@
           means by "Agent config", and the one used when no chat overrides it. Leave it
           unset and nothing is sent — the model applies its own default.
           {#if modelConfigEffortWords}
-            The model chosen above accepts <strong>{modelConfigEffortWords.words.join(', ')}</strong>{#if modelConfigEffortWords.default}, defaulting to <strong>{modelConfigEffortWords.default}</strong>{/if} — read from the model itself. A word it does not have is folded onto the nearest rung it does, and dropped when there is none.
+            The model chosen above accepts <strong>{modelConfigEffortWords.words.join(', ')}</strong>{#if modelConfigEffortWords.default}, defaulting to <strong>{modelConfigEffortWords.default}</strong>{/if} — read from the model itself, and the list offers exactly those. Change the model and the list changes with it; a level this agent already had that the new model does not know stays on the list, marked, until you replace it. Off is not one of the model's words: it is the switch that turns thinking off, and every provider takes it.
           {:else}
-            Each provider maps this scale onto what its own model can do; Off is the one value all of them accept.
+            This model names no words of its own, so the list is the shared scale and the provider folds it onto whatever its model can do. Off is the one value all of them accept.
           {/if}
         </p>
 

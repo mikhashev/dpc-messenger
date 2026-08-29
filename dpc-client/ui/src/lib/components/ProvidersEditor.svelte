@@ -1436,12 +1436,15 @@
                               and defaults to
                               <code>{effortWords[editedConfig.providers[i].alias].default}</code>
                             {/if}
-                            — read from the model file, not from a table. A word the fleet
-                            has and the model does not is folded onto the nearest rung it
-                            does have, and dropped with a warning when there is none.
+                            — read from the model file, and the list above offers exactly
+                            those. A level that arrives from somewhere else on the shared
+                            scale — a chat header, an agent's own setting — is folded onto
+                            the nearest rung this model has, or dropped with a warning when
+                            it has none.
                           {:else}
-                            The words are the fleet's scale; each provider folds them onto
-                            what its own model can do.
+                            This model names no words of its own, so the list above is the
+                            shared scale and the provider folds it onto whatever its model
+                            can do.
                           {/if}
                         </p>
                       </div>
