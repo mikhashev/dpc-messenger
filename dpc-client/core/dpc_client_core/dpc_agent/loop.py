@@ -20,6 +20,7 @@ import logging
 import pathlib
 import time
 import queue
+import re
 import threading
 from concurrent.futures import Future
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple
@@ -397,6 +398,17 @@ def _extract_thinking_prefix(content: str) -> str:
 
 
 _ROLE_BOUNDARY_PATTERNS = ["\n[USER]\n", "\n[ASSISTANT]\n", "\n[SYSTEM]\n", "[USER]"]
+
+# `[#74 | 06:42:57 | Johnny]` — the marker `context.history_prefix` puts on every
+# history line, which a model reading them sometimes emits on its own. Alone it is
+# a label rather than an answer, and the empty-content retry never saw it.
+_HISTORY_PREFIX_ONLY = re.compile(r"^\[#\d+(?:\s*\|[^\]\n]*)?\]$")
+
+
+def _is_answerless(content: str) -> bool:
+    """True when there is nothing here a reader could use."""
+    stripped = (content or "").strip()
+    return not stripped or bool(_HISTORY_PREFIX_ONLY.match(stripped))
 
 
 def _strip_role_boundaries(content: str) -> str:
@@ -927,7 +939,7 @@ async def run_llm_loop(
 
             # No tool calls — final response or empty-response retry
             if not tool_calls:
-                if content and content.strip():
+                if not _is_answerless(content):
                     clean_content = _strip_role_boundaries(content)
                     # Intermediate per-round text is shown per-round (round_text), not
                     # assembled into the final answer (Variant 2). Final = this last round.
@@ -961,7 +973,9 @@ async def run_llm_loop(
                 # retry is a blind re-send, so a deterministic cause repeats identically.
                 _empty_thinking = (msg.get("thinking") or "").strip()
                 _empty_diag = (
-                    "thinking-budget (CoT present, no output text)"
+                    "history prefix only, no answer behind it"
+                    if (content or "").strip()
+                    else "thinking-budget (CoT present, no output text)"
                     if _empty_thinking
                     else "transient (no CoT either)"
                 )
