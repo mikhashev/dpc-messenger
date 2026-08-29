@@ -206,7 +206,71 @@ def _is_whitelisted(command: str, whitelist: list[str]) -> bool:
     return False
 
 
-def _validate_command(command: str, ctx: Optional["ToolContext"] = None) -> Optional[Tuple[str, str]]:
+PATH_PATTERNS: list[re.Pattern] = [
+    re.compile(r'\b([A-Z]:\\[^\s"\'<>|&;]+)'),
+    re.compile(r'(?<!\w)(/[a-zA-Z][^\s"\'<>|&;]*)'),
+]
+
+# An interpreter invoked on a script file. `-c` and `-e` have their own Tier 1
+# rules; running a file had none.
+_SCRIPT_LAUNCH_PATTERNS: list[re.Pattern] = [
+    re.compile(
+        r"\b(?:python3?|py|node|deno|ruby|perl|bash|sh|zsh)\s+"
+        r"(?:-[^\s]+\s+)*"
+        r"([^\s\"'<>|&;]+\.(?:py|pyw|js|mjs|cjs|ts|rb|pl|sh|bash|zsh))\b",
+        re.I,
+    ),
+    re.compile(r"\b(?:powershell|pwsh)\b.*?-f(?:i(?:l(?:e)?)?)?\s+([^\s\"'<>|&;]+\.ps1)\b", re.I),
+]
+
+_SCRIPT_READ_LIMIT = 256 * 1024
+
+
+def _script_paths_out_of_sandbox(
+    segment: str, ctx: "ToolContext", base_dir: str
+) -> Optional[Tuple[str, str]]:
+    """A path that leaves the sandbox, found inside a script this segment runs.
+
+    A speed bump rather than a boundary: it catches the naive form and an
+    import, a computed name or base64 walks past it. The class is closed only
+    by isolation — see WRITE-A-SCRIPT-AND-RUN-IT-AND-THE-PATH-GATE-NEVER-SEES-THE-PATH.
+
+    Returns (script, offending path); ("", script) when the script is present
+    and unreadable, because a gate that cannot see must say so.
+    """
+    for pat in _SCRIPT_LAUNCH_PATTERNS:
+        for match in pat.finditer(segment):
+            raw = match.group(1).strip("\"'")
+            candidate = raw if os.path.isabs(raw) else os.path.join(base_dir, raw)
+            candidate = os.path.normpath(os.path.expanduser(candidate))
+            if not os.path.isfile(candidate):
+                continue
+            try:
+                # Never open a file outside the sandbox to decide: that is the
+                # hole this check exists for.
+                ctx.validate_extended_path(candidate)
+            except PermissionError:
+                continue
+            try:
+                if os.path.getsize(candidate) > _SCRIPT_READ_LIMIT:
+                    continue
+                with open(candidate, "r", encoding="utf-8", errors="replace") as fh:
+                    body = fh.read()
+            except OSError as e:
+                log.warning("script gate could not read %s: %s", candidate, e)
+                return ("", raw)
+            for path_pat in PATH_PATTERNS:
+                for hit in path_pat.finditer(body):
+                    try:
+                        ctx.validate_extended_path(hit.group(1))
+                    except PermissionError:
+                        return (raw, hit.group(1))
+    return None
+
+
+def _validate_command(
+    command: str, ctx: Optional["ToolContext"] = None, cwd: str = ""
+) -> Optional[Tuple[str, str]]:
     """Validate command against safety tiers. Returns (tier, reason) or None if allowed."""
     normalized = _normalize_command(command)
 
@@ -252,15 +316,11 @@ def _validate_command(command: str, ctx: Optional["ToolContext"] = None) -> Opti
         return ("tier1", "Requires approval: " + "; ".join(dangerous))
 
     if ctx:
-        _PATH_PATTERNS = [
-            re.compile(r'\b([A-Z]:\\[^\s"\'<>|&;]+)'),
-            re.compile(r'(?<!\w)(/[a-zA-Z][^\s"\'<>|&;]*)'),
-        ]
         whitelist = _get_tier1_whitelist(ctx)
         # Per segment, for the same reason: the path that leaves the sandbox is
         # in one segment, and only that segment may be waived.
         for segment in segments:
-            for pat in _PATH_PATTERNS:
+            for pat in PATH_PATTERNS:
                 for match in pat.finditer(segment):
                     extracted = match.group(1)
                     try:
@@ -269,6 +329,22 @@ def _validate_command(command: str, ctx: Optional["ToolContext"] = None) -> Opti
                         if whitelist and _is_whitelisted(segment, whitelist):
                             break
                         return ("tier1", f"Command accesses path outside sandbox: {extracted}")
+
+        base_dir = os.path.expanduser(cwd) if cwd else str(getattr(ctx, "agent_root", "") or "")
+        if base_dir:
+            for segment in segments:
+                found = _script_paths_out_of_sandbox(segment, ctx, base_dir)
+                if not found:
+                    continue
+                if whitelist and _is_whitelisted(segment, whitelist):
+                    continue
+                script, path = found
+                if not script:
+                    return ("tier1", f"Command runs a script the gate could not read: {path}")
+                return (
+                    "tier1",
+                    f"Script {script} accesses path outside sandbox: {path}",
+                )
 
     return None
 
@@ -540,7 +616,7 @@ def _execute_shell_command(command: str, working_dir: str | None, timeout: int) 
 
 def run_shell(ctx: ToolContext, command: str, timeout: int = 120, cwd: str = "") -> str:
     # ADR-030: validate command before execution
-    violation = _validate_command(command, ctx)
+    violation = _validate_command(command, ctx, cwd)
     if violation:
         tier, reason = violation
         if tier == "tier2":
