@@ -22,6 +22,7 @@ export type AgentModelConfigState = {
   compactionThreshold: number | string;
   retrievalVector: 'native' | 'grafeo';
   retrievalText: 'native' | 'grafeo';
+  reasoningEffort: string;
 };
 
 export type AgentModelConfigPayload = {
@@ -34,6 +35,7 @@ export type AgentModelConfigPayload = {
   compaction_threshold: number | null;
   retrieval_vector: 'native' | 'grafeo';
   retrieval_text: 'native' | 'grafeo';
+  reasoning_effort: string;
 };
 
 export function buildAgentModelConfigPayload(
@@ -54,5 +56,8 @@ export function buildAgentModelConfigPayload(
       Number(state.compactionThreshold) > 0 ? Number(state.compactionThreshold) : null,
     retrieval_vector: state.retrievalVector,
     retrieval_text: state.retrievalText,
+    // Carries '' through like the provider fields above: the empty option
+    // clears the agent's own level rather than leaving it untouched.
+    reasoning_effort: state.reasoningEffort,
   };
 }

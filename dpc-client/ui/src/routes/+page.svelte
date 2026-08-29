@@ -1078,11 +1078,11 @@
               <span class="group-effort-label">Reasoning:</span>
               <select
                 class="group-effort-select"
-                title="How hard the model reasons before answering — the field is `reasoning_effort` in the code and in DeepSeek's own API, which is why the label says Reasoning rather than Thinking. One scale for a room whose agents sit on different models: each provider maps it onto what its own model can do, so the same word can mean different depths here. Max cannot be sent to a local Ollama model at all and arrives as High. A model that reports no thinking drops every level — Off is the one value all of them accept, and it is a switch rather than an amount."
+                title="How hard the model reasons before answering — the field is `reasoning_effort` in the code and in DeepSeek's own API, which is why the label says Reasoning rather than Thinking. One scale for a room whose agents sit on different models: each provider maps it onto what its own model can do, so the same word can mean different depths here. Max cannot be sent to a local Ollama model at all and arrives as High. A model that reports no thinking drops every level — Off is the one value all of them accept, and it is a switch rather than an amount. Agent config keeps the room out of it: every agent answers at the level in its own config, which is the only way a room of mixed models can be set per agent."
                 value={$groupChats.get(activeChatId)?.reasoning_effort || ''}
                 onchange={(e: Event) => setGroupReasoningEffort(activeChatId, (e.currentTarget as HTMLSelectElement).value)}
               >
-                <option value="">Config</option>
+                <option value="">Agent config</option>
                 <option value="off">Off</option>
                 <option value="low">Low</option>
                 <option value="medium">Medium</option>
@@ -1098,24 +1098,16 @@
               <select
                 class="group-effort-select"
                 title="How hard the model reasons before answering — the field is `reasoning_effort` in the code and in DeepSeek's own API, which is why the label says Reasoning rather than Thinking. One scale for a room whose agents sit on different models: each provider maps it onto what its own model can do, so the same word can mean different depths here. Max cannot be sent to a local Ollama model at all and arrives as High. A model that reports no thinking drops every level — Off is the one value all of them accept, and it is a switch rather than an amount."
-                value={$agentsList.find((a: any) => a.agent_id === activeChatId)?.reasoning_effort
-                       ?? ($chatEfforts.get(activeChatId) || '')}
-                onchange={async (e: Event) => {
+                value={$chatEfforts.get(activeChatId) || ''}
+                onchange={(e: Event) => {
+                  // A lever over this chat, not the agent's setting: the level the
+                  // agent keeps lives in Agent Models Configuration, and the empty
+                  // option is how a chat hands the choice back to it.
                   const level = (e.currentTarget as HTMLSelectElement).value;
-                  // The write mirrors the read one line above: a chat that answers to an
-                  // agent stores the level in that agent's config, and one that does not
-                  // keeps it here and sends it with the query. Deciding by the same
-                  // lookup both ways is what keeps the control from writing somewhere
-                  // the reader never looks.
-                  if ($agentsList.find((a: any) => a.agent_id === activeChatId)) {
-                    await updateAgentConfig(activeChatId, { reasoning_effort: level });
-                    await listAgents();
-                  } else {
-                    chatEfforts.update(m => new Map(m).set(activeChatId, level));
-                  }
+                  chatEfforts.update(m => new Map(m).set(activeChatId, level));
                 }}
               >
-                <option value="">Config</option>
+                <option value="">Agent config</option>
                 <option value="off">Off</option>
                 <option value="low">Low</option>
                 <option value="medium">Medium</option>

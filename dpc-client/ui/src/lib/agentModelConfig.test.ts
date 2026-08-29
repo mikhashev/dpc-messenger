@@ -22,6 +22,7 @@ const base: AgentModelConfigState = {
   compactionThreshold: 0.3,
   retrievalVector: 'native',
   retrievalText: 'native',
+  reasoningEffort: 'high',
 };
 
 describe('agent model config payload', () => {
@@ -61,6 +62,17 @@ describe('agent model config payload', () => {
 
     expect(payload.snapshot_summarize_threshold).toBeNull();
     expect(payload.compaction_threshold).toBeNull();
+  });
+
+  it('clears the agent level with an empty string, so the alias decides again', () => {
+    const chosen = buildAgentModelConfigPayload(base);
+    const cleared = buildAgentModelConfigPayload({ ...base, reasoningEffort: '' });
+
+    expect(chosen.reasoning_effort).toBe('high');
+    expect(cleared.reasoning_effort).toBe('');
+    // Same rule as the model dropdowns: null would mean «not mentioned», and
+    // the level could then be set but never removed.
+    expect(cleared.reasoning_effort).not.toBeNull();
   });
 
   it('carries the flags and the retrieval backends verbatim', () => {

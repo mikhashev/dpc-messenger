@@ -36,6 +36,7 @@
   let modelConfigCompactionThreshold = $state<number>(0.8);
   let modelConfigProvidersList = $state<{alias: string, model: string, type: string, is_remote?: boolean, peer_id?: string}[]>([]);
   let modelConfigSaving = $state(false);
+  let modelConfigReasoningEffort = $state('');
   let modelConfigRetrievalVector = $state<'native' | 'grafeo'>('native');
   let modelConfigRetrievalText = $state<'native' | 'grafeo'>('native');
   let mainConfigPeerId = $derived(
@@ -198,6 +199,7 @@
         ? Number(result.compaction_threshold)
         : 0.8;
       modelConfigProvidersList = result.providers || [];
+      modelConfigReasoningEffort = result.reasoning_effort || '';
       modelConfigRetrievalVector = (result.retrieval_vector === 'grafeo') ? 'grafeo' : 'native';
       modelConfigRetrievalText = (result.retrieval_text === 'grafeo') ? 'grafeo' : 'native';
       showModelConfigPopup = true;
@@ -219,6 +221,7 @@
         compactionThreshold: modelConfigCompactionThreshold,
         retrievalVector: modelConfigRetrievalVector,
         retrievalText: modelConfigRetrievalText,
+        reasoningEffort: modelConfigReasoningEffort,
       }));
       showModelConfigPopup = false;
     } catch (error) {
@@ -256,6 +259,7 @@
     agent_id: string;
     name: string;
     provider_alias: string;
+    reasoning_effort?: string;
     profile_name: string;
     instruction_set_name?: string;
     created_at: string;
@@ -690,6 +694,16 @@
                   onclick={(e) => { e.stopPropagation(); handleModelConfig(agent.agent_id); }}
                   onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.stopPropagation(); handleModelConfig(agent.agent_id); } }}
                 >{agent.provider_alias}</span>
+                <span
+                  role="button"
+                  tabindex="0"
+                  class="agent-effort"
+                  title={agent.reasoning_effort
+                    ? `Reasoning: ${agent.reasoning_effort} — click to change`
+                    : 'Reasoning: not set, the model decides — click to change'}
+                  onclick={(e) => { e.stopPropagation(); handleModelConfig(agent.agent_id); }}
+                  onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.stopPropagation(); handleModelConfig(agent.agent_id); } }}
+                >{agent.reasoning_effort || '—'}</span>
                 {#if agent.telegram_enabled}
                   <span
                     role="button"
@@ -880,6 +894,17 @@
           {/each}
         </select>
         <p class="dialog-hint">Primary language model used for agent conversations.</p>
+
+        <label for="agent-reasoning" class="dialog-label">Reasoning effort:</label>
+        <select id="agent-reasoning" class="dialog-input" bind:value={modelConfigReasoningEffort}>
+          <option value="">Not set — the model decides</option>
+          <option value="off">Off</option>
+          <option value="low">Low</option>
+          <option value="medium">Medium</option>
+          <option value="high">High</option>
+          <option value="max">Max</option>
+        </select>
+        <p class="dialog-hint">How hard this agent thinks before answering. This is the level a chat header means by "Agent config", and the one used when no chat overrides it. Leave it unset and nothing is sent: a local llama.cpp model then applies its own chat template's default, which for qwen3.8 is its deepest setting, and a cloud alias applies whatever its provider config carries. Each provider maps the scale onto what its own model can do; Off is the one value all of them accept.</p>
 
         <label for="sleep-llm" class="dialog-label">Sleep feature LLM:</label>
         <select id="sleep-llm" class="dialog-input" bind:value={modelConfigSleepProvider}>
@@ -1953,6 +1978,17 @@
   .telegram-action-btn:disabled {
     opacity: 0.4;
     cursor: not-allowed;
+  }
+
+  .agent-effort {
+    font-size: 0.68rem;
+    padding: 1px 5px;
+    border-radius: 3px;
+    background: var(--bg-tertiary, #2a2a2a);
+    color: var(--text-secondary, #999);
+    border: 1px solid var(--border-color, #3a3a3a);
+    cursor: pointer;
+    white-space: nowrap;
   }
 
   .telegram-link-badge {
