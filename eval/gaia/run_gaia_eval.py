@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import hashlib
 import json
 import os
 import re
@@ -39,8 +40,9 @@ import string
 import sys
 import tempfile
 import time
+import uuid
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 # The shared harness bits live one directory up.
 HERE = Path(__file__).resolve().parent
@@ -159,36 +161,142 @@ def hub_caches_in_effect() -> List[Path]:
 def reachable_gold(caches: List[Path], results_dir: Optional[Path] = None) -> List[Path]:
     """Copies of the answers an agent on this machine could open and read.
 
-    Two kinds, and the second is the one that surprises people: the dataset in
-    the hub cache, and every earlier report, because a report carries `gold`
-    per task so it can be re-scored.
+    Three kinds: the dataset in the hub cache; any report written before this
+    run recorded digests instead of answers; and any run log from then, whose
+    per-task progress line printed the gold beside the answer.
     """
     marker = "datasets--" + REPO.replace("/", "--")
     found = [c / marker for c in caches if (c / marker).is_dir()]
     if results_dir and results_dir.is_dir():
-        for f in sorted(results_dir.glob("*.json")):
+        for f in sorted(results_dir.iterdir()):
+            if not f.is_file() or f.suffix not in (".json", ".log"):
+                continue
             try:
-                text = f.read_text(encoding="utf-8")
+                text = f.read_text(encoding="utf-8", errors="replace")
             except Exception:
                 continue
-            if '"gold"' in text:
+            if '"gold"' in text or "gold='" in text:
                 found.append(f)
     return found
 
 
-def redirect_hub_into(workdir: Path) -> Path:
+BENCH_PROFILE = "gaia_benchmark"
+BENCH_RULES = HERE / "benchmark_rules.json"
+
+
+def benchmark_firewall(workdir: Path):
+    """The rules a benchmark agent runs under, owned by the run.
+
+    Not the operator's `~/.dpc/privacy_rules.json`: that file grants eight
+    profiles read of this repository, it is edited between runs, and loading it
+    would let a score depend on one machine's personal configuration. The copy
+    lands in the workdir because the firewall reconciles tool keys against the
+    registry and writes the result back.
+    """
+    from dpc_client_core.dpc_agent.tools.registry import ToolRegistry
+    from dpc_client_core.firewall import ContextFirewall
+
+    # Every tool the registry knows, on. The runs this score is compared with
+    # had no firewall at all, and the registry's own defaults leave the web,
+    # the shell and write_file off - a benchmark that quietly drops them
+    # measures the tooling rather than the loop.
+    rules = json.loads(BENCH_RULES.read_text(encoding="utf-8"))
+    every_tool = {name: True for name in ToolRegistry()._entries}
+    rules["dpc_agent"]["tools"] = dict(every_tool)
+    rules["agent_profiles"][BENCH_PROFILE]["tools"] = dict(every_tool)
+
+    local = workdir / "privacy_rules.json"
+    local.write_text(json.dumps(rules, indent=2), encoding="utf-8")
+    return ContextFirewall(local)
+
+
+def gold_fingerprint(gold: str) -> str:
+    """What a report may say about an answer without handing it over.
+
+    A run used to record the answer itself so a later re-score could compare
+    against it, which left one readable answer key per run on the machine the
+    next run's agent walks. The digest identifies the answer without being it;
+    a re-score reads the dataset, which is where the answers belong.
+    """
+    return hashlib.sha256(gold.strip().encode("utf-8")).hexdigest()
+
+
+CANARY_NAME = "gaia-validation-answers.json"
+
+
+def plant_canary(caches: List[Path], results_dir: Optional[Path], token: str) -> List[Path]:
+    """A decoy answer key where the real one used to live.
+
+    An empty machine and an agent that never looked produce the same clean
+    trace, so the trace alone cannot say which happened. The decoy is the
+    positive control: bait an agent would open if it went looking, holding a
+    token that appears nowhere else, so finding it in an answer or in the tool
+    ledger is proof of a read rather than absence of evidence.
+    """
+    payload = json.dumps(
+        {"canary": token, "note": "decoy planted by the GAIA harness", "answers": {}},
+        indent=2,
+    )
+    planted: List[Path] = []
+    for target in [c / CANARY_NAME for c in caches] + (
+        [results_dir / CANARY_NAME] if results_dir else []
+    ):
+        if not target.parent.is_dir():
+            continue
+        try:
+            target.write_text(payload, encoding="utf-8")
+        except Exception:
+            continue
+        planted.append(target)
+    return planted
+
+
+def canary_was_read(token: str, results: List[Dict[str, Any]], logs_dir: Path) -> Dict[str, Any]:
+    """Where the token surfaced: the answers, the tool ledger, or nowhere."""
+    in_answers = [r["task_id"] for r in results if token in (r.get("answer") or "")]
+    in_trace = []
+    if logs_dir.is_dir():
+        for f in sorted(logs_dir.rglob("*.jsonl")):
+            try:
+                if token in f.read_text(encoding="utf-8", errors="replace"):
+                    in_trace.append(f.name)
+            except Exception:
+                continue
+    return {
+        "token": token,
+        "seen_in_answers": in_answers,
+        "seen_in_trace": in_trace,
+        "triggered": bool(in_answers or in_trace),
+    }
+
+
+_HUB_VARS = ("HF_HOME", "HF_HUB_CACHE", "HUGGINGFACE_HUB_CACHE", "HF_DATASETS_CACHE")
+
+
+def redirect_hub_into(workdir: Path) -> Tuple[Path, Dict[str, Optional[str]]]:
     """Point huggingface_hub at a directory this run owns, so it can delete it.
 
-    Set before the first `huggingface_hub` import — the library reads these at
-    import time and a later change moves nothing.
+    Returns the directory and the settings it replaced, which `restore_hub`
+    puts back: the redirect hides every other model in the machine's cache as
+    well as the dataset, and the agent needs its embedding model from there.
     """
     private = workdir / "hf"
     (private / "hub").mkdir(parents=True, exist_ok=True)
+    previous = {var: os.environ.get(var) for var in _HUB_VARS}
     os.environ["HF_HOME"] = str(private)
     os.environ["HF_HUB_CACHE"] = str(private / "hub")
     os.environ["HUGGINGFACE_HUB_CACHE"] = str(private / "hub")
     os.environ["HF_DATASETS_CACHE"] = str(private / "datasets")
-    return private
+    return private, previous
+
+
+def restore_hub(previous: Dict[str, Optional[str]]) -> None:
+    """Give the machine's own cache back, once the dataset is gone from disk."""
+    for var, value in previous.items():
+        if value is None:
+            os.environ.pop(var, None)
+        else:
+            os.environ[var] = value
 
 
 def load_tasks(token: str, limit: Optional[int], with_files: bool) -> List[Dict[str, Any]]:
@@ -301,7 +409,7 @@ async def run_one(agent, row: Dict[str, Any], attachment: Optional[Path]) -> Dic
     usage = dict(getattr(agent, "_last_usage", None) or {})
     return {
         "task_id": row["task_id"],
-        "gold": row["Final answer"],
+        "gold_sha256": gold_fingerprint(row["Final answer"]),
         "answer": (answer or "")[:600],
         "correct": scores_as_correct(answer or "", row["Final answer"]),
         "error": error,
@@ -336,7 +444,8 @@ async def main_async(args) -> int:
     # steps that no path gate sees, because the path lives inside the file. So
     # the answer is not a better gate, it is not leaving the answers where a
     # process can open them.
-    visible = reachable_gold(hub_caches_in_effect(), RESULTS_DIR)
+    real_caches = hub_caches_in_effect()
+    visible = reachable_gold(real_caches, RESULTS_DIR)
     _DATASET_STATE["gold_reachable_at_start"] = [str(v) for v in visible]
     _DATASET_STATE["gold_reachable_allowed"] = bool(args.allow_reachable_gold)
     if visible and not args.allow_reachable_gold:
@@ -353,13 +462,20 @@ async def main_async(args) -> int:
               "on purpose — this score is contaminable", flush=True)
 
     workdir = Path(tempfile.mkdtemp(prefix="dpc-gaia-"))
-    agent_root = workdir / "agent"
-    agent_root.mkdir(parents=True, exist_ok=True)
-    # Attachments live inside the agent root: outside it, ADR-030 Tier 1 stops
-    # every read as off-sandbox and a headless run has no approver to ask.
-    attachments_dir = agent_root / "gaia-files"
+    # Staging only. Each task gets its own agent root below, and the attachment
+    # it needs is copied in: outside the root, ADR-030 Tier 1 stops every read
+    # as off-sandbox and a headless run has no approver to ask.
+    attachments_dir = workdir / "attachments"
+    attachments_dir.mkdir(parents=True, exist_ok=True)
+    logs_root = workdir / "agent-logs"
+    logs_root.mkdir(parents=True, exist_ok=True)
 
-    private_hub = redirect_hub_into(workdir)
+    canary_token = f"GAIA-CANARY-{uuid.uuid4().hex}"
+    canary_files = plant_canary(real_caches, RESULTS_DIR, canary_token)
+    _DATASET_STATE["canary_planted"] = [str(p) for p in canary_files]
+    print(f"canary planted in {len(canary_files)} place(s)", flush=True)
+
+    private_hub, hub_before = redirect_hub_into(workdir)
     rows = load_tasks(token, args.limit, args.with_files)
     print(f"{len(rows)} task(s) from GAIA L1 validation", flush=True)
 
@@ -374,6 +490,7 @@ async def main_async(args) -> int:
             )
     shutil.rmtree(private_hub, ignore_errors=True)
     _DATASET_STATE["private_cache_removed"] = not private_hub.exists()
+    restore_hub(hub_before)
     print(f"attachments prefetched: {len(prefetched)}; hub cache removed: "
           f"{_DATASET_STATE['private_cache_removed']}", flush=True)
 
@@ -384,9 +501,8 @@ async def main_async(args) -> int:
     print(f"provider: {entry['alias']!r} type={entry.get('type')} model={entry.get('model')}")
 
     llm = LLMManager(config_path=providers_path)
+    firewall = benchmark_firewall(workdir)
     try:
-        agent = DpcAgent(llm_manager=llm, config=AgentConfig(), agent_root=agent_root)
-
         approver = None
         if args.auto_approve:
             from _harness.auto_approve import Tier1AutoApprover
@@ -396,8 +512,21 @@ async def main_async(args) -> int:
         results = []
         started = time.time()
         for i, row in enumerate(rows, 1):
+            # A root per task, so nothing an agent writes reaches the next one:
+            # scratchpad, knowledge, logs and task_results all start empty.
+            task_root = workdir / f"task-{i:03d}"
+            (task_root / "gaia-files").mkdir(parents=True, exist_ok=True)
             attachment = prefetched.get(row["task_id"])
+            if attachment is not None:
+                attachment = Path(shutil.copy2(attachment, task_root / "gaia-files"))
+            agent = DpcAgent(
+                llm_manager=llm, config=AgentConfig(), agent_root=task_root,
+                firewall=firewall, firewall_profile=BENCH_PROFILE,
+            )
             outcome = await run_one(agent, row, attachment)
+            if (task_root / "logs").is_dir():
+                shutil.copytree(task_root / "logs", logs_root / task_root.name,
+                                dirs_exist_ok=True)
             results.append(outcome)
             mark = "OK  " if outcome["correct"] else "MISS"
             # flush: redirected stdout is block-buffered, so a run watched through
@@ -405,7 +534,7 @@ async def main_async(args) -> int:
             # agent was demonstrably on its third. The progress line is the only
             # window into a run that takes hours; it has to reach the file.
             print(f"  [{i:2}/{len(rows)}] {mark} {outcome['seconds']:6.1f}s  "
-                  f"gold={outcome['gold'][:28]!r:32} got={outcome['answer'][-60:].strip()!r}",
+                  f"task={outcome['task_id'][:8]} got={outcome['answer'][-60:].strip()!r}",
                   flush=True)
 
         if approver is not None:
@@ -447,6 +576,10 @@ async def main_async(args) -> int:
                          "of this run's tasks did, so absent never reads as zero"),
             },
             "results": results,
+            "canary": {
+                **canary_was_read(canary_token, results, logs_root),
+                "planted": [str(p) for p in canary_files],
+            },
             **({"approvals": approver.summary()} if approver is not None else {}),
             "provenance": provenance.snapshot(
                 repo_root=HERE.parent.parent,
@@ -467,6 +600,13 @@ async def main_async(args) -> int:
                                "comma lists elementwise, strings lowercased and "
                                "de-articled; no model judges anything",
                     "tier1_auto_approved": bool(args.auto_approve),
+                    # Which tools were on decides what the number measures at
+                    # least as much as the model does: the runs before this one
+                    # had no firewall, so they had all of them.
+                    "tools_enabled": sorted(
+                        name for name, on in
+                        firewall.get_agent_tools_map(BENCH_PROFILE).items() if on
+                    ),
                 },
             ),
         }
@@ -476,6 +616,10 @@ async def main_async(args) -> int:
               f"in {report['seconds']}s | {tok['total']} tokens over {tok['reported_by']} task(s)",
               flush=True)
         print("NOT comparable with atomic-agent's 69.8%: different model and setup.")
+        if report["canary"]["triggered"]:
+            print(f"CANARY TRIGGERED: the decoy answer key was read — "
+                  f"answers={report['canary']['seen_in_answers']} "
+                  f"trace={report['canary']['seen_in_trace']}", flush=True)
 
         if args.json:
             out = Path(args.json)
@@ -486,8 +630,8 @@ async def main_async(args) -> int:
             # The tool ledger this run wrote is evidence, and the cleanup below
             # deletes it with the workdir — so a night could score itself and never
             # be an observation of anything. Copied beside the report instead.
-            logs_src = agent_root / "logs"
-            if logs_src.is_dir():
+            logs_src = logs_root
+            if any(logs_src.iterdir()):
                 logs_dst = out.parent / f"{out.stem}.agent-logs"
                 shutil.rmtree(logs_dst, ignore_errors=True)
                 shutil.copytree(logs_src, logs_dst)
@@ -497,6 +641,8 @@ async def main_async(args) -> int:
             shutil.rmtree(workdir, ignore_errors=True)
         return 0
     finally:
+        for bait in canary_files:
+            bait.unlink(missing_ok=True)
         # Without this the llama-server the provider spawned outlives the run,
         # and the campaign's own GPU gate then waits for a child of the run
         # before it: 0 of 4 runs started on 2026-08-25, 1 of 4 on 2026-08-27.

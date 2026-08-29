@@ -1,0 +1,23 @@
+{
+  "_comment": "Firewall rules the GAIA benchmark agent runs under. Copied into each run's workdir and reconciled there, so the operator's ~/.dpc/privacy_rules.json is never read or written by a benchmark run. Empty sandbox_extensions leave the task's own agent_root as the whole sandbox: the repository, the hub cache and the results directory are all outside it.",
+  "dpc_agent": {
+    "tools": {},
+    "sandbox_extensions": {
+      "read_only": [],
+      "read_write": [],
+      "extended_read_enabled": false,
+      "extended_write_enabled": false
+    }
+  },
+  "agent_profiles": {
+    "gaia_benchmark": {
+      "tools": {},
+      "sandbox_extensions": {
+        "read_only": [],
+        "read_write": [],
+        "extended_read_enabled": false,
+        "extended_write_enabled": false
+      }
+    }
+  }
+}
