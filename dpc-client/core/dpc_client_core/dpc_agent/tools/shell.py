@@ -213,14 +213,18 @@ PATH_PATTERNS: list[re.Pattern] = [
 
 # An interpreter invoked on a script file. `-c` and `-e` have their own Tier 1
 # rules; running a file had none.
+_SCRIPT_EXT = r"py|pyw|js|mjs|cjs|ts|rb|pl|sh|bash|zsh"
 _SCRIPT_LAUNCH_PATTERNS: list[re.Pattern] = [
+    # `python3.12 x.py` and `py -3 x.py` as well as the bare name.
     re.compile(
-        r"\b(?:python3?|py|node|deno|ruby|perl|bash|sh|zsh)\s+"
+        r"\b(?:python(?:3(?:\.\d+)?)?|py|node|deno|ruby|perl|bash|sh|zsh)\s+"
         r"(?:-[^\s]+\s+)*"
-        r"([^\s\"'<>|&;]+\.(?:py|pyw|js|mjs|cjs|ts|rb|pl|sh|bash|zsh))\b",
+        rf"([^\s\"'<>|&;]+\.(?:{_SCRIPT_EXT}))\b",
         re.I,
     ),
     re.compile(r"\b(?:powershell|pwsh)\b.*?-f(?:i(?:l(?:e)?)?)?\s+([^\s\"'<>|&;]+\.ps1)\b", re.I),
+    # A script run by its shebang: the segment starts with the file itself.
+    re.compile(rf"^\s*([^\s\"'<>|&;]*[./\\][^\s\"'<>|&;]*\.(?:{_SCRIPT_EXT}|ps1))(?:\s|$)", re.I),
 ]
 
 _SCRIPT_READ_LIMIT = 256 * 1024

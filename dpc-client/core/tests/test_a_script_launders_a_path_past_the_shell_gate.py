@@ -3,8 +3,8 @@ read of anything the service could open, because the classifier saw the command
 string and the path lived in the file.
 
 Falsifier for the whole file: neutralise the `_script_paths_out_of_sandbox`
-call in `_validate_command` and the four cases below that assert Tier 1 go
-green-to-red; the three that assert ordinary work stays Tier 0 must not move.
+call in `_validate_command` and the six cases that need the new check go
+green-to-red; the four that pin ordinary work and the old rule must not move.
 """
 
 import os
@@ -136,3 +136,37 @@ def test_an_unreadable_script_is_refused_rather_than_waved_on(tmp_path):
 
     assert verdict is not None and verdict[0] == "tier1"
     assert "could not read" in verdict[1], verdict[1]
+
+
+def test_a_script_run_by_its_shebang(tmp_path):
+    """A script run without naming an interpreter.
+
+    The backslash spelling is the discriminating one: `./x.py` is caught by the
+    older command-string rule anyway, because `/x.py` looks to it like an
+    absolute POSIX path — the right verdict for the wrong reason.
+    """
+    _script(tmp_path, "x.py", "open('/etc/shadow')\n")
+    ctx = _Ctx(tmp_path)
+
+    verdict = _validate_command(r".\x.py", ctx, str(tmp_path))
+
+    assert verdict is not None and verdict[0] == "tier1", verdict
+    assert "Script" in verdict[1], verdict[1]
+
+
+def test_a_versioned_interpreter(tmp_path):
+    """`python3.12 x.py` is the ordinary spelling on a distro with several."""
+    _script(tmp_path, "x.py", "open('/etc/shadow')\n")
+    ctx = _Ctx(tmp_path)
+
+    verdict = _validate_command("python3.12 x.py", ctx, str(tmp_path))
+
+    assert verdict is not None and verdict[0] == "tier1", verdict
+
+
+def test_reading_a_file_is_not_running_it(tmp_path):
+    """`cat x.py` names a script and runs nothing — it must stay Tier 0."""
+    _script(tmp_path, "x.py", "open('/etc/shadow')\n")
+    ctx = _Ctx(tmp_path)
+
+    assert _validate_command("cat x.py", ctx, str(tmp_path)) is None
