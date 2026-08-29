@@ -350,6 +350,8 @@
     think: false, // Reasoning is opt-in on a new provider — see the form's help text
   };
 
+  let effortWords: Record<string, { words: string[]; default: string | null }> = {};
+
   // Load config when modal opens
   $: if (open && !config) {
     loadConfig();
@@ -360,6 +362,9 @@
       const result = await sendCommand('get_providers_config', {});
       if (result.status === 'success') {
         config = result.config;
+        // What each model's own chat template accepts, read from the file.
+        // Absent for an alias whose template names no words.
+        effortWords = result.effort_words || {};
       } else {
         console.error('Failed to load providers config:', result.message);
       }
@@ -1404,12 +1409,21 @@
                         <p class="help-text">
                           The level this alias asks for when neither the chat nor the agent
                           named one — the last say before the model's own default. Leave it
-                          unset and nothing is sent: a local llama.cpp model then applies its
-                          chat template's default, which on qwen3.8 is <code>xhigh</code>, the
-                          deepest and slowest rung. The words are the fleet's scale and each
-                          provider folds them onto its own model: this template knows
-                          <code>low</code>, <code>medium</code> and <code>xhigh</code>, so
-                          High and Max both arrive as <code>xhigh</code>.
+                          unset and nothing is sent, and the model applies its own default.
+                          {#if effortWords[editedConfig.providers[i].alias]}
+                            This model's chat template accepts
+                            <code>{effortWords[editedConfig.providers[i].alias].words.join(', ')}</code>
+                            {#if effortWords[editedConfig.providers[i].alias].default}
+                              and defaults to
+                              <code>{effortWords[editedConfig.providers[i].alias].default}</code>
+                            {/if}
+                            — read from the model file, not from a table. A word the fleet
+                            has and the model does not is folded onto the nearest rung it
+                            does have, and dropped with a warning when there is none.
+                          {:else}
+                            The words are the fleet's scale; each provider folds them onto
+                            what its own model can do.
+                          {/if}
                         </p>
                       </div>
 

@@ -37,6 +37,13 @@
   let modelConfigProvidersList = $state<{alias: string, model: string, type: string, is_remote?: boolean, peer_id?: string}[]>([]);
   let modelConfigSaving = $state(false);
   let modelConfigReasoningEffort = $state('');
+  // The words belong to the model picked above, so the sentence follows the dropdown.
+  let modelConfigEffortWords = $derived.by(() => {
+    const row: any = modelConfigProvidersList.find(p => p.alias === modelConfigProviderAlias);
+    return row?.reasoning_words
+      ? { words: row.reasoning_words as string[], default: row.reasoning_default as string | null }
+      : null;
+  });
   let modelConfigRetrievalVector = $state<'native' | 'grafeo'>('native');
   let modelConfigRetrievalText = $state<'native' | 'grafeo'>('native');
   let mainConfigPeerId = $derived(
@@ -904,7 +911,16 @@
           <option value="high">High</option>
           <option value="max">Max</option>
         </select>
-        <p class="dialog-hint">How hard this agent thinks before answering. This is the level a chat header means by "Agent config", and the one used when no chat overrides it. Leave it unset and nothing is sent: a local llama.cpp model then applies its own chat template's default, which for qwen3.8 is its deepest setting, and a cloud alias applies whatever its provider config carries. Each provider maps the scale onto what its own model can do; Off is the one value all of them accept.</p>
+        <p class="dialog-hint">
+          How hard this agent thinks before answering. This is the level a chat header
+          means by "Agent config", and the one used when no chat overrides it. Leave it
+          unset and nothing is sent — the model applies its own default.
+          {#if modelConfigEffortWords}
+            The model chosen above accepts <strong>{modelConfigEffortWords.words.join(', ')}</strong>{#if modelConfigEffortWords.default}, defaulting to <strong>{modelConfigEffortWords.default}</strong>{/if} — read from the model itself. A word it does not have is folded onto the nearest rung it does, and dropped when there is none.
+          {:else}
+            Each provider maps this scale onto what its own model can do; Off is the one value all of them accept.
+          {/if}
+        </p>
 
         <label for="sleep-llm" class="dialog-label">Sleep feature LLM:</label>
         <select id="sleep-llm" class="dialog-input" bind:value={modelConfigSleepProvider}>

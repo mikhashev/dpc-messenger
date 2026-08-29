@@ -2002,9 +2002,12 @@ class CoreService:
             with open(self.llm_manager.config_path, 'r') as f:
                 config = json.load(f)
 
+            # Beside the config rather than inside it: the editor sends the
+            # config back verbatim on save, and these are read from the model.
             return {
                 "status": "success",
-                "config": config
+                "config": config,
+                "effort_words": self._effort_words_by_alias(config),
             }
         except Exception as e:
             return {
@@ -2071,6 +2074,21 @@ class CoreService:
             "knowledge_provider": getattr(self.llm_manager, 'knowledge_provider', None) or ""
         }
 
+    def _effort_words_by_alias(self, config: Dict[str, Any]) -> Dict[str, Any]:
+        """{alias: {words, default}} for every alias whose model names them."""
+        from .managers.llama_server_supervisor import gguf_effort_dictionary
+
+        out: Dict[str, Any] = {}
+        for entry in config.get("providers", []) or []:
+            alias, path = entry.get("alias"), entry.get("gguf_path")
+            if not alias or not path:
+                continue
+            dictionary = gguf_effort_dictionary(path)
+            if dictionary:
+                words, default = dictionary
+                out[alias] = {"words": list(words), "default": default}
+        return out
+
     async def get_providers_list(self) -> Dict[str, Any]:
         """
         Get list of available providers for UI dropdowns.
@@ -2111,6 +2129,13 @@ class CoreService:
             }
             # v0.13.0+: Add supports_voice flag for Whisper-capable providers
             provider_dict["supports_voice"] = self._provider_supports_voice(provider)
+
+            # The effort words this model's own chat template accepts, present
+            # only when they were read from the model — a fallback table must
+            # not reach the UI wearing the model's name.
+            if getattr(provider, "_template_efforts_source", None) == "model":
+                provider_dict["reasoning_words"] = list(provider._template_efforts)
+                provider_dict["reasoning_default"] = provider._template_default
 
             # v0.18.1+: Add remote inference fields for dpc_agent provider
             if alias == "dpc_agent":

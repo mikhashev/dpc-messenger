@@ -172,9 +172,15 @@ class LlamaServerProvider(DeepSeekProvider):
         # rather than from a table measured against one pin. The constants stay
         # as the fallback for a GGUF whose template does not guard the value.
         self._template_efforts = TEMPLATE_EFFORTS
+        self._template_default: Optional[str] = None
+        # Whether the words above came from this model or from the table. The UI
+        # may only quote them as the model's when they were read from it.
+        self._template_efforts_source = "fallback"
         dictionary = gguf_effort_dictionary(config.get("gguf_path") or "")
         if dictionary:
             self._template_efforts, template_default = dictionary
+            self._template_default = template_default
+            self._template_efforts_source = "model"
             logger.info(
                 "llamacpp_server '%s': the model's template accepts %s (default %s)",
                 alias, "/".join(self._template_efforts), template_default or "unset",
