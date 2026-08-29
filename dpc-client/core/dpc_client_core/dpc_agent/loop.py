@@ -939,6 +939,18 @@ async def run_llm_loop(
 
             # No tool calls — final response or empty-response retry
             if not tool_calls:
+                # The ledger used to be written only where tools were called, so
+                # the turn that ends a run — the one a reader opens when an
+                # answer looks wrong — left no record of what was thought.
+                _final_quality = _detect_reasoning_quality(
+                    (msg.get("thinking") or "") or _extract_thinking_prefix(content), []
+                )
+                _final_quality["ts"] = utc_now_iso()
+                _final_quality["round"] = round_idx
+                _final_quality["task_id"] = task_id
+                _final_quality["answered"] = not _is_answerless(content)
+                append_jsonl(logs_dir / "reasoning.jsonl", _final_quality)
+
                 if not _is_answerless(content):
                     clean_content = _strip_role_boundaries(content)
                     # Intermediate per-round text is shown per-round (round_text), not
