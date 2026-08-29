@@ -236,6 +236,73 @@ def _total_vram_mib() -> Optional[int]:
 _GGUF_VALUE_SIZES = {0: 1, 1: 1, 2: 2, 3: 2, 4: 4, 5: 4, 6: 4, 7: 1, 10: 8, 11: 8, 12: 8}
 
 
+def gguf_effort_dictionary(path: str) -> Optional[Tuple[Tuple[str, ...], Optional[str]]]:
+    """(words the chat template accepts, the word it defaults to), or None.
+
+    The template is the authority on effort words and it ships inside the model:
+    `tokenizer.chat_template` holds the same jinja the server reports at /props,
+    so the dictionary can be read without starting a child. A template that
+    guards the value names its own vocabulary in the guard.
+    """
+    try:
+        with open(path, "rb") as f:
+            if f.read(4) != b"GGUF":
+                return None
+            if struct.unpack("<I", f.read(4))[0] < 2:
+                return None
+            _, n_kv = struct.unpack("<QQ", f.read(16))
+
+            def read_str():
+                n = struct.unpack("<Q", f.read(8))[0]
+                return f.read(n).decode("utf-8", errors="replace")
+
+            template = None
+            for _ in range(n_kv):
+                key = read_str()
+                t = struct.unpack("<I", f.read(4))[0]
+                if t == 8:
+                    value = read_str()
+                    if key == "tokenizer.chat_template":
+                        template = value
+                        break
+                elif t == 9:
+                    et = struct.unpack("<I", f.read(4))[0]
+                    cnt = struct.unpack("<Q", f.read(8))[0]
+                    if et == 8:
+                        for _ in range(cnt):
+                            read_str()
+                    elif et in _GGUF_VALUE_SIZES:
+                        f.seek(_GGUF_VALUE_SIZES[et] * cnt, 1)
+                    else:
+                        return None
+                elif t in _GGUF_VALUE_SIZES:
+                    f.seek(_GGUF_VALUE_SIZES[t], 1)
+                else:
+                    return None
+    except Exception as e:
+        logger.debug("effort dictionary unreadable in %s: %s", path, e)
+        return None
+    if not template:
+        return None
+    return effort_dictionary_of(template)
+
+
+_EFFORT_GUARD = re.compile(r"reasoning_effort\s+not\s+in\s*\(([^)]*)\)")
+_EFFORT_DEFAULT = re.compile(r"reasoning_effort\s*\|\s*default\(\s*'([^']+)'")
+
+
+def effort_dictionary_of(template: str) -> Optional[Tuple[Tuple[str, ...], Optional[str]]]:
+    """The guard's own tuple and the default beside it, or None when unguarded."""
+    guard = _EFFORT_GUARD.search(template)
+    if not guard:
+        return None
+    words = tuple(w.strip().strip("'\"") for w in guard.group(1).split(",") if w.strip())
+    if not words:
+        return None
+    default = _EFFORT_DEFAULT.search(template)
+    return words, (default.group(1) if default else None)
+
+
 def _gguf_attention_kv_dims(path: str) -> Optional[Tuple[int, int]]:
     """(attention layer count, kv width per layer) from a GGUF's tensor directory.
 

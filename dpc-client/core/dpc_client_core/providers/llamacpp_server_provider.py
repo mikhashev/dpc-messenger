@@ -38,6 +38,7 @@ from .deepseek_provider import DeepSeekProvider
 
 from ..managers.llama_server_supervisor import DEFAULTS as SUPERVISOR_DEFAULTS
 from ..managers.llama_server_supervisor import LlamaServerSupervisor
+from ..managers.llama_server_supervisor import gguf_effort_dictionary
 
 logger = logging.getLogger(__name__)
 
@@ -167,6 +168,17 @@ class LlamaServerProvider(DeepSeekProvider):
         # The configured effort stays raw: `xhigh` is legal here and must not
         # be folded to `high` on its way in.
         self._reasoning_effort_raw = config.get("reasoning_effort")
+        # The words this model's own chat template accepts, read from the file
+        # rather than from a table measured against one pin. The constants stay
+        # as the fallback for a GGUF whose template does not guard the value.
+        self._template_efforts = TEMPLATE_EFFORTS
+        dictionary = gguf_effort_dictionary(config.get("gguf_path") or "")
+        if dictionary:
+            self._template_efforts, template_default = dictionary
+            logger.info(
+                "llamacpp_server '%s': the model's template accepts %s (default %s)",
+                alias, "/".join(self._template_efforts), template_default or "unset",
+            )
         self._reasoning_budget = config.get("reasoning_budget_tokens")
         self._mmproj = config.get("mmproj")
         self.top_p = config.get("top_p")
@@ -289,17 +301,26 @@ class LlamaServerProvider(DeepSeekProvider):
         word = (raw or "").strip().lower()
         if word == REASONING_OFF:
             return REASONING_OFF
-        if word in TEMPLATE_EFFORTS:
+        if word in self._template_efforts:
             return word
         if word in FLEET_TO_TEMPLATE:
             mapped = FLEET_TO_TEMPLATE[word]
+            # A fold onto a rung this model does not have would be the one thing
+            # the template refuses outright, so it is dropped instead.
+            if mapped not in self._template_efforts:
+                logger.warning(
+                    "llamacpp_server '%s': effort '%s' folds to '%s', which this "
+                    "model's template does not accept (%s) — sending nothing",
+                    self.alias, word, mapped, "/".join(self._template_efforts),
+                )
+                return None
             if not self._effort_translation_logged:
                 self._effort_translation_logged = True
                 logger.info(
                     "llamacpp_server '%s': effort '%s' -> '%s' — the template's "
                     "dictionary is %s and refuses other words with HTTP 500 "
                     "(measured 2026-08-19)",
-                    self.alias, word, mapped, "/".join(TEMPLATE_EFFORTS),
+                    self.alias, word, mapped, "/".join(self._template_efforts),
                 )
             return mapped
         return None
