@@ -176,3 +176,66 @@ def test_a_posix_path_is_trimmed_the_same_way(monkeypatch):
 
     assert campaign.gpu_holder_candidates() == [
         "llama-server (pid 7040)", "python3.12 (pid 9001)"]
+
+
+# --- A queue that spends itself on a configuration error ------------------
+# 2026-08-30: an HF token that was the placeholder from a chat message. Four
+# runs, exit 1 each, 25 seconds, and the screen read `-> None/None = None`
+# four times. The operator went to bed believing a campaign was running.
+
+
+def _fake_run_one(records):
+    """Stand in for run_one, handing back prepared records in order."""
+    it = iter(records)
+
+    def run_one(cfg, deadline, stamp):
+        return next(it)
+
+    return run_one
+
+
+def _record(name, exit_code, minutes):
+    return {"name": name, "temperature": 0.0, "reasoning_effort": "xhigh",
+            "minutes": minutes, "exit_code": exit_code,
+            "json": f"{name}.json"}
+
+
+def _run_main(monkeypatch, tmp_path, records):
+    monkeypatch.setattr(campaign, "RESULTS", tmp_path)
+    monkeypatch.setattr(campaign, "wait_for_gpu", lambda *a, **k: True)
+    monkeypatch.setattr(campaign, "run_one", _fake_run_one(records))
+    monkeypatch.setattr(sys, "argv", ["campaign.py", "--hours", "24"])
+    return campaign.main()
+
+
+def test_a_fast_failure_stops_the_queue(monkeypatch, tmp_path, capsys):
+    records = [_record(cfg["name"], 1, 0.1) for cfg in campaign.QUEUE]
+
+    _run_main(monkeypatch, tmp_path, records)
+
+    out = capsys.readouterr().out
+    assert "stopping the queue" in out, out
+    assert out.count("FAILED (exit 1)") <= 2, "only the first run should have been started"
+
+
+def test_a_slow_failure_does_not_stop_the_queue(monkeypatch, tmp_path, capsys):
+    """A run that dies at minute 90 is a bad run, not a bad configuration."""
+    records = [_record(campaign.QUEUE[0]["name"], 1, 90.0)] + [
+        _record(cfg["name"], 0, 100.0) for cfg in campaign.QUEUE[1:]
+    ]
+
+    _run_main(monkeypatch, tmp_path, records)
+
+    out = capsys.readouterr().out
+    assert "stopping the queue" not in out, out
+    assert out.count("FAILED") >= 1
+
+
+def test_a_failure_says_so_on_screen_rather_than_none(monkeypatch, tmp_path, capsys):
+    records = [_record(cfg["name"], 1, 0.1) for cfg in campaign.QUEUE]
+
+    _run_main(monkeypatch, tmp_path, records)
+
+    out = capsys.readouterr().out
+    assert "FAILED (exit 1)" in out
+    assert "None/None = None" not in out, "a failed run must not read as a score"

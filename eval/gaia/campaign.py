@@ -199,9 +199,34 @@ def run_one(cfg: dict, deadline: datetime, stamp: str) -> dict:
             record["tasks"] = report.get("tasks")
         except Exception as exc:
             record["read_error"] = str(exc)
-    print(f"  -> {record.get('correct')}/{record.get('tasks')} "
-          f"= {record.get('accuracy')} in {record['minutes']} min", flush=True)
+    if proc.returncode == 0:
+        print(f"  -> {record.get('correct')}/{record.get('tasks')} "
+              f"= {record.get('accuracy')} in {record['minutes']} min", flush=True)
+    else:
+        print(f"  -> FAILED (exit {proc.returncode}) after {record['minutes']} min "
+              f"— {out_log}", flush=True)
+        for line in _log_tail(out_log):
+            print(f"     {line}", flush=True)
     return record
+
+
+def _log_tail(path: Path, lines: int = 3) -> list:
+    """The last non-empty lines of a run's log, for the operator's screen.
+
+    A failed run used to read `-> None/None = None in 0.1 min`, with the cause
+    in a file nobody opens until morning.
+    """
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return []
+    return [ln.strip() for ln in text.splitlines() if ln.strip()][-lines:]
+
+
+# A run that dies in the first minutes died of its configuration — a token, a
+# missing model, a path — and every other run in the queue carries the same
+# configuration. Stopping is what keeps a typo from reading as a night's work.
+FAST_FAILURE_MINUTES = 3.0
 
 
 def main() -> int:
@@ -234,15 +259,23 @@ def main() -> int:
             print("not starting the rest of the queue: the card never came free",
                   flush=True)
             break
-        done.append(run_one(cfg, deadline, stamp))
+        record = run_one(cfg, deadline, stamp)
+        done.append(record)
         summary = RESULTS / f"{stamp}-campaign.json"
         summary.write_text(json.dumps({"runs": done}, indent=2), encoding="utf-8")
+        if record["exit_code"] != 0 and record["minutes"] < FAST_FAILURE_MINUTES:
+            print(f"\nstopping the queue: {cfg['name']} failed in "
+                  f"{record['minutes']} min, so the rest would fail the same way. "
+                  f"Fix what the lines above name and start the campaign again.",
+                  flush=True)
+            break
 
     print("\n=== campaign ===", flush=True)
     for r in done:
+        outcome = (f"{r.get('correct')}/{r.get('tasks')} = {r.get('accuracy')}"
+                   if r["exit_code"] == 0 else f"FAILED (exit {r['exit_code']})")
         print(f"  {r['name']:12} t={r['temperature']} effort={r['reasoning_effort']:6} "
-              f"{r.get('correct')}/{r.get('tasks')} = {r.get('accuracy')} "
-              f"({r['minutes']} min)", flush=True)
+              f"{outcome} ({r['minutes']} min)", flush=True)
     return 0
 
 
