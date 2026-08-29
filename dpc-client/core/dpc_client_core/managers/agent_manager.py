@@ -920,7 +920,8 @@ class DpcAgentManager:
         log.warning("No active agent loop for conversation %s", conversation_id)
         return False
 
-    def _resolve_reasoning_effort(self, conversation_id: Optional[str]) -> tuple:
+    def _resolve_reasoning_effort(self, conversation_id: Optional[str],
+                                  per_call: Optional[str] = None) -> tuple:
         """The effort this call should ask for, and which branch decided it.
 
         The source is returned rather than logged here because it is the whole
@@ -935,6 +936,8 @@ class DpcAgentManager:
         or nobody answered at all; a conversation id that is not a room never
         consults the first branch, which is why the id is logged beside it.
         """
+        if per_call:
+            return per_call, "call"
         try:
             if conversation_id and conversation_id.startswith("group-"):
                 gm = getattr(self.service, "group_manager", None)
@@ -987,6 +990,9 @@ class DpcAgentManager:
         telegram_chat_id: Optional[str] = None,
         # Source of the message for tool filtering (discord, telegram_public, etc.)
         message_source: Optional[str] = None,
+        # Level chosen in a chat header for this call only. The room and the
+        # agent's own config are consulted when it is empty.
+        reasoning_effort: Optional[str] = None,
         # When True, don't save user message to history (already saved by caller)
         _skip_history: bool = False,
         # Group chat metadata for agent context awareness
@@ -1118,7 +1124,9 @@ class DpcAgentManager:
                 if self._daily_tokens_used >= quota_limit:
                     return f"⚠️ Agent quota exceeded ({self._daily_tokens_used:,}/{quota_limit:,} tokens today). Reset at midnight UTC."
 
-            reasoning_effort, effort_source = self._resolve_reasoning_effort(conversation_id)
+            reasoning_effort, effort_source = self._resolve_reasoning_effort(
+                conversation_id, reasoning_effort
+            )
             log.info(
                 "Reasoning effort for %s: %s (source=%s, agent_id=%s)",
                 conversation_id, reasoning_effort or "unresolved",

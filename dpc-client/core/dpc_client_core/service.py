@@ -6985,7 +6985,8 @@ class CoreService:
 
     async def _execute_agent_query(self, command_id: str, prompt: str, conversation_id: str,
                                    include_context: bool, instruction_set_name: str,
-                                   agent_llm_provider: str) -> None:
+                                   agent_llm_provider: str,
+                                   reasoning_effort: str = None) -> None:
         """
         Execute an agent query (routes to DpcAgentManager).
 
@@ -6999,6 +7000,8 @@ class CoreService:
             include_context: Whether to include DPC context
             instruction_set_name: Instruction set to use
             agent_llm_provider: Underlying LLM provider for the agent
+            reasoning_effort: Level chosen in this chat's header for this call
+                only; empty means the agent's own configured level applies
         """
         try:
             # Get the dpc_agent provider
@@ -7086,6 +7089,7 @@ class CoreService:
                 message=prompt,
                 conversation_id=conversation_id,
                 include_context=include_context,
+                reasoning_effort=reasoning_effort,
                 agent_llm_provider=agent_llm_provider or conversation_id,
                 sender_name=self.p2p_manager.get_display_name() or "User",
                 _skip_history=True,
@@ -7510,7 +7514,8 @@ class CoreService:
                 conversation_id=conversation_id,
                 include_context=include_context,
                 instruction_set_name=instruction_set_name,
-                agent_llm_provider=agent_llm_provider
+                agent_llm_provider=agent_llm_provider,
+                reasoning_effort=reasoning_effort,
             )
 
         monitor = self._get_or_create_conversation_monitor(conversation_id, instruction_set_name)
@@ -8276,6 +8281,7 @@ class CoreService:
         compaction_threshold: float = None,
         retrieval_vector: str = None,
         retrieval_text: str = None,
+        reasoning_effort: str = None,
     ) -> Dict[str, Any]:
         """Delegated to AgentService."""
         if not self.agent_service:
@@ -8293,6 +8299,7 @@ class CoreService:
             compaction_threshold=compaction_threshold,
             retrieval_vector=retrieval_vector,
             retrieval_text=retrieval_text,
+            reasoning_effort=reasoning_effort,
             providers_getter=self.get_providers_list,
         )
 

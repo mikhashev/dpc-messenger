@@ -850,6 +850,7 @@ class AgentService:
                 "compaction_enabled": config.get("compaction_enabled", False),
                 "compaction_provider": config.get("compaction_provider"),
                 "compaction_threshold": config.get("compaction_threshold", 0.8),
+                "reasoning_effort": config.get("reasoning_effort", ""),
                 "retrieval_vector": config.get("retrieval_vector", "native"),
                 "retrieval_text": config.get("retrieval_text", "native"),
                 "providers": providers_list,
@@ -884,6 +885,7 @@ class AgentService:
         compaction_threshold: float = None,
         retrieval_vector: str = None,
         retrieval_text: str = None,
+        reasoning_effort: str = None,
         providers_getter=None,
     ) -> Dict[str, Any]:
         """Save per-agent model configuration (Main LLM + Sleep LLM +
@@ -928,6 +930,13 @@ class AgentService:
                 config["retrieval_vector"] = retrieval_vector
             if retrieval_text is not None:
                 config["retrieval_text"] = retrieval_text
+            # '' is the panel's «Default (global)»: drop the agent's own level so
+            # the alias decides again. None means the caller left the field alone.
+            if reasoning_effort is not None:
+                if reasoning_effort:
+                    config["reasoning_effort"] = reasoning_effort
+                else:
+                    config.pop("reasoning_effort", None)
             save_agent_config(agent_id, config)
             context_window = await self._refresh_live_agent_manager(agent_id, config)
             providers_data = await providers_getter() if providers_getter else {"providers": [], "default_provider": ""}
@@ -941,6 +950,7 @@ class AgentService:
                 "compaction_enabled": config.get("compaction_enabled", False),
                 "compaction_provider": config.get("compaction_provider"),
                 "compaction_threshold": config.get("compaction_threshold", 0.8),
+                "reasoning_effort": config.get("reasoning_effort", ""),
                 "retrieval_vector": config.get("retrieval_vector", "native"),
                 "retrieval_text": config.get("retrieval_text", "native"),
                 "context_window": context_window,
