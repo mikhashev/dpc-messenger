@@ -6,11 +6,15 @@ the only one where «better» has a meaning outside this repository.
 
 Read the caveats before quoting any figure it produces:
 
-- **A score from here is not comparable with atomic-agent's 69.8 % unless the
-  setup matches.** Theirs ran `qwen-3.6-35b-a3b` (UD-Q4_K_XL) at `n_ctx`
-  262144 on an M4 Max, with hybrid recall on against a second embedding
-  daemon. Different model, different quantisation, different step budget or
-  different memory configuration and the two numbers describe two experiments.
+- **A score from here is comparable with runs of this harness and with nothing
+  else.** GAIA is public and plenty of figures are published on it; every one of
+  them was produced with some model, quantisation, context window, step budget
+  and memory configuration, and unless all five match, two numbers on the same
+  split describe two experiments. Even against ourselves the floor is coarse:
+  two greedy runs of one configuration disagreed on 14 of 53 tasks. (The figure
+  that prompted this instrument was atomic-agent's 69.8 % — `qwen-3.6-35b-a3b`
+  UD-Q4_K_XL at n_ctx 262144 on an M4 Max with hybrid recall against a second
+  embedding daemon. It is here as provenance, not as a comparator.)
 - **Many GAIA tasks need the open web.** A run without working browse tooling
   measures the tooling's absence, not the loop. The report separates tasks the
   agent answered from tasks it could not attempt.
@@ -805,7 +809,15 @@ async def main_async(args) -> int:
         print(f"{correct}/{len(results)} = {report['accuracy']:.1%} on {entry.get('model')} "
               f"in {report['seconds']}s | {tok['total']} tokens over {tok['reported_by']} task(s)",
               flush=True)
-        print("NOT comparable with atomic-agent's 69.8%: different model and setup.")
+        # The report's own `caveat` field has said the general thing since it was
+        # written; this line named one project and one number, and our own best
+        # draw is 37/53 — which *is* 69.8 %, so it read as a denial of the very
+        # parity it was printed under. Say what the number can be compared with.
+        print("One draw of 53 tasks. Comparable with runs of this harness at the same "
+              "tree, alias and effort, and with nothing else: two greedy runs of one "
+              "configuration have disagreed on 14 of the 53. No published figure means "
+              "the same thing unless model, quantisation, context window, step budget "
+              "and memory configuration all match.")
         if report["canary"]["triggered"]:
             print(f"CANARY TRIGGERED: the decoy answer key was read — "
                   f"answers={report['canary']['seen_in_answers']} "
