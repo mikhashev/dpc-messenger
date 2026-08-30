@@ -256,3 +256,43 @@ class TestTheTwoSurfacesThatReportRatherThanRefuse:
     def test_no_logs_directory_is_not_an_error(self, gaia, tmp_path):
         assert gaia.web_lookups(tmp_path / "absent", ["x"]) == []
         assert gaia.gold_in_traces(tmp_path / "absent") == []
+
+
+class TestTheRedirectDoesNotOutliveItself:
+    """`huggingface_hub` reads its cache path once, at import, and `load_tasks`
+    does that import inside the redirect. Putting the environment back left the
+    library pointing at a directory the run had just deleted, so the agent
+    re-downloaded its 2.27 GB embedding model into a temp hub on every run —
+    measured on a --limit 1 run, 2026-08-30, with the first task racing a
+    download at 37 %.
+
+    The reload is not decoration: it is what makes the test non-vacuous. Without
+    it the constant was already frozen to the machine cache before the redirect,
+    the assertion held for the wrong reason, and neutralising the fix changed
+    nothing."""
+
+    def test_the_library_points_at_the_machine_cache_again(self, gaia, tmp_path):
+        import importlib
+
+        import huggingface_hub.constants as hf
+
+        env_before = {v: os.environ.get(v) for v in
+                      ("HF_HOME", "HF_HUB_CACHE", "HUGGINGFACE_HUB_CACHE", "HF_DATASETS_CACHE")}
+        machine = Path(env_before["HF_HUB_CACHE"] or
+                       Path(env_before["HF_HOME"] or Path.home() / ".cache" / "huggingface") / "hub")
+        try:
+            _, previous = gaia.redirect_hub_into(tmp_path)
+            importlib.reload(hf)          # the import load_tasks performs, inside the window
+            assert str(tmp_path) in hf.HF_HUB_CACHE, "the redirect did not take — test is vacuous"
+
+            gaia.restore_hub(previous)
+
+            assert Path(hf.HF_HUB_CACHE) == machine
+            assert str(tmp_path) not in hf.HF_HUB_CACHE
+        finally:
+            for var, value in env_before.items():
+                if value is None:
+                    os.environ.pop(var, None)
+                else:
+                    os.environ[var] = value
+            importlib.reload(hf)

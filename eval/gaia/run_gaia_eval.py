@@ -429,12 +429,32 @@ def redirect_hub_into(workdir: Path) -> Tuple[Path, Dict[str, Optional[str]]]:
 
 
 def restore_hub(previous: Dict[str, Optional[str]]) -> None:
-    """Give the machine's own cache back, once the dataset is gone from disk."""
+    """Give the machine's own cache back, once the dataset is gone from disk.
+
+    The environment is only half of it. `huggingface_hub` reads these variables
+    **once, at import**, into `constants.HF_HUB_CACHE`, and `load_tasks` does
+    that import inside the redirect — so putting the variables back left the
+    library still pointing at a directory this run had just deleted. Measured
+    2026-08-30 on a --limit 1 run: the agent re-downloaded BAAI/bge-m3, 2.27 GB,
+    into the temp hub, and the first task ran while that download was at 37 %.
+    Every run since the redirect landed has paid it.
+    """
     for var, value in previous.items():
         if value is None:
             os.environ.pop(var, None)
         else:
             os.environ[var] = value
+    try:
+        from huggingface_hub import constants as _hf_constants
+
+        home = os.environ.get("HF_HOME") or str(Path.home() / ".cache" / "huggingface")
+        _hf_constants.HF_HOME = home
+        _hf_constants.HF_HUB_CACHE = os.environ.get("HF_HUB_CACHE") or str(Path(home) / "hub")
+        _hf_constants.HUGGINGFACE_HUB_CACHE = _hf_constants.HF_HUB_CACHE
+    except Exception:
+        # The library not being importable here is not a reason to fail a run;
+        # the cost of missing it is a re-download, not a wrong number.
+        pass
 
 
 def load_tasks(token: str, limit: Optional[int], with_files: bool) -> List[Dict[str, Any]]:
