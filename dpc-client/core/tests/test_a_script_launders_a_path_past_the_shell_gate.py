@@ -170,3 +170,30 @@ def test_reading_a_file_is_not_running_it(tmp_path):
     ctx = _Ctx(tmp_path)
 
     assert _validate_command("cat x.py", ctx, str(tmp_path)) is None
+
+
+# --- what the first production night refused, and should not have ----------
+# 2026-08-30, campaign 20260830-0321: four firings, four false positives, all
+# XPath prefixes from scripts unpacking the tasks' own docx and pptx.
+
+
+def test_an_xpath_prefix_is_not_a_path(tmp_path):
+    _script(tmp_path, "extract.py", "for n in root.iter('.//w:t'):\n    print(n.text)\n")
+    ctx = _Ctx(tmp_path)
+
+    assert _validate_command("python extract.py", ctx, str(tmp_path)) is None
+
+
+def test_a_url_inside_a_script_is_not_a_path(tmp_path):
+    _script(tmp_path, "fetch.py", "urlopen('https://journals.le.ac.uk/index.php/jist')\n")
+    ctx = _Ctx(tmp_path)
+
+    assert _validate_command("python fetch.py", ctx, str(tmp_path)) is None
+
+
+def test_a_single_segment_root_is_not_enough(tmp_path):
+    """`/best` is a yt-dlp format selector, not a directory."""
+    _script(tmp_path, "dl.py", "opts = {'format': '/best'}\n")
+    ctx = _Ctx(tmp_path)
+
+    assert _validate_command("python dl.py", ctx, str(tmp_path)) is None

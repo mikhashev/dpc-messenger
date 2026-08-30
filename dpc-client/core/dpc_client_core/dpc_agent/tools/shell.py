@@ -265,11 +265,32 @@ def _script_paths_out_of_sandbox(
                 return ("", raw)
             for path_pat in PATH_PATTERNS:
                 for hit in path_pat.finditer(body):
+                    if not _reads_as_a_filesystem_path(body, hit):
+                        continue
                     try:
                         ctx.validate_extended_path(hit.group(1))
                     except PermissionError:
                         return (raw, hit.group(1))
     return None
+
+
+def _reads_as_a_filesystem_path(body: str, hit: "re.Match") -> bool:
+    """Inside a file, most slashes are not paths.
+
+    Measured on the campaign of 2026-08-30: all four firings of this gate were
+    XPath prefixes — `//w:t`, `//a:t` — from scripts parsing docx and pptx, and
+    every one refused a legitimate read inside the sandbox. URLs are the same
+    shape. Both are rejected here rather than in PATH_PATTERNS, which the
+    command-line scan shares and which has its own, larger version of this
+    problem.
+    """
+    text = hit.group(1)
+    start = hit.start(1)
+    if start > 0 and body[start - 1] in "/:":
+        return False
+    if re.match(r"^[A-Za-z]:[\\/]", text):
+        return True
+    return bool(re.match(r"^/[^/:\s]+/", text))
 
 
 def _validate_command(
