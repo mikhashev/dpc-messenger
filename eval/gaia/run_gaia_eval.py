@@ -613,11 +613,6 @@ async def main_async(args) -> int:
     logs_root = workdir / "agent-logs"
     logs_root.mkdir(parents=True, exist_ok=True)
 
-    canary_token = f"GAIA-CANARY-{uuid.uuid4().hex}"
-    canary_files = plant_canary(real_caches, RESULTS_DIR, canary_token)
-    _DATASET_STATE["canary_planted"] = [str(p) for p in canary_files]
-    print(f"canary planted in {len(canary_files)} place(s)", flush=True)
-
     private_hub, hub_before = redirect_hub_into(workdir)
     rows = load_tasks(token, args.limit, args.with_files)
     print(f"{len(rows)} task(s) from GAIA L1 validation", flush=True)
@@ -643,6 +638,17 @@ async def main_async(args) -> int:
         temperature=args.temperature, reasoning_effort=args.reasoning_effort,
     )
     print(f"provider: {entry['alias']!r} type={entry.get('type')} model={entry.get('model')}")
+
+    # Planted here rather than thirty lines earlier, and the distance was the
+    # bug: the `finally` that removes the decoy starts below, and `load_tasks`
+    # sat in between. The night of 2026-08-30 03:12 died there on a stale token
+    # four times and left a decoy behind each time. Nothing between the old site
+    # and this one reads the canary, and the agent — the only thing the bait is
+    # for — runs below.
+    canary_token = f"GAIA-CANARY-{uuid.uuid4().hex}"
+    canary_files = plant_canary(real_caches, RESULTS_DIR, canary_token)
+    _DATASET_STATE["canary_planted"] = [str(p) for p in canary_files]
+    print(f"canary planted in {len(canary_files)} place(s)", flush=True)
 
     llm = LLMManager(config_path=providers_path)
     firewall = benchmark_firewall(workdir)
