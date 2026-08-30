@@ -1161,3 +1161,64 @@ class TestTheStreamCarriesAnEffort:
         # provider actually builds rather than the one DeepSeek uses.
         assert seen_params["extra_body"]["chat_template_kwargs"]["reasoning_effort"] == "low"
 
+
+
+class TestTheUsageLineSaysHowMuchOfThePromptWasReused:
+    """The prompt cache had no success signal at all until 2026-08-30.
+
+    llama.cpp warns on a failed load (`server-context.cpp:284`, b10566) and
+    saves at TRACE, so the production log read «two loads, ever, both
+    refusals» over 74 starts — a meter that can only report bad news. The
+    engine's own `prompt eval time = ... / N tokens` says what it actually
+    re-evaluated; against what we sent, that is the reuse, and the supervisor
+    already parsed it and threw it away.
+    """
+
+    def _usage(self, prompt_tokens, engine_prompt_tokens):
+        p = _provider()
+        p.supervisor = _FakeSupervisor()
+        p.supervisor.last_task_timings = lambda: {
+            "prefill_tok_s": 800, "decode_tok_s": 40,
+            "engine_prompt_tokens": engine_prompt_tokens, "engine_gen_tokens": 20,
+        }
+        usage = SimpleNamespace(
+            prompt_tokens=prompt_tokens, completion_tokens=20, total_tokens=prompt_tokens + 20,
+            completion_tokens_details=None,
+        )
+        return p._record_usage(usage, path="tools", elapsed_s=10.0)
+
+    def test_a_warm_turn_is_reported_as_reuse(self):
+        out = self._usage(150_000, 4_000)
+        assert out["prefilled_tokens"] == 4_000
+        assert out["cached_tokens"] == 146_000
+
+    def test_a_cold_turn_reports_no_reuse(self):
+        out = self._usage(150_000, 150_000)
+        assert out["cached_tokens"] == 0
+
+    def test_the_line_carries_the_percentage(self, caplog):
+        import logging
+
+        with caplog.at_level(logging.INFO, logger="dpc_client_core.providers.llamacpp_server_provider"):
+            self._usage(150_000, 4_000)
+        assert any("prefilled=4000 of 150000 (reuse=97.3%)" in r.getMessage()
+                   for r in caplog.records)
+
+    def test_a_tokeniser_disagreement_never_prints_a_negative_reuse(self):
+        """The two counts come from two tokenisers — the API's and the
+        engine's — so the engine can report more than we think we sent."""
+        assert self._usage(1_000, 1_010)["cached_tokens"] == 0
+
+    def test_no_timings_leaves_the_line_as_it_was(self, caplog):
+        import logging
+
+        p = _provider()
+        p.supervisor = _FakeSupervisor()
+        usage = SimpleNamespace(
+            prompt_tokens=100, completion_tokens=20, total_tokens=120,
+            completion_tokens_details=None,
+        )
+        with caplog.at_level(logging.INFO, logger="dpc_client_core.providers.llamacpp_server_provider"):
+            out = p._record_usage(usage, path="plain", elapsed_s=1.0)
+        assert "cached_tokens" not in out
+        assert not any("prefilled=" in r.getMessage() for r in caplog.records)

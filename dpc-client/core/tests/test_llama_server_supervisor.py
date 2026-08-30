@@ -653,3 +653,51 @@ class TestEngineTimings:
         log.write_text("nothing here\n", encoding="utf-8")
         sup._log_path = log
         assert sup.last_task_timings() is None
+
+
+class TestTheStartLineResolvesFlashAttention:
+    """The start line is the only place a reader can learn what the child got,
+    and until 2026-08-30 it did not name flash attention at all.
+
+    Measured that day on the production log: 103 804 lines over 74 starts,
+    16 occurrences of "flash", all of them DFlash. The child never prints
+    flash_attn at any verbosity we run, so an absent flag plus `-ctv q4_0`
+    read as "off or unknown" when the pin forces it on
+    (`src/llama-context.cpp:3596-3605`).
+    """
+
+    def _line(self, caplog, **overrides):
+        import logging
+
+        sup = _sup(**overrides)
+        with caplog.at_level(logging.INFO):
+            sup.log_start(None, {}, binary=BINARY)
+        return "\n".join(r.getMessage() for r in caplog.records)
+
+    def test_a_quantised_v_cache_forces_it_on_and_the_line_says_so(self, caplog):
+        line = self._line(caplog, cache_type_k="q4_0", cache_type_v="q4_0")
+        assert "flash_attn=on (auto, forced by the quantised V cache)" in line
+
+    def test_an_unquantised_cache_leaves_the_binarys_auto(self, caplog):
+        line = self._line(caplog, cache_type_k="f16", cache_type_v="f16")
+        assert "flash_attn=auto (build default)" in line
+
+    def test_a_named_value_is_reported_as_named(self, caplog):
+        assert "flash_attn=on" in self._line(caplog, flash_attn=True)
+
+    def test_off_against_a_quantised_v_is_named_as_the_refusal_it_is(self, caplog):
+        """`quantized V cache requires flash_attn to be enabled` -> nullptr:
+        the child does not start, and the start line should not read like a
+        working configuration."""
+        line = self._line(caplog, flash_attn=False, cache_type_v="q4_0")
+        assert "flash_attn=off (refused at start by the quantised V cache)" in line
+
+    def test_the_ladders_rung_wins_over_the_alias(self, caplog):
+        """`build_command` takes `cache_type or config`, so the resolved value
+        must read the same source or the line describes a different child."""
+        import logging
+
+        sup = _sup(cache_type_v="f16")
+        with caplog.at_level(logging.INFO):
+            sup.log_start("q4_0", {}, binary=BINARY)
+        assert "forced by the quantised V cache" in caplog.records[0].getMessage()

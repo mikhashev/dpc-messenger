@@ -580,16 +580,29 @@ class LlamaServerProvider(DeepSeekProvider):
                     "decode_tok_s": timings["decode_tok_s"],
                     "speed_source": "engine",
                 })
+                # The only place a cache hit is visible. The engine logs a
+                # prompt-cache load solely when it FAILS (server-context.cpp:284,
+                # b10566) and the save at TRACE, so the whole host cache reads as
+                # «two refusals, ever» in a log where it may have worked all week.
+                # What it re-evaluated against what we sent is the measurement.
+                prefilled = timings.get("engine_prompt_tokens")
+                if prefilled is not None and usage["prompt_tokens"] > 0:
+                    usage["prefilled_tokens"] = prefilled
+                    usage["cached_tokens"] = max(0, usage["prompt_tokens"] - prefilled)
             usage["speed"] = speed
+        cached = usage.get("cached_tokens")
         logger.info(
             "llamacpp usage: alias=%s conv=%s prompt=%d, completion=%d "
             "(reasoning=%d/content=%d%s), tool_calls=%d, effort=%s, path=%s"
-            "%s",
+            "%s%s",
             self.alias, conversation_id or "-", usage["prompt_tokens"],
             usage["completion_tokens"], usage["reasoning_tokens"],
             usage["content_tokens"], ", split=estimated" if estimated else "",
             tool_calls, effort, path,
             f", finish={finish_reason}" if finish_reason else "",
+            "" if cached is None else
+            f", prefilled={usage['prefilled_tokens']} of {usage['prompt_tokens']}"
+            f" (reuse={100 * cached / usage['prompt_tokens']:.1f}%)",
         )
         return usage
 

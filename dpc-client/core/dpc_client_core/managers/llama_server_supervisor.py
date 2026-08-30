@@ -152,6 +152,30 @@ def _flash_attn_value(value: Any) -> Optional[str]:
     return None
 
 
+_QUANTISED_KV_TYPES = frozenset({"q8_0", "q4_0", "q4_1", "iq4_nl", "q5_0", "q5_1"})
+
+
+def _flash_attn_effective(value: Any, type_v: Any) -> str:
+    """What the child will do, which silence here does not say.
+
+    `auto` is the binary's default, and on a quantised V cache the pin
+    resolves it to on and refuses to start when it is off
+    (`src/llama-context.cpp:3596-3605`, b10566). So the one configuration
+    production runs — no flag, `-ctv q4_0` — is the one a reader of the start
+    line could not resolve without opening llama.cpp; the child's own log
+    never names flash_attn at any verbosity.
+    """
+    explicit = _flash_attn_value(value)
+    quantised_v = str(type_v or "").strip().lower() in _QUANTISED_KV_TYPES
+    if explicit == "on":
+        return "on"
+    if explicit == "off":
+        return "off (refused at start by the quantised V cache)" if quantised_v else "off"
+    if quantised_v:
+        return "on (auto, forced by the quantised V cache)"
+    return "auto (build default)"
+
+
 def _fmt_knob(value: Any) -> str:
     """How a knob reads in the start line: silence and an explicit 0 differ.
 
@@ -714,12 +738,17 @@ class LlamaServerSupervisor:
         window = self.config.get("context_window")
         logger.info(
             "llama-server[%s] starting on :%s (binary=%s, n_ctx=%s, context_window=%s, "
-            "kv=%s, cache_ram=%s, ctx_checkpoints=%s, checkpoint_min_step=%s, "
+            "kv=%s, flash_attn=%s, cache_ram=%s, ctx_checkpoints=%s, checkpoint_min_step=%s, "
             "n_ubatch=%s, cache_reuse=%s, spec_type=%s, spec_draft_n_max=%s, "
             "vram_overhead=%s)",
             self.alias, self.port, binary if binary is not None else "unknown",
             n_ctx, _fmt_knob(window),
-            cache_type or "configured", _cache,
+            cache_type or "configured",
+            _flash_attn_effective(
+                self.config.get("flash_attn"),
+                cache_type or self.config.get("cache_type_v"),
+            ),
+            _cache,
             _fmt_knob(self.config.get("ctx_checkpoints")),
             _fmt_knob(self.config.get("checkpoint_min_step")),
             _fmt_knob(self.config.get("n_ubatch")),
