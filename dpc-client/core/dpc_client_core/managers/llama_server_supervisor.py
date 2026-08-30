@@ -470,6 +470,41 @@ def format_restore_refusal(refusal: Dict[str, Any], n_ctx: int) -> str:
     )
 
 
+# `mean len` is tokens emitted per target forward pass, not draft length: it
+# equals acceptance × n_max + 1, which reproduces every line in this box's log
+# to two decimals. That identity is also the only place a finished child says
+# which n_max it ran with — neither the command line nor the log records it.
+_DRAFT_RE = re.compile(
+    r"draft acceptance = ([\d.]+) \(\s*(\d+) accepted /\s*(\d+) generated\), "
+    r"mean len =\s*([\d.]+)"
+)
+
+
+def _parse_draft(tail: str) -> Dict[str, Any]:
+    """Speculation counters of the last finished task, or {} when there are none.
+
+    Empty rather than zero: an alias with no `--spec-type` writes no such line,
+    and a reader that cannot tell "not drafting" from "drafted nothing" is the
+    defect this project already paid for once.
+    """
+    found = _DRAFT_RE.findall(tail)
+    if not found:
+        return {}
+    rate, accepted, generated, mean_len = found[-1]
+    rate, mean_len = float(rate), float(mean_len)
+    out: Dict[str, Any] = {
+        "draft_acceptance": rate,
+        "draft_accepted": int(accepted),
+        "draft_generated": int(generated),
+        "draft_tokens_per_pass": mean_len,
+    }
+    if rate > 0:
+        n_est = (mean_len - 1) / rate
+        if abs(n_est - round(n_est)) <= 0.08 and 1 <= round(n_est) <= 16:
+            out["draft_n_max"] = round(n_est)
+    return out
+
+
 def _gguf_mib(path: str) -> int:
     try:
         return os.path.getsize(path) // (1024 * 1024)
@@ -1131,12 +1166,14 @@ class LlamaServerSupervisor:
             return None
         n_prompt, prefill_rate = pre[-1]
         n_gen, decode_rate = dec[-1]
-        return {
+        out = {
             "prefill_tok_s": int(float(prefill_rate)),
             "decode_tok_s": int(float(decode_rate)),
             "engine_prompt_tokens": int(n_prompt),
             "engine_gen_tokens": int(n_gen),
         }
+        out.update(_parse_draft(tail))
+        return out
 
     def _close_log(self) -> None:
         if self._log_fh:

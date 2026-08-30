@@ -589,6 +589,13 @@ class LlamaServerProvider(DeepSeekProvider):
                 if prefilled is not None and usage["prompt_tokens"] > 0:
                     usage["prefilled_tokens"] = prefilled
                     usage["cached_tokens"] = max(0, usage["prompt_tokens"] - prefilled)
+                # Speculation was measured once, on one synthetic prompt, and the
+                # figure decided a default. The child has been printing its own
+                # counters per task all along; carrying them here makes the knob
+                # answerable from production instead of from a probe.
+                for key in ("draft_acceptance", "draft_tokens_per_pass", "draft_n_max"):
+                    if key in timings:
+                        speed[key] = timings[key]
             usage["speed"] = speed
         # A refused restore is not ours to prevent — nothing in this package
         # asks for one; the engine tries it on its own prompt-cache lookup and
@@ -600,10 +607,11 @@ class LlamaServerProvider(DeepSeekProvider):
             except Exception:
                 logger.debug("restore-refusal scan failed", exc_info=True)
         cached = usage.get("cached_tokens")
+        spd = usage.get("speed") or {}
         logger.info(
             "llamacpp usage: alias=%s conv=%s prompt=%d, completion=%d "
             "(reasoning=%d/content=%d%s), tool_calls=%d, effort=%s, path=%s"
-            "%s%s",
+            "%s%s%s",
             self.alias, conversation_id or "-", usage["prompt_tokens"],
             usage["completion_tokens"], usage["reasoning_tokens"],
             usage["content_tokens"], ", split=estimated" if estimated else "",
@@ -612,6 +620,9 @@ class LlamaServerProvider(DeepSeekProvider):
             "" if cached is None else
             f", prefilled={usage['prefilled_tokens']} of {usage['prompt_tokens']}"
             f" (reuse={100 * cached / usage['prompt_tokens']:.1f}%)",
+            "" if "draft_acceptance" not in spd else
+            f", draft={100 * spd['draft_acceptance']:.1f}% at n={spd.get('draft_n_max', '?')}"
+            f" ({spd['draft_tokens_per_pass']:.2f} tok/pass)",
         )
         return usage
 
