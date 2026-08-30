@@ -12,10 +12,12 @@ least able to show a distorted attention score.
 This runs the comparison the board entry asks for
 (THE-KEYS-RUN-AT-Q4-0-AND-THE-ONE-CHECK-WAS-A-SINGLE-RETRIEVAL-QUESTION):
 
-  * V stays q4_0 in both arms, K is the only variable;
   * temperature 0 and a fixed seed, so a difference is the cache and not the
     sampler;
-  * three depths — 32 K, 120 K, 175 K — because the suspicion is accumulation;
+  * three depths, requested as 32 K / 120 K / 175 K — but the third rung is not
+    a chosen depth: its seed corpus overshoots the pool and is clamped, so it
+    lands at ~252 K, four per cent under the 262 144-cell ceiling. `depth_real`
+    and the reports carry the measured count; `DEPTHS` carries the request;
   * needles carrying numbers and code, which fail loudly, rather than prose
     that can be paraphrased two ways and scored as agreement;
   * the measure is the rate of divergence against the other arm, not a score.
@@ -27,12 +29,21 @@ It needs the card to itself. The production child holds 26-28 GiB, so run this
 with the DPC service stopped — two 27B children on one 32 GiB card is the
 incident of 2026-08-24, not an experiment.
 
-    uv run python eval/kv/ab_key_quant.py --ctk q4_0
-    uv run python eval/kv/ab_key_quant.py --ctk q8_0
+    uv run python eval/kv/ab_key_quant.py --ctk q4_0 --ctv q4_0
+    uv run python eval/kv/ab_key_quant.py --ctk q8_0 --ctv q8_0
     uv run python eval/kv/ab_key_quant.py --compare
 
-Each arm writes eval/kv/results/<ctk>.json; --compare reads both and prints the
-divergence table. Roughly 12 minutes per arm on this box: two model loads plus
+**What actually ran, and it is not what this file was filed for.** `ARMS` is
+q4_0/q4_0 against q8_0/q8_0 — *both* halves move, because the mixed pair the
+entry wanted has no flash-attention kernel on the pin and collapses to 34 tok/s
+(see --ctv's help). So a null here says «the two matched rungs agree», not «K
+costs nothing»: with V moving alongside, no divergence can be attributed to K.
+The docstring claimed the isolated design until 2026-08-30, when Fable 5 and
+GLM 5.3 read the constant instead of the sentence. Passing --ctv is therefore
+required above: the defaults write a file --compare does not read.
+
+Each arm writes eval/kv/results/<ctk>-<ctv>.json; --compare reads both and prints
+the divergence table. Roughly 12 minutes per arm on this box: two model loads plus
 six prefills of 32-175 K at the measured 750-900 tok/s.
 """
 
@@ -62,6 +73,9 @@ RESULTS = HERE / "results"
 PROVIDERS = Path.home() / ".dpc" / "providers.json"
 ALIAS_TYPE = "llamacpp_server"
 
+# Requested depths. The third is clamped to ~0.97 of the pool by
+# `_corpus_at_depth`, so it delivers ~252 K rather than 175 K — the reports
+# record what was measured, this records what was asked for.
 DEPTHS = (32_000, 120_000, 175_000)
 # The pair to compare, by report file name.
 ARMS = ("q4_0-q4_0", "q8_0-q8_0")

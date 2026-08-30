@@ -270,6 +270,54 @@ def canary_was_read(token: str, results: List[Dict[str, Any]], logs_dir: Path) -
     }
 
 
+# Phrases an answer reached for when it had found the key rather than solved the
+# task. Every one is verbatim from a report on this machine — 2026-08-25
+# («the official answer file confirms»), 08-28 («I located the official answer in
+# the local GAIA dataset»), 08-29 («I found the ground truth answer from a dataset
+# with this exact question»). The canary saw none of them: the file read was real.
+_ADMISSION_RE = re.compile(
+    r"reference answer|official answer|answer key|ground.truth answer|true_answer"
+    r"|authoritative source|local GAIA dataset|metadata\.level1",
+    re.I,
+)
+
+
+def answers_admitting_a_lookup(results: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Tasks whose own answer text says where the answer came from.
+
+    A second surface rather than a replacement: the trace detector keys on the
+    parquet's column names surfacing in a tool result, and a run whose logs have
+    been deleted cannot be checked that way at all — the stored answer outlives
+    the logs. This flags for a reader; it scores nothing and refuses nothing,
+    because an honest answer may quote the phrase too.
+    """
+    flagged = []
+    for row in results:
+        hit = _ADMISSION_RE.search(row.get("answer") or "")
+        if hit:
+            flagged.append({
+                "task_id": row.get("task_id"),
+                "phrase": hit.group(0),
+                "correct": row.get("correct"),
+            })
+    return flagged
+
+
+_GATED_TOKEN_VARS = ("HF_TOKEN", "HUGGINGFACE_HUB_TOKEN")
+
+
+def drop_gated_credentials() -> List[str]:
+    """Remove the dataset credential from the environment the agent inherits.
+
+    The token outlives the answers it fetched: the agent runs in-process and its
+    shell inherits `os.environ`, so a gated re-download of the *original* key is
+    one command away from a run that has just deleted its local copy — and it
+    evades both the canary and the path enumeration, which watch files. Called
+    once the attachments are prefetched, after which nothing here needs it.
+    """
+    return [var for var in _GATED_TOKEN_VARS if os.environ.pop(var, None) is not None]
+
+
 _HUB_VARS = ("HF_HOME", "HF_HUB_CACHE", "HUGGINGFACE_HUB_CACHE", "HF_DATASETS_CACHE")
 
 
@@ -394,12 +442,16 @@ async def run_one(agent, row: Dict[str, Any], attachment: Optional[Path]) -> Dic
     question = row["Question"]
     if attachment:
         question = f"{question}\n\nThe attached file is at: {attachment}"
+    # An opaque id. `gaia-<task_id[:8]>` handed the model the split's own row
+    # key, and a 2026-08-25 answer used it: «matching our gaia-e142056d … the
+    # official answer file confirms». The report keeps the mapping.
+    conversation_id = f"gaia-run-{uuid.uuid4().hex[:12]}"
     started = time.time()
     answer, error = "", None
     try:
         answer = await agent.process(
             message=question + PROMPT_SUFFIX,
-            conversation_id=f"gaia-{row['task_id'][:8]}",
+            conversation_id=conversation_id,
         )
     except Exception as exc:
         error = f"{type(exc).__name__}: {exc}"
@@ -409,6 +461,7 @@ async def run_one(agent, row: Dict[str, Any], attachment: Optional[Path]) -> Dic
     usage = dict(getattr(agent, "_last_usage", None) or {})
     return {
         "task_id": row["task_id"],
+        "conversation_id": conversation_id,
         "gold_sha256": gold_fingerprint(row["Final answer"]),
         "answer": (answer or "")[:600],
         "correct": scores_as_correct(answer or "", row["Final answer"]),
@@ -491,6 +544,7 @@ async def main_async(args) -> int:
     shutil.rmtree(private_hub, ignore_errors=True)
     _DATASET_STATE["private_cache_removed"] = not private_hub.exists()
     restore_hub(hub_before)
+    _DATASET_STATE["token_dropped"] = drop_gated_credentials()
     print(f"attachments prefetched: {len(prefetched)}; hub cache removed: "
           f"{_DATASET_STATE['private_cache_removed']}", flush=True)
 
@@ -580,6 +634,10 @@ async def main_async(args) -> int:
                 **canary_was_read(canary_token, results, logs_root),
                 "planted": [str(p) for p in canary_files],
             },
+            # What the canary structurally cannot see: an answer that names its
+            # own source. Four such tasks are already on the board for 2026-08-28
+            # and two more were found on 08-30 in runs nobody had re-read.
+            "admissions": answers_admitting_a_lookup(results),
             # The one bit whose whole job is «this number is dirty», computed at
             # :449 since the guard was written and dropped before the report ever
             # since — the `--allow-reachable-gold` help promises the run records
