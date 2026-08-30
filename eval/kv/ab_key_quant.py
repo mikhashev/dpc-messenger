@@ -62,6 +62,8 @@ PROVIDERS = Path.home() / ".dpc" / "providers.json"
 ALIAS_TYPE = "llamacpp_server"
 
 DEPTHS = (32_000, 120_000, 175_000)
+# The pair to compare, by report file name.
+ARMS = ("q4_0-q4_0", "q8_0-q8_0")
 N_CTX = 262_144
 SEED = 42
 # Deterministic decoding. The vendor does not recommend greedy for a thinking
@@ -169,13 +171,13 @@ def _corpus(rng: random.Random, target_chars: int) -> tuple[str, list[dict]]:
 # --- the server ------------------------------------------------------------
 
 
-def _start(binary: Path, alias: dict, ctk: str, port: int) -> subprocess.Popen:
+def _start(binary: Path, alias: dict, ctk: str, ctv: str, port: int) -> subprocess.Popen:
     cmd = [
         str(binary),
         "-m", alias["gguf_path"],
         "-c", str(N_CTX),
         "-ctk", ctk,
-        "-ctv", "q4_0",
+        "-ctv", ctv,
         "-ngl", "999",
         # One slot, no speculation, no projector: every one of those is a source
         # of difference between two runs that is not the KV cache.
@@ -192,7 +194,7 @@ def _start(binary: Path, alias: dict, ctk: str, port: int) -> subprocess.Popen:
     backend = find_cuda_backend(binary.parent)
     if backend:
         env["GGML_BACKEND_PATH"] = str(backend)
-    log = RESULTS / f"server-{ctk}.log"
+    log = RESULTS / f"server-{ctk}-{ctv}.log"
     RESULTS.mkdir(parents=True, exist_ok=True)
     proc = subprocess.Popen(cmd, stdout=open(log, "wb"), stderr=subprocess.STDOUT, env=env)
     return proc
@@ -279,7 +281,7 @@ def _hit(answer: str, text: str) -> bool:
     return re.search(rf"(?<![0-9a-fA-F]){re.escape(answer)}(?![0-9a-fA-F])", text) is not None
 
 
-def run_arm(ctk: str) -> Path:
+def run_arm(ctk: str, ctv: str) -> Path:
     alias = _alias()
     binary = _binary()
     free = _free_vram_mib()
@@ -289,9 +291,9 @@ def run_arm(ctk: str) -> Path:
             "two 27B children on one card is an incident, not an experiment"
         )
     port = _free_port()
-    proc = _start(binary, alias, ctk, port)
+    proc = _start(binary, alias, ctk, ctv, port)
     record = {
-        "ctk": ctk, "ctv": "q4_0", "seed": SEED, "temperature": TEMPERATURE,
+        "ctk": ctk, "ctv": ctv, "seed": SEED, "temperature": TEMPERATURE,
         "gguf": alias["gguf_path"], "binary": str(binary),
         "free_vram_mib_before": free, "depths": {},
     }
@@ -325,52 +327,68 @@ def run_arm(ctk: str) -> Path:
         except subprocess.TimeoutExpired:
             proc.kill()
     RESULTS.mkdir(parents=True, exist_ok=True)
-    out_path = RESULTS / f"{ctk}.json"
+    out_path = RESULTS / f"{ctk}-{ctv}.json"
     out_path.write_text(json.dumps(record, indent=1), encoding="utf-8")
     print(f"written {out_path}")
     return out_path
 
 
 def compare() -> None:
-    arms = {}
-    for ctk in ("q4_0", "q8_0"):
-        path = RESULTS / f"{ctk}.json"
-        if not path.exists():
-            raise SystemExit(f"missing {path} — run the {ctk} arm first")
-        arms[ctk] = json.loads(path.read_text(encoding="utf-8"))
+    """The two arms side by side, with «empty» kept apart from «wrong».
 
-    print(f"{'depth':>8} {'pos':>5} {'q4_0 K':>8} {'q8_0 K':>8}  agree  answer")
-    totals = {"q4_0": 0, "q8_0": 0, "n": 0, "agree": 0}
+    An empty reply is the model spending its whole budget thinking, not a
+    retrieval failure, and scoring the two together would blame the cache for
+    the sampler.
+    """
+    arms = {}
+    for name in ARMS:
+        path = RESULTS / f"{name}.json"
+        if not path.exists():
+            raise SystemExit(f"missing {path} — run that arm first")
+        arms[name] = json.loads(path.read_text(encoding="utf-8"))
+    a_name, b_name = ARMS
+
+    def verdict(row):
+        return "hit" if row["hit"] else ("empty" if not row["got"] else "wrong")
+
+    print(f"{'depth':>8} {'pos':>5} {a_name:>12} {b_name:>12}  agree  answer")
+    totals = {a_name: 0, b_name: 0, "n": 0, "agree": 0, "empty": 0}
     for depth in DEPTHS:
-        a = arms["q4_0"]["depths"][str(depth)]
-        b = arms["q8_0"]["depths"][str(depth)]
-        for x, y in zip(a, b):
+        rows_a = arms[a_name]["depths"][str(depth)]
+        rows_b = arms[b_name]["depths"][str(depth)]
+        for x, y in zip(rows_a, rows_b):
             same = x["got"] == y["got"]
             totals["n"] += 1
-            totals["q4_0"] += x["hit"]
-            totals["q8_0"] += y["hit"]
+            totals[a_name] += x["hit"]
+            totals[b_name] += y["hit"]
             totals["agree"] += same
-            print(f"{depth:>8} {x['position']:>5.2f} "
-                  f"{'hit' if x['hit'] else 'MISS':>8} {'hit' if y['hit'] else 'MISS':>8}"
+            totals["empty"] += (not x["got"]) + (not y["got"])
+            depth_real = arms[a_name].get("corpus_tokens", {}).get(str(depth), depth)
+            print(f"{depth_real:>8} {x['position']:>5.2f} {verdict(x):>12} {verdict(y):>12}"
                   f"  {'yes' if same else 'NO':>5}  {x['expected']}")
     n = totals["n"]
-    print(f"\nneedles found: q4_0 K {totals['q4_0']}/{n}, q8_0 K {totals['q8_0']}/{n}")
+    print(f"\nneedles found: {a_name} {totals[a_name]}/{n}, {b_name} {totals[b_name]}/{n}"
+          f"   (empty replies, scored as neither: {totals['empty']})")
     print(f"identical replies: {totals['agree']}/{n} "
           f"(divergence {100 * (n - totals['agree']) / n:.0f}%)")
     print("\nBoth arms are greedy at one seed, so a divergence is the cache. "
-          "Equal counts with different text is a real result and not a null: "
-          "it says the keys move the trajectory without moving the answer.")
+          "Equal counts with different text is a result and not a null: it says "
+          "the cache moves the trajectory without moving the answer.")
 
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--ctk", choices=("q4_0", "q8_0"), help="run one arm")
+    ap.add_argument("--ctv", choices=("q4_0", "q8_0"), default="q4_0",
+                    help="only a MATCHED pair has a flash-attention kernel on the "
+                         "pinned CUDA build: measured 2026-08-30, q8_0 K over q4_0 V "
+                         "prefills at 34 tok/s and falling against 800-900 matched")
     ap.add_argument("--compare", action="store_true", help="read both arms and diff them")
     args = ap.parse_args()
     if args.compare:
         compare()
     elif args.ctk:
-        run_arm(args.ctk)
+        run_arm(args.ctk, args.ctv)
     else:
         ap.error("give --ctk or --compare")
 

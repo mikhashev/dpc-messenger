@@ -1,0 +1,103 @@
+{
+ "ctk": "q4_0",
+ "ctv": "q4_0",
+ "seed": 42,
+ "temperature": 0.0,
+ "gguf": "C:\\Users\\mikha\\.dpc\\models\\esatapedico--Qwen3.8-27B-NVFP4-MTP-GGUF\\Qwen3.8-27B-Cold-Fusion-GAIN-V1.1-NVFP4-MID-HIGH.gguf",
+ "binary": "C:\\Users\\mikha\\.dpc\\bin\\llama.cpp\\b10566\\win-cuda-13.3-x64\\llama-server.exe",
+ "free_vram_mib_before": 29996,
+ "depths": {
+  "32000": [
+   {
+    "position": 0.25,
+    "question": "What is the calibration constant for sensor 1948? Answer with the number alone.",
+    "expected": "295",
+    "got": "295",
+    "hit": true,
+    "prompt_tokens": 32216,
+    "seconds": 16.2
+   },
+   {
+    "position": 0.5,
+    "question": "What is the checksum of batch 8396? Answer with the hex string alone.",
+    "expected": "a7da10fd80b1",
+    "got": "a7da10fd80b1",
+    "hit": true,
+    "prompt_tokens": 32216,
+    "seconds": 3.1
+   },
+   {
+    "position": 0.75,
+    "question": "In this transcript there is a function route_1059. What does route_1059(7) return? Answer with the number alone.",
+    "expected": "5139",
+    "got": "5139",
+    "hit": true,
+    "prompt_tokens": 32230,
+    "seconds": 4.6
+   }
+  ],
+  "120000": [
+   {
+    "position": 0.25,
+    "question": "What is the calibration constant for sensor 9230? Answer with the number alone.",
+    "expected": "965",
+    "got": "965",
+    "hit": true,
+    "prompt_tokens": 120196,
+    "seconds": 100.5
+   },
+   {
+    "position": 0.5,
+    "question": "What is the checksum of batch 8498? Answer with the hex string alone.",
+    "expected": "a510a238c47e",
+    "got": "a510a238c47e",
+    "hit": true,
+    "prompt_tokens": 120196,
+    "seconds": 5.3
+   },
+   {
+    "position": 0.75,
+    "question": "In this transcript there is a function route_6790. What does route_6790(7) return? Answer with the number alone.",
+    "expected": "3441",
+    "got": "",
+    "hit": false,
+    "prompt_tokens": 120210,
+    "seconds": 11.3
+   }
+  ],
+  "175000": [
+   {
+    "position": 0.25,
+    "question": "What is the calibration constant for sensor 2028? Answer with the number alone.",
+    "expected": "187",
+    "got": "187",
+    "hit": true,
+    "prompt_tokens": 252536,
+    "seconds": 368.4
+   },
+   {
+    "position": 0.5,
+    "question": "What is the checksum of batch 6002? Answer with the hex string alone.",
+    "expected": "7d41698802f6",
+    "got": "7d41698802f6",
+    "hit": true,
+    "prompt_tokens": 252536,
+    "seconds": 7.9
+   },
+   {
+    "position": 0.75,
+    "question": "In this transcript there is a function route_6073. What does route_6073(7) return? Answer with the number alone.",
+    "expected": "6858",
+    "got": "6858",
+    "hit": true,
+    "prompt_tokens": 252550,
+    "seconds": 9.5
+   }
+  ]
+ },
+ "corpus_tokens": {
+  "32000": 32157,
+  "120000": 120137,
+  "175000": 252477
+ }
+}
