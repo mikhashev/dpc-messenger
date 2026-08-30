@@ -62,6 +62,7 @@ PROVIDERS = Path.home() / ".dpc" / "providers.json"
 ALIAS_TYPE = "llamacpp_server"
 
 DEPTHS = (32_000, 120_000, 175_000)
+N_CTX = 262_144
 SEED = 42
 # Deterministic decoding. The vendor does not recommend greedy for a thinking
 # model, and that caveat is real for a quality verdict — but this is a paired
@@ -124,16 +125,15 @@ _NEEDLES = [
 ]
 
 
-def _corpus(rng: random.Random, target_tokens: int) -> tuple[str, list[dict]]:
+def _corpus(rng: random.Random, target_chars: int) -> tuple[str, list[dict]]:
     """Filler with needles spread through it, and the questions that read them.
 
-    Needles sit at 10 %, 50 % and 90 % of the depth: a cache defect that eats
-    the oldest region and one that eats the middle look identical if every
-    needle is at the end.
+    Needles sit at 25 %, 50 % and 75 % of the depth: a defect that eats the
+    oldest region and one that eats the middle look identical if every needle
+    is at the end. The budget is characters; the caller converts from the depth
+    it wants through the model's own tokeniser, because this filler runs 1.7×
+    denser than the four-chars-per-token guess.
     """
-    # ~4 chars per token is the estimate this repo already uses elsewhere; the
-    # exact depth does not matter as long as both arms get the same text.
-    target_chars = target_tokens * 4
     blocks: list[str] = []
     needles: list[dict] = []
     n_slots = 3
@@ -173,7 +173,7 @@ def _start(binary: Path, alias: dict, ctk: str, port: int) -> subprocess.Popen:
     cmd = [
         str(binary),
         "-m", alias["gguf_path"],
-        "-c", "262144",
+        "-c", str(N_CTX),
         "-ctk", ctk,
         "-ctv", "q4_0",
         "-ngl", "999",
@@ -210,6 +210,38 @@ def _wait_healthy(port: int, proc: subprocess.Popen, timeout_s: float = 600.0) -
         except (urllib.error.URLError, TimeoutError, ConnectionError, OSError):
             time.sleep(2)
     raise SystemExit("server never became healthy")
+
+
+def _count_tokens(port: int, text: str) -> int:
+    """The model's own tokeniser, so a depth is the depth it claims to be."""
+    body = json.dumps({"content": text}).encode()
+    req = urllib.request.Request(
+        f"http://127.0.0.1:{port}/tokenize",
+        data=body, headers={"Content-Type": "application/json"},
+    )
+    with urllib.request.urlopen(req, timeout=600) as r:
+        return len(json.loads(r.read())["tokens"])
+
+
+def _corpus_at_depth(rng: random.Random, depth: int, port: int, budget: int):
+    """A corpus whose token count is `depth`, measured rather than assumed.
+
+    One calibration read plus one correction lands inside a few per cent, and
+    the result is clamped to `budget` so the deepest rung cannot ask for more
+    cells than the pool has — the failure that would look like a cache defect.
+    """
+    corpus, needles = _corpus(rng, depth * 4)
+    for _ in range(3):
+        actual = _count_tokens(port, corpus)
+        if abs(actual - depth) <= max(500, depth // 50) or actual > budget:
+            break
+        rng2 = random.Random(rng.random())
+        corpus, needles = _corpus(rng2, int(len(corpus) * depth / actual))
+    while actual > budget:
+        corpus, needles = _corpus(random.Random(rng.random()),
+                                  int(len(corpus) * budget / actual * 0.97))
+        actual = _count_tokens(port, corpus)
+    return corpus, needles, actual
 
 
 def _ask(port: int, prompt: str, question: str) -> dict:
@@ -267,7 +299,9 @@ def run_arm(ctk: str) -> Path:
         _wait_healthy(port, proc)
         for depth in DEPTHS:
             rng = random.Random(SEED * 1000 + depth)
-            corpus, needles = _corpus(rng, depth)
+            corpus, needles, actual = _corpus_at_depth(rng, depth, port, N_CTX - 2_000)
+            record.setdefault("corpus_tokens", {})[str(depth)] = actual
+            print(f"  {ctk} @{depth}: corpus is {actual} tokens", flush=True)
             answers = []
             for n in needles:
                 out = _ask(port, corpus, n["question"])

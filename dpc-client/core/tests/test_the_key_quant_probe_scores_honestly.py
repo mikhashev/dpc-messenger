@@ -46,36 +46,38 @@ class TestTheCorpus:
     def test_both_arms_get_byte_identical_text(self):
         """The arms run in separate processes; only the seed carries between
         them, so the corpus must be a function of the seed and nothing else."""
-        a, na = ab._corpus(random.Random(42_000 + 32_000), 32_000)
-        b, nb = ab._corpus(random.Random(42_000 + 32_000), 32_000)
+        a, na = ab._corpus(random.Random(42_000 + 32_000), 128_000)
+        b, nb = ab._corpus(random.Random(42_000 + 32_000), 128_000)
         assert a == b
         assert na == nb
 
     def test_a_different_depth_is_a_different_corpus(self):
-        a, _ = ab._corpus(random.Random(1), 32_000)
-        b, _ = ab._corpus(random.Random(1), 8_000)
+        a, _ = ab._corpus(random.Random(1), 128_000)
+        b, _ = ab._corpus(random.Random(1), 32_000)
         assert a != b
 
     def test_the_needles_are_spread_and_not_all_at_the_end(self):
         """A defect that eats the oldest region and one that eats the middle
         look identical when every needle sits near the last token."""
-        _, needles = ab._corpus(random.Random(7), 8_000)
+        _, needles = ab._corpus(random.Random(7), 32_000)
         positions = [n["position"] for n in needles]
         assert positions == [0.25, 0.5, 0.75]
 
     def test_every_needle_is_stated_once_in_the_text(self):
-        corpus, needles = ab._corpus(random.Random(7), 8_000)
+        corpus, needles = ab._corpus(random.Random(7), 32_000)
         for n in needles:
             assert corpus.count(f"{n['fact']} is {n['answer']}") == 1
 
     def test_the_filler_carries_no_answer_by_accident(self):
         """The filler is random digits; a needle value appearing in it would
         be scored as a hit the model never earned."""
-        corpus, needles = ab._corpus(random.Random(7), 8_000)
+        corpus, needles = ab._corpus(random.Random(7), 32_000)
         for n in needles:
             stated = f"NOTE: {n['fact']} is {n['answer']}.\n"
             assert ab._hit(n["answer"], corpus.replace(stated, "")) is False
 
-    def test_the_depth_is_roughly_what_was_asked_for(self):
-        corpus, _ = ab._corpus(random.Random(3), 32_000)
-        assert 30_000 <= len(corpus) // 4 <= 34_000
+    def test_the_character_budget_is_honoured(self):
+        """The depth itself is calibrated against the model's tokeniser at run
+        time; what this function owes the caller is the character budget."""
+        corpus, _ = ab._corpus(random.Random(3), 128_000)
+        assert 128_000 <= len(corpus) <= 128_000 * 1.02
