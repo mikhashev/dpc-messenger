@@ -580,6 +580,16 @@ async def main_async(args) -> int:
                 **canary_was_read(canary_token, results, logs_root),
                 "planted": [str(p) for p in canary_files],
             },
+            # The one bit whose whole job is «this number is dirty», computed at
+            # :449 since the guard was written and dropped before the report ever
+            # since — the `--allow-reachable-gold` help promises the run records
+            # it. Found by GLM 5.3 in the 2026-08-30 history audit; no report on
+            # disk carries either field.
+            "containment": {
+                "gold_reachable_at_start": _DATASET_STATE.get("gold_reachable_at_start", []),
+                "gold_reachable_allowed": _DATASET_STATE.get("gold_reachable_allowed", False),
+                "private_cache_removed": _DATASET_STATE.get("private_cache_removed"),
+            },
             **({"approvals": approver.summary()} if approver is not None else {}),
             "provenance": provenance.snapshot(
                 repo_root=HERE.parent.parent,

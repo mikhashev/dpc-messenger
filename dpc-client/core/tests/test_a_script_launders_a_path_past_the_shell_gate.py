@@ -197,3 +197,63 @@ def test_a_single_segment_root_is_not_enough(tmp_path):
     ctx = _Ctx(tmp_path)
 
     assert _validate_command("python dl.py", ctx, str(tmp_path)) is None
+
+
+# --- what two independent reviews found the gate could not see ------------
+# 2026-08-30, Fable 5 and GLM 5.3 on the eval traces: the agent wrote `dl.bat`
+# around a curl the gate had refused. It never ran it. Measured on this tree the
+# same morning, before the fix: `dl.bat`, `.\dl.bat`, `dl.cmd`, `call dl.bat`,
+# `start dl.bat` and a bare `grab.py` were all Tier 0 — a batch extension the
+# pattern list did not carry, and a shebang rule that demanded a separator in
+# the name.
+
+
+def test_a_batch_file_is_a_script(tmp_path):
+    _script(tmp_path, "dl.cmd", r"type C:\Users\mikha\gaia-archive\gold.parquet" + "\\n")
+    ctx = _Ctx(tmp_path)
+
+    verdict = _validate_command("dl.cmd", ctx, str(tmp_path))
+
+    assert verdict is not None and verdict[0] == "tier1", verdict
+    assert "dl.cmd" in verdict[1] and "gaia-archive" in verdict[1], verdict[1]
+
+
+def test_the_cmd_wrappers_reach_the_batch_file(tmp_path):
+    _script(tmp_path, "dl.bat", r"type C:\Users\mikha\gaia-archive\gold.parquet" + "\\n")
+    ctx = _Ctx(tmp_path)
+
+    for spelling in ("call dl.bat", "start dl.bat", r".\dl.bat"):
+        verdict = _validate_command(spelling, ctx, str(tmp_path))
+        assert verdict is not None and verdict[0] == "tier1", spelling
+        assert "dl.bat" in verdict[1], (spelling, verdict[1])
+
+
+def test_a_bare_name_is_a_launch_on_both_platforms(tmp_path):
+    """Windows runs `grab.py` by file association, POSIX by the executable bit.
+    The older rule needed a `.` or a slash in the name and saw neither."""
+    _script(tmp_path, "grab.py", "open('/etc/shadow')\n")
+    ctx = _Ctx(tmp_path)
+
+    verdict = _validate_command("grab.py", ctx, str(tmp_path))
+
+    assert verdict is not None and verdict[0] == "tier1", verdict
+    assert "grab.py" in verdict[1] and "/etc/shadow" in verdict[1], verdict[1]
+
+
+def test_a_batch_file_that_only_fetches_a_url_is_still_tier_zero(tmp_path):
+    """The whole point of the 2026-08-30 narrowing: the agent's legitimate
+    reason for writing dl.bat was a download, and a URL is not a path."""
+    _script(tmp_path, "dl.bat", "curl -o out.parquet https://huggingface.co/api/x/parquet\n")
+    ctx = _Ctx(tmp_path)
+
+    assert _validate_command("dl.bat", ctx, str(tmp_path)) is None
+
+
+def test_naming_a_script_as_an_argument_is_not_running_it(tmp_path):
+    """The bare-name rule anchors at the start of a segment, so a script named
+    anywhere else in the line must not be read as a launch."""
+    _script(tmp_path, "dl.cmd", r"type C:\Users\mikha\gaia-archive\gold.parquet" + "\\n")
+    ctx = _Ctx(tmp_path)
+
+    assert _validate_command("type dl.cmd", ctx, str(tmp_path)) is None
+    assert _validate_command("git add dl.cmd", ctx, str(tmp_path)) is None

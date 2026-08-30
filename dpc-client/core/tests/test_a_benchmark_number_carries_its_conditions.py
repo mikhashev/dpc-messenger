@@ -91,3 +91,44 @@ def test_the_machine_is_recorded_because_the_score_depends_on_it():
     assert "gpu" in block["machine"]
     assert block["machine"]["cpu_count"]
     assert block["machine"]["python"]
+
+
+# --- what the 2026-08-30 history audit found in the provenance itself -------
+
+
+def test_a_number_is_never_a_secret():
+    """`reasoning_budget_tokens` carries "token" in its name and is a count.
+
+    Every provenance file on disk reads `"[redacted]"` where the reasoning
+    budget was, because the filter matched the key and never looked at the
+    value. (GLM 5.3, 2026-08-30.)
+    """
+    block = _snapshot(provider_entry={
+        "alias": "a", "reasoning_budget_tokens": 10000, "api_key": "sk-live-1",
+    })
+
+    assert block["provider"]["reasoning_budget_tokens"] == 10000
+    assert block["provider"]["api_key"] == "[redacted]", "a string secret still goes"
+
+
+def test_the_first_dirty_file_keeps_its_first_character(tmp_path, monkeypatch):
+    """`git status --porcelain` puts the status in columns 1-2, so an unstaged
+    edit is ` M path`; stripping the blob ate that leading space and the `[3:]`
+    that removes the columns then ate a character of the path. Measured in the
+    2026-08-29 provenance files, which all name `pc-client/...`. (Fable 5.)
+    """
+    calls = {}
+
+    def _fake_run(cmd, cwd=None, timeout=30, keep_indent=False):
+        calls[tuple(cmd[:3])] = keep_indent
+        if cmd[1] == "status":
+            out = " M dpc-client/core/tests/test_x.py\n?? eval/gaia/results/\n"
+            return out.rstrip() if keep_indent else out.strip()
+        return "deadbeef" if cmd[1] == "rev-parse" else ""
+
+    monkeypatch.setattr(provenance, "_run", _fake_run)
+    repo = provenance._git(REPO_ROOT)
+
+    assert repo["dirty_files"][0] == "dpc-client/core/tests/test_x.py"
+    assert repo["dirty_files"][1] == "eval/gaia/results/"
+    assert calls[("git", "status", "--porcelain")] is True
