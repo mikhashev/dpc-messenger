@@ -1,0 +1,54 @@
+{
+ "ctk": "q4_0",
+ "ctv": "q4_0",
+ "seed": 42,
+ "temperature": 0.0,
+ "gguf": "C:\\Users\\mikha\\.dpc\\models\\esatapedico--Qwen3.8-27B-NVFP4-MTP-GGUF\\Qwen3.8-27B-Cold-Fusion-GAIN-V1.1-NVFP4-MID-HIGH.gguf",
+ "binary": "C:\\Users\\mikha\\.dpc\\bin\\llama.cpp\\b10566\\win-cuda-13.3-x64\\llama-server.exe",
+ "free_vram_mib_before": 30026,
+ "max_tokens": 4096,
+ "only_needle": 2,
+ "depths": {
+  "32000": [
+   {
+    "position": 0.75,
+    "question": "In this transcript there is a function route_1059. What does route_1059(7) return? Answer with the number alone.",
+    "expected": "5139",
+    "got": "5139",
+    "hit": true,
+    "prompt_tokens": 32230,
+    "finish_reason": "stop",
+    "seconds": 18.6
+   }
+  ],
+  "120000": [
+   {
+    "position": 0.75,
+    "question": "In this transcript there is a function route_6790. What does route_6790(7) return? Answer with the number alone.",
+    "expected": "3441",
+    "got": "3441",
+    "hit": true,
+    "prompt_tokens": 120210,
+    "finish_reason": "stop",
+    "seconds": 101.9
+   }
+  ],
+  "175000": [
+   {
+    "position": 0.75,
+    "question": "In this transcript there is a function route_6073. What does route_6073(7) return? Answer with the number alone.",
+    "expected": "6858",
+    "got": "6858",
+    "hit": true,
+    "prompt_tokens": 252550,
+    "finish_reason": "stop",
+    "seconds": 373.7
+   }
+  ]
+ },
+ "corpus_tokens": {
+  "32000": 32157,
+  "120000": 120137,
+  "175000": 252477
+ }
+}

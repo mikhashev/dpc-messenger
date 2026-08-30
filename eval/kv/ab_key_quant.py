@@ -49,6 +49,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+from typing import Optional
 
 import urllib.error
 import urllib.request
@@ -71,6 +72,9 @@ SEED = 42
 # comparison, and without determinism the difference between the arms is the
 # sampler.
 TEMPERATURE = 0.0
+# 256 was too small for the needle that asks the model to compute: on 2026-08-30
+# four of four failures were an empty answer, the whole budget spent thinking.
+MAX_TOKENS = 256
 
 
 def _alias() -> dict:
@@ -246,14 +250,14 @@ def _corpus_at_depth(rng: random.Random, depth: int, port: int, budget: int):
     return corpus, needles, actual
 
 
-def _ask(port: int, prompt: str, question: str) -> dict:
+def _ask(port: int, prompt: str, question: str, max_tokens: int = MAX_TOKENS) -> dict:
     body = json.dumps({
         "messages": [
             {"role": "user", "content": f"{prompt}\n\n{question}"},
         ],
         "temperature": TEMPERATURE,
         "seed": SEED,
-        "max_tokens": 256,
+        "max_tokens": max_tokens,
         "cache_prompt": True,
         "chat_template_kwargs": {"reasoning_effort": "low"},
     }).encode()
@@ -264,9 +268,11 @@ def _ask(port: int, prompt: str, question: str) -> dict:
     t0 = time.time()
     with urllib.request.urlopen(req, timeout=1800) as r:
         doc = json.loads(r.read())
-    text = doc["choices"][0]["message"]["content"] or ""
+    choice = doc["choices"][0]
+    text = choice["message"]["content"] or ""
     return {
         "text": text.strip(),
+        "finish_reason": choice.get("finish_reason"),
         "prompt_tokens": doc.get("usage", {}).get("prompt_tokens"),
         "seconds": round(time.time() - t0, 1),
     }
@@ -281,7 +287,8 @@ def _hit(answer: str, text: str) -> bool:
     return re.search(rf"(?<![0-9a-fA-F]){re.escape(answer)}(?![0-9a-fA-F])", text) is not None
 
 
-def run_arm(ctk: str, ctv: str) -> Path:
+def run_arm(ctk: str, ctv: str, only: Optional[int] = None,
+            max_tokens: int = MAX_TOKENS, suffix: str = "") -> Path:
     alias = _alias()
     binary = _binary()
     free = _free_vram_mib()
@@ -295,7 +302,8 @@ def run_arm(ctk: str, ctv: str) -> Path:
     record = {
         "ctk": ctk, "ctv": ctv, "seed": SEED, "temperature": TEMPERATURE,
         "gguf": alias["gguf_path"], "binary": str(binary),
-        "free_vram_mib_before": free, "depths": {},
+        "free_vram_mib_before": free, "max_tokens": max_tokens,
+        "only_needle": only, "depths": {},
     }
     try:
         _wait_healthy(port, proc)
@@ -305,8 +313,10 @@ def run_arm(ctk: str, ctv: str) -> Path:
             record.setdefault("corpus_tokens", {})[str(depth)] = actual
             print(f"  {ctk} @{depth}: corpus is {actual} tokens", flush=True)
             answers = []
-            for n in needles:
-                out = _ask(port, corpus, n["question"])
+            for i, n in enumerate(needles):
+                if only is not None and i != only:
+                    continue
+                out = _ask(port, corpus, n["question"], max_tokens)
                 answers.append({
                     "position": n["position"],
                     "question": n["question"],
@@ -314,6 +324,7 @@ def run_arm(ctk: str, ctv: str) -> Path:
                     "got": out["text"],
                     "hit": _hit(n["answer"], out["text"]),
                     "prompt_tokens": out["prompt_tokens"],
+                    "finish_reason": out["finish_reason"],
                     "seconds": out["seconds"],
                 })
                 print(f"  {ctk} @{depth}: pos {n['position']:.2f} "
@@ -327,7 +338,7 @@ def run_arm(ctk: str, ctv: str) -> Path:
         except subprocess.TimeoutExpired:
             proc.kill()
     RESULTS.mkdir(parents=True, exist_ok=True)
-    out_path = RESULTS / f"{ctk}-{ctv}.json"
+    out_path = RESULTS / f"{ctk}-{ctv}{suffix}.json"
     out_path.write_text(json.dumps(record, indent=1), encoding="utf-8")
     print(f"written {out_path}")
     return out_path
@@ -384,11 +395,15 @@ def main() -> None:
                          "pinned CUDA build: measured 2026-08-30, q8_0 K over q4_0 V "
                          "prefills at 34 tok/s and falling against 800-900 matched")
     ap.add_argument("--compare", action="store_true", help="read both arms and diff them")
+    ap.add_argument("--only", type=int, choices=(0, 1, 2),
+                    help="run one needle: 0 constant, 1 checksum, 2 the one that computes")
+    ap.add_argument("--max-tokens", type=int, default=MAX_TOKENS)
+    ap.add_argument("--suffix", default="", help="report name suffix, to keep runs apart")
     args = ap.parse_args()
     if args.compare:
         compare()
     elif args.ctk:
-        run_arm(args.ctk, args.ctv)
+        run_arm(args.ctk, args.ctv, args.only, args.max_tokens, args.suffix)
     else:
         ap.error("give --ctk or --compare")
 
