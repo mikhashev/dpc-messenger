@@ -590,6 +590,15 @@ class LlamaServerProvider(DeepSeekProvider):
                     usage["prefilled_tokens"] = prefilled
                     usage["cached_tokens"] = max(0, usage["prompt_tokens"] - prefilled)
             usage["speed"] = speed
+        # A refused restore is not ours to prevent — nothing in this package
+        # asks for one; the engine tries it on its own prompt-cache lookup and
+        # only logs the failure, into a file nobody reads. Saying it here is
+        # what turns a silent re-prefill into a named event.
+        if hasattr(self.supervisor, "log_restore_refusals"):
+            try:
+                self.supervisor.log_restore_refusals()
+            except Exception:
+                logger.debug("restore-refusal scan failed", exc_info=True)
         cached = usage.get("cached_tokens")
         logger.info(
             "llamacpp usage: alias=%s conv=%s prompt=%d, completion=%d "

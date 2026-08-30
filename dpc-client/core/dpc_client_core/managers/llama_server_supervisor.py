@@ -428,6 +428,48 @@ def _looks_like_oom(log_lines: List[str]) -> bool:
     return any(marker in joined for marker in _OOM_MARKERS)
 
 
+# The four lines the engine writes when a parked prefix cannot be laid back
+# into the pool. Taken from this machine's own child logs rather than from a
+# quote: 2 blocks in the current alias file, 6 in the pre-rename one.
+# Matched on bytes, because the position they are remembered by is a byte
+# offset into the log: decoding first would drift the two apart on any
+# non-ASCII line the child ever writes.
+_RESTORE_CELLS_RE = re.compile(rb"state_read_meta: failed to find (\d+) available cells in kv cache")
+_RESTORE_SIZE_RE = re.compile(rb"load: failed to restore state with size (\d+)")
+_RESTORE_SLOT_RE = re.compile(rb"prompt_load: id\s+(\d+) \| task \S+ \| failed to load prompt from cache")
+
+# How far past the anchor line the companions are looked for. The four arrive
+# within two milliseconds of each other; the window only has to survive another
+# slot interleaving a line between them.
+_RESTORE_BLOCK_BYTES = 4000
+
+
+def format_restore_refusal(refusal: Dict[str, Any], n_ctx: int) -> str:
+    """The sentence the engine does not write: the arithmetic behind a refusal.
+
+    A restore that wanted W cells out of a P-cell pool failed because fewer
+    than W were free, so at least P-W were held by other work. When W exceeds
+    the pool the parked state could never have fitted it at all.
+    """
+    wanted = refusal["cells"]
+    where = f"slot {refusal['slot']}" if refusal.get("slot") is not None else "an unnamed slot"
+    size = f"{refusal['bytes'] / (1024 * 1024):.0f} MiB" if refusal.get("bytes") else "unknown size"
+    if wanted >= n_ctx:
+        arithmetic = (
+            f"the parked state alone wants {wanted} of the {n_ctx}-cell pool, "
+            "so it cannot fit whatever else is running"
+        )
+    else:
+        arithmetic = (
+            f"{wanted} cells wanted against a {n_ctx}-cell pool, so at least "
+            f"{n_ctx - wanted} were held by other conversations"
+        )
+    return (
+        f"host-cache restore refused on {where} ({size} parked): {arithmetic}. "
+        "The turn re-reads that prefix from zero; the usage line's reuse% is what it cost."
+    )
+
+
 def _gguf_mib(path: str) -> int:
     try:
         return os.path.getsize(path) // (1024 * 1024)
@@ -458,6 +500,11 @@ class LlamaServerSupervisor:
         self._predecessor: Optional["asyncio.Task"] = None
         self._in_flight = 0
         self._start_lock = asyncio.Lock()
+        # Where the restore-refusal scan has already looked. The log is opened
+        # "ab" and outlives restarts, so None means "not primed yet": the first
+        # scan starts at the end of the file rather than reporting a previous
+        # child's refusal as this one's.
+        self._restore_scan_offset: Optional[int] = None
 
     # --- command assembly, pure and table-testable -------------------------
 
@@ -780,6 +827,7 @@ class LlamaServerSupervisor:
         self.log_start(cache_type, env, binary)
         self._log_path.parent.mkdir(parents=True, exist_ok=True)
         self._log_fh = open(self._log_path, "ab")
+        self.prime_restore_scan()
         self._proc = await self._spawn(cmd, env)
         try:
             await self._wait_healthy()
@@ -839,6 +887,77 @@ class LlamaServerSupervisor:
         if not self.port:
             raise LlamaServerError(f"llama-server[{self.alias}] is not running")
         return await self._get("/slots")
+
+    def _read_tail(self, window: int = 65536) -> Optional[Tuple[bytes, int]]:
+        """(the last `window` bytes, the absolute offset they start at).
+
+        Bytes rather than text: one of the two readers remembers where it
+        stopped, and that position has to mean the same thing as the seek.
+        """
+        try:
+            with open(self._log_path, "rb") as f:
+                f.seek(0, 2)
+                size = f.tell()
+                start = max(0, size - window)
+                f.seek(start)
+                return f.read(), start
+        except OSError:
+            return None
+
+    def prime_restore_scan(self) -> None:
+        """Watch from here on. Called at launch, so the previous child's lines
+        in this append-only file are never reported as this one's."""
+        try:
+            self._restore_scan_offset = self._log_path.stat().st_size
+        except OSError:
+            self._restore_scan_offset = 0
+
+    def new_restore_refusals(self) -> List[Dict[str, Any]]:
+        """Restore refusals appended since the last scan, oldest first.
+
+        The engine logs a prompt-cache load only when it FAILS, so this is the
+        one place the host cache is visible at all. Keyed by the anchor line's
+        absolute offset: the window moves forward, the offset does not go back.
+        """
+        read = self._read_tail()
+        if read is None:
+            return []
+        data, start = read
+        end = start + len(data)
+        if self._restore_scan_offset is None:
+            self._restore_scan_offset = end
+            return []
+        if self._restore_scan_offset > end:
+            # The file shrank — rotated or truncated under us. What we counted
+            # is gone; watch what is there now, including its first byte.
+            self._restore_scan_offset = start - 1
+        out: List[Dict[str, Any]] = []
+        for m in _RESTORE_CELLS_RE.finditer(data):
+            offset = start + m.start()
+            if offset <= self._restore_scan_offset:
+                continue
+            block = data[m.end():m.end() + _RESTORE_BLOCK_BYTES]
+            size_m = _RESTORE_SIZE_RE.search(block)
+            slot_m = _RESTORE_SLOT_RE.search(block)
+            out.append({
+                "cells": int(m.group(1)),
+                "bytes": int(size_m.group(1)) if size_m else None,
+                "slot": int(slot_m.group(1)) if slot_m else None,
+                "offset": offset,
+            })
+        if out:
+            self._restore_scan_offset = out[-1]["offset"]
+        return out
+
+    def log_restore_refusals(self) -> int:
+        """Say what the child said, with the arithmetic it does not carry."""
+        refusals = self.new_restore_refusals()
+        for refusal in refusals:
+            logger.warning(
+                "llama-server[%s]: %s",
+                self.alias, format_restore_refusal(refusal, int(self.config["n_ctx"])),
+            )
+        return len(refusals)
 
     def tail_log(self, n: int = 12) -> List[str]:
         try:
@@ -989,14 +1108,10 @@ class LlamaServerSupervisor:
         belongs to whichever task finished last - under the supervisor's
         serialized traffic that is the caller's own task."""
         import re
-        try:
-            with open(self._log_path, "rb") as f:
-                f.seek(0, 2)
-                size = f.tell()
-                f.seek(max(0, size - 65536))
-                tail = f.read().decode("utf-8", errors="replace")
-        except OSError:
+        read = self._read_tail()
+        if read is None:
             return None
+        tail = read[0].decode("utf-8", errors="replace")
         # [\d.]+ in the rate capture: the rate is fractional ("438.86 tokens
         # per second") and a \d+ capture eats only its tail ("86").
         pre = re.findall(
