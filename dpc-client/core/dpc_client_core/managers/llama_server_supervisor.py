@@ -62,7 +62,12 @@ DEFAULTS: Dict[str, Any] = {
     "flash_attn": None,
     "mmproj": None,
     "spec_type": "draft-mtp",
-    "spec_draft_n_max": 3,  # measured: acceptance 0.686 against 4's 0.578
+    # 3 came from one synthetic prompt on 2026-08-19 comparing acceptance
+    # RATES (0.686 against 4's 0.578) — the wrong quantity: what a turn gets is
+    # acceptance x n, and 7 547 production tasks give 0.592 at n=3 against
+    # 0.589 at n=4, i.e. 2.78 tokens per target pass against 3.35. The value
+    # stays until its owner picks; the aliases already override it with 4.
+    "spec_draft_n_max": 3,
     # None = the server's own choice (4 unified slots on b10472). An explicit
     # value is ALWAYS sent, so -np 1 is expressible — the old guard ate it and
     # the config said 1 while the server ran 4.
