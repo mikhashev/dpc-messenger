@@ -55,6 +55,9 @@ RESULTS_DIR = HERE / "results"
 REPO = "gaia-benchmark/GAIA"
 SPLIT = "2023/validation/metadata.level1.parquet"
 ATTACHMENT_DIR = "2023/validation"
+# Where this project moved eleven gold-bearing files on 2026-08-29 rather than
+# deleting them. Named here so the guard can see its own cold storage.
+GOLD_ARCHIVE = Path.home() / "gaia-archive"
 
 
 # --- scoring ---------------------------------------------------------------
@@ -149,6 +152,11 @@ def hub_caches_in_effect() -> List[Path]:
     if os.environ.get("HF_HOME"):
         out.append(Path(os.environ["HF_HOME"]) / "hub")
     out.append(Path.home() / ".cache" / "huggingface" / "hub")
+    # Cold storage this project created on 2026-08-29 when it moved eleven
+    # gold-bearing files «somewhere no profile's sandbox lists». Nothing in the
+    # guard looked there afterwards, so the refusal it advertises was void for
+    # every run since. It is ours, so it is named here rather than guessed at.
+    out.append(GOLD_ARCHIVE)
     seen, uniq = set(), []
     for c in out:
         key = str(c).lower()
@@ -158,7 +166,8 @@ def hub_caches_in_effect() -> List[Path]:
     return uniq
 
 
-def reachable_gold(caches: List[Path], results_dir: Optional[Path] = None) -> List[Path]:
+def reachable_gold(caches: List[Path], results_dir: Optional[Path] = None,
+                   archives: Optional[List[Path]] = None) -> List[Path]:
     """Copies of the answers an agent on this machine could open and read.
 
     Three kinds: the dataset in the hub cache; any report written before this
@@ -167,17 +176,98 @@ def reachable_gold(caches: List[Path], results_dir: Optional[Path] = None) -> Li
     """
     marker = "datasets--" + REPO.replace("/", "--")
     found = [c / marker for c in caches if (c / marker).is_dir()]
-    if results_dir and results_dir.is_dir():
-        for f in sorted(results_dir.iterdir()):
-            if not f.is_file() or f.suffix not in (".json", ".log"):
-                continue
-            try:
-                text = f.read_text(encoding="utf-8", errors="replace")
-            except Exception:
-                continue
-            if '"gold"' in text or "gold='" in text:
-                found.append(f)
+    # A directory that is not a hub cache still holds the split if the parquet
+    # is anywhere under it: the archive keeps the snapshot layout without the
+    # `datasets--` root, so the marker above walks straight past it.
+    # The split by name, under anything enumerated: the archive keeps the
+    # snapshot layout without the `datasets--` root, so the marker above walks
+    # straight past it.
+    split_name = Path(SPLIT).name
+    for c in caches:
+        if c.is_dir() and not (c / marker).is_dir():
+            found.extend(sorted(c.rglob(split_name)))
+    # The text scan runs only where *we* write reports — the caller names them.
+    # A model cache is not one of those, and pointing it there refuses on
+    # nineteen `vocab.json` files: a tokeniser maps the word «gold» to an id, so
+    # the key test matches and the benchmark refuses because GPT-2 knows the word.
+    for root in list(archives or []) + [results_dir]:
+        found.extend(_files_carrying_gold(root))
     return found
+
+
+def _files_carrying_gold(root: Optional[Path]) -> List[Path]:
+    """Reports and logs under `root` that spell an answer out."""
+    if not root or not root.is_dir():
+        return []
+    out = []
+    for f in sorted(root.rglob("*")):
+        if not f.is_file() or f.suffix not in (".json", ".log"):
+            continue
+        try:
+            text = f.read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            continue
+        if '"gold"' in text or "gold='" in text:
+            out.append(f)
+    return out
+
+
+def gold_in_traces(results_dir: Optional[Path]) -> List[Path]:
+    """Tool ledgers carrying the answers as free text — reported, not refused.
+
+    The gold reaches `*.agent-logs/tools.jsonl` as the output of whatever the
+    agent ran, so it is not the `"gold"` key the refusal keys on. Refusing on it
+    would stop tonight's campaign for every ledger written before today, which
+    is a decision rather than a fix; until it is taken, the run says what it
+    found instead of pretending the directory is clean.
+    """
+    if not results_dir or not results_dir.is_dir():
+        return []
+    needle = "Final answer"
+    hits = []
+    for f in sorted(results_dir.rglob("*.jsonl")):
+        try:
+            if needle in f.read_text(encoding="utf-8", errors="replace"):
+                hits.append(f)
+        except Exception:
+            continue
+    return hits
+
+
+# A task id in a search query is not ambiguous: nothing but the answer key uses
+# it. On 2026-08-29 a run searched `"72e110e7-…" answer`, found a public mirror
+# with the same question, and its answer said so — the local guards saw nothing,
+# because nothing local was touched. No decoy can be planted on the open web, so
+# the ledger is the only surface there is.
+_MIRROR_RE = re.compile(
+    r"huggingface\.co/(?:api/)?datasets/\S*gaia|harbor-datasets|cmriat/gaia",
+    re.I,
+)
+
+
+def web_lookups(logs_dir: Optional[Path], task_ids: List[str]) -> List[Dict[str, str]]:
+    """Ledger evidence that a run went looking for the answers on the web.
+
+    Reports, never refuses: a mirror URL can appear in an honest search result,
+    and a task id can be quoted by the harness itself. It names the file and
+    what matched, and a reader decides.
+    """
+    if not logs_dir or not logs_dir.is_dir():
+        return []
+    ids = [t for t in task_ids if t]
+    hits: List[Dict[str, str]] = []
+    for f in sorted(logs_dir.rglob("*.jsonl")):
+        try:
+            text = f.read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            continue
+        mirror = _MIRROR_RE.search(text)
+        searched = next((t for t in ids if t in text), None)
+        if mirror:
+            hits.append({"file": f.name, "marker": mirror.group(0), "kind": "mirror"})
+        if searched:
+            hits.append({"file": f.name, "marker": searched, "kind": "task_id_in_trace"})
+    return hits
 
 
 BENCH_PROFILE = "gaia_benchmark"
@@ -498,7 +588,7 @@ async def main_async(args) -> int:
     # the answer is not a better gate, it is not leaving the answers where a
     # process can open them.
     real_caches = hub_caches_in_effect()
-    visible = reachable_gold(real_caches, RESULTS_DIR)
+    visible = reachable_gold(real_caches, RESULTS_DIR, archives=[GOLD_ARCHIVE])
     _DATASET_STATE["gold_reachable_at_start"] = [str(v) for v in visible]
     _DATASET_STATE["gold_reachable_allowed"] = bool(args.allow_reachable_gold)
     if visible and not args.allow_reachable_gold:
@@ -638,6 +728,12 @@ async def main_async(args) -> int:
             # own source. Four such tasks are already on the board for 2026-08-28
             # and two more were found on 08-30 in runs nobody had re-read.
             "admissions": answers_admitting_a_lookup(results),
+            # The two surfaces that report rather than refuse: answers reachable
+            # in the run's own ledgers, and the open web, where nothing can be
+            # planted. Turning either into a refusal stops the campaign for every
+            # ledger already on disk, which is a decision, not a fix.
+            "traces_carrying_gold": [str(p) for p in gold_in_traces(RESULTS_DIR)],
+            "web_lookups": web_lookups(logs_root, [r.get("task_id") for r in results]),
             # The one bit whose whole job is «this number is dirty», computed at
             # :449 since the guard was written and dropped before the report ever
             # since — the `--allow-reachable-gold` help promises the run records

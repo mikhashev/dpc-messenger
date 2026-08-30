@@ -148,3 +148,111 @@ class TestTheModelIsNotToldWhichRowItIs:
         asyncio.run(gaia.run_one(RecordingAgent(), row, None))
 
         assert len(set(ids)) == 2
+
+
+class TestTheEnumerationLooksWhereWeActuallyPutTheAnswers:
+    """The archive was created by this project on 2026-08-29 and then watched by
+    nothing: `reachable_gold` walked four HF roots and the top level of
+    `results/`, and the eleven files moved out of reach of all of them."""
+
+    def _archive(self, tmp_path, monkeypatch, gaia):
+        archive = tmp_path / "gaia-archive" / "2026-08-29"
+        archive.mkdir(parents=True)
+        monkeypatch.setattr(gaia, "GOLD_ARCHIVE", tmp_path / "gaia-archive")
+        return archive
+
+    def test_the_split_is_found_without_the_hub_layout(self, gaia, tmp_path, monkeypatch):
+        archive = self._archive(tmp_path, monkeypatch, gaia)
+        deep = archive / "snapshots" / "682dd723" / "2023" / "validation"
+        deep.mkdir(parents=True)
+        (deep / "metadata.level1.parquet").write_bytes(b"PAR1")
+
+        found = gaia.reachable_gold([tmp_path / "gaia-archive"], None)
+
+        assert [f.name for f in found] == ["metadata.level1.parquet"]
+
+    def test_a_report_that_spells_the_answers_out_is_found_in_the_archive(
+        self, gaia, tmp_path, monkeypatch
+    ):
+        archive = self._archive(tmp_path, monkeypatch, gaia)
+        (archive / "old-run.json").write_text('{"results": [{"gold": "42"}]}', encoding="utf-8")
+
+        found = gaia.reachable_gold([], None, archives=[tmp_path / "gaia-archive"])
+
+        assert [f.name for f in found] == ["old-run.json"]
+
+    def test_a_model_cache_is_not_text_scanned(self, gaia, tmp_path, monkeypatch):
+        """A tokeniser maps the word «gold» to an id, so `"gold"` appears in
+        every vocab.json. Scanning model caches refused on nineteen files here
+        and would have stopped the benchmark because GPT-2 knows the word."""
+        monkeypatch.setattr(gaia, "GOLD_ARCHIVE", tmp_path / "nothing-here")
+        cache = tmp_path / "hub" / "models--gpt2" / "snapshots" / "abc"
+        cache.mkdir(parents=True)
+        (cache / "vocab.json").write_text('{"gold": 3383, "silver": 4021}', encoding="utf-8")
+
+        assert gaia.reachable_gold([tmp_path / "hub"], None) == []
+        # and pointing the text scan at it is what the archives argument exists
+        # to keep the caller from doing by accident
+        assert gaia.reachable_gold([], None, archives=[tmp_path / "hub"]) != []
+
+    def test_a_report_one_directory_down_is_no_longer_invisible(
+        self, gaia, tmp_path, monkeypatch
+    ):
+        monkeypatch.setattr(gaia, "GOLD_ARCHIVE", tmp_path / "nothing-here")
+        results = tmp_path / "results"
+        (results / "nested").mkdir(parents=True)
+        (results / "nested" / "report.json").write_text('{"gold": "42"}', encoding="utf-8")
+
+        found = gaia.reachable_gold([], results)
+
+        assert [f.name for f in found] == ["report.json"]
+
+    def test_the_archive_is_one_of_the_places_enumerated(self, gaia):
+        """Without this the tests above pass vacuously: they hand the archive to
+        `reachable_gold` themselves, and a run does not — it asks
+        `hub_caches_in_effect` where to look."""
+        assert gaia.GOLD_ARCHIVE in gaia.hub_caches_in_effect()
+
+
+class TestTheTwoSurfacesThatReportRatherThanRefuse:
+    def test_a_ledger_carrying_the_answers_is_reported_not_refused(
+        self, gaia, tmp_path, monkeypatch
+    ):
+        monkeypatch.setattr(gaia, "GOLD_ARCHIVE", tmp_path / "nothing-here")
+        results = tmp_path / "results"
+        logs = results / "run.agent-logs"
+        logs.mkdir(parents=True)
+        (logs / "tools.jsonl").write_text(
+            '{"result_preview": "--- Final answer ---\n42"}', encoding="utf-8"
+        )
+
+        # refusing on this would stop the campaign for every ledger on disk
+        assert gaia.reachable_gold([], results) == []
+        assert [p.name for p in gaia.gold_in_traces(results)] == ["tools.jsonl"]
+
+    def test_a_mirror_and_a_task_id_are_both_named(self, gaia, tmp_path):
+        logs = tmp_path / "agent-logs"
+        logs.mkdir()
+        (logs / "tools.jsonl").write_text(
+            '{"args": {"query": "\\"72e110e7-464c-453c-a309-90a95aed6538\\" answer"}}\n'
+            '{"args": {"url": "https://huggingface.co/datasets/cmriat/gaia/resolve/main/x"}}\n',
+            encoding="utf-8",
+        )
+
+        hits = gaia.web_lookups(logs, ["72e110e7-464c-453c-a309-90a95aed6538"])
+
+        assert {h["kind"] for h in hits} == {"mirror", "task_id_in_trace"}
+
+    def test_an_ordinary_ledger_is_quiet(self, gaia, tmp_path):
+        logs = tmp_path / "agent-logs"
+        logs.mkdir()
+        (logs / "tools.jsonl").write_text(
+            '{"args": {"query": "University of Leicester fish bag volume"}}\n',
+            encoding="utf-8",
+        )
+
+        assert gaia.web_lookups(logs, ["72e110e7-464c-453c-a309-90a95aed6538"]) == []
+
+    def test_no_logs_directory_is_not_an_error(self, gaia, tmp_path):
+        assert gaia.web_lookups(tmp_path / "absent", ["x"]) == []
+        assert gaia.gold_in_traces(tmp_path / "absent") == []

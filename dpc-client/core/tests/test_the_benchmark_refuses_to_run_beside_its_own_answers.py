@@ -73,7 +73,9 @@ class TestFindingTheAnswers:
         for var in ("HF_HOME", "HF_HUB_CACHE", "HUGGINGFACE_HUB_CACHE"):
             monkeypatch.delenv(var, raising=False)
 
-        assert gaia.hub_caches_in_effect()[-1] == Path.home() / ".cache" / "huggingface" / "hub"
+        # membership, not position: the list gained the gold archive on
+        # 2026-08-30 and «is always consulted» was never about being last
+        assert (Path.home() / ".cache" / "huggingface" / "hub") in gaia.hub_caches_in_effect()
 
     def test_an_operator_set_home_is_consulted_first(self, monkeypatch, tmp_path):
         monkeypatch.setenv("HF_HOME", str(tmp_path / "elsewhere"))
