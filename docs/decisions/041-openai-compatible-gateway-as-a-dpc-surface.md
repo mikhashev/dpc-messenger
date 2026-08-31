@@ -226,7 +226,34 @@ this is a decision rather than an addition. Keeping per-agent files and writing
 a second ledger only for strangers is cheaper and produces exactly the two
 schemas this decision exists to avoid.
 
-**And it records attribution, not price.** Johnny's objection (#95) is adopted
+**When a paid provider is what is shared, the money is counted — and it has to
+be counted at the moment of the call.** Mike, #111: «если таким образом или иным
+шарится доступ к платному провайдеру то надо считать и деньги». That is not
+merely the `cost_usd` column being present; it is a constraint on *when* it is
+filled, and the reason is in `pricing.py`.
+
+A DeepSeek call's price is not a function of its tokens. `rates_at` reads the
+UTC hour against `PEAK_WINDOWS_UTC` (01:00–04:00 and 06:00–10:00,
+`PEAK_MULTIPLIER = 2.0`), suspends those windows on a *Beijing* weekend — the
+vendor's calendar, which spans three UTC days — and only from
+`WEEKEND_OFF_PEAK_FROM = 2026-08-22 16:00 UTC`; and `_peak_applies` limits the
+whole rule to DeepSeek, because Z.AI shares the tables and not the clock. The
+table itself has already changed twice this month.
+
+So a row that stores only tokens **cannot** be priced later: recomputing it needs
+the exact instant, that day's rate table, and that day's version of these rules.
+`cost_usd` and `billing` are therefore written by the node that made the call, at
+the time it made it, and are never re-derived. `Observed`: the machinery exists
+and is correct — `compute_cost_usd(..., at=...)` takes the moment for exactly
+this reason; only the row is missing.
+
+*A design question this raises and does not answer:* the response to the
+requester carries tokens but **no cost field** (`create_remote_inference_response`
+has none). So today the host can know what a shared call cost and the guest
+cannot. Whether the guest should be told is a decision for whoever takes up
+pricing; the ledger works either way.
+
+**Beyond that it records attribution, not price.** Johnny's objection (#95) is adopted
 as a correction rather than a footnote: the ledger records that a thing was
 consumed; a policy decides what that fact is worth. M5 is the evidence that they
 cannot be one field — a local model is priced at zero, which is exactly the
