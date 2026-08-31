@@ -926,7 +926,9 @@ class P2PManager:
         expected_node_id: str
     ) -> bool:
         """
-        Validate peer certificate matches expected node_id.
+        Validate peer certificate matches expected node_id: CN, then the
+        public key's fingerprint. The CN catches a wrong peer, the key
+        catches a peer that says the right name.
 
         Args:
             cert: Peer's X.509 certificate
@@ -965,6 +967,22 @@ class P2PManager:
                         "Certificate validation failed: CN=%r but expected node_id=%r",
                         cn, expected_node_id
                     )
+                return False
+
+            # A CN is a claim; the key fingerprint is the proof. node_id is the
+            # hash of the public key, and TLS has already made the far end prove
+            # it holds that key's private half — so this comparison turns
+            # possession into identity. Without it a stranger who terminates TLS
+            # with a self-signed certificate carrying the right CN is that peer
+            # for the rest of the session, and every instrument keyed on
+            # sender_node_id downstream inherits the lie.
+            derived_id = generate_node_id(cert.public_key())
+            if derived_id != expected_node_id:
+                logger.error(
+                    "Certificate validation failed: CN says %r but its public key "
+                    "hashes to %r — the name matches and the key does not",
+                    expected_node_id, derived_id
+                )
                 return False
 
             logger.info("Certificate validated: node_id=%s", cn)
@@ -1094,11 +1112,11 @@ class P2PManager:
         answers None ("cert not cached") for every peer, every time — so message
         signatures can be produced but never checked.
 
-        The identity is re-derived here rather than trusted from the caller: the
-        outbound path validates CN alone (_validate_peer_certificate), and a CN
-        is a claim. node_id is the fingerprint of the public key, so a cert whose
-        key hashes to the claimed node_id is that peer's by construction — which
-        also makes overwriting a re-issued cert for the same key safe.
+        The identity is re-derived here rather than trusted from the caller,
+        because callers are many and this store is one. node_id is the
+        fingerprint of the public key, so a cert whose key hashes to the claimed
+        node_id is that peer's by construction — which also makes overwriting a
+        re-issued cert for the same key safe.
 
         Returns:
             True if the certificate is now stored, False if it was refused.
