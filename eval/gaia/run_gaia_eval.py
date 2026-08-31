@@ -52,10 +52,15 @@ from typing import Any, Dict, List, Optional, Tuple
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parent))
 from _harness import provenance  # noqa: E402
+from _harness.results_root import results_root  # noqa: E402
 
 _DATASET_STATE = {}
 
-RESULTS_DIR = HERE / "results"
+# Not `HERE / "results"` any more: the guards below (reachable_gold,
+# plant_canary, gold_in_traces) all read this path, so it has to be the one
+# the runs actually write to or they inspect an empty directory and call it
+# clean.
+RESULTS_DIR = results_root("gaia")
 REPO = "gaia-benchmark/GAIA"
 SPLIT = "2023/validation/metadata.level1.parquet"
 ATTACHMENT_DIR = "2023/validation"

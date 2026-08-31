@@ -51,7 +51,10 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
-RESULTS = HERE / "results"
+sys.path.insert(0, str(HERE.parent))
+from _harness.results_root import results_root  # noqa: E402
+
+RESULTS = results_root("gaia")
 RUNNER = HERE / "run_gaia_eval.py"
 CORE = HERE.parent.parent / "dpc-client" / "core"
 

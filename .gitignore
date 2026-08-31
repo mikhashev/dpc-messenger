@@ -168,10 +168,13 @@ cc-out*.md
 tools/backlog/*.html
 tools/backlog/*.json
 
-# GAIA run output. Every results JSON stores each task's `gold` in plaintext, so
-# committing one publishes the benchmark's answer key — and the logs beside it
-# print the same values. Nothing here has ever been tracked; this keeps a
-# `git add -A` from being the first time.
+# GAIA run output moved to ~/.dpc/eval-results/gaia on 2026-09-01 (Mike's call):
+# the traces carry the machine that made them, and an audit of all 1 633 files
+# found a disk serial in 45, three peers' node ids, and in four of them the
+# previews of our own chat. The rule stays because the path is one env var away
+# from being written again. The old rationale here — "every results JSON stores
+# each task's gold in plaintext" — stopped being true at decontamination:
+# reports now carry gold_sha256 and no answer.
 eval/gaia/results/
 dpc-client/core/config.ini
 

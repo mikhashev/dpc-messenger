@@ -40,9 +40,14 @@ headless eval and nowhere else.
 - **`retrieval/` and `loop/` have each run once, on 2026-08-24** — the day they
   were written. Whatever this file says below about the precedent that ran once
   and was never re-run, half the set is currently in that state.
-- **GAIA results are not in git.** 1 029 files under `gaia/results/`, zero
-  tracked: five nights exist on one disk only. The other three harnesses commit
-  their results.
+- **GAIA results are not in git, and since 2026-09-01 are not in the tree
+  either** — `~/.dpc/eval-results/gaia`, 1 633 files, 15.4 MB, moved with every
+  SHA256 checked. They stayed out on evidence, not taste: an audit of all of
+  them found a disk serial in 45 files, three peers' node ids, 86 scraped
+  third-party addresses, and in four files the previews of our own chat that a
+  run read back through `read_session_archive`. Reports and traces still exist
+  on one disk only, which is the thing this line has been saying since the
+  count was 1 029. The other three harnesses commit their results.
 - Results from `retrieval/` and `loop/` carry no date inside the file — the
   window lives only in the filename. `provenance.py` fixed that, for `gaia/`
   alone; it has never been wired into the older two.
