@@ -3,7 +3,9 @@
 It sits outside the working tree because the traces carry the machine that
 made them — a disk serial, `~/.dpc` listings, and in four files the previews
 of our own chat that a run read back through `read_session_archive`. Mike's
-call, 2026-09-01. `DPC_EVAL_RESULTS` overrides the base for a scratch run.
+call, 2026-08-31 20:37 UTC — the zone is written because this box runs at
+UTC+7 and the same moment is already the next day here.
+`DPC_EVAL_RESULTS` overrides the base for a scratch run.
 """
 
 from __future__ import annotations
