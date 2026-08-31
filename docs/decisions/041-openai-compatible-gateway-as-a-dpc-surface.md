@@ -4,12 +4,12 @@ title: "Serve outside tools an OpenAI-compatible surface from inside the DPC cli
 status: proposed
 date: 2026-08-31
 deciders: [Mike]
-consulted: [Ark, Johnny, CC]
+consulted: [Ark, Johnny, Warren, CC]
 informed: []
 depends_on: [ADR-040]
 related: [ADR-002, ADR-026, ADR-038]
 supersedes: []
-session: "DPC Project #82–#110, 2026-08-31 — Mike's colleague wants Qwen3.8-27B from Continue in VSCode; Ark proposed the gateway (#85), Johnny objected to one clause (#95), Mike settled four questions and added a fifth (#101–#102), then ruled the Hub out of the trust path (#110); two review rounds by Ark and Johnny"
+session: "DPC Project #82–#110, 2026-08-31 — Mike's colleague wants Qwen3.8-27B from Continue in VSCode; Ark proposed the gateway (#85), Johnny objected to one clause (#95), Mike settled four questions and added a fifth (#101–#102), ruled the Hub out of the trust path (#110) and required that sharing not be transitive (#121); three review rounds by Ark and Johnny, one by Warren"
 ---
 
 # ADR-041: Serve outside tools an OpenAI-compatible surface from inside the DPC client, gated by identity on the one transport that proves it — and move the usage ledger from the agent to the node
@@ -21,7 +21,9 @@ session: "DPC Project #82–#110, 2026-08-31 — Mike's colleague wants Qwen3.8-
 > assumption**; three more were needed and one of them changes the price of D1.
 >
 > Nothing here is started. Of the four questions the first draft left open, all
-> four are now decided; **D6** carries a recommendation and waits on Mike.
+> four are now decided; **D6** carries a recommendation and waits on Mike. Three
+> review rounds have been folded in, and where a reviewer's figure was an
+> estimate it was replaced by a count.
 
 ## Context and Problem Statement
 
@@ -197,8 +199,20 @@ One row per model call, in one schema, on the node that owns the resource:
 ```
 request_id, caller, caller_kind (agent|peer|gateway), alias, model,
 route (local|peer), prompt/completion/thinking tokens, counts_source (ours|engine),
-started_at, duration_s, card_seconds, billing (subscription|pay_per_use), cost_usd
+started_at, duration_s, billing (subscription|pay_per_use), cost_usd
 ```
+
+**`card_seconds` was in the first draft of this schema and is deliberately not
+here.** Warren asked who would measure it (#120) and the answer is nobody:
+`grep card_seconds|gpu_seconds|occupancy` over the client finds only *slot*
+occupancy in the supervisor and *context-window* occupancy in the loop. His
+objection is right and its consequence is larger than a missing measurer —
+under `kv_unified` with four slots the card is shared, so «seconds of card» is
+not even well defined for one call: two calls overlapping on two slots each
+occupied the card for their whole duration and together used it once. What is
+measurable is `duration_s`, which is in the schema. Anyone who wants a
+GPU-occupancy figure has to first decide what it means when the pool is shared,
+and that is a separate question from this ledger.
 
 **Why the node and not the agent.** The card is on the node. The DeepSeek key is
 on the node. All three kinds of call — an agent of ours, a peer, a future
@@ -219,12 +233,21 @@ What it looks like:
 Then «how much did the colleague use» and «how much did that agent use» are two
 filters on one table rather than a reconciliation of two schemas.
 
-**Price of the change:** the per-agent files become a projection
-(`WHERE caller=<agent>`), and every existing reader — the UI, the agent's own
-history — has to be moved onto it. That is a migration, and it is the reason
-this is a decision rather than an addition. Keeping per-agent files and writing
-a second ledger only for strangers is cheaper and produces exactly the two
-schemas this decision exists to avoid.
+**Price of the change, counted rather than estimated.** Johnny and Warren both
+said «migration» was too vague to be a decision (#119, #120), and Warren put the
+UI first among the readers. Enumerated instead: `events.jsonl` has **five read
+sites in the client** — `agent_service.py:459` (the legacy fallback for entries
+with no result file), `dpc_agent/context.py:291`, `dpc_agent/events.py:203` and
+`:255`, and `dpc_agent/tools/core.py:875` (the agent's own «task history» tool)
+— plus **four test files**. **The UI is not among them**: it renders
+`task_completed` and friends as they arrive over the WebSocket
+(`Sidebar.svelte:77, 92`) and never opens the file. So the migration is five
+call sites and their tests, not a rewrite of the front end. Warren's 4–6 hours
+was an estimate over three assumed readers; the count above is the list.
+
+That is still a decision rather than an addition, because keeping per-agent
+files and writing a second ledger only for strangers is cheaper and produces
+exactly the two schemas this decision exists to avoid.
 
 **When a paid provider is what is shared, the money is counted — and it has to
 be counted at the moment of the call.** Mike, #111: «если таким образом или иным
@@ -247,11 +270,20 @@ the time it made it, and are never re-derived. `Observed`: the machinery exists
 and is correct — `compute_cost_usd(..., at=...)` takes the moment for exactly
 this reason; only the row is missing.
 
-*A design question this raises and does not answer:* the response to the
-requester carries tokens but **no cost field** (`create_remote_inference_response`
-has none). So today the host can know what a shared call cost and the guest
-cannot. Whether the guest should be told is a decision for whoever takes up
-pricing; the ledger works either way.
+**The guest's copy of the number belongs in the first version of the wire
+format, not in a later one.** The response carries tokens but no cost field
+(`create_remote_inference_response` has none), so today the host can know what a
+shared call cost and the guest cannot. This ADR first left that as an open fork;
+Warren's objection (#120) closes it, and he is right about the mechanism: adding
+it later is a **wire-format change**, and a wire-format change is the one kind of
+addition old clients cannot read. An optional field that nobody fills costs
+nothing now; the same field introduced after there are peers in the field costs
+a compatibility story. So: the response gains an optional cost field in v1, and
+whether it is populated stays a policy question.
+
+*Still not decided, and it is a policy question rather than a protocol one:*
+whether the number the guest sees is the host's cost or a price. The ledger and
+the wire field work either way.
 
 **Beyond that it records attribution, not price.** Johnny's objection (#95) is adopted
 as a correction rather than a footnote: the ledger records that a thing was
@@ -292,8 +324,14 @@ things this design must leave room for, and two of them do not exist today:
    `coordinators/discord_coordinator.py` enforces per-user and global windows for
    an outside surface, and `managers/relay_manager.py` rate-limits a relayed peer
    at 100 messages per second. The shape is written three times in this
-   repository and wired to neither the peer nor the gateway — which makes item 2
-   a wiring job rather than a design one.
+   repository and wired to neither the peer nor the gateway. **It is a wiring
+   job and it is also a precondition** — Johnny and Warren both refused the
+   first phrasing (#119, #120) and they are right: without a quota, one shared
+   pay-per-use alias is an open cheque on the owner's balance. Warren put a
+   number on it — a thousand calls at the 1000/1000 rate is about $0.88, and
+   `p2p_coordinator` today admits any roster member to the serving alias with
+   nothing counting how often. So: **API-backed sharing does not ship before the
+   quota does.** Local sharing may, because its ceiling is the card.
 3. **A ledger row carrying `cost_usd`**, which for a pay-per-use alias is
    already computable (M5: `0.00088` for a 1000/1000 DeepSeek call). The column
    exists; the row to put it in does not.
@@ -305,25 +343,7 @@ the second, independent reason for D3.
 Shipping order is unchanged: local first, API-backed sharing second — but the
 schema is decided now so the second step is not a rewrite.
 
-## Consequences
-
-- **The product grows an outward-facing surface.** Everything that has been true
-  only of our own UI — the firewall's coverage, the shape of refusals, what a log
-  line reveals — now faces a tool we do not control.
-- **A new dependency or a hand-written HTTP/SSE server** (M4).
-- **A migration of every usage reader** onto the node ledger (D3).
-- **The colleague needs a place in the roster**; «просто знакомый» is not an
-  identity our gate can read.
-- **The card is unchanged.** ONE-CARD-ONE-OWNER still holds: the gateway adds no
-  VRAM and a second consumer competes with the agents for the same slots. That
-  is a policy question, deliberately not decided here.
-- **`_est` token counts become a published number.** The moment anyone reads the
-  ledger to settle anything, «close and different» from the engine's own count
-  stops being an internal curiosity — hence `counts_source` in the schema.
-- **The WebRTC path's identity gap (M6) becomes load-bearing.** Today it decides
-  who may read a chat; under D2 it would also decide who may spend the card.
-
-## D6 — The HTTP server: a decision to take here, with both cases put
+### D6 — The HTTP server: a decision to take here, with both cases put
 
 Ark asked (#108) that this stop being an open question and be argued in the ADR,
 and he is right: it is architecture, not code review. Both cases, honestly:
@@ -347,6 +367,77 @@ is 500–600 lines with tests rather than 300–400.
 client that must start on a machine with no server stack has a different budget
 from a service that is one. But the deciding vote is Mike's, and if the answer is
 FastAPI the ADR is unchanged apart from this section.
+
+### D7 — What is shared may not be shared onward
+
+Mike, #121: «Если я шарю кому то модель, то тот кому я пошарил не может ее сам
+перешарить еще кому то». Sharing is a permission between two nodes and it does
+not travel.
+
+**There is a prior record, and it is a research finding rather than a task.**
+`ideas/cc-mike-research/2026-04-15/named-unsolved-problems.md`, Finding 16,
+«Consent propagation on re-sharing»: *«Firewall rules are pairwise. If Alice
+shares knowledge with Bob, and Bob shares with Carol, Alice's firewall does not
+follow… at mesh, re-sharing is the dominant mode. Without propagation
+constraints, "shared with 150" really means "shared with the 150's 150s" =
+transitively public.»* Territory: Mike, policy framing. `Observed`: a search of
+`backlog.md`, `ideas/` and `docs/` finds that finding and **no board entry** —
+so it was named in April and never became work.
+
+**The compute version is not prevented today, and the configuration that does it
+is short.** `remote_peer` is a provider type (`llm_manager.py:56`) taking a
+`peer_id` and the remote alias to ask for. `compute.serving_alias` is validated
+only for *existence* — `firewall.py:173` warns when the name is not a configured
+provider, and nothing anywhere looks at its **type**. So node B can point a
+`remote_peer` alias at our node A and designate that alias as what B serves
+peers from; C then asks B, B asks A, and A's ledger records `caller = B`. A's
+firewall is satisfied, because B is genuinely allowed. `Observed` from the code;
+not run.
+
+**Decision, in two parts, because they are enforceable to different degrees.**
+
+1. **Refuse to serve peers from an alias that is itself remote.** A
+   `serving_alias` whose provider type is `remote_peer` — or `dpc_agent`, which
+   is the same shape one layer up — is a configuration error, refused at load
+   with a named reason, the way an unset alias already is. This is cheap,
+   complete against accident and misconfiguration, and testable.
+2. **State the rule on the wire and record the claim.** A request may carry whom
+   it is *on behalf of*; a node that declares a third party is refused unless
+   that party is itself allowed. This does not stop a modified client — B can
+   proxy at the application layer and simply not declare — and no protocol can
+   stop it, because from A's side an honest B and a proxying B send identical
+   bytes. What it buys is that honesty is expressible and dishonesty is a
+   deliberate act rather than a default, and that the ledger (D3) shows a
+   caller whose volume does not match one machine.
+
+**What must not be claimed:** that re-sharing is prevented. Part 1 prevents it in
+our client. Against a peer running modified code the only instruments are
+attribution and quotas — which is the same conclusion F16 reached in April for
+knowledge, and it is why D5's quota is a precondition rather than a nicety.
+
+## Consequences
+
+- **The WebRTC challenge is a task that precedes wide deployment of the
+  gateway, not a follow-up.** Ark, Johnny and Warren all asked for this line
+  (#118–#120) and it is the honest reading of D2 plus D6: if gateway traffic is
+  authorised only on the direct path, then a consumer behind a NAT that only
+  WebRTC could traverse has no gateway at all. For one colleague on a reachable
+  network that is no obstacle; for anything wider it is the blocking item.
+- **The product grows an outward-facing surface.** Everything that has been true
+  only of our own UI — the firewall's coverage, the shape of refusals, what a log
+  line reveals — now faces a tool we do not control.
+- **A new dependency or a hand-written HTTP/SSE server** (M4).
+- **A migration of every usage reader** onto the node ledger (D3).
+- **The colleague needs a place in the roster**; «просто знакомый» is not an
+  identity our gate can read.
+- **The card is unchanged.** ONE-CARD-ONE-OWNER still holds: the gateway adds no
+  VRAM and a second consumer competes with the agents for the same slots. That
+  is a policy question, deliberately not decided here.
+- **`_est` token counts become a published number.** The moment anyone reads the
+  ledger to settle anything, «close and different» from the engine's own count
+  stops being an internal curiosity — hence `counts_source` in the schema.
+- **The WebRTC path's identity gap (M6) becomes load-bearing.** Today it decides
+  who may read a chat; under D2 it would also decide who may spend the card.
 
 ## Open Questions
 
@@ -387,6 +478,14 @@ One per claim that would change the decision if it failed.
   not serve; the refusal must name the alias. Observed once already in
   production, on the Ubuntu node, 2026-08-31 — as the symptom of a different
   defect.
+- **D7, the enforceable half:** point `compute.serving_alias` at a `remote_peer`
+  alias and start the service. It must refuse at load, naming the type. Today it
+  starts, and a peer's request is served by another machine.
+- **D7, the unenforceable half — stated so nobody later reads the decision as a
+  guarantee:** there is no check that distinguishes an honest peer from one
+  proxying for a third party, and there cannot be one; the bytes are identical.
+  The falsifier for the claim «we prevent re-sharing» is therefore that it must
+  never be written.
 - **D5, run 2026-08-31.** `grep -niE "quota|rate_limit|max_requests|budget|throttl"`
   over `firewall.py` and `p2p_coordinator.py` returns nothing; the same pattern
   across the client finds `dpc_agent/budget.py` (per agent and provider) and
