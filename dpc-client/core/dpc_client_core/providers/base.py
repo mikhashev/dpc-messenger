@@ -117,6 +117,53 @@ def parse_thinking_tags(content: str) -> Tuple[str, Optional[str]]:
     return content, None
 
 
+# --- Shared network bounds ---
+
+# The openai and anthropic SDKs default to read=600 with two automatic retries;
+# a client built with no timeout inherits half an hour on a dead socket. `read`
+# is httpx's wait for any byte, so streaming resets it and a non-streamed
+# reasoning call is the case that needs `timeout_seconds` raised.
+NETWORK_CONNECT_TIMEOUT = 10.0
+NETWORK_READ_TIMEOUT = 300.0
+NETWORK_WRITE_TIMEOUT = 60.0
+NETWORK_POOL_TIMEOUT = 10.0
+# Retries multiply the wait. One keeps the transient 429/5xx handling.
+NETWORK_MAX_RETRIES = 1
+
+
+def network_client_bounds(config: Dict[str, Any]) -> Dict[str, Any]:
+    """Client kwargs — `timeout` and `max_retries` — for an SDK backed by httpx.
+
+    Overridable per provider via `timeout_seconds`, `connect_timeout_seconds`,
+    `write_timeout_seconds` and `max_retries`. A value that is not a positive
+    number falls back to the shared bound, because `0` means «no timeout» to
+    httpx and that is the state this exists to prevent.
+    """
+    import httpx
+
+    def _positive(value, fallback):
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            return fallback
+        return number if number > 0 else fallback
+
+    try:
+        retries = int(config.get("max_retries", NETWORK_MAX_RETRIES))
+    except (TypeError, ValueError):
+        retries = NETWORK_MAX_RETRIES
+
+    return {
+        "timeout": httpx.Timeout(
+            connect=_positive(config.get("connect_timeout_seconds"), NETWORK_CONNECT_TIMEOUT),
+            read=_positive(config.get("timeout_seconds"), NETWORK_READ_TIMEOUT),
+            write=_positive(config.get("write_timeout_seconds"), NETWORK_WRITE_TIMEOUT),
+            pool=NETWORK_POOL_TIMEOUT,
+        ),
+        "max_retries": max(0, retries),
+    }
+
+
 # --- Abstract Base Class for all Providers ---
 
 class AIProvider:

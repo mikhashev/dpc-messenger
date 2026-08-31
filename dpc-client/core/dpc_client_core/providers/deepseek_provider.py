@@ -10,7 +10,7 @@ from typing import Dict, Any, Optional, List, Union
 
 from openai import AsyncOpenAI
 
-from .base import AIProvider, REASONING_OFF, normalize_reasoning_effort
+from .base import AIProvider, REASONING_OFF, network_client_bounds, normalize_reasoning_effort
 
 logger = logging.getLogger(__name__)
 
@@ -65,7 +65,8 @@ class DeepSeekProvider(AIProvider):
             raise ValueError(f"API key not found for DeepSeek provider '{self.alias}'")
 
         base_url = config.get("base_url", DEEPSEEK_DEFAULT_BASE_URL)
-        self.client = AsyncOpenAI(api_key=api_key, base_url=base_url)
+        self.client = AsyncOpenAI(api_key=api_key, base_url=base_url,
+                                  **network_client_bounds(config))
         # Kept for the REST balance endpoint (/user/balance); the openai SDK doesn't cover it.
         self._api_key = api_key
         self._base_url = base_url

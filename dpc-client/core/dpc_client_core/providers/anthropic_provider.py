@@ -7,7 +7,7 @@ from typing import Dict, Any, Optional, List
 
 from anthropic import AsyncAnthropic
 
-from .base import AIProvider, ANTHROPIC_THINKING_MODELS
+from .base import AIProvider, ANTHROPIC_THINKING_MODELS, network_client_bounds
 
 logger = logging.getLogger(__name__)
 
@@ -21,7 +21,7 @@ class AnthropicProvider(AIProvider):
         if not api_key:
             raise ValueError(f"API key environment variable not set for Anthropic provider '{self.alias}'")
 
-        self.client = AsyncAnthropic(api_key=api_key)
+        self.client = AsyncAnthropic(api_key=api_key, **network_client_bounds(config))
 
         # Read max_tokens from config (optional, defaults to 4096  if not specified)
         # Set to None or omit from config to use model's maximum

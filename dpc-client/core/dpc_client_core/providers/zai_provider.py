@@ -11,7 +11,7 @@ from typing import Dict, Any, Optional, List, Union
 
 from openai import AsyncOpenAI
 
-from .base import AIProvider
+from .base import AIProvider, network_client_bounds
 
 logger = logging.getLogger(__name__)
 
@@ -108,7 +108,8 @@ class ZaiProvider(AIProvider):
                 f"{ZAI_DEFAULT_BASE_URL}"
             )
 
-        self.client = AsyncOpenAI(api_key=api_key, base_url=base_url)
+        self.client = AsyncOpenAI(api_key=api_key, base_url=base_url,
+                                  **network_client_bounds(config))
         self.base_url = base_url
 
         self.max_tokens = config.get("max_tokens", 8192)

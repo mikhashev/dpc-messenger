@@ -7,7 +7,7 @@ from typing import Dict, Any, List
 
 from openai import AsyncOpenAI
 
-from .base import AIProvider, OPENAI_THINKING_MODELS
+from .base import AIProvider, OPENAI_THINKING_MODELS, network_client_bounds
 
 logger = logging.getLogger(__name__)
 
@@ -24,7 +24,8 @@ class OpenAICompatibleProvider(AIProvider):
         if not api_key:
             raise ValueError(f"API key not found for OpenAI compatible provider '{self.alias}'")
 
-        self.client = AsyncOpenAI(base_url=config.get("base_url"), api_key=api_key)
+        self.client = AsyncOpenAI(base_url=config.get("base_url"), api_key=api_key,
+                                  **network_client_bounds(config))
 
     def supports_vision(self) -> bool:
         """OpenAI vision models: gpt-4o, gpt-4-turbo, gpt-4o-mini"""

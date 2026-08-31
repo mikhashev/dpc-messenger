@@ -1,0 +1,133 @@
+"""A dead socket must become an error, not a silence.
+
+Mike, 2026-08-31: «если агент отвечает уже в loop и произошло переключение
+интернет соединения то он висит». It is not waiting on a peer. It is waiting on
+the vendor, and the wait was inherited rather than chosen. Asked of the
+installed library rather than recalled:
+
+    openai 1.109.1
+    DEFAULT_TIMEOUT     = Timeout(connect=5.0, read=600, write=600, pool=600)
+    DEFAULT_MAX_RETRIES = 2
+
+All four of our network providers built their client with no timeout argument
+at all, so all four took that. When the network changes underneath an
+*established* connection the five-second connect timeout never applies — the
+socket is already open, it is simply dead — and what remains is a ten-minute
+read timeout the SDK will then retry twice: up to half an hour on one call, with
+nothing in the agent loop above it to call that too long.
+
+The same file, `deepseek_provider.py`, passes `httpx.AsyncClient(timeout=20)`
+for the balance endpoint. The secondary request was bounded and the inference
+was not.
+
+These tests pin the bound and its shape, not a particular number: the number is
+config, the bound is not. `NETWORK_READ_TIMEOUT` may be retuned; a provider that
+goes back to inheriting the default fails here.
+"""
+
+from __future__ import annotations
+
+import pytest
+
+from dpc_client_core.providers.base import (
+    NETWORK_CONNECT_TIMEOUT,
+    NETWORK_MAX_RETRIES,
+    NETWORK_READ_TIMEOUT,
+    network_client_bounds,
+)
+
+
+# The vendor defaults we are refusing to inherit. Named here so the test says
+# what it is protecting against, not merely that a number is small.
+SDK_DEFAULT_READ = 600.0
+SDK_DEFAULT_RETRIES = 2
+
+
+def _providers(monkeypatch):
+    """Every provider that talks over the network, built for inspection."""
+    monkeypatch.setenv("TEST_PROVIDER_KEY", "sk-not-a-real-key")
+
+    from dpc_client_core.providers.deepseek_provider import DeepSeekProvider
+    from dpc_client_core.providers.zai_provider import ZaiProvider
+    from dpc_client_core.providers.openai_provider import OpenAICompatibleProvider
+    from dpc_client_core.providers.anthropic_provider import AnthropicProvider
+
+    common = {"api_key_env": "TEST_PROVIDER_KEY", "model": "a-model"}
+    return {
+        "deepseek": DeepSeekProvider("t", dict(common)),
+        "zai": ZaiProvider("t", dict(common)),
+        "openai": OpenAICompatibleProvider("t", dict(common, base_url="https://example.invalid/v1")),
+        "anthropic": AnthropicProvider("t", dict(common)),
+    }
+
+
+def test_every_network_provider_sets_its_own_read_timeout(monkeypatch):
+    """The defect: four out of four inherited 600 seconds."""
+    for name, provider in _providers(monkeypatch).items():
+        read = provider.client.timeout.read
+        assert read is not None, f"{name}: no read timeout"
+        assert read < SDK_DEFAULT_READ, f"{name}: still on the SDK default ({read}s)"
+        assert read == NETWORK_READ_TIMEOUT, f"{name}: {read}s, not the shared bound"
+
+
+def test_every_network_provider_sets_its_own_connect_timeout(monkeypatch):
+    for name, provider in _providers(monkeypatch).items():
+        assert provider.client.timeout.connect == NETWORK_CONNECT_TIMEOUT, name
+
+
+def test_no_provider_keeps_the_two_automatic_retries(monkeypatch):
+    """Retries multiply the wait. Two of them over a ten-minute read timeout is
+    where the half hour came from."""
+    for name, provider in _providers(monkeypatch).items():
+        assert provider.client.max_retries < SDK_DEFAULT_RETRIES, name
+        assert provider.client.max_retries == NETWORK_MAX_RETRIES, name
+
+
+def test_the_worst_case_wait_is_bounded_in_minutes_not_half_an_hour(monkeypatch):
+    """The number that matters to the person watching the agent: how long a
+    dead socket can hold a turn."""
+    for name, provider in _providers(monkeypatch).items():
+        worst = provider.client.timeout.read * (provider.client.max_retries + 1)
+        assert worst <= 600, f"{name}: worst case {worst}s"
+
+
+def test_a_slow_model_can_be_given_more_time_in_its_own_config(monkeypatch):
+    """The bound is a default, not a ceiling. A reasoning model answering
+    without streaming sends no bytes until it is done, and that is the one case
+    where a longer wait is the right answer — so it stays configurable."""
+    monkeypatch.setenv("TEST_PROVIDER_KEY", "sk-not-a-real-key")
+    from dpc_client_core.providers.deepseek_provider import DeepSeekProvider
+
+    provider = DeepSeekProvider("t", {"api_key_env": "TEST_PROVIDER_KEY",
+                                      "model": "a-model",
+                                      "timeout_seconds": 900})
+
+    assert provider.client.timeout.read == 900
+
+
+def test_the_shared_helper_reads_the_config_and_falls_back_to_the_bound():
+    assert network_client_bounds({})["timeout"].read == NETWORK_READ_TIMEOUT
+    assert network_client_bounds({})["max_retries"] == NETWORK_MAX_RETRIES
+    assert network_client_bounds({"timeout_seconds": 42})["timeout"].read == 42
+    assert network_client_bounds({"connect_timeout_seconds": 3})["timeout"].connect == 3
+    assert network_client_bounds({"max_retries": 0})["max_retries"] == 0
+
+
+def test_a_nonsense_timeout_in_the_config_does_not_become_no_timeout():
+    """`timeout_seconds: 0` reads as «no wait at all» to httpx, and a negative
+    number is not a duration. Neither may quietly restore the unbounded case."""
+    for bad in (0, -1, "", None):
+        bounds = network_client_bounds({"timeout_seconds": bad})
+        assert bounds["timeout"].read == NETWORK_READ_TIMEOUT, bad
+
+
+def test_the_local_providers_are_left_alone(monkeypatch):
+    """Ollama and the llama.cpp child are on loopback: their waits are about a
+    model loading, not about a network, and they already set their own."""
+    import inspect
+    from dpc_client_core.providers import ollama_provider, llamacpp_server_provider
+
+    for module in (ollama_provider, llamacpp_server_provider):
+        source = inspect.getsource(module)
+        assert "timeout" in source, module.__name__
+        assert "network_client_bounds" not in source, module.__name__
