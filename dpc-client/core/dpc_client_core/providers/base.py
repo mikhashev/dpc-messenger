@@ -131,13 +131,17 @@ NETWORK_POOL_TIMEOUT = 10.0
 NETWORK_MAX_RETRIES = 1
 
 
-def network_client_bounds(config: Dict[str, Any]) -> Dict[str, Any]:
+def network_client_bounds(config: Dict[str, Any],
+                          default_retries: int = NETWORK_MAX_RETRIES) -> Dict[str, Any]:
     """Client kwargs — `timeout` and `max_retries` — for an SDK backed by httpx.
 
     Overridable per provider via `timeout_seconds`, `connect_timeout_seconds`,
     `write_timeout_seconds` and `max_retries`. A value that is not a positive
     number falls back to the shared bound, because `0` means «no timeout» to
     httpx and that is the state this exists to prevent.
+
+    `default_retries=0` is for a provider that retries in its own code: two
+    layers multiply, and the one with backoff is the one worth keeping.
     """
     import httpx
 
@@ -149,9 +153,9 @@ def network_client_bounds(config: Dict[str, Any]) -> Dict[str, Any]:
         return number if number > 0 else fallback
 
     try:
-        retries = int(config.get("max_retries", NETWORK_MAX_RETRIES))
+        retries = int(config.get("max_retries", default_retries))
     except (TypeError, ValueError):
-        retries = NETWORK_MAX_RETRIES
+        retries = default_retries
 
     return {
         "timeout": httpx.Timeout(

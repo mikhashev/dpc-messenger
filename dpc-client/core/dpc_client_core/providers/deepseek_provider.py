@@ -4,6 +4,7 @@ import os
 import json
 import base64
 import asyncio
+import time
 import logging
 from types import SimpleNamespace
 from typing import Dict, Any, Optional, List, Union
@@ -66,7 +67,7 @@ class DeepSeekProvider(AIProvider):
 
         base_url = config.get("base_url", DEEPSEEK_DEFAULT_BASE_URL)
         self.client = AsyncOpenAI(api_key=api_key, base_url=base_url,
-                                  **network_client_bounds(config))
+                                  **network_client_bounds(config, default_retries=0))
         # Kept for the REST balance endpoint (/user/balance); the openai SDK doesn't cover it.
         self._api_key = api_key
         self._base_url = base_url
@@ -242,17 +243,24 @@ class DeepSeekProvider(AIProvider):
         )
 
     async def _retry_with_backoff(self, fn, last_error: Exception):
+        # The budget is wall time, including the calls. Counting only the sleeps
+        # made `max_retry_seconds` mean something other than its name: against a
+        # call that always times out the sleeps 3, 6, 12 … reach 600 on the
+        # ninth pass, so the loop spent ten call-lengths rather than ten minutes.
+        started = time.monotonic()
+        deadline = started + self.max_retry_seconds
         delay = 3
-        elapsed = 0
         attempt = 0
-        while elapsed < self.max_retry_seconds:
+        while time.monotonic() < deadline:
             attempt += 1
             logger.warning(
                 "DeepSeek retry %d, waiting %ds (elapsed %ds/%ds): %s",
-                attempt, delay, elapsed, self.max_retry_seconds, last_error,
+                attempt, delay, int(time.monotonic() - started),
+                self.max_retry_seconds, last_error,
             )
             await asyncio.sleep(delay)
-            elapsed += delay
+            if time.monotonic() >= deadline:
+                break
             try:
                 return await fn()
             except Exception as e:
@@ -262,7 +270,7 @@ class DeepSeekProvider(AIProvider):
                 delay = min(delay * 2, 192)
         raise RuntimeError(
             f"DeepSeek provider '{self.alias}' failed after {attempt} retries "
-            f"({elapsed}s elapsed): {last_error}"
+            f"({int(time.monotonic() - started)}s elapsed): {last_error}"
         ) from last_error
 
     @staticmethod

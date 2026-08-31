@@ -80,7 +80,6 @@ def test_no_provider_keeps_the_two_automatic_retries(monkeypatch):
     where the half hour came from."""
     for name, provider in _providers(monkeypatch).items():
         assert provider.client.max_retries < SDK_DEFAULT_RETRIES, name
-        assert provider.client.max_retries == NETWORK_MAX_RETRIES, name
 
 
 def test_the_worst_case_wait_is_bounded_in_minutes_not_half_an_hour(monkeypatch):
@@ -131,3 +130,123 @@ def test_the_local_providers_are_left_alone(monkeypatch):
         source = inspect.getsource(module)
         assert "timeout" in source, module.__name__
         assert "network_client_bounds" not in source, module.__name__
+
+
+# --- The second layer, found in review the same day -------------------------
+#
+# Ark and Johnny both read the first fix and said the falsifier under-counts.
+# They are right twice over. `max_retries=1` means two attempts, so the bound
+# is 600 s and not the «about five minutes» first written. And DeepSeek — with
+# Z.AI and the llama.cpp child, which subclass it — wraps every call in its own
+# `_retry_with_backoff`, whose `_is_retryable` names `APITimeoutError`. So the
+# SDK's retries and ours stack.
+#
+# Measured from the loop rather than estimated: its budget `max_retry_seconds`
+# counts only what it *sleeps* (`elapsed += delay`), never what the call costs.
+# With delays 3, 6, 12 … capped at 192 the sleeps reach 600 on the ninth pass,
+# so a call that always times out is attempted **ten** times. At 600 s each
+# that is one hundred minutes, and before the timeouts landed it was five hours.
+
+def _timeout_error():
+    import openai
+    return openai.APITimeoutError(request=None)
+
+
+class _Clock:
+    """A fake monotonic clock; `asyncio.sleep` and the call both advance it."""
+
+    def __init__(self):
+        self.now = 0.0
+
+    def __call__(self):
+        return self.now
+
+
+@pytest.fixture
+def deepseek_with_a_fake_clock(monkeypatch):
+    monkeypatch.setenv("TEST_PROVIDER_KEY", "sk-not-a-real-key")
+    from dpc_client_core.providers import deepseek_provider as mod
+
+    clock = _Clock()
+    monkeypatch.setattr(mod.time, "monotonic", clock, raising=False)
+
+    async def _sleep(seconds):
+        clock.now += seconds
+
+    monkeypatch.setattr(mod.asyncio, "sleep", _sleep)
+
+    provider = mod.DeepSeekProvider("t", {"api_key_env": "TEST_PROVIDER_KEY", "model": "a-model"})
+    return provider, clock
+
+
+@pytest.mark.asyncio
+async def test_the_retry_budget_counts_the_calls_and_not_only_the_sleeps(deepseek_with_a_fake_clock):
+    """`max_retry_seconds` is 600 by default. A call that costs 600 s of that
+    budget has to spend it."""
+    provider, clock = deepseek_with_a_fake_clock
+    attempts = []
+
+    async def _always_times_out():
+        attempts.append(clock.now)
+        clock.now += 600.0          # what one call costs once the SDK gives up
+        raise _timeout_error()
+
+    with pytest.raises(RuntimeError):
+        await provider._retry_with_backoff(_always_times_out, _timeout_error())
+
+    assert len(attempts) <= 2, f"{len(attempts)} attempts, {clock.now}s of wall time"
+    assert clock.now <= 2 * provider.max_retry_seconds
+
+
+@pytest.mark.asyncio
+async def test_a_retryable_error_is_still_retried(deepseek_with_a_fake_clock):
+    """The guard on the fix: the loop must not become a single attempt."""
+    provider, clock = deepseek_with_a_fake_clock
+    calls = []
+
+    async def _fails_once_then_works():
+        calls.append(clock.now)
+        if len(calls) == 1:
+            raise _timeout_error()
+        return "answer"
+
+    assert await provider._retry_with_backoff(_fails_once_then_works, _timeout_error()) == "answer"
+    assert len(calls) == 2
+
+
+@pytest.mark.asyncio
+async def test_a_permanent_error_is_not_retried_at_all(deepseek_with_a_fake_clock):
+    provider, _clock = deepseek_with_a_fake_clock
+
+    async def _bad_request():
+        raise ValueError("model does not exist")
+
+    with pytest.raises(ValueError):
+        await provider._retry_with_backoff(_bad_request, _timeout_error())
+
+
+def test_a_provider_that_retries_itself_does_not_also_let_the_sdk_retry(monkeypatch):
+    """Two layers of retry is one too many, and ours is the better one — it
+    backs off, the SDK's does not."""
+    providers = _providers(monkeypatch)
+    for name in ("deepseek", "zai"):
+        assert providers[name].client.max_retries == 0, name
+    for name in ("openai", "anthropic"):
+        assert providers[name].client.max_retries == NETWORK_MAX_RETRIES, name
+
+
+def test_the_llama_cpp_child_inherits_the_repaired_loop():
+    """`LlamaServerProvider` subclasses `DeepSeekProvider`, so the loop is the
+    same object — a fix that missed it would be silent."""
+    from dpc_client_core.providers.deepseek_provider import DeepSeekProvider
+    from dpc_client_core.providers.llamacpp_server_provider import LlamaServerProvider
+
+    assert issubclass(LlamaServerProvider, DeepSeekProvider)
+    assert LlamaServerProvider._retry_with_backoff is DeepSeekProvider._retry_with_backoff
+
+
+def test_one_deepseek_call_is_bounded_by_the_read_timeout_alone(monkeypatch):
+    """With the SDK's retries off, one attempt costs one read timeout."""
+    provider = _providers(monkeypatch)["deepseek"]
+    worst_one_call = provider.client.timeout.read * (provider.client.max_retries + 1)
+    assert worst_one_call == NETWORK_READ_TIMEOUT
