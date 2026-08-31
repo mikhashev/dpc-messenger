@@ -249,11 +249,22 @@ UI first among the readers. Enumerated instead: `events.jsonl` has **five read
 sites in the client** — `agent_service.py:459` (the legacy fallback for entries
 with no result file), `dpc_agent/context.py:291`, `dpc_agent/events.py:203` and
 `:255`, and `dpc_agent/tools/core.py:875` (the agent's own «task history» tool)
-— plus **four test files**. **The UI is not among them**: it renders
-`task_completed` and friends as they arrive over the WebSocket
-(`Sidebar.svelte:77, 92`) and never opens the file. So the migration is five
-call sites and their tests, not a rewrite of the front end. Warren's 4–6 hours
-was an estimate over three assumed readers; the count above is the list.
+— plus **four test files**.
+
+**And one reader that a search by filename does not find**, added after Ark and
+Johnny both said the count would miss consumers reaching the data through a
+service (#126, #127) — they were right about the class and wrong about their
+examples: the sleep pipeline and the graph export do not touch it, but
+`agent_service.get_agent_tasks` does, it is exposed as a local-API command
+(`service.py:8333`), and `AgentTaskBoard.svelte:196` calls it. So **the UI does
+consume this data, through the wrapper rather than the file.** The earlier
+sentence here — «the UI is not among them, it renders socket events and never
+opens the file» — was true of the file and misleading about the data.
+
+The migration is therefore: five read sites, four test files, one service
+command whose output shape must be preserved or whose one caller must change.
+Warren's 4–6 hours was an estimate over three assumed readers; the list above is
+the count, and it is the panel rather than the whole front end.
 
 That is still a decision rather than an addition, because keeping per-agent
 files and writing a second ledger only for strangers is cheaper and produces
