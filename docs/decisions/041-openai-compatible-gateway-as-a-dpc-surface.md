@@ -1,6 +1,6 @@
 ---
 adr: 041
-title: "Serve outside tools an OpenAI-compatible surface from inside the DPC client, gated by identity rather than by an API key — and move the usage ledger from the agent to the node"
+title: "Serve outside tools an OpenAI-compatible surface from inside the DPC client, gated by identity on the one transport that proves it — and move the usage ledger from the agent to the node"
 status: proposed
 date: 2026-08-31
 deciders: [Mike]
@@ -9,10 +9,10 @@ informed: []
 depends_on: [ADR-040]
 related: [ADR-002, ADR-026, ADR-038]
 supersedes: []
-session: "DPC Project #82–#106, 2026-08-31 — Mike's colleague wants Qwen3.8-27B from Continue in VSCode; Ark proposed the gateway (#85), Johnny objected to one clause (#95), Mike settled four questions and added a fifth (#101–#102)"
+session: "DPC Project #82–#110, 2026-08-31 — Mike's colleague wants Qwen3.8-27B from Continue in VSCode; Ark proposed the gateway (#85), Johnny objected to one clause (#95), Mike settled four questions and added a fifth (#101–#102), then ruled the Hub out of the trust path (#110); two review rounds by Ark and Johnny"
 ---
 
-# ADR-041: Serve outside tools an OpenAI-compatible surface from inside the DPC client, gated by identity rather than by an API key — and move the usage ledger from the agent to the node
+# ADR-041: Serve outside tools an OpenAI-compatible surface from inside the DPC client, gated by identity on the one transport that proves it — and move the usage ledger from the agent to the node
 
 > **Status: proposed.** A recommendation standing on measurements, in the form
 > ADR-040 used. Every claim is marked `Observed` (read in this tree today,
@@ -20,8 +20,8 @@ session: "DPC Project #82–#106, 2026-08-31 — Mike's colleague wants Qwen3.8-
 > asked for before drafting are closed and **two came back against the thread's
 > assumption**; three more were needed and one of them changes the price of D1.
 >
-> Nothing here is started. What is still Mike's is in **Open Questions**, and it
-> is now one question rather than four.
+> Nothing here is started. Of the four questions the first draft left open, all
+> four are now decided; **D6** carries a recommendation and waits on Mike.
 
 ## Context and Problem Statement
 
@@ -97,7 +97,7 @@ destination.
 server on 9999. An OpenAI-compatible surface is HTTP with `text/event-stream`,
 so D1 costs either a new server dependency in the client or a hand-written
 HTTP/SSE server. Nobody priced this in the thread, and it is a decision to take
-here rather than at code review — see **Open Questions**.
+here rather than at code review — see **D6**.
 
 ### M5 — A locally served model has no dollar cost by construction. `Observed`
 
@@ -117,14 +117,28 @@ exactly as strong as the weakest path the gateway can route over.
 |---|---|---|
 | Direct TLS (IPv4/IPv6) | TLS to the peer's self-signed certificate | **three checks, and they are stricter than a CA chain.** `_verify_hello_identity`: cert CN equals the claimed node_id; `SHA256(public key)[:32]` equals the claimed node_id; and an RSA-PSS signature over a fresh 32-byte nonce from `HELLO_CHALLENGE`. The identity is self-certifying, so a forged certificate fails check 2 and a stolen public certificate fails check 3 |
 | WebRTC via the Hub | DTLS (aiortc, SCTP over DTLS) | **none of its own.** The challenge runs in `_handle_direct_connection` only; `hello_handler.py` says so in its own docstring — «Mainly for WebRTC connections that don't have initial handshake». The binding between the DTLS fingerprint and the node identity is whatever the Hub signalled |
-| Volunteer relay | end-to-end AES-256-GCM + RSA-OAEP **above** the transport, keyed from the peer's certificate | inherited from the certificate the payload was encrypted to; the relay sees node ids, blob sizes and timing, never content |
-| Gossip | the same hybrid scheme | the same |
+| Volunteer relay | end-to-end AES-256-GCM + RSA-OAEP **above** the transport, keyed from the peer's certificate | **recipient only.** Only the holder of the matching private key can decrypt, and the GCM tag proves the ciphertext is untampered — but nothing signs the sender. `grep sign\|signature\|verify` over `transports/relayed_connection.py` and `managers/gossip_manager.py` returns nothing |
+| Gossip | the same hybrid scheme | the same — recipient and integrity, not sender |
 | Hub | signalling only; message content never passes through it | — |
 
 `verify_mode = ssl.CERT_NONE` on the direct path is not a weakening: it is
 required because there is no shared CA, and the manual binding that replaces it
-is checked above. **The gap worth naming is the WebRTC path**, where identity
-rests on the Hub behaving.
+is stricter than a chain — the identity is the hash of the key.
+
+**The conclusion that matters to D2 is sharper than «one gap».** The firewall
+gates compute on `can_request_inference(peer_id, …)`, and `peer_id` is
+`sender_node_id`, which the transport supplies. Only the direct TLS path
+establishes that value cryptographically. On WebRTC it is what the Hub routed;
+on relay and gossip it is a field in an envelope. **The one path that proves who
+is asking is the one this ADR should require for gateway traffic** — which is
+D2.
+
+*Found while reading this and reported separately, not part of this ADR:* the
+relay path as written cannot deliver at all. `relay_message_handler.py:102`
+refuses when `payload["from"] != sender_node_id`, and on the **destination**
+node those two are the originator and the relay respectively — the check fires
+before the client-mode branch at `:123` is reached. There are no tests for
+`RELAY_MESSAGE`. Read from the code, not run.
 
 ## Decision
 
@@ -155,8 +169,26 @@ router** (ADR-040 D4-0). A caller naming an alias we do not serve is refused by
 name; that behaviour was observed in production on 2026-08-31.
 
 The gateway's local key is a convenience for the tool on that machine, not the
-boundary. The boundary is the roster — and, per M6, on the direct path that
-boundary is cryptographic, while on the WebRTC path it is the Hub's word.
+boundary. The boundary is the roster.
+
+**And the boundary is only as strong as the transport that carried the caller's
+name (M6), so this decision names the transport.** Gateway traffic is authorised
+on the direct TLS path, where `sender_node_id` is proved by the HELLO challenge
+against a self-certifying identity. It is **not** authorised on the WebRTC path,
+whose binding is the Hub's word.
+
+That is a decision rather than a measurement, and Mike took it (#110): «Хаб
+планировали выпиливать, так что пофиг на него». The written form of the same
+direction is ROADMAP §211 — «Hub becomes optional bootstrap, not architecture
+center». *No board entry planning the Hub's removal was found; the plan is
+Mike's word plus that roadmap line.* Either way the consequence is the same:
+building an outward-facing authorisation boundary on Hub-mediated identity would
+tie the product's new surface to the component it is moving away from.
+
+**What this costs:** a consumer behind a NAT that only WebRTC could traverse
+cannot use the gateway until either the WebRTC path gains its own challenge or a
+lower tier serves him. Relay and gossip do not currently substitute — per M6 they
+prove the recipient, not the sender, which is the half D2 needs.
 
 ### D3 — The usage ledger moves from the agent to the node, and carries who called
 
@@ -216,18 +248,25 @@ Mike, #102. Sharing a vendor-backed alias is not the same act as sharing a local
 one: **the node holding the key pays real money.** It therefore needs three
 things this design must leave room for, and two of them do not exist today:
 
-1. An **allow-list of served aliases** rather than a single
-   `compute.serving_alias` — `Observed`: the firewall serves exactly one alias
-   today, and `p2p_coordinator` refuses out loud when it is unset.
+1. **Two lists, not one longer list** — Ark's correction (#108), adopted. The
+   single `compute.serving_alias` becomes an allow-list *per class*: local
+   aliases, whose scarce resource is the card and whose refusal is «the card is
+   busy»; and vendor aliases, whose scarce resource is money and whose refusal is
+   «the budget is spent». One list would put two different refusal policies
+   behind one setting, and the owner would not be able to say «share the GPU
+   freely, the API never» — which is the setting most people would want first.
+   `Observed`: the firewall serves exactly one alias today, and
+   `p2p_coordinator` refuses out loud when it is unset.
 2. **Per-caller quotas or limits** — `Observed absent on this path, and present
-   twice elsewhere.` `firewall.py` and `p2p_coordinator.py` contain no quota,
-   rate limit, budget or throttle: `can_request_inference` answers yes or no and
-   nothing counts how often. Meanwhile `dpc_agent/budget.py` enforces
-   `requests_per_minute` / `requests_per_day` per agent and provider, and
+   three times elsewhere.` `firewall.py` and `p2p_coordinator.py` contain no
+   quota, rate limit, budget or throttle: `can_request_inference` answers yes or
+   no and nothing counts how often. Meanwhile `dpc_agent/budget.py` enforces
+   `requests_per_minute` / `requests_per_day` per agent and provider,
    `coordinators/discord_coordinator.py` enforces per-user and global windows for
-   an outside surface. So the shape is written twice in this repository and wired
-   to neither the peer nor the gateway — which makes item 2 a wiring job rather
-   than a design one.
+   an outside surface, and `managers/relay_manager.py` rate-limits a relayed peer
+   at 100 messages per second. The shape is written three times in this
+   repository and wired to neither the peer nor the gateway — which makes item 2
+   a wiring job rather than a design one.
 3. **A ledger row carrying `cost_usd`**, which for a pay-per-use alias is
    already computable (M5: `0.00088` for a 1000/1000 DeepSeek call). The column
    exists; the row to put it in does not.
@@ -257,18 +296,36 @@ schema is decided now so the second step is not a rewrite.
 - **The WebRTC path's identity gap (M6) becomes load-bearing.** Today it decides
   who may read a chat; under D2 it would also decide who may spend the card.
 
-## Open Questions — Mike's, not the code's
+## D6 — The HTTP server: a decision to take here, with both cases put
 
-**One remains.** The other three were settled in #101–#102 and are now part of
-D1, D3 and D5.
+Ark asked (#108) that this stop being an open question and be argued in the ADR,
+and he is right: it is architecture, not code review. Both cases, honestly:
 
-1. **M4: a hand-written HTTP/SSE server, or `fastapi`+`uvicorn` in the client?**
-   Ark's position (#103) is hand-written — a component, no new dependency, on the
-   order of 300–400 lines for a surface this narrow. Against it: SSE, chunked
-   bodies, keep-alive and HTTP error semantics are exactly the kind of thing that
-   is cheap to write and expensive to get right, and the Hub already runs FastAPI
-   so the idiom is not foreign to this repository. The client's dependency
-   footprint is the argument on the other side. **Not decided.**
+**Hand-written asyncio HTTP + SSE.** No new dependency in a client that must run
+on a user's machine without the Hub; complete control of the error surface; and
+the repository already contains one hand-written asyncio server — `local_api.py`
+on 9999 — so this is a second instance of an existing pattern rather than a first.
+
+**`fastapi` + `uvicorn`.** The Hub already runs them, so the idiom is not foreign
+to the team; and the parts that are cheap to write badly are exactly the parts
+this buys — chunked transfer, client-disconnect mid-stream, and the HTTP status
+vocabulary a tool like Continue expects (400/401/403/429/503).
+
+**Johnny's correction to the size estimate is adopted** (#109): `local_api.py` is
+a *WebSocket* server, not an HTTP one, so «second instance of the pattern»
+understates the work. With SSE, disconnect handling and status codes, his figure
+is 500–600 lines with tests rather than 300–400.
+
+**Recommendation: hand-written**, on the strength of the dependency argument — a
+client that must start on a machine with no server stack has a different budget
+from a service that is one. But the deciding vote is Mike's, and if the answer is
+FastAPI the ADR is unchanged apart from this section.
+
+## Open Questions
+
+None outstanding. The four of the first draft were settled in #101–#102 and
+#110 and are now inside D1, D2, D3 and D5; D6 carries a recommendation awaiting
+Mike's word.
 
 ## Falsifiers
 
