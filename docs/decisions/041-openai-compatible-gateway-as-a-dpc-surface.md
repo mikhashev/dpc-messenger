@@ -117,7 +117,8 @@ exactly as strong as the weakest path the gateway can route over.
 
 | path | encryption | authentication of the peer's identity |
 |---|---|---|
-| Direct TLS (IPv4/IPv6) | TLS to the peer's self-signed certificate | **three checks, and they are stricter than a CA chain.** `_verify_hello_identity`: cert CN equals the claimed node_id; `SHA256(public key)[:32]` equals the claimed node_id; and an RSA-PSS signature over a fresh 32-byte nonce from `HELLO_CHALLENGE`. The identity is self-certifying, so a forged certificate fails check 2 and a stolen public certificate fails check 3 |
+| Direct TLS, **inbound** (a peer dials us) | TLS to the peer's self-signed certificate | **three checks, stricter than a CA chain.** `_verify_hello_identity`: cert CN equals the claimed node_id; `SHA256(public key)[:32]` equals the claimed node_id; and an RSA-PSS signature over a fresh 32-byte nonce from `HELLO_CHALLENGE`. The identity is self-certifying, so a forged certificate fails check 2 and a stolen public certificate fails check 3 |
+| Direct TLS, **outbound** (we dial a peer) | the same TLS | **two string comparisons and no proof.** `_validate_peer_certificate` reads the certificate's CN and compares it to the node_id from the URI — and stops there; it never derives the id from the public key and never verifies a signature. `HELLO_ACK` is then checked for a matching `node_id`, which the peer also simply states. Nothing on this side asks the far end to prove it holds a key, so an active middle that terminates TLS with a self-signed certificate carrying the expected CN passes both checks — and its certificate is then persisted as the peer's |
 | WebRTC via the Hub | DTLS (aiortc, SCTP over DTLS) | **none of its own.** The challenge runs in `_handle_direct_connection` only; `hello_handler.py` says so in its own docstring — «Mainly for WebRTC connections that don't have initial handshake». The binding between the DTLS fingerprint and the node identity is whatever the Hub signalled |
 | Volunteer relay | end-to-end AES-256-GCM + RSA-OAEP **above** the transport, keyed from the peer's certificate | **recipient only.** Only the holder of the matching private key can decrypt, and the GCM tag proves the ciphertext is untampered — but nothing signs the sender. `grep sign\|signature\|verify` over `transports/relayed_connection.py` and `managers/gossip_manager.py` returns nothing |
 | Gossip | the same hybrid scheme | the same — recipient and integrity, not sender |
@@ -126,6 +127,15 @@ exactly as strong as the weakest path the gateway can route over.
 `verify_mode = ssl.CERT_NONE` on the direct path is not a weakening: it is
 required because there is no shared CA, and the manual binding that replaces it
 is stricter than a chain — the identity is the hash of the key.
+
+**The direction matters, and the first writing of this table got it wrong.** It
+said «three checks» of the direct path as a whole. The three run only where a
+peer connects *to us*, which is fortunate for D2 — `can_request_inference` is
+evaluated on the serving node, and that is the proved direction. It is not
+fortunate for D1: a consumer dialling a seed does not verify the seed, so the
+privacy claim «the prompt reaches only the machine you chose» is, on the
+outbound leg, a claim about a string. Recorded here, and a separate defect from
+this ADR's subject.
 
 **The conclusion that matters to D2 is sharper than «one gap».** The firewall
 gates compute on `can_request_inference(peer_id, …)`, and `peer_id` is
