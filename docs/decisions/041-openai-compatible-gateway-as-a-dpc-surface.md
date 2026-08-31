@@ -1,7 +1,7 @@
 ---
 adr: 041
 title: "Serve outside tools an OpenAI-compatible surface from inside the DPC client, gated by a proved peer key rather than by an API key — and give every model call one usage row on the node that ran it"
-status: proposed
+status: accepted
 date: 2026-08-31
 deciders: [Mike]
 consulted: [Ark, Johnny, Warren, CC, Fable 5, GLM 5.3]
@@ -14,8 +14,13 @@ session: "DPC Project #82–#136, 2026-08-31 — Mike's colleague wants Qwen3.8-
 
 # ADR-041: Serve outside tools an OpenAI-compatible surface from inside the DPC client, gated by a proved peer key rather than by an API key — and give every model call one usage row on the node that ran it
 
-> **Status: proposed.** A recommendation standing on measurements, in the form
-> ADR-040 used. Every claim is marked `Observed` (read in this tree, location
+> **Status: accepted, 2026-08-31** — Mike, after three internal review rounds and
+> two independent adversarial reviews: «ADR принимаю». The work is filed as the
+> epic `AN-OPENAI-COMPATIBLE-SURFACE-IS-THE-PRODUCTS-FIRST-OUTWARD-FACING-DOOR`
+> with six children in the shipping order of D4, and the two production defects
+> the reviews turned up are filed separately because they do not wait on this.
+>
+> A recommendation standing on measurements, in the form ADR-040 used. Every claim is marked `Observed` (read in this tree, location
 > given), `Inferred`, or `Not verified`.
 >
 > **Two outside reviews broke four of this document's supports and none of its
@@ -24,7 +29,8 @@ session: "DPC Project #82–#136, 2026-08-31 — Mike's colleague wants Qwen3.8-
 > text below says so and names the finding; where a figure of ours was an
 > estimate it has been replaced by a count. **M4 was false and D6 rested on
 > it**, so D6 is re-decided here with the option that was missing. The one
-> question left for Mike is D6's vote among three options rather than two.
+> question that had been left for Mike was D6's vote; it was taken with the
+> reviews, for `aiohttp.web`.
 
 ## Context and Problem Statement
 
@@ -432,8 +438,7 @@ protocol we did write ourselves.
 `discord.py` ever leaves, the gateway leaves with it. One line in the base
 dependencies.
 
-**This is the one item still open for Mike's vote**, now among three options
-rather than two. The recommendation is `aiohttp.web`.
+**Decided** with the reviews rather than against them: `aiohttp.web`, declared.
 
 ### D7 — What is shared may not be shared onward
 
@@ -538,8 +543,8 @@ exposure; 8888 is the large one.
 
 ## Open Questions
 
-**One.** D6's vote, among three options rather than two, with `aiohttp.web`
-recommended.
+None. D6 was the last, and the two outside reviews decided it: `aiohttp.web`,
+declared in the base dependencies.
 
 ## Falsifiers
 
