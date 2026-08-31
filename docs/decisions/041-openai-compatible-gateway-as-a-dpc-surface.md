@@ -438,7 +438,9 @@ protocol we did write ourselves.
 `discord.py` ever leaves, the gateway leaves with it. One line in the base
 dependencies.
 
-**Decided** with the reviews rather than against them: `aiohttp.web`, declared.
+**Decided** with the reviews rather than against them, and voted by Mike on
+2026-08-31 — «A (aiohttp)»: `aiohttp.web`, with `aiohttp` declared in the base
+dependencies so the gateway does not hang on `discord.py` staying.
 
 ### D7 — What is shared may not be shared onward
 
