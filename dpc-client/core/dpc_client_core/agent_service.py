@@ -899,11 +899,21 @@ class AgentService:
             if provider_alias is not None:
                 config["provider_alias"] = provider_alias
                 registry.update_agent(agent_id, {"provider_alias": provider_alias})
+                # Local first. An alias is a bare string and two machines may
+                # well use the same one; until 2026-08-31 only `peer_metadata`
+                # was consulted here, so a peer advertising our own name took
+                # the agent by construction — and `llm_adapter.chat` puts the
+                # peer ahead of every local branch, so it never came back.
+                local_providers = getattr(getattr(self, "llm_manager", None), "providers", None) or {}
                 resolved_peer = None
-                for peer_id, meta in self.peer_metadata.items():
-                    if any(p.get("alias") == provider_alias for p in meta.get("providers", [])):
-                        resolved_peer = peer_id
-                        break
+                if provider_alias in local_providers:
+                    logger.info("Agent %s: '%s' is served locally — not resolving to a peer",
+                                agent_id, provider_alias)
+                else:
+                    for peer_id, meta in self.peer_metadata.items():
+                        if any(p.get("alias") == provider_alias for p in meta.get("providers", [])):
+                            resolved_peer = peer_id
+                            break
                 if resolved_peer:
                     config["compute_host"] = resolved_peer
                     cw = self._peer_provider_context_window(resolved_peer, provider_alias)

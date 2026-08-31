@@ -171,9 +171,13 @@ class FakeMonitor:
 class _FakeAgent:
     def __init__(self):
         self.provider_alias = "unset"
+        self.compute_host = "unset"
 
     def set_provider_alias(self, alias):
         self.provider_alias = alias
+
+    def set_compute_host(self, compute_host):
+        self.compute_host = compute_host
 
 
 class TestResolveAndApplyModelConfig:

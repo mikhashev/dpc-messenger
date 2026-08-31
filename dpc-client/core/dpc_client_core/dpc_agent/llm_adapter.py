@@ -63,6 +63,20 @@ class DpcLlmAdapter:
         self._provider_alias = provider_alias
         self._default_model = None
 
+    def set_compute_host(self, compute_host: Optional[str]) -> None:
+        """Update the per-agent remote peer at runtime, so unpinning an agent
+        takes effect on the agent that is already running.
+
+        Without this the pin was a constructor argument and nothing else: a
+        model switch rewrote the config, the live adapter kept the old peer, and
+        every following call went to that peer carrying an alias it does not
+        serve. Only `disconnect_from_peer` cleared it. `None` and `""` are the
+        same answer — the config writes one, the registry may write the other,
+        and neither may reach the routing test as truthy.
+        """
+        self._compute_host = compute_host or ""
+        self._default_model = None
+
     def _get_agent_provider_alias(self) -> Optional[str]:
         """
         Get the provider alias to use for agent inference.

@@ -215,6 +215,10 @@ class DpcAgent:
         self._provider_alias = provider_alias
         self.llm.set_provider_alias(provider_alias)
 
+    def set_compute_host(self, compute_host: Optional[str]) -> None:
+        """Attach this agent to a remote peer, or detach it, at runtime — the counterpart of `set_provider_alias`, without which a model switch left the running adapter pinned to the previous peer."""
+        self.llm.set_compute_host(compute_host)
+
     async def process(
         self,
         message: str,

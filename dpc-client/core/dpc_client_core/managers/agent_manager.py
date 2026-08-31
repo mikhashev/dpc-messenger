@@ -1426,6 +1426,10 @@ class DpcAgentManager:
         self.config = new_config
         if self._agent is not None:
             self._agent.set_provider_alias(new_config.get("provider_alias"))
+            # The pin travels with the alias. Pushing only the alias is what
+            # made a switch away from a peer model unfixable from the UI: the
+            # config said «no peer» while the live adapter kept dialling one.
+            self._agent.set_compute_host(new_config.get("compute_host", ""))
         window = self._resolve_context_window()
         if window:
             for monitor in self._agent_monitors.values():
