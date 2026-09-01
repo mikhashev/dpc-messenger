@@ -539,6 +539,10 @@ class LlamaServerSupervisor:
         # spending VRAM, so draining the old child cannot turn into two children.
         self._predecessor: Optional["asyncio.Task"] = None
         self._in_flight = 0
+        # The most slots held at once since the last telemetry read. Nothing
+        # serialises traffic to the child, so this is what says whether the
+        # last timing block in the shared log belongs to the caller asking.
+        self._peak_in_flight = 0
         self._start_lock = asyncio.Lock()
         # Where the restore-refusal scan has already looked. The log is opened
         # "ab" and outlives restarts, so None means "not primed yet": the first
@@ -1090,6 +1094,7 @@ class LlamaServerSupervisor:
         if self._draining:
             raise LlamaServerError(f"llama-server[{self.alias}] is draining; new calls refused")
         self._in_flight += 1
+        self._peak_in_flight = max(self._peak_in_flight, self._in_flight)
         return self._Slot(self)
 
     class _Slot:
@@ -1172,10 +1177,21 @@ class LlamaServerSupervisor:
         estimate. Gives the phase split to non-streaming callers (the agents'
         tools path has no first-chunk boundary to time it by itself).
 
-        Caveat, stated: with concurrent slots the last block in the file
-        belongs to whichever task finished last - under the supervisor's
-        serialized traffic that is the caller's own task."""
+        Not attributable under concurrency, and it says so rather than
+        guessing. The caveat here used to rest on "the supervisor's serialized
+        traffic", which the same file refutes: call_slot increments a counter
+        and refuses only while draining - there is no semaphore, no queue and
+        no cap. So when more than one slot has been held since the last read,
+        the last block in the shared log belongs to whichever task finished
+        last and this returns None instead of handing it to the caller."""
         import re
+        peak, self._peak_in_flight = self._peak_in_flight, self._in_flight
+        if peak > 1:
+            logger.debug(
+                "llama-server[%s]: %d slots in flight since the last read, so the "
+                "engine's timing block is not this caller's", self.alias, peak,
+            )
+            return None
         read = self._read_tail()
         if read is None:
             return None
