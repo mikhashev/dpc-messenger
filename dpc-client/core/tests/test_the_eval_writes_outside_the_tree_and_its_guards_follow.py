@@ -19,10 +19,12 @@ EVAL = Path(__file__).resolve().parents[3] / "eval"
 REPO = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(EVAL))
 sys.path.insert(0, str(EVAL / "gaia"))
+sys.path.insert(0, str(EVAL / "kv"))
 
 from _harness.results_root import results_root  # noqa: E402
 import run_gaia_eval as gaia  # noqa: E402
 import campaign  # noqa: E402
+import ab_key_quant as kv  # noqa: E402
 
 
 def test_the_results_root_is_outside_the_repository():
@@ -42,8 +44,18 @@ def test_the_paths_the_two_modules_actually_hold_are_outside_the_repository():
     the helper being right says nothing about what the modules assigned.
     """
     for name, path in (("run_gaia_eval.RESULTS_DIR", gaia.RESULTS_DIR),
-                       ("campaign.RESULTS", campaign.RESULTS)):
+                       ("campaign.RESULTS", campaign.RESULTS),
+                       ("ab_key_quant.RESULTS", kv.RESULTS)):
         assert REPO not in path.parents, f"{name} is {path}, inside the working tree"
+
+
+def test_each_benchmark_gets_its_own_directory():
+    """`loop` and `retrieval` take their output path from the caller, so they
+    are not asserted here — there is no constant to hold wrong."""
+    roots = {b: results_root(b) for b in ("gaia", "kv", "loop", "retrieval")}
+
+    assert len(set(roots.values())) == 4
+    assert kv.RESULTS == roots["kv"]
 
 
 def test_the_runner_and_the_campaign_name_the_same_directory():

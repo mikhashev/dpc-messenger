@@ -66,7 +66,14 @@ import urllib.error
 import urllib.request
 
 HERE = Path(__file__).resolve().parent
-RESULTS = HERE / "results"
+sys.path.insert(0, str(HERE.parent))
+from _harness.results_root import results_root  # noqa: E402
+
+# New output goes beside every other harness's, outside the tree. The four
+# JSONs already committed under `results/` stay where they are: they are the
+# only eval numbers this repository publishes, and moving them would delete
+# tracked files to solve a problem they do not have.
+RESULTS = results_root("kv")
 
 # The production alias, read rather than retyped: this probe is worthless if it
 # measures a different model or a different pin than the fleet runs.

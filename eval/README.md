@@ -47,7 +47,14 @@ headless eval and nowhere else.
   third-party addresses, and in four files the previews of our own chat that a
   run read back through `read_session_archive`. Reports and traces still exist
   on one disk only, which is the thing this line has been saying since the
-  count was 1 029. The other three harnesses commit their results.
+  count was 1 029.
+- **New output from every harness goes to `~/.dpc/eval-results/<benchmark>/`**
+  (`results_root()` in `_harness/`, `DPC_EVAL_RESULTS` overrides the base).
+  `kv` holds a constant and was rewired; `loop` and `retrieval` take their
+  output path from the caller and have nothing to rewire. The seven result
+  JSONs already committed under `kv/`, `loop/` and `retrieval/` stay tracked —
+  they are the only eval numbers this repository publishes, and deleting
+  tracked files would solve a problem those seven do not have.
 - Results from `retrieval/` and `loop/` carry no date inside the file — the
   window lives only in the filename. `provenance.py` fixed that, for `gaia/`
   alone; it has never been wired into the older two.
