@@ -16,6 +16,7 @@ seeding the next run's answer key. The check stays because reports and logs
 written before that still carry the answers in full.
 """
 import json
+import os
 import sys
 import types
 from pathlib import Path
@@ -338,3 +339,64 @@ class TestTheRefusal:
 
         assert gaia._DATASET_STATE["private_cache_removed"] is True
         assert "hub cache removed: True" in capsys.readouterr().out
+
+
+class TestWhatACrashLeavesBehind:
+    """The gold reached disk before the guard opened, so a crash kept it.
+
+    Measured in the code and in the file's own comment: the night of
+    2026-08-30 03:12 died on a stale token four times between `mkdtemp` and
+    the `try`, and left a private hub full of answers behind each time.
+    """
+
+    def _leaked_workdir(self, tmp_path):
+        leaked = tmp_path / "dpc-gaia-abcd1234"
+        hub = leaked / "hf" / "hub" / "datasets--gaia-benchmark--GAIA"
+        hub.mkdir(parents=True)
+        (hub / Path(gaia.SPLIT).name).write_bytes(b"parquet")
+        return leaked
+
+    def test_a_leaked_workdir_is_a_cache_the_next_run_looks_at(self, tmp_path, monkeypatch):
+        leaked = self._leaked_workdir(tmp_path)
+        monkeypatch.setattr(gaia.tempfile, "tempdir", str(tmp_path))
+
+        assert leaked in gaia.hub_caches_in_effect()
+
+    def test_the_answers_inside_it_are_found(self, tmp_path):
+        leaked = self._leaked_workdir(tmp_path)
+
+        assert gaia.reachable_gold([leaked]), "the parquet under a leaked workdir was not seen"
+
+    def test_a_setup_that_throws_leaves_no_workdir_and_no_redirect(self, tmp_path, monkeypatch):
+        import asyncio
+
+        monkeypatch.setattr(gaia.tempfile, "tempdir", str(tmp_path))
+        monkeypatch.setenv("HF_TOKEN", "not-a-real-token")
+        monkeypatch.setenv("HF_HOME", str(tmp_path / "machine-hub"))
+        monkeypatch.setattr(gaia, "hub_caches_in_effect", lambda: [])
+        monkeypatch.setattr(gaia, "reachable_gold", lambda *a, **k: [])
+
+        def _expired(*_a, **_k):
+            raise RuntimeError("401 gated dataset")
+
+        monkeypatch.setattr(gaia, "load_tasks", _expired)
+        args = types.SimpleNamespace(
+            limit=1, with_files=False, allow_reachable_gold=False, keep=False,
+            provider_alias=None, model="m", base_url="http://127.0.0.1:1",
+            context_window=1024, temperature=None, reasoning_effort=None,
+            auto_approve=False, json=None,
+        )
+
+        with pytest.raises(RuntimeError):
+            asyncio.run(gaia.main_async(args))
+
+        assert list(tmp_path.glob("dpc-gaia-*")) == [], "the private hub survived the crash"
+        assert os.environ["HF_HOME"] == str(tmp_path / "machine-hub")
+
+
+class TestAContaminatedRunIsNotAScore:
+    def test_the_runner_and_the_campaign_agree_on_the_exit(self):
+        import campaign
+
+        assert gaia.CONTAMINATED_EXIT == campaign.CONTAMINATED_EXIT
+        assert gaia.CONTAMINATED_EXIT != 0

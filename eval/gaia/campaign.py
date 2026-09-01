@@ -56,6 +56,10 @@ from _harness.results_root import results_root  # noqa: E402
 
 RESULTS = results_root("gaia")
 RUNNER = HERE / "run_gaia_eval.py"
+# The runner's own exit for «the agent read a planted answer key». Named here
+# rather than folded into the generic failure branch: the run did not fail, it
+# produced a number that must not be counted.
+CONTAMINATED_EXIT = 3
 CORE = HERE.parent.parent / "dpc-client" / "core"
 
 # Order matters: the reference number first, so that if the night is cut short
@@ -202,7 +206,12 @@ def run_one(cfg: dict, deadline: datetime, stamp: str) -> dict:
             record["tasks"] = report.get("tasks")
         except Exception as exc:
             record["read_error"] = str(exc)
-    if proc.returncode == 0:
+    if proc.returncode == CONTAMINATED_EXIT:
+        record["contaminated"] = True
+        print(f"  -> CONTAMINATED: the canary was read, so "
+              f"{record.get('correct')}/{record.get('tasks')} is not a score "
+              f"({record['minutes']} min) — {out_log}", flush=True)
+    elif proc.returncode == 0:
         print(f"  -> {record.get('correct')}/{record.get('tasks')} "
               f"= {record.get('accuracy')} in {record['minutes']} min", flush=True)
     else:
@@ -275,8 +284,12 @@ def main() -> int:
 
     print("\n=== campaign ===", flush=True)
     for r in done:
-        outcome = (f"{r.get('correct')}/{r.get('tasks')} = {r.get('accuracy')}"
-                   if r["exit_code"] == 0 else f"FAILED (exit {r['exit_code']})")
+        if r["exit_code"] == CONTAMINATED_EXIT:
+            outcome = f"CONTAMINATED ({r.get('correct')}/{r.get('tasks')}, not a score)"
+        elif r["exit_code"] == 0:
+            outcome = f"{r.get('correct')}/{r.get('tasks')} = {r.get('accuracy')}"
+        else:
+            outcome = f"FAILED (exit {r['exit_code']})"
         print(f"  {r['name']:12} t={r['temperature']} effort={r['reasoning_effort']:6} "
               f"{outcome} ({r['minutes']} min)", flush=True)
     return 0

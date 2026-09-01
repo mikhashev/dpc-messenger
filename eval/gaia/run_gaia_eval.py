@@ -67,6 +67,14 @@ ATTACHMENT_DIR = "2023/validation"
 # Where this project moved eleven gold-bearing files on 2026-08-29 rather than
 # deleting them. Named here so the guard can see its own cold storage.
 GOLD_ARCHIVE = Path.home() / "gaia-archive"
+# What a crashed run leaves behind. The private hub lives at <workdir>/hf,
+# and until 2026-09-02 nothing looked for it, so a leaked copy of the answers
+# did not stop the next run the way every other cache does.
+LEAKED_WORKDIR_GLOB = "dpc-gaia-*"
+# A run whose canary was read exits with this rather than 0, so «the agent
+# found a planted answer key» is visible to a caller that reads status codes
+# and never opens the report.
+CONTAMINATED_EXIT = 3
 
 
 # --- scoring ---------------------------------------------------------------
@@ -166,6 +174,7 @@ def hub_caches_in_effect() -> List[Path]:
     # guard looked there afterwards, so the refusal it advertises was void for
     # every run since. It is ours, so it is named here rather than guessed at.
     out.append(GOLD_ARCHIVE)
+    out.extend(sorted(Path(tempfile.gettempdir()).glob(LEAKED_WORKDIR_GLOB)))
     seen, uniq = set(), []
     for c in out:
         key = str(c).lower()
@@ -634,54 +643,62 @@ async def main_async(args) -> int:
               "on purpose — this score is contaminable", flush=True)
 
     workdir = Path(tempfile.mkdtemp(prefix="dpc-gaia-"))
-    # Staging only. Each task gets its own agent root below, and the attachment
-    # it needs is copied in: outside the root, ADR-030 Tier 1 stops every read
-    # as off-sandbox and a headless run has no approver to ask.
-    attachments_dir = workdir / "attachments"
-    attachments_dir.mkdir(parents=True, exist_ok=True)
-    logs_root = workdir / "agent-logs"
-    logs_root.mkdir(parents=True, exist_ok=True)
-
-    private_hub, hub_before = redirect_hub_into(workdir)
-    rows = load_tasks(token, args.limit, args.with_files)
-    print(f"{len(rows)} task(s) from GAIA L1 validation", flush=True)
-
-    # Every attachment is fetched now, while the cache still exists, and copied
-    # into the sandbox. After this the run needs the hub for nothing, so the
-    # cache goes and the gold survives only in `rows` — in memory.
-    prefetched: Dict[str, Optional[Path]] = {}
-    for row in rows:
-        if row.get("file_name"):
-            prefetched[row["task_id"]] = fetch_attachment(
-                token, row["file_name"], attachments_dir
-            )
-    shutil.rmtree(private_hub, ignore_errors=True)
-    _DATASET_STATE["private_cache_removed"] = not private_hub.exists()
-    restore_hub(hub_before)
-    _DATASET_STATE["token_dropped"] = drop_gated_credentials()
-    print(f"attachments prefetched: {len(prefetched)}; hub cache removed: "
-          f"{_DATASET_STATE['private_cache_removed']}", flush=True)
-
-    providers_path, entry = providers_file_for(
-        args.provider_alias, args.model, args.base_url, args.context_window, workdir,
-        temperature=args.temperature, reasoning_effort=args.reasoning_effort,
-    )
-    print(f"provider: {entry['alias']!r} type={entry.get('type')} model={entry.get('model')}")
-
-    # Planted here rather than thirty lines earlier, and the distance was the
-    # bug: the `finally` that removes the decoy starts below, and `load_tasks`
-    # sat in between. The night of 2026-08-30 03:12 died there on a stale token
-    # four times and left a decoy behind each time. Nothing between the old site
-    # and this one reads the canary, and the agent — the only thing the bait is
-    # for — runs below.
-    canary_token = f"GAIA-CANARY-{uuid.uuid4().hex}"
-    canary_files = plant_canary(real_caches, RESULTS_DIR, canary_token)
-    _DATASET_STATE["canary_planted"] = [str(p) for p in canary_files]
-    print(f"canary planted in {len(canary_files)} place(s)", flush=True)
-
-    llm = LLMManager(config_path=providers_path)
-    firewall = benchmark_firewall(workdir)
+    canary_files: List[Path] = []
+    hub_before = None
+    llm = None
+    # The gold lands on disk inside the setup below, and this guard used to open
+    # after it: the night of 2026-08-30 03:12 died on a stale token four times
+    # between the two and left a hub full of answers in the temp directory each
+    # time. Everything the run creates is now removed on every path out.
     try:
+        # Staging only. Each task gets its own agent root below, and the attachment
+        # it needs is copied in: outside the root, ADR-030 Tier 1 stops every read
+        # as off-sandbox and a headless run has no approver to ask.
+        attachments_dir = workdir / "attachments"
+        attachments_dir.mkdir(parents=True, exist_ok=True)
+        logs_root = workdir / "agent-logs"
+        logs_root.mkdir(parents=True, exist_ok=True)
+
+        private_hub, hub_before = redirect_hub_into(workdir)
+        rows = load_tasks(token, args.limit, args.with_files)
+        print(f"{len(rows)} task(s) from GAIA L1 validation", flush=True)
+
+        # Every attachment is fetched now, while the cache still exists, and copied
+        # into the sandbox. After this the run needs the hub for nothing, so the
+        # cache goes and the gold survives only in `rows` — in memory.
+        prefetched: Dict[str, Optional[Path]] = {}
+        for row in rows:
+            if row.get("file_name"):
+                prefetched[row["task_id"]] = fetch_attachment(
+                    token, row["file_name"], attachments_dir
+                )
+        shutil.rmtree(private_hub, ignore_errors=True)
+        _DATASET_STATE["private_cache_removed"] = not private_hub.exists()
+        restore_hub(hub_before)
+        hub_before = None
+        _DATASET_STATE["token_dropped"] = drop_gated_credentials()
+        print(f"attachments prefetched: {len(prefetched)}; hub cache removed: "
+              f"{_DATASET_STATE['private_cache_removed']}", flush=True)
+
+        providers_path, entry = providers_file_for(
+            args.provider_alias, args.model, args.base_url, args.context_window, workdir,
+            temperature=args.temperature, reasoning_effort=args.reasoning_effort,
+        )
+        print(f"provider: {entry['alias']!r} type={entry.get('type')} model={entry.get('model')}")
+
+        # Planted here rather than thirty lines earlier, and the distance was the
+        # bug: the `finally` that removes the decoy starts below, and `load_tasks`
+        # sat in between. The night of 2026-08-30 03:12 died there on a stale token
+        # four times and left a decoy behind each time. Nothing between the old site
+        # and this one reads the canary, and the agent — the only thing the bait is
+        # for — runs below.
+        canary_token = f"GAIA-CANARY-{uuid.uuid4().hex}"
+        canary_files = plant_canary(real_caches, RESULTS_DIR, canary_token)
+        _DATASET_STATE["canary_planted"] = [str(p) for p in canary_files]
+        print(f"canary planted in {len(canary_files)} place(s)", flush=True)
+
+        llm = LLMManager(config_path=providers_path)
+        firewall = benchmark_firewall(workdir)
         approver = None
         if args.auto_approve:
             from _harness.auto_approve import Tier1AutoApprover
@@ -844,19 +861,26 @@ async def main_async(args) -> int:
                 shutil.copytree(logs_src, logs_dst)
                 print(f"agent logs  -> {logs_dst}", flush=True)
 
-        if not args.keep:
-            shutil.rmtree(workdir, ignore_errors=True)
-        return 0
+        # A triggered canary means the agent read a planted answer key, so the
+        # number above is not a score. It used to leave by the same door as a
+        # clean run, which made the one signal that says «do not cite this»
+        # invisible to the campaign, to CI and to anything reading the status.
+        return CONTAMINATED_EXIT if report["canary"]["triggered"] else 0
     finally:
         for bait in canary_files:
             bait.unlink(missing_ok=True)
+        if hub_before is not None:
+            restore_hub(hub_before)
         # Without this the llama-server the provider spawned outlives the run,
         # and the campaign's own GPU gate then waits for a child of the run
         # before it: 0 of 4 runs started on 2026-08-25, 1 of 4 on 2026-08-27.
-        try:
-            await llm.shutdown()
-        except Exception as exc:
-            print(f"warning: provider shutdown failed: {exc}", flush=True)
+        if llm is not None:
+            try:
+                await llm.shutdown()
+            except Exception as exc:
+                print(f"warning: provider shutdown failed: {exc}", flush=True)
+        if not args.keep:
+            shutil.rmtree(workdir, ignore_errors=True)
 
 def main() -> int:
     # Model answers carry arrows, dashes and non-Latin text; a Windows console
