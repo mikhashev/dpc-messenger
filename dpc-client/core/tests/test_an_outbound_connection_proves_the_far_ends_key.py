@@ -16,6 +16,7 @@ line to find out.
 import asyncio
 import datetime
 import ssl
+import time
 
 import pytest
 from cryptography import x509
@@ -92,9 +93,10 @@ async def _tls_server(cert_pem, key_pem, tmp_path, name):
     Hanging up is deliberate. The dial fails either way once the certificate
     stage is behind it — an honest peer here never sends HELLO_CHALLENGE — so
     what separates the two worlds is not whether it fails but whether the
-    certificate got as far as the store. Closing rather than idling is also
-    what keeps the test bounded: `connect_directly`'s timeout covers the TLS
-    connect and not the challenge read, so a silent server hangs for ever.
+    certificate got as far as the store. It used to close rather than idle for
+    a second reason — the dial's timeout covered the TLS connect and not the
+    challenge read, so a silent server hung for ever. That is now bounded, and
+    the test below is the one that holds it.
     """
     cert_file = tmp_path / f"{name}.crt"
     key_file = tmp_path / f"{name}.key"
@@ -157,3 +159,46 @@ async def test_dialling_an_honest_peer_reaches_the_store(tmp_path):
 
     assert len(offered) == 1
     assert offered[0][0] == node_id
+
+
+async def _silent_tls_server(cert_pem, key_pem, tmp_path, name):
+    """Completes TLS and then says nothing at all — the shape that hung."""
+    cert_file = tmp_path / f"{name}.crt"
+    key_file = tmp_path / f"{name}.key"
+    cert_file.write_text(cert_pem, encoding="utf-8")
+    key_file.write_text(key_pem, encoding="utf-8")
+
+    ctx = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
+    ctx.load_cert_chain(certfile=str(cert_file), keyfile=str(key_file))
+
+    idle = asyncio.Event()
+
+    async def _handle(reader, writer):
+        await idle.wait()
+
+    server = await asyncio.start_server(_handle, "127.0.0.1", 0, ssl=ctx)
+    return server, server.sockets[0].getsockname()[1], idle
+
+
+@pytest.mark.asyncio
+async def test_a_peer_that_completes_tls_and_then_says_nothing_does_not_hold_the_dial(tmp_path):
+    """The timeout the caller passes has to buy the exchange, not only the connect."""
+    node_id, _, cert_pem, key_pem = _identity()
+    manager = _manager()
+    manager._persist_peer_certificate = lambda nid, pem: True
+
+    server, port, idle = await _silent_tls_server(cert_pem, key_pem, tmp_path, "silent")
+    started = time.monotonic()
+    try:
+        with pytest.raises(ConnectionError) as err:
+            await asyncio.wait_for(
+                manager.connect_directly("127.0.0.1", port, node_id, timeout=1.0),
+                timeout=20,
+            )
+    finally:
+        idle.set()
+        server.close()
+        await server.wait_closed()
+
+    assert "HELLO_CHALLENGE" in str(err.value), str(err.value)
+    assert time.monotonic() - started < 10, "the dial outlived the budget it was given"

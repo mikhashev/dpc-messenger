@@ -699,12 +699,34 @@ class P2PManager:
         ssl_context.check_hostname = False  # We validate manually via CN
         ssl_context.verify_mode = ssl.CERT_NONE  # Required for self-signed certs
 
+        # One budget for the whole dial. The caller's `timeout` used to buy the
+        # TCP and TLS connect and nothing else, so a peer that finished the
+        # handshake and then said nothing held this task for ever — the harness
+        # written for AN-OUTBOUND-CONNECTION-NEVER-ASKS-THE-FAR-END-TO-PROVE-ITS-KEY
+        # was still waiting past 300 s with timeout=5.0.
+        deadline = asyncio.get_running_loop().time() + timeout
+
         try:
             # Add timeout to prevent long hangs
             reader, writer = await asyncio.wait_for(
                 asyncio.open_connection(host, port, ssl=ssl_context),
                 timeout=timeout
             )
+
+            async def _handshake_read(expected: str) -> Optional[dict]:
+                """A read that cannot outlive the budget the caller paid for."""
+                left = deadline - asyncio.get_running_loop().time()
+                try:
+                    if left <= 0:
+                        raise asyncio.TimeoutError
+                    return await asyncio.wait_for(read_message(reader), timeout=left)
+                except asyncio.TimeoutError:
+                    writer.close()
+                    raise ConnectionError(
+                        f"Handshake with {target_node_id} at {host}:{port} timed out "
+                        f"waiting for {expected}: the TLS connect succeeded inside the "
+                        f"{timeout}s budget and the peer then said nothing."
+                    ) from None
 
             # Enable TCP keepalive to detect zombie connections (half-open TCP)
             # Without this, a dead connection appears alive indefinitely and causes
@@ -753,7 +775,7 @@ class P2PManager:
 
             # Read the server's challenge nonce (new in authenticated HELLO protocol).
             import base64 as _b64
-            challenge_msg = await read_message(reader)
+            challenge_msg = await _handshake_read("HELLO_CHALLENGE")
             if not challenge_msg or challenge_msg.get("command") != "HELLO_CHALLENGE":
                 error_msg = (
                     f"Expected HELLO_CHALLENGE from {target_node_id} but got "
@@ -783,7 +805,7 @@ class P2PManager:
             }
             await write_message(writer, hello)
 
-            response = await read_message(reader)
+            response = await _handshake_read("HELLO_ACK")
             if not response or response.get("status") != "OK":
                 raise ConnectionError(f"Peer did not acknowledge HELLO.")
 
