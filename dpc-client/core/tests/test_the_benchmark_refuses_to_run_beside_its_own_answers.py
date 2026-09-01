@@ -400,3 +400,21 @@ class TestAContaminatedRunIsNotAScore:
 
         assert gaia.CONTAMINATED_EXIT == campaign.CONTAMINATED_EXIT
         assert gaia.CONTAMINATED_EXIT != 0
+
+
+class TestContaminationIsNotAFastFailure:
+    def test_a_contaminated_run_does_not_stop_the_queue(self):
+        """It is not a run that died before it started: the number exists, it
+        simply is not a score, and the next configuration is no more doomed."""
+        import campaign
+
+        record = {"exit_code": campaign.CONTAMINATED_EXIT, "minutes": 1.0}
+
+        assert campaign.stops_the_queue(record) is False
+
+    def test_a_real_fast_failure_still_stops_the_queue(self):
+        import campaign
+
+        assert campaign.stops_the_queue({"exit_code": 1, "minutes": 1.0}) is True
+        assert campaign.stops_the_queue({"exit_code": 1, "minutes": 90.0}) is False
+        assert campaign.stops_the_queue({"exit_code": 0, "minutes": 1.0}) is False

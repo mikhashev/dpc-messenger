@@ -10,6 +10,8 @@ difference. Both are cheap to pin and neither is visible in the output.
 
 import importlib.util
 import random
+
+import pytest
 from pathlib import Path
 
 PROBE = Path(__file__).resolve().parents[3] / "eval" / "kv" / "ab_key_quant.py"
@@ -150,3 +152,39 @@ class TestTheEvidenceRecomputesItself:
         self._arm(legacy, ab.ARMS[0], compute_got="5139")
 
         assert ab._arm_file(f"{ab.ARMS[0]}.json").parent == legacy
+
+    def test_a_rerun_from_a_different_measurement_is_refused(self, tmp_path, monkeypatch):
+        """The join is what the whole fix is for; a join that checks nothing
+        prints a number neither run produced."""
+        import pytest
+
+        monkeypatch.setattr(ab, "RESULTS", tmp_path)
+        monkeypatch.setattr(ab, "LEGACY_RESULTS", tmp_path)
+        name = ab.ARMS[0]
+        self._arm(tmp_path, name, compute_got="")
+        self._arm(tmp_path, f"{name}-compute", compute_got="5139",
+                  max_tokens=4096, only_needle=2)
+        import json as _json
+        path = tmp_path / f"{name}-compute.json"
+        doc = _json.loads(path.read_text(encoding="utf-8"))
+        doc["gguf"] = "some-other-model.gguf"
+        path.write_text(_json.dumps(doc), encoding="utf-8")
+
+        with pytest.raises(SystemExit) as err:
+            ab._arm_with_the_rerun(name)
+
+        assert "same measurement" in str(err.value), str(err.value)
+
+    def test_the_base_only_tally_is_computed_and_not_recited(self, tmp_path, monkeypatch):
+        """The reassuring sentence used to be a literal that could not go stale."""
+        monkeypatch.setattr(ab, "RESULTS", tmp_path)
+        monkeypatch.setattr(ab, "LEGACY_RESULTS", tmp_path)
+        for name in ab.ARMS:
+            self._arm(tmp_path, name, compute_got="")
+
+        same, total = ab._identical_cells(
+            {name: __import__("json").loads((tmp_path / f"{name}.json").read_text(encoding="utf-8"))
+             for name in ab.ARMS}
+        )
+
+        assert (same, total) == (9, 9), (same, total)

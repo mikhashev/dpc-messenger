@@ -60,6 +60,19 @@ RUNNER = HERE / "run_gaia_eval.py"
 # rather than folded into the generic failure branch: the run did not fail, it
 # produced a number that must not be counted.
 CONTAMINATED_EXIT = 3
+
+
+def stops_the_queue(record: dict) -> bool:
+    """A run that died before it started tells the rest of the queue nothing.
+
+    Contamination is not that: the run worked, its number is simply not a
+    score, and the next configuration is no more doomed than before. Folding
+    exit 3 into «failed fast» said the opposite.
+    """
+    return (
+        record["exit_code"] not in (0, CONTAMINATED_EXIT)
+        and record["minutes"] < FAST_FAILURE_MINUTES
+    )
 CORE = HERE.parent.parent / "dpc-client" / "core"
 
 # Order matters: the reference number first, so that if the night is cut short
@@ -275,7 +288,7 @@ def main() -> int:
         done.append(record)
         summary = RESULTS / f"{stamp}-campaign.json"
         summary.write_text(json.dumps({"runs": done}, indent=2), encoding="utf-8")
-        if record["exit_code"] != 0 and record["minutes"] < FAST_FAILURE_MINUTES:
+        if stops_the_queue(record):
             print(f"\nstopping the queue: {cfg['name']} failed in "
                   f"{record['minutes']} min, so the rest would fail the same way. "
                   f"Fix what the lines above name and start the campaign again.",

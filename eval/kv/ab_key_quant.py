@@ -397,6 +397,7 @@ def _arm_with_the_rerun(name: str) -> tuple[dict, str, int]:
     except SystemExit:
         return arm, f"{where} (no compute re-run beside it)", 0
     rerun = json.loads(rerun_path.read_text(encoding="utf-8"))
+    _refuse_a_foreign_rerun(arm, rerun, base_path, rerun_path)
     replaced = 0
     for depth, rows in arm["depths"].items():
         by_position = {r["position"]: r for r in rerun["depths"].get(depth, [])}
@@ -408,6 +409,35 @@ def _arm_with_the_rerun(name: str) -> tuple[dict, str, int]:
             rows[i] = dict(better, **{"from": f"re-run at {rerun['max_tokens']} tokens"})
             replaced += 1
     return arm, f"{where} + {replaced} cell(s) from {rerun_path.name}", replaced
+
+
+# What has to agree before two files can be treated as one measurement. The
+# corpus is keyed by depth, so a differing token count means differing text.
+_IDENTITY = ("ctk", "ctv", "seed", "temperature", "gguf", "binary", "corpus_tokens")
+
+
+def _refuse_a_foreign_rerun(arm: dict, rerun: dict, base_path: Path, rerun_path: Path) -> None:
+    """A join that verifies nothing is the disease it was written to cure."""
+    disagree = [f for f in _IDENTITY if arm.get(f) != rerun.get(f)]
+    if disagree:
+        raise SystemExit(
+            f"{rerun_path.name} does not describe the same measurement as "
+            f"{base_path.name}: {', '.join(disagree)} differ. Splicing its cells in "
+            f"would print a number neither run produced."
+        )
+
+
+def _identical_cells(arms: dict) -> tuple[int, int]:
+    """(cells where both arms replied the same, cells compared)."""
+    a_name, b_name = ARMS
+    same = total = 0
+    for depth in DEPTHS:
+        rows_a = arms[a_name]["depths"][str(depth)]
+        rows_b = arms[b_name]["depths"][str(depth)]
+        for x, y in zip(rows_a, rows_b):
+            total += 1
+            same += x["got"] == y["got"]
+    return same, total
 
 
 def compare() -> None:
@@ -449,10 +479,13 @@ def compare() -> None:
     print(f"identical replies: {totals['agree']}/{n} "
           f"(divergence {100 * (n - totals['agree']) / n:.0f}%)")
     if substituted:
-        print(f"{substituted} of the {2 * n} cells come from the 4096-token re-run, "
-              f"named in the `from` column: the 256-token budget left the "
+        raw = {name: json.loads(_arm_file(f"{name}.json").read_text(encoding="utf-8"))
+               for name in ARMS}
+        base_same, base_n = _identical_cells(raw)
+        print(f"{substituted} of the {2 * n} cells come from a re-run at a larger "
+              f"output budget, named in the `from` column: 256 tokens left the "
               f"computational needle no room to answer in. On the base files alone "
-              f"this reads 7/9, which is the sampler and not the cache.")
+              f"this reads {base_same}/{base_n}, which is the sampler and not the cache.")
     print("\nBoth arms are greedy at one seed, so a divergence is the cache. "
           "Equal counts with different text is a result and not a null: it says "
           "the cache moves the trajectory without moving the answer.")
