@@ -12,7 +12,11 @@ dependencies = [
     "toml>=0.10.2,<0.11.0",
     "openai>=1.0.0,<2.0.0",
     "anthropic>=0.45.0",
-    "tiktoken>=0.5.1,<0.6.0",
+    # The ceiling has to clear every interpreter requires-python allows: 0.5.2
+    # builds through PyO3 0.20, which refuses anything above 3.12, so a 3.13
+    # install of this project could not succeed with or without a Rust
+    # toolchain. 0.14.0 ships a cp313 wheel — measured 2026-09-02.
+    "tiktoken>=0.5.1,<0.15",
     "httpx>=0.27.0,<0.28.0",
     "aiortc>=1.6.0,<2.0.0",
     "certifi>=2024.0.0",
