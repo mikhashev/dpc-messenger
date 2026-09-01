@@ -21,7 +21,7 @@ import subprocess
 import threading
 import time
 import unicodedata
-from typing import List, Optional, Tuple
+from typing import List, NamedTuple, Optional, Tuple
 
 from .registry import ToolEntry, ToolContext, agent_display_name, conversation_origin
 # Moved to `process.py` on 2026-08-26 so they cover every spawn this service
@@ -148,6 +148,9 @@ def _normalize_command(command: str) -> str:
     return normalized
 
 
+_SEGMENT_OPERATORS = ("||", "&&", "|", ";", "&", "\r", "\n")
+
+
 def _split_segments(command: str) -> list[str]:
     """Split command by pipe/chain operators to check each segment.
 
@@ -157,9 +160,43 @@ def _split_segments(command: str) -> list[str]:
     blob — and it is safety by accident: any pattern anchored at the start of
     a line, and any future check that assumes a segment is one command, was
     blind to it.
+
+    Quotes are honoured: an operator inside them is part of an argument, not a
+    boundary. Splitting `cd "C:/R&D/tools"` at the `&` gave the cwd tracker a
+    confident, wrong directory, and a wrong-but-truthy answer never trips a
+    fail-closed net.
+
+    Grouping punctuation is stripped from the edges, so `( cd sub` is still a cd.
     """
-    parts = re.split(r"\s*(?:\|\||&&|[|;&\r\n])\s*", command)
-    return [part for part in parts if part and part.strip()]
+    parts, buf, quote, i = [], [], "", 0
+    while i < len(command):
+        ch = command[i]
+        if quote:
+            buf.append(ch)
+            if ch == quote:
+                quote = ""
+            i += 1
+            continue
+        if ch in "\"'":
+            quote = ch
+            buf.append(ch)
+            i += 1
+            continue
+        hit = next((op for op in _SEGMENT_OPERATORS if command.startswith(op, i)), None)
+        if hit:
+            parts.append("".join(buf))
+            buf = []
+            i += len(hit)
+            continue
+        buf.append(ch)
+        i += 1
+    parts.append("".join(buf))
+    return [cleaned for cleaned in (_strip_grouping(part) for part in parts) if cleaned]
+
+
+def _strip_grouping(segment: str) -> str:
+    """One command, without the shell's grouping punctuation around it."""
+    return segment.strip().strip("(){}").strip()
 
 
 def _is_fork_bomb(command: str) -> bool:
@@ -246,6 +283,7 @@ _SCRIPT_READ_LIMIT = 256 * 1024
 
 _CD_RE = re.compile(r"^\s*(?:cd|chdir|pushd)\b(?:\s+/d\b)?\s*(?P<target>.*?)\s*$", re.I)
 _POPD_RE = re.compile(r"^\s*popd\b", re.I)
+_PUSHD_RE = re.compile(r"^\s*pushd\b", re.I)
 # A target we cannot evaluate without running the shell: a variable, a
 # substitution, or `cd -`. Resolving one of these by guessing is worse than
 # saying the directory is unknown.
@@ -255,32 +293,88 @@ _POPD_RE = re.compile(r"^\s*popd\b", re.I)
 # path on the fleet's own platform — read as unresolvable and every script after
 # it went to the approval queue. That is the same false-positive shape as the
 # four XPath firings of 2026-08-30, introduced by the fix for them.
-_UNRESOLVABLE_CD = re.compile(r"\$[\w{(]|\$$|`|%\w+%|^-$")
+_UNRESOLVABLE_CD = re.compile(r"\$[\w{(]|\$$|`|%\w+%")
 
 
-def _cd_target(segment: str) -> Optional[str]:
-    """Where a `cd` segment moves to; "" when it cannot be told.
+class _Move(NamedTuple):
+    """A directory change, as much of it as the gate can know statically."""
 
-    None means the segment is not a directory change at all.
+    kind: str          # move | push | pop | previous | unknown
+    target: str = ""
+
+
+def _cd_move(segment: str) -> Optional[_Move]:
+    """The directory change this segment makes, or None if it makes none.
+
+    `popd` and `cd -` are *knowable* moves, not unknown ones — the first
+    returns to what `pushd` recorded, the second to where we just were. Calling
+    them unknown made every later script in the command unreadable, which
+    refused ordinary work on a directory the gate had already cleared.
     """
     if _POPD_RE.match(segment):
-        return ""
+        return _Move("pop")
     match = _CD_RE.match(segment)
     if not match:
         return None
-    target = match.group("target").strip().strip("\"'")
+    kind = "push" if _PUSHD_RE.match(segment) else "move"
+    target = _strip_comment(match.group("target")).strip().strip("\"'")
+    if target == "-":
+        return _Move("previous")
     if not target:
-        return os.path.expanduser("~")
-    return "" if _UNRESOLVABLE_CD.search(target) else target
+        return _Move("move", os.path.expanduser("~"))
+    if _UNRESOLVABLE_CD.search(target):
+        return _Move("unknown")
+    return _Move(kind, os.path.expanduser(target))
 
 
-def _moved_to(here: str, target: str) -> str:
-    """The directory after a `cd`, or "" once it is no longer known."""
-    if not target:
-        return ""
-    if os.path.isabs(target):
-        return os.path.normpath(target)
-    return os.path.normpath(os.path.join(here, target)) if here else ""
+def _strip_comment(text: str) -> str:
+    """Everything before an unquoted `#` that starts a word."""
+    quote = ""
+    for i, ch in enumerate(text):
+        if quote:
+            if ch == quote:
+                quote = ""
+        elif ch in "\"'":
+            quote = ch
+        elif ch == "#" and (i == 0 or text[i - 1].isspace()):
+            return text[:i]
+    return text
+
+
+class _Cwd:
+    """Where each segment of one command runs, tracked as the shell would.
+
+    `here` is "" once a move cannot be evaluated. `candidates` always offers the
+    starting directory as well, so a move can only add places the gate looks.
+    """
+
+    def __init__(self, base_dir: str):
+        self.base = os.path.normpath(base_dir)
+        self.here = self.base
+        self._stack: list[str] = []
+        self._previous = self.base
+
+    def apply(self, move: _Move) -> None:
+        if move.kind == "pop":
+            self.here = self._stack.pop() if self._stack else ""
+            return
+        if move.kind == "previous":
+            self.here, self._previous = self._previous, self.here
+            return
+        if move.kind == "push":
+            self._stack.append(self.here)
+        was = self.here
+        if move.kind == "unknown":
+            self.here = ""
+        elif os.path.isabs(move.target):
+            self.here = os.path.normpath(move.target)
+        else:
+            self.here = os.path.normpath(os.path.join(was, move.target)) if was else ""
+        self._previous = was
+
+    @property
+    def candidates(self) -> list[str]:
+        return list(dict.fromkeys(d for d in (self.here, self.base) if d))
 
 
 def _script_named_in(segment: str) -> str:
@@ -294,16 +388,22 @@ def _script_named_in(segment: str) -> str:
 
 def _script_paths_out_of_sandbox(
     segment: str, ctx: "ToolContext", base_dir: str
-) -> Optional[Tuple[str, str]]:
+) -> Tuple[Optional[Tuple[str, str]], bool]:
     """A path that leaves the sandbox, found inside a script this segment runs.
 
     A speed bump rather than a boundary: it catches the naive form and an
     import, a computed name or base64 walks past it. The class is closed only
     by isolation — see WRITE-A-SCRIPT-AND-RUN-IT-AND-THE-PATH-GATE-NEVER-SEES-THE-PATH.
 
-    Returns (script, offending path); ("", script) when the script is present
-    and unreadable, because a gate that cannot see must say so.
+    Returns ((script, offending path), resolved); ("", script) when the script
+    is present and unreadable, because a gate that cannot see must say so.
+
+    `resolved` says whether a launched script was actually located here and
+    read. Without it the caller cannot tell «nothing to look at» from «looked,
+    and it was clean», and treating the second as the first refuses work the
+    gate has already cleared.
     """
+    resolved = False
     for pat in _SCRIPT_LAUNCH_PATTERNS:
         for match in pat.finditer(segment):
             raw = match.group(1).strip("\"'")
@@ -327,12 +427,13 @@ def _script_paths_out_of_sandbox(
                         "script gate: %s is %d bytes, over the %d-byte read limit",
                         candidate, size, _SCRIPT_READ_LIMIT,
                     )
-                    return ("", raw)
+                    return ("", raw), True
                 with open(candidate, "r", encoding="utf-8", errors="replace") as fh:
                     body = fh.read()
+                resolved = True
             except OSError as e:
                 log.warning("script gate could not read %s: %s", candidate, e)
-                return ("", raw)
+                return ("", raw), True
             for path_pat in PATH_PATTERNS:
                 for hit in path_pat.finditer(body):
                     if not _reads_as_a_filesystem_path(body, hit):
@@ -340,8 +441,8 @@ def _script_paths_out_of_sandbox(
                     try:
                         ctx.validate_extended_path(hit.group(1))
                     except PermissionError:
-                        return (raw, hit.group(1))
-    return None
+                        return (raw, hit.group(1)), True
+    return None, resolved
 
 
 def _reads_as_a_filesystem_path(body: str, hit: "re.Match") -> bool:
@@ -431,25 +532,23 @@ def _validate_command(
             # applied to every segment, so `cd sub && python steal.py` resolved the
             # script against the directory above the one it runs in, os.path.isfile
             # missed, and the gate skipped it — one cd was the whole bypass.
-            base_dir = os.path.normpath(base_dir)
-            here = base_dir
+            walk = _Cwd(base_dir)
             for segment in segments:
-                target = _cd_target(segment)
-                if target is not None:
-                    here = _moved_to(here, target)
+                move = _cd_move(segment)
+                if move is not None:
+                    walk.apply(move)
                     continue
-                # Both directories are tried, so a cd can only widen what the gate
-                # sees: a pipeline whose segments do not in fact inherit the move
-                # still gets the original directory checked.
-                found = None
-                for candidate_dir in dict.fromkeys([d for d in (here, base_dir) if d]):
-                    found = _script_paths_out_of_sandbox(segment, ctx, candidate_dir)
+                found, resolved = None, False
+                for candidate_dir in walk.candidates:
+                    found, seen = _script_paths_out_of_sandbox(segment, ctx, candidate_dir)
+                    resolved = resolved or seen
                     if found:
                         break
-                if not found and not here:
-                    # An unresolvable cd (a variable, a substitution, `cd -`) plus a
-                    # script launch: the gate cannot say where the file is, which is
-                    # the case the unreadable branch already answers with a refusal.
+                if not found and not resolved and not walk.here:
+                    # The gate cannot say where this file is: the move before it was
+                    # a variable or a substitution, and no directory it does know
+                    # holds the script. That is the case the unreadable branch
+                    # already answers with a refusal.
                     named = _script_named_in(segment)
                     if named:
                         found = ("", named)

@@ -356,25 +356,31 @@ def test_an_ordinary_windows_path_is_not_an_unresolvable_cd(tmp_path):
     `(` and `%` were listed as plain «cannot evaluate this» characters, so
     `cd "C:/Program Files (x86)/…"` — the most ordinary path on the platform
     this fleet runs on — marked the directory unknown and sent every script
-    after it to the approval queue. Same false-positive shape as the four
-    XPath firings of 2026-08-30, introduced by the fix for them.
+    after it to the approval queue.
     """
-    from dpc_client_core.dpc_agent.tools.shell import _cd_target
+    from dpc_client_core.dpc_agent.tools.shell import _cd_move
 
-    assert _cd_target('cd "C:/Program Files (x86)/tool"') == "C:/Program Files (x86)/tool"
-    assert _cd_target("cd 50%done") == "50%done"
+    assert _cd_move('cd "C:/Program Files (x86)/tool"').target == "C:/Program Files (x86)/tool"
+    assert _cd_move("cd 50%done").target == "50%done"
 
 
 def test_a_target_the_shell_would_expand_is_still_unknown(tmp_path):
-    """The control: the cases the rule exists for must keep failing closed."""
-    from dpc_client_core.dpc_agent.tools.shell import _cd_target
+    """The control: a target only the shell can evaluate stays unknown."""
+    from dpc_client_core.dpc_agent.tools.shell import _cd_move
 
-    assert _cd_target("cd $BUILD") == ""
-    assert _cd_target("cd ${BUILD}") == ""
-    assert _cd_target("cd $(pwd)") == ""
-    assert _cd_target("cd %BUILD%") == ""
-    assert _cd_target("cd -") == ""
-    assert _cd_target("popd") == ""
+    for spelling in ("cd $BUILD", "cd ${BUILD}", "cd $(pwd)", "cd %BUILD%"):
+        assert _cd_move(spelling).kind == "unknown", spelling
+
+
+def test_a_stack_move_is_known_rather_than_unknown(tmp_path):
+    """`popd` and `cd -` return somewhere the gate can name."""
+    from dpc_client_core.dpc_agent.tools.shell import _cd_move
+
+    assert _cd_move("popd").kind == "pop"
+    assert _cd_move("cd -").kind == "previous"
+    assert _cd_move("pushd sub").kind == "push"
+    assert _cd_move("cd sub").kind == "move"
+    assert _cd_move("ls -la") is None
 
 
 def test_work_under_an_ordinary_windows_path_is_still_tier_zero(tmp_path):
@@ -387,3 +393,107 @@ def test_work_under_an_ordinary_windows_path_is_still_tier_zero(tmp_path):
     assert _validate_command(
         f'cd "{sub}" && python work.py', ctx, str(tmp_path)
     ) is None
+
+
+class TestTheCwdIsTrackedTheWayAShellWouldTrackIt:
+    """Two outside reviewers reproduced both halves of the same mistake.
+
+    The cwd tracker treated `popd` and `cd -` as unknowable, so every later
+    script in the command was refused — including one the gate had already
+    found in the sandbox, read and cleared. And it read the command through a
+    quote-blind regex split, so a subshell, a brace group or an `&` in a
+    directory name hid the move entirely and the script ran unexamined.
+    """
+
+    def _box(self, tmp_path):
+        (tmp_path / "sub").mkdir()
+        (tmp_path / "a && b").mkdir()
+        _script(tmp_path, "work.py", "open('out.txt', 'w').write('hi')\n")
+        _sub_script(tmp_path, "steal.py", "open('/var/secrets/key')\n")
+        (tmp_path / "a && b" / "steal.py").write_text(
+            "open('/var/secrets/key')\n", encoding="utf-8"
+        )
+        return _Ctx(tmp_path)
+
+    def test_a_balanced_pushd_popd_does_not_refuse_clean_work(self, tmp_path):
+        ctx = self._box(tmp_path)
+
+        assert _validate_command(
+            "pushd sub && popd && python work.py", ctx, str(tmp_path)
+        ) is None
+
+    def test_popd_on_its_own_does_not_refuse_clean_work(self, tmp_path):
+        ctx = self._box(tmp_path)
+
+        assert _validate_command("popd && python work.py", ctx, str(tmp_path)) is None
+
+    def test_cd_dash_does_not_refuse_clean_work(self, tmp_path):
+        ctx = self._box(tmp_path)
+
+        assert _validate_command("cd - && python work.py", ctx, str(tmp_path)) is None
+
+    def test_a_script_the_sandbox_already_cleared_is_not_unreadable(self, tmp_path):
+        """Even after a move the gate genuinely cannot evaluate."""
+        ctx = self._box(tmp_path)
+
+        assert _validate_command(
+            "cd $BUILD && python work.py", ctx, str(tmp_path)
+        ) is None
+
+    def test_an_unknown_move_still_refuses_a_script_nowhere_known_holds(self, tmp_path):
+        """The fail-closed half has to survive the false-positive repair."""
+        ctx = self._box(tmp_path)
+
+        verdict = _validate_command("cd $BUILD && python absent.py", ctx, str(tmp_path))
+
+        assert verdict is not None and verdict[0] == "tier1", verdict
+        assert "could not read" in verdict[1], verdict[1]
+
+    def test_a_subshell_does_not_hide_the_move(self, tmp_path):
+        ctx = self._box(tmp_path)
+
+        verdict = _validate_command("( cd sub && python steal.py )", ctx, str(tmp_path))
+
+        assert verdict is not None and verdict[0] == "tier1", verdict
+
+    def test_a_brace_group_does_not_hide_the_move(self, tmp_path):
+        ctx = self._box(tmp_path)
+
+        verdict = _validate_command(
+            "{ cd sub && python steal.py ; }", ctx, str(tmp_path)
+        )
+
+        assert verdict is not None and verdict[0] == "tier1", verdict
+
+    def test_an_operator_inside_a_quoted_path_is_not_a_boundary(self, tmp_path):
+        ctx = self._box(tmp_path)
+
+        verdict = _validate_command(
+            f'cd "{tmp_path / "a && b"}" && python steal.py', ctx, str(tmp_path)
+        )
+
+        assert verdict is not None and verdict[0] == "tier1", verdict
+
+    def test_the_stack_keeps_looking_where_popd_actually_lands(self, tmp_path):
+        """The half the resolved-flag repair does not cover.
+
+        After `pushd a && pushd b && popd` the shell is in `a`, which is
+        neither the starting directory nor the last target. Treating popd as
+        unknowable leaves only the starting directory to check, and a script
+        that lives in `a` alone runs unexamined.
+        """
+        ctx = self._box(tmp_path)
+        (tmp_path / "a").mkdir()
+        (tmp_path / "a" / "b").mkdir()
+        (tmp_path / "a" / "steal.py").write_text(
+            "open('/var/secrets/key')\n", encoding="utf-8"
+        )
+
+        verdict = _validate_command(
+            "pushd a && pushd b && popd && python steal.py", ctx, str(tmp_path)
+        )
+
+        assert verdict is not None and verdict[0] == "tier1", verdict
+        assert "accesses path outside sandbox" in verdict[1], (
+            "the refusal has to come from reading the script, not from failing to find it"
+        )
