@@ -74,6 +74,11 @@ from _harness.results_root import results_root  # noqa: E402
 # only eval numbers this repository publishes, and moving them would delete
 # tracked files to solve a problem they do not have.
 RESULTS = results_root("kv")
+# Where the arms were written before the root moved out of the tree on
+# 2026-08-31. The committed artefacts stayed here, so without this fallback
+# `--compare` on a fresh clone exits on «run that arm first» and the evidence
+# in the repository cannot be recomputed by the tool that produced it.
+LEGACY_RESULTS = Path(__file__).resolve().parent / "results"
 
 # The production alias, read rather than retyped: this probe is worthless if it
 # measures a different model or a different pin than the fleet runs.
@@ -365,6 +370,46 @@ def run_arm(ctk: str, ctv: str, only: Optional[int] = None,
     return out_path
 
 
+def _arm_file(name: str) -> Path:
+    """The arm's report, wherever it actually is."""
+    for root in (RESULTS, LEGACY_RESULTS):
+        path = root / name
+        if path.exists():
+            return path
+    raise SystemExit(f"missing {RESULTS / name} — run that arm first")
+
+
+def _arm_with_the_rerun(name: str) -> tuple[dict, str, int]:
+    """The arm's nine cells, with the computational needle taken from the re-run.
+
+    256 output tokens was too small for the needle that asks the model to
+    compute: the whole budget went to thinking and the reply came back empty.
+    Those three cells were re-run at 4096 and written to `{arm}-compute.json`,
+    and until 2026-09-02 nothing read that file — so the comparator reported
+    seven identical cells out of nine while the write-up, correctly, said nine
+    of nine. Same measurement, two files, no tool joining them.
+    """
+    base_path = _arm_file(f"{name}.json")
+    arm = json.loads(base_path.read_text(encoding="utf-8"))
+    where = f"{base_path.parent}"
+    try:
+        rerun_path = _arm_file(f"{name}-compute.json")
+    except SystemExit:
+        return arm, f"{where} (no compute re-run beside it)", 0
+    rerun = json.loads(rerun_path.read_text(encoding="utf-8"))
+    replaced = 0
+    for depth, rows in arm["depths"].items():
+        by_position = {r["position"]: r for r in rerun["depths"].get(depth, [])}
+        for i, row in enumerate(rows):
+            better = by_position.get(row["position"])
+            if better is None:
+                row["from"] = "base"
+                continue
+            rows[i] = dict(better, **{"from": f"re-run at {rerun['max_tokens']} tokens"})
+            replaced += 1
+    return arm, f"{where} + {replaced} cell(s) from {rerun_path.name}", replaced
+
+
 def compare() -> None:
     """The two arms side by side, with «empty» kept apart from «wrong».
 
@@ -372,18 +417,18 @@ def compare() -> None:
     retrieval failure, and scoring the two together would blame the cache for
     the sampler.
     """
-    arms = {}
+    arms, sources, substituted = {}, {}, 0
     for name in ARMS:
-        path = RESULTS / f"{name}.json"
-        if not path.exists():
-            raise SystemExit(f"missing {path} — run that arm first")
-        arms[name] = json.loads(path.read_text(encoding="utf-8"))
+        arms[name], sources[name], added = _arm_with_the_rerun(name)
+        substituted += added
     a_name, b_name = ARMS
+    for name in ARMS:
+        print(f"{name}: {sources[name]}")
 
     def verdict(row):
         return "hit" if row["hit"] else ("empty" if not row["got"] else "wrong")
 
-    print(f"{'depth':>8} {'pos':>5} {a_name:>12} {b_name:>12}  agree  answer")
+    print(f"{'depth':>8} {'pos':>5} {a_name:>12} {b_name:>12}  agree  {'from':<24} answer")
     totals = {a_name: 0, b_name: 0, "n": 0, "agree": 0, "empty": 0}
     for depth in DEPTHS:
         rows_a = arms[a_name]["depths"][str(depth)]
@@ -397,12 +442,17 @@ def compare() -> None:
             totals["empty"] += (not x["got"]) + (not y["got"])
             depth_real = arms[a_name].get("corpus_tokens", {}).get(str(depth), depth)
             print(f"{depth_real:>8} {x['position']:>5.2f} {verdict(x):>12} {verdict(y):>12}"
-                  f"  {'yes' if same else 'NO':>5}  {x['expected']}")
+                  f"  {'yes' if same else 'NO':>5}  {x.get('from', 'base'):<24} {x['expected']}")
     n = totals["n"]
     print(f"\nneedles found: {a_name} {totals[a_name]}/{n}, {b_name} {totals[b_name]}/{n}"
           f"   (empty replies, scored as neither: {totals['empty']})")
     print(f"identical replies: {totals['agree']}/{n} "
           f"(divergence {100 * (n - totals['agree']) / n:.0f}%)")
+    if substituted:
+        print(f"{substituted} of the {2 * n} cells come from the 4096-token re-run, "
+              f"named in the `from` column: the 256-token budget left the "
+              f"computational needle no room to answer in. On the base files alone "
+              f"this reads 7/9, which is the sampler and not the cache.")
     print("\nBoth arms are greedy at one seed, so a divergence is the cache. "
           "Equal counts with different text is a result and not a null: it says "
           "the cache moves the trajectory without moving the answer.")

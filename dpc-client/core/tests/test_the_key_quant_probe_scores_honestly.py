@@ -81,3 +81,72 @@ class TestTheCorpus:
         time; what this function owes the caller is the character budget."""
         corpus, _ = ab._corpus(random.Random(3), 128_000)
         assert 128_000 <= len(corpus) <= 128_000 * 1.02
+
+
+class TestTheEvidenceRecomputesItself:
+    """The write-up says nine comparable cells, identical in both arms, and the
+    comparator on the base files alone says seven — because the three
+    computational cells were re-run at 4096 tokens into `{arm}-compute.json`
+    and nothing read that file. Two artefacts of one measurement, and no tool
+    joining them; the 22% was an empty reply, not a different answer.
+    """
+
+    def _arm(self, root, name, compute_got, max_tokens=None, only_needle=None):
+        rows = {
+            str(depth): [
+                {"position": 0.25, "expected": "295", "got": "295", "hit": True},
+                {"position": 0.50, "expected": "abc", "got": "abc", "hit": True},
+                {"position": 0.75, "expected": "5139", "got": compute_got,
+                 "hit": compute_got == "5139"},
+            ]
+            for depth in ab.DEPTHS
+        }
+        doc = {"ctk": "x", "ctv": "y", "depths": rows, "corpus_tokens": {}}
+        if max_tokens is not None:
+            doc["max_tokens"] = max_tokens
+            doc["only_needle"] = only_needle
+            for depth in rows:
+                rows[depth] = [r for r in rows[depth] if r["position"] == 0.75]
+        (root / f"{name}.json").write_text(__import__("json").dumps(doc), encoding="utf-8")
+
+    def test_the_compute_rerun_is_read_and_named(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(ab, "RESULTS", tmp_path)
+        monkeypatch.setattr(ab, "LEGACY_RESULTS", tmp_path)
+        name = ab.ARMS[0]
+        self._arm(tmp_path, name, compute_got="")
+        self._arm(tmp_path, f"{name}-compute", compute_got="5139",
+                  max_tokens=4096, only_needle=2)
+
+        arm, source, replaced = ab._arm_with_the_rerun(name)
+
+        assert replaced == 3, "the computational cells were not substituted"
+        assert "compute.json" in source
+        assert all(
+            row["got"] == "5139" and row["from"].startswith("re-run")
+            for rows in arm["depths"].values()
+            for row in rows if row["position"] == 0.75
+        )
+
+    def test_an_arm_with_no_rerun_beside_it_is_still_read(self, tmp_path, monkeypatch):
+        """Non-regression: the substitution is an addition, not a requirement."""
+        monkeypatch.setattr(ab, "RESULTS", tmp_path)
+        monkeypatch.setattr(ab, "LEGACY_RESULTS", tmp_path)
+        name = ab.ARMS[0]
+        self._arm(tmp_path, name, compute_got="5139")
+
+        arm, source, replaced = ab._arm_with_the_rerun(name)
+
+        assert replaced == 0
+        assert "no compute re-run" in source
+        assert len(arm["depths"][str(ab.DEPTHS[0])]) == 3
+
+    def test_the_committed_artefacts_are_found_after_the_root_moved(self, tmp_path, monkeypatch):
+        """`--compare` exited on «run that arm first» while the files sat in the
+        tree: the results root moved out and the artefacts stayed behind."""
+        legacy = tmp_path / "in-the-tree"
+        legacy.mkdir()
+        monkeypatch.setattr(ab, "RESULTS", tmp_path / "moved-away")
+        monkeypatch.setattr(ab, "LEGACY_RESULTS", legacy)
+        self._arm(legacy, ab.ARMS[0], compute_got="5139")
+
+        assert ab._arm_file(f"{ab.ARMS[0]}.json").parent == legacy
