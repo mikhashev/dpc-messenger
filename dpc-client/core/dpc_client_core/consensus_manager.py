@@ -404,6 +404,12 @@ class ConsensusManager:
                 # the same commit_hash (parent_commit_id is part of the hash input).
                 parent_commit_id=proposal.parent_commit_id,
                 proposal_id=proposal.proposal_id,
+                # The same rule, and the field it was not applied to. `timestamp`
+                # is in the hash input too, and its default is this node's clock —
+                # so two nodes counting one vote a microsecond apart minted two
+                # commit ids for it, and neither could hold the other's signature.
+                # The proposal is what every participant already shares.
+                timestamp=proposal.timestamp,
             )
 
             # Apply commit to local context; only fire success callbacks if write succeeded
