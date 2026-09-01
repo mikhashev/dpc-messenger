@@ -257,3 +257,94 @@ def test_naming_a_script_as_an_argument_is_not_running_it(tmp_path):
 
     assert _validate_command("type dl.cmd", ctx, str(tmp_path)) is None
     assert _validate_command("git add dl.cmd", ctx, str(tmp_path)) is None
+
+
+def _sub_script(sandbox, name, body):
+    sub = Path(sandbox) / "sub"
+    sub.mkdir(exist_ok=True)
+    p = sub / name
+    p.write_text(body, encoding="utf-8")
+    return p
+
+
+def test_a_cd_into_a_subdirectory_does_not_hide_the_script(tmp_path):
+    """One `cd` was the whole bypass: the script exists only in sub/."""
+    _sub_script(tmp_path, "steal.py", "open('/var/secrets/key')\n")
+    ctx = _Ctx(tmp_path)
+
+    verdict = _validate_command("cd sub && python steal.py", ctx, str(tmp_path))
+
+    assert verdict is not None and verdict[0] == "tier1", verdict
+
+
+def test_an_absolute_cd_into_a_subdirectory_does_not_hide_the_script(tmp_path):
+    """The same move spelled with the whole path."""
+    _sub_script(tmp_path, "steal.py", "open('/var/secrets/key')\n")
+    ctx = _Ctx(tmp_path)
+
+    verdict = _validate_command(
+        f"cd {tmp_path / 'sub'} && python steal.py", ctx, str(tmp_path)
+    )
+
+    assert verdict is not None and verdict[0] == "tier1", verdict
+
+
+def test_naming_the_subdirectory_instead_of_entering_it_was_never_the_hole(tmp_path):
+    """The control: the same script reached without a cd was always caught."""
+    _sub_script(tmp_path, "steal.py", "open('/var/secrets/key')\n")
+    ctx = _Ctx(tmp_path)
+
+    verdict = _validate_command("python sub/steal.py", ctx, str(tmp_path))
+
+    assert verdict is not None and verdict[0] == "tier1", verdict
+
+
+def test_a_cd_the_gate_cannot_resolve_refuses_the_script_it_cannot_find(tmp_path):
+    """A variable in the cd target: the gate cannot say where the file is."""
+    ctx = _Ctx(tmp_path)
+
+    verdict = _validate_command("cd $BUILD && python run.py", ctx, str(tmp_path))
+
+    assert verdict is not None and verdict[0] == "tier1", verdict
+    assert "could not read" in verdict[1], verdict[1]
+
+
+def test_an_unresolvable_cd_without_a_script_is_still_tier_zero(tmp_path):
+    """The refusal is for a launch the gate cannot see, not for the cd itself."""
+    ctx = _Ctx(tmp_path)
+
+    assert _validate_command("cd $BUILD && dir", ctx, str(tmp_path)) is None
+
+
+def test_a_cd_before_ordinary_work_is_still_tier_zero(tmp_path):
+    """The non-regression: entering a subdirectory must not need a person."""
+    _sub_script(tmp_path, "work.py", "open('out.txt', 'w').write('hi')\n")
+    ctx = _Ctx(tmp_path)
+
+    assert _validate_command("cd sub && python work.py", ctx, str(tmp_path)) is None
+
+
+def test_a_script_too_big_to_read_is_refused_rather_than_skipped(tmp_path):
+    """Over the read limit is a kind of unreadable, and used to be a pass."""
+    from dpc_client_core.dpc_agent.tools.shell import _SCRIPT_READ_LIMIT
+
+    body = "open('/var/secrets/key')\n" + "# pad\n" * (_SCRIPT_READ_LIMIT // 6)
+    _script(tmp_path, "big.py", body)
+    assert (tmp_path / "big.py").stat().st_size > _SCRIPT_READ_LIMIT
+    ctx = _Ctx(tmp_path)
+
+    verdict = _validate_command("python big.py", ctx, str(tmp_path))
+
+    assert verdict is not None and verdict[0] == "tier1", verdict
+    assert "could not read" in verdict[1], verdict[1]
+
+
+def test_the_same_content_under_the_limit_is_read_and_named(tmp_path):
+    """The control: the size is what changed, not the content."""
+    _script(tmp_path, "small.py", "open('/var/secrets/key')\n")
+    ctx = _Ctx(tmp_path)
+
+    verdict = _validate_command("python small.py", ctx, str(tmp_path))
+
+    assert verdict is not None and verdict[0] == "tier1", verdict
+    assert "accesses path outside sandbox" in verdict[1], verdict[1]

@@ -244,6 +244,47 @@ _SCRIPT_LAUNCH_PATTERNS: list[re.Pattern] = [
 
 _SCRIPT_READ_LIMIT = 256 * 1024
 
+_CD_RE = re.compile(r"^\s*(?:cd|chdir|pushd)\b(?:\s+/d\b)?\s*(?P<target>.*?)\s*$", re.I)
+_POPD_RE = re.compile(r"^\s*popd\b", re.I)
+# A target we cannot evaluate without running the shell: a variable, a
+# substitution, or `cd -`. Resolving one of these by guessing is worse than
+# saying the directory is unknown.
+_UNRESOLVABLE_CD = re.compile(r"[$%`(]|^-$")
+
+
+def _cd_target(segment: str) -> Optional[str]:
+    """Where a `cd` segment moves to; "" when it cannot be told.
+
+    None means the segment is not a directory change at all.
+    """
+    if _POPD_RE.match(segment):
+        return ""
+    match = _CD_RE.match(segment)
+    if not match:
+        return None
+    target = match.group("target").strip().strip("\"'")
+    if not target:
+        return os.path.expanduser("~")
+    return "" if _UNRESOLVABLE_CD.search(target) else target
+
+
+def _moved_to(here: str, target: str) -> str:
+    """The directory after a `cd`, or "" once it is no longer known."""
+    if not target:
+        return ""
+    if os.path.isabs(target):
+        return os.path.normpath(target)
+    return os.path.normpath(os.path.join(here, target)) if here else ""
+
+
+def _script_named_in(segment: str) -> str:
+    """The first script this segment launches, or "" if it launches none."""
+    for pat in _SCRIPT_LAUNCH_PATTERNS:
+        match = pat.search(segment)
+        if match:
+            return match.group(1).strip("\"'")
+    return ""
+
 
 def _script_paths_out_of_sandbox(
     segment: str, ctx: "ToolContext", base_dir: str
@@ -271,8 +312,16 @@ def _script_paths_out_of_sandbox(
             except PermissionError:
                 continue
             try:
-                if os.path.getsize(candidate) > _SCRIPT_READ_LIMIT:
-                    continue
+                # Too big to read is a kind of cannot read, and the branch three
+                # lines down already answers that with a refusal. This used to
+                # `continue`, so a script over the limit ran unexamined.
+                size = os.path.getsize(candidate)
+                if size > _SCRIPT_READ_LIMIT:
+                    log.warning(
+                        "script gate: %s is %d bytes, over the %d-byte read limit",
+                        candidate, size, _SCRIPT_READ_LIMIT,
+                    )
+                    return ("", raw)
                 with open(candidate, "r", encoding="utf-8", errors="replace") as fh:
                     body = fh.read()
             except OSError as e:
@@ -372,8 +421,32 @@ def _validate_command(
 
         base_dir = os.path.expanduser(cwd) if cwd else str(getattr(ctx, "agent_root", "") or "")
         if base_dir:
+            # The cwd travels with the command. It used to be fixed once here and
+            # applied to every segment, so `cd sub && python steal.py` resolved the
+            # script against the directory above the one it runs in, os.path.isfile
+            # missed, and the gate skipped it — one cd was the whole bypass.
+            base_dir = os.path.normpath(base_dir)
+            here = base_dir
             for segment in segments:
-                found = _script_paths_out_of_sandbox(segment, ctx, base_dir)
+                target = _cd_target(segment)
+                if target is not None:
+                    here = _moved_to(here, target)
+                    continue
+                # Both directories are tried, so a cd can only widen what the gate
+                # sees: a pipeline whose segments do not in fact inherit the move
+                # still gets the original directory checked.
+                found = None
+                for candidate_dir in dict.fromkeys([d for d in (here, base_dir) if d]):
+                    found = _script_paths_out_of_sandbox(segment, ctx, candidate_dir)
+                    if found:
+                        break
+                if not found and not here:
+                    # An unresolvable cd (a variable, a substitution, `cd -`) plus a
+                    # script launch: the gate cannot say where the file is, which is
+                    # the case the unreadable branch already answers with a refusal.
+                    named = _script_named_in(segment)
+                    if named:
+                        found = ("", named)
                 if not found:
                     continue
                 if whitelist and _is_whitelisted(segment, whitelist):
