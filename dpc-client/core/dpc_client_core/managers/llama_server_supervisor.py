@@ -944,6 +944,28 @@ class LlamaServerSupervisor:
         except OSError:
             return None
 
+    _SCAN_CHUNK = 8 * 1024 * 1024
+
+    def _read_from(self, offset: int) -> Optional[Tuple[bytes, int]]:
+        """(bytes from `offset` forward, the offset they start at).
+
+        Forward from the cursor, not backward from EOF. A tail read loses every
+        refusal a busy window has already pushed out of it — measured: a refusal
+        with 70 KiB of log after it was reported as nothing, and stayed nothing,
+        which is exactly the noisy start this mechanism exists for. A read is
+        capped, and the cursor stops short of the cap so the next call picks up
+        a match that straddled the boundary.
+        """
+        try:
+            with open(self._log_path, "rb") as f:
+                f.seek(0, 2)
+                size = f.tell()
+                start = 0 if offset > size else max(0, offset)
+                f.seek(start)
+                return f.read(self._SCAN_CHUNK), start
+        except OSError:
+            return None
+
     def prime_restore_scan(self) -> None:
         """Watch from here on. Called at launch, so the previous child's lines
         in this append-only file are never reported as this one's."""
@@ -959,22 +981,22 @@ class LlamaServerSupervisor:
         one place the host cache is visible at all. Keyed by the anchor line's
         absolute offset: the window moves forward, the offset does not go back.
         """
-        read = self._read_tail()
+        if self._restore_scan_offset is None:
+            self.prime_restore_scan()
+            return []
+        read = self._read_from(self._restore_scan_offset)
         if read is None:
             return []
         data, start = read
         end = start + len(data)
-        if self._restore_scan_offset is None:
-            self._restore_scan_offset = end
-            return []
-        if self._restore_scan_offset > end:
+        if start < self._restore_scan_offset:
             # The file shrank — rotated or truncated under us. What we counted
             # is gone; watch what is there now, including its first byte.
-            self._restore_scan_offset = start - 1
+            self._restore_scan_offset = start
         out: List[Dict[str, Any]] = []
         for m in _RESTORE_CELLS_RE.finditer(data):
             offset = start + m.start()
-            if offset <= self._restore_scan_offset:
+            if offset < self._restore_scan_offset:
                 continue
             block = data[m.end():m.end() + _RESTORE_BLOCK_BYTES]
             size_m = _RESTORE_SIZE_RE.search(block)
@@ -985,8 +1007,14 @@ class LlamaServerSupervisor:
                 "slot": int(slot_m.group(1)) if slot_m else None,
                 "offset": offset,
             })
-        if out:
-            self._restore_scan_offset = out[-1]["offset"]
+        # To the end of what was read, never to the last hit: a cursor that stops
+        # at the last refusal re-reads the same window for ever and loses the
+        # event once the window has moved past it.
+        capped = len(data) == self._SCAN_CHUNK
+        self._restore_scan_offset = max(
+            self._restore_scan_offset,
+            end - _RESTORE_BLOCK_BYTES if capped else end,
+        )
         return out
 
     def log_restore_refusals(self) -> int:

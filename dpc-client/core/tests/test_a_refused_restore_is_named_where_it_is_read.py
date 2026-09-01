@@ -255,3 +255,46 @@ class TestTheSharedTailDidNotBreakTheTimings:
 
         assert timings["prefill_tok_s"] == 438
         assert timings["engine_prompt_tokens"] == 1621
+
+
+class TestANoisyStartDoesNotBuryTheEvent:
+    """The window used to be a 64 KiB tail, and the cursor stopped at the last
+    hit rather than at the end of what was read. A refusal with more than a
+    window of log after it was reported as nothing, for ever — and a noisy
+    start is the only run where this mechanism has anything to say.
+    """
+
+    def test_a_refusal_under_sixty_kilobytes_of_noise_is_still_found(self, tmp_path):
+        sup, log = _sup(tmp_path, ORDINARY)
+        sup.prime_restore_scan()
+        _append(log, REFUSAL)
+        _append(log, ORDINARY * 300)
+
+        assert len(sup.new_restore_refusals()) == 1
+
+    def test_a_refusal_under_a_megabyte_of_noise_is_still_found(self, tmp_path):
+        sup, log = _sup(tmp_path, ORDINARY)
+        sup.prime_restore_scan()
+        _append(log, REFUSAL)
+        _append(log, ORDINARY * 5000)
+
+        found = sup.new_restore_refusals()
+
+        assert len(found) == 1, "the tail read had moved past it"
+        assert found[0]["cells"] == 126546
+
+    def test_the_cursor_reaches_the_end_of_the_read_not_the_last_hit(self, tmp_path):
+        """The mechanism of the loss: a cursor left at the hit re-reads the
+        same bytes, so the next refusal is only seen while it stays in view."""
+        sup, log = _sup(tmp_path, ORDINARY)
+        sup.prime_restore_scan()
+        _append(log, REFUSAL)
+        assert len(sup.new_restore_refusals()) == 1
+
+        _append(log, ORDINARY * 5000)
+        assert sup.new_restore_refusals() == []
+
+        _append(log, OLDER_REFUSAL)
+        found = sup.new_restore_refusals()
+
+        assert [f["cells"] for f in found] == [150145]
