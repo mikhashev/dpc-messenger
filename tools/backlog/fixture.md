@@ -9,9 +9,11 @@ sections:
 
 Run it: `uv run python tools/backlog/build.py --check tools/backlog/fixture.md`
 
-Expected: 11 refusals, 5 warnings, exit 1. Six entries must produce nothing at all.
-(The line said 6 and 3 until 2026-08-11; the counts had drifted as rules were added and
-nobody re-measured. These two are measured, not remembered.)
+Expected: 14 refusals, 25 warnings, exit 1. Seven entries must produce nothing at all.
+(The line said 6 and 3 until 2026-08-11 and 11 and 5 until 2026-09-01; the counts drift as
+rules are added and nobody re-measures. These are measured on the day they change, not
+remembered. The jump in warnings on 2026-09-01 is the axis field arriving: every entry
+written before it warns once, here as in the real board.)
 
 The non-English rule is the one rule not testable from here — a fixture entry proving it
 would have to contain the very thing this file must not contain. It is asserted inside
@@ -94,6 +96,31 @@ would have to contain the very thing this file must not contain. It is asserted 
 - **Observed.** Must be refused as a post-cutoff entry, and must still parse as HIGH — the
   value is recovered on read so a legacy entry does not lose its priority, and refused on
   write so nothing new comes to depend on the tolerance.
+
+### AXIS-MISSING-AFTER-ITS-CUTOFF: an entry written after the axis field was agreed and carrying none (LOW, open, 2026-09-01 — CC: fixture)
+
+- **Observed.** Must be refused: dated on the axis cutoff, so the field is required.
+
+### AXIS-TOKEN-NOT-IN-THE-VOCABULARY: a misspelled axis groups the entry under nothing (LOW, open, 2026-09-01 — CC: fixture)
+
+- **Observed.** Must be refused, naming the bad token rather than the absent field.
+- **axis:** compute
+
+### AXIS-BULLET-TWICE: two bullets, and the parser reads only the first (LOW, open, 2026-09-01 — CC: fixture)
+
+- **Observed.** Must be refused: the second bullet is invisible prose that can disagree.
+- **axis:** network
+- **axis:** knowledge
+
+### AXIS-ON-EVERYTHING: three axes on one entry (LOW, open, 2026-09-01 — CC: fixture)
+
+- **Observed.** Must warn, not refuse: an entry that serves everything reports nothing.
+- **axis:** network, knowledge, honesty
+
+### AXIS-CLEAN-AND-DOUBLE: one entry, two axes, correct (LOW, open, 2026-09-01 — CC: fixture)
+
+- **Observed.** Must produce **nothing at all** — two axes is the supported case.
+- **axis:** collective, honesty
 
 ## IN REVIEW
 

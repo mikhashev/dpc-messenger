@@ -28,10 +28,12 @@ BACKLOG = f"""# Fixture backlog for the write verbs
 ### ALPHA-ENTRY-EXISTS: the verb fixture needs one entry to move around (LOW, open, {TODAY} — CC: verb fixture)
 
 - **Observed.** Referenced by [[BETA-ENTRY-POINTS-AT-ALPHA]] so a rename has something to rewrite.
+- **axis:** honesty
 
 ### BETA-ENTRY-POINTS-AT-ALPHA: an entry whose body cites another by name (LOW, open, {TODAY} — CC: verb fixture)
 
 - **Observed.** Cross-ref: [[ALPHA-ENTRY-EXISTS]].
+- **axis:** honesty
 
 ## IN PROGRESS
 
@@ -76,7 +78,8 @@ def main():
         # --- add -------------------------------------------------------------------
         code, out = run(work, "add", "GAMMA-ENTRY-WAS-ADDED",
                         "--desc=an entry written by the add verb",
-                        "--priority=HIGH", "--origin=CC: verb fixture",
+                        "--priority=HIGH", "--axis=honesty",
+                        "--origin=CC: verb fixture",
                         "--observed=written by build.py add", "--by=CC")
         text = (work / "backlog.md").read_text(encoding="utf-8")
         check("add writes an entry that passes the checker", code == 0, out[-400:])
@@ -94,31 +97,43 @@ def main():
         check("add records the actor as an event",
               f"- **filed:** CC · {TODAY}" in text)
 
+        # The direction the entry serves is written by the verb, not typed into the
+        # body afterwards: a field the tool does not write is a field nobody fills.
+        check("add writes the axis bullet", "- **axis:** honesty" in text)
+
         # Mike, 2026-08-22: the actor is mandatory, and the fallback is an environment
         # variable rather than the OS user — several actors share one account on this box.
         code, out = run(work, "add", "ZETA-NO-ACTOR", "--desc=x", "--priority=LOW",
-                        "--origin=y", "--observed=z")
+                        "--axis=honesty", "--origin=y", "--observed=z")
         text_after = (work / "backlog.md").read_text(encoding="utf-8")
         check("add refuses when no actor is named",
               code == 2 and "ZETA-NO-ACTOR" not in text_after, out[-300:])
 
         code, out = run(work, "add", "ZETA-ACTOR-FROM-ENV", "--desc=x", "--priority=LOW",
-                        "--origin=y", "--observed=z", env={"DPC_BACKLOG_BY": "Johnny"})
+                        "--axis=honesty", "--origin=y", "--observed=z",
+                        env={"DPC_BACKLOG_BY": "Johnny"})
         text_after = (work / "backlog.md").read_text(encoding="utf-8")
         check("the actor may come from DPC_BACKLOG_BY",
               code == 0 and f"- **filed:** Johnny · {TODAY}" in text_after, out[-300:])
 
+        code, out = run(work, "add", "ETA-BAD-AXIS", "--desc=x", "--priority=LOW",
+                        "--axis=compute", "--origin=y", "--observed=z", "--by=CC")
+        text_after = (work / "backlog.md").read_text(encoding="utf-8")
+        check("add refuses an axis outside the vocabulary",
+              code == 2 and "ETA-BAD-AXIS" not in text_after, out[-300:])
+
         code, out = run(work, "add", "notaname", "--desc=x", "--priority=LOW",
-                        "--origin=y", "--observed=z", "--by=CC")
+                        "--axis=honesty", "--origin=y", "--observed=z", "--by=CC")
         check("add refuses a name that is not SCREAMING-KEBAB", code == 2)
 
         code, out = run(work, "add", "DELTA-NO-BODY", "--desc=x", "--priority=LOW",
-                        "--origin=y", "--by=CC")
+                        "--axis=honesty", "--origin=y", "--by=CC")
         check("add refuses an entry with no body", code == 2)
 
         code, out = run(work, "add", "EPSILON-CYRILLIC",
                         "--desc=описание",
-                        "--priority=LOW", "--origin=y", "--observed=z", "--by=CC")
+                        "--priority=LOW", "--axis=honesty", "--origin=y",
+                        "--observed=z", "--by=CC")
         text = (work / "backlog.md").read_text(encoding="utf-8")
         check("a write whose result would refuse is not written at all",
               code == 1 and "EPSILON-CYRILLIC" not in text, out[-400:])

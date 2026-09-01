@@ -89,6 +89,13 @@ ROADMAP = SRC.parent / "ROADMAP.md"
 
 PRIORITIES = ["CRITICAL", "HIGH", "MEDIUM", "LOW", "RESEARCH", "—"]
 CUTOFF = "2026-08-10"          # BACKLOG_FORMAT.md §6 — envelope required from here on
+
+# Which direction an entry serves. Words rather than Ark's letters because the letters
+# collide — the network vector and the honesty loop were both proposed as «C». Mike's
+# call, 2026-09-01; the standing argument against a formal field (§4) is answered in
+# BACKLOG_FORMAT.md §4a.
+AXES = ("collective", "knowledge", "network", "honesty", "reach")
+AXIS_CUTOFF = "2026-09-01"     # required from here on; older entries warn, as in §7
 RESOLUTIONS = {"fixed", "disproved", "moot", "superseded", "duplicate", "wontfix"}
 # The shelf is left by recording an observation, and only `close` moves the entry — so an
 # observation written into a body and nowhere else leaves the entry sitting there. Four did,
@@ -321,7 +328,20 @@ for i, line in enumerate(lines):
 
     _nm = NAME_RE.match(name)
 
+    # A body bullet rather than per-entry front matter (§5): an entry has to stay legible
+    # when an agent receives it as a bare chunk, and `- **axis:** network` reads as a
+    # sentence where a YAML block reads as noise.
+    _body_text = "\n".join(lines[i + 1:end])
+    _al = re.findall(r"^\s*-\s*\*\*axis:?\*\*\s*(.+)$", _body_text, re.M)
+    _axis = [t.strip().lower() for t in re.split(r"[,;/]", _al[0])
+             if t.strip()] if _al else []
+
     entries.append({
+        "axis": _axis,
+        # Two bullets is not two axes: the parser reads the first and the second becomes
+        # invisible prose that disagrees with the meter. Caught rather than merged.
+        "axis_twice": len(_al) > 1,
+        "axis_bad": [a for a in _axis if a not in AXES],
         "ref": _nm.group(0) if _nm else "",
         "section": section, "name": name, "desc": desc, "pri": pri, "pri_typo": pri_typo,
         "when": when, "first": first, "line": i + 1,
@@ -825,8 +845,8 @@ if VERB == "rename":
 if VERB == "add":
     if not ARGS:
         _die("usage: build.py add NAME --desc='claim, not topic' --priority=HIGH "
-             "--origin=\"Mike: '…'\" --by=CC [--section=OPEN] [--observed='…'] "
-             "[--first-step='…'] [--dry-run]")
+             "--axis=network --origin=\"Mike: '…'\" --by=CC [--section=OPEN] "
+             "[--observed='…'] [--first-step='…'] [--dry-run]")
     name = ARGS[0]
     if not re.fullmatch(r"[A-Z][A-Z0-9]*(?:-[A-Z0-9]+)+", name):
         _die(f"«{name}» is not a name (§1): SCREAMING-KEBAB, at least two segments.",
@@ -847,6 +867,18 @@ if VERB == "add":
         _die("--origin is mandatory (§1): who raised it, in their words when there are "
              "words. An entry with no origin cannot be taken back to the person who "
              "wanted it.")
+    axis = [t.strip().lower() for t in re.split(r"[,;/]", _flag("axis") or "") if t.strip()]
+    if not axis:
+        _die(f"--axis is mandatory (§4a): which direction this serves, one or two of "
+             f"{' / '.join(AXES)}.",
+             "An entry that names no direction cannot be counted under one, and the "
+             "generated ROADMAP has nowhere to put it.")
+    bad = [a for a in axis if a not in AXES]
+    if bad:
+        _die(f"axis token(s) {', '.join(repr(a) for a in bad)} not in the vocabulary "
+             f"({' / '.join(AXES)}).")
+    if len(axis) > 2:
+        _die("more than two axes: an entry that serves everything reports nothing.")
     sec_name, _ = _section_at(lines, _flag("section", "OPEN"))
     status = _status_for(sec_name)
     body = []
@@ -864,6 +896,7 @@ if VERB == "add":
     # The actor as an appended event, the same shape `move` uses for `taken:`. It is
     # deliberately not part of the heading: `origin` says who *wanted* the entry, this
     # says who *wrote* it, and the two are frequently different people.
+    body.append(f"- **axis:** {', '.join(axis)}")
     body.append(f"- **filed:** {_by} · {_when}")
     head = f"### {name}: {desc} ({pri}, {status}, {_when} — {origin})"
     rest = list(lines)
@@ -979,6 +1012,26 @@ if "--check" in sys.argv:
             at(e, "markdown emphasis at the start of the envelope — the priority is read "
                   "from the first character, so «(**HIGH …» reads as no priority at all. "
                   "The value is recovered on read, but new entries write it plain", refusals)
+
+        # Which direction the entry serves (§4a). Its own cutoff, not CUTOFF: the field
+        # was agreed on 2026-09-01 with 528 entries already written, and a refusal on all
+        # of them would leave exit 1 permanently on — the same reasoning §7 uses for the
+        # envelope. Legacy entries warn, and that warning count is the backfill meter.
+        axis_new = bool(e["when"]) and e["when"] >= AXIS_CUTOFF
+        if e["axis_twice"]:
+            at(e, "two `- **axis:**` bullets — the parser reads the first and the second "
+                  "is invisible prose that can disagree with it", refusals)
+        if e["axis_bad"]:
+            at(e, f"axis token(s) {', '.join(repr(a) for a in e['axis_bad'])} not in the "
+                  f"vocabulary ({' / '.join(AXES)}) — a misspelled axis groups the entry "
+                  f"under nothing at all", refusals if axis_new else warnings)
+        elif not e["axis"]:
+            at(e, f"no `- **axis:**` bullet — the entry does not say which direction it "
+                  f"serves, so it cannot be counted under one ({' / '.join(AXES)})",
+               refusals if axis_new else warnings)
+        elif len(e["axis"]) > 2:
+            at(e, f"{len(e['axis'])} axes on one entry — an entry that serves everything "
+                  f"reports nothing; split it or pick the two it actually serves", warnings)
 
         if new:
             missing = [f for f, v in (("priority", e["pri"] != "—" or e["pri_typo"]),
@@ -1154,9 +1207,21 @@ if "--check" in sys.argv:
     # been migrated; this measures how much of "what blocks what" has never been written
     # down at all. Nobody was going to open graph.json to find out.
     dep_all = len(dependencies)
+    no_axis = sum(1 for e in entries if not e["axis"])
     print(f"\n{len(entries)} entries · {len(refusals)} refusals · {len(warnings)} warnings"
           f" · {len(dangling)} stale references · {len(short_refs)} shortened"
-          f" · {dep_all} dependencies")
+          f" · {dep_all} dependencies · {no_axis} without axis")
+
+    # The backfill meter (§4a). Printed as a distribution rather than a total, because the
+    # useful question is not "how many are unmarked" but "does any direction hold nothing" —
+    # an axis with no entries is either finished or forgotten, and the two look identical
+    # from the ROADMAP.
+    if len(entries) - no_axis:
+        by_axis = {a: sum(1 for e in entries if a in e["axis"]) for a in AXES}
+        obs = {a: sum(1 for e in entries if a in e["axis"]
+                      and canonical(e["section"]) == "done-awaiting-observation") for a in AXES}
+        print("axis     " + " · ".join(f"{a} {by_axis[a]} ({obs[a]} awaiting obs)"
+                                       for a in AXES))
     print(f"Of the {len(dangling)} stale, {stated_n} sit next to a stated relation and "
           f"{len(dangling) - stated_n} are bare mentions. The first number is the one to "
           f"drive to zero; the total is an upper bound on real breakage, not a count of it.")

@@ -169,6 +169,55 @@ they will be re-proposed:
   renders stale edges manufactures false confidence.
 - **`owner:`** — for a team this size, `origin` already names who cares.
 
+## 4a. The one field that was added anyway — `axis:`
+
+```markdown
+- **axis:** network
+- **axis:** collective, honesty      ← two is allowed, three is a smell
+```
+
+Vocabulary, five words, from VISION's three vectors plus the two loops that VISION does
+not promise but the project cannot be honest without:
+
+| token | what it serves |
+|---|---|
+| `collective` | from personal to collective — P2P, groups, identity, signatures, history |
+| `knowledge` | from passive to collaborative — memory, retrieval, the agent that works on it |
+| `network` | from local to networked — local inference, compute, cost, the gateway |
+| `honesty` | that our own numbers mean something — eval, CI, the board and its gates |
+| `reach` | that somebody outside can find and use this — docs, releases, distribution |
+
+**§4 above says a formal field is filled once and then lies, and that objection is
+correct about `depends-on:` and wrong about this one.** `depends-on` encodes a relation
+between two moving things, so both ends can drift out from under it. An axis encodes what
+the entry is *about*, which changes only when the entry is rewritten — and then the axis
+is rewritten with it. It is also falsifiable in a word, which is what `Updated:` was not:
+a reviewer who thinks an entry is `knowledge` and not `network` can say so and be right or
+wrong. And unlike `owner:`, nothing else in the entry carries it: no existing field says
+which direction the work serves.
+
+**Two values, not one.** The first real use case had two: a three-node bench serves
+`collective` and `honesty` at once, and ADR-041 serves `network` and `honesty`. A field
+that forces one value makes the author pick a favourite, and the counter then reports a
+preference rather than a fact. Three or more is warned about, not refused — an entry that
+serves everything reports nothing, and is usually two entries.
+
+**Words, not letters.** Ark's original scheme was `A / B / C` for the vectors and
+`C1 / C2` for the loops; `C` and `C1` are one keystroke apart and mean different things.
+Words cost four characters and need no legend.
+
+**Migration is the same shape as §7.** `AXIS_CUTOFF = 2026-09-01`: an entry dated on or
+after it is refused without the field, everything older warns. The unmarked count is
+printed in the check summary and is the backfill meter, exactly as the warning count is
+the language meter. The first pass marked 396 entries whose name made the direction
+unambiguous and deliberately left 130 blank — a guessed axis is worse than a missing one,
+because the meter then reports coverage it does not have.
+
+**What the counter is for.** The check prints, per axis, how many entries sit in
+`DONE — AWAITING OBSERVATION`. That number is the project's own health signal — work
+finished and never seen working — and per axis it says *which direction* is running ahead
+of its evidence.
+
 ## 5. File-level front matter
 
 Per-**entry** front matter is rejected: it doubles the structural noise, pushes metadata
