@@ -549,6 +549,10 @@ class LlamaServerSupervisor:
         # scan starts at the end of the file rather than reporting a previous
         # child's refusal as this one's.
         self._restore_scan_offset: Optional[int] = None
+        # Offsets already reported that the cursor deliberately sits behind, so
+        # the rewind that lets a straddling anchor complete cannot also make a
+        # whole one arrive twice.
+        self._reported_refusals: set = set()
 
     # --- command assembly, pure and table-testable -------------------------
 
@@ -977,6 +981,7 @@ class LlamaServerSupervisor:
             self._restore_scan_offset = self._log_path.stat().st_size
         except OSError:
             self._restore_scan_offset = 0
+        self._reported_refusals = set()
 
     def new_restore_refusals(self) -> List[Dict[str, Any]]:
         """Restore refusals appended since the last scan, oldest first.
@@ -988,6 +993,7 @@ class LlamaServerSupervisor:
         if self._restore_scan_offset is None:
             self.prime_restore_scan()
             return []
+        already = self._reported_refusals
         read = self._read_from(self._restore_scan_offset)
         if read is None:
             return []
@@ -1000,7 +1006,7 @@ class LlamaServerSupervisor:
         out: List[Dict[str, Any]] = []
         for m in _RESTORE_CELLS_RE.finditer(data):
             offset = start + m.start()
-            if offset < self._restore_scan_offset:
+            if offset < self._restore_scan_offset or offset in already:
                 continue
             block = data[m.end():m.end() + _RESTORE_BLOCK_BYTES]
             size_m = _RESTORE_SIZE_RE.search(block)
@@ -1019,6 +1025,11 @@ class LlamaServerSupervisor:
             self._restore_scan_offset,
             end - _RESTORE_BLOCK_BYTES if capped else end,
         )
+        cursor = self._restore_scan_offset
+        self._reported_refusals = {
+            r["offset"] for r in list(out) + [{"offset": o} for o in already]
+            if r["offset"] >= cursor
+        }
         return out
 
     def log_restore_refusals(self) -> int:

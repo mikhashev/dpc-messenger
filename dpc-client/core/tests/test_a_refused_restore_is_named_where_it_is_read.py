@@ -298,3 +298,42 @@ class TestANoisyStartDoesNotBuryTheEvent:
         found = sup.new_restore_refusals()
 
         assert [f["cells"] for f in found] == [150145]
+
+    def test_a_refusal_is_reported_once_even_when_the_cursor_rewinds(self, tmp_path):
+        """The cost of the rewind, found by two outside reviewers.
+
+        A capped read leaves the cursor short of the end so a straddling anchor
+        can complete next time — and a whole anchor inside that band was then
+        reported again on every following scan. The anchor here is placed
+        deliberately between the rewound cursor and the end of the chunk, which
+        is the only band where the duplicate happens.
+        """
+        sup, log = _sup(tmp_path, ORDINARY)
+        sup._SCAN_CHUNK = 5000
+        sup.prime_restore_scan()
+        _append(log, ORDINARY * 10)
+        _append(log, REFUSAL)
+        _append(log, ORDINARY * 400)
+
+        seen = [len(sup.new_restore_refusals()) for _ in range(4)]
+
+        assert seen == [1, 0, 0, 0], seen
+
+    def test_a_later_refusal_still_arrives_after_a_rewind(self, tmp_path):
+        """The control: deduping must not swallow the next real event."""
+        sup, log = _sup(tmp_path, ORDINARY)
+        sup._SCAN_CHUNK = 5000
+        sup.prime_restore_scan()
+        _append(log, ORDINARY * 10)
+        _append(log, REFUSAL)
+        _append(log, ORDINARY * 400)
+        assert len(sup.new_restore_refusals()) == 1
+
+        _append(log, OLDER_REFUSAL)
+        found = []
+        for _ in range(200):
+            found = sup.new_restore_refusals()
+            if found:
+                break
+
+        assert [f["cells"] for f in found] == [150145]
