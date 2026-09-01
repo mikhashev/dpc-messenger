@@ -764,9 +764,18 @@ def _validate(src_text, arc_text):
         # the code and the first `add` after И2 confirmed it. The block is regenerated
         # here, against the candidate, before the check runs, and again on the real file
         # in `_commit`: the writer and the checker see one state or the guard is a wall.
-        subprocess.run([sys.executable, str(Path(__file__).resolve()),
-                        "--roadmap", str(tmp / SRC.name)],
-                       capture_output=True, text=True)
+        _g = subprocess.run([sys.executable, str(Path(__file__).resolve()),
+                             "--roadmap", str(tmp / SRC.name)],
+                            capture_output=True, text=True, encoding="utf-8",
+                            errors="replace")
+        if _g.returncode != 0:
+            # Discarding this code left a trap armed: a scratch regeneration that failed
+            # for its own reason would surface one step later as a mismatch, or — with the
+            # markers absent — as nothing at all. Both reviewers found it in the same hour.
+            return _g.returncode, ((_g.stdout or "") + (_g.stderr or "") +
+                                   "\nREFUSE  the roadmap block could not be rendered for "
+                                   "the candidate, so the write was not validated against "
+                                   "the state it would produce")
         r = subprocess.run([sys.executable, str(Path(__file__).resolve()),
                             "--check", str(tmp / SRC.name)],
                            capture_output=True, text=True, encoding="utf-8",
@@ -801,9 +810,21 @@ def _commit(src_text, arc_text, announcement):
     _road = ""
     if ROADMAP.exists():
         import subprocess as _sp
-        _r = _sp.run([sys.executable, str(Path(__file__).resolve()), "--roadmap"],
+        # The path is passed. Without it the verb regenerated *this* project's roadmap
+        # whatever board it had just written, so every other project the standard serves
+        # kept the wall this fix exists to remove — and a fixture run could rewrite the
+        # tracked file behind the author's back. GLM 5.3 found both halves.
+        _r = _sp.run([sys.executable, str(Path(__file__).resolve()),
+                      "--roadmap", str(SRC)],
                      capture_output=True, text=True, encoding="utf-8", errors="replace")
-        if _r.returncode == 0 and "written" in (_r.stdout or ""):
+        if _r.returncode != 0:
+            # The board is already on disk, so this cannot be undone by refusing — say it
+            # loudly instead of reporting a success the tree does not have.
+            print(f"WARNING   {SRC.name} was written but {ROADMAP.name} could not be "
+                  f"regenerated, so `--check` will refuse until it is:")
+            for ln in ((_r.stdout or "") + (_r.stderr or "")).strip().split("\n")[:6]:
+                print("  " + ln)
+        elif "written" in (_r.stdout or ""):
             _road = f" + {ROADMAP.name}"
     summary = next((ln for ln in out.split("\n") if " entries · " in ln), "")
     print(f"written   {SRC.name}" + (f" + {ARCHIVE.name}" if arc_text != _ARC_TEXT else "")
@@ -986,7 +1007,10 @@ if VERB == "add":
         _die(f"axis token(s) {', '.join(repr(a) for a in bad)} not in the vocabulary "
              f"({' / '.join(AXES)}).")
     if len(axis) > 2:
-        _die("more than two axes: an entry that serves everything reports nothing.")
+        # `--check` warns and §4a says «warned about, not refused»; the verb used to kill
+        # the write. Three surfaces, one rule — Fable 5 found the third disagreeing.
+        print(f"warning   {len(axis)} axes: an entry that serves everything reports "
+              f"nothing, and this is usually two entries.")
     sec_name, _ = _section_at(lines, _flag("section", "OPEN"))
     status = _status_for(sec_name)
     body = []
@@ -1276,6 +1300,14 @@ if "--check" in sys.argv:
                          f"{num:03d} — one of the two is wrong", refusals)
                 st = (fm.get("status") or "").strip().strip('"').lower()
                 head = st.split()[0] if st else ""
+                # The number in the status is a reference like any other, and until now it
+                # was the only one nobody resolved: a scratch ADR declaring
+                # `superseded-by-999` produced no finding at all, and the fixture's own
+                # canonical escape pointed at a decision absent from its directory.
+                _sup = re.fullmatch(r"superseded-by-(\d{3})", head or "")
+                if _sup and int(_sup.group(1)) not in adr_nums:
+                    _adr(f"status says superseded-by-{_sup.group(1)}, which is not a file "
+                         f"in {DECISIONS.name}/ — the escape from И1 points at nothing")
                 if head and not (head in ADR_STATUS or re.fullmatch(r"superseded-by-\d{3}", head)):
                     _adr(f"status «{head}» is outside the vocabulary "
                          f"({'/'.join(sorted(ADR_STATUS))}/superseded-by-NNN)")
@@ -1330,10 +1362,17 @@ if "--check" in sys.argv:
                     f"and if the new numbers are wrong, they are wrong at the source, "
                     f"which is the point of generating them")
         else:
-            warnings.append(
-                f"{ROADMAP.name}\n    no generated status block (rule 13, И2). Its status "
-                f"is written by hand, so nothing can tell you when it stops being true — "
-                f"that is how it came to claim enforcement the code did not have")
+            # A refusal, not a warning. GLM 5.3 demonstrated the asymmetry end to end: a
+            # hand edit *inside* the block was caught, deleting the whole block left exit 0
+            # for ever, and no verb ever re-adds the markers. The invariant was one
+            # deletion away from off — which is what a merge resolution or a tidy-up does.
+            refusals.append(
+                f"{ROADMAP.name}\n    no generated status block (rule 13, И2). Add the two "
+                f"markers once, by hand, where the status belongs:\n"
+                f"      {GEN_OPEN}\n      {GEN_CLOSE}\n"
+                f"    Without them the status is written by hand again, and nothing can "
+                f"tell you when it stops being true — that is how it came to claim "
+                f"enforcement the code did not have")
 
     for line in refusals:
         print(f"REFUSE  {line}")

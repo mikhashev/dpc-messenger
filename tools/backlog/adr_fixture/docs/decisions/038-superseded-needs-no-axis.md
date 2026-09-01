@@ -1,7 +1,7 @@
 ---
 adr: 038
 title: "A superseded decision belongs to no current direction"
-status: superseded-by-041
+status: superseded-by-039
 date: 2026-09-01
 deciders: [Mike]
 consulted: [CC]

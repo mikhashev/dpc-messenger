@@ -27,7 +27,10 @@ import campaign  # noqa: E402
 import ab_key_quant as kv  # noqa: E402
 
 
-def test_the_results_root_is_outside_the_repository():
+def test_the_results_root_is_outside_the_repository(monkeypatch):
+    # The default is what this asserts, so the override has to be off: a developer with
+    # DPC_EVAL_RESULTS exported got a red that said nothing about their code (Fable 5).
+    monkeypatch.delenv("DPC_EVAL_RESULTS", raising=False)
     root = results_root("gaia")
 
     assert REPO not in root.parents, (

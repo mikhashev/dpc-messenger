@@ -5,7 +5,7 @@ per ADR rule, plus one clean decision that must produce nothing at all.
 
 Run it: `uv run python tools/backlog/build.py --check tools/backlog/adr_fixture/fixture-backlog.md`
 
-Expected: 10 refusals, 1 warning, exit 1. Three decisions must produce nothing at all:
+Expected: 11 refusals, 1 warning, exit 1. Three decisions must produce nothing at all:
 the clean one, the superseded one and the proposed one — the last two are the escapes
 invariant И1 leaves open, and a fixture that did not hold them would let the check
 start shouting at every decision the project has already replaced or not yet taken.

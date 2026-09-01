@@ -53,8 +53,17 @@ headless eval and nowhere else.
   `kv` holds a constant and was rewired; `loop` and `retrieval` take their
   output path from the caller and have nothing to rewire. The seven result
   JSONs already committed under `kv/`, `loop/` and `retrieval/` stay tracked —
-  they are the only eval numbers this repository publishes, and deleting
-  tracked files would solve a problem those seven do not have.
+  they are the only eval numbers this repository publishes.
+- **Corrected 2026-09-01, and the correction is the point.** The line above used
+  to end «deleting tracked files would solve a problem those seven do not have».
+  Fable 5 checked instead of agreeing: **four of the seven carry it** — the four
+  `kv/results/*.json` each record the llama-server binary and the GGUF as
+  absolute paths under `C:\Users\mikha\.dpc\…`, written there by the harness.
+  That is the same class — the account name and a `~/.dpc` layout — that the GAIA
+  move was made to stop publishing. The username is already in git history and in
+  eight other tracked files, so this is a boundary to state rather than a leak to
+  panic about; but the sentence claiming the seven were clean was written without
+  looking, and one reviewer looked.
 - Results from `retrieval/` and `loop/` carry no date inside the file — the
   window lives only in the filename. `provenance.py` fixed that, for `gaia/`
   alone; it has never been wired into the older two.
