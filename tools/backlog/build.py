@@ -759,6 +759,14 @@ def _validate(src_text, arc_text):
         _dec = SRC.parent / "docs" / "decisions"
         if _dec.is_dir():
             shutil.copytree(_dec, tmp / "docs" / "decisions")
+        # The candidate has one more entry than the roadmap block was rendered from, so
+        # the drift check would refuse every write — Warren predicted exactly this from
+        # the code and the first `add` after И2 confirmed it. The block is regenerated
+        # here, against the candidate, before the check runs, and again on the real file
+        # in `_commit`: the writer and the checker see one state or the guard is a wall.
+        subprocess.run([sys.executable, str(Path(__file__).resolve()),
+                        "--roadmap", str(tmp / SRC.name)],
+                       capture_output=True, text=True)
         r = subprocess.run([sys.executable, str(Path(__file__).resolve()),
                             "--check", str(tmp / SRC.name)],
                            capture_output=True, text=True, encoding="utf-8",
@@ -787,8 +795,19 @@ def _commit(src_text, arc_text, announcement):
         return
     SRC.write_text(src_text, encoding="utf-8")
     ARCHIVE.write_text(arc_text, encoding="utf-8")
+    # Part of the same write, not a chore left for later: the roadmap's status block is
+    # rendered from what just changed, so leaving it for a separate command would put the
+    # tree in the one state `--check` refuses — and it would be the verb that did it.
+    _road = ""
+    if ROADMAP.exists():
+        import subprocess as _sp
+        _r = _sp.run([sys.executable, str(Path(__file__).resolve()), "--roadmap"],
+                     capture_output=True, text=True, encoding="utf-8", errors="replace")
+        if _r.returncode == 0 and "written" in (_r.stdout or ""):
+            _road = f" + {ROADMAP.name}"
     summary = next((ln for ln in out.split("\n") if " entries · " in ln), "")
-    print(f"written   {SRC.name}" + (f" + {ARCHIVE.name}" if arc_text != _ARC_TEXT else ""))
+    print(f"written   {SRC.name}" + (f" + {ARCHIVE.name}" if arc_text != _ARC_TEXT else "")
+          + _road)
     if summary:
         print("check     " + summary)
     # Item 7: the announcement is a text line in the closure-line grammar and nothing else.
