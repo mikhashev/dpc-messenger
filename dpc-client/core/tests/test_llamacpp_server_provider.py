@@ -14,6 +14,8 @@ import asyncio
 import json
 from types import SimpleNamespace
 
+from dpc_client_core.providers import llamacpp_server_provider
+
 import pytest
 
 from dpc_client_core.llm_manager import PROVIDER_MAP
@@ -1222,3 +1224,80 @@ class TestTheUsageLineSaysHowMuchOfThePromptWasReused:
             out = p._record_usage(usage, path="plain", elapsed_s=1.0)
         assert "cached_tokens" not in out
         assert not any("prefilled=" in r.getMessage() for r in caplog.records)
+
+
+class TestTheResponseIsTheSourceOfItsOwnTimings:
+    """The child states its per-request numbers in the body it returns.
+
+    Measured against the running server, through the same AsyncOpenAI client
+    this provider uses: `resp.model_extra["timings"]` carries prompt_n,
+    prompt_per_second, predicted_n, predicted_per_second, cache_n and the
+    draft counters. The log scrape they were taken from cannot say which task
+    a block belongs to, which is the whole of the attribution problem.
+    """
+
+    SERVER = {
+        "cache_n": 50, "prompt_n": 4, "prompt_ms": 1.2, "prompt_per_second": 171.7,
+        "predicted_n": 20, "predicted_ms": 620.0, "predicted_per_second": 32.6,
+        "draft_n": 10, "draft_n_accepted": 7,
+    }
+
+    def _provider_with_log_timings(self):
+        p = _provider()
+        p.supervisor = _FakeSupervisor()
+        p.supervisor.last_task_timings = lambda: {
+            "prefill_tok_s": 111, "decode_tok_s": 11,
+            "engine_prompt_tokens": 1, "engine_gen_tokens": 1,
+        }
+        return p
+
+    def _usage(self, prompt_tokens=54, completion_tokens=20):
+        return SimpleNamespace(
+            prompt_tokens=prompt_tokens, completion_tokens=completion_tokens,
+            total_tokens=prompt_tokens + completion_tokens,
+            completion_tokens_details=None,
+        )
+
+    def test_the_fields_map_onto_this_files_vocabulary(self):
+        out = llamacpp_server_provider._timings_from_response(self.SERVER)
+
+        assert out["prefill_tok_s"] == 171
+        assert out["decode_tok_s"] == 32
+        assert out["engine_prompt_tokens"] == 4
+        assert out["engine_cached_tokens"] == 50
+        assert out["draft_acceptance"] == 0.7
+
+    def test_a_response_without_timings_is_not_a_source(self):
+        assert llamacpp_server_provider._timings_from_response(None) is None
+        assert llamacpp_server_provider._timings_from_response({}) is None
+        assert llamacpp_server_provider._timings_from_response({"cache_n": 3}) is None
+
+    def test_the_response_wins_over_the_shared_log(self):
+        p = self._provider_with_log_timings()
+
+        out = p._record_usage(
+            self._usage(), path="tools", elapsed_s=10.0, engine_timings=self.SERVER
+        )
+
+        assert out["speed"]["prefill_tok_s"] == 171, "the log's 111 was preferred"
+        assert out["speed"]["decode_tok_s"] == 32
+
+    def test_the_reuse_is_stated_rather_than_subtracted(self):
+        """54 sent, 4 evaluated, 50 reused — the server says all three."""
+        p = self._provider_with_log_timings()
+
+        out = p._record_usage(
+            self._usage(prompt_tokens=54), path="tools", elapsed_s=10.0,
+            engine_timings=self.SERVER,
+        )
+
+        assert out["prefilled_tokens"] == 4
+        assert out["cached_tokens"] == 50
+
+    def test_without_response_timings_the_log_is_still_read(self):
+        """Non-regression: a build that does not send them keeps the old path."""
+        p = self._provider_with_log_timings()
+
+        out = p._record_usage(self._usage(), path="tools", elapsed_s=10.0)
+
+        assert out["speed"]["prefill_tok_s"] == 111

@@ -79,6 +79,31 @@ def _flags_of(config: Dict[str, Any]) -> tuple:
     return tuple(merged.get(k) for k in _FLAG_KEYS)
 
 
+def _timings_from_response(raw: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """The child's own per-request timings, in this file's vocabulary.
+
+    llama-server puts them in the response body, so they belong to the call
+    that asked — the shared log cannot say that about anything.
+    """
+    if not raw:
+        return None
+    out: Dict[str, Any] = {}
+    if raw.get("prompt_per_second") is not None:
+        out["prefill_tok_s"] = int(raw["prompt_per_second"])
+    if raw.get("predicted_per_second") is not None:
+        out["decode_tok_s"] = int(raw["predicted_per_second"])
+    if raw.get("prompt_n") is not None:
+        out["engine_prompt_tokens"] = int(raw["prompt_n"])
+    if raw.get("predicted_n") is not None:
+        out["engine_gen_tokens"] = int(raw["predicted_n"])
+    if raw.get("cache_n") is not None:
+        out["engine_cached_tokens"] = int(raw["cache_n"])
+    drafted = raw.get("draft_n")
+    if drafted:
+        out["draft_acceptance"] = round(raw.get("draft_n_accepted", 0) / drafted, 3)
+    return out if "prefill_tok_s" in out and "decode_tok_s" in out else None
+
+
 class LlamaServerProvider(DeepSeekProvider):
     """Local `llama-server` behind the OpenAI-compatible face.
 
@@ -518,6 +543,7 @@ class LlamaServerProvider(DeepSeekProvider):
         t_first_chunk_s: Optional[float] = None,
         finish_reason: Optional[str] = None,
         max_tokens: Optional[int] = None,
+        engine_timings: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """Same accounting as the parent, under this provider's own name — the
         burn history is grepped by that prefix, and a local box joining the
@@ -566,10 +592,12 @@ class LlamaServerProvider(DeepSeekProvider):
             )
             # The engine's own per-task timings give every path the phase
             # split, not just the streaming one: the agents' tools path has no
-            # first-chunk boundary, but the child's print_timing lines carry
-            # exact prompt-eval and eval rates for the finished task.
-            timings = None
-            if hasattr(self.supervisor, "last_task_timings"):
+            # first-chunk boundary. The response carries them for the call that
+            # asked, so there is nothing to attribute; the log scrape stays as a
+            # fallback for a build that does not send them, and it is the one
+            # that cannot tell two concurrent tasks apart.
+            timings = _timings_from_response(engine_timings)
+            if timings is None and hasattr(self.supervisor, "last_task_timings"):
                 try:
                     timings = self.supervisor.last_task_timings()
                 except Exception:
@@ -580,15 +608,18 @@ class LlamaServerProvider(DeepSeekProvider):
                     "decode_tok_s": timings["decode_tok_s"],
                     "speed_source": "engine",
                 })
-                # The only place a cache hit is visible. The engine logs a
-                # prompt-cache load solely when it FAILS (server-context.cpp:284,
-                # b10566) and the save at TRACE, so the whole host cache reads as
-                # «two refusals, ever» in a log where it may have worked all week.
-                # What it re-evaluated against what we sent is the measurement.
+                # What the engine re-evaluated against what we sent. The
+                # response states the reused count outright; from the log it can
+                # only be derived, because the child logs a prompt-cache load
+                # solely when it FAILS (server-context.cpp:284, b10566).
                 prefilled = timings.get("engine_prompt_tokens")
                 if prefilled is not None and usage["prompt_tokens"] > 0:
                     usage["prefilled_tokens"] = prefilled
-                    usage["cached_tokens"] = max(0, usage["prompt_tokens"] - prefilled)
+                    reused = timings.get("engine_cached_tokens")
+                    usage["cached_tokens"] = (
+                        reused if reused is not None
+                        else max(0, usage["prompt_tokens"] - prefilled)
+                    )
                 # Speculation was measured once, on one synthetic prompt, and the
                 # figure decided a default. The child has been printing its own
                 # counters per task all along; carrying them here makes the knob
@@ -622,7 +653,8 @@ class LlamaServerProvider(DeepSeekProvider):
             f" (reuse={100 * cached / usage['prompt_tokens']:.1f}%)",
             "" if "draft_acceptance" not in spd else
             f", draft={100 * spd['draft_acceptance']:.1f}% at n={spd.get('draft_n_max', '?')}"
-            f" ({spd['draft_tokens_per_pass']:.2f} tok/pass)",
+            + ("" if "draft_tokens_per_pass" not in spd
+               else f" ({spd['draft_tokens_per_pass']:.2f} tok/pass)"),
         )
         return usage
 
@@ -693,6 +725,7 @@ class LlamaServerProvider(DeepSeekProvider):
                 elapsed_s=_time.perf_counter() - _t0,
                 finish_reason=getattr(_choice, "finish_reason", None),
                 max_tokens=_eff_max,
+                engine_timings=(getattr(resp, "model_extra", None) or {}).get("timings"),
             )
             return msg.content or ""
 
@@ -766,6 +799,9 @@ class LlamaServerProvider(DeepSeekProvider):
                             # post-loop assignment — the field is still None
                             # here, and the estimate would silently read 0.
                             reasoning_text=thinking_text or None,
+                            engine_timings=(
+                                getattr(chunk, "model_extra", None) or {}
+                            ).get("timings"),
                             elapsed_s=_time.perf_counter() - _t0,
                             t_first_chunk_s=_t_first,
                             finish_reason=finish_reason,
@@ -882,6 +918,7 @@ class LlamaServerProvider(DeepSeekProvider):
                 elapsed_s=_time.perf_counter() - _t0,
                 finish_reason=getattr(_choice, "finish_reason", None),
                 max_tokens=self.max_tokens,
+                engine_timings=(getattr(resp, "model_extra", None) or {}).get("timings"),
             )
             return {
                 "content": content,
@@ -973,6 +1010,7 @@ class LlamaServerProvider(DeepSeekProvider):
                 elapsed_s=_time.perf_counter() - _t0,
                 finish_reason=getattr(_choice, "finish_reason", None),
                 max_tokens=kwargs.get("max_tokens", self.max_tokens),
+                engine_timings=(getattr(resp, "model_extra", None) or {}).get("timings"),
             )
             return msg.content or ""
 
