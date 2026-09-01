@@ -670,11 +670,19 @@ class P2PManager:
 
         logger.info("Initiating direct connection to %s at %s:%d", target_node_id, host, port)
 
+        # One budget for the whole dial, taken before the first packet. The
+        # pre-flight below is itself a TCP connect, so leaving it outside meant a
+        # caller asking for five seconds could wait ten.
+        deadline = asyncio.get_running_loop().time() + timeout
+
+        def _budget_left() -> float:
+            return deadline - asyncio.get_running_loop().time()
+
         # Pre-flight check: Test basic port connectivity before SSL handshake
         # This provides clearer error messages than cryptic SSL errors (e.g., WinError 121)
         logger.debug("Running pre-flight port connectivity check for %s:%d", host, port)
         # Respect caller's timeout (e.g., 5s for quick cache probes) up to 60s max for slow networks
-        preflight_timeout = min(timeout, 60.0)
+        preflight_timeout = min(_budget_left(), 60.0)
         port_accessible, port_message = await self.test_port_connectivity(host, port, preflight_timeout)
 
         if not port_accessible:
@@ -699,29 +707,25 @@ class P2PManager:
         ssl_context.check_hostname = False  # We validate manually via CN
         ssl_context.verify_mode = ssl.CERT_NONE  # Required for self-signed certs
 
-        # One budget for the whole dial. The caller's `timeout` used to buy the
-        # TCP and TLS connect and nothing else, so a peer that finished the
-        # handshake and then said nothing held this task for ever — the harness
-        # written for AN-OUTBOUND-CONNECTION-NEVER-ASKS-THE-FAR-END-TO-PROVE-ITS-KEY
-        # was still waiting past 300 s with timeout=5.0.
-        deadline = asyncio.get_running_loop().time() + timeout
-
         try:
-            # Add timeout to prevent long hangs
+            # The connect gets what the pre-flight left, and the handshake reads
+            # below get what the connect left: a peer that completes TLS and then
+            # says nothing used to hold this task for ever.
             reader, writer = await asyncio.wait_for(
                 asyncio.open_connection(host, port, ssl=ssl_context),
-                timeout=timeout
+                timeout=max(0.0, _budget_left()),
             )
 
             async def _handshake_read(expected: str) -> Optional[dict]:
                 """A read that cannot outlive the budget the caller paid for."""
-                left = deadline - asyncio.get_running_loop().time()
+                left = _budget_left()
                 try:
                     if left <= 0:
                         raise asyncio.TimeoutError
                     return await asyncio.wait_for(read_message(reader), timeout=left)
                 except asyncio.TimeoutError:
                     writer.close()
+                    await writer.wait_closed()
                     raise ConnectionError(
                         f"Handshake with {target_node_id} at {host}:{port} timed out "
                         f"waiting for {expected}: the TLS connect succeeded inside the "

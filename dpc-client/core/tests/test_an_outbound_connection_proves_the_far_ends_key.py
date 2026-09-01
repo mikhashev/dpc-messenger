@@ -202,3 +202,39 @@ async def test_a_peer_that_completes_tls_and_then_says_nothing_does_not_hold_the
 
     assert "HELLO_CHALLENGE" in str(err.value), str(err.value)
     assert time.monotonic() - started < 10, "the dial outlived the budget it was given"
+
+
+@pytest.mark.asyncio
+async def test_the_whole_dial_fits_the_budget_the_caller_paid_for(tmp_path):
+    """The pre-flight is a TCP connect too, and it used to sit outside the clock.
+
+    Both outside reviewers measured the same thing: a caller passing five
+    seconds could spend five on the pre-flight and five more on the rest. On
+    loopback the pre-flight is instant, so it is slowed here deliberately —
+    that is the only way the two budgets show up as one number.
+    """
+    node_id, _, cert_pem, key_pem = _identity()
+    manager = _manager()
+    manager._persist_peer_certificate = lambda nid, pem: True
+
+    async def _slow_preflight(host, port, timeout):
+        await asyncio.sleep(min(1.5, timeout))
+        return True, "ok"
+
+    manager.test_port_connectivity = _slow_preflight
+
+    server, port, idle = await _silent_tls_server(cert_pem, key_pem, tmp_path, "budgeted")
+    started = time.monotonic()
+    try:
+        with pytest.raises(ConnectionError):
+            await asyncio.wait_for(
+                manager.connect_directly("127.0.0.1", port, node_id, timeout=2.0),
+                timeout=30,
+            )
+    finally:
+        idle.set()
+        server.close()
+        await server.wait_closed()
+
+    spent = time.monotonic() - started
+    assert spent < 2.0 + 0.9, f"the dial spent {spent:.1f}s against a 2.0s budget"
