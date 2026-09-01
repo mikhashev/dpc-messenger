@@ -56,14 +56,15 @@ headless eval and nowhere else.
   they are the only eval numbers this repository publishes.
 - **Corrected 2026-09-01, and the correction is the point.** The line above used
   to end «deleting tracked files would solve a problem those seven do not have».
-  Fable 5 checked instead of agreeing: **four of the seven carry it** — the four
-  `kv/results/*.json` each record the llama-server binary and the GGUF as
-  absolute paths under `C:\Users\mikha\.dpc\…`, written there by the harness.
-  That is the same class — the account name and a `~/.dpc` layout — that the GAIA
-  move was made to stop publishing. The username is already in git history and in
-  eight other tracked files, so this is a boundary to state rather than a leak to
-  panic about; but the sentence claiming the seven were clean was written without
-  looking, and one reviewer looked.
+  Fable 5 checked instead of agreeing: **four of the seven carry it** — each
+  `kv/results/*.json` records the `binary` and `gguf` fields as absolute paths on
+  the machine that ran the probe, and that machine's home directory contains the
+  operator's account name. Same class as what the GAIA move stopped publishing.
+- **Nothing there is configuration.** `_alias()` reads `~/.dpc/providers.json` and
+  `_binary()` resolves the pinned install root, both on the machine running the
+  probe (`ab_key_quant.py:101-119`), so another operator's run records their own
+  paths and nothing has to be edited first. The two fields are provenance of one
+  past run, not a setting anyone inherits.
 - Results from `retrieval/` and `loop/` carry no date inside the file — the
   window lives only in the filename. `provenance.py` fixed that, for `gaia/`
   alone; it has never been wired into the older two.
