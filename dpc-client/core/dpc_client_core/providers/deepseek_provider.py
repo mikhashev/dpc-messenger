@@ -258,15 +258,22 @@ class DeepSeekProvider(AIProvider):
                 attempt, delay, int(time.monotonic() - started),
                 self.max_retry_seconds, last_error,
             )
-            await asyncio.sleep(delay)
-            if time.monotonic() >= deadline:
+            # Both halves clipped to what is left. Neither was: the ladder
+            # 3, 6, 12 … 192 enters the loop at 573s and sleeps a full 192, so
+            # a 600s budget left at 765s, and the call after the sleep was
+            # bounded only by the client's own read timeout.
+            await asyncio.sleep(min(delay, max(0.0, deadline - time.monotonic())))
+            left = deadline - time.monotonic()
+            if left <= 0:
                 break
             try:
-                return await fn()
+                return await asyncio.wait_for(fn(), timeout=left)
             except Exception as e:
+                last_error = e
+                if time.monotonic() >= deadline:
+                    break
                 if not self._is_retryable(e):
                     raise
-                last_error = e
                 delay = min(delay * 2, 192)
         raise RuntimeError(
             f"DeepSeek provider '{self.alias}' failed after {attempt} retries "

@@ -250,3 +250,54 @@ def test_one_deepseek_call_is_bounded_by_the_read_timeout_alone(monkeypatch):
     provider = _providers(monkeypatch)["deepseek"]
     worst_one_call = provider.client.timeout.read * (provider.client.max_retries + 1)
     assert worst_one_call == NETWORK_READ_TIMEOUT
+
+
+# The deadline existed and was checked at the top of each pass, and then the
+# pass overran it twice over: the sleep ran its full ladder step and the call
+# after it was bounded only by the client's own read timeout. Measured on the
+# ladder 3, 6, 12 … 192: the loop entered its last pass at 573 s and left at
+# 765 s against a budget of 600.
+
+
+@pytest.mark.asyncio
+async def test_the_loop_leaves_at_its_deadline_and_not_a_ladder_step_past_it(
+    deepseek_with_a_fake_clock,
+):
+    """Only the sleeps move the clock here, so what is measured is the ladder."""
+    provider, clock = deepseek_with_a_fake_clock
+
+    async def _instant_failure():
+        raise _timeout_error()
+
+    with pytest.raises(RuntimeError):
+        await provider._retry_with_backoff(_instant_failure, _timeout_error())
+
+    assert clock.now <= provider.max_retry_seconds, (
+        f"budget {provider.max_retry_seconds}s, left at {clock.now}s"
+    )
+
+
+@pytest.mark.asyncio
+async def test_the_zai_loop_is_bounded_the_same_way(monkeypatch):
+    """The two providers carry the same loop, so they need the same proof."""
+    monkeypatch.setenv("TEST_PROVIDER_KEY", "sk-not-a-real-key")
+    from dpc_client_core.providers import zai_provider as mod
+
+    clock = _Clock()
+    monkeypatch.setattr(mod.time, "monotonic", clock, raising=False)
+
+    async def _sleep(seconds):
+        clock.now += seconds
+
+    monkeypatch.setattr(mod.asyncio, "sleep", _sleep)
+    provider = mod.ZaiProvider("t", {"api_key_env": "TEST_PROVIDER_KEY", "model": "glm-4.7"})
+
+    async def _instant_failure():
+        raise _timeout_error()
+
+    with pytest.raises(RuntimeError):
+        await provider._retry_with_backoff(_instant_failure, _timeout_error())
+
+    assert clock.now <= provider.max_retry_seconds, (
+        f"budget {provider.max_retry_seconds}s, left at {clock.now}s"
+    )
