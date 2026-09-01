@@ -348,3 +348,42 @@ def test_the_same_content_under_the_limit_is_read_and_named(tmp_path):
 
     assert verdict is not None and verdict[0] == "tier1", verdict
     assert "accesses path outside sandbox" in verdict[1], verdict[1]
+
+
+def test_an_ordinary_windows_path_is_not_an_unresolvable_cd(tmp_path):
+    """The regression the first spelling of the cd rule introduced.
+
+    `(` and `%` were listed as plain «cannot evaluate this» characters, so
+    `cd "C:/Program Files (x86)/…"` — the most ordinary path on the platform
+    this fleet runs on — marked the directory unknown and sent every script
+    after it to the approval queue. Same false-positive shape as the four
+    XPath firings of 2026-08-30, introduced by the fix for them.
+    """
+    from dpc_client_core.dpc_agent.tools.shell import _cd_target
+
+    assert _cd_target('cd "C:/Program Files (x86)/tool"') == "C:/Program Files (x86)/tool"
+    assert _cd_target("cd 50%done") == "50%done"
+
+
+def test_a_target_the_shell_would_expand_is_still_unknown(tmp_path):
+    """The control: the cases the rule exists for must keep failing closed."""
+    from dpc_client_core.dpc_agent.tools.shell import _cd_target
+
+    assert _cd_target("cd $BUILD") == ""
+    assert _cd_target("cd ${BUILD}") == ""
+    assert _cd_target("cd $(pwd)") == ""
+    assert _cd_target("cd %BUILD%") == ""
+    assert _cd_target("cd -") == ""
+    assert _cd_target("popd") == ""
+
+
+def test_work_under_an_ordinary_windows_path_is_still_tier_zero(tmp_path):
+    """And the whole gate, not only the helper: no approval for honest work."""
+    sub = tmp_path / "Program Files (x86)"
+    sub.mkdir()
+    (sub / "work.py").write_text("open('out.txt', 'w').write('hi')\n", encoding="utf-8")
+    ctx = _Ctx(tmp_path)
+
+    assert _validate_command(
+        f'cd "{sub}" && python work.py', ctx, str(tmp_path)
+    ) is None

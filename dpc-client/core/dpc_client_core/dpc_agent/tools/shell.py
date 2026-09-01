@@ -249,7 +249,13 @@ _POPD_RE = re.compile(r"^\s*popd\b", re.I)
 # A target we cannot evaluate without running the shell: a variable, a
 # substitution, or `cd -`. Resolving one of these by guessing is worse than
 # saying the directory is unknown.
-_UNRESOLVABLE_CD = re.compile(r"[$%`(]|^-$")
+#
+# Bare `(` and `%` are NOT that. The first spelling of this rule listed them as
+# plain characters, so `cd "C:/Program Files (x86)/tool"` — the most ordinary
+# path on the fleet's own platform — read as unresolvable and every script after
+# it went to the approval queue. That is the same false-positive shape as the
+# four XPath firings of 2026-08-30, introduced by the fix for them.
+_UNRESOLVABLE_CD = re.compile(r"\$[\w{(]|\$$|`|%\w+%|^-$")
 
 
 def _cd_target(segment: str) -> Optional[str]:
