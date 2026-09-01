@@ -3,6 +3,7 @@ adr: 038
 title: "Make the group roster signed state, and give it an owner"
 status: accepted
 date: 2026-08-06
+axis: collective
 deciders: [Mike]
 consulted: [Ark, CC]
 informed: []

@@ -3,6 +3,7 @@ adr: 040
 title: "Add the second local inference path as a DPC-owned llama-server child, not an in-process binding — and fix residency before adding an engine"
 status: accepted
 date: 2026-08-18
+axis: network
 deciders: [Mike]
 consulted: [Ark, Johnny, Warren, CC, Fable 5, GLM 5.3]
 informed: []

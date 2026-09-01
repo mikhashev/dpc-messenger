@@ -3,6 +3,7 @@ adr: 029
 title: "Replace T10 popup orchestration with headed Camoufox for agent browser interaction"
 status: accepted
 date: 2026-05-24
+axis: knowledge
 deciders: [Mike]
 consulted: [Ark, CC]
 informed: []

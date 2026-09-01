@@ -3,6 +3,7 @@ adr: 034
 title: "Repair the Active Recall access layer, then adopt EvoLib's bookkeeping mechanisms"
 status: accepted
 date: 2026-07-31
+axis: knowledge
 deciders: [Mike]
 consulted: [CC, Ark, Warren, Fable 5, GLM 5.2]
 informed: []

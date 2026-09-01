@@ -3,6 +3,7 @@ adr: 027
 title: "Markdown Runtime Validation in DPC Backend"
 status: proposed
 date: 2026-05-15
+axis: honesty
 deciders: [Mike]
 consulted: [Ark, CC]
 informed: []

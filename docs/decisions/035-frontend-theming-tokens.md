@@ -3,6 +3,7 @@ adr: 035
 title: "Unify the split-brain UI under a token layer before adding a dark theme"
 status: accepted
 date: 2026-08-03
+axis: reach
 deciders: [Mike]
 consulted: [Ark, CC, Fable 5, GLM 5.2]
 informed: []

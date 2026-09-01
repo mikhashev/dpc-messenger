@@ -3,6 +3,7 @@ adr: 030
 title: "Add safety guardrails to agent run_shell tool"
 status: implemented
 date: 2026-06-01
+axis: knowledge
 deciders: [Mike]
 consulted: [Ark, CC]
 informed: []

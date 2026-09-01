@@ -3,6 +3,7 @@ adr: 041
 title: "Serve outside tools an OpenAI-compatible surface from inside the DPC client, gated by a proved peer key rather than by an API key — and give every model call one usage row on the node that ran it"
 status: accepted
 date: 2026-08-31
+axis: network, honesty
 deciders: [Mike]
 consulted: [Ark, Johnny, Warren, CC, Fable 5, GLM 5.3]
 informed: []

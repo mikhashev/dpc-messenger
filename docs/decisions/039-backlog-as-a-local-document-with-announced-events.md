@@ -3,6 +3,7 @@ adr: 039
 title: "Keep the backlog a local document and announce its changes as events"
 status: accepted
 date: 2026-08-10
+axis: honesty
 deciders: [Mike]
 consulted: [CC, Ark, Warren, Fable 5, GLM 5.2]
 informed: []

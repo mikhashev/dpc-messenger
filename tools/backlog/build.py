@@ -1148,6 +1148,28 @@ if "--check" in sys.argv:
                         if int(ref) not in adr_nums:
                             _adr(f"{key} points at ADR-{int(ref):03d}, which is not a file "
                                  f"in {DECISIONS.name}/", warnings)
+
+                # И1 (protocol 13, rule 13): a decision that is live has to be reachable
+                # from a direction. The escape is the status the vocabulary already has —
+                # a superseded decision belongs to no current axis and is not asked for
+                # one. Measured the day this landed: 41 ADRs, 15 with front matter, and
+                # `superseded-by-NNN` used by none of them, so nothing legitimate is
+                # caught by the escape being absent.
+                adr_axis = [t.strip().lower() for t in
+                            re.split(r"[,;/]", fm.get("axis", "")) if t.strip()]
+                superseded = bool(re.fullmatch(r"superseded-by-\d{3}", head))
+                if head in ("accepted", "implemented") and not superseded:
+                    bad = [a for a in adr_axis if a not in AXES]
+                    if bad:
+                        _adr(f"axis token(s) {', '.join(repr(a) for a in bad)} not in the "
+                             f"vocabulary ({' / '.join(AXES)})")
+                    elif not adr_axis:
+                        _adr(f"status is «{head}» and no `axis:` — an accepted decision "
+                             f"that names no direction cannot be reached from the plan "
+                             f"({' / '.join(AXES)}, or status superseded-by-NNN)")
+                    elif len(adr_axis) > 2:
+                        _adr(f"{len(adr_axis)} axes — a decision that serves everything "
+                             f"points nowhere; two is the ceiling", warnings)
             if not re.search(r"^## Decision\b", text, re.M):
                 _adr("no `## Decision` section — Context + Decision is the minimum an ADR "
                      "has to carry (TEMPLATE.md, RFC 3)")

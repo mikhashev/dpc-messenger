@@ -22,6 +22,7 @@ adr: NNN
 title: "Title in imperative mood"
 status: proposed | rejected | accepted | implemented | deprecated | superseded-by-NNN
 date: YYYY-MM-DD
+axis: collective | knowledge | network | honesty | reach   # which direction this serves; two allowed
 deciders: [Mike]                    # Who makes the final call
 consulted: [Ark, CC]                # SMEs who provided input (two-way)
 informed: []                        # People to notify post-decision (one-way)
@@ -47,6 +48,25 @@ against these five words plus `superseded-by-NNN` (2026-08-10).
 **Keep the field to one token.** A qualification — "implemented (opt-in per agent, default
 off)" — belongs in the body or in Implementation Status; the front-matter field is the
 machine-readable one, and the checker warns when it carries more than the word.
+
+### `axis:` — which direction the decision serves
+
+One of `collective` (personal → collective), `knowledge` (passive → collaborative),
+`network` (local → networked), `honesty` (that our own numbers mean something) or `reach`
+(that somebody outside can find and use this). Two are allowed and sometimes necessary —
+ADR-041 is the compute axis and the honesty loop at once. Vocabulary and reasoning:
+[BACKLOG_FORMAT.md §4a](../BACKLOG_FORMAT.md).
+
+**A decision whose status is `accepted` or `implemented` must carry one**, and
+`build.py --check` refuses it otherwise. This is invariant И1 of Protocol 13 rule 13: a
+decision is not accepted until it is reachable from the plan. `proposed` is exempt — that
+is the point of the rule, since naming the direction is part of accepting. The escape is
+the status the lifecycle already has: a `superseded-by-NNN` decision belongs to no current
+direction and is not asked for one — no sixth spelling of the word was invented for it.
+
+Measured the day it landed, 2026-09-01: 41 ADRs, 15 with front matter, 14 of those
+`accepted`/`implemented` and every one of them refused for the missing field. None was a
+historical orphan, so the check's first run said something true rather than shouting.
 
 ---
 

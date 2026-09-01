@@ -3,6 +3,7 @@ adr: 027
 title: "A decision that must produce nothing at all"
 status: accepted
 date: 2026-08-11
+axis: honesty
 deciders: [Mike]
 consulted: [CC]
 informed: []

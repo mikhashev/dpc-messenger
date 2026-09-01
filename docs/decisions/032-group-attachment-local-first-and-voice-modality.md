@@ -3,6 +3,7 @@ adr: 032
 title: "Local-first publishing for group attachments + voice input modality routing"
 status: accepted
 date: 2026-06-30
+axis: collective
 deciders: [Mike]
 consulted: [Ark, CC]
 informed: []

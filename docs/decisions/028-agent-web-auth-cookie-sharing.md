@@ -3,6 +3,7 @@ adr: 028
 title: "Agent web authentication via cookie sharing"
 status: accepted
 date: 2026-05-22
+axis: knowledge
 deciders: [Mike]
 consulted: [Ark, CC]
 informed: []
