@@ -1208,9 +1208,10 @@ if "--check" in sys.argv:
     # down at all. Nobody was going to open graph.json to find out.
     dep_all = len(dependencies)
     no_axis = sum(1 for e in entries if not e["axis"])
+    bad_axis = sum(1 for e in entries if e["axis_bad"])
     print(f"\n{len(entries)} entries · {len(refusals)} refusals · {len(warnings)} warnings"
           f" · {len(dangling)} stale references · {len(short_refs)} shortened"
-          f" · {dep_all} dependencies · {no_axis} without axis")
+          f" · {dep_all} dependencies · {no_axis} without axis · {bad_axis} bad axis")
 
     # The backfill meter (§4a). Printed as a distribution rather than a total, because the
     # useful question is not "how many are unmarked" but "does any direction hold nothing" —
@@ -1222,6 +1223,18 @@ if "--check" in sys.argv:
                       and canonical(e["section"]) == "done-awaiting-observation") for a in AXES}
         print("axis     " + " · ".join(f"{a} {by_axis[a]} ({obs[a]} awaiting obs)"
                                        for a in AXES))
+        # The per-axis figures above cannot be summed: an entry may carry two axes, and
+        # an unmarked entry carries none, so a shelf item can be counted twice or not at
+        # all. Warren caught the second half — 18 of the 80 were sitting in the unmarked
+        # and the line reported a triad with eighteen invisible units. Both halves are
+        # counted here directly, and the marked half is the remainder by construction, so
+        # neither number can go stale against the other.
+        shelf = sum(1 for e in entries
+                    if canonical(e["section"]) == "done-awaiting-observation")
+        shelf_blind = sum(1 for e in entries if not e["axis"]
+                          and canonical(e["section"]) == "done-awaiting-observation")
+        print(f"shelf    {shelf - shelf_blind} awaiting observation under an axis "
+              f"+ {shelf_blind} in entries that carry none = {shelf}")
     print(f"Of the {len(dangling)} stale, {stated_n} sit next to a stated relation and "
           f"{len(dangling) - stated_n} are bare mentions. The first number is the one to "
           f"drive to zero; the total is an upper bound on real breakage, not a count of it.")
