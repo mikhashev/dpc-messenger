@@ -237,15 +237,31 @@ uv sync --extra graph-grafeo --extra browser --extra graph-ner
 | `graph-grafeo` | Grafeo retrieval backend for agent memory (opt-in; default is native FAISS) |
 | `browser` | camoufox — headless browser tool for agents |
 | `graph-ner` | gliner — named-entity extraction |
+| `pdf` | pypdfium2 — PDF reading for `read_document` |
 | `mlx` | macOS Apple Silicon only — GPU Whisper via MLX |
 
-> **Do not run them as separate lines.** `uv sync --extra browser` followed by
-> `uv sync --extra graph-ner` leaves you with *only* `graph-ner` — the second
-> command removes what the first installed.
+**To add one extra to an environment that already works, use `--inexact`:**
+
+```bash
+uv sync --extra pdf --inexact
+```
+
+`--inexact` tells uv to leave alone anything it was not asked about, so the
+extras already installed survive. Measured on the developer machine: the same
+command without it would have uninstalled 17 packages — camoufox, playwright,
+gliner, grafeo and their trees.
+
+> **Without `--inexact`, do not run extras as separate lines.**
+> `uv sync --extra browser` followed by `uv sync --extra graph-ner` leaves you
+> with *only* `graph-ner` — the second command removes what the first installed.
 >
 > The same applies to a plain `uv sync` later (after a `git pull`, say): it
-> removes **every** extra. Whenever you re-sync, repeat the full `--extra`
-> list you want to keep.
+> removes **every** extra. Either repeat the full `--extra` list, or add
+> `--inexact` when you only mean to add something.
+>
+> The full-list form is still the one to use when you want the environment to
+> be *exactly* what you name — `--inexact` also keeps packages a dependency
+> change was supposed to remove.
 
 > If an agent is configured for the Grafeo backend but the package is
 > missing, the log shows

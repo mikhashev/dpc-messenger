@@ -80,6 +80,13 @@ uv run pytest --cov=dpc_client_core  # Run with coverage
 > The same applies to `uv sync --extra X` on its own: it keeps `X` and drops the
 > others. Check with `uv sync --dry-run` before running it on a live environment
 > — it prints exactly what would be uninstalled.
+>
+> **To add one extra without touching the rest, pass `--inexact`** — it leaves
+> alone anything the command did not name: `uv sync --extra pdf --inexact`.
+> Measured 2026-09-02 on this machine: the same line without it would have
+> uninstalled 17 packages. Repeat the full list only when the environment is
+> meant to become exactly what the line says, because `--inexact` also keeps
+> packages a dependency change was supposed to remove.
 
 **Platform-Specific Dependencies (macOS Apple Silicon):**
 

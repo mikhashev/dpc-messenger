@@ -733,6 +733,7 @@ def test_a_missing_pdf_reader_says_how_to_get_it(ctx, tiny, monkeypatch):
     out = asyncio.run(D.read_document(ctx, str(tiny)))
 
     assert "--extra pdf" in out, out
+    assert "--inexact" in out, "the safe form of the command is the one to hand out"
     assert "UNINSTALLS" in out, (
         "a bare `uv sync --extra pdf` removes every other extra — measured at 17 "
         "packages on the developer machine — so the message must not hand one out"

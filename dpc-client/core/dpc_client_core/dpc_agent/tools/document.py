@@ -534,10 +534,10 @@ async def read_document(
         return (
             "⚠️ PDF reading is not installed. It is an optional extra, because its "
             "wheel does not exist for every platform and the source build fetches "
-            "PDFium over the network. Add `--extra pdf` to the `uv sync` line this "
-            "environment already uses — a bare `uv sync --extra pdf` UNINSTALLS "
-            "every other extra, because uv sync makes the environment match the "
-            "command exactly. `uv sync --extra pdf --dry-run` prints what would go."
+            "PDFium over the network. Add it without disturbing anything else: "
+            "`uv sync --extra pdf --inexact` in dpc-client/core. Leave `--inexact` "
+            "out and uv makes the environment match the command exactly, which "
+            "UNINSTALLS every extra the line does not name."
         )
 
     try:
