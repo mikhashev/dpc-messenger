@@ -49,6 +49,27 @@ def _wrapped_connect_failure():
         return e
 
 
+# --- one ladder ---------------------------------------------------------------
+
+def test_every_provider_that_retries_shares_one_ladder():
+    """The fix above went into two copies by hand before this was true.
+
+    A provider says which name the log carries and what to do with an error on
+    its way out; the loop itself has one definition.
+    """
+    from dpc_client_core.providers.base import AIProvider
+    from dpc_client_core.providers.zai_provider import ZaiProvider
+    from dpc_client_core.providers.llamacpp_server_provider import LlamaServerProvider
+
+    for provider in (DeepSeekProvider, ZaiProvider, LlamaServerProvider):
+        assert provider._retry_with_backoff is AIProvider._retry_with_backoff, (
+            f"{provider.__name__} carries its own copy of the retry ladder"
+        )
+
+    labels = {p.RETRY_LABEL for p in (DeepSeekProvider, ZaiProvider, LlamaServerProvider)}
+    assert len(labels) == 3, f"two providers would log under one name: {labels}"
+
+
 # --- the predicate -----------------------------------------------------------
 
 def test_a_connect_failure_is_told_apart_from_a_busy_service():

@@ -12,7 +12,7 @@ from typing import Dict, Any, Optional, List, Union
 
 from openai import AsyncOpenAI
 
-from .base import AIProvider, network_client_bounds, never_connected
+from .base import AIProvider, network_client_bounds
 
 logger = logging.getLogger(__name__)
 
@@ -21,10 +21,6 @@ logger = logging.getLogger(__name__)
 # docs.z.ai/api-reference/introduction: "Z.ai Platform's general API endpoint is
 # as follows: https://api.z.ai/api/paas/v4".
 ZAI_DEFAULT_BASE_URL = "https://api.z.ai/api/paas/v4"
-
-# Consecutive attempts that never opened a connection before the retry loop
-# stops asking; see base.never_connected.
-_UNREACHABLE_ATTEMPTS = 2
 
 # The three base URLs that draw a GLM Coding Plan **subscription** rather than the
 # prepaid balance. They are listed together in the vendor's own protocol table at
@@ -84,6 +80,8 @@ class ZaiProvider(AIProvider):
     what it spent, because a prepaid route whose spend is invisible is worse than
     no route at all.
     """
+
+    RETRY_LABEL = "Z.AI"
 
     def __init__(self, alias: str, config: Dict[str, Any]):
         super().__init__(alias, config)
@@ -176,7 +174,7 @@ class ZaiProvider(AIProvider):
             "APIConnectionError", "APITimeoutError", "InternalServerError",
         )
 
-    def _note_if_subscription_error(self, error: Exception) -> None:
+    def _on_non_retryable(self, error: Exception) -> None:
         """A 1313 from here is a canary, not a hiccup — say so at ERROR."""
         if "1313" in str(error).lower():
             logger.error(
@@ -186,55 +184,6 @@ class ZaiProvider(AIProvider):
                 "API key's plan before retrying anything.",
                 self.alias, self.base_url,
             )
-
-    async def _retry_with_backoff(self, fn, last_error: Exception):
-        # Wall time, calls included — see the same loop in DeepSeekProvider.
-        started = time.monotonic()
-        deadline = started + self.max_retry_seconds
-        delay = 3
-        attempt = 0
-        # A route that is gone answers the same way every time.
-        unreachable_run = 1 if never_connected(last_error) else 0
-        while time.monotonic() < deadline:
-            attempt += 1
-            logger.warning(
-                "Z.AI retry %d, waiting %ds (elapsed %ds/%ds): %s",
-                attempt, delay, int(time.monotonic() - started),
-                self.max_retry_seconds, last_error,
-            )
-            # Both halves clipped to what is left. Neither was: the ladder
-            # 3, 6, 12 … 192 enters the loop at 573s and sleeps a full 192,
-            # so a 600s budget left at 765s, and the call after the sleep was
-            # bounded only by the client's own read timeout.
-            await asyncio.sleep(min(delay, max(0.0, deadline - time.monotonic())))
-            left = deadline - time.monotonic()
-            if left <= 0:
-                break
-            try:
-                return await asyncio.wait_for(fn(), timeout=left)
-            except Exception as e:
-                last_error = e
-                if time.monotonic() >= deadline:
-                    break
-                if not self._is_retryable(e):
-                    self._note_if_subscription_error(e)
-                    raise
-                if never_connected(e):
-                    unreachable_run += 1
-                    if unreachable_run >= _UNREACHABLE_ATTEMPTS:
-                        break
-                else:
-                    unreachable_run = 0
-                delay = min(delay * 2, 192)
-        why = (
-            f"{_UNREACHABLE_ATTEMPTS} consecutive attempts never reached the host"
-            if unreachable_run >= _UNREACHABLE_ATTEMPTS
-            else f"{attempt} retries"
-        )
-        raise RuntimeError(
-            f"Z.AI provider '{self.alias}' failed after {why} "
-            f"({int(time.monotonic() - started)}s elapsed): {last_error}"
-        ) from last_error
 
     def _build_extra_body(self, reasoning_effort: Optional[str] = None) -> Optional[Dict[str, Any]]:
         """GLM's thinking is a switch, not a level — there is no `reasoning_effort`
@@ -316,7 +265,7 @@ class ZaiProvider(AIProvider):
         except Exception as e:
             if self._is_retryable(e):
                 return await self._retry_with_backoff(_call, e)
-            self._note_if_subscription_error(e)
+            self._on_non_retryable(e)
             raise RuntimeError(
                 f"Z.AI provider '{self.alias}' failed: {type(e).__name__}: {e}"
             ) from e
@@ -396,7 +345,7 @@ class ZaiProvider(AIProvider):
                 # three lines live in `deepseek_provider.py:461` and
                 # `llamacpp_server_provider.py:729`.)
                 return await self._retry_with_backoff(_call, e)
-            self._note_if_subscription_error(e)
+            self._on_non_retryable(e)
             logger.error("Z.AI streaming failed: %s", e, exc_info=True)
             raise RuntimeError(
                 f"Z.AI streaming provider '{self.alias}' failed: {type(e).__name__}: {e}"
@@ -568,7 +517,7 @@ class ZaiProvider(AIProvider):
         except Exception as e:
             if self._is_retryable(e):
                 return await self._retry_with_backoff(_call, e)
-            self._note_if_subscription_error(e)
+            self._on_non_retryable(e)
             raise RuntimeError(
                 f"Z.AI native tool calling failed for '{self.alias}': "
                 f"{type(e).__name__}: {e}"
@@ -606,7 +555,7 @@ class ZaiProvider(AIProvider):
         except Exception as e:
             if self._is_retryable(e):
                 return await self._retry_with_backoff(_call, e)
-            self._note_if_subscription_error(e)
+            self._on_non_retryable(e)
             raise RuntimeError(
                 f"Z.AI vision failed for '{self.alias}': {type(e).__name__}: {e}"
             ) from e

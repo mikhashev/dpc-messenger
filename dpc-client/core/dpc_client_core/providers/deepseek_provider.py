@@ -11,17 +11,11 @@ from typing import Dict, Any, Optional, List, Union
 
 from openai import AsyncOpenAI
 
-from .base import (AIProvider, REASONING_OFF, network_client_bounds,
-                   never_connected, normalize_reasoning_effort)
+from .base import AIProvider, REASONING_OFF, network_client_bounds, normalize_reasoning_effort
 
 logger = logging.getLogger(__name__)
 
 DEEPSEEK_DEFAULT_BASE_URL = "https://api.deepseek.com"
-
-# Consecutive attempts that never opened a connection before the retry loop stops
-# asking. Two rather than one because a single connect failure can be a blip; more
-# than two buys nothing, because the answer does not change while the route is gone.
-_UNREACHABLE_ATTEMPTS = 2
 
 # The wire accepts more words than we offer: `none, minimal, low, medium, high,
 # xhigh, max` (the server names them itself when it refuses one), running three
@@ -59,6 +53,8 @@ class DeepSeekProvider(AIProvider):
         off the default-on thinking.
       - 1313 is NOT special-cased (DeepSeek never emits it).
     """
+
+    RETRY_LABEL = "DeepSeek"
 
     def __init__(self, alias: str, config: Dict[str, Any]):
         super().__init__(alias, config)
@@ -247,58 +243,6 @@ class DeepSeekProvider(AIProvider):
         ]) or isinstance(error, (ConnectionError, OSError)) or type(error).__name__ in (
             "APIConnectionError", "APITimeoutError", "InternalServerError",
         )
-
-    async def _retry_with_backoff(self, fn, last_error: Exception):
-        # The budget is wall time, including the calls. Counting only the sleeps
-        # made `max_retry_seconds` mean something other than its name: against a
-        # call that always times out the sleeps 3, 6, 12 … reach 600 on the
-        # ninth pass, so the loop spent ten call-lengths rather than ten minutes.
-        started = time.monotonic()
-        deadline = started + self.max_retry_seconds
-        delay = 3
-        attempt = 0
-        # One connect failure can be a blip; two in a row is the route. The
-        # budget still governs everything the service actually answers.
-        unreachable_run = 1 if never_connected(last_error) else 0
-        while time.monotonic() < deadline:
-            attempt += 1
-            logger.warning(
-                "DeepSeek retry %d, waiting %ds (elapsed %ds/%ds): %s",
-                attempt, delay, int(time.monotonic() - started),
-                self.max_retry_seconds, last_error,
-            )
-            # Both halves clipped to what is left. Neither was: the ladder
-            # 3, 6, 12 … 192 enters the loop at 573s and sleeps a full 192, so
-            # a 600s budget left at 765s, and the call after the sleep was
-            # bounded only by the client's own read timeout.
-            await asyncio.sleep(min(delay, max(0.0, deadline - time.monotonic())))
-            left = deadline - time.monotonic()
-            if left <= 0:
-                break
-            try:
-                return await asyncio.wait_for(fn(), timeout=left)
-            except Exception as e:
-                last_error = e
-                if time.monotonic() >= deadline:
-                    break
-                if not self._is_retryable(e):
-                    raise
-                if never_connected(e):
-                    unreachable_run += 1
-                    if unreachable_run >= _UNREACHABLE_ATTEMPTS:
-                        break
-                else:
-                    unreachable_run = 0
-                delay = min(delay * 2, 192)
-        why = (
-            f"{_UNREACHABLE_ATTEMPTS} consecutive attempts never reached the host"
-            if unreachable_run >= _UNREACHABLE_ATTEMPTS
-            else f"{attempt} retries"
-        )
-        raise RuntimeError(
-            f"DeepSeek provider '{self.alias}' failed after {why} "
-            f"({int(time.monotonic() - started)}s elapsed): {last_error}"
-        ) from last_error
 
     @staticmethod
     def _normalize_effort(value: Optional[str]) -> Optional[str]:

@@ -114,6 +114,8 @@ class LlamaServerProvider(DeepSeekProvider):
     costs nothing on a box that never routes to it.
     """
 
+    RETRY_LABEL = "llama-server"
+
     def __init__(self, alias: str, config: Dict[str, Any]):
         # AIProvider directly, not DeepSeekProvider.__init__: there is no API
         # key to require, and DeepSeek's effort normalisation must not run on

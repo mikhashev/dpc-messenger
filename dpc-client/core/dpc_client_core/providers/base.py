@@ -189,11 +189,88 @@ def network_client_bounds(config: Dict[str, Any],
 
 class AIProvider:
     """Abstract base class for all AI providers."""
+
+    # What the retry log calls this provider. One word, because it is read in a
+    # log line beside the alias.
+    RETRY_LABEL = "Provider"
+    # Wall-clock budget for `_retry_with_backoff`, overridden per instance from
+    # config by the providers that retry.
+    max_retry_seconds: float = 600
+    # Consecutive attempts that never opened a connection before the loop stops
+    # asking. Two rather than one because a single connect failure can be a blip;
+    # more than two buys nothing, because the answer does not change while the
+    # route is gone.
+    UNREACHABLE_ATTEMPTS = 2
+
     def __init__(self, alias: str, config: Dict[str, Any]):
         self.alias = alias
         self.config = config
         self.model = config.get("model")
         self.temperature = config.get("temperature", 0.7)  # Default temperature for creativity
+
+    def _on_non_retryable(self, error: Exception) -> None:
+        """Last look at an error that is about to escape the retry loop.
+
+        A provider with something to say about a particular failure says it here
+        rather than by owning a copy of the loop.
+        """
+
+    async def _retry_with_backoff(self, fn, last_error: Exception):
+        """Retry `fn` on a growing delay until the wall-clock budget is spent.
+
+        The budget is wall time, calls included: counting only the sleeps made
+        `max_retry_seconds` mean something other than its name, since against a
+        call that always times out the ladder 3, 6, 12 … reaches 600 on the ninth
+        pass — ten call-lengths rather than ten minutes. Both the sleep and the
+        call are clipped to what is left.
+
+        A connection that never opened is the exception to the patience: see
+        `never_connected`.
+        """
+        import asyncio
+        import time
+
+        started = time.monotonic()
+        deadline = started + self.max_retry_seconds
+        delay = 3
+        attempt = 0
+        unreachable_run = 1 if never_connected(last_error) else 0
+        while time.monotonic() < deadline:
+            attempt += 1
+            logger.warning(
+                "%s retry %d, waiting %ds (elapsed %ds/%ds): %s",
+                self.RETRY_LABEL, attempt, delay, int(time.monotonic() - started),
+                self.max_retry_seconds, last_error,
+            )
+            await asyncio.sleep(min(delay, max(0.0, deadline - time.monotonic())))
+            left = deadline - time.monotonic()
+            if left <= 0:
+                break
+            try:
+                return await asyncio.wait_for(fn(), timeout=left)
+            except Exception as e:
+                last_error = e
+                if time.monotonic() >= deadline:
+                    break
+                if not self._is_retryable(e):
+                    self._on_non_retryable(e)
+                    raise
+                if never_connected(e):
+                    unreachable_run += 1
+                    if unreachable_run >= self.UNREACHABLE_ATTEMPTS:
+                        break
+                else:
+                    unreachable_run = 0
+                delay = min(delay * 2, 192)
+        why = (
+            f"{self.UNREACHABLE_ATTEMPTS} consecutive attempts never reached the host"
+            if unreachable_run >= self.UNREACHABLE_ATTEMPTS
+            else f"{attempt} retries"
+        )
+        raise RuntimeError(
+            f"{self.RETRY_LABEL} provider '{self.alias}' failed after {why} "
+            f"({int(time.monotonic() - started)}s elapsed): {last_error}"
+        ) from last_error
 
     async def generate_response(self, prompt: str, **kwargs) -> str:
         """
