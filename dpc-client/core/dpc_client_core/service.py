@@ -2053,7 +2053,12 @@ class CoreService:
             return {"status": "success", "alias": alias, "balance": balance}
         except Exception as e:
             logger.error("get_provider_balance failed: %s", e)
-            return {"status": "error", "message": str(e)}
+            # A transport exception often carries no message at all — httpx's
+            # ConnectTimeout stringifies to "" — and the screen then shows the
+            # bare word "error", which reads as "the account is empty" on a
+            # project whose standing decision is to spend down to zero. The
+            # class name is the one thing always present.
+            return {"status": "error", "message": str(e) or type(e).__name__}
 
     async def get_default_providers(self) -> Dict[str, Any]:
         """

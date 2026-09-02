@@ -12,7 +12,7 @@ from typing import Dict, Any, Optional, List, Union
 
 from openai import AsyncOpenAI
 
-from .base import AIProvider, network_client_bounds
+from .base import AIProvider, network_client_bounds, never_connected
 
 logger = logging.getLogger(__name__)
 
@@ -21,6 +21,10 @@ logger = logging.getLogger(__name__)
 # docs.z.ai/api-reference/introduction: "Z.ai Platform's general API endpoint is
 # as follows: https://api.z.ai/api/paas/v4".
 ZAI_DEFAULT_BASE_URL = "https://api.z.ai/api/paas/v4"
+
+# Consecutive attempts that never opened a connection before the retry loop
+# stops asking; see base.never_connected.
+_UNREACHABLE_ATTEMPTS = 2
 
 # The three base URLs that draw a GLM Coding Plan **subscription** rather than the
 # prepaid balance. They are listed together in the vendor's own protocol table at
@@ -189,6 +193,8 @@ class ZaiProvider(AIProvider):
         deadline = started + self.max_retry_seconds
         delay = 3
         attempt = 0
+        # A route that is gone answers the same way every time.
+        unreachable_run = 1 if never_connected(last_error) else 0
         while time.monotonic() < deadline:
             attempt += 1
             logger.warning(
@@ -213,9 +219,20 @@ class ZaiProvider(AIProvider):
                 if not self._is_retryable(e):
                     self._note_if_subscription_error(e)
                     raise
+                if never_connected(e):
+                    unreachable_run += 1
+                    if unreachable_run >= _UNREACHABLE_ATTEMPTS:
+                        break
+                else:
+                    unreachable_run = 0
                 delay = min(delay * 2, 192)
+        why = (
+            f"{_UNREACHABLE_ATTEMPTS} consecutive attempts never reached the host"
+            if unreachable_run >= _UNREACHABLE_ATTEMPTS
+            else f"{attempt} retries"
+        )
         raise RuntimeError(
-            f"Z.AI provider '{self.alias}' failed after {attempt} retries "
+            f"Z.AI provider '{self.alias}' failed after {why} "
             f"({int(time.monotonic() - started)}s elapsed): {last_error}"
         ) from last_error
 

@@ -11,11 +11,17 @@ from typing import Dict, Any, Optional, List, Union
 
 from openai import AsyncOpenAI
 
-from .base import AIProvider, REASONING_OFF, network_client_bounds, normalize_reasoning_effort
+from .base import (AIProvider, REASONING_OFF, network_client_bounds,
+                   never_connected, normalize_reasoning_effort)
 
 logger = logging.getLogger(__name__)
 
 DEEPSEEK_DEFAULT_BASE_URL = "https://api.deepseek.com"
+
+# Consecutive attempts that never opened a connection before the retry loop stops
+# asking. Two rather than one because a single connect failure can be a blip; more
+# than two buys nothing, because the answer does not change while the route is gone.
+_UNREACHABLE_ATTEMPTS = 2
 
 # The wire accepts more words than we offer: `none, minimal, low, medium, high,
 # xhigh, max` (the server names them itself when it refuses one), running three
@@ -251,6 +257,9 @@ class DeepSeekProvider(AIProvider):
         deadline = started + self.max_retry_seconds
         delay = 3
         attempt = 0
+        # One connect failure can be a blip; two in a row is the route. The
+        # budget still governs everything the service actually answers.
+        unreachable_run = 1 if never_connected(last_error) else 0
         while time.monotonic() < deadline:
             attempt += 1
             logger.warning(
@@ -274,9 +283,20 @@ class DeepSeekProvider(AIProvider):
                     break
                 if not self._is_retryable(e):
                     raise
+                if never_connected(e):
+                    unreachable_run += 1
+                    if unreachable_run >= _UNREACHABLE_ATTEMPTS:
+                        break
+                else:
+                    unreachable_run = 0
                 delay = min(delay * 2, 192)
+        why = (
+            f"{_UNREACHABLE_ATTEMPTS} consecutive attempts never reached the host"
+            if unreachable_run >= _UNREACHABLE_ATTEMPTS
+            else f"{attempt} retries"
+        )
         raise RuntimeError(
-            f"DeepSeek provider '{self.alias}' failed after {attempt} retries "
+            f"DeepSeek provider '{self.alias}' failed after {why} "
             f"({int(time.monotonic() - started)}s elapsed): {last_error}"
         ) from last_error
 

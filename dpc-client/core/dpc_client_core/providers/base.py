@@ -84,6 +84,23 @@ ANTHROPIC_THINKING_MODELS = [
 ]
 
 
+def never_connected(error: BaseException) -> bool:
+    """True when the connection was never established.
+
+    A 429 or a 502 means the service answered and is busy; a connect timeout means
+    nothing answered, and waiting inside one call does not bring a route back. Both
+    belong in the same retryable set and want different amounts of patience.
+    """
+    seen: set = set()
+    e: Optional[BaseException] = error
+    while e is not None and id(e) not in seen:
+        seen.add(id(e))
+        if type(e).__name__ in ("ConnectTimeout", "ConnectError", "ConnectionRefusedError"):
+            return True
+        e = e.__cause__ or e.__context__
+    return False
+
+
 def parse_thinking_tags(content: str) -> Tuple[str, Optional[str]]:
     r"""
     Parse <think\>...</think\> tags from model response content.
