@@ -530,8 +530,15 @@ async def read_document(
 
     try:
         import pypdfium2 as pdfium
-    except ImportError:  # pragma: no cover - dependency is declared
-        return "⚠️ pypdfium2 is not installed; document reading is unavailable."
+    except ImportError:
+        return (
+            "⚠️ PDF reading is not installed. It is an optional extra, because its "
+            "wheel does not exist for every platform and the source build fetches "
+            "PDFium over the network. Add `--extra pdf` to the `uv sync` line this "
+            "environment already uses — a bare `uv sync --extra pdf` UNINSTALLS "
+            "every other extra, because uv sync makes the environment match the "
+            "command exactly. `uv sync --extra pdf --dry-run` prints what would go."
+        )
 
     try:
         doc = pdfium.PdfDocument(source)

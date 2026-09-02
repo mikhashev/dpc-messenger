@@ -707,3 +707,33 @@ def test_the_detector_reads_the_string_before_it_is_repaired(monkeypatch):
     )
     assert entry["suspect_chars"] == 0
     assert "\ufffe" not in entry["text"] and "admissible" in entry["text"]
+
+
+def test_a_missing_pdf_reader_says_how_to_get_it(ctx, tiny, monkeypatch):
+    """PDF reading is an optional extra, so the absence has to be actionable.
+
+    It left the base dependency set because its macOS x86_64 wheel now needs
+    macOS 13 and the source build fetches PDFium over the network — one machine
+    could not install the client at all because of a PDF reader. The argument
+    for keeping it in the base set was that an extra is forgettable and the
+    loss would be silent; that argument only holds while this message names the
+    extra.
+    """
+    import builtins
+
+    real_import = builtins.__import__
+
+    def without_pypdfium(name, *args, **kwargs):
+        if name.startswith("pypdfium2"):
+            raise ImportError("not installed")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", without_pypdfium)
+
+    out = asyncio.run(D.read_document(ctx, str(tiny)))
+
+    assert "--extra pdf" in out, out
+    assert "UNINSTALLS" in out, (
+        "a bare `uv sync --extra pdf` removes every other extra — measured at 17 "
+        "packages on the developer machine — so the message must not hand one out"
+    )
