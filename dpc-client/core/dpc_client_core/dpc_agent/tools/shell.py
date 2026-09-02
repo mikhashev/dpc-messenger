@@ -7,7 +7,8 @@ Restricted tool — requires explicit enable in privacy_rules.json.
 
 Safety guardrails (ADR-030): 3-tier command classification.
   Tier 0 — auto-approve (safe read-only commands)
-  Tier 1 — require approval (v2, currently blocked same as Tier 2)
+  Tier 1 — goes to the approval queue: the caller is asked and the command runs
+           only if a person says yes
   Tier 2 — hard block (catastrophic/destructive commands)
 """
 
