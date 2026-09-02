@@ -78,6 +78,26 @@ Your team connects directly — no servers, no cloud, peer-to-peer. Humans and A
 
 ---
 
+## Which branch
+
+`main` carries the releases — it is what a version tag points at. **`dev` is where the work lands, and it normally runs well ahead of `main`:** fixes arrive there first, often weeks before they are tagged, along with everything else not yet released.
+
+So if you want the fixes rather than the last tag, take `dev`:
+
+```bash
+git clone -b dev https://github.com/mikhashev/dpc-messenger.git
+```
+
+To see how far apart the two are at any moment, rather than trusting a number written here:
+
+```bash
+git rev-list --left-right --count origin/main...origin/dev
+```
+
+What you are accepting by using it: `dev` is not a release. It holds work in progress, a commit on it can be reverted, and the alpha warning at the top of this file applies to it more than anywhere else. What you are not accepting: an untested branch. CI runs the client and protocol suites on every push to `main` and `dev` alike ([tests.yml](.github/workflows/tests.yml)) — the same gate, whichever you take.
+
+---
+
 ## Licensing
 
 | Component | License |
