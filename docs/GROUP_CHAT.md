@@ -1,4 +1,4 @@
-# Group Chat (v0.26.0)
+# Group Chat
 
 D-PC Messenger's group chat enables multi-participant communication with full feature parity to 1:1 P2P chat: text, files, voice messages, screenshots, voice transcription, knowledge commits, and session management.
 
@@ -14,7 +14,11 @@ There are **two participant types**:
 
 ### Data Model
 
-Group metadata stored at `~/.dpc/groups/{group_id}.json`:
+Group metadata is stored beside the conversation, at
+`~/.dpc/conversations/{group_id}-{slug}/metadata.json` (the slug is the group
+name; a group with no name gets `{group_id}/`). The older
+`~/.dpc/groups/{group_id}.json` is read for migration only — the directory now
+holds nothing but `deleted_registry.json`.
 
 ```json
 {
@@ -163,6 +167,10 @@ On connect, nodes reconcile group history so all members converge.
 | `update_group_topic` | group_id, topic | Update topic (creator-only; broadcasts `GROUP_SYNC`) |
 | `add_group_member` | group_id, node_id | Add member + push full history |
 | `remove_group_member` | group_id, node_id | Remove member; broadcast `GROUP_SYNC` |
+| `set_group_agents` | group_id, agent_ids | Choose which of this node's agents take part |
+| `set_group_reasoning_effort` | group_id, reasoning_effort | Group-scoped thinking depth for this node's agents; local, not synced |
+| `trigger_group_sleep` | group_id | Run sleep consolidation and post the morning briefs |
+| `activate_group_chat` | group_id | Called when the group is opened; posts any pending morning briefs |
 | `get_groups` | (none) | List all groups |
 | `leave_group` | group_id | Leave a group |
 | `delete_group` | group_id | Delete group (creator-only) |
