@@ -108,6 +108,7 @@ class KnowledgeService:
         self.consensus_manager.on_commit_signed = self._on_commit_signed
         self.consensus_manager.on_commit_ack = self._on_commit_ack
         self.consensus_manager.on_commit_apply_failed = self._on_commit_apply_failed
+        self.consensus_manager.on_apply_retransmit = self._on_apply_retransmit
         self.consensus_manager.on_proposal_received = self._on_proposal_received_from_peer
         self.consensus_manager.on_result_broadcast = self._broadcast_commit_result
         self.consensus_manager.on_commit_revision_needed = self._on_commit_revision_needed
@@ -1463,6 +1464,33 @@ Respond in JSON format:
                     logger.debug("Could not send COMMIT_ACK to %s: %s", peer_id[:20], e)
         except Exception as e:
             logger.error("Error in _on_commit_ack: %s", e, exc_info=True)
+
+    async def _on_apply_retransmit(self, commit, node_ids: List[str]) -> None:
+        """Hand the whole commit to participants that never ACKed it.
+
+        The counterpart of `_on_commit_ack`: that one says «I applied it», this one
+        answers the silence. A node that failed its own apply cannot ask for the
+        commit — it does not know there is one — so the commit has to be pushed.
+        """
+        from dpc_protocol.knowledge_commit import ApplyKnowledgeCommitMessage
+
+        message = ApplyKnowledgeCommitMessage.create(commit)
+        for peer_id in node_ids:
+            if peer_id == self.p2p_manager.node_id:
+                continue
+            try:
+                await self.p2p_manager.send_message_to_peer(
+                    peer_id, {"command": message.command, "payload": message.payload}
+                )
+                logger.info(
+                    "Retransmitted commit %s to %s (no COMMIT_ACK within the window)",
+                    commit.commit_id[:12], peer_id[:20],
+                )
+            except Exception as e:
+                logger.warning(
+                    "Could not retransmit commit %s to %s: %s",
+                    commit.commit_id[:12], peer_id[:20], e,
+                )
 
     async def _on_commit_apply_failed(self, commit, error_msg: str) -> None:
         """Surface apply failures to the UI."""

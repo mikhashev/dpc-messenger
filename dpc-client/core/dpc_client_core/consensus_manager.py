@@ -81,9 +81,19 @@ class ConsensusManager:
         self.on_commit_signed: Optional[Callable] = None    # Called after apply so service can sign+broadcast COMMIT_SIGNED
         self.on_commit_ack: Optional[Callable] = None       # Called after apply so service can broadcast COMMIT_ACK
         self.on_commit_apply_failed: Optional[Callable] = None  # Called when _apply_commit fails (disk error etc); arg: (commit, error_msg)
+        self.on_apply_retransmit: Optional[Callable] = None  # Called when the ACK window closes on a silent participant; args: (commit, node_ids)
 
         # Tracks which nodes confirmed successful apply per commit_id (Gap 3 observability)
         self.commit_acks: Dict[str, set] = {}  # commit_id -> set of node_ids that sent COMMIT_ACK
+
+        # How long a participant may stay silent before it is sent the commit itself.
+        # A COMMIT_ACK says "I applied it"; silence says nothing about why, and the node
+        # that failed its apply is exactly the one that cannot ask. Long enough that an
+        # ordinary apply and its ACK have both had time to travel.
+        self.ack_retransmit_seconds: float = 60.0
+        # Held so the retransmit is not collected mid-sleep: a task nobody references is
+        # this board's most frequent defect shape wearing an asyncio hat.
+        self._retransmit_tasks: set = set()
 
     async def propose_commit(
         self,
@@ -647,6 +657,9 @@ class ConsensusManager:
             if self.on_commit_ack:
                 await self.on_commit_ack(commit)
 
+            # 12. Close the loop on whoever stays silent.
+            self.arm_ack_retransmit(commit, origin)
+
             return True
 
         except Exception as e:
@@ -765,6 +778,65 @@ class ConsensusManager:
             if len(self.commit_acks) > 200:
                 oldest = next(iter(self.commit_acks))
                 del self.commit_acks[oldest]
+
+    def arm_ack_retransmit(self, commit: KnowledgeCommit, origin: str) -> bool:
+        """Start the ACK window for a commit we minted, and only for such a commit.
+
+        A commit that arrived over the recovery path is already somebody else's
+        retransmit; re-arming it there would have two nodes hand the same commit back
+        and forth for as long as one of them stayed quiet.
+
+        Returns whether the window was armed, so the decision can be exercised
+        without standing up the whole of `_apply_commit` around it.
+        """
+        if origin != "local":
+            return False
+        if not self.on_apply_retransmit or not (commit.participants or []):
+            return False
+        task = asyncio.create_task(self._retransmit_after_ack_window(commit))
+        self._retransmit_tasks.add(task)
+        task.add_done_callback(self._retransmit_tasks.discard)
+        return True
+
+    def silent_participants(self, commit: KnowledgeCommit) -> List[str]:
+        """Participants that never confirmed this commit.
+
+        Our own apply is not an ACK we send to ourselves, so this node is never
+        counted among the silent.
+        """
+        acked = self.commit_acks.get(commit.commit_id, set())
+        return [
+            node_id for node_id in (commit.participants or [])
+            if node_id != self.node_id and node_id not in acked
+        ]
+
+    async def _retransmit_after_ack_window(self, commit: KnowledgeCommit) -> None:
+        """Send the commit itself to every participant that let the ACK window pass.
+
+        The sender `ApplyKnowledgeCommitHandler` was written for and never had, so a
+        node whose apply failed could not learn the commit existed — it cannot ask for
+        what it does not know about.
+        """
+        try:
+            await asyncio.sleep(self.ack_retransmit_seconds)
+        except asyncio.CancelledError:
+            return
+
+        silent = self.silent_participants(commit)
+        if not silent:
+            logger.debug(
+                "All participants confirmed commit %s within the ACK window",
+                commit.commit_id[:12]
+            )
+            return
+
+        logger.info(
+            "Commit %s unconfirmed by %d participant(s) after %.0fs — retransmitting: %s",
+            commit.commit_id[:12], len(silent), self.ack_retransmit_seconds,
+            ", ".join(n[:20] for n in silent)
+        )
+        if self.on_apply_retransmit:
+            await self.on_apply_retransmit(commit, silent)
 
     async def _handle_vote_deadline(self, proposal_id: str) -> None:
         """Handle vote deadline timeout
