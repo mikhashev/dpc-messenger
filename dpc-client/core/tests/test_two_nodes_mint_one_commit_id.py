@@ -107,3 +107,18 @@ def test_the_identity_comes_from_the_proposal_and_not_from_the_clock():
     assert here.commit_id != there.commit_id, (
         "two proposals with different timestamps must not collapse into one commit"
     )
+
+
+def test_the_timestamp_survives_the_wire():
+    """The fix rests on the peer holding the proposer's timestamp.
+
+    The tests above build the proposal directly on both sides, so they pin the
+    hashing rule and not the thing it depends on — Ark's note. The peer gets
+    the proposal through `to_dict` and `from_dict`; this is that path.
+    """
+    sent = _proposal()
+
+    received = KnowledgeCommitProposal.from_dict(sent.to_dict())
+
+    assert received.timestamp == sent.timestamp
+    assert _commit_on(A, sent).commit_id == _commit_on(B, received).commit_id
