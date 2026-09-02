@@ -118,6 +118,12 @@ Knowledge should not sit in a chat log waiting to be scrolled. Agents help you o
 
 The architecture already enables shared compute, shared knowledge, and peer discovery. The direction is making these mechanisms governable — so the community controls the commons, not a platform.
 
+**From one practice to many**
+
+The project is meant to be shown, and there are two ways to take it. Lift the parts — Personal Context Technology, Protocol 13, knowledge commits, the firewall — into work of your own. Or run the whole of it and develop inside it, the way it is developed here.
+
+Both count. Neither is a number: installs, stars and visitors say nothing about whether anyone took anything, and this project has no engagement metrics by design. What counts is a trace of adoption — a fork that goes its own way, a question about applying one piece somewhere else, someone who deployed it and came back with something of their own.
+
 ### What This Is Not
 
 - Not a cloud backup service — your data stays on your hardware
