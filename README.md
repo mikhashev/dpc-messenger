@@ -30,7 +30,7 @@ Your team connects directly — no servers, no cloud, peer-to-peer. Humans and A
 - **Privacy on your terms** — granular firewall, field-level control
 - **Direct by default** — IPv6/IPv4 peer-to-peer, LAN or open internet; relay and gossip fallbacks are experimental
 
-**Two ways to take it:** lift the parts — Personal Context Technology, Protocol 13, knowledge commits, the firewall — into work of your own, or run the whole of it and develop inside it. Both are what this is published for. There is no growth metric behind it: what counts is that someone took something and made it theirs.
+**Two ways to take it:** take the ideas — Personal Context Technology, Protocol 13, knowledge commits, the context firewall — and build them your own way, or run the whole of it and develop inside it. Both are what this is published for. Terms differ by component — specs are CC0, the protocol library LGPL v3, the client GPL v3; see [LICENSING.md](./LICENSING.md). There is no growth metric behind it: what counts is that someone took something and made it theirs.
 
 **[Read the full vision →](./VISION.md)** | **[Roadmap →](./ROADMAP.md)** | **[Quick Start →](./QUICK_START.md)** | **[Documentation →](./docs/)**
 

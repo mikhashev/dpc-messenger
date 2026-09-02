@@ -120,7 +120,7 @@ The architecture already enables shared compute, shared knowledge, and peer disc
 
 **From one practice to many**
 
-The project is meant to be shown, and there are two ways to take it. Lift the parts — Personal Context Technology, Protocol 13, knowledge commits, the firewall — into work of your own. Or run the whole of it and develop inside it, the way it is developed here.
+The project is meant to be shown, and there are two ways to take it. Take the ideas — Personal Context Technology, Protocol 13, knowledge commits, the context firewall — and build them your own way: an idea carries no licence, the protocol specifications are CC0, and the protocol library is LGPL so it can be linked from work that stays your own. Or run the whole of it and develop inside it, the way it is developed here — the client is GPL v3, which means a fork stays open and what it learns comes back. [LICENSING.md](./LICENSING.md) says which part is which.
 
 Both count. Neither is a number: installs, stars and visitors say nothing about whether anyone took anything, and this project has no engagement metrics by design. What counts is a trace of adoption — a fork that goes its own way, a question about applying one piece somewhere else, someone who deployed it and came back with something of their own.
 
