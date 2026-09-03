@@ -33,6 +33,7 @@ from dpc_client_core.dpc_agent.loop import (
     _empty_answer_diagnosis,
     _is_answerless,
     _strip_history_markers,
+    _strip_role_boundaries,
 )
 
 
@@ -127,3 +128,47 @@ class TestTheLogSaysHowBigTheNothingWas:
     def test_an_empty_answer_with_nothing_behind_it_is_called_transient(self):
         assert "transient" in _empty_answer_diagnosis("", "")
         assert "transient" in _empty_answer_diagnosis("   ", "  ")
+
+
+class TestTheToolScaffoldDoesNotReachTheRoom:
+    """The second thing a model copies from the runtime, after the history marker.
+
+    2026-09-03, group-b3fb2a14b815: an agent posted its prose, then a ```tool_call
+    fence, then two [TOOL RESULT: call_00_...] sections — the second carrying the
+    whole vision-call JSON including an absolute path under the user's home. The
+    structured calls were already in the record's own field, so every byte of it was
+    duplication. The guard's pattern list covered [USER], [ASSISTANT] and [SYSTEM]
+    and neither of these, although the comment one function above had named
+    [TOOL RESULT] as a known hallucination since GLM-4.7.
+    """
+
+    def test_a_tool_result_section_is_cut(self):
+        answer = (
+            "Checked it once, and the panel is complete.\n\n"
+            "[TOOL RESULT: call_00_VckZzKGCVWChpNnvR7j5I9072]\n"
+            '{"image_path": "C:\\\\Users\\\\mikha\\\\.dpc\\\\agents\\\\agent_001"}'
+        )
+        out = _strip_role_boundaries(answer)
+        assert out == "Checked it once, and the panel is complete."
+        assert "call_00_" not in out, "an internal call id reached the room"
+        assert "Users" not in out, "a path under the user's home reached the room"
+
+    def test_a_tool_call_fence_is_cut(self):
+        answer = "One screenshot to verify it.\n\n```tool_call\n{\"name\": \"browser_screenshot\"}\n```"
+        assert _strip_role_boundaries(answer) == "One screenshot to verify it."
+
+    def test_an_ordinary_answer_is_untouched(self):
+        """Six of the seven real messages from that room contained no scaffolding and
+        must come through byte for byte."""
+        answer = "The DOM shows the panel truncated at «...Achie», which matches the\n"
+        answer += "accessibility artefact from the previous screen."
+        assert _strip_role_boundaries(answer) == answer
+
+    def test_the_cut_is_at_the_earliest_marker_in_the_text(self):
+        """The result section comes first here and the fence second — the reverse of
+        their order in the pattern list. Written that way on purpose: with the two in
+        list order, a guard that kept the *last* match it found still cut in the right
+        place and the first version of this test passed under exactly that damage.
+        """
+        answer = "Prose.\n\n[TOOL RESULT: call_1]\nx\n\n```tool_call\n{}\n```"
+        assert _strip_role_boundaries(answer) == "Prose."

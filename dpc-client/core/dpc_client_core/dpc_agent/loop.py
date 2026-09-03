@@ -397,7 +397,19 @@ def _extract_thinking_prefix(content: str) -> str:
     return prefix
 
 
-_ROLE_BOUNDARY_PATTERNS = ["\n[USER]\n", "\n[ASSISTANT]\n", "\n[SYSTEM]\n", "[USER]"]
+# The scaffolding a model writes into a final answer because it has seen the runtime
+# write it. `[USER]` / `[ASSISTANT]` / `[SYSTEM]` came first; the last two were added
+# 2026-09-03 after Ark posted a ```tool_call fence and two [TOOL RESULT: call_00_...]
+# sections into a group chat, the second carrying an absolute path under the user's
+# home. The comment on `_extract_thinking_prefix` above had named [TOOL RESULT] as a
+# known hallucination since GLM-4.7; the list simply never grew to match it.
+#
+# The fence is the uncomfortable one: this project discusses its own tool format in
+# prose, so cutting there can eat a real sentence. It is cut anyway, because the
+# alternative is internal ids and home paths in a shared room — and the cut is named
+# in the log, so eating prose is visible rather than silent.
+_ROLE_BOUNDARY_PATTERNS = ["\n[USER]\n", "\n[ASSISTANT]\n", "\n[SYSTEM]\n", "[USER]",
+                          "[TOOL RESULT:", "```tool_call"]
 
 # `[#74 | 06:42:57 | Johnny]` — the marker `context.history_prefix` puts on every
 # history line, the reader's own past turns included, which is why a model emits it
@@ -466,17 +478,25 @@ def _strip_history_markers(content: str) -> str:
 
 
 def _strip_role_boundaries(content: str) -> str:
-    """Strip hallucinated role markers and everything after them from a final response."""
+    """Strip runtime scaffolding, and everything after it, from a final response.
+
+    The log names which marker it cut on: with six patterns «a role marker» no longer
+    identifies anything, and the one that can cut a real sentence needs to be legible
+    when it does.
+    """
     lower = content.lower()
     earliest = len(content)
+    hit = ""
     for pat in _ROLE_BOUNDARY_PATTERNS:
         idx = lower.find(pat.lower())
         if idx != -1 and idx < earliest:
             earliest = idx
+            hit = pat.strip()
     if earliest < len(content):
         log.warning(
-            "_strip_role_boundaries: stripped %d chars starting at hallucinated role marker",
-            len(content) - earliest,
+            "_strip_role_boundaries: cut %d chars at %r — scaffolding the model copied "
+            "from the runtime, not an answer",
+            len(content) - earliest, hit,
         )
         return content[:earliest].strip()
     return content
