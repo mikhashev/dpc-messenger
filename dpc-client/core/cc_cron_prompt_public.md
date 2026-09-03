@@ -112,9 +112,12 @@ not through a different tool. One allowlist entry covers both.
   chatter. Tighten or loosen it to taste (for example, ignore
   mentions that end with a period, only respond to questions ending
   with `?`, etc.).
-- **Mentions in other scripts.** The bridge scans for `@CC` and the
-  Cyrillic `@СС`. If your user name for Claude Code is different
-  (editable in the DPC UI under Firewall → Agent Permissions → CC
+- **Mentions in other scripts.** The group bridge's `--mentions` scans for
+  the tag this node registered in Group Settings (`@CC_mike`, matched as a
+  whole word — `@CC` and `@CC_mike2` do not count), falling back to
+  `@<cc_display_name>` plus the Cyrillic `@СС` when nothing is registered;
+  `--as TAG` picks one of several. If your user name for Claude Code is
+  different (editable in the DPC UI under Firewall → Agent Permissions → CC
   Display Name; persists to `[agent_chat] cc_display_name` in
   `~/.dpc/config.ini`), add the actual `@<name>` variant to the scan
   instructions.

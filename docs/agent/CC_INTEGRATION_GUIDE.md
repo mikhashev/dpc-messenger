@@ -157,11 +157,20 @@ for group conversations with multiple agents. Same architecture as the
 | `uv run python cc_group_chat_bridge.py --group GROUP_ID --last 10` | Dump the last 10 messages from a group. |
 | `uv run python cc_group_chat_bridge.py --group GROUP_ID --send "text"` | Post a CC response to the group. |
 | `uv run python cc_group_chat_bridge.py --group GROUP_ID --send-file path` | Send from file (backtick-safe). |
-| `uv run python cc_group_chat_bridge.py --group GROUP_ID --mentions` | Show only `@CC` mentions. |
+| `uv run python cc_group_chat_bridge.py --group GROUP_ID --mentions` | Show only mentions of this bridge's tag, matched as a whole word (`@CC_mike`, not `@CC` or `@CC_mike2`). |
+| `uv run python cc_group_chat_bridge.py --group GROUP_ID --as TAG --send "text"` | Post (or, with `--mentions`, scan) as one specific registered tag. |
 
 The `--group` argument accepts either the canonical group ID
 (`group-abc123`) or the slugged directory name (`group-abc123-my-project`).
 The bridge resolves the canonical ID from `metadata.json` automatically.
+
+The name the bridge posts and listens under is resolved in this order:
+`--as` → the tag this node registered in the group (from `metadata.json`
+`agents` / `agent_names`, keyed by `~/.dpc/node.id`) → `[agent_chat]
+cc_display_name`. When the name differs from `cc_display_name` the send
+prints `[INFO] posting as <tag>` before `[SENT]`. With several tags
+registered and no `--as`, `--send` refuses with exit code 2 and lists them;
+`--mentions` scans for all of them.
 
 ### One name, several machines — read this before the second bridge
 
@@ -207,9 +216,13 @@ verbatim; only the routing truncated it. Nothing on screen says the mention went
 somewhere else, so the mistake looks like it worked.
 
 You can register several tags on one node; the group mention event names which
-one was matched. The node's own `[agent_chat] cc_display_name` in
-`~/.dpc/config.ini` still decides what an unregistered node answers to, and it is
-what the cron prompt's scan instructions should look for.
+one was matched. The group bridge reads the same registration: it posts under
+the registered tag (so the message is attributed `CC_mike`, not `CC`) and its
+`--mentions` scan matches that tag as a whole word — `@CC_mike` and `@cc_mike,`
+wake it, `@CC` and `@CC_mike2` do not. `--as TAG` overrides the choice; with
+several tags and no `--as`, sending refuses and the scan matches all of them.
+The node's own `[agent_chat] cc_display_name` in `~/.dpc/config.ini` still
+decides what an unregistered node answers to.
 
 **In a one-to-one chat you cannot separate them at all, and registration does not
 help.** That send path carries no sender field, so both bridges arrive under the
