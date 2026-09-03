@@ -134,6 +134,19 @@ PERSONAL_CONTEXT = "personal.json"
 
 NODE_KEY = "node.key"
 
+# An entry in `group.agents[node_id]` is normally a folder id under ~/.dpc/agents.
+# This prefix marks the other kind: an external harness, identified by the tag a
+# person typed in Group Settings. Prefixed rather than bare so the two cannot
+# collide, and so the mention gate can ask «has this node registered any external
+# agent at all» — which is the question the transitional behaviour turns on.
+EXTERNAL_AGENT_PREFIX = "ext:"
+
+# Mention routing parses `@(\w+)\b`, so a tag is only addressable as far as its
+# first non-word character. Measured 2026-09-03: `@CC-lnx` reaches `CC`,
+# `@Fifth Agent` reaches `Fifth`, `@агент_1` reaches all of itself.
+_EXTERNAL_TAG_RE = re.compile(r"\w+")
+
+
 class CoreService:
     """
     The main orchestrating class for the D-PC client's backend.
@@ -5001,14 +5014,34 @@ class CoreService:
         return {"status": "success", "groups": groups}
 
     async def set_group_agents(self, group_id: str, agent_ids: list = None) -> Dict[str, Any]:
-        """Set which agents from this node participate in a group."""
+        """Set which agents from this node participate in a group.
+
+        An id prefixed `ext:` is an external harness — a Claude Code bridge or
+        anything else that answers over the local API. It has no folder under
+        ~/.dpc/agents, so it carries its own tag as its name, and the tag is what
+        the group mention has to match.
+        """
         try:
+            bad = [a for a in (agent_ids or [])
+                   if a.startswith(EXTERNAL_AGENT_PREFIX)
+                   and not _EXTERNAL_TAG_RE.fullmatch(a[len(EXTERNAL_AGENT_PREFIX):])]
+            if bad:
+                # Refused here and not only in the dialog: a tag with a hyphen looks
+                # unique in the interface and is cut to its first segment by agent
+                # routing, so `CC-lnx` would quietly address every `CC` in the group.
+                return {"status": "error", "message":
+                        "External agent tags may contain only letters, digits and "
+                        "underscore — a hyphen or a space is cut by mention routing "
+                        f"and would address every agent sharing the first part: {bad}"}
             agent_names = {}
             if agent_ids and self.agent_service:
                 result = await self.agent_service.list_agents()
                 for a in result.get("agents", []):
                     if a["agent_id"] in agent_ids:
                         agent_names[a["agent_id"]] = a.get("name", a["agent_id"])
+            for _aid in (agent_ids or []):
+                if _aid.startswith(EXTERNAL_AGENT_PREFIX):
+                    agent_names[_aid] = _aid[len(EXTERNAL_AGENT_PREFIX):]
             self.group_manager.set_node_agents(
                 group_id, self.p2p_manager.node_id, agent_ids or [], agent_names
             )

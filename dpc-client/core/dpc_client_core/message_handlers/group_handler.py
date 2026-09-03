@@ -340,14 +340,51 @@ class GroupTextHandler(MessageHandler):
             else:
                 self.logger.debug("Skipping @%s — agent %s not in metadata.agents for %s", agent_name, agent_id, group_id)
 
+        # External agents. The embedded path above asks whether the agent is
+        # registered to THIS node; until 2026-09-03 this path asked nothing at all,
+        # so one `@CC` woke every machine running a bridge under that name — each
+        # with a different working tree and a different memory, and the reply from
+        # the one that could not do the work looked exactly like the reply from the
+        # one that could.
+        #
+        # Transitional on purpose (Mike, 2026-09-03, chose this over a migration).
+        # Nothing was registrable before the Group Settings field existed, so gating
+        # on registration from the first run would have left `@CC` waking nobody,
+        # silently, everywhere. Instead: once this node has registered at least one
+        # external agent for this group, registration decides; until then the old
+        # behaviour stands and says so. The gate arrives per group, on the day
+        # somebody fills the field, rather than on a release date.
+        from dpc_client_core.service import EXTERNAL_AGENT_PREFIX
+        registered = {a[len(EXTERNAL_AGENT_PREFIX):].lower()
+                      for a in allowed_agents if a.startswith(EXTERNAL_AGENT_PREFIX)}
         cc_name = self.service.get_cc_display_name().lower()
-        if cc_name in mention_names:
-            # Broadcast event — the MCP server bridge subscribes and queues it
+
+        if registered:
+            woken = registered & mention_names
+            if not woken:
+                self.logger.debug(
+                    "No registered external agent of %s mentioned in %s",
+                    sorted(registered), group_id)
+        elif cc_name in mention_names:
+            woken = {cc_name}
+            self.logger.warning(
+                "@%s answered in %s by name alone — no external agent is registered "
+                "for this node in that group, so every node carrying this name "
+                "answers. Register it in Group Settings to address one machine.",
+                cc_name, group_id)
+        else:
+            woken = set()
+
+        for tag in sorted(woken):
+            # Broadcast event — the MCP server bridge subscribes and queues it.
+            # `agent_tag` says which name was matched: with several external agents
+            # on one node, the bridge cannot tell from the text alone.
             await self.service.local_api.broadcast_event("cc_group_mention", {
                 "group_id": group_id,
                 "text": text,
                 "sender_name": sender_name,
                 "sender_node_id": sender_node_id,
+                "agent_tag": tag,
             })
 
     async def _invoke_agent(self, group_id: str, text: str, sender_name: str,

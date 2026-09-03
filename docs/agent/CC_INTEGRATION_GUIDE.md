@@ -165,52 +165,61 @@ The bridge resolves the canonical ID from `metadata.json` automatically.
 
 ### One name, several machines — read this before the second bridge
 
-A display name is a routing key here, and nothing enforces that it is unique.
-Two bridges with the same name are, to everything downstream, one participant.
+Register the bridge in **Group Settings → External agents**, by the tag you want
+to be addressed as. That registration is what makes `@tag` reach *this* machine
+and not every machine running a bridge under the same name.
 
-**In a group, a mention wakes every node whose bridge carries that name.** The
-embedded-agent path first checks whether the agent is registered to *this* node;
-the external path does not — a name match alone raises the event
-(`group_handler.py`). So if two people each run a bridge called `CC`, one `@CC`
-wakes both, and both answer. That is not a cosmetic collision: the two have
+Why it needs saying: a display name is a routing key here. The embedded-agent
+path has always checked whether the agent is registered to *this* node; the
+external path did not, so a name match alone raised the event and every node
+carrying that name answered. That is not a cosmetic collision — the two have
 different working trees and different memory, so a reply from the machine that
-*cannot* do the work looks exactly like a reply from the one that can. It has
-cost this project a round.
+*cannot* do the work looks exactly like a reply from the one that can. It cost
+this project a round before the field existed.
 
-**The obvious fix does not work, and it fails in a way you cannot see.** Agent
-routing parses mentions with `@(\w+)\b`, which stops at the first non-word
-character: `@CC-lnx` routes to `CC`, and so does every other hyphenated variant;
-`@Fifth Agent` routes to `Fifth`. Only `\w` survives — letters, digits and
-underscore. So distinguish the names *inside* `\w+`:
+**Until you register something, the old behaviour stands.** Nothing was
+registrable before, so gating on registration from the first run would have left
+`@CC` waking nobody, everywhere, with no error to explain it. Instead the gate
+arrives per group, on the day somebody fills the field:
 
-| name | reaches |
+| this node's external agents in that group | who answers `@CC` |
 |---|---|
-| `CC-lnx` | every `CC` in the group — **not** what you meant |
+| none registered | this node, by its configured display name — and so does every other node with that name. A warning naming the group goes to `dpc-client.log`. |
+| one or more registered | only the nodes whose registered tag was actually mentioned |
+
+So the transition costs nothing and nothing breaks; what changes is that the
+collision stops as soon as the people in the group each register their own tag.
+
+**Choose a tag that survives mention routing.** The field refuses anything
+outside `\w` and says why, because the failure is invisible otherwise: routing
+parses `@(\w+)\b` and stops at the first non-word character, so `@CC-lnx`
+reaches `CC`, and `@Fifth Agent` reaches `Fifth`.
+
+| tag | reaches |
+|---|---|
+| `CC-lnx` | every `CC` in the group — **refused by the field** |
 | `CC_lnx` | `CC_lnx` only |
 | `CC2` | `CC2` only |
 
-The reason it is invisible is that the text is parsed **twice, by two different
-expressions**. The six sites that decide routing use `@(\w+)\b`; the one that
-records who was mentioned in the message metadata uses `@([\w\-]+)`, where the
-hyphen does not break the name. So `@CC-lnx` is stored as a mention of `CC-lnx`
-and delivered to every `CC` — the interface and the routing disagree about who
-was addressed, and the interface is the one that looks right.
+What makes that worth refusing rather than documenting is that the text is
+parsed **twice, by two different expressions**. The six sites that decide routing
+use `@(\w+)\b`; the one that records who was mentioned in the message metadata
+uses `@([\w\-]+)`, where the hyphen does not break the name. So `@CC-lnx` is
+stored as a mention of `CC-lnx` and delivered to every `CC` — the interface and
+the routing disagree about who was addressed, and the interface is the one that
+looks right.
 
-Set each machine's name in `[agent_chat] cc_display_name` in `~/.dpc/config.ini`
-(or in the UI under Firewall → Agent Permissions → CC Display Name), and give
-the `@<name>` variant to the cron prompt's scan instructions.
+You can register several tags on one node; the group mention event names which
+one was matched. The node's own `[agent_chat] cc_display_name` in
+`~/.dpc/config.ini` still decides what an unregistered node answers to, and it is
+what the cron prompt's scan instructions should look for.
 
-**In a one-to-one chat you cannot separate them at all.** That send path carries
-no sender field, so both bridges arrive under the node's single
-`cc_display_name`, and a de-duplication check drops the second one's identical
-reply with nothing but a log line. Until that changes: one external agent per
-1:1 chat. Group chats do carry the sender, which is why the rule above is enough
-there.
-
-All of this is a workaround for an open defect, not a property of the design:
-the fix is for the external-agent path to check node registration the way the
-embedded one already does, after which the name stops being a routing key. Until
-then, the rules above are what keeps two machines apart.
+**In a one-to-one chat you cannot separate them at all, and registration does not
+help.** That send path carries no sender field, so both bridges arrive under the
+node's single `cc_display_name`, and a de-duplication check drops the second
+one's identical reply with nothing but a log line. Group settings register a tag
+for a *group*; a 1:1 conversation has no such list. Until that changes: one
+external agent per 1:1 chat.
 
 ### Sending markdown
 
