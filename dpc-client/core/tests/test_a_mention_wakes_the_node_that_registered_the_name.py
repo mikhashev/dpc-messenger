@@ -22,6 +22,7 @@ message arriving from a peer. Both call `external_agents_to_wake`, and so do
 these tests: an earlier version modelled the decision instead of calling it, and
 stayed green while one of the paths went ungated.
 """
+import asyncio
 import sys
 from pathlib import Path
 
@@ -165,3 +166,75 @@ class TestAnEmbeddedAgentIsNamedTheSameWay:
                 assert _name_refusal(name) == "", (
                     f"«{name}» is configured and the new rule would refuse it"
                 )
+
+
+class TestAnExternalTagIsNeverAnAgentFolder:
+    """`group.agents[node_id]` holds two kinds of entry since 2026-09-03: folder
+    ids under ~/.dpc/agents, and `ext:` tags that name a bridge on this machine.
+    Two loops walked the list without telling them apart. On Windows the second
+    kind reached `os.mkdir` and raised `WinError 267` mid-answer; on Linux
+    `ext:CC` is a legal directory name, so it would have been created quietly and
+    an empty agent would have started answering out of it."""
+
+    def test_an_agent_id_still_resolves(self, tmp_path, monkeypatch):
+        from dpc_client_core.dpc_agent import utils
+        monkeypatch.setattr(utils.pathlib.Path, "home", staticmethod(lambda: tmp_path))
+        root = utils.get_agent_root("agent_001")
+        assert root.is_dir() and root.name == "agent_001"
+
+    @pytest.mark.parametrize("bad", ["ext:CC", "", ".", "..", "../../etc", "CC lnx", "a/b"])
+    def test_anything_that_is_not_a_folder_id_is_refused(self, bad, tmp_path, monkeypatch):
+        from dpc_client_core.dpc_agent import utils
+        monkeypatch.setattr(utils.pathlib.Path, "home", staticmethod(lambda: tmp_path))
+        with pytest.raises(ValueError):
+            utils.get_agent_root(bad)
+        made = [p.name for p in (tmp_path / ".dpc" / "agents").glob("*")] \
+            if (tmp_path / ".dpc" / "agents").exists() else []
+        assert made == [], f"the refusal still left {made} behind"
+
+    def _fake_service(self, agents):
+        import re as _re
+        from types import SimpleNamespace
+        from dpc_client_core.service import CoreService
+        invoked, broadcast = [], []
+
+        async def _broadcast(event, payload):
+            broadcast.append((event, payload))
+
+        async def _invoke(group_id, text, sender_name, aid, trigger_id=None):
+            invoked.append(aid)
+
+        svc = SimpleNamespace(
+            _CODE_BLOCK_RE=CoreService._CODE_BLOCK_RE,
+            group_manager=SimpleNamespace(
+                get_group=lambda gid: SimpleNamespace(agents={"node-me": agents})),
+            p2p_manager=SimpleNamespace(node_id="node-me"),
+            local_api=SimpleNamespace(broadcast_event=_broadcast),
+            _get_agent_display_name=lambda aid: {"agent_001": "Ubu"}.get(aid, aid),
+            get_cc_display_name=lambda: "CC",
+            _invoke_agent_in_group_serialized=_invoke,
+        )
+        return svc, invoked, broadcast
+
+    @pytest.mark.asyncio
+    async def test_at_all_does_not_invoke_the_external_tag_as_an_agent(self):
+        """`@all` matches unconditionally, so it reached the crash with no help
+        from the mention text. The embedded path must skip `ext:` outright."""
+        from dpc_client_core.service import CoreService
+        svc, invoked, broadcast = self._fake_service(["agent_001", "ext:CC"])
+        await CoreService._handle_group_agent_mentions(
+            svc, "g1", "@all please", "Mike", is_agent_sender=False)
+        await asyncio.sleep(0)
+        assert "ext:CC" not in invoked, "an external tag was sent to the agent loader"
+        assert invoked == ["agent_001"], f"the embedded agent stopped answering @all: {invoked}"
+        assert [p["agent_tag"] for _, p in broadcast] == ["cc"], "the bridge was not woken"
+
+    @pytest.mark.asyncio
+    async def test_the_named_mention_reaches_only_the_bridge(self):
+        from dpc_client_core.service import CoreService
+        svc, invoked, broadcast = self._fake_service(["agent_001", "ext:CC"])
+        await CoreService._handle_group_agent_mentions(
+            svc, "g1", "@CC look at this", "Mike", is_agent_sender=False)
+        await asyncio.sleep(0)
+        assert invoked == [], f"a bare @CC invoked an embedded agent: {invoked}"
+        assert [p["agent_tag"] for _, p in broadcast] == ["cc"]

@@ -5266,6 +5266,8 @@ class CoreService:
         # Check if any mention matches an allowed agent's name or id
         sender_lower = sender_name.lower() if sender_name else ""
         for aid in allowed_agents:
+            if aid.startswith(EXTERNAL_AGENT_PREFIX):
+                continue
             aname = self._get_agent_display_name(aid).lower()
             if aname == sender_lower:
                 continue

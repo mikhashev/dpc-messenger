@@ -125,23 +125,32 @@
     .map(id => id.slice(EXT.length));
 
   // Mention routing parses @(\w+)\b, so a tag is addressable only as far as its
-  // first non-word character: `CC-lnx` is delivered to every `CC`. The interface
-  // would show the full name and look correct, which is why this is refused at
-  // the moment of typing rather than explained in a document.
+  // first non-word character, and the interface would show the full name and look
+  // correct. A pasted tag can also carry a character that renders as nothing, in
+  // which case the refusal has to name the code point or it names nothing at all.
+  const INVISIBLE = /[\p{Cf}\u200B-\u200D\u2060\uFEFF]/gu;
+  const cleanTag = (raw: string) => raw.trim().replace(INVISIBLE, '').trim();
+
   function validateTag(tag: string): string {
-    const t = tag.trim();
+    const t = cleanTag(tag);
     if (!t) return 'Enter a tag';
     if (!/^\w+$/u.test(t)) {
-      return 'Letters, digits and underscore only — a hyphen or space is cut by '
-           + 'mention routing, so «' + t + '» would reach every agent named «'
-           + (t.match(/^\w+/u)?.[0] || '') + '»';
+      const bad = [...t].find(c => !/\w/u.test(c)) ?? '';
+      const code = 'U+' + (bad.codePointAt(0) ?? 0).toString(16).toUpperCase().padStart(4, '0');
+      const named = /\s/u.test(bad) ? 'a space' : '«' + bad + '» (' + code + ')';
+      const reach = t.match(/^\w+/u)?.[0];
+      return 'Letters, digits and underscore only. Mention routing stops at ' + named
+           + ', so ' + (reach
+               ? '«' + t + '» would answer to «@' + reach + '» and share it with every '
+                 + 'agent whose tag starts the same way'
+               : '«' + t + '» would not be reached by any mention at all');
     }
     if (externalTags.some(x => x.toLowerCase() === t.toLowerCase())) return 'Already added';
     return '';
   }
 
   function addExternalAgent() {
-    const t = newTag.trim();
+    const t = cleanTag(newTag);
     tagError = validateTag(t);
     if (tagError) return;
     localAgentIds = [...localAgentIds, EXT + t];

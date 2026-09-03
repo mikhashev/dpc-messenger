@@ -461,7 +461,10 @@ class KnowledgeService:
             if group and self.llm_manager:
                 max_ctx = 0
                 node_id = getattr(self.p2p_manager, "node_id", None)
+                from .service import EXTERNAL_AGENT_PREFIX
                 for aid in group.agents.get(node_id, []):
+                    if aid.startswith(EXTERNAL_AGENT_PREFIX):
+                        continue
                     try:
                         from .dpc_agent.utils import load_agent_config
                         cfg = load_agent_config(aid) or {}
