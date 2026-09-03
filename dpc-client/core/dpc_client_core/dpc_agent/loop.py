@@ -434,6 +434,21 @@ def _is_answerless(content: str) -> bool:
     return not rest or bool(_DANGLING_MARKER.match(rest))
 
 
+def _empty_answer_diagnosis(content: str, thinking: str) -> str:
+    """Why a round ended with no answer, in the words a reader needs.
+
+    The length is in it because without it a 25-character label and a 13 516-
+    character runaway of the same marker log the same sentence — and on 2026-09-03
+    the difference between those two was ninety minutes of generation that nothing
+    in the client log distinguished from a quiet night.
+    """
+    if (content or "").strip():
+        return f"history prefix only, no answer behind {len(content)} characters"
+    if (thinking or "").strip():
+        return "thinking-budget (CoT present, no output text)"
+    return "transient (no CoT either)"
+
+
 def _strip_history_markers(content: str) -> str:
     """Remove the runtime's own history marker from the front of an answer.
 
@@ -987,10 +1002,13 @@ async def run_llm_loop(
                 _final_quality["ts"] = utc_now_iso()
                 _final_quality["round"] = round_idx
                 _final_quality["task_id"] = task_id
-                _final_quality["answered"] = not _is_answerless(content)
+                # Asked once: the predicate decides both what the ledger records and
+                # which branch runs, and calling it twice invites the two to disagree.
+                _answered = not _is_answerless(content)
+                _final_quality["answered"] = _answered
                 append_jsonl(logs_dir / "reasoning.jsonl", _final_quality)
 
-                if not _is_answerless(content):
+                if _answered:
                     clean_content = _strip_history_markers(_strip_role_boundaries(content))
                     # Intermediate per-round text is shown per-round (round_text), not
                     # assembled into the final answer (Variant 2). Final = this last round.
@@ -1017,19 +1035,12 @@ async def run_llm_loop(
                         llm_trace,
                     )
                 # LLM returned empty content (e.g. GLM thinking-only with no text).
-                # Retry the same call without prompt modification.
-                # Diagnose the empty: non-empty thinking + empty content points at
-                # thinking-budget exhaustion (CoT consumed the output-token budget);
-                # empty thinking too points at a transient provider/network blip. The
-                # retry is a blind re-send, so a deterministic cause repeats identically.
+                # Retry the same call without prompt modification: it is a blind
+                # re-send, so a deterministic cause repeats identically — which is why
+                # the line below has to say which cause it was. `_empty_answer_diagnosis`
+                # holds that reasoning and is tested on its own.
                 _empty_thinking = (msg.get("thinking") or "").strip()
-                _empty_diag = (
-                    "history prefix only, no answer behind it"
-                    if (content or "").strip()
-                    else "thinking-budget (CoT present, no output text)"
-                    if _empty_thinking
-                    else "transient (no CoT either)"
-                )
+                _empty_diag = _empty_answer_diagnosis(content, _empty_thinking)
                 if empty_retry_count < MAX_EMPTY_RETRIES:
                     empty_retry_count += 1
                     log.warning(

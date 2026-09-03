@@ -29,7 +29,11 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from dpc_client_core.dpc_agent.loop import _is_answerless, _strip_history_markers
+from dpc_client_core.dpc_agent.loop import (
+    _empty_answer_diagnosis,
+    _is_answerless,
+    _strip_history_markers,
+)
 
 
 class TestWhatCountsAsAnswerless:
@@ -97,3 +101,29 @@ class TestStrippingKeepsTheAnswer:
 
     def test_an_answer_with_no_marker_is_returned_unchanged(self):
         assert _strip_history_markers("Plain answer.") == "Plain answer."
+
+
+class TestTheLogSaysHowBigTheNothingWas:
+    """The guard catching a runaway in silence is the same defect one layer on.
+
+    Before this, a 25-character label and a 13 516-character run of the same
+    marker produced an identical line — «history prefix only, no answer behind
+    it» — so the client log could not tell ninety minutes of generation from a
+    quiet night. Reviewed into existence by Johnny, 2026-09-03.
+    """
+
+    def test_the_size_is_in_the_diagnosis(self):
+        small = _empty_answer_diagnosis("[#74 | 06:42:57 | Johnny]", "")
+        big = _empty_answer_diagnosis("**[#76 | 07:45 | J]**\n\n" * 400, "")
+        assert "25 characters" in small
+        assert small != big, (
+            "a label and a runaway log the same sentence, which is how the "
+            "runaway went unnoticed for ninety minutes"
+        )
+
+    def test_an_empty_answer_with_thinking_blames_the_budget(self):
+        assert "thinking-budget" in _empty_answer_diagnosis("", "a long chain of thought")
+
+    def test_an_empty_answer_with_nothing_behind_it_is_called_transient(self):
+        assert "transient" in _empty_answer_diagnosis("", "")
+        assert "transient" in _empty_answer_diagnosis("   ", "  ")
