@@ -141,10 +141,13 @@ NODE_KEY = "node.key"
 # agent at all» — which is the question the transitional behaviour turns on.
 EXTERNAL_AGENT_PREFIX = "ext:"
 
-# Mention routing parses `@(\w+)\b`, so a tag is only addressable as far as its
-# first non-word character. Measured 2026-09-03: `@CC-lnx` reaches `CC`,
-# `@Fifth Agent` reaches `Fifth`, `@агент_1` reaches all of itself.
-_EXTERNAL_TAG_RE = re.compile(r"\w+")
+# Mention routing parses `@(\w+)\b`, so a name is only addressable as far as its
+# first non-word character: `@CC-lnx` reaches `CC` and `@Fifth Agent` reaches
+# `Fifth`, while `@агент_1` reaches all of itself. Applies to anything a
+# mention can name — an external agent's tag and an embedded agent's display name
+# alike, which is why the rule is here rather than beside either one.
+MENTIONABLE_NAME_RE = re.compile(r"\w+")
+_EXTERNAL_TAG_RE = MENTIONABLE_NAME_RE
 
 
 def external_agents_to_wake(allowed_agents, mention_names, cc_display_name,

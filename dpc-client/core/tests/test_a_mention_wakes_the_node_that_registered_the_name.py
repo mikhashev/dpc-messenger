@@ -29,28 +29,29 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from dpc_client_core.agent_service import _name_refusal
 from dpc_client_core.service import (
     EXTERNAL_AGENT_PREFIX,
-    _EXTERNAL_TAG_RE,
+    MENTIONABLE_NAME_RE,
     external_agents_to_wake,
 )
 
 
 class TestTheTagRuleIsEnforcedWhereItIsTyped:
     """Mention routing parses `@(\\w+)\\b`, so a tag is addressable only as far as
-    its first non-word character. `CC-lnx` looks unique in the interface — the
-    message metadata even keeps it whole — and is delivered to every `CC`. The
-    error looks like success, which is why it is refused rather than documented."""
+    its first non-word character. `CC-lnx` is delivered to every `CC`, while the
+    chat still shows the text as typed — so the mistake looks like it worked,
+    which is why it is refused at the input rather than explained in a document."""
 
     @pytest.mark.parametrize("tag", ["CC", "CC_lnx", "CC2", "agent_1", "агент_1"])
     def test_a_reachable_tag_is_accepted(self, tag):
-        assert _EXTERNAL_TAG_RE.fullmatch(tag), (
+        assert MENTIONABLE_NAME_RE.fullmatch(tag), (
             f"«{tag}» survives mention routing whole and must be allowed"
         )
 
     @pytest.mark.parametrize("tag", ["CC-lnx", "Fifth Agent", "CC.win", "", "  "])
     def test_a_tag_that_routing_would_cut_is_refused(self, tag):
-        assert not _EXTERNAL_TAG_RE.fullmatch(tag), (
+        assert not MENTIONABLE_NAME_RE.fullmatch(tag), (
             f"«{tag}» is cut by mention routing and would address every agent "
             "sharing its first segment"
         )
@@ -105,3 +106,62 @@ def test_both_mention_paths_ask_the_same_function():
     assert service.count("external_agents_to_wake(") >= 2, "the send path stopped asking"
     for src, who in ((handler, "peer path"), (service, "send path")):
         assert '"agent_tag": tag' in src, f"{who} stopped naming the matched tag"
+
+
+class TestAnEmbeddedAgentIsNamedTheSameWay:
+    """A display name is how a mention reaches an embedded agent, so it is under
+    the same rule as an external tag — and was not, until Mike asked for it."""
+
+    def test_a_hyphen_is_refused(self):
+        """The case the rule exists for: `CC-lnx` is reached by `@CC`."""
+        refusal = _name_refusal("CC-lnx")
+        assert refusal, "an agent named this answers to @CC and shares it"
+        assert "@CC»" in refusal, "the refusal should name what it would answer to"
+
+    def test_a_space_is_refused(self):
+        assert "@Fifth»" in _name_refusal("Fifth Agent")
+
+    def test_a_reachable_name_is_accepted(self):
+        for name in ("Ark", "CC_win", "agent_1", "агент_1"):
+            assert _name_refusal(name) == "", f"«{name}» survives routing whole"
+
+    def test_an_empty_name_is_refused_as_empty(self):
+        """Refused *for being empty*. Both branches return a string, so
+        asserting truthiness passed with the empty check deleted."""
+        for blank in ("", "   ", None):
+            assert _name_refusal(blank) == "An agent needs a name."
+
+    def test_creation_and_rename_both_ask(self):
+        """The wiring, not the helper — and counted, not matched.
+
+        Testing the helper alone stayed green with the call deleted from
+        `create_agent`. Then `"_name_refusal(name)" in src` stayed green too,
+        because `def _name_refusal(name):` contains it.
+        """
+        src = (Path(__file__).resolve().parents[1] / "dpc_client_core"
+               / "agent_service.py").read_text(encoding="utf-8")
+        assert src.count("_name_refusal(") == 3, (
+            "one definition and two call sites — creation or rename stopped asking"
+        )
+        assert '_name_refusal(updates["name"])' in src, "rename stopped asking"
+
+    def test_every_agent_on_this_machine_would_pass(self):
+        """The rule was chosen to break nothing that exists: all nine agents
+        configured here are already addressable whole."""
+        import json
+        import os
+        root = Path.home() / ".dpc" / "agents"
+        if not root.exists():
+            return
+        for d in sorted(os.listdir(root)):
+            cfg = root / d / "config.json"
+            if not cfg.exists():
+                continue
+            try:
+                name = json.loads(cfg.read_text(encoding="utf-8")).get("name") or ""
+            except Exception:
+                continue
+            if name:
+                assert _name_refusal(name) == "", (
+                    f"«{name}» is configured and the new rule would refuse it"
+                )

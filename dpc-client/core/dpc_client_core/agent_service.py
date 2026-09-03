@@ -25,6 +25,29 @@ from typing import Dict, Any, Optional
 logger = logging.getLogger(__name__)
 
 
+
+def _name_refusal(name):
+    """Why this display name cannot be used, or "" if it can.
+
+    A name is how a mention reaches the agent, and mention routing stops at the
+    first non-word character — so `Fifth Agent` answers to `@Fifth`, alongside
+    anything else whose name starts that way.
+    """
+    from .service import MENTIONABLE_NAME_RE
+    n = (name or "").strip()
+    if not n:
+        return "An agent needs a name."
+    if not MENTIONABLE_NAME_RE.fullmatch(n):
+        reachable = MENTIONABLE_NAME_RE.match(n)
+        return (
+            f"«{n}» cannot be addressed whole: a mention is parsed up to the first "
+            f"character outside letters, digits and underscore, so this agent would "
+            f"answer to «@{reachable.group(0) if reachable else ''}» and share it with "
+            f"anything else starting the same way. Use letters, digits and underscore."
+        )
+    return ""
+
+
 class AgentService:
     """DPC Agent lifecycle management."""
 
@@ -137,6 +160,10 @@ class AgentService:
             create_agent_storage,
             AgentRegistry,
         )
+
+        refusal = _name_refusal(name)
+        if refusal:
+            return {"status": "error", "message": refusal}
 
         try:
             agent_id = generate_agent_id(name)
@@ -260,6 +287,11 @@ class AgentService:
                     "status": "error",
                     "message": f"Agent not found: {agent_id}",
                 }
+
+            if "name" in updates:
+                refusal = _name_refusal(updates["name"])
+                if refusal:
+                    return {"status": "error", "message": refusal}
 
             config = load_agent_config(agent_id)
             config.update(updates)
