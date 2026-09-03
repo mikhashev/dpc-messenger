@@ -108,7 +108,7 @@ from .message_handlers.skill_handler import (  # v0.21.0+ P2P skill sharing
     SkillSearchHandler, SkillsCatalogHandler, SkillRequestHandler,
     SkillDataHandler, SkillOfferHandler,
 )
-from .managers.file_transfer_manager import FileTransferManager
+from .managers.file_transfer_manager import FileTransferManager, group_file_ui_key
 from .voice_service import VoiceService
 from .knowledge_service import KnowledgeService
 from .telegram_service import TelegramService
@@ -5997,7 +5997,9 @@ class CoreService:
             image_msg_id = hashlib.sha256(
                 f"{self.p2p_manager.node_id}:group-image-send:{group_id}:{filename}".encode()
             ).hexdigest()[:16]
-            ui_dedup_key = f"group_image_ui:{group_id}:{filename}"
+            # Keyed on the on-disk name: that is what FileCompleteHandler sees as
+            # transfer.filename, and it may carry a "_N" suffix `filename` lacks.
+            ui_dedup_key = group_file_ui_key(group_id, file_path.name)
             if ui_dedup_key not in self._processed_message_ids:
                 self._processed_message_ids.add(ui_dedup_key)
                 # Stored before the broadcast, because the index is assigned on
@@ -6176,7 +6178,7 @@ class CoreService:
                 "file_path": str(file_path),
                 "voice_metadata": voice_metadata,
             }
-            ui_dedup_key = f"group_file_ui:{group_id}:{final_filename}"
+            ui_dedup_key = group_file_ui_key(group_id, final_filename)
             if ui_dedup_key not in self._processed_message_ids:
                 self._processed_message_ids.add(ui_dedup_key)
                 message_id = hashlib.sha256(

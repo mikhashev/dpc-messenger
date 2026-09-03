@@ -3,6 +3,7 @@
 from datetime import datetime, timezone
 from typing import Dict, Any, Optional
 from . import MessageHandler
+from ..managers.file_transfer_manager import group_file_ui_key
 
 
 class FileCompleteHandler(MessageHandler):
@@ -122,7 +123,7 @@ class FileCompleteHandler(MessageHandler):
             if transfer.group_id:
                 # Dedup: for group sends, one transfer per recipient all complete separately.
                 # Only show in UI and add to history once (on the first FILE_COMPLETE).
-                ui_dedup_key = f"group_file_ui:{transfer.group_id}:{transfer.filename}"
+                ui_dedup_key = group_file_ui_key(transfer.group_id, transfer.filename)
                 if ui_dedup_key not in self.service._processed_message_ids:
                     self.service._processed_message_ids.add(ui_dedup_key)
                     message_event["group_id"] = transfer.group_id

@@ -60,6 +60,15 @@ class TransferStatus(Enum):
     CANCELLED = "cancelled"
 
 
+def group_file_ui_key(group_id: str, filename: str) -> str:
+    """Dedup key shared by the group send paths and FileCompleteHandler.
+
+    The sender seeds it on send; the handler checks it on every FILE_COMPLETE
+    echo. `filename` is the on-disk name (what `transfer.filename` carries).
+    """
+    return f"group_file_ui:{group_id}:{filename}"
+
+
 @dataclass
 class FileTransfer:
     """
