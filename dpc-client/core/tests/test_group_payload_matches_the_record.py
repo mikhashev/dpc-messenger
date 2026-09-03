@@ -27,6 +27,9 @@ class _Group:
     group_id = GROUP
     members = [NODE]
     name = "1234"
+    # An agent post carries only a name this node registered for the group.
+    agents = {NODE: ["agent_001"]}
+    agent_names = {NODE: {"agent_001": "Ark"}}
 
 
 class _P2P:
@@ -106,8 +109,15 @@ class _Service:
     def _group_agent_context_list(self, group_id):
         return []
 
-    # The real one — a stub here would only assert the stub agrees with itself.
+    # The real ones — a stub here would only assert the stub agrees with itself.
     _signature_fields_for = staticmethod(CoreService._signature_fields_for)
+    _names_this_node_may_post_as = CoreService._names_this_node_may_post_as
+
+    def _get_agent_display_name(self, agent_id):
+        return {"agent_001": "Ark"}.get(agent_id, agent_id)
+
+    def get_cc_display_name(self):
+        return "CC"
 
 
 class _GroupManager:

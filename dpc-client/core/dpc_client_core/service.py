@@ -5425,6 +5425,24 @@ class CoreService:
             key=lambda v: (v[0] / v[1]) if v[1] else 0,
         )
 
+    def _names_this_node_may_post_as(self, group) -> set:
+        """Lower-cased names an agent message from this node may carry in `group`:
+        `agent_names[node]`, the display part of each `ext:` tag, the config name
+        of each embedded agent in `agents[node]`, and — under the same transitional
+        rule as `external_agents_to_wake` — the CC display name while no `ext:`
+        tag is registered here."""
+        node_id = self.p2p_manager.node_id
+        agent_ids = list((getattr(group, "agents", None) or {}).get(node_id) or [])
+        names = {n for n in ((getattr(group, "agent_names", None) or {}).get(node_id) or {}).values() if n}
+        for aid in agent_ids:
+            if aid.startswith(EXTERNAL_AGENT_PREFIX):
+                names.add(aid[len(EXTERNAL_AGENT_PREFIX):])
+            else:
+                names.add(self._get_agent_display_name(aid))
+        if not any(a.startswith(EXTERNAL_AGENT_PREFIX) for a in agent_ids):
+            names.add(self.get_cc_display_name())
+        return {n.lower() for n in names if n}
+
     async def send_group_agent_message(
         self, group_id: str, agent_name: str, text: str,
         tool_calls: Optional[list] = None,
@@ -5442,12 +5460,22 @@ class CoreService:
         Returns:
             The generated message_id (16-char hex), or None if the group was not found.
             Callers use this to track posted messages for later deletion (e.g. morning
-            brief replacement on Sleep button).
+            brief replacement on Sleep button). A name this node did not register for
+            the group is refused with `{"status": "error", "message": ...}`.
         """
         group = self.group_manager.get_group(group_id)
         if not group:
             logger.warning("send_group_agent_message: group %s not found", group_id)
             return None
+
+        allowed = self._names_this_node_may_post_as(group)
+        if (agent_name or "").lower() not in allowed:
+            logger.warning(
+                "send_group_agent_message: %r is not a name this node registered for "
+                "group %s (registered: %s) — refused",
+                agent_name, group_id, sorted(allowed))
+            return {"status": "error", "message":
+                    f"agent name not registered for this node in this group: {agent_name}"}
 
         import uuid
         message_id = uuid.uuid4().hex[:16]
@@ -8753,7 +8781,7 @@ class CoreService:
                         chat_text = self._format_morning_brief(brief)
                         new_msg_id = await self.send_group_agent_message(group_id, dname, chat_text)
                         brief["consumed"] = True
-                        if new_msg_id:
+                        if isinstance(new_msg_id, str):  # a refusal is a dict, and truthy
                             brief["chat_message_id"] = new_msg_id
                         brief_path.write_text(json.dumps(brief, ensure_ascii=False, indent=2), encoding="utf-8")
                     done_data = {"agent_id": aid, "group_id": group_id, "status": "awake",
