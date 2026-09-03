@@ -1,13 +1,20 @@
-# Claude Code Integration Guide
+# External Agent Integration Guide
 
-This guide explains how to connect [Claude Code](https://claude.com/claude-code)
-as a third participant in a DPC agent chat — alongside you and your
-embedded DPC agent. We refer to Claude Code as **CC** throughout.
+> The file name (`CC_INTEGRATION_GUIDE.md`) and the `cc_` prefixes on the bridge
+> scripts and the config key are historical — they date from when Claude Code was
+> the only harness wired in. The name an external agent answers to is set by you.
+
+This guide explains how to connect an external agent — any harness that can run
+a shell command, read a file and call a local WebSocket — as a third participant
+in a DPC agent chat, alongside you and your embedded DPC agent.
+[Claude Code](https://claude.com/claude-code) is the worked example throughout,
+and the identity in the examples is the tag the maintainers registered for it
+(`CC_mike`); substitute your harness and your tag.
 
 > **Status:** this is the same integration the project maintainers use
 > day-to-day (see `protocol-13-public.md` for how the three-way
-> collaboration is structured). The bridge is a local helper — nothing
-> in DPC requires Claude Code. If you want an agent chat without CC,
+> collaboration is structured). The bridges are local helpers — nothing
+> in DPC requires an external agent. If you want an agent chat without one,
 > skip this file.
 
 ---
@@ -48,19 +55,22 @@ one exists and is written down, not that it names these five files.
 
 ---
 
-## What CC sees, what CC does
+## What the external agent sees, what it does
 
-CC runs in your VSCode (or terminal) as a separate Claude Code session.
-A tiny Python helper in this repo — `cc_agent_bridge.py` — lets CC:
+The external agent runs outside DPC — Claude Code in your VSCode (or terminal),
+or any other harness — as a separate LLM session. Two small Python helpers in
+this repo, the **agent-chat bridge** (`cc_agent_bridge.py`, for 1:1 chats) and
+the **group bridge** (`cc_group_chat_bridge.py`, for group chats), let it:
 
-1. **Read** the DPC agent chat by loading `history.json` from disk.
+1. **Read** the DPC chat by loading `history.json` from disk.
 2. **Send** messages back over the local WebSocket API (the same one
    the Tauri UI uses).
 
-CC is not magically embedded. It is a second LLM session authorized to
-read/write the same conversation file your DPC agent uses. A
-one-minute cron tick inside Claude Code tells CC to check the chat,
-respond to `@CC` mentions, and stay quiet otherwise.
+The external agent is not magically embedded. It is a second LLM session
+authorized to read/write the same conversation file your DPC agent uses. A
+one-minute cron tick inside the harness (Claude Code has one built in) tells it
+to check the chat, respond to mentions of its own tag, and stay quiet otherwise;
+harnesses without a cron use the group bridge's `--listen` instead (below).
 
 ### Architecture (one chat, two AI participants)
 
@@ -74,14 +84,27 @@ respond to `@CC` mentions, and stay quiet otherwise.
                            history.json + WS API  │
                                                   ▼
 ┌──────────────┐        file + WS          ┌──────────────┐
-│ Claude Code  │◀──── cc_agent_bridge ────▶│  ~/.dpc/     │
-│  (VSCode)    │                           │  .ws_token   │
+│ external     │◀──── bridge script  ─────▶│  ~/.dpc/     │
+│ agent        │  (agent-chat / group)     │  .ws_token   │
 └──────────────┘                           └──────────────┘
 ```
 
 Port `9999` is the default for the local API server; override it via
-`[api] port` in `~/.dpc/config.ini` if you need to move it. The bridge
-reads the same config and follows.
+`[api] port` in `~/.dpc/config.ini` if you need to move it. The bridges
+read the same config and follow.
+
+### Which name it answers to
+
+- **In a group:** the tag you registered for this node in **Group Settings →
+  External agents** (stored in the group's `metadata.json` under `agents` /
+  `agent_names`, keyed by `~/.dpc/node.id`). This is the identity — see
+  "One name, several machines" below for why registration matters.
+- **Fallback, and the only identity in a 1:1 chat:** the configured display
+  name, `[agent_chat] cc_display_name` in `~/.dpc/config.ini` (default `CC`;
+  editable in the DPC UI under Firewall → Agent Permissions → CC Display Name).
+
+Every user-visible line the bridges print — the `--mentions` banner, the
+`[INFO] posting as <tag>` line, the `--listen` status — names the resolved tag.
 
 ---
 
@@ -89,17 +112,17 @@ reads the same config and follows.
 
 - DPC client installed and running ([QUICK_START.md](../../QUICK_START.md)).
 - At least one agent linked to your DPC instance (an `agent_*` folder
-  under `~/.dpc/agents/`). With exactly one agent, the bridge uses it
+  under `~/.dpc/agents/`). With exactly one agent, the agent-chat bridge uses it
   by default. With more than one, you pick the target via
   `--conversation-id` (see below).
-- [Claude Code](https://claude.com/claude-code) set up in VSCode (or
-  the terminal).
+- Your harness set up — for the worked example,
+  [Claude Code](https://claude.com/claude-code) in VSCode (or the terminal).
 - Python 3.12+ with `websockets` installed in the same virtualenv that
   runs the DPC backend (it is already a dependency of `dpc-client/core`).
 
 ---
 
-## How CC authenticates
+## How the bridge authenticates
 
 The backend writes a 256-bit random token to `~/.dpc/.ws_token` at
 startup. Anything that can read that file can talk to the local API.
@@ -115,7 +138,7 @@ directory are your trust boundary.
 
 Two bridge scripts cover 1:1 agent chats and group chats:
 
-### 1:1 Agent Chat Bridge
+### The agent-chat bridge (1:1)
 
 [`cc_agent_bridge.py`](../../dpc-client/core/cc_agent_bridge.py) — for
 1:1 conversations with a single agent. Useful flags:
@@ -123,9 +146,9 @@ Two bridge scripts cover 1:1 agent chats and group chats:
 | Command | What it does |
 |---------|--------------|
 | `uv run python cc_agent_bridge.py --once --last 10 --full` | Dump the last 10 messages, full content. This is what the cron runs. |
-| `uv run python cc_agent_bridge.py --send "text"` | Post a CC response to the current agent conversation. |
+| `uv run python cc_agent_bridge.py --send "text"` | Post a response to the current agent conversation. |
 | `uv run python cc_agent_bridge.py --status` | Check whether the backend is up and when `history.json` last changed. |
-| `uv run python cc_agent_bridge.py --mentions` | Show only messages that `@` mention CC. |
+| `uv run python cc_agent_bridge.py --mentions` | Show only messages that `@` mention the configured display name. |
 | `uv run python cc_agent_bridge.py` | Poll mode — watch for new messages in a terminal (5-second interval). |
 
 ### Picking a conversation
@@ -144,18 +167,18 @@ Every command above accepts `--conversation-id NAME-OR-FOLDER`:
 There is no state kept inside the bridge between invocations. Each
 call re-reads `history.json` from scratch.
 
-### Group Chat Bridge
+### The group bridge
 
 [`cc_group_chat_bridge.py`](../../dpc-client/core/cc_group_chat_bridge.py) —
 for group conversations with multiple agents. Same architecture as the
-1:1 bridge but reads from group history files and sends via
+agent-chat bridge but reads from group history files and sends via
 `send_group_agent_message` WebSocket command.
 
 | Command | What it does |
 |---------|--------------|
 | `uv run python cc_group_chat_bridge.py --list` | List available group chats. |
 | `uv run python cc_group_chat_bridge.py --group GROUP_ID --last 10` | Dump the last 10 messages from a group. |
-| `uv run python cc_group_chat_bridge.py --group GROUP_ID --send "text"` | Post a CC response to the group. |
+| `uv run python cc_group_chat_bridge.py --group GROUP_ID --send "text"` | Post a response to the group under this bridge's tag. |
 | `uv run python cc_group_chat_bridge.py --group GROUP_ID --send-file path` | Send from file (backtick-safe). |
 | `uv run python cc_group_chat_bridge.py --group GROUP_ID --mentions` | Show only mentions of this bridge's tag, matched as a whole word (`@CC_mike`, not `@CC` or `@CC_mike2`). |
 | `uv run python cc_group_chat_bridge.py --group GROUP_ID --as TAG --send "text"` | Post (or, with `--mentions`, scan) as one specific registered tag. |
@@ -171,7 +194,8 @@ The name the bridge posts and listens under is resolved in this order:
 cc_display_name`. When the name differs from `cc_display_name` the send
 prints `[INFO] posting as <tag>` before `[SENT]`. With several tags
 registered and no `--as`, `--send` refuses with exit code 2 and lists them;
-`--mentions` scans for all of them.
+`--mentions` scans for all of them and its banner names every tag scanned
+(`No mentions of @CC_mike found.` / `=== 2 mention(s) of @CC_mike ===`).
 
 **Harnesses without a cron: `--listen`.** Instead of polling `history.json`
 every minute, `--listen` authenticates on the local WebSocket (the same
@@ -201,10 +225,11 @@ this project a round before the field existed.
 
 **Until you register something, the old behaviour stands.** Nothing was
 registrable before, so gating on registration from the first run would have left
-`@CC` waking nobody, everywhere, with no error to explain it. Instead the gate
-arrives per group, on the day somebody fills the field:
+a mention of the configured name waking nobody, everywhere, with no error to
+explain it. Instead the gate arrives per group, on the day somebody fills the
+field:
 
-| this node's external agents in that group | who answers `@CC` |
+| this node's external agents in that group | who answers a mention of the configured name (`@CC` by default) |
 |---|---|
 | none registered | this node, by its configured display name — and so does every other node with that name. A warning naming the group goes to `dpc-client.log`. |
 | one or more registered | only the nodes whose registered tag was actually mentioned |
@@ -252,9 +277,9 @@ then send it.
 
 ---
 
-## The cron loop (Claude Code side)
+## The cron loop (harness side)
 
-CC runs a cron inside Claude Code. The exact prompt text lives in
+The worked example runs a cron inside Claude Code. The exact prompt text lives in
 [`cc_cron_prompt_public.md`](../../dpc-client/core/cc_cron_prompt_public.md)
 and is versioned there. The internal version (`cc_cron_prompt.md` at
 project root, gitignored) may have additional project-specific prompts
@@ -262,13 +287,15 @@ for group chats.
 
 **Schedule:** every minute while the Claude Code session is open. Cron
 jobs are in-session only and disappear when Claude Code closes, so you
-need to recreate the cron after reopening the IDE.
+need to recreate the cron after reopening the IDE. A harness with a
+persistent scheduler, or one that can wait on a subprocess with
+`--listen`, does not have this step.
 
 **Behavior each fire (1:1 agent chat):**
 
 1. Run `uv run python cc_agent_bridge.py --once --last 10 --full --conversation-id <agent>`.
-2. Scan the output for `@CC` or `@СС` (Cyrillic) mentions from anyone
-   who isn't CC.
+2. Scan the output for mentions of your tag (`@<tag>`, plus `@СС` in
+   Cyrillic when the tag is `CC`) from anyone who isn't you.
 3. If there is an unanswered direct question, respond via
    `uv run python cc_agent_bridge.py --send "..." --conversation-id <agent>`.
    Keep responses in markdown.
@@ -277,20 +304,20 @@ need to recreate the cron after reopening the IDE.
 **Behavior each fire (group chat):**
 
 1. Run `uv run python cc_group_chat_bridge.py --group <group_id> --last 10`.
-2. Same `@CC` scan and response logic.
+2. Same scan and response logic, against the tag you registered.
 3. Respond via `--send "..."` or `--send-file path` for markdown content.
 
 You can run both crons in parallel — one for 1:1, one for group chat.
 
-The cron prompt does the filtering; CC just executes what the cron
-says. Substitute the agent name (or folder id) for `<agent>` when you
-create the cron — see the canonical prompt in
+The cron prompt does the filtering; the external agent just executes what
+the cron says. Substitute the agent name (or folder id) for `<agent>` and
+your tag for `<tag>` when you create the cron — see the canonical prompt in
 [`cc_cron_prompt_public.md`](../../dpc-client/core/cc_cron_prompt_public.md), which
 ships with `Ark` as the default and notes how to swap it.
 
 ---
 
-## Where CC fits in Protocol 13
+## Where the external agent fits in Protocol 13
 
 Protocol 13 is the project's three-agent collaboration contract
 (see [`../../protocol-13-public.md`](../../protocol-13-public.md)). In short:
@@ -298,10 +325,11 @@ Protocol 13 is the project's three-agent collaboration contract
 - **Mike** (human) — decides, approves actions.
 - **Ark** (embedded DPC agent) — reviews, flags risks, writes
   rationale.
-- **CC** (Claude Code) — executes code changes, runs tests, commits.
+- **The external agent** (Claude Code, registered as `CC_mike` in the
+  worked example) — executes code changes, runs tests, commits.
 
 This is a working pattern, not a requirement of the software. Your
-own setup can use CC differently (or not use CC at all).
+own setup can use the external agent differently (or not use one at all).
 
 ---
 
@@ -325,24 +353,29 @@ own setup can use CC differently (or not use CC at all).
    You should see `Backend: UP` and a fresh `history.json`
    update time.
 
-3. In Claude Code, create a cron using the exact prompt from
-   [`cc_cron_prompt_public.md`](../../dpc-client/core/cc_cron_prompt_public.md). The
-   schedule is `every 1 minute`. The shipped prompt targets the agent
-   named `Ark`; if your agent uses a different display name, replace
-   `Ark` with that name (or with the folder id) in both the
-   `--once` and `--send` invocations.
+3. For a group chat, open the group's **Group Settings → External agents**
+   in the DPC UI and register the tag this machine should answer to. For a
+   1:1 chat there is nothing to register; the bridge answers to
+   `[agent_chat] cc_display_name` (default `CC`).
 
-4. Open the agent chat in the DPC UI and mention `@CC` in a message.
-   Within ~60 seconds Claude Code should respond.
+4. In your harness, create the recurring check using the exact prompt from
+   [`cc_cron_prompt_public.md`](../../dpc-client/core/cc_cron_prompt_public.md).
+   In Claude Code that is a cron with schedule `every 1 minute`. The shipped
+   prompt targets the agent named `Ark`; if your agent uses a different
+   display name, replace `Ark` with that name (or with the folder id) in both
+   the `--once` and `--send` invocations, and replace `<tag>` with your tag.
 
-5. If Claude Code restarts (IDE reload, window closed), recreate the
-   cron — it does not persist.
+5. Open the chat in the DPC UI and mention `@<tag>` in a message.
+   Within ~60 seconds the external agent should respond.
+
+6. If the harness restarts (IDE reload, window closed), recreate the
+   cron — in Claude Code it does not persist.
 
 ---
 
 ## Troubleshooting
 
-**CC does not respond.** Check
+**The external agent does not respond.** Check
 `uv run python cc_agent_bridge.py --status --conversation-id <agent>`. If the
 backend is down, start it. If you see
 `[ERROR] Multiple agents found, specify --conversation-id...`, the
@@ -350,7 +383,9 @@ cron prompt is missing the flag — recreate the cron with the current
 [`cc_cron_prompt_public.md`](../../dpc-client/core/cc_cron_prompt_public.md). If the
 warning is `--conversation-id=... did not match any known agent`, you
 have a typo (or the agent was deleted) — the bridge prints the list of
-known agents alongside the warning.
+known agents alongside the warning. In a group, check that the tag you
+mention is the one this node registered: `--mentions` prints the names it
+scanned for in its banner.
 
 **`websockets not installed`.** You are running the bridge in a
 different virtualenv than the one with `dpc-client/core` deps. Use
@@ -360,7 +395,7 @@ different virtualenv than the one with `dpc-client/core` deps. Use
 every backend start. If the bridge was last run against a previous
 backend process, re-run it — it reads the file fresh each time.
 
-**CC responds when it shouldn't (or vice versa).** The cron prompt
+**It responds when it shouldn't (or vice versa).** The cron prompt
 defines the filter. Tune it in `cc_cron_prompt_public.md` and recreate the
 cron — the prompt version you create the cron with is what runs.
 
@@ -368,8 +403,9 @@ cron — the prompt version you create the cron with is what runs.
 
 ## Related
 
-- [`../../dpc-client/core/cc_agent_bridge.py`](../../dpc-client/core/cc_agent_bridge.py) — bridge source
+- [`../../dpc-client/core/cc_agent_bridge.py`](../../dpc-client/core/cc_agent_bridge.py) — the agent-chat bridge
+- [`../../dpc-client/core/cc_group_chat_bridge.py`](../../dpc-client/core/cc_group_chat_bridge.py) — the group bridge
 - [`../../dpc-client/core/cc_cron_prompt_public.md`](../../dpc-client/core/cc_cron_prompt_public.md) — canonical cron prompt
 - [`../../protocol-13-public.md`](../../protocol-13-public.md) — three-agent collaboration contract
-- [`./DPC_AGENT_GUIDE.md`](./DPC_AGENT_GUIDE.md) — embedded DPC agent (the one CC talks *with*, not the one CC *is*)
+- [`./DPC_AGENT_GUIDE.md`](./DPC_AGENT_GUIDE.md) — embedded DPC agent (the one the external agent talks *with*, not the one it *is*)
 - [`./DPC_AGENT_TELEGRAM.md`](./DPC_AGENT_TELEGRAM.md) — Telegram integration (parallel concept, different channel)

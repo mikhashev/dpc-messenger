@@ -7,6 +7,9 @@ shape the backend writes (agents + agent_names), and an empty history.
 
 import importlib.util
 import json
+import re
+import runpy
+import sys
 import types
 from pathlib import Path
 
@@ -203,3 +206,53 @@ def test_build_send_command_is_the_backend_shape(bridge):
     assert cmd["command"] == "send_group_agent_message"
     assert cmd["payload"] == {"group_id": GROUP, "agent_name": "CC_mike", "text": "x"}
     assert len(cmd["id"]) == 8
+
+
+# (v) what the user reads names the resolved tag, never a hardcoded CC
+
+
+def test_mentions_banner_names_the_tags_scanned_for(bridge):
+    assert bridge._mentions_banner(["CC_mike"], 0) == "No mentions of @CC_mike found."
+    assert bridge._mentions_banner(["CC_mike", "CC_night"], 3) == \
+        "=== 3 mention(s) of @CC_mike, @CC_night ==="
+    assert bridge._mentions_banner(["Fable"], 1) == "=== 1 mention(s) of @Fable ==="
+
+
+def _run_cli(bridge, monkeypatch, capsys, *argv):
+    """Run the bridge as __main__ against the fixture home; return stdout."""
+    monkeypatch.setenv("DPC_HOME", str(bridge.DPC_HOME))
+    monkeypatch.setattr(sys, "argv", ["cc_group_chat_bridge.py", *argv])
+    runpy.run_path(str(BRIDGE), run_name="__main__")
+    return capsys.readouterr().out
+
+
+def test_mentions_output_names_the_registered_tag_and_keeps_the_parsed_line(bridge, monkeypatch, capsys):
+    out = _run_cli(bridge, monkeypatch, capsys, "--group", GROUP, "--mentions")
+    assert out == "[CC Group Bridge] 0 messages (last 10)\n\nNo mentions of @CC_mike found.\n"
+
+    gdir = bridge._find_group_dir(GROUP)
+    history = {"messages": [
+        {"sender_name": "Mike", "content": "@CC привет", "timestamp": "2026-09-04T10:00:00"},
+        {"sender_name": "Mike", "content": "@CC_mike глянь", "timestamp": "2026-09-04T10:00:01"},
+    ]}
+    (gdir / "history.json").write_text(json.dumps(history), encoding="utf-8")
+    out = _run_cli(bridge, monkeypatch, capsys, "--group", GROUP, "--mentions")
+    assert out == ("[CC Group Bridge] 2 messages (last 10)\n\n"
+                   "=== 1 mention(s) of @CC_mike ===\n"
+                   "  [2] 10:00:01 Mike: @CC_mike глянь\n")
+
+
+def test_mentions_output_names_the_configured_name_when_nothing_is_registered(bridge, monkeypatch, capsys):
+    _set_node(bridge, NOBODY)
+    (bridge.DPC_HOME / "config.ini").write_text("[agent_chat]\ncc_display_name = Fable\n",
+                                                encoding="utf-8")
+    out = _run_cli(bridge, monkeypatch, capsys, "--group", GROUP, "--mentions")
+    assert out.endswith("No mentions of @Fable found.\n")
+
+
+def test_help_names_no_cc_outside_the_historical_identifiers(bridge):
+    text = bridge._build_parser().format_help()
+    assert "cc_display_name" in text          # the config key is allowed to keep its name
+    scrubbed = re.sub(r"cc_display_name|cc_group_chat_bridge\.py|cc_group_mention", "", text)
+    assert re.search(r"\bcc\b", scrubbed, re.IGNORECASE) is None, scrubbed
+    assert "Claude Code" not in text

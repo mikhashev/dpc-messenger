@@ -1,8 +1,11 @@
-# CC Agent Chat Monitor — Public Cron Prompt Template
+# Agent Chat Monitor — Public Cron Prompt Template
 
-A generic Claude Code cron prompt for monitoring a DPC agent chat and
-responding to `@CC` mentions via the bridge. Use this as a starting
-point when setting up Claude Code integration in your own project.
+A generic cron prompt for an external agent that monitors a DPC agent chat
+and responds to mentions of its own tag via the agent-chat bridge. Claude
+Code is the worked example throughout; any harness that can run a shell
+command on a schedule fits the same prompt. Use this as a starting point
+when setting up an external agent in your own project. (The file name and
+the `cc_` prefixes are historical — the name the agent answers to is yours.)
 
 The internal variant the project maintainers run lives at the repo root
 as `cc_cron_prompt.md` (gitignored — contains team-specific references:
@@ -11,14 +14,17 @@ template drops those so you can adopt the pattern cleanly in any context.
 
 ## How to use
 
-1. Decide which agent Claude Code should monitor. Use the display name
+1. Decide which agent your harness should monitor. Use the display name
    from `~/.dpc/agents/<folder>/config.json:name` (for example `Ark`,
    or any custom name you set). Folder ids like `agent_001` also work.
 2. In the prompt below, replace every `<agent>` with your agent name.
    Quote names with spaces: `--conversation-id "My Agent"`.
-3. In Claude Code, create a recurring cron (schedule: `every 1 minute`)
+3. Replace every `<tag>` with the name your harness answers to: in a group,
+   the tag you registered in Group Settings → External agents; in a 1:1 chat,
+   `[agent_chat] cc_display_name` from `~/.dpc/config.ini` (default `CC`).
+4. In Claude Code, create a recurring cron (schedule: `every 1 minute`)
    and paste the resulting prompt.
-4. The cron is session-only — recreate it after reopening the IDE.
+5. The cron is session-only — recreate it after reopening the IDE.
 
 > **Run the bridge with `uv run python`, not plain `python`.** The
 > **send** path (`--send` / `--send-file`) imports `websockets` to reach
@@ -36,7 +42,7 @@ template drops those so you can adopt the pattern cleanly in any context.
 ## Prompt template
 
 ```
-Check DPC agent chat. Run: cd <path-to-dpc-client-core> && uv run python cc_agent_bridge.py --once --last 10 --full --conversation-id <agent>. Scan output for @CC or @СС mentions from non-CC senders. If unanswered @CC mentions with direct questions are found, read context and respond via the bridge. For plain text without backticks use: uv run python cc_agent_bridge.py --send "response text" --conversation-id <agent>. For markdown responses with backticks, code blocks, or any shell-special characters, write the response to <path-to-temp-file> and send it via: uv run python cc_agent_bridge.py --send-file <path-to-temp-file> --conversation-id <agent>. Keep responses in markdown formatting. Distinguish: @CC as direct question (needs response) vs @CC mentioned in passing (no response needed). If no actionable mentions, do nothing and don't report.
+Check DPC agent chat. Run: cd <path-to-dpc-client-core> && uv run python cc_agent_bridge.py --once --last 10 --full --conversation-id <agent>. Scan output for mentions of your registered tag (@<tag>, plus @СС when the tag is CC) from senders other than you. If unanswered @<tag> mentions with direct questions are found, read context and respond via the bridge. For plain text without backticks use: uv run python cc_agent_bridge.py --send "response text" --conversation-id <agent>. For markdown responses with backticks, code blocks, or any shell-special characters, write the response to <path-to-temp-file> and send it via: uv run python cc_agent_bridge.py --send-file <path-to-temp-file> --conversation-id <agent>. Keep responses in markdown formatting. Distinguish: @<tag> as direct question (needs response) vs @<tag> mentioned in passing (no response needed). If no actionable mentions, do nothing and don't report.
 ```
 
 `<path-to-dpc-client-core>` is the absolute path to the
@@ -50,16 +56,17 @@ the outbox file feeds back into the agent's Active Recall as if it were
 knowledge. Recommended: `~/.dpc/.cc_outbox/cc-out-{target}.md` where
 `{target}` is the conversation-id or group-id being addressed (e.g.
 `cc-out-Ark.md`, `cc-out-group-b88b65076b85.md`). Per-target files
-prevent cross-chat stale content leaks when CC participates in multiple
-conversations simultaneously. The leading dot on `.cc_outbox/` and its
+prevent cross-chat stale content leaks when the harness participates in
+multiple conversations simultaneously. The leading dot on `.cc_outbox/` and its
 placement under `~/.dpc/` keep it out of any typical indexed-paths scan.
 The bridge reads this file directly (no shell interpretation), so
 backticks and code blocks pass through intact.
 
 ## Eliminating per-send permission prompts
 
-Claude Code prompts for approval before running each unfamiliar Bash
-command. With no allowlist, **every cron fire and every bridge send
+This section is Claude Code-specific; other harnesses have their own
+approval model. Claude Code prompts for approval before running each
+unfamiliar Bash command. With no allowlist, **every cron fire and every bridge send
 triggers a new prompt** — because the command string varies by agent
 name, message content, or file path. That kills the whole point of a
 cron-driven monitor.
@@ -108,29 +115,31 @@ not through a different tool. One allowlist entry covers both.
   limits, tone, banned phrasings) rather than stuffing them into every
   response.
 - **What counts as actionable.** The distinction between a direct
-  `@CC` question and a passing mention is intentional — it avoids
+  `@<tag>` question and a passing mention is intentional — it avoids
   chatter. Tighten or loosen it to taste (for example, ignore
   mentions that end with a period, only respond to questions ending
   with `?`, etc.).
-- **Mentions in other scripts.** The group bridge's `--mentions` scans for
-  the tag this node registered in Group Settings (`@CC_mike`, matched as a
-  whole word — `@CC` and `@CC_mike2` do not count), falling back to
-  `@<cc_display_name>` plus the Cyrillic `@СС` when nothing is registered;
-  `--as TAG` picks one of several. If your user name for Claude Code is
-  different (editable in the DPC UI under Firewall → Agent Permissions → CC
+- **Which name the bridges scan for.** The group bridge's `--mentions` scans
+  for the tag this node registered in Group Settings (`@CC_mike` in the
+  worked example, matched as a whole word — `@CC` and `@CC_mike2` do not
+  count), falling back to `@<cc_display_name>` plus the Cyrillic `@СС` when
+  nothing is registered; `--as TAG` picks one of several. The agent-chat
+  bridge has no registration to read and scans for `@<cc_display_name>`
+  only (editable in the DPC UI under Firewall → Agent Permissions → CC
   Display Name; persists to `[agent_chat] cc_display_name` in
-  `~/.dpc/config.ini`), add the actual `@<name>` variant to the scan
-  instructions.
+  `~/.dpc/config.ini`). Whatever the name, put the same `@<name>` in the
+  scan instruction of the prompt.
 - **The name must be unique across machines, and `-` will not make it so.**
-  In a group an external agent is reached by name match alone, with no check
-  that it belongs to this node — so two bridges with the same name both wake
-  on one `@CC` and both answer, from different working trees and different
-  memory. Renaming looks like the fix and is not: mentions are parsed with
-  `@(\w+)\b`, so `@CC-lnx` still routes to `CC` (measured; `@Fifth Agent`
-  routes to `Fifth`). Distinguish inside `\w+` — `CC_lnx`, `CC2` — and set it
-  per machine in `[agent_chat] cc_display_name`. In a 1:1 chat the send path
-  carries no sender at all, so two bridges are indistinguishable there
-  whatever they are called: run one per 1:1 conversation.
+  In a group an unregistered external agent is reached by name match alone,
+  with no check that it belongs to this node — so two bridges with the same
+  name both wake on one mention and both answer, from different working
+  trees and different memory. Renaming looks like the fix and is not: mentions
+  are parsed with `@(\w+)\b`, so `@CC-lnx` still routes to `CC` (measured;
+  `@Fifth Agent` routes to `Fifth`). Distinguish inside `\w+` — `CC_lnx`,
+  `CC2` — and register it per machine in Group Settings (or set it in
+  `[agent_chat] cc_display_name`). In a 1:1 chat the send path carries no
+  sender at all, so two bridges are indistinguishable there whatever they are
+  called: run one per 1:1 conversation.
 - **Harnesses without a cron.** `uv run python cc_group_chat_bridge.py --group <group-id> --listen [--once] [--json]`
   blocks and prints one line per `cc_group_mention` event for this bridge's
   tag as the backend emits it, so a runner that can wait on a subprocess needs
@@ -141,10 +150,10 @@ not through a different tool. One allowlist entry covers both.
 
 ## Related
 
-- [`cc_agent_bridge.py`](./cc_agent_bridge.py) — the bridge script
+- [`cc_agent_bridge.py`](./cc_agent_bridge.py) — the agent-chat bridge
   invoked by the prompt
 - [`../../docs/agent/CC_INTEGRATION_GUIDE.md`](../../docs/agent/CC_INTEGRATION_GUIDE.md) —
-  full integration guide (setup, authentication, troubleshooting)
+  the External Agent Integration Guide (setup, authentication, troubleshooting)
 - [`../../docs/BACKLOG_FORMAT.md`](../../docs/BACKLOG_FORMAT.md) — **required reading before
   writing a backlog entry.** An external agent working a project through this bridge writes
   into the same backlog the internal agents read; the entry shape, the status vocabulary and
@@ -159,7 +168,7 @@ For monitoring a group chat instead of an agent 1:1 chat, use
 `cc_group_chat_bridge.py` with `--group <group-id>`:
 
 ```
-Check DPC group chat. Run: cd <path-to-dpc-client-core> && uv run python cc_group_chat_bridge.py --group <group-id> --last 10. Scan output for @CC or @СС mentions from non-CC senders. If unanswered @CC mentions with direct questions are found, read context and respond via the bridge. For plain text without backticks use: uv run python cc_group_chat_bridge.py --group <group-id> --send "response text". For markdown responses with backticks, code blocks, or any shell-special characters, write the response to <path-to-temp-file> and send it via: uv run python cc_group_chat_bridge.py --group <group-id> --send-file <path-to-temp-file>. Keep responses in markdown formatting. Distinguish: @CC as direct question (needs response) vs @CC mentioned in passing (no response needed). If no actionable mentions, do nothing and don't report.
+Check DPC group chat. Run: cd <path-to-dpc-client-core> && uv run python cc_group_chat_bridge.py --group <group-id> --last 10. Scan output for mentions of your registered tag (@<tag>, plus @СС when the tag is CC) from senders other than you. If unanswered @<tag> mentions with direct questions are found, read context and respond via the bridge. For plain text without backticks use: uv run python cc_group_chat_bridge.py --group <group-id> --send "response text". For markdown responses with backticks, code blocks, or any shell-special characters, write the response to <path-to-temp-file> and send it via: uv run python cc_group_chat_bridge.py --group <group-id> --send-file <path-to-temp-file>. Keep responses in markdown formatting. Distinguish: @<tag> as direct question (needs response) vs @<tag> mentioned in passing (no response needed). If no actionable mentions, do nothing and don't report.
 ```
 
 Find your `<group-id>` by running `uv run python cc_group_chat_bridge.py --list`.

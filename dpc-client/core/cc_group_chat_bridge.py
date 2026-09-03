@@ -1,16 +1,16 @@
 """
-CC Group Chat Bridge — read group chat history and send CC responses.
+Group chat bridge — an external agent (Claude Code or any harness) reads a DPC
+group chat and posts under the tag it registered. File name is historical.
 
-Replaces dpc_group_mcp.py with stateless file + WebSocket approach:
 - READ: history.json from ~/.dpc/conversations/{group_id}/history.json
 - WRITE: WebSocket to localhost:9999 (send_group_agent_message command)
 
 Usage:
     python cc_group_chat_bridge.py --list                    # list available groups
     python cc_group_chat_bridge.py --group GROUP_ID --last 5 # show last 5 messages
-    python cc_group_chat_bridge.py --group GROUP_ID --send "hello"  # send CC response
-    python cc_group_chat_bridge.py --group GROUP_ID --mentions      # show @CC mentions
-    python cc_group_chat_bridge.py --group GROUP_ID --as CC_mike --send "hi"  # pick a tag
+    python cc_group_chat_bridge.py --group GROUP_ID --send "hello"  # post as this bridge's tag
+    python cc_group_chat_bridge.py --group GROUP_ID --mentions      # mentions of that tag
+    python cc_group_chat_bridge.py --group GROUP_ID --as TAG --send "hi"  # pick a tag
     python cc_group_chat_bridge.py --group GROUP_ID --listen [--once] [--json]  # push, no cron
 
 Identity: --as, else the tag registered for this node in Group Settings
@@ -42,9 +42,26 @@ def _read_config():
 
 
 def _get_cc_display_name() -> str:
-    """Read CC display name from config.ini [agent_chat] section."""
+    """Config fallback: [agent_chat] cc_display_name in config.ini, "CC" when unset."""
     config = _read_config()
     return config.get("agent_chat", "cc_display_name", fallback="CC")
+
+
+def _configured_display_name() -> str:
+    """The name-neutral reader; the key it reads keeps its historical name."""
+    return _get_cc_display_name()
+
+
+def _at_names(names: list) -> str:
+    """'@a, @b' for user-visible lines."""
+    return ", ".join("@" + n for n in names)
+
+
+def _mentions_banner(names: list, n: int) -> str:
+    """The --mentions header, naming the tags scanned for."""
+    if not n:
+        return f"No mentions of {_at_names(names)} found."
+    return f"=== {n} mention(s) of {_at_names(names)} ==="
 
 
 def _get_node_id() -> str:
@@ -77,7 +94,7 @@ def _identity_names(group_id: str, override=None) -> list:
     """Names this bridge answers to: --as, else registered tags, else cc_display_name."""
     if override:
         return [override]
-    return _registered_tags(group_id) or [_get_cc_display_name()]
+    return _registered_tags(group_id) or [_configured_display_name()]
 
 
 def _resolve_identity(group_id: str, override=None) -> str:
@@ -153,7 +170,7 @@ def read_history(group_id: str, last_n: int = None) -> list:
 
 
 def _mention_patterns(names: list) -> list:
-    """One whole-word regex per name (@CC_mike, not @CC_mike2); Cyrillic @сс only for CC."""
+    """One whole-word regex per name (@tag, not @tag2); Cyrillic @сс only when a name is CC."""
     patterns = [re.compile(r"(?<!\w)@" + re.escape(n) + r"(?!\w)", re.IGNORECASE) for n in names]
     if any(n.lower() == "cc" for n in names):
         patterns.append(re.compile(r"(?<!\w)@сс(?!\w)", re.IGNORECASE))
@@ -166,7 +183,7 @@ def find_mentions(messages: list, since_index: int = 0, names: list = None) -> l
     names defaults to [cc_display_name]; the CLI passes the resolved identity list.
     """
     if not names:
-        names = [_get_cc_display_name()]
+        names = [_configured_display_name()]
     patterns = _mention_patterns(names)
     mentions = []
     for i, msg in enumerate(messages):
@@ -196,7 +213,7 @@ def _build_send_command(group_id: str, name: str, text: str) -> dict:
 
 
 async def send_group_message(group_id: str, text: str, name: str = None) -> dict:
-    """Send CC response to group chat via WebSocket, as `name` (default: resolved identity)."""
+    """Post `text` to the group via WebSocket, as `name` (default: resolved identity)."""
     canonical_id = _resolve_group_id(group_id)
 
     try:
@@ -207,7 +224,7 @@ async def send_group_message(group_id: str, text: str, name: str = None) -> dict
 
     if name is None:
         name = _resolve_identity(group_id)
-    if name != _get_cc_display_name():
+    if name != _configured_display_name():
         print(f"[INFO] posting as {name}")
     command = _build_send_command(canonical_id, name, text)
 
@@ -369,15 +386,20 @@ def format_message(i: int, msg: dict) -> str:
     return f"  [{i + 1}] {ts} {sender}: {preview}"
 
 
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="CC Group Chat Bridge")
+def _build_parser() -> argparse.ArgumentParser:
+    """The CLI; factored out so tests can read its help."""
+    parser = argparse.ArgumentParser(
+        prog="cc_group_chat_bridge.py",
+        description="Group chat bridge for an external agent: read a group's history, "
+                    "scan for mentions of this bridge's tag, post under it")
     parser.add_argument("--list", action="store_true", help="List available groups")
     parser.add_argument("--group", type=str, help="Group ID to interact with")
     parser.add_argument("--last", type=int, default=10, help="Last N messages")
-    parser.add_argument("--mentions", action="store_true", help="Show @CC mentions")
-    parser.add_argument("--send", type=str, help="Send CC response text")
+    parser.add_argument("--mentions", action="store_true",
+                        help="Show mentions of this bridge's tag")
+    parser.add_argument("--send", type=str, help="Send a response as this bridge's name")
     parser.add_argument("--send-file", type=str, dest="send_file",
-                        help="Send CC response from file (backtick-safe)")
+                        help="Send a response from file as this bridge's name (backtick-safe)")
     parser.add_argument("--as", type=str, dest="as_name", metavar="TAG",
                         help="Post/scan as this tag (default: the tag registered in "
                              "Group Settings, else cc_display_name)")
@@ -391,7 +413,11 @@ if __name__ == "__main__":
                         help="With --listen: one JSON object per line instead of [MENTION]")
     parser.add_argument("--once", action="store_true",
                         help="With --listen: exit 0 after the first matching mention")
-    args = parser.parse_args()
+    return parser
+
+
+if __name__ == "__main__":
+    args = _build_parser().parse_args()
 
     if args.list:
         groups = list_groups()
@@ -434,13 +460,11 @@ if __name__ == "__main__":
     print(f"[CC Group Bridge] {len(messages)} messages (last {args.last})\n")
 
     if args.mentions:
-        mentions = find_mentions(messages, names=_identity_names(args.group, args.as_name))
-        if not mentions:
-            print("No @CC mentions found.")
-        else:
-            print(f"=== {len(mentions)} @CC mention(s) ===")
-            for i, msg in mentions:
-                print(format_message(i, msg))
+        names = _identity_names(args.group, args.as_name)
+        mentions = find_mentions(messages, names=names)
+        print(_mentions_banner(names, len(mentions)))
+        for i, msg in mentions:
+            print(format_message(i, msg))
     else:
         for i, msg in enumerate(messages):
             print(format_message(i, msg))

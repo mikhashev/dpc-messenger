@@ -1144,6 +1144,6 @@ See **[DPC Agent Skills Guide](DPC_AGENT_SKILLS.md)** for full documentation inc
 
 - **[DPC_AGENT_SKILLS.md](./DPC_AGENT_SKILLS.md)** — Memento-Skills system: teach the agent multi-step strategies, skill reflection loop, custom skills
 - **[DPC_AGENT_TELEGRAM.md](./DPC_AGENT_TELEGRAM.md)** — link an agent to a Telegram chat (per-agent linking or legacy `[dpc_agent_telegram]`)
-- **[CC_INTEGRATION_GUIDE.md](./CC_INTEGRATION_GUIDE.md)** — connect Claude Code as a second participant in the same agent chat
+- **[CC_INTEGRATION_GUIDE.md](./CC_INTEGRATION_GUIDE.md)** — connect an external agent such as Claude Code as a second participant in the same agent chat
 - **[../CONFIGURATION.md](../CONFIGURATION.md)** — full client configuration reference
 - **[../../QUICK_START.md](../../QUICK_START.md)** — user-facing quick start (install + first agent creation via UI)
