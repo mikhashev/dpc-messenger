@@ -147,6 +147,29 @@ EXTERNAL_AGENT_PREFIX = "ext:"
 _EXTERNAL_TAG_RE = re.compile(r"\w+")
 
 
+def external_agents_to_wake(allowed_agents, mention_names, cc_display_name,
+                            mention_all=False, sender_name=""):
+    """Which external agents on this node a mention wakes, and whether to warn.
+
+    Called from both mention paths — the one for a message this node sends and
+    the one for a message arriving from a peer. Keep it that way: the two have
+    diverged on the same input before.
+
+    `warn` is true when the answer comes from the display name because nothing is
+    registered for this node in this group.
+    """
+    registered = {a[len(EXTERNAL_AGENT_PREFIX):].lower()
+                  for a in allowed_agents if a.startswith(EXTERNAL_AGENT_PREFIX)}
+    sender = (sender_name or "").lower()
+    if registered:
+        woken = set(registered) if mention_all else (registered & set(mention_names))
+        return {t for t in woken if t != sender}, False
+    cc = (cc_display_name or "").lower()
+    if cc and cc != sender and (mention_all or cc in mention_names):
+        return {cc}, True
+    return set(), False
+
+
 class CoreService:
     """
     The main orchestrating class for the D-PC client's backend.
@@ -5249,15 +5272,25 @@ class CoreService:
                 asyncio.ensure_future(self._invoke_agent_in_group_serialized(
                     group_id, text, sender_name, aid, trigger_message_id))
 
-        cc_name = self.get_cc_display_name().lower()
-        if (mention_all or cc_name in mentions) and cc_name != sender_lower:
+        woken, warn = external_agents_to_wake(
+            allowed_agents, mentions, self.get_cc_display_name(),
+            mention_all=mention_all, sender_name=sender_lower,
+        )
+        if warn:
+            logger.warning(
+                "@%s answered in %s by name alone — nothing is registered for this "
+                "node in that group, so every node carrying this name answers. "
+                "Register it in Group Settings to address one machine.",
+                self.get_cc_display_name().lower(), group_id)
+        for tag in sorted(woken):
             logger.info("Group @%s mention detected — broadcasting cc_group_mention in group %s",
-                        "all" if mention_all else "cc", group_id)
+                        tag, group_id)
             await self.local_api.broadcast_event("cc_group_mention", {
                 "group_id": group_id,
                 "text": text,
                 "sender_name": sender_name,
                 "sender_node_id": self.p2p_manager.node_id,
+                "agent_tag": tag,
             })
 
     async def _invoke_agent_in_group_serialized(

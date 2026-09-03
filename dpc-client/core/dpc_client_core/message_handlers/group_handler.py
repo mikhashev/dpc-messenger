@@ -354,26 +354,15 @@ class GroupTextHandler(MessageHandler):
         # external agent for this group, registration decides; until then the old
         # behaviour stands and says so. The gate arrives per group, on the day
         # somebody fills the field, rather than on a release date.
-        from dpc_client_core.service import EXTERNAL_AGENT_PREFIX
-        registered = {a[len(EXTERNAL_AGENT_PREFIX):].lower()
-                      for a in allowed_agents if a.startswith(EXTERNAL_AGENT_PREFIX)}
+        from dpc_client_core.service import external_agents_to_wake
         cc_name = self.service.get_cc_display_name().lower()
-
-        if registered:
-            woken = registered & mention_names
-            if not woken:
-                self.logger.debug(
-                    "No registered external agent of %s mentioned in %s",
-                    sorted(registered), group_id)
-        elif cc_name in mention_names:
-            woken = {cc_name}
+        woken, warn = external_agents_to_wake(allowed_agents, mention_names, cc_name)
+        if warn:
             self.logger.warning(
-                "@%s answered in %s by name alone — no external agent is registered "
-                "for this node in that group, so every node carrying this name "
-                "answers. Register it in Group Settings to address one machine.",
+                "@%s answered in %s by name alone — nothing is registered for this "
+                "node in that group, so every node carrying this name answers. "
+                "Register it in Group Settings to address one machine.",
                 cc_name, group_id)
-        else:
-            woken = set()
 
         for tag in sorted(woken):
             # Broadcast event — the MCP server bridge subscribes and queues it.

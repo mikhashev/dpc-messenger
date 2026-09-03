@@ -16,6 +16,11 @@ Mike chose the transitional behaviour over a migration (2026-09-03): registratio
 decides once this node has registered anything for this group, and until then the
 old behaviour stands and says so in the log. The gate then arrives per group, on
 the day somebody fills the field, rather than on a release date.
+
+There are two mention paths — one for a message this node sends, one for a
+message arriving from a peer. Both call `external_agents_to_wake`, and so do
+these tests: an earlier version modelled the decision instead of calling it, and
+stayed green while one of the paths went ungated.
 """
 import sys
 from pathlib import Path
@@ -24,7 +29,11 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from dpc_client_core.service import EXTERNAL_AGENT_PREFIX, _EXTERNAL_TAG_RE
+from dpc_client_core.service import (
+    EXTERNAL_AGENT_PREFIX,
+    _EXTERNAL_TAG_RE,
+    external_agents_to_wake,
+)
 
 
 class TestTheTagRuleIsEnforcedWhereItIsTyped:
@@ -53,78 +62,46 @@ class TestTheTagRuleIsEnforcedWhereItIsTyped:
         assert not "agent_001".startswith(EXTERNAL_AGENT_PREFIX)
 
 
-class _Recorder:
-    """The narrowest stand-in that still exercises the branch: the handler only
-    reads a display name and a group's agent map, and only writes an event."""
-
-    def __init__(self, registered, cc_name="cc", node_id="node-A"):
-        self.events = []
-        self.warnings = []
-        self._registered = registered
-        self._cc = cc_name
-        self.node_id = node_id
-
-    def allowed(self):
-        return set(self._registered)
-
-
-def _decide(mention_names, allowed_agents, cc_name):
-    """The branch under test, lifted from group_handler._handle_agent_mentions.
-
-    Kept in step with the handler by test_the_handler_still_holds_this_shape
-    below, which reads the source rather than trusting this copy.
-    """
-    registered = {a[len(EXTERNAL_AGENT_PREFIX):].lower()
-                  for a in allowed_agents if a.startswith(EXTERNAL_AGENT_PREFIX)}
-    warned = False
-    if registered:
-        woken = registered & mention_names
-    elif cc_name in mention_names:
-        woken = {cc_name}
-        warned = True
-    else:
-        woken = set()
-    return woken, warned
-
-
 class TestWhoIsWoken:
     def test_nothing_registered_anywhere_keeps_todays_behaviour(self):
         """The transition. On the first run after the change no node has
         registered anything, and the old behaviour has to survive that."""
-        woken, warned = _decide({"cc"}, {"agent_001"}, "cc")
+        woken, warned = external_agents_to_wake({"agent_001"}, {"cc"}, "CC")
         assert woken == {"cc"}, "the change silenced a node that answered yesterday"
         assert warned, "it answered by name alone and said nothing about it"
 
     def test_a_registered_node_is_woken_by_its_own_tag(self):
-        woken, warned = _decide({"cc_win"}, {"agent_001", "ext:CC_win"}, "cc")
+        woken, warned = external_agents_to_wake(
+            {"agent_001", "ext:CC_win"}, {"cc_win"}, "CC")
         assert woken == {"cc_win"}
         assert not warned, "registration decided, so there is nothing to warn about"
 
     def test_a_registered_node_is_not_woken_by_someone_elses_tag(self):
         """The whole point: the Linux machine's tag no longer wakes this one."""
-        woken, warned = _decide({"cc_lnx"}, {"ext:CC_win"}, "cc")
+        woken, warned = external_agents_to_wake({"ext:CC_win"}, {"cc_lnx"}, "CC")
         assert woken == set()
         assert not warned
 
     def test_registration_replaces_the_configured_name(self):
         """Once a node has registered anything, its config name stops being a way
         in — otherwise the collision survives the fix for anyone who registers."""
-        woken, _ = _decide({"cc"}, {"ext:CC_win"}, "cc")
+        woken, _ = external_agents_to_wake({"ext:CC_win"}, {"cc"}, "CC")
         assert woken == set(), "the bare display name still reached a registered node"
 
     def test_several_external_agents_on_one_node(self):
         """The config holds one name; the group list holds as many as were typed."""
-        woken, _ = _decide({"cc_win", "reviewer"},
-                           {"ext:CC_win", "ext:reviewer", "agent_001"}, "cc")
+        woken, _ = external_agents_to_wake(
+            {"ext:CC_win", "ext:reviewer", "agent_001"},
+            {"cc_win", "reviewer"}, "CC")
         assert woken == {"cc_win", "reviewer"}
 
 
-def test_the_handler_still_holds_this_shape():
-    """The copy above is a copy. This reads the handler and fails if the branch
-    it models is gone — a green suite over a stale model is worth nothing."""
-    src = (Path(__file__).resolve().parents[1] / "dpc_client_core" / "message_handlers"
-           / "group_handler.py").read_text(encoding="utf-8")
-    assert "EXTERNAL_AGENT_PREFIX" in src, "the handler no longer knows external agents"
-    assert "registered & mention_names" in src, "the registration branch is gone"
-    assert 'elif cc_name in mention_names:' in src, "the transitional branch is gone"
-    assert '"agent_tag": tag' in src, "the event stopped saying which tag was matched"
+def test_both_mention_paths_ask_the_same_function():
+    core = Path(__file__).resolve().parents[1] / "dpc_client_core"
+    handler = (core / "message_handlers" / "group_handler.py").read_text(encoding="utf-8")
+    service = (core / "service.py").read_text(encoding="utf-8")
+
+    assert "external_agents_to_wake(" in handler, "the peer path stopped asking"
+    assert service.count("external_agents_to_wake(") >= 2, "the send path stopped asking"
+    for src, who in ((handler, "peer path"), (service, "send path")):
+        assert '"agent_tag": tag' in src, f"{who} stopped naming the matched tag"
