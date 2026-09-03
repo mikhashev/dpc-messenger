@@ -400,15 +400,54 @@ def _extract_thinking_prefix(content: str) -> str:
 _ROLE_BOUNDARY_PATTERNS = ["\n[USER]\n", "\n[ASSISTANT]\n", "\n[SYSTEM]\n", "[USER]"]
 
 # `[#74 | 06:42:57 | Johnny]` — the marker `context.history_prefix` puts on every
-# history line, which a model reading them sometimes emits on its own. Alone it is
-# a label rather than an answer, and the empty-content retry never saw it.
-_HISTORY_PREFIX_ONLY = re.compile(r"^\[#\d+(?:\s*\|[^\]\n]*)?\]$")
+# history line, the reader's own past turns included, which is why a model emits it
+# as if it were its own: it has only ever seen its words wearing it.
+#
+# It has to be stripped rather than tolerated, because it compounds. The marker the
+# model writes is stored in the message, and next turn the runtime prepends its own
+# on top — so the stored count grows by exactly one per turn. Measured 2026-09-03 in
+# group-b88b65076b85: 2 markers, then 3, then 4, then 436 in one 13516-character
+# message that was nothing else and ended mid-token on the max_tokens cap.
+#
+# Three shapes in production, which is why one pattern was not enough: bare
+# `[#76 | 07:45 | Johnny]`, bold `**[#76 | 07:45 | Johnny]**`, and any number of
+# either, one per line. The old pattern matched a single bare marker that was the
+# whole message, so the run of 436 passed it as a real answer.
+_HISTORY_MARKER = r"\*{0,2}\[#\d+(?:\s*\|[^\]\n]*)?\]\*{0,2}"
+_LEADING_HISTORY_MARKERS = re.compile(rf"^(?:\s*{_HISTORY_MARKER})+\s*")
+# What a run of markers leaves behind when max_tokens cuts it: an opener with no
+# closing bracket, because generation stopped inside one. Five characters, and
+# without this the 13516-character message above would have been stored as `**[#7`
+# and counted as an answer.
+_DANGLING_MARKER = re.compile(r"^\*{0,2}\[#\d*[^\]\n]*$")
+
+
+def _without_history_markers(content: str) -> str:
+    """The front markers removed. Silent — `_strip_history_markers` is the one
+    that reports, and `_is_answerless` must be free to ask without narrating."""
+    return _LEADING_HISTORY_MARKERS.sub("", content or "", count=1)
 
 
 def _is_answerless(content: str) -> bool:
     """True when there is nothing here a reader could use."""
-    stripped = (content or "").strip()
-    return not stripped or bool(_HISTORY_PREFIX_ONLY.match(stripped))
+    rest = _without_history_markers(content).strip()
+    return not rest or bool(_DANGLING_MARKER.match(rest))
+
+
+def _strip_history_markers(content: str) -> str:
+    """Remove the runtime's own history marker from the front of an answer.
+
+    Only from the front: a marker quoted mid-sentence is the agent talking *about*
+    the format, which in this project happens more than it does in most.
+    """
+    stripped = _without_history_markers(content)
+    if stripped != content:
+        log.warning(
+            "_strip_history_markers: stripped %d chars of history marker the model "
+            "copied from its own replayed turns",
+            len(content) - len(stripped),
+        )
+    return stripped
 
 
 def _strip_role_boundaries(content: str) -> str:
@@ -952,7 +991,7 @@ async def run_llm_loop(
                 append_jsonl(logs_dir / "reasoning.jsonl", _final_quality)
 
                 if not _is_answerless(content):
-                    clean_content = _strip_role_boundaries(content)
+                    clean_content = _strip_history_markers(_strip_role_boundaries(content))
                     # Intermediate per-round text is shown per-round (round_text), not
                     # assembled into the final answer (Variant 2). Final = this last round.
                     llm_trace["assistant_notes"].append(clean_content.strip()[:320])
