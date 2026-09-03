@@ -177,17 +177,24 @@ different working trees and different memory, so a reply from the machine that
 *cannot* do the work looks exactly like a reply from the one that can. It has
 cost this project a round.
 
-**The obvious fix does not work.** Mentions are parsed with `@(\w+)\b`, which
-stops at the first non-word character. Measured: `@CC-lnx` routes to `CC`, and
-so does every other hyphenated variant; `@Fifth Agent` routes to `Fifth`. Only
-`\w` survives — letters, digits and underscore. So distinguish the names
-*inside* `\w+`:
+**The obvious fix does not work, and it fails in a way you cannot see.** Agent
+routing parses mentions with `@(\w+)\b`, which stops at the first non-word
+character: `@CC-lnx` routes to `CC`, and so does every other hyphenated variant;
+`@Fifth Agent` routes to `Fifth`. Only `\w` survives — letters, digits and
+underscore. So distinguish the names *inside* `\w+`:
 
 | name | reaches |
 |---|---|
 | `CC-lnx` | every `CC` in the group — **not** what you meant |
 | `CC_lnx` | `CC_lnx` only |
 | `CC2` | `CC2` only |
+
+The reason it is invisible is that the text is parsed **twice, by two different
+expressions**. The six sites that decide routing use `@(\w+)\b`; the one that
+records who was mentioned in the message metadata uses `@([\w\-]+)`, where the
+hyphen does not break the name. So `@CC-lnx` is stored as a mention of `CC-lnx`
+and delivered to every `CC` — the interface and the routing disagree about who
+was addressed, and the interface is the one that looks right.
 
 Set each machine's name in `[agent_chat] cc_display_name` in `~/.dpc/config.ini`
 (or in the UI under Firewall → Agent Permissions → CC Display Name), and give
@@ -199,6 +206,11 @@ no sender field, so both bridges arrive under the node's single
 reply with nothing but a log line. Until that changes: one external agent per
 1:1 chat. Group chats do carry the sender, which is why the rule above is enough
 there.
+
+All of this is a workaround for an open defect, not a property of the design:
+the fix is for the external-agent path to check node registration the way the
+embedded one already does, after which the name stops being a routing key. Until
+then, the rules above are what keeps two machines apart.
 
 ### Sending markdown
 
