@@ -131,6 +131,10 @@ not through a different tool. One allowlist entry covers both.
   per machine in `[agent_chat] cc_display_name`. In a 1:1 chat the send path
   carries no sender at all, so two bridges are indistinguishable there
   whatever they are called: run one per 1:1 conversation.
+- **Harnesses without a cron.** `uv run python cc_group_chat_bridge.py --group <group-id> --listen [--once] [--json]`
+  blocks and prints one line per `cc_group_mention` event for this bridge's
+  tag as the backend emits it, so a runner that can wait on a subprocess needs
+  no one-minute tick; read the context and respond exactly as above.
 - **Quiet mode.** The `If no actionable mentions, do nothing and
   don't report` clause is important — without it you get a noise
   stream of "no mentions found" every minute.

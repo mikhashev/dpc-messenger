@@ -159,6 +159,7 @@ for group conversations with multiple agents. Same architecture as the
 | `uv run python cc_group_chat_bridge.py --group GROUP_ID --send-file path` | Send from file (backtick-safe). |
 | `uv run python cc_group_chat_bridge.py --group GROUP_ID --mentions` | Show only mentions of this bridge's tag, matched as a whole word (`@CC_mike`, not `@CC` or `@CC_mike2`). |
 | `uv run python cc_group_chat_bridge.py --group GROUP_ID --as TAG --send "text"` | Post (or, with `--mentions`, scan) as one specific registered tag. |
+| `uv run python cc_group_chat_bridge.py --group GROUP_ID --listen` | Block and print one `[MENTION]` line per `cc_group_mention` event for this bridge's tag as the backend emits it; reconnects with backoff when the backend drops. `--once` exits 0 after the first match, `--json` prints the payload as one JSON object per line, `--all-tags` takes every tag in the group. |
 
 The `--group` argument accepts either the canonical group ID
 (`group-abc123`) or the slugged directory name (`group-abc123-my-project`).
@@ -171,6 +172,18 @@ cc_display_name`. When the name differs from `cc_display_name` the send
 prints `[INFO] posting as <tag>` before `[SENT]`. With several tags
 registered and no `--as`, `--send` refuses with exit code 2 and lists them;
 `--mentions` scans for all of them.
+
+**Harnesses without a cron: `--listen`.** Instead of polling `history.json`
+every minute, `--listen` authenticates on the local WebSocket (the same
+`.ws_token` handshake as `--send`) and blocks, printing one line per
+`cc_group_mention` event whose `group_id` is this group and whose `agent_tag`
+is one of the names resolved above (`--as` applies). The backend emits the
+event on both the local send path and the peer path with
+`{group_id, text, sender_name, sender_node_id, agent_tag}`. `--once` returns 0
+after the first match, so `--listen --once --json` is "block until mentioned"
+for a script; without `--once` it runs until Ctrl-C (exit 0, `[LISTEN] stopped`
+on stderr) and reconnects with 1s→30s backoff when the backend restarts. Status
+lines go to stderr, events to stdout.
 
 ### One name, several machines — read this before the second bridge
 

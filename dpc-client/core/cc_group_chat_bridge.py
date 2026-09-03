@@ -11,6 +11,7 @@ Usage:
     python cc_group_chat_bridge.py --group GROUP_ID --send "hello"  # send CC response
     python cc_group_chat_bridge.py --group GROUP_ID --mentions      # show @CC mentions
     python cc_group_chat_bridge.py --group GROUP_ID --as CC_mike --send "hi"  # pick a tag
+    python cc_group_chat_bridge.py --group GROUP_ID --listen [--once] [--json]  # push, no cron
 
 Identity: --as, else the tag registered for this node in Group Settings
 (metadata.json agents/agent_names), else [agent_chat] cc_display_name.
@@ -25,6 +26,7 @@ import argparse
 from pathlib import Path
 
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
 DPC_HOME = Path(os.environ.get("DPC_HOME", Path.home() / ".dpc"))
 CONFIG_PATH = DPC_HOME / "config.ini"
@@ -276,6 +278,86 @@ def send_group_message_sync(group_id: str, text: str, name: str = None) -> dict:
     return asyncio.run(send_group_message(group_id, text, name))
 
 
+def _mention_for_me(frame, canonical_group_id: str, names_lower, all_tags: bool = False):
+    """Payload of a cc_group_mention frame for this group and one of our tags, else None."""
+    if not isinstance(frame, dict) or frame.get("event") != "cc_group_mention":
+        return None
+    payload = frame.get("payload")
+    if not isinstance(payload, dict) or payload.get("group_id") != canonical_group_id:
+        return None
+    tag = str(payload.get("agent_tag") or "").lower()
+    if not all_tags and tag not in names_lower:
+        return None
+    return payload
+
+
+def _format_mention(payload: dict, ts: str = None) -> str:
+    """One human line per event: first line of the text, cut at 200 chars."""
+    import time
+    first = (str(payload.get("text") or "").splitlines() or [""])[0]
+    return (f"[MENTION] {ts or time.strftime('%H:%M:%S')} {payload.get('sender_name', '?')} "
+            f"(@{payload.get('agent_tag', '?')}) in {payload.get('group_id', '?')}: {first[:200]}")
+
+
+async def listen_for_mentions(group_id: str, names: list, all_tags: bool = False,
+                              as_json: bool = False, once: bool = False) -> int:
+    """Print one line per cc_group_mention event addressed to `names`; reconnect with backoff."""
+    canonical_id = _resolve_group_id(group_id)
+    try:
+        import websockets
+    except ImportError:
+        print("[ERROR] websockets not installed.", file=sys.stderr)
+        return 1
+
+    names_lower = [n.lower() for n in names]
+    who = "any tag" if all_tags else ", ".join("@" + n for n in names)
+    print(f"[LISTEN] listening for {who} in {canonical_id}", file=sys.stderr, flush=True)
+
+    delay = 1
+    while True:
+        try:
+            # Re-read per connect: the backend rotates the token on every start.
+            auth_token = (DPC_HOME / ".ws_token").read_text(encoding="utf-8").strip()
+            async with websockets.connect(_get_ws_url()) as ws:
+                await ws.send(json.dumps({
+                    "id": "group-bridge-auth",
+                    "command": "auth",
+                    "token": auth_token,
+                }))
+                auth_result = json.loads(await asyncio.wait_for(ws.recv(), timeout=5))
+                if auth_result.get("status") != "OK":
+                    print(f"[ERROR] Auth rejected: {auth_result}", file=sys.stderr)
+                    return 1
+                delay = 1
+                while True:
+                    try:
+                        frame = json.loads(await ws.recv())
+                    except ValueError:
+                        continue
+                    payload = _mention_for_me(frame, canonical_id, names_lower, all_tags)
+                    if payload is None:
+                        continue
+                    print(json.dumps(payload, ensure_ascii=False) if as_json
+                          else _format_mention(payload), flush=True)
+                    if once:
+                        return 0
+        except Exception as e:  # socket closed, backend down, bad auth frame — all transient
+            reason = str(e) or type(e).__name__
+            print(f"[LISTEN] reconnecting in {delay}s ({reason})", file=sys.stderr, flush=True)
+            await asyncio.sleep(delay)
+            delay = min(delay * 2, 30)
+
+
+def listen_sync(group_id: str, names: list, all_tags: bool = False,
+                as_json: bool = False, once: bool = False) -> int:
+    """Sync wrapper for listen_for_mentions; Ctrl-C ends it with exit 0."""
+    try:
+        return asyncio.run(listen_for_mentions(group_id, names, all_tags, as_json, once))
+    except KeyboardInterrupt:
+        print("[LISTEN] stopped", file=sys.stderr, flush=True)
+        return 0
+
+
 def format_message(i: int, msg: dict) -> str:
     """Format a message for display. Full content, no truncation."""
     sender = msg.get("sender_name", msg.get("sender", "?"))
@@ -299,6 +381,16 @@ if __name__ == "__main__":
     parser.add_argument("--as", type=str, dest="as_name", metavar="TAG",
                         help="Post/scan as this tag (default: the tag registered in "
                              "Group Settings, else cc_display_name)")
+    parser.add_argument("--listen", action="store_true",
+                        help="Block and print each cc_group_mention event for this bridge's "
+                             "tag as it arrives (push, no cron); reconnects when the backend "
+                             "drops")
+    parser.add_argument("--all-tags", action="store_true", dest="all_tags",
+                        help="With --listen: print mentions of any tag in the group")
+    parser.add_argument("--json", action="store_true", dest="as_json",
+                        help="With --listen: one JSON object per line instead of [MENTION]")
+    parser.add_argument("--once", action="store_true",
+                        help="With --listen: exit 0 after the first matching mention")
     args = parser.parse_args()
 
     if args.list:
@@ -314,6 +406,14 @@ if __name__ == "__main__":
     if not args.group:
         print("Error: --group GROUP_ID required (use --list to see available groups)")
         sys.exit(1)
+
+    if args.listen:
+        if args.send or args.send_file or args.mentions:
+            print("Error: --listen cannot be combined with --send, --send-file or --mentions",
+                  file=sys.stderr)
+            sys.exit(2)
+        sys.exit(listen_sync(args.group, _identity_names(args.group, args.as_name),
+                             args.all_tags, args.as_json, args.once))
 
     if args.send:
         name = _resolve_identity(args.group, args.as_name)
