@@ -27,3 +27,22 @@ export const firewallRulesUpdated = writable<Record<string, any> | null>(null);
 // { status: 'success'|'unsupported'|'error', alias?, balance?, message? } where
 // balance = { is_available, balance_infos: [{currency, total_balance, ...}] }.
 export const providerBalance = writable<any>(null);
+
+// The provider calls currently waiting out a backoff, by `retry_id`. A map
+// rather than one slot because an agent and a chat can be waiting at the same
+// time, and a single slot would let either one's closing notice clear the
+// other's row. Entries arrive on `provider_retry` and leave on
+// `provider_retry_finished`, so a strip bound to this empties itself.
+export interface ProviderRetry {
+    retry_id: string;        // the handle a cancel is sent with
+    provider: string;        // "DeepSeek", "Z.AI", "llama-server"
+    alias: string;
+    attempt: number;
+    waiting_seconds: number;
+    elapsed_seconds: number;
+    budget_seconds: number;
+    error: string;
+    unreachable: boolean;    // the connection never opened, vs the service said no
+}
+
+export const providerRetries = writable<Map<string, ProviderRetry>>(new Map());

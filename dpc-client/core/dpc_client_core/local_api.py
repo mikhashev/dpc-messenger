@@ -195,6 +195,8 @@ ALLOWED_COMMANDS: frozenset = frozenset({
     "schedule_agent_task",
     "cancel_agent_task",
     "interrupt_agent",
+    # Stop a provider sitting in a backoff (providers/base.py)
+    "cancel_provider_retry",
     # Frontend logging relay
     "ui_log",
     # Sleep Consolidation (ADR-014)

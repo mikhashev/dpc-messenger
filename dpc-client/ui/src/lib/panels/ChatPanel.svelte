@@ -8,6 +8,7 @@
   import FileTransferUI from '$lib/components/FileTransferUI.svelte';
   import VoiceRecorder from '$lib/components/VoiceRecorder.svelte';
   import TokenWarningBanner from '$lib/components/TokenWarningBanner.svelte';
+  import ProviderRetryBanner from '$lib/components/ProviderRetryBanner.svelte';
   import IntegrityWarningBanner from '$lib/components/IntegrityWarningBanner.svelte';
   import AgentTaskBoard from '$lib/components/AgentTaskBoard.svelte';
   import { votingConversationId } from '$lib/services/knowledge';
@@ -1086,6 +1087,10 @@
   />
 
   <div class="input-row">
+    <!-- A provider waiting out a backoff. Not per-chat: the wait belongs to the
+         provider, and whoever is watching is the one sitting at the input. -->
+    <ProviderRetryBanner />
+
     {#if $integrityWarnings && $integrityWarnings.count > 0 && !$integrityWarnings.dismissed}
       <IntegrityWarningBanner
         count={$integrityWarnings.count}

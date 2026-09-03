@@ -1,6 +1,7 @@
 # dpc_client_core/providers/base.py
 # Base class, shared exceptions, shared constants, and shared utilities for all AI providers.
 
+import itertools
 import logging
 from typing import Dict, Any, Optional, List, Tuple
 
@@ -15,6 +16,16 @@ class ModelNotCachedError(Exception):
         self.cache_path = cache_path
         self.download_size_gb = download_size_gb
         super().__init__(f"Model '{model_name}' not found in cache: {cache_path}")
+
+class ProviderRetryCancelled(Exception):
+    """The interface abandoned a call that was waiting out a backoff.
+
+    An ordinary exception on purpose. Cancelling the surrounding task would do
+    the same job and would also skip every `except Exception` between here and
+    the caller — including the one that answers the UI — leaving the request
+    that was cancelled with no reply at all.
+    """
+
 
 # --- Shared reasoning-effort vocabulary ---
 
@@ -99,6 +110,147 @@ def never_connected(error: BaseException) -> bool:
             return True
         e = e.__cause__ or e.__context__
     return False
+
+
+# Set once at startup by whoever can reach the interface. A module-level slot
+# rather than a constructor argument because providers are built in several
+# places and none of them holds the interface.
+_retry_observer: Optional[Any] = None
+
+
+def set_retry_observer(observer: Optional[Any]) -> None:
+    """Register the callable that carries retry notices to the interface.
+
+    It is called from the retry loop and must not raise: a provider that failed
+    to tell anyone is still retrying, and an exception here would replace a
+    recoverable error with an unrecoverable one.
+    """
+    global _retry_observer
+    _retry_observer = observer
+
+
+# One flag per wait, by the id carried in the notice. Setting it is how the
+# interface says stop; the loop watches it beside every sleep and every call.
+_retry_waiters: Dict[str, Any] = {}
+_retry_seq = itertools.count(1)
+
+
+def register_retry_waiter(retry_id: str, flag: Any) -> None:
+    """Remember the flag this wait watches, so `cancel_retry` can set it."""
+    _retry_waiters[retry_id] = flag
+
+
+def forget_retry_waiter(retry_id: str) -> None:
+    _retry_waiters.pop(retry_id, None)
+
+
+def cancel_retry(retry_id: str) -> bool:
+    """Stop waiting, and abandon the request with it.
+
+    Returns False when the id is unknown or the wait already ended — the
+    ordinary case for a click that lands just as the call recovers, and not an
+    error.
+    """
+    flag = _retry_waiters.get(retry_id)
+    if flag is None or flag.is_set():
+        return False
+    flag.set()
+    return True
+
+
+def _drop(future) -> None:
+    """Let go of a future whose answer we no longer want.
+
+    Deliberately not a coroutine. Awaiting a cancelled future here would open a
+    window in which the surrounding task's own cancellation arrives and gets
+    swallowed by the same `except` — which is how shutdown stops working. The
+    callback exists only to retrieve the result, so a discarded task does not
+    log «exception was never retrieved».
+    """
+    future.cancel()
+    future.add_done_callback(lambda f: f.cancelled() or f.exception())
+
+
+async def sleep_unless_cancelled(seconds: float, flag: Any) -> None:
+    """Wait out the backoff, or stop the moment the flag is set.
+
+    The wait is `asyncio.sleep`, raced against the flag, and not
+    `wait_for(flag.wait(), timeout=...)`. The two are equivalent against a real
+    clock and not at all against a frozen one: `wait_for` measures with the
+    event loop's own timer, so a test that fakes `time.monotonic` — as the
+    budget tests do — leaves that timer unable to fire and the loop waits
+    forever. Going through `asyncio.sleep` keeps the wait where every such test
+    already patches it.
+    """
+    import asyncio
+    if seconds <= 0:
+        return
+    sleeper = asyncio.ensure_future(asyncio.sleep(seconds))
+    stop = asyncio.ensure_future(flag.wait())
+    try:
+        await asyncio.wait({sleeper, stop}, return_when=asyncio.FIRST_COMPLETED)
+    except BaseException:
+        _drop(sleeper)
+        _drop(stop)
+        raise
+    if stop.done():
+        _drop(sleeper)
+        raise ProviderRetryCancelled("the wait was cancelled")
+    _drop(stop)
+
+
+async def call_unless_cancelled(fn, timeout: float, flag: Any):
+    """Run `fn`, but stop waiting on it if the flag is set.
+
+    A hung call can hold the rest of the budget on its own, so the flag has to
+    reach here too and not only the sleep before it.
+    """
+    import asyncio
+    call = asyncio.ensure_future(fn())
+    stop = asyncio.ensure_future(flag.wait())
+    try:
+        done, _ = await asyncio.wait(
+            {call, stop}, timeout=timeout, return_when=asyncio.FIRST_COMPLETED
+        )
+    except BaseException:
+        _drop(call)
+        _drop(stop)
+        raise
+    _drop(stop)
+    if call in done:
+        return call.result()
+    _drop(call)
+    if stop in done:
+        raise ProviderRetryCancelled("the call was abandoned")
+    raise asyncio.TimeoutError()
+
+
+def announce_retry(payload: Dict[str, Any]) -> None:
+    """Say that an attempt is about to wait, and for how long."""
+    if _retry_observer is None:
+        return
+    try:
+        _retry_observer("provider_retry", payload)
+    except Exception:
+        logger.debug("retry observer raised on provider_retry", exc_info=True)
+
+
+def announce_retry_finished(retry_id: str, alias: str, outcome: str, attempts: int) -> None:
+    """Say how a run of retries ended: `recovered` or `failed`.
+
+    Sent when the loop ends, so an interface showing "retry 3" always has
+    something that clears it: `recovered`, `failed`, or `cancelled`. The one
+    ending that sends nothing is the surrounding task being cancelled, which
+    happens at shutdown, when there is no interface left to tell.
+    """
+    if _retry_observer is None:
+        return
+    try:
+        _retry_observer("provider_retry_finished",
+                        {"retry_id": retry_id, "alias": alias,
+                         "outcome": outcome, "attempts": attempts})
+    except Exception:
+        logger.debug("retry observer raised on provider_retry_finished", exc_info=True)
 
 
 def parse_thinking_tags(content: str) -> Tuple[str, Optional[str]]:
@@ -196,11 +348,6 @@ class AIProvider:
     # Wall-clock budget for `_retry_with_backoff`, overridden per instance from
     # config by the providers that retry.
     max_retry_seconds: float = 600
-    # Consecutive attempts that never opened a connection before the loop stops
-    # asking. Two rather than one because a single connect failure can be a blip;
-    # more than two buys nothing, because the answer does not change while the
-    # route is gone.
-    UNREACHABLE_ATTEMPTS = 2
 
     def __init__(self, alias: str, config: Dict[str, Any]):
         self.alias = alias
@@ -218,14 +365,16 @@ class AIProvider:
     async def _retry_with_backoff(self, fn, last_error: Exception):
         """Retry `fn` on a growing delay until the wall-clock budget is spent.
 
-        The budget is wall time, calls included: counting only the sleeps made
-        `max_retry_seconds` mean something other than its name, since against a
-        call that always times out the ladder 3, 6, 12 … reaches 600 on the ninth
-        pass — ten call-lengths rather than ten minutes. Both the sleep and the
-        call are clipped to what is left.
+        The budget is wall time, calls included: counting only the sleeps would
+        let a call that always times out spend ten call-lengths rather than ten
+        minutes, so both the sleep and the call are clipped to what is left.
 
-        A connection that never opened is the exception to the patience: see
-        `never_connected`.
+        Everything retryable gets the whole budget, a connection that never
+        opened included — a route can come back inside it. What bounds the wait
+        instead is the caller: every attempt is announced through
+        `announce_retry` under a `retry_id`, and `cancel_retry(retry_id)` ends
+        both the sleep and any call in flight. Cancelling the surrounding task
+        still works too, for shutdown.
         """
         import asyncio
         import time
@@ -234,41 +383,81 @@ class AIProvider:
         deadline = started + self.max_retry_seconds
         delay = 3
         attempt = 0
-        unreachable_run = 1 if never_connected(last_error) else 0
+        retry_id = f"{self.alias}:{next(_retry_seq)}"
+        stop = asyncio.Event()
+        register_retry_waiter(retry_id, stop)
+        try:
+            return await self._backoff_loop(
+                fn, last_error, retry_id, stop, started, deadline, delay, attempt
+            )
+        finally:
+            forget_retry_waiter(retry_id)
+
+    def _cancelled(self, retry_id: str, attempt: int, started: float) -> "ProviderRetryCancelled":
+        """Close the notice and build the error the chat will show.
+
+        The message carries the alias because it lands where an answer would
+        have been, and «the wait was cancelled» does not say whose.
+        """
+        import time
+        announce_retry_finished(retry_id, self.alias, "cancelled", attempt)
+        return ProviderRetryCancelled(
+            f"{self.RETRY_LABEL} provider '{self.alias}' was stopped after "
+            f"{attempt} {'retry' if attempt == 1 else 'retries'} "
+            f"({int(time.monotonic() - started)}s elapsed)"
+        )
+
+    async def _backoff_loop(self, fn, last_error, retry_id, stop, started, deadline, delay, attempt):
+        """The wait itself. Split out only so the registry entry above is
+        removed on every exit, cancellation included."""
+        import time
+
         while time.monotonic() < deadline:
             attempt += 1
+            elapsed = int(time.monotonic() - started)
             logger.warning(
                 "%s retry %d, waiting %ds (elapsed %ds/%ds): %s",
-                self.RETRY_LABEL, attempt, delay, int(time.monotonic() - started),
+                self.RETRY_LABEL, attempt, delay, elapsed,
                 self.max_retry_seconds, last_error,
             )
-            await asyncio.sleep(min(delay, max(0.0, deadline - time.monotonic())))
+            announce_retry({
+                "retry_id": retry_id,
+                "provider": self.RETRY_LABEL,
+                "alias": self.alias,
+                "attempt": attempt,
+                "waiting_seconds": delay,
+                "elapsed_seconds": elapsed,
+                "budget_seconds": self.max_retry_seconds,
+                "error": str(last_error) or type(last_error).__name__,
+                "unreachable": never_connected(last_error),
+            })
+            try:
+                await sleep_unless_cancelled(
+                    min(delay, max(0.0, deadline - time.monotonic())), stop
+                )
+            except ProviderRetryCancelled:
+                raise self._cancelled(retry_id, attempt, started) from None
             left = deadline - time.monotonic()
             if left <= 0:
                 break
             try:
-                return await asyncio.wait_for(fn(), timeout=left)
+                result = await call_unless_cancelled(fn, left, stop)
+                announce_retry_finished(retry_id, self.alias, "recovered", attempt)
+                return result
+            except ProviderRetryCancelled:
+                raise self._cancelled(retry_id, attempt, started) from None
             except Exception as e:
                 last_error = e
                 if time.monotonic() >= deadline:
                     break
                 if not self._is_retryable(e):
                     self._on_non_retryable(e)
+                    announce_retry_finished(retry_id, self.alias, "failed", attempt)
                     raise
-                if never_connected(e):
-                    unreachable_run += 1
-                    if unreachable_run >= self.UNREACHABLE_ATTEMPTS:
-                        break
-                else:
-                    unreachable_run = 0
                 delay = min(delay * 2, 192)
-        why = (
-            f"{self.UNREACHABLE_ATTEMPTS} consecutive attempts never reached the host"
-            if unreachable_run >= self.UNREACHABLE_ATTEMPTS
-            else f"{attempt} retries"
-        )
+        announce_retry_finished(retry_id, self.alias, "failed", attempt)
         raise RuntimeError(
-            f"{self.RETRY_LABEL} provider '{self.alias}' failed after {why} "
+            f"{self.RETRY_LABEL} provider '{self.alias}' failed after {attempt} retries "
             f"({int(time.monotonic() - started)}s elapsed): {last_error}"
         ) from last_error
 

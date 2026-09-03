@@ -121,7 +121,7 @@ export type {
 
 import { connectionStatus, nodeStatus, coreMessages } from './services/connection';
 import { p2pMessages, unreadMessageCounts } from './services/messaging';
-import { availableProviders, defaultProviders, providersList, peerProviders, aiResponseWithImage, firewallRulesUpdated, providerBalance } from './services/providers';
+import { availableProviders, defaultProviders, providersList, peerProviders, aiResponseWithImage, firewallRulesUpdated, providerBalance, providerRetries } from './services/providers';
 import { showNotificationIfBackground } from './notificationService';
 import { fileTransferOffer, fileTransferProgress, fileTransferComplete, fileTransferCancelled, activeFileTransfers, filePreparationStarted, filePreparationProgress, filePreparationCompleted } from './services/fileTransfer';
 import { voiceOfferReceived, voiceTranscriptionReceived, voiceTranscriptionComplete, voiceTranscriptionConfig, whisperModelLoadingStarted, whisperModelLoaded, whisperModelLoadingFailed, whisperModelUnloaded, whisperModelDownloadRequired, whisperModelDownloadStarted, whisperModelDownloadCompleted, whisperModelDownloadFailed } from './services/voice';
@@ -136,7 +136,7 @@ import { historyRestored, newSessionProposal, newSessionResult, conversationRese
 // services/providers.ts and re-export it here. See CLAUDE.md "UI Integration Pattern".
 export { connectionStatus, nodeStatus, coreMessages };
 export { p2pMessages, unreadMessageCounts };
-export { availableProviders, defaultProviders, providersList, peerProviders, aiResponseWithImage, firewallRulesUpdated, providerBalance };
+export { availableProviders, defaultProviders, providersList, peerProviders, aiResponseWithImage, firewallRulesUpdated, providerBalance, providerRetries };
 export { fileTransferOffer, fileTransferProgress, fileTransferComplete, fileTransferCancelled, activeFileTransfers, filePreparationStarted, filePreparationProgress, filePreparationCompleted };
 export { voiceOfferReceived, voiceTranscriptionReceived, voiceTranscriptionComplete, voiceTranscriptionConfig, whisperModelLoadingStarted, whisperModelLoaded, whisperModelLoadingFailed, whisperModelUnloaded, whisperModelDownloadRequired, whisperModelDownloadStarted, whisperModelDownloadCompleted, whisperModelDownloadFailed };
 export { groupChats, groupTextReceived, groupFileReceived, groupInviteReceived, groupUpdated, groupMemberLeft, groupDeleted, groupHistorySynced, groupAccessDenied, groupMessageDeleted, tokenUsageUpdated };
@@ -204,6 +204,9 @@ function startPolling() {
             }
             
             nodeStatus.set(null);
+            // No backend, no closing notice: drop the rows rather than leave
+            // them claiming waits that no longer exist.
+            providerRetries.set(new Map());
             socket = null;
 
             // Attempt reconnection
@@ -427,6 +430,20 @@ export async function connectToCoreService() {
                 // Handle token usage update (group chat counter)
                 else if (message.event === "token_usage_updated") {
                     tokenUsageUpdated.set(message.payload);
+                }
+                // A provider is waiting out a backoff (providers/base.py
+                // _retry_with_backoff). One event per attempt, keyed by retry_id
+                // so two waits cannot clear each other; the finished event below
+                // closes the row on recovered, failed or cancelled alike.
+                else if (message.event === "provider_retry") {
+                    providerRetries.update(m => new Map(m).set(message.payload.retry_id, message.payload));
+                }
+                else if (message.event === "provider_retry_finished") {
+                    providerRetries.update(m => {
+                        const next = new Map(m);
+                        next.delete(message.payload.retry_id);
+                        return next;
+                    });
                 }
                 // Handle token limit warning (Phase 2)
                 else if (message.event === "token_limit_warning") {
@@ -1158,6 +1175,9 @@ export async function connectToCoreService() {
             clearLogSender();
             console.log("WebSocket closed:", event.code, event.reason);
             nodeStatus.set(null);
+            // No backend, no closing notice: drop the rows rather than leave
+            // them claiming waits that no longer exist.
+            providerRetries.set(new Map());
             socket = null;
 
             // Code 1008 = policy violation. The backend uses this exclusively for
@@ -1242,6 +1262,8 @@ export function disconnectFromCoreService() {
     
     connectionStatus.set('disconnected');
     nodeStatus.set(null);
+    // Same reason as in the close handler: no backend, no closing notice.
+    providerRetries.set(new Map());
 }
 
 export function resetReconnection() {

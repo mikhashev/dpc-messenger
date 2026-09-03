@@ -187,6 +187,12 @@ class CoreService:
         self.local_api = LocalApiServer(core_service=self)
         self.file_server = FileServer(dpc_home_dir=DPC_HOME_DIR, host="127.0.0.1", port=9998)
 
+        # A provider that is waiting out a backoff says so on screen instead of
+        # looking hung for up to its whole budget. Registered here because the
+        # providers are built elsewhere and none of them can reach the interface.
+        from dpc_client_core.providers.base import set_retry_observer
+        set_retry_observer(self._announce_provider_retry)
+
         # Knowledge Architecture components (Phase 1-6)
         self.pcm_core = PCMCore(DPC_HOME_DIR / PERSONAL_CONTEXT)
 
@@ -4251,6 +4257,19 @@ class CoreService:
                     logger.info("Schedule approval %s withdrawn from Telegram: %s", request_id, outcome)
             except Exception as e:
                 logger.debug("Could not withdraw schedule approval %s from Telegram: %s", request_id, e)
+
+    def _announce_provider_retry(self, event: str, payload: Dict[str, Any]) -> None:
+        """Carry a provider's retry notice to the interface.
+
+        Called from inside the retry loop, so it must return at once and must
+        not raise — the caller is in the middle of recovering from an error and
+        an exception here would turn a recoverable failure into a lost one.
+        """
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        loop.create_task(self.local_api.broadcast_event(event, payload))
 
     async def announce_shell_approval_request(
         self,
@@ -8421,6 +8440,23 @@ class CoreService:
         except Exception as e:
             logger.error("interrupt_agent error: %s", e)
             return {"status": "error", "message": str(e)}
+
+    async def cancel_provider_retry(self, retry_id: str = "") -> Dict[str, Any]:
+        """Stop a provider that is sitting in a backoff.
+
+        The wait is bounded by a ten-minute budget, which is the right ceiling
+        for an outage nobody is watching and far too long for someone who is:
+        this is how they take the decision back. Cancelling ends the request,
+        not just the sleep — that is what abandoning it means.
+        """
+        from dpc_client_core.providers.base import cancel_retry
+        if not retry_id:
+            return {"status": "error", "message": "retry_id required"}
+        cancelled = cancel_retry(retry_id)
+        logger.info("cancel_provider_retry: retry_id=%s cancelled=%s", retry_id, cancelled)
+        # Not found is the ordinary race with a call that just recovered, so the
+        # interface is told plainly rather than shown an error.
+        return {"status": "cancelled" if cancelled else "not_waiting"}
 
     # --- Sleep Consolidation (ADR-014) ---
 
