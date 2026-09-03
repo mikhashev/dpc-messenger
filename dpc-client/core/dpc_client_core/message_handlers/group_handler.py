@@ -324,6 +324,9 @@ class GroupTextHandler(MessageHandler):
 
         mentions = re.findall(r'@(\w+)\b', text, re.IGNORECASE)
         mention_names = {m.lower() for m in mentions}
+        self.logger.debug(
+            "_handle_agent_mentions (peer path): mentions=%s in group %s (sender=%s)",
+            mention_names, group_id, sender_name)
 
         # Get allowed agents for this group from metadata
         group = self.service.group_manager.get_group(group_id) if self.service.group_manager else None
@@ -356,7 +359,14 @@ class GroupTextHandler(MessageHandler):
         # somebody fills the field, rather than on a release date.
         from dpc_client_core.service import external_agents_to_wake
         cc_name = self.service.get_cc_display_name().lower()
-        woken, warn = external_agents_to_wake(allowed_agents, mention_names, cc_name)
+        # Same rule as the send path: @all is a human's word. The agent case
+        # already returned above, so here every sender is a human.
+        mention_all = "all" in mention_names
+        woken, warn = external_agents_to_wake(
+            allowed_agents, mention_names, cc_name,
+            mention_all=mention_all,
+            sender_name=sender_name.lower() if sender_name else "",
+        )
         if warn:
             self.logger.warning(
                 "@%s answered in %s by name alone — nothing is registered for this "
@@ -368,6 +378,9 @@ class GroupTextHandler(MessageHandler):
             # Broadcast event — the MCP server bridge subscribes and queues it.
             # `agent_tag` says which name was matched: with several external agents
             # on one node, the bridge cannot tell from the text alone.
+            self.logger.info(
+                "Group @%s mention from peer %s — broadcasting cc_group_mention in group %s",
+                tag, sender_name, group_id)
             await self.service.local_api.broadcast_event("cc_group_mention", {
                 "group_id": group_id,
                 "text": text,
