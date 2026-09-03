@@ -201,13 +201,10 @@ reaches `CC`, and `@Fifth Agent` reaches `Fifth`.
 | `CC_lnx` | `CC_lnx` only |
 | `CC2` | `CC2` only |
 
-What makes that worth refusing rather than documenting is that the text is
-parsed **twice, by two different expressions**. The six sites that decide routing
-use `@(\w+)\b`; the one that records who was mentioned in the message metadata
-uses `@([\w\-]+)`, where the hyphen does not break the name. So `@CC-lnx` is
-stored as a mention of `CC-lnx` and delivered to every `CC` — the interface and
-the routing disagree about who was addressed, and the interface is the one that
-looks right.
+What makes that worth refusing rather than documenting is that the message still
+*reads* as you typed it. The chat shows `@CC-lnx`, because the text is displayed
+verbatim; only the routing truncated it. Nothing on screen says the mention went
+somewhere else, so the mistake looks like it worked.
 
 You can register several tags on one node; the group mention event names which
 one was matched. The node's own `[agent_chat] cc_display_name` in
