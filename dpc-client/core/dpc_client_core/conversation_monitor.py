@@ -46,6 +46,39 @@ def rechain(messages: List[Dict[str, Any]]) -> None:
         prev_hash = m["chain_hash"]
 
 
+def attachment_matches(att: Dict[str, Any], filename: Optional[str],
+                       size_bytes: Optional[int], file_hash: Optional[str]) -> bool:
+    """Same file: same name, then the hash when both sides have a real one,
+    else the size. A sender's own record carries neither hash nor transfer id
+    — only what it pasted — so the size is what it can be matched on."""
+    if not filename or att.get("filename") != filename:
+        return False
+    mine = att.get("hash")
+    if mine and mine != "none" and file_hash and file_hash != "none":
+        return mine == file_hash
+    return att.get("size_bytes") == size_bytes
+
+
+def merge_received_attachment(target: Dict[str, Any], source: Dict[str, Any]) -> Dict[str, Any]:
+    """Fold what a completed transfer knows into the sender's attachment.
+
+    Path, hash, transfer id and status are the transfer's; a thumbnail or
+    dimensions the sender's copy already carries are kept.
+    """
+    for key in ("file_path", "hash", "transfer_id", "size_mb", "size_bytes",
+                "status", "mime_type", "voice_metadata"):
+        value = source.get(key)
+        if value in (None, ""):
+            continue
+        if key == "hash" and value == "none" and target.get("hash"):
+            continue
+        target[key] = value
+    for key in ("thumbnail", "dimensions"):
+        if not target.get(key) and source.get(key):
+            target[key] = source[key]
+    return target
+
+
 def digest_for(messages: List[Dict[str, Any]]) -> Dict[str, Any]:
     """Per-author counts and digests over a message list.
 
@@ -343,6 +376,9 @@ class ConversationMonitor:
         self._history_dirty: bool = False  # Track unsaved changes
         self._signer = None  # Lazy-loaded CommitSigner for message signing
         self._chain_rebuilt = False  # One-time local repair of a pre-local chain
+        # Ids of «Received file» notes this node wrote for a peer's transfer,
+        # to be dropped when the peer's own record of that file arrives.
+        self._local_file_notes: set = set()
         # What the last folder consolidation did, for the caller to announce.
         self.last_consolidation: Dict[str, Any] = {"merged": 0}
         self.peer_context_hashes: Dict[str, str] = {}  # {node_id: context_hash} for peer cache invalidation
@@ -2231,41 +2267,39 @@ PARTICIPANTS' CULTURAL CONTEXTS:
             List of attachment dicts with remapped file_path (if file exists locally)
         """
         import os
-        from pathlib import Path
 
-        # Construct local files directory: ~/.dpc/conversations/{peer_id}/files/
-        dpc_home = Path.home() / ".dpc"
-        local_files_dir = dpc_home / "conversations" / self.conversation_id / "files"
+        # The folder in use, not a folder named after the id: a group store is
+        # `{id}-{slug}` when it has a name, and images land one level deeper.
+        # Resolved from the bare id, this looked in a folder that did not exist
+        # and left every synced screenshot pointing at the sender's disk.
+        conv_dir = self._get_conversation_dir()
+        subdirs = (conv_dir / "files" / "screenshots", conv_dir / "files")
 
         remapped = []
         for attachment in attachments:
-            # Make a copy to avoid modifying original
             att = dict(attachment)
-
-            # Check if this attachment has a file_path (voice/file attachments)
-            if "file_path" in att and att["file_path"]:
-                peer_path = att["file_path"]
-
-                # Extract filename from peer's path (cross-platform)
-                # Handle both Unix (/) and Windows (\) separators
-                filename = os.path.basename(peer_path.replace("\\", "/"))
-
-                # Construct local path: ~/.dpc/conversations/{peer_id}/files/{filename}
-                local_file_path = local_files_dir / filename
-
-                # Check if file exists locally
-                if local_file_path.exists():
-                    # Replace with local path
-                    att["file_path"] = str(local_file_path)
-                    logger.debug(f"Remapped attachment path: {peer_path} -> {local_file_path}")
-                else:
-                    # File doesn't exist locally - keep peer's path but log warning
-                    logger.warning(
-                        f"Voice/file attachment not found locally: {filename}. "
-                        f"Expected at {local_file_path}. Voice message may not play."
-                    )
-                    # Keep the peer's path (will fail to play, but preserves history)
-
+            peer_path = att.get("file_path") or ""
+            if peer_path and Path(peer_path).exists():
+                remapped.append(att)  # already ours
+                continue
+            names = []
+            if peer_path:
+                names.append(os.path.basename(str(peer_path).replace("\\", "/")))
+            if att.get("filename") and att["filename"] not in names:
+                names.append(att["filename"])
+            local = next(
+                (d / n for n in names for d in subdirs if n and (d / n).is_file()), None
+            )
+            if local is not None:
+                att["file_path"] = str(local)
+                logger.debug(f"Remapped attachment path: {peer_path or '<none>'} -> {local}")
+            elif peer_path:
+                # Kept as it came: the UI falls back to the thumbnail, and the
+                # transfer that brings the file may still be on its way.
+                logger.warning(
+                    "Attachment %s not found locally under %s; keeping the sender's path",
+                    names[0] if names else "?", conv_dir,
+                )
             remapped.append(att)
 
         return remapped
@@ -3043,6 +3077,95 @@ PARTICIPANTS' CULTURAL CONTEXTS:
             return (self.conversation_id, local)
         return (self.conversation_id,)
 
+    def _local_node_id(self) -> Optional[str]:
+        """This node's id, or None when the roster does not say.
+
+        A group roster follows member order, so the local node is the entry
+        marked `context: local`, not necessarily the first one.
+        """
+        for p in self.participants or ():
+            if p.get("context") == "local" and p.get("node_id"):
+                return p["node_id"]
+        return self.participants[0].get("node_id") if self.participants else None
+
+    def find_file_record(self, sender_node_id: str, filename: str,
+                         size_bytes: Optional[int], file_hash: Optional[str]
+                         ) -> Optional[Dict[str, Any]]:
+        """The record already holding this file from this sender, if any."""
+        for record in self.message_history:
+            if record.get("sender_node_id") != sender_node_id:
+                continue
+            for att in record.get("attachments") or ():
+                if attachment_matches(att, filename, size_bytes, file_hash):
+                    return record
+        return None
+
+    def note_local_file_record(self, message_id: str) -> None:
+        """Remember a «Received file» note this node wrote for a peer's transfer."""
+        self._local_file_notes.add(message_id)
+
+    def _is_local_file_note(self, record: Dict[str, Any]) -> bool:
+        """A record this node wrote *about* a peer's file: attributed to the
+        peer, signed by us. That shape is exactly what every other node
+        rejects, and it puts our hash into the peer's author digest, so the
+        two copies never agree about that author until it goes."""
+        if record.get("id") in getattr(self, "_local_file_notes", ()):
+            return True
+        local = self._local_node_id()
+        return bool(local) and record.get("signer_node_id") == local \
+            and record.get("sender_node_id") not in (None, local)
+
+    def _drop_local_file_note(self, arriving: Dict[str, Any]) -> bool:
+        """Drop our own note for a file once the sender's record of it arrives.
+
+        Safe for the chain: it describes this node's copy and is recomputed
+        from genesis on every reorder (`restore_chronological_order`), so it
+        is rechained here the same way. `save_history` rewrites the deletion
+        anchor alongside.
+        """
+        sender = arriving.get("sender_node_id")
+        for i, record in enumerate(self.message_history):
+            if record.get("sender_node_id") != sender or not self._is_local_file_note(record):
+                continue
+            if not any(
+                attachment_matches(mine, theirs.get("filename"), theirs.get("size_bytes"),
+                                   theirs.get("hash"))
+                for mine in record.get("attachments") or ()
+                for theirs in arriving.get("attachments") or ()
+            ):
+                continue
+            # Our note carries the local path, the hash and the transfer id;
+            # the sender's copy carries none of them. Move them over.
+            for mine in record.get("attachments") or ():
+                for theirs in arriving.get("attachments") or ():
+                    if attachment_matches(mine, theirs.get("filename"), theirs.get("size_bytes"),
+                                          theirs.get("hash")):
+                        merge_received_attachment(theirs, mine)
+            del self.message_history[i]
+            self.message_ids.discard(record.get("id"))
+            self._local_file_notes.discard(record.get("id"))
+            rechain(self.message_history)
+            self._history_dirty = True
+            logger.info("Dropped local file note %s: the sender's record %s arrived",
+                        record.get("id"), arriving.get("id"))
+            return True
+        return False
+
+    def attach_received_file(self, record: Dict[str, Any], attachment: Dict[str, Any]) -> Dict[str, Any]:
+        """Complete the sender's record with what the transfer brought.
+
+        The signature covers none of `attachments`, so the record stays the
+        sender's and stays verifiable.
+        """
+        for att in record.get("attachments") or ():
+            if attachment_matches(att, attachment.get("filename"), attachment.get("size_bytes"),
+                                  attachment.get("hash")):
+                merge_received_attachment(att, attachment)
+                self._history_dirty = True
+                self.save_history()
+                return att
+        raise ValueError("record holds no attachment matching the transfer")
+
     def _verify_incoming(self, message: Dict[str, Any]) -> tuple[Optional[Dict[str, Any]], str]:
         """Decide what an arriving record is before it can enter history.
 
@@ -3153,6 +3276,12 @@ PARTICIPANTS' CULTURAL CONTEXTS:
         if msg_id:
             self.message_ids.add(msg_id)
 
+        # A peer's attachment names a file on the peer's disk. Rebased here,
+        # not only in import_history: this is the path group sync takes, and
+        # it used to store the foreign path as it came.
+        if message.get("attachments") and message.get("sender_node_id") != self._local_node_id():
+            message = dict(message, attachments=self._remap_attachment_paths(message["attachments"]))
+
         # Add to history, re-chained for this node. A foreign index and hash
         # appended verbatim broke the local chain permanently: the loader
         # recomputes what it expects from the local sequence, finds the
@@ -3179,12 +3308,18 @@ PARTICIPANTS' CULTURAL CONTEXTS:
         added = 0
         rejected = 0
         legacy = 0
+        dropped = 0
         for msg in remote_messages:
             checked, verdict = self._verify_incoming(msg)
             if checked is None:
                 logger.warning("Rejected message %s: %s", msg.get("id", "?"), verdict)
                 rejected += 1
                 continue
+            # The transfer got here before the sender's record of it, and we
+            # wrote a note of our own meanwhile. One file, one record.
+            if checked.get("attachments") and checked.get("id") not in self.message_ids:
+                if self._drop_local_file_note(checked):
+                    dropped += 1
             if self.add_message_with_id(checked):
                 added += 1
                 if verdict == "legacy":
@@ -3197,7 +3332,7 @@ PARTICIPANTS' CULTURAL CONTEXTS:
                 "Merged %d unsigned record(s) into %s: stored `verification: legacy`, not checked",
                 legacy, self.conversation_id,
             )
-        if added > 0:
+        if added > 0 or dropped > 0:
             self.restore_chronological_order()
             self.save_history()
             logger.info("Merged %d new messages into conversation history", added)
