@@ -30,7 +30,7 @@ log = logging.getLogger(__name__)
 # Agent Storage
 # ---------------------------------------------------------------------------
 
-AGENT_ID_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
+AGENT_ID_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 
 
 def get_agent_root(agent_id: str) -> pathlib.Path:
@@ -44,12 +44,20 @@ def get_agent_root(agent_id: str) -> pathlib.Path:
     that is not a folder id is refused rather than made. An external agent's
     tag reached here twice on 2026-09-03 (`ext:CC`): Windows raised deep in
     `os.mkdir`, and Linux would have silently grown `~/.dpc/agents/ext:CC/`.
+
+    A dot is not in the set at all, which is what makes `.`, `..` and `...`
+    ordinary refusals rather than special cases. Win32 strips a trailing dot
+    from the component: measured here, `...` resolves to the agents directory
+    itself — the whole sandbox as one agent's root — and `a...` resolves to
+    `a`, so four ids share one folder. Linux keeps them apart, which is the
+    same defect wearing the other operating system. No agent directory on this
+    machine carries a dot, so nothing is lost by excluding it.
     """
-    if not agent_id or agent_id in (".", "..") or not AGENT_ID_RE.match(agent_id):
+    if not agent_id or not AGENT_ID_RE.match(agent_id):
         raise ValueError(
             f"«{agent_id}» is not an agent id. This creates a directory under "
-            "~/.dpc/agents, so it takes letters, digits, underscore, dot and "
-            "hyphen — an external agent's tag or a display name does not belong here."
+            "~/.dpc/agents, so it takes letters, digits, underscore and hyphen — "
+            "an external agent's tag or a display name does not belong here."
         )
     agent_root = pathlib.Path.home() / ".dpc" / "agents" / agent_id
     agent_root.mkdir(parents=True, exist_ok=True)

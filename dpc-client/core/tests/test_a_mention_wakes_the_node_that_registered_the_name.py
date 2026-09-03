@@ -176,13 +176,19 @@ class TestAnExternalTagIsNeverAnAgentFolder:
     `ext:CC` is a legal directory name, so it would have been created quietly and
     an empty agent would have started answering out of it."""
 
-    def test_an_agent_id_still_resolves(self, tmp_path, monkeypatch):
+    @pytest.mark.parametrize("good", ["agent_001", "task-001", "agent_johnny_f309700d",
+                                      "default", "a"])
+    def test_an_agent_id_still_resolves(self, good, tmp_path, monkeypatch):
+        """Both shapes present on this machine: `agent_*` with underscores and
+        the 53 `task-NNN` directories with a hyphen. Tightening the alphabet
+        must not reach either."""
         from dpc_client_core.dpc_agent import utils
         monkeypatch.setattr(utils.pathlib.Path, "home", staticmethod(lambda: tmp_path))
-        root = utils.get_agent_root("agent_001")
-        assert root.is_dir() and root.name == "agent_001"
+        root = utils.get_agent_root(good)
+        assert root.is_dir() and root.name == good
 
-    @pytest.mark.parametrize("bad", ["ext:CC", "", ".", "..", "../../etc", "CC lnx", "a/b"])
+    @pytest.mark.parametrize("bad", ["ext:CC", "", ".", "..", "../../etc", "CC lnx", "a/b",
+                                     "...", "....", "a...", "agent_001."])
     def test_anything_that_is_not_a_folder_id_is_refused(self, bad, tmp_path, monkeypatch):
         from dpc_client_core.dpc_agent import utils
         monkeypatch.setattr(utils.pathlib.Path, "home", staticmethod(lambda: tmp_path))
@@ -191,6 +197,24 @@ class TestAnExternalTagIsNeverAnAgentFolder:
         made = [p.name for p in (tmp_path / ".dpc" / "agents").glob("*")] \
             if (tmp_path / ".dpc" / "agents").exists() else []
         assert made == [], f"the refusal still left {made} behind"
+
+    def test_a_trailing_dot_would_name_a_different_folder(self, tmp_path, monkeypatch):
+        """Win32 strips a trailing dot from the component, so `...` resolves to
+        the agents directory itself — the whole sandbox as one agent's root —
+        and `a...` resolves to `a`. Measured on this machine 2026-09-03; the
+        ids stay distinct on Linux, which is the same defect on the other OS.
+        Found by Johnny (`...`), sharpened by Ark, and the `a...` collision by
+        running it."""
+        from dpc_client_core.dpc_agent import utils
+        monkeypatch.setattr(utils.pathlib.Path, "home", staticmethod(lambda: tmp_path))
+        base = tmp_path / ".dpc" / "agents"
+        for one, other in (("a", "a..."), ("agent_001", "agent_001.")):
+            utils.get_agent_root(one)
+            with pytest.raises(ValueError):
+                utils.get_agent_root(other)
+        assert sorted(p.name for p in base.iterdir()) == ["a", "agent_001"], (
+            "a refused id still created or renamed a folder"
+        )
 
     def _fake_service(self, agents):
         import re as _re
