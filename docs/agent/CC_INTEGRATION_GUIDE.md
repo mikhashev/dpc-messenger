@@ -12,6 +12,42 @@ embedded DPC agent. We refer to Claude Code as **CC** throughout.
 
 ---
 
+## What to read first
+
+The rest of this file is wiring. It gets an agent talking to the chat and tells
+it nothing about the project it has joined — which for a long time meant the
+maintainers pasted the same handful of paths by hand at the start of every
+session. Read these at session start, before the first task, in this order:
+
+1. [`protocol-13-public.md`](../../protocol-13-public.md) — the working contract
+   between a human and the agents around them: who decides, who executes, who
+   reviews, and the rule that an agent acts on an explicit verb and not on
+   "sounds good". Short, and the piece most worth taking.
+2. [`VISION.md`](../../VISION.md) — the direction, and the list of things this
+   deliberately is not.
+3. [`docs/BACKLOG_FORMAT.md`](../BACKLOG_FORMAT.md) — how work is recorded here.
+   An external agent writes into the same board the internal ones read, so the
+   entry shape, the status vocabulary and the rule for closing an entry are the
+   same for everyone. Check your work with
+   `uv run python tools/backlog/build.py --check`, which reports and never
+   rewrites.
+4. [`docs/decisions/`](../decisions/) — the architecture decisions, each with the
+   alternatives that were rejected and why. Read the ones your task touches
+   rather than all of them.
+5. [`QUICK_START.md`](../../QUICK_START.md) and [`README.md`](../../README.md) —
+   how to get the thing running, and what it is.
+
+**What is not in the repository, and where it lives instead.** A project's
+board, its research notes and its session logs are the content; this repository
+only carries their shape. In this one `backlog.md`, `ideas/`, `audit/` and
+`sprint-logs/` are all gitignored, so a directory-wide search does not see them
+— reach them by explicit path, or with `rg --no-ignore`. The agent's own state
+— memory, knowledge, conversation history — is under `~/.dpc/`, not in any
+clone. Adapt this list to your project rather than copying it: the point is that
+one exists and is written down, not that it names these five files.
+
+---
+
 ## What CC sees, what CC does
 
 CC runs in your VSCode (or terminal) as a separate Claude Code session.
@@ -86,11 +122,11 @@ Two bridge scripts cover 1:1 agent chats and group chats:
 
 | Command | What it does |
 |---------|--------------|
-| `python cc_agent_bridge.py --once --last 10 --full` | Dump the last 10 messages, full content. This is what the cron runs. |
-| `python cc_agent_bridge.py --send "text"` | Post a CC response to the current agent conversation. |
-| `python cc_agent_bridge.py --status` | Check whether the backend is up and when `history.json` last changed. |
-| `python cc_agent_bridge.py --mentions` | Show only messages that `@` mention CC. |
-| `python cc_agent_bridge.py` | Poll mode — watch for new messages in a terminal (5-second interval). |
+| `uv run python cc_agent_bridge.py --once --last 10 --full` | Dump the last 10 messages, full content. This is what the cron runs. |
+| `uv run python cc_agent_bridge.py --send "text"` | Post a CC response to the current agent conversation. |
+| `uv run python cc_agent_bridge.py --status` | Check whether the backend is up and when `history.json` last changed. |
+| `uv run python cc_agent_bridge.py --mentions` | Show only messages that `@` mention CC. |
+| `uv run python cc_agent_bridge.py` | Poll mode — watch for new messages in a terminal (5-second interval). |
 
 ### Picking a conversation
 
@@ -117,19 +153,58 @@ for group conversations with multiple agents. Same architecture as the
 
 | Command | What it does |
 |---------|--------------|
-| `python cc_group_chat_bridge.py --list` | List available group chats. |
-| `python cc_group_chat_bridge.py --group GROUP_ID --last 10` | Dump the last 10 messages from a group. |
-| `python cc_group_chat_bridge.py --group GROUP_ID --send "text"` | Post a CC response to the group. |
-| `python cc_group_chat_bridge.py --group GROUP_ID --send-file path` | Send from file (backtick-safe). |
-| `python cc_group_chat_bridge.py --group GROUP_ID --mentions` | Show only `@CC` mentions. |
+| `uv run python cc_group_chat_bridge.py --list` | List available group chats. |
+| `uv run python cc_group_chat_bridge.py --group GROUP_ID --last 10` | Dump the last 10 messages from a group. |
+| `uv run python cc_group_chat_bridge.py --group GROUP_ID --send "text"` | Post a CC response to the group. |
+| `uv run python cc_group_chat_bridge.py --group GROUP_ID --send-file path` | Send from file (backtick-safe). |
+| `uv run python cc_group_chat_bridge.py --group GROUP_ID --mentions` | Show only `@CC` mentions. |
 
 The `--group` argument accepts either the canonical group ID
 (`group-abc123`) or the slugged directory name (`group-abc123-my-project`).
 The bridge resolves the canonical ID from `metadata.json` automatically.
 
-For markdown responses containing backticks or code blocks, use
-`--send-file` to avoid bash command-substitution issues — write the
-response to a temp file first, then send it.
+### One name, several machines — read this before the second bridge
+
+A display name is a routing key here, and nothing enforces that it is unique.
+Two bridges with the same name are, to everything downstream, one participant.
+
+**In a group, a mention wakes every node whose bridge carries that name.** The
+embedded-agent path first checks whether the agent is registered to *this* node;
+the external path does not — a name match alone raises the event
+(`group_handler.py`). So if two people each run a bridge called `CC`, one `@CC`
+wakes both, and both answer. That is not a cosmetic collision: the two have
+different working trees and different memory, so a reply from the machine that
+*cannot* do the work looks exactly like a reply from the one that can. It has
+cost this project a round.
+
+**The obvious fix does not work.** Mentions are parsed with `@(\w+)\b`, which
+stops at the first non-word character. Measured: `@CC-lnx` routes to `CC`, and
+so does every other hyphenated variant; `@Fifth Agent` routes to `Fifth`. Only
+`\w` survives — letters, digits and underscore. So distinguish the names
+*inside* `\w+`:
+
+| name | reaches |
+|---|---|
+| `CC-lnx` | every `CC` in the group — **not** what you meant |
+| `CC_lnx` | `CC_lnx` only |
+| `CC2` | `CC2` only |
+
+Set each machine's name in `[agent_chat] cc_display_name` in `~/.dpc/config.ini`
+(or in the UI under Firewall → Agent Permissions → CC Display Name), and give
+the `@<name>` variant to the cron prompt's scan instructions.
+
+**In a one-to-one chat you cannot separate them at all.** That send path carries
+no sender field, so both bridges arrive under the node's single
+`cc_display_name`, and a de-duplication check drops the second one's identical
+reply with nothing but a log line. Until that changes: one external agent per
+1:1 chat. Group chats do carry the sender, which is why the rule above is enough
+there.
+
+### Sending markdown
+
+For responses containing backticks or code blocks, use `--send-file` to avoid
+bash command-substitution issues — write the response to a temp file first,
+then send it.
 
 ---
 
@@ -147,17 +222,17 @@ need to recreate the cron after reopening the IDE.
 
 **Behavior each fire (1:1 agent chat):**
 
-1. Run `python cc_agent_bridge.py --once --last 10 --full --conversation-id <agent>`.
+1. Run `uv run python cc_agent_bridge.py --once --last 10 --full --conversation-id <agent>`.
 2. Scan the output for `@CC` or `@СС` (Cyrillic) mentions from anyone
    who isn't CC.
 3. If there is an unanswered direct question, respond via
-   `python cc_agent_bridge.py --send "..." --conversation-id <agent>`.
+   `uv run python cc_agent_bridge.py --send "..." --conversation-id <agent>`.
    Keep responses in markdown.
 4. If nothing actionable, do nothing.
 
 **Behavior each fire (group chat):**
 
-1. Run `python cc_group_chat_bridge.py --group <group_id> --last 10`.
+1. Run `uv run python cc_group_chat_bridge.py --group <group_id> --last 10`.
 2. Same `@CC` scan and response logic.
 3. Respond via `--send "..."` or `--send-file path` for markdown content.
 
@@ -224,7 +299,7 @@ own setup can use CC differently (or not use CC at all).
 ## Troubleshooting
 
 **CC does not respond.** Check
-`python cc_agent_bridge.py --status --conversation-id <agent>`. If the
+`uv run python cc_agent_bridge.py --status --conversation-id <agent>`. If the
 backend is down, start it. If you see
 `[ERROR] Multiple agents found, specify --conversation-id...`, the
 cron prompt is missing the flag — recreate the cron with the current

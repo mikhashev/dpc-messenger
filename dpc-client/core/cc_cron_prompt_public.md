@@ -118,6 +118,16 @@ not through a different tool. One allowlist entry covers both.
   Display Name; persists to `[agent_chat] cc_display_name` in
   `~/.dpc/config.ini`), add the actual `@<name>` variant to the scan
   instructions.
+- **The name must be unique across machines, and `-` will not make it so.**
+  In a group an external agent is reached by name match alone, with no check
+  that it belongs to this node — so two bridges with the same name both wake
+  on one `@CC` and both answer, from different working trees and different
+  memory. Renaming looks like the fix and is not: mentions are parsed with
+  `@(\w+)\b`, so `@CC-lnx` still routes to `CC` (measured; `@Fifth Agent`
+  routes to `Fifth`). Distinguish inside `\w+` — `CC_lnx`, `CC2` — and set it
+  per machine in `[agent_chat] cc_display_name`. In a 1:1 chat the send path
+  carries no sender at all, so two bridges are indistinguishable there
+  whatever they are called: run one per 1:1 conversation.
 - **Quiet mode.** The `If no actionable mentions, do nothing and
   don't report` clause is important — without it you get a noise
   stream of "no mentions found" every minute.
@@ -145,7 +155,7 @@ For monitoring a group chat instead of an agent 1:1 chat, use
 Check DPC group chat. Run: cd <path-to-dpc-client-core> && uv run python cc_group_chat_bridge.py --group <group-id> --last 10. Scan output for @CC or @СС mentions from non-CC senders. If unanswered @CC mentions with direct questions are found, read context and respond via the bridge. For plain text without backticks use: uv run python cc_group_chat_bridge.py --group <group-id> --send "response text". For markdown responses with backticks, code blocks, or any shell-special characters, write the response to <path-to-temp-file> and send it via: uv run python cc_group_chat_bridge.py --group <group-id> --send-file <path-to-temp-file>. Keep responses in markdown formatting. Distinguish: @CC as direct question (needs response) vs @CC mentioned in passing (no response needed). If no actionable mentions, do nothing and don't report.
 ```
 
-Find your `<group-id>` by running `python cc_group_chat_bridge.py --list`.
+Find your `<group-id>` by running `uv run python cc_group_chat_bridge.py --list`.
 
 Add the matching permission pattern:
 ```json
