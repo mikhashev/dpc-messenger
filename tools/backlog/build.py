@@ -2001,7 +2001,11 @@ def layout(nodes, links, prev):
         for i in range(n):
             for j in range(i + 1, n):
                 dx, dy = xs[j] - xs[i], ys[j] - ys[i]
-                d2 = dx * dx + dy * dy or 1.0
+                # Never closer than 20 px for the force: at sub-pixel distances 2600/d2 is
+                # thousands of px per step, the pair flies past the 300 px cutoff, the
+                # spring drags it back through the crowd and the run never settles.
+                # Measured 2026-09-04: bbox 21 639 x 10 456 without this line, 1 276 x 1 288 with it.
+                d2 = max(dx * dx + dy * dy, 400.0)
                 if d2 > 90000:
                     continue
                 d = math.sqrt(d2)
