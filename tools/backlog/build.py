@@ -1907,11 +1907,12 @@ DST.write_text(doc, encoding="utf-8")
 
 # ===================================================================== graph.html
 # The board answers "what is open". This answers "what leans on what" — the one thing a
-# flat list cannot show. Only nodes with at least one link are drawn: on the day this
-# shipped, 116 of 217 entries referenced nothing and nothing referenced them, and a
-# force layout with half its points floating in space hides the structure it exists to
-# reveal. Those entries are listed underneath instead, by priority, because "18 HIGH
-# entries no one has connected to anything" is a finding in its own right.
+# flat list cannot show. The linked nodes make the picture: on the day this shipped, 116
+# of 217 entries referenced nothing and nothing referenced them, and a force layout with
+# half its points floating in space hides the structure it exists to reveal. Those
+# entries are listed underneath, by priority, because "18 HIGH entries no one has
+# connected to anything" is a finding in its own right — and since 2026-09-04 they are
+# also drawn, as a ring outside the linked graph behind a chip that starts off.
 g_deg = Counter()
 node_kind = {}
 for a, b, _ in edges:
@@ -1979,23 +1980,49 @@ g_links = (_links(edges, 0) + _links(adr_edges, 1) + _links(arc_edges, 2)
 # one a human's spatial memory needs. Warm-starting from the last layout delivers it.
 def layout(nodes, links, prev):
     n = len(nodes)
-    warm = sum(1 for d in nodes if d["id"] in prev)
-    steps = 90 if warm > n * 0.8 else 420          # refine an old picture, or draw a new one
+    ln = [(l["s"], l["t"]) for l in links]
+    tied = {i for pair in ln for i in pair}
+    # Warm or cold is decided by the linked nodes alone: a node no spring pulls is not a
+    # body that re-routes the descent, and 165 of them arriving at once must not turn a
+    # refinement into a redraw.
+    warm = sum(1 for i, d in enumerate(nodes) if i in tied and d["id"] in prev)
+    steps = 90 if warm > len(tied) * 0.8 else 420  # refine an old picture, or draw a new one
+
+    def seed(name):
+        # A new node starts where its name says, not where its index says: the same
+        # entry lands in the same place whatever else was added alongside it.
+        h = 2166136261
+        for ch in name:
+            h = ((h ^ ord(ch)) * 16777619) & 0xFFFFFFFF
+        return (h / 0x100000000) * 6.283185, ((h >> 8) % 1000) / 1000
+
     xs, ys = [0.0] * n, [0.0] * n
+    loose = []
     for i, d in enumerate(nodes):
         if d["id"] in prev:
             xs[i], ys[i] = prev[d["id"]]
-        else:
-            # A new node starts where its name says, not where its index says: the same
-            # entry lands in the same place whatever else was added alongside it.
-            h = 2166136261
-            for ch in d["id"]:
-                h = ((h ^ ord(ch)) * 16777619) & 0xFFFFFFFF
-            ang = (h / 0x100000000) * 6.283185
-            rad = 30 + ((h >> 8) % 1000) / 1000 * 430
+        elif i in tied:
+            ang, u = seed(d["id"])
+            rad = 30 + u * 430
             xs[i], ys[i] = 600 + rad * math.cos(ang), 410 + rad * math.sin(ang)
+        else:
+            loose.append(i)
+    # A node with no link starts on a ring just outside the linked cloud and lets the
+    # repulsion and the centring settle it against the cloud's edge. Seeded inside like the
+    # others it wedges between linked nodes and never leaves — measured 2026-09-04: median
+    # radius 505 px against 381 px for the linked nodes, and the run went cold, moving the
+    # linked median 68 px.
+    if loose:
+        rad = max([math.hypot(xs[i] - 600, ys[i] - 410) for i in tied] or [0.0]) + 70
+        for i in loose:
+            ang, _ = seed(nodes[i]["id"])
+            xs[i], ys[i] = 600 + rad * math.cos(ang), 410 + rad * math.sin(ang)
+    # The loose nodes are pushed by everything and push only each other: 165 bodies
+    # leaning on the cloud's edge otherwise squeeze it — measured 2026-09-04, the linked
+    # median moved 27 px and the outer radius lost a tenth, with the chip that shows them
+    # still off.
+    held = [i in tied for i in range(n)]
     vx, vy = [0.0] * n, [0.0] * n
-    ln = [(l["s"], l["t"]) for l in links]
     for s in range(steps):
         cool = 1 - s / steps
         for i in range(n):
@@ -2011,10 +2038,12 @@ def layout(nodes, links, prev):
                 d = math.sqrt(d2)
                 f = 2600 / d2
                 fx, fy = f * dx / d, f * dy / d
-                vx[i] -= fx
-                vy[i] -= fy
-                vx[j] += fx
-                vy[j] += fy
+                if held[j] or not held[i]:
+                    vx[i] -= fx
+                    vy[i] -= fy
+                if held[i] or not held[j]:
+                    vx[j] += fx
+                    vy[j] += fy
         for a, b in ln:
             dx, dy = xs[b] - xs[a], ys[b] - ys[a]
             d = math.hypot(dx, dy) or 1.0
@@ -2045,19 +2074,41 @@ if JSON_DST.exists():
     except (ValueError, OSError):
         previous = {}                    # a corrupt or hand-edited file just means cold start
 
+orphans = [e for e in entries if e["is_name"] and e["ref"] not in idx]
+# Unlinked entries are drawn too, as their own class (Mike, 2026-09-04: «сделай тоже для
+# них отдельный фильтр, чтобы я мог выбирать»). They stay ordinary task nodes — priority
+# colour, section, line — with one flag, `lone`, that the page's visible() reads as one
+# more class key; their chip starts hidden on a first visit, so the picture is the one it
+# was until somebody asks. One node per name: an id is a key, and a fixture may repeat a
+# name on purpose — the `unlinked` list below keeps every occurrence.
+for ref in sorted({e["ref"] for e in orphans}):
+    e = live[ref]
+    g_nodes.append({
+        "id": ref,
+        "k": "task",
+        "lone": True,
+        "p": e["pri"],
+        "sec": e["section"].split(" ")[0],
+        "d": (e["desc"] or e["first"])[:220],
+        "ln": e["line"],
+        "deg": 0,
+    })
+
 layout_steps = layout(g_nodes, g_links, previous)
 
-orphans = [e for e in entries if e["is_name"] and e["ref"] not in idx]
 orph_by_pri = Counter(e["pri"] for e in orphans)
 _orph_rows = []
 for e in sorted(orphans, key=lambda x: (PRIORITIES.index(x["pri"])
                                         if x["pri"] in PRIORITIES else 9, x["ref"])):
     _d = f'<p class="d">{md(e["desc"])}</p>' if e["desc"] else ""
     _orph_rows.append(
-        f'<li class="item" data-pri="{esc(e["pri"])}">'
-        f'<div class="hd">{chip(e["pri"])}<code>{esc(e["ref"])}</code>'
+        f'<li class="item" data-pri="{esc(e["pri"])}" data-sec="{esc(e["section"].split(" ")[0])}" '
+        f'data-ref="{esc(e["ref"])}">'
+        f'<div class="hd">{chip(e["pri"])}<code><a data-node="{esc(e["ref"])}">{esc(e["ref"])}</a></code>'
         f'<time>{esc(e["section"].split(" ")[0])}</time></div>{_d}</li>')
 orph_html = "".join(_orph_rows)
+orph_count_line = (f"{len(orphans)} of {len(orphans)} shown — "
+                   + " · ".join(f"{p} {orph_by_pri[p]}" for p in PRIORITIES if orph_by_pri.get(p)))
 
 # Legend chips are filters (Mike, 2026-09-04). A chip's key is what the page's visible()
 # reads: a task's priority ('none' for '—') and its section, any other node's kind. The
@@ -2070,6 +2121,8 @@ for n in g_nodes:
         continue
     g_class["none" if n["p"] == "—" else n["p"]] += 1
     g_class[n["sec"]] += 1
+    if n.get("lone"):
+        g_class["lone"] += 1
     _sec_label.setdefault(n["sec"], live.get(n["id"], {}).get("section", n["sec"]))
 _sec_order = ["OPEN", "IN", "DONE", "BACKLOG", "IDEAS"]
 sec_chips = [s for s in _sec_order if s in _sec_label] \
@@ -2082,7 +2135,8 @@ kind_chips = [("CRITICAL", "CRITICAL", '<i class="sw" style="background:var(--cr
               ("none", "no priority", '<i class="sw" style="background:var(--none)"></i>'),
               ("adr", "ADR", '<i class="sw adr" style="background:var(--accent)"></i>'),
               ("phase", "ROADMAP phase", '<i class="sw adr" style="background:var(--ok)"></i>'),
-              ("arc", "closed, in the archive", '<i class="sw arc"></i>')]
+              ("arc", "closed, in the archive", '<i class="sw arc"></i>'),
+              ("lone", "linked to nothing", '<i class="sw lone"></i>')]
 
 
 def _gk(key, label, group, sw=""):
@@ -2130,6 +2184,11 @@ font-size:.72rem;color:var(--ink-mut)}
 .sw{width:12px;height:12px;border-radius:50%;display:inline-block}
 .sw.adr{border-radius:2px}
 .sw.arc{background:none;border:1.5px dashed var(--ink-faint)}
+.sw.lone{background:none;border:1.5px solid var(--ink-mut)}
+/* The list under the canvas obeys the priority and section chips; a name in it is a link
+   to its node. */
+#lone .item.off{display:none}
+#lone a[data-node]{color:inherit;cursor:pointer;text-decoration:none;border-bottom:1px dotted var(--ink-faint)}
 /* Legend chips are filters: a struck chip is a hidden class. */
 .gkey .gk{display:inline-flex;align-items:center;gap:.35rem;font:inherit;color:inherit;
 background:none;border:0;padding:0;cursor:pointer}
@@ -2172,11 +2231,13 @@ LINKS.forEach(l=>{adj[l.s].push(l.t);adj[l.t].push(l.s);});
 let shown=NODES.map(()=>true);   // set by applyFilters(), read by everything else
 // The drawing sits wherever the simulation left it. Rather than squeeze it into a fixed
 // viewBox (which left a third of the canvas empty, because the content's aspect is not the
-// element's), frame the content: the starting view IS the bounding box. Extra room on the
-// right is label space.
-const BB=(function(){const xs=NODES.map(n=>n.x),ys=NODES.map(n=>n.y);
+// element's), frame the content: the starting view IS the bounding box — of what is shown,
+// so a class hidden by default (the unlinked ring) does not zoom the picture out to fit
+// itself. Extra room on the right is label space.
+function frame(){const on=NODES.filter((n,i)=>shown[i]);if(!on.length)return vb;
+  const xs=on.map(n=>n.x),ys=on.map(n=>n.y);
   const x0=Math.min(...xs)-40,x1=Math.max(...xs)+150,y0=Math.min(...ys)-30,y1=Math.max(...ys)+30;
-  return{x:x0,y:y0,w:x1-x0,h:y1-y0};})();
+  return{x:x0,y:y0,w:x1-x0,h:y1-y0};}
 const R=n=>4+Math.sqrt(n.deg)*2.6;
 const lg=document.getElementById('links'),ng=document.getElementById('nodes');
 // Arrowheads: the semantics were always directed — src wrote dst's name, not the reverse —
@@ -2201,6 +2262,8 @@ ng.innerHTML=NODES.map((n,i)=>{
     ? `<rect x="${-r}" y="${-r}" width="${2*r}" height="${2*r}" rx="2" fill="var(--accent)" stroke="var(--accent)"></rect>`
     : n.k==='arc'
     ? `<circle r="${r}" fill="none" stroke="var(--ink-faint)" stroke-dasharray="2 2"></circle>`
+    : n.lone   // a task nothing links to: hollow, the priority on the rim
+    ? `<circle r="${r}" fill="var(--surface)" stroke="var(--${PC[n.p]||'none'})" stroke-width="1.6"></circle>`
     : `<circle r="${r}" fill="var(--${PC[n.p]||'none'})" stroke="var(--surface)" stroke-width="1"></circle>`;
   return `<g class="node" data-i="${i}" transform="translate(${n.x},${n.y})">${shape}${lab}</g>`;
 }).join('');
@@ -2214,7 +2277,7 @@ function draw(){
 }
 draw();
 // pan and zoom
-let vb={...BB};
+let vb=frame();
 const setvb=()=>svg.setAttribute('viewBox',`${vb.x} ${vb.y} ${vb.w} ${vb.h}`);
 setvb();
 svg.addEventListener('wheel',ev=>{ev.preventDefault();
@@ -2270,7 +2333,7 @@ function select(i){
     `<li>${on?`<a data-jump="${x}">${x}</a>`:`<span class="hidn">${x} (hidden by filter)</span>`}`
     +`${r&&r!=='mention'?` <em>${r}</em>`:''}</li>`).join('')}</ul>`:'';
   info.innerHTML=`<h3><code>${n.id}</code></h3>
-    <p class="k">${n.k==='adr'?'decision record':n.k==='arc'?'closed — in the archive':n.sec+' · '+n.p}${n.ln?' · backlog.md:'+n.ln:''}</p>
+    <p class="k">${n.k==='adr'?'decision record':n.k==='arc'?'closed — in the archive':n.sec+' · '+n.p}${n.lone?' · linked to nothing':''}${n.ln?' · backlog.md:'+n.ln:''}</p>
     ${n.d?`<p>${n.d}</p>`:''}${list('references',out)}${list('referenced by',inn)}`;
   info.querySelectorAll('[data-jump]').forEach(a=>a.addEventListener('click',()=>{
     const j=NODES.findIndex(x=>x.id===a.dataset.jump);if(j>=0)select(j);}));
@@ -2292,19 +2355,30 @@ function clearSel(){sel=-1;
   gs.forEach(g=>g.classList.remove('dim','sel','nbr'));
   lines.forEach(e=>e.classList.remove('dim','hot'));
   info.innerHTML=START;}
-document.getElementById('reset').addEventListener('click',()=>{vb={...BB};setvb();clearSel();});
+document.getElementById('reset').addEventListener('click',()=>{vb=frame();setvb();clearSel();});
 const START=info.innerHTML;
 // filters (Mike, 2026-09-04). One predicate decides what is on the canvas; drawing,
 // hover, search and selection all read `shown`. `filters` is the set of hidden class
 // keys: a task's priority ('none' for '—') and its section, any other node's kind.
 function visible(n,filters){
   const cs=n.k==='task'?[n.p==='—'?'none':n.p,n.sec]:[n.k];
+  if(n.lone)cs.push('lone');   // an unlinked task is a task, and one class more
   return !cs.some(c=>filters.has(c));
 }
-const FKEY='backlog-graph-filters';
-let hidden=new Set();
-try{hidden=new Set(JSON.parse(localStorage.getItem(FKEY)||'[]'));}catch(e){}
+// What a first visit hides: the unlinked ring, so the picture stays the one it was until
+// somebody asks for it. A stored choice wins — including the choice to hide nothing, which
+// is why an empty set is written rather than removed. A set stored before the lone class
+// existed (the old key) cannot have decided about it and is migrated with the ring hidden.
+function initialFilters(stored,legacy){
+  if(stored!==null)try{return new Set(JSON.parse(stored));}catch(e){}
+  if(legacy!==null)try{return new Set([...JSON.parse(legacy),'lone']);}catch(e){}
+  return new Set(['lone']);
+}
+const FKEY='backlog-graph-filters-2',OLDKEY='backlog-graph-filters';
+let hidden=new Set(['lone']);
+try{hidden=initialFilters(localStorage.getItem(FKEY),localStorage.getItem(OLDKEY));}catch(e){}
 const chips=[...document.querySelectorAll('.gk[data-filter]')];
+const loneItems=[...document.querySelectorAll('#lone .item')],loneCnt=document.getElementById('lonecnt');
 function applyFilters(){
   shown=NODES.map(n=>visible(n,hidden));
   gs.forEach((g,i)=>g.classList.toggle('off',!shown[i]));
@@ -2313,10 +2387,28 @@ function applyFilters(){
     // what the chip toggles: its members that the other chips let through
     c.querySelector('.n').textContent=NODES.filter(x=>!visible(x,new Set([k]))&&visible(x,rest)).length;
     c.classList.toggle('hid',hidden.has(k));c.setAttribute('aria-pressed',String(!hidden.has(k)));});
-  try{hidden.size?localStorage.setItem(FKEY,JSON.stringify([...hidden])):localStorage.removeItem(FKEY);}catch(e){}
+  // The list under the canvas obeys the priority and section chips and never the lone
+  // chip: it is the reading that exists whether or not the ring is drawn.
+  let on=0;const by={};
+  loneItems.forEach(li=>{const v=visible({k:'task',p:li.dataset.pri,sec:li.dataset.sec},hidden);
+    li.classList.toggle('off',!v);if(v){on++;by[li.dataset.pri]=(by[li.dataset.pri]||0)+1;}});
+  loneCnt.textContent=`${on} of ${loneItems.length} shown`
+    +(on?' — '+Object.entries(by).map(([p,c])=>`${p} ${c}`).join(' · '):'');
+  try{localStorage.setItem(FKEY,JSON.stringify([...hidden]));}catch(e){}
   if(sel>=0)shown[sel]?select(sel):clearSel();
   if(gq.value.trim())search();
 }
+// A name in the list finds its node. The ring is switched on for the click when it is off,
+// and the panel says so — a chip flipping by itself is the kind of thing nobody notices.
+loneItems.forEach(li=>li.querySelector('[data-node]').addEventListener('click',()=>{
+  const j=NODES.findIndex(x=>x.id===li.dataset.ref);if(j<0)return;
+  const flipped=hidden.has('lone');
+  if(flipped){hidden.delete('lone');applyFilters();}
+  select(j);
+  vb.x=NODES[j].x-vb.w/2;vb.y=NODES[j].y-vb.h/2;setvb();
+  if(flipped&&sel===j)info.insertAdjacentHTML('beforeend',
+    '<p class="k">the «linked to nothing» chip was turned on for this click</p>');
+  document.querySelector('.stagebox').scrollIntoView({behavior:'smooth',block:'start'});}));
 const inGroup=g=>chips.filter(c=>c.dataset.group===g);
 chips.forEach(c=>c.addEventListener('click',ev=>{const k=c.dataset.filter;
   if(ev.shiftKey){inGroup(c.dataset.group).forEach(o=>hidden.add(o.dataset.filter));hidden.delete(k);}
@@ -2326,6 +2418,7 @@ document.querySelectorAll('.gk[data-all],.gk[data-none]').forEach(b=>b.addEventL
   inGroup(b.dataset.all||b.dataset.none).forEach(c=>b.dataset.all?hidden.delete(c.dataset.filter):hidden.add(c.dataset.filter));
   applyFilters();}));
 applyFilters();
+vb=frame();setvb();
 """
 
 gdoc = f"""<!doctype html>
@@ -2343,7 +2436,7 @@ gdoc = f"""<!doctype html>
   <h1>Backlog graph</h1>
   <div class="meta">
     <span>built <b>{today}</b> from <b>backlog.md</b></span>
-    <span><b>{len(g_nodes)}</b> linked nodes</span>
+    <span><b>{len([n for n in g_nodes if not n.get("lone")])}</b> linked nodes</span>
     <span><b>{len(g_links)}</b> links</span>
     <span><b>{len(orphans)}</b> entries link to nothing</span>
   </div>
@@ -2420,12 +2513,14 @@ gdoc = f"""<!doctype html>
   </aside>
 </div>
 
-<section class="sec">
+<section class="sec" id="lone">
   <h2>Linked to nothing <span class="cnt">{len(orphans)}</span></h2>
-  <p class="legend">{" · ".join(f"{p} {orph_by_pri[p]}" for p in PRIORITIES if orph_by_pri.get(p))}</p>
+  <p class="legend" id="lonecnt">{orph_count_line}</p>
   <p class="legend">No other entry mentions these by name, and they mention none. That is
-  either genuine independence or a missing Cross-ref — the graph cannot tell which, so it
-  lists them rather than drawing them as dust.</p>
+  either genuine independence or a missing Cross-ref — the graph cannot tell which. They
+  are drawn as a ring of hollow dots around the linked graph, off until the «linked to
+  nothing» chip is on; click a name here to find its dot. This list follows the priority
+  and section chips.</p>
   <ul class="list">{orph_html}</ul>
 </section>
 

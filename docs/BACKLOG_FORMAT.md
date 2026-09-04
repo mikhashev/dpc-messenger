@@ -361,9 +361,11 @@ them has a known false-positive shape, so they point rather than gate:
 **Three artefacts, one pass.** The default run (no `--check`) writes `backlog.html` — the
 board, what is open — `graph.html` — what leans on what, which a flat list cannot show —
 and `graph.json`, the same graph for readers that cannot click. They are written together
-so they can never disagree about how fresh they are. The graph draws only entries with at
-least one link; the rest are listed underneath by priority, because "HIGH entries no one
-has connected to anything" is a finding of its own. ADR nodes are drawn as a second node
+so they can never disagree about how fresh they are. Entries with no link at all are drawn on a
+ring around the linked graph as hollow dots, behind a legend chip that starts off, and are
+also listed underneath by priority, because "HIGH entries no one has connected to anything"
+is a finding of its own; every legend chip — priority, section, ADR, roadmap phase, archive,
+the ring — is a filter. ADR nodes are drawn as a second node
 type: the backlog and the roadmap already speak the same language — decisions — so the join
 between the two documents costs nobody a new habit. **No `depends_on` field exists and none
 is asked for.** Every link is already in the prose, which also bounds what the picture may
