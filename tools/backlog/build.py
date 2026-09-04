@@ -2059,6 +2059,45 @@ for e in sorted(orphans, key=lambda x: (PRIORITIES.index(x["pri"])
         f'<time>{esc(e["section"].split(" ")[0])}</time></div>{_d}</li>')
 orph_html = "".join(_orph_rows)
 
+# Legend chips are filters (Mike, 2026-09-04). A chip's key is what the page's visible()
+# reads: a task's priority ('none' for '—') and its section, any other node's kind. The
+# first row is fixed; the section row is whatever sections the linked tasks are in.
+g_class = Counter()
+_sec_label = {}
+for n in g_nodes:
+    if n["k"] != "task":
+        g_class[n["k"]] += 1
+        continue
+    g_class["none" if n["p"] == "—" else n["p"]] += 1
+    g_class[n["sec"]] += 1
+    _sec_label.setdefault(n["sec"], live.get(n["id"], {}).get("section", n["sec"]))
+_sec_order = ["OPEN", "IN", "DONE", "BACKLOG", "IDEAS"]
+sec_chips = [s for s in _sec_order if s in _sec_label] \
+    + sorted(s for s in _sec_label if s not in _sec_order)
+kind_chips = [("CRITICAL", "CRITICAL", '<i class="sw" style="background:var(--crit)"></i>'),
+              ("HIGH", "HIGH", '<i class="sw" style="background:var(--high)"></i>'),
+              ("MEDIUM", "MEDIUM", '<i class="sw" style="background:var(--med)"></i>'),
+              ("LOW", "LOW", '<i class="sw" style="background:var(--low)"></i>'),
+              ("RESEARCH", "RESEARCH", '<i class="sw" style="background:var(--res)"></i>'),
+              ("none", "no priority", '<i class="sw" style="background:var(--none)"></i>'),
+              ("adr", "ADR", '<i class="sw adr" style="background:var(--accent)"></i>'),
+              ("phase", "ROADMAP phase", '<i class="sw adr" style="background:var(--ok)"></i>'),
+              ("arc", "closed, in the archive", '<i class="sw arc"></i>')]
+
+
+def _gk(key, label, group, sw=""):
+    return (f'<button type="button" class="gk" data-filter="{esc(key)}" data-group="{group}" '
+            f'aria-pressed="true">{sw}{esc(label)} <b class="n">{g_class.get(key, 0)}</b></button>')
+
+
+def _gk_ctl(group):
+    return (f'<button type="button" class="gk ctl" data-all="{group}">all</button>'
+            f'<button type="button" class="gk ctl" data-none="{group}">none</button>')
+
+
+kind_chips_html = "".join(_gk(k, lab, "kind", sw) for k, lab, sw in kind_chips) + _gk_ctl("kind")
+sec_chips_html = "".join(_gk(s, _sec_label[s], "sec") for s in sec_chips) + _gk_ctl("sec")
+
 GRAPH_CSS = """
 /* The board's 1080px column is sized for prose. A graph is not prose — on a wide screen
    that column was most of why the canvas felt cramped. */
@@ -2091,6 +2130,15 @@ font-size:.72rem;color:var(--ink-mut)}
 .sw{width:12px;height:12px;border-radius:50%;display:inline-block}
 .sw.adr{border-radius:2px}
 .sw.arc{background:none;border:1.5px dashed var(--ink-faint)}
+/* Legend chips are filters: a struck chip is a hidden class. */
+.gkey .gk{display:inline-flex;align-items:center;gap:.35rem;font:inherit;color:inherit;
+background:none;border:0;padding:0;cursor:pointer}
+.gkey .gk .n{color:var(--ink-faint);font-weight:400}
+.gkey .gk.hid{opacity:.45;text-decoration:line-through}
+.gkey .gk.ctl{border:1px solid var(--line);border-radius:3px;padding:.05rem .4rem;color:var(--ink-mut)}
+#gqn{font-family:var(--mono);font-size:.72rem;color:var(--ink-faint)}
+.side .hidn{color:var(--ink-faint)}
+.node.off,.link.off{display:none}
 .node{cursor:pointer}
 .node text{font-family:var(--mono);font-size:9.5px;fill:var(--ink-mut);pointer-events:none;
 paint-order:stroke;stroke:var(--surface);stroke-width:3.5px;stroke-linejoin:round}
@@ -2121,6 +2169,7 @@ const W=1200,H=820;
 // entry is added. This page only draws, drags and queries.
 const adj=NODES.map(()=>[]);
 LINKS.forEach(l=>{adj[l.s].push(l.t);adj[l.t].push(l.s);});
+let shown=NODES.map(()=>true);   // set by applyFilters(), read by everything else
 // The drawing sits wherever the simulation left it. Rather than squeeze it into a fixed
 // viewBox (which left a third of the canvas empty, because the content's aspect is not the
 // element's), frame the content: the starting view IS the bounding box. Extra room on the
@@ -2202,9 +2251,12 @@ svg.addEventListener('pointermove',ev=>{
 addEventListener('pointerup',()=>{
   if(drag&&!drag.moved)select(drag.i);
   drag=null;pan=null;svg.classList.remove('drag');});
-// selection
+// selection — a hidden node cannot be selected; a hidden neighbour is listed, marked.
 const info=document.getElementById('info');
+let sel=-1;
 function select(i){
+  if(!shown[i])return;
+  sel=i;
   const near=new Set([i,...adj[i]]);
   gs.forEach((g,j)=>{g.classList.toggle('sel',j===i);
     g.classList.toggle('nbr',near.has(j));
@@ -2212,28 +2264,68 @@ function select(i){
   lines.forEach((e,j)=>{const on=LINKS[j].s===i||LINKS[j].t===i;
     e.classList.toggle('hot',on);e.classList.toggle('dim',!on);});
   const n=NODES[i];
-  const out=LINKS.filter(l=>l.s===i).map(l=>[NODES[l.t].id,l.rel]);
-  const inn=LINKS.filter(l=>l.t===i).map(l=>[NODES[l.s].id,l.rel]);
-  const list=(t,a)=>a.length?`<p class="k">${t}</p><ul>${a.map(([x,r])=>
-    `<li><a data-jump="${x}">${x}</a>${r&&r!=='mention'?` <em>${r}</em>`:''}</li>`).join('')}</ul>`:'';
+  const out=LINKS.filter(l=>l.s===i).map(l=>[NODES[l.t].id,l.rel,shown[l.t]]);
+  const inn=LINKS.filter(l=>l.t===i).map(l=>[NODES[l.s].id,l.rel,shown[l.s]]);
+  const list=(t,a)=>a.length?`<p class="k">${t}</p><ul>${a.map(([x,r,on])=>
+    `<li>${on?`<a data-jump="${x}">${x}</a>`:`<span class="hidn">${x} (hidden by filter)</span>`}`
+    +`${r&&r!=='mention'?` <em>${r}</em>`:''}</li>`).join('')}</ul>`:'';
   info.innerHTML=`<h3><code>${n.id}</code></h3>
     <p class="k">${n.k==='adr'?'decision record':n.k==='arc'?'closed — in the archive':n.sec+' · '+n.p}${n.ln?' · backlog.md:'+n.ln:''}</p>
     ${n.d?`<p>${n.d}</p>`:''}${list('references',out)}${list('referenced by',inn)}`;
   info.querySelectorAll('[data-jump]').forEach(a=>a.addEventListener('click',()=>{
     const j=NODES.findIndex(x=>x.id===a.dataset.jump);if(j>=0)select(j);}));
 }
-document.getElementById('gq').addEventListener('input',ev=>{
-  const t=ev.target.value.trim().toLowerCase();
-  const hit=j=>NODES[j].id.toLowerCase().includes(t);
+// search — only among shown nodes; a hit the filter hides is counted, not unhidden.
+const gq=document.getElementById('gq'),gqn=document.getElementById('gqn');
+function search(){
+  const t=gq.value.trim().toLowerCase();
+  const hit=j=>shown[j]&&NODES[j].id.toLowerCase().includes(t);
   gs.forEach((g,j)=>g.classList.toggle('dim',!!t&&!hit(j)));
   lines.forEach((e,j)=>e.classList.toggle('dim',!!t&&!hit(LINKS[j].s)&&!hit(LINKS[j].t)));
-});
-document.getElementById('reset').addEventListener('click',()=>{
-  vb={...BB};setvb();
+  if(!t){gqn.textContent='';return;}
+  const all=NODES.filter(n=>n.id.toLowerCase().includes(t)).length;
+  const vis=NODES.filter((n,j)=>hit(j)).length;
+  gqn.textContent=`${vis} shown`+(all>vis?`, ${all-vis} hidden by filter`:'');
+}
+gq.addEventListener('input',search);
+function clearSel(){sel=-1;
   gs.forEach(g=>g.classList.remove('dim','sel','nbr'));
   lines.forEach(e=>e.classList.remove('dim','hot'));
-  info.innerHTML=START;});
+  info.innerHTML=START;}
+document.getElementById('reset').addEventListener('click',()=>{vb={...BB};setvb();clearSel();});
 const START=info.innerHTML;
+// filters (Mike, 2026-09-04). One predicate decides what is on the canvas; drawing,
+// hover, search and selection all read `shown`. `filters` is the set of hidden class
+// keys: a task's priority ('none' for '—') and its section, any other node's kind.
+function visible(n,filters){
+  const cs=n.k==='task'?[n.p==='—'?'none':n.p,n.sec]:[n.k];
+  return !cs.some(c=>filters.has(c));
+}
+const FKEY='backlog-graph-filters';
+let hidden=new Set();
+try{hidden=new Set(JSON.parse(localStorage.getItem(FKEY)||'[]'));}catch(e){}
+const chips=[...document.querySelectorAll('.gk[data-filter]')];
+function applyFilters(){
+  shown=NODES.map(n=>visible(n,hidden));
+  gs.forEach((g,i)=>g.classList.toggle('off',!shown[i]));
+  lines.forEach((e,j)=>e.classList.toggle('off',!shown[LINKS[j].s]||!shown[LINKS[j].t]));
+  chips.forEach(c=>{const k=c.dataset.filter,rest=new Set(hidden);rest.delete(k);
+    // what the chip toggles: its members that the other chips let through
+    c.querySelector('.n').textContent=NODES.filter(x=>!visible(x,new Set([k]))&&visible(x,rest)).length;
+    c.classList.toggle('hid',hidden.has(k));c.setAttribute('aria-pressed',String(!hidden.has(k)));});
+  try{hidden.size?localStorage.setItem(FKEY,JSON.stringify([...hidden])):localStorage.removeItem(FKEY);}catch(e){}
+  if(sel>=0)shown[sel]?select(sel):clearSel();
+  if(gq.value.trim())search();
+}
+const inGroup=g=>chips.filter(c=>c.dataset.group===g);
+chips.forEach(c=>c.addEventListener('click',ev=>{const k=c.dataset.filter;
+  if(ev.shiftKey){inGroup(c.dataset.group).forEach(o=>hidden.add(o.dataset.filter));hidden.delete(k);}
+  else hidden.has(k)?hidden.delete(k):hidden.add(k);
+  applyFilters();}));
+document.querySelectorAll('.gk[data-all],.gk[data-none]').forEach(b=>b.addEventListener('click',()=>{
+  inGroup(b.dataset.all||b.dataset.none).forEach(c=>b.dataset.all?hidden.delete(c.dataset.filter):hidden.add(c.dataset.filter));
+  applyFilters();}));
+applyFilters();
 """
 
 gdoc = f"""<!doctype html>
@@ -2270,18 +2362,20 @@ gdoc = f"""<!doctype html>
 
 <div class="controls">
   <input id="gq" type="search" placeholder="highlight by name" aria-label="Highlight nodes by name">
+  <span id="gqn"></span>
   <button class="fbtn" type="button" id="reset">reset view</button>
 </div>
 
 <div class="gkey">
-  <span><i class="sw" style="background:var(--crit)"></i>CRITICAL</span>
-  <span><i class="sw" style="background:var(--high)"></i>HIGH</span>
-  <span><i class="sw" style="background:var(--med)"></i>MEDIUM</span>
-  <span><i class="sw" style="background:var(--low)"></i>LOW</span>
-  <span><i class="sw" style="background:var(--res)"></i>RESEARCH</span>
-  <span><i class="sw adr" style="background:var(--accent)"></i>ADR</span>
-  <span><i class="sw adr" style="background:var(--ok)"></i>ROADMAP phase</span>
-  <span><i class="sw arc"></i>closed, in the archive</span>
+  {kind_chips_html}
+  <span>click a chip to hide its nodes · shift-click: only this one</span>
+</div>
+<div class="gkey">
+  <span>sections</span>
+  {sec_chips_html}
+</div>
+
+<div class="gkey">
   <span><i class="sw" style="background:var(--crit);border-radius:1px;height:3px"></i>stated dependency</span>
   <span>size = number of links</span>
   <span>drag the bottom-right corner of the canvas to resize it</span>
