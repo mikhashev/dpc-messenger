@@ -90,3 +90,38 @@ class TestTheHookItself:
 
     def test_a_missing_argument_is_an_error_not_a_pass(self):
         assert hook.main(["commit-msg"]) == 1
+
+
+class TestTheWrapperRunsEverywhere:
+    """The shell file git actually calls. It sat in the index as 100644 from 2026-08-28 to
+    2026-09-05, and git skipped it on every Linux and macOS clone with a one-line hint
+    nobody read — the rule held only on Windows. These are the checks that would have said so."""
+
+    WRAPPER = HOOKS / "commit-msg"
+
+    def test_the_wrapper_is_executable_where_git_checks_the_bit(self):
+        import os
+        import sys
+        if sys.platform == "win32":
+            pytest.skip("git ignores the mode bit on Windows")
+        assert os.access(self.WRAPPER, os.X_OK), (
+            "tools/git-hooks/commit-msg is not executable — git skips it silently; "
+            "fix with: git update-index --chmod=+x tools/git-hooks/commit-msg")
+
+    def test_the_wrapper_is_a_posix_shell_script_with_lf_endings(self):
+        raw = self.WRAPPER.read_bytes()
+        assert raw.startswith(b"#!/bin/sh\n")
+        assert b"\r" not in raw, "CRLF makes the shebang unreadable on Linux"
+
+    def test_the_wrapper_reaches_the_check_end_to_end(self, tmp_path):
+        import shutil
+        import subprocess
+        sh = shutil.which("sh")
+        if not sh:
+            pytest.skip("no POSIX shell on this machine")
+        refused = tmp_path / "refused"
+        refused.write_text("docs: x\n\nпривет\n", encoding="utf-8")
+        accepted = tmp_path / "accepted"
+        accepted.write_text(GOOD, encoding="utf-8")
+        assert subprocess.run([sh, str(self.WRAPPER), str(refused)]).returncode == 1
+        assert subprocess.run([sh, str(self.WRAPPER), str(accepted)]).returncode == 0

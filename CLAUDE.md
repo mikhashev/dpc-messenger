@@ -1108,6 +1108,15 @@ The check is `tools/git-hooks/commit_msg_check.py`; its tests run in the client
 suite (`tests/test_a_commit_message_carries_no_quoted_chat.py`), because
 `tools/` is imported by no package and would otherwise go untested.
 
+The file git calls is the shell wrapper `tools/git-hooks/commit-msg`. It has to carry
+the executable bit *in the index* (`git ls-files -s` shows `100755`) and LF endings
+(`.gitattributes` pins them): with either missing, git prints a one-line hint and
+runs nothing, which is how the rule held only on Windows from 2026-08-28 to 2026-09-05
+— the bit was `100644`, and Windows does not check it. The wrapper starts `python3`,
+then `python`, then `py -3`, trusting each only after it has run once, because the
+Microsoft Store leaves a `python3.exe` stub on PATH. The same test file checks the
+bit, the endings and one end-to-end run through `sh`.
+
 ### Starting Full Stack Locally
 
 **Terminal 1 - Hub (optional for Direct TLS only):**

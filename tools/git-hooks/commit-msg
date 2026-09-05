@@ -1,3 +1,22 @@
 #!/bin/sh
 # Installed by: git config core.hooksPath tools/git-hooks
-exec python "$(dirname "$0")/commit_msg_check.py" "$@"
+#
+# Runs the check under the first interpreter that actually starts: `python3` (Debian,
+# Ubuntu and macOS ship no `python`), then `python` (the Windows installer), then the
+# Windows launcher. Each candidate is started once before it is trusted, because the
+# Microsoft Store leaves a `python3.exe` stub on PATH that opens the store instead of
+# running anything; `command -v` alone would pick it. Between 2026-08-28 and 2026-09-05
+# this file sat in the index without the executable bit, and git skipped it on every
+# Linux and macOS clone with a one-line hint — the check ran only on Windows.
+here="$(dirname "$0")"
+for py in python3 python; do
+    if "$py" -c "import sys" >/dev/null 2>&1; then
+        exec "$py" "$here/commit_msg_check.py" "$@"
+    fi
+done
+if py -3 -c "import sys" >/dev/null 2>&1; then
+    exec py -3 "$here/commit_msg_check.py" "$@"
+fi
+echo "commit-msg: no Python interpreter found (tried python3, python, py -3);" >&2
+echo "commit-msg: the message was not checked. Deliberate exception: git commit --no-verify" >&2
+exit 1
