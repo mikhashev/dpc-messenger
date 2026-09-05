@@ -282,6 +282,108 @@ would end that.
    `ADR-022` Phase 1 is done — a real question, but it belongs to `BUDGET-WIRING-IS-DEAD`
    and to ADR-022, not to a second copy here.
 
+---
+
+## Amendment 2026-09-05 — the axis vocabulary is declared in VISION and read from there
+
+**Status of this amendment: proposed.** Drafted by CC_linux on Mike's «давай как поправку к
+ADR-039» (2026-09-05); nothing below is implemented until Mike accepts it. The form — an
+amendment rather than ADR-042 — is Mike's call of the same day.
+
+### What is closed and what is not
+
+Protocol 13 rule 13 (И1–И3, 2026-08-27 → 09-01) welded three of the four layers: every
+accepted ADR carries an `axis:`, every board entry carries one, and the ROADMAP status block
+is rendered from both rather than typed. The vocabulary those fields draw from is a constant
+in the tool — `AXES` at `tools/backlog/build.py:97`, read in fifteen places — and the document
+the vocabulary is *about* is read by nothing. Measured 2026-09-01
+(`THE-FOUR-LAYERS-ARE-JOINED-PAIRWISE-AND-THERE-IS-NO-PROCESS`): `grep VISION build.py` is
+empty, VISION cites no ADR, ROADMAP cites VISION zero times; upward the links exist (the
+board cites ROADMAP 17 times and VISION 28), downward they are a person remembering. Mike,
+2026-09-01: «надо придумать механизм и формализовать в протоколе 13».
+
+Four of the five axes already have a paragraph in VISION's *Direction* section — *from
+personal to collective*, *from passive to collaborative*, *from local to networked*, *from one
+practice to many* — so the vocabulary is VISION's, not the board's. The fifth, `honesty`, is
+the loop the format standard added because the project «cannot be honest without» it
+(`docs/BACKLOG_FORMAT.md` §4a); VISION does not promise it today.
+
+### Decision (proposed)
+
+1. **VISION.md carries the vocabulary in a front-matter block at its top.** One record per
+   axis: `token` (the word `axis:` fields use), `vector` (the VISION phrase it stands for,
+   quoted from the prose), `done_when` (what would count as finishing — the one kind of prose
+   И2 permits a status document to carry). The block is YAML front matter, which GitHub
+   renders as a table above the document: the file stays a document people read and becomes
+   one the tool reads, in the same bytes. The prose of VISION is not changed by this
+   amendment.
+2. **`build.py` reads the vocabulary from that block.** The constant stays as the fallback
+   for a project whose VISION has no block, and using the fallback prints a warning naming the
+   file to declare it in — so the five sibling projects keep working the day this lands and
+   are told what to do next. No parser is added: the front-matter reader that already serves
+   `docs/decisions/*.md` reads this block too.
+3. **The check runs in both directions.** An `axis:` token in an entry or an ADR that VISION
+   does not declare is a **refusal** — the same refusal that exists today, now against the
+   document's list rather than the tool's. An axis VISION declares with no accepted decision
+   and no board entry behind it is a **warning**: a direction promised and not worked on,
+   which today nothing can see. Warning and not refusal, because a new project legitimately
+   declares a direction before the first entry under it exists — that is what declaring a
+   direction is for. (This answers the first open question the backlog entry asked.)
+4. **Prose and block are not machine-compared.** A reader can compare them because the block
+   quotes the vector phrase verbatim; drift between the paragraph and the record stays a
+   review matter, exactly as И2's own prose does. Writing a prose checker here would promise
+   what «ни одно утверждение нельзя опровергнуть кодом» already says cannot be checked.
+   (This answers the second open question.)
+5. **Whether VISION promises `honesty` is Mike's decision, taken when the block is written.**
+   Either the block gains a fifth record and VISION gains one sentence promising it, or the
+   record is marked as the format standard's loop rather than a VISION vector. The tool does
+   not care; the document's author does.
+6. **First consumer after the validator: the roadmap view.** Mike asked on 2026-09-05 for an
+   HTML rendering of ROADMAP; it is drawn as lanes per axis from the same function the
+   validator reads, never from a second copy of the list, so the lanes come from VISION the
+   day this lands and do not change when it does. Statuses that ROADMAP states in prose are
+   drawn grey and labelled «claimed in prose, not measured» (Mike, 2026-09-05). The view is a
+   fourth artefact of the default build beside `backlog.html`, `graph.html` and `graph.json`,
+   with the same freshness line in `--check`.
+7. **Protocol 13 rule 13 is proposed to gain И4** — every axis in use is declared in VISION,
+   and VISION is read by the tool. Protocol changes are agreed by the three parties; this
+   amendment records the proposal and does not enact it.
+
+### Consequences
+
+The top arrow of Mike's chain stops being a memory: a token in use *is* a reference into
+VISION, and «zero links from VISION» stops being the diagnosis. The vocabulary gains a source
+that can be argued with in the document that owns it. A foreign project declares its own axes
+in its own VISION instead of inheriting ours — the scratch run of 2026-09-01 showed it cannot
+today (first entry and first decision both refused on `axis token 'delivery' not in the
+vocabulary`). Accepted cost: VISION.md, a public file, now opens with a block of metadata, and
+a hand edit to that block can break the check for every writer — which is the point.
+
+### Confirmation
+
+- `grep VISION tools/backlog/build.py` is no longer empty, and `--check` prints where the
+  vocabulary came from: `vocabulary  VISION.md (5 axes)` or `vocabulary  built-in constant —
+  declare it in VISION.md`.
+- Fixture cases, each watched to fire: a token not declared in VISION refuses; a declared axis
+  with nothing behind it warns; a project with no block falls back and warns.
+- Neither `--check` nor the roadmap view carries a second copy of the axis list — one function,
+  measured by grep.
+- Not claimed until observed: that the dead-axis warning is read by anyone. If it is never
+  acted on within a month of landing, it is decoration.
+
+### Scope
+
+In: the front-matter block in `VISION.md`, the vocabulary reader and the two-way check in
+`build.py`, the fixture, `docs/BACKLOG_FORMAT.md` §4a (which currently says the vocabulary is
+«five words, from VISION's three vectors plus the two loops» and will say where it is read
+from), and the roadmap view of item 6.
+
+Out: any change to VISION's prose beyond the block and the one sentence item 5 may add; the
+И4 wording in Protocol 13; generated identifiers and everything else this ADR already leaves
+out.
+
+---
+
 ## Authors
 
 CC (draft, measurements, code reading), Ark (review, convergence synthesis), Warren (cost
