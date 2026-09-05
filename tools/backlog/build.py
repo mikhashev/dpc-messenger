@@ -1347,6 +1347,22 @@ if "--check" in sys.argv:
                 _adr("no `## Decision` section — Context + Decision is the minimum an ADR "
                      "has to carry (TEMPLATE.md, RFC 3)")
 
+    # The glossary points, it does not define (docs/GLOSSARY.md, 2026-09-05): every row
+    # carries a «Defined in» link, and a link that resolves to nothing is the same defect
+    # as a stale reference one document up. Content, not structure — it warns, never
+    # refuses. The second check is the one that made the file exist: an axis token that
+    # has no row is a word the board files work under and nobody has written down.
+    # The walk itself lives in glossary_check.py so the client suite can run it without a
+    # board — this script needs backlog.md, which no clone has, so CI never saw it here.
+    GLOSSARY = SRC.parent / "docs" / "GLOSSARY.md"
+    glossary_terms, glossary_links, glossary_bad = [], 0, 0
+    if GLOSSARY.exists():
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        from glossary_check import check_glossary
+        glossary_terms, glossary_links, _bad_links, _no_row = check_glossary(GLOSSARY, AXES)
+        glossary_bad = len(_bad_links)
+        warnings.extend(_bad_links + _no_row)
+
     # И2's checkable half: the block is rendered, so a stale one is a claim that has
     # drifted from the two surfaces it was rendered from. Nothing here reads the prose —
     # a rule about what prose may assert is for review, not for a validator.
@@ -1508,6 +1524,10 @@ if "--check" in sys.argv:
               f"files, {adr_no_fm} without front matter — required from "
               f"{ADR_FM_FROM:03d} on, so the older ones warn rather than refuse. The "
               f"backlog cites {len(cited_adr)} of them.")
+    if glossary_terms:
+        print(f"glossary   {GLOSSARY.parent.name}/{GLOSSARY.name}: {len(glossary_terms)} terms, "
+              f"{glossary_links} «Defined in» links, {glossary_bad} resolving to nothing; "
+              f"{sum(1 for a in AXES if a in glossary_terms)} of {len(AXES)} axis tokens have a row.")
     print(f"Rules: docs/BACKLOG_FORMAT.md §8. Cutoff for the required envelope: {CUTOFF}.")
     print("Stale and shortened references do not set the exit code: they are content, not "
           "structure, and this checker points rather than edits.")

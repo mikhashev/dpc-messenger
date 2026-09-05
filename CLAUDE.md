@@ -31,6 +31,28 @@ The working tree is shared — a second developer and a second CC session write 
 mtime and do not assume a change there is mine. `backlog.md` is a dated synthesis, not the
 state of the code: an entry tells you what to check, never that it is still true.
 
+## Vocabulary — read the project's words before naming anything
+
+The project already has a vocabulary; the failure is not looking for it. Before naming a
+file, a function, a field, a backlog entry or a concept in a document:
+
+1. **Read the words that exist**, in this order: [docs/GLOSSARY.md](docs/GLOSSARY.md) (one
+   row per word, each pointing at the document that owns it); the document that owns the
+   area (`docs/BACKLOG_FORMAT.md` for the board, `protocol-13-public.md` for roles,
+   `docs/GROUP_CHAT.md` for groups, `specs/dptp_v1.md` for the wire); then the neighbours in
+   code — the handler, provider or tool beside the one being written.
+2. **Build the name from those words.** No field called `login` means no `find_by_login`.
+3. **Grep before you coin**: `rg --no-ignore -c "<word>"` over the repository and the
+   gitignored working layer. Zero hits means the word is invented; many hits means check
+   what it already means — `node` is a network node here and an XML or DOM node elsewhere,
+   `tier` is a connection tier (1–6) and a shell tier (0–2), `session` carries three
+   numbering families.
+4. **A word the vocabulary lacks is a question to the owner before the code**, not a note
+   after it. The owner of this vocabulary is Mike.
+
+Everything that lands in this repository is English; Russian is for the working chat and
+the gitignored layer only (`docs/BACKLOG_FORMAT.md` §6; the commit hook refuses Cyrillic).
+
 ## Project Overview
 
 **D-PC Messenger** is a privacy-first, peer-to-peer messaging platform enabling collaborative AI intelligence through secure sharing of personal contexts. The project implements a novel "transactional communication" paradigm with end-to-end encryption and no server-stored messages.
