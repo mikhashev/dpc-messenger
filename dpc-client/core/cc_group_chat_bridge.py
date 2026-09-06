@@ -229,6 +229,25 @@ def _send_outcome(reply: dict) -> tuple:
     return True, "OK"
 
 
+async def _await_reply(ws, command_id: str, deadline: float) -> dict:
+    """The frame answering `command_id`. The backend broadcasts events to every
+    client, this one included, and the send's own group_text_received arrives
+    before the reply — so events, other ids and unparsable frames are skipped.
+    Raises asyncio.TimeoutError once `deadline` (loop time) passes."""
+    loop = asyncio.get_running_loop()
+    while True:
+        remaining = deadline - loop.time()
+        if remaining <= 0:
+            raise asyncio.TimeoutError
+        raw = await asyncio.wait_for(ws.recv(), timeout=remaining)
+        try:
+            frame = json.loads(raw)
+        except ValueError:
+            continue
+        if isinstance(frame, dict) and "event" not in frame and frame.get("id") == command_id:
+            return frame
+
+
 async def send_group_message(group_id: str, text: str, name: str = None) -> dict:
     """Post `text` to the group via WebSocket, as `name` (default: resolved identity)."""
     canonical_id = _resolve_group_id(group_id)
@@ -271,8 +290,8 @@ async def send_group_message(group_id: str, text: str, name: str = None) -> dict
 
             await ws.send(json.dumps(command))
             try:
-                raw = await asyncio.wait_for(ws.recv(), timeout=10)
-                result = json.loads(raw)
+                deadline = asyncio.get_running_loop().time() + 10
+                result = await _await_reply(ws, command["id"], deadline)
                 _, status = _send_outcome(result)
                 print(f"[SENT] {len(text)} chars → group {group_id}: {status}")
                 return result

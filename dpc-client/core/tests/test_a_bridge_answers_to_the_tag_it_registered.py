@@ -153,16 +153,17 @@ def test_default_names_is_cc_display_name(bridge):
 class _FakeWS:
     def __init__(self, sent):
         self.sent = sent
-        # auth, then the local API's envelope round a posted message_id
-        self._replies = [json.dumps({"status": "OK"}),
-                         json.dumps({"id": "x", "command": "send_group_agent_message",
-                                     "status": "OK", "payload": "0123456789abcdef"})]
+        # auth, then the local API's envelope round a posted message_id; the
+        # envelope carries the id of the command just sent, as the backend echoes it
+        self._replies = [lambda _cid: json.dumps({"status": "OK"}),
+                         lambda cid: json.dumps({"id": cid, "command": "send_group_agent_message",
+                                                 "status": "OK", "payload": "0123456789abcdef"})]
 
     async def send(self, raw):
         self.sent.append(json.loads(raw))
 
     async def recv(self):
-        return self._replies.pop(0)
+        return self._replies.pop(0)(self.sent[-1]["id"])
 
     async def __aenter__(self):
         return self
