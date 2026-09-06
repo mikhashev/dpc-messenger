@@ -142,11 +142,13 @@ def _find_group_dir(group_id: str) -> Path:
       ~/.dpc/conversations/{group_id}/history.json           (no display name)
       ~/.dpc/conversations/{group_id}-{slug}/history.json    (with display name)
 
-    Prefer the slugged directory (backend's active write target).
+    Prefer the slugged directory (backend's active write target). metadata.json is
+    the group's identity and exists from the join; history.json only after a message.
     """
     base = DPC_HOME / "conversations"
     for d in sorted(base.iterdir()):
-        if d.is_dir() and d.name.startswith(group_id + "-") and (d / "history.json").exists():
+        if d.is_dir() and d.name.startswith(group_id + "-") and (
+                (d / "metadata.json").exists() or (d / "history.json").exists()):
             return d
     return base / group_id
 
@@ -212,6 +214,21 @@ def _build_send_command(group_id: str, name: str, text: str) -> dict:
     }
 
 
+def _send_outcome(reply: dict) -> tuple:
+    """(ok, text for the [SENT] line). The local API answers
+    {"status": "OK"|"ERROR", "payload": <handler return>}; a refused post is
+    {"status": "error", "message": ...} under an OK envelope, success a message_id."""
+    if not isinstance(reply, dict):
+        return False, "ERROR malformed reply"
+    outer, inner = reply.get("status"), reply.get("payload")
+    inner_msg = inner.get("message") or inner.get("error") if isinstance(inner, dict) else None
+    if outer != "OK":
+        return False, f"ERROR {inner_msg or reply.get('message') or outer or '?'}"
+    if isinstance(inner, dict) and str(inner.get("status", "")).lower() == "error":
+        return False, f"ERROR {inner_msg or '(no message given)'}"
+    return True, "OK"
+
+
 async def send_group_message(group_id: str, text: str, name: str = None) -> dict:
     """Post `text` to the group via WebSocket, as `name` (default: resolved identity)."""
     canonical_id = _resolve_group_id(group_id)
@@ -256,7 +273,8 @@ async def send_group_message(group_id: str, text: str, name: str = None) -> dict
             try:
                 raw = await asyncio.wait_for(ws.recv(), timeout=10)
                 result = json.loads(raw)
-                print(f"[SENT] {len(text)} chars → group {group_id}: {result.get('status', '?')}")
+                _, status = _send_outcome(result)
+                print(f"[SENT] {len(text)} chars → group {group_id}: {status}")
                 return result
             except asyncio.TimeoutError:
                 print(f"[SENT] {len(text)} chars → group {group_id} (no response, timeout)")
@@ -293,6 +311,13 @@ def _resolve_group_id(group_id: str) -> str:
 def send_group_message_sync(group_id: str, text: str, name: str = None) -> dict:
     """Sync wrapper for send_group_message."""
     return asyncio.run(send_group_message(group_id, text, name))
+
+
+def _send_exit_code(reply: dict) -> int:
+    """CLI exit for a send: 1 on a refused or failed post; a timed-out reply is not a refusal."""
+    if isinstance(reply, dict) and reply.get("status") == "sent":
+        return 0
+    return 0 if _send_outcome(reply)[0] else 1
 
 
 def _mention_for_me(frame, canonical_group_id: str, names_lower, all_tags: bool = False):
@@ -443,8 +468,7 @@ if __name__ == "__main__":
 
     if args.send:
         name = _resolve_identity(args.group, args.as_name)
-        send_group_message_sync(args.group, args.send, name)
-        sys.exit(0)
+        sys.exit(_send_exit_code(send_group_message_sync(args.group, args.send, name)))
 
     if args.send_file:
         try:
@@ -453,8 +477,7 @@ if __name__ == "__main__":
             print(f"[ERROR] Cannot read --send-file: {e}", file=sys.stderr)
             sys.exit(1)
         name = _resolve_identity(args.group, args.as_name)
-        send_group_message_sync(args.group, text, name)
-        sys.exit(0)
+        sys.exit(_send_exit_code(send_group_message_sync(args.group, text, name)))
 
     messages = read_history(args.group, last_n=args.last)
     print(f"[CC Group Bridge] {len(messages)} messages (last {args.last})\n")

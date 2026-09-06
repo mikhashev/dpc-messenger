@@ -153,7 +153,10 @@ def test_default_names_is_cc_display_name(bridge):
 class _FakeWS:
     def __init__(self, sent):
         self.sent = sent
-        self._replies = [json.dumps({"status": "OK"}), json.dumps({"status": "sent"})]
+        # auth, then the local API's envelope round a posted message_id
+        self._replies = [json.dumps({"status": "OK"}),
+                         json.dumps({"id": "x", "command": "send_group_agent_message",
+                                     "status": "OK", "payload": "0123456789abcdef"})]
 
     async def send(self, raw):
         self.sent.append(json.loads(raw))
@@ -186,7 +189,7 @@ def test_send_posts_as_the_registered_tag(bridge, fake_websockets, capsys):
     assert cmd["payload"] == {"group_id": GROUP, "agent_name": "CC_mike", "text": "hi"}
     out = capsys.readouterr().out
     assert "[INFO] posting as CC_mike" in out
-    assert "[SENT] 2 chars → group group-0a52389f2bb6: sent" in out
+    assert "[SENT] 2 chars → group group-0a52389f2bb6: OK" in out
 
 
 def test_send_posts_as_cc_with_no_info_line_when_nothing_is_registered(bridge, fake_websockets, capsys):
