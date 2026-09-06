@@ -265,7 +265,9 @@ class DiscordCoordinator:
                     await asyncio.sleep(delay)
                 sanitized = self._sanitize_output(response)
                 await self.discord_manager.send_message(channel_id, sanitized)
-                agent_name = getattr(manager, 'display_name', None) or agent_id
+                # The manager caches the config name as `_agent_display_name`;
+                # `display_name` never existed on it, so this always sent the id.
+                agent_name = getattr(manager, '_agent_display_name', None) or agent_id
                 await self._echo_response_to_mirror(response, agent_name)
                 self._trim_conversation(discord_user_id)
         except Exception as e:

@@ -5468,6 +5468,19 @@ class CoreService:
             logger.warning("send_group_agent_message: group %s not found", group_id)
             return None
 
+        # A registered folder id resolves to the name it was registered under:
+        # the check_back delivery passed `agent_forge_7244b181` and was refused,
+        # and the report never reached the chat. The record and the wire carry
+        # the display name, never the id.
+        node_id = self.p2p_manager.node_id
+        registered_ids = (getattr(group, "agents", None) or {}).get(node_id) or []
+        if agent_name in registered_ids and not agent_name.startswith(EXTERNAL_AGENT_PREFIX):
+            resolved = ((getattr(group, "agent_names", None) or {}).get(node_id) or {}).get(agent_name) \
+                or self._get_agent_display_name(agent_name)
+            logger.info("send_group_agent_message: agent id %r posts as %r in group %s",
+                        agent_name, resolved, group_id)
+            agent_name = resolved
+
         allowed = self._names_this_node_may_post_as(group)
         if (agent_name or "").lower() not in allowed:
             logger.warning(
@@ -5480,8 +5493,6 @@ class CoreService:
         import uuid
         message_id = uuid.uuid4().hex[:16]
         timestamp = datetime.now(timezone.utc).isoformat()
-
-        node_id = self.p2p_manager.node_id
 
         # Feed to ConversationMonitor FIRST so msg_index gets assigned
         monitor = self._get_or_create_conversation_monitor(group_id)

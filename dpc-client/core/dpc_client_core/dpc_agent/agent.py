@@ -109,6 +109,15 @@ class AgentConfig:
     embedding_model: Optional[str] = None
 
 
+def _display_name_from(agent_root: pathlib.Path) -> Optional[str]:
+    """The `name` in `<agent_root>/config.json`, or None when there is none."""
+    try:
+        cfg = json.loads((agent_root / "config.json").read_text(encoding="utf-8"))
+        return cfg.get("name") or None
+    except Exception:
+        return None
+
+
 class DpcAgent:
     """
     Simplified agent for DPC Messenger integration.
@@ -143,6 +152,8 @@ class DpcAgent:
         """
         self.config = config or AgentConfig()
         self.agent_root = agent_root or get_agent_root("default")
+        # The name the agent posts under; the folder id is not one a group registers.
+        self.display_name = _display_name_from(self.agent_root)
         self._firewall = firewall  # Firewall controls tool access
         self._provider_alias = provider_alias  # Store for LLM adapter
         self._firewall_profile = firewall_profile  # Store for tool permission lookups
@@ -1104,16 +1115,24 @@ class DpcAgent:
             # first live run woke correctly, produced its line, and the agent's
             # own send_user_message delivered it to Telegram instead, so the
             # group saw nothing.
+            outcome = result
             if reply_conversation_id.startswith("group-") and result:
                 service = getattr(self, "_service", None)
                 sender = getattr(self, "display_name", None) or self.agent_root.name
                 if service is not None:
                     try:
-                        await service.send_group_agent_message(
+                        posted = await service.send_group_agent_message(
                             group_id=reply_conversation_id,
                             agent_name=sender,
                             text=result,
                         )
+                        # A refusal is a dict; the queue would otherwise record
+                        # "completed successfully" over a report nobody saw.
+                        if isinstance(posted, dict) and posted.get("status") == "error":
+                            reason = posted.get("message") or "refused"
+                            log.warning("check_back task %s: post to %s as %r refused: %s",
+                                        task.id, reply_conversation_id, sender, reason)
+                            outcome = f"[not posted to {reply_conversation_id}: {reason}]\n{result}"
                     except Exception as e:
                         log.warning("Failed to publish check_back result to %s: %s",
                                     reply_conversation_id, e)
@@ -1131,7 +1150,7 @@ class DpcAgent:
                         await send_fn(reply_telegram_chat_id, result)
                     except Exception as e:
                         log.warning("Failed to deliver check_back result to Telegram: %s", e)
-            return result
+            return outcome
         elif task.task_type == "reminder":
             # Deliver reminder message directly — no LLM call to prevent scheduling loops
             message = task.data.get("message", task.data.get("text", ""))

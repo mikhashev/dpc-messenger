@@ -340,3 +340,60 @@ async def test_a_one_to_one_wake_up_does_not_go_looking_for_a_group():
     await DpcAgent._execute_task(agent, task)
 
     assert calls == [], "a 1:1 wake-up tried to publish into a group"
+
+
+def test_an_agent_takes_its_display_name_from_its_own_config(tmp_path):
+    """The tests above set `display_name` on the double, and the real agent never
+    had the attribute — so the live delivery fell to `agent_root.name`, the folder
+    id, and the guard refused it (2026-09-06, task-e3f602b1)."""
+    from dpc_client_core.dpc_agent.agent import _display_name_from
+
+    root = tmp_path / "agent_forge_7244b181"
+    root.mkdir()
+    assert _display_name_from(root) is None, "no config.json, yet a name came back"
+
+    (root / "config.json").write_text('{"name": "Forge"}', encoding="utf-8")
+    assert _display_name_from(root) == "Forge"
+
+    (root / "config.json").write_text("{not json", encoding="utf-8")
+    assert _display_name_from(root) is None, "a broken config must not raise mid-task"
+
+
+@pytest.mark.asyncio
+async def test_a_refused_group_post_reaches_the_task_log(caplog):
+    """The queue logged «completed successfully» over a report nobody saw: the
+    guard's refusal is a returned dict, not an exception. It must name the task
+    and the reason, and the task's recorded outcome must carry it too."""
+    import logging
+    from types import SimpleNamespace as NS
+    from dpc_client_core.dpc_agent.agent import DpcAgent
+
+    class _Service:
+        async def send_group_agent_message(self, group_id, agent_name, text, tool_calls=None):
+            return {"status": "error",
+                    "message": f"agent name not registered for this node in this group: {agent_name}"}
+
+    agent = DpcAgent.__new__(DpcAgent)
+    agent._run_gate = asyncio.Lock()
+    agent._service = _Service()
+    agent.agent_root = NS(name="agent_forge_7244b181")  # no display_name: the fallback path
+    agent._task_handlers = {}
+    agent._telegram_send_fn = None
+
+    async def _process(text, conversation_id=None, **_kw):
+        return "the report"
+
+    agent.process = _process
+    agent._convert_task_data_to_prompt = lambda d: ""
+
+    task = NS(id="task-e3f602b1", task_type="check_back",
+              data={"text": "x", "_reply_conversation_id": "group-60aff6110f02"})
+
+    with caplog.at_level(logging.WARNING, logger="dpc_client_core.dpc_agent.agent"):
+        outcome = await DpcAgent._execute_task(agent, task)
+
+    warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+    assert any("task-e3f602b1" in w and "group-60aff6110f02" in w and "not registered" in w
+               for w in warnings), f"no WARNING named the task and the reason: {warnings}"
+    assert outcome.startswith("[not posted to group-60aff6110f02:"), outcome
+    assert outcome.endswith("the report")

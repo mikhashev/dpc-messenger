@@ -192,3 +192,39 @@ async def test_registering_a_tag_closes_the_configured_name(caplog):
         result = await _post(service, "CC")
 
     _assert_refused(service, result, "CC", caplog)
+
+
+@pytest.mark.asyncio
+async def test_a_registered_agent_id_posts_under_its_registered_name():
+    """The regression of 2026-09-06: a check_back report offered the folder id
+    `agent_forge_7244b181`, the guard knew only «Forge», and the report was lost.
+    The id is registered for this node, so it posts — as «Forge», in the record
+    and on the wire, never as the folder id."""
+    service = _Service(agents=["agent_forge_7244b181"],
+                       agent_names={"agent_forge_7244b181": "Forge"})
+
+    result = await _post(service, "agent_forge_7244b181")
+
+    _assert_posted(service, result, "Forge")
+
+
+@pytest.mark.asyncio
+async def test_a_registered_agent_id_with_a_stale_map_posts_under_its_config_name():
+    """`agent_names` may predate a rename; the id still resolves through config.json."""
+    service = _Service(agents=["agent_forge_7244b181"], agent_names={},
+                       display_names={"agent_forge_7244b181": "Forge"})
+
+    result = await _post(service, "agent_forge_7244b181")
+
+    _assert_posted(service, result, "Forge")
+
+
+@pytest.mark.asyncio
+async def test_an_agent_id_this_node_did_not_register_is_refused(caplog):
+    service = _Service(agents=["agent_001"], agent_names={"agent_001": "Ark"},
+                       display_names={"agent_forge_7244b181": "Forge"})
+
+    with caplog.at_level(logging.WARNING, logger="dpc_client_core.service"):
+        result = await _post(service, "agent_forge_7244b181")
+
+    _assert_refused(service, result, "agent_forge_7244b181", caplog)
