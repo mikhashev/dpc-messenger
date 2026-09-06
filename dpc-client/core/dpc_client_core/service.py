@@ -5495,12 +5495,10 @@ class CoreService:
             timestamp=timestamp,
             sender_type="agent",
             agent_owner=self.p2p_manager.node_id,
+            # Signed with the record. Patching them in afterwards left the
+            # hash computed without them, and every peer refused the post.
+            tool_calls=tool_calls or None,
         ))
-        if tool_calls:
-            history = monitor.get_message_history()
-            if history and history[-1].get("id") == message_id:
-                history[-1]["tool_calls"] = tool_calls
-                monitor._history_dirty = True
         monitor.save_history()
 
         last_msg = monitor.get_message_history()[-1] if monitor.get_message_history() else {}
@@ -5524,8 +5522,8 @@ class CoreService:
             "is_agent": True,
             "msg_index": msg_index,
             **self._signature_fields_for(monitor, message_id),
-            # tool_calls in the live broadcast so the collapsible renders immediately
-            # on the finalized message, not only after a history reload.
+            # The same list the record was signed with; [] and None hash alike
+            # (message_signing._canonical_json), so an empty one may travel as [].
             "tool_calls": tool_calls or [],
         }
 

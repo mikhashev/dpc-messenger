@@ -273,6 +273,9 @@ class GroupTextHandler(MessageHandler):
                 timestamp=timestamp,  # v0.20.0: Use sender-provided timestamp
                 sender_type=payload.get("sender_type"),
                 agent_owner=payload.get("agent_owner"),
+                # Covered by the carried hash; stored without them, the copy
+                # fails its own signature on re-export. [] hashes as None.
+                tool_calls=payload.get("tool_calls") or None,
                 signature_fields=signature_fields,
             )
 
