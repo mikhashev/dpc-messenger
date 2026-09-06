@@ -36,7 +36,7 @@ jobs:
       # out — Apple Silicon only.
       - name: Sync (with the extras whose tests exist here)
         working-directory: dpc-client/core
-        run: uv sync --extra graph-grafeo --extra browser
+        run: uv sync --extra graph-grafeo --extra browser --extra pdf
       # Baseline measured on Windows 2026-08-20: 4 failed · 2086 passed · 3 skipped (160s).
       # The four are deselected by name, not hidden by a bare `|| true`, and each one has a
       # backlog entry (CI-BASELINE-FOUR-TESTS-FAIL-BEFORE-THE-FIRST-RUN). A gate that is red
