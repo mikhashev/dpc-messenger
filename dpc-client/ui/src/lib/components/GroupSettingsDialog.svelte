@@ -373,7 +373,12 @@
           <p class="ext-hint">
             A Claude Code bridge or any harness answering over the local API. Registering
             it here is what makes <code>@tag</code> reach this machine and not every
-            machine running the same name.
+            machine running the same name. Setup for a new agent:
+            <a
+              href="https://github.com/mikhashev/dpc-messenger/blob/main/docs/agent/CC_INTEGRATION_GUIDE.md"
+              target="_blank"
+              rel="noopener noreferrer"
+            >External Agent Integration Guide</a>.
           </p>
 
           <div class="member-list">
@@ -610,6 +615,15 @@
     font-size: 12px;
     color: #a6adc8;
     line-height: 1.45;
+  }
+
+  .ext-hint a {
+    color: #0088cc;
+    text-decoration: none;
+  }
+
+  .ext-hint a:hover {
+    text-decoration: underline;
   }
 
   .ext-empty {
