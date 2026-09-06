@@ -2477,6 +2477,11 @@ PARTICIPANTS' CULTURAL CONTEXTS:
 
         logger.info(f"Imported {len(accepted)} messages into all conversation buffers")
 
+        # Written now, as merge_history does, not at the next add_message: a
+        # restart in between lost every restored record (41, 2026-09-06).
+        self._history_dirty = True
+        self.save_history()
+
     # Phase 7: Peer context cache management methods
     def cache_peer_context(self, node_id: str, context: Any, device_context: dict = None):
         """Cache peer's personal context and device context locally
