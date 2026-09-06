@@ -27,13 +27,16 @@ PARTICIPANTS = [
     {"node_id": PEER, "name": "Mike (linux)", "context": "peer"},
     {"node_id": ME, "name": "User", "context": "local"},
 ]
-FOREIGN = f"/home/mike/.dpc/conversations/{GROUP}-1234/files/screenshots/paste_1788443154187.png"
+# The sender's disk under a root no machine has: the remapper keeps a `file_path`
+# that exists, and the real `/home/mike/...` does exist on the Linux node.
+FOREIGN = f"/nonexistent-node/home/mike/.dpc/conversations/{GROUP}-1234/files/screenshots/paste_1788443154187.png"
 
 
 @pytest.fixture(autouse=True)
 def _home_is_tmp(tmp_path, monkeypatch):
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
     monkeypatch.setattr(ConversationMonitor, "persist_history", property(lambda self: True))
+    assert not Path(FOREIGN).exists(), "the foreign path must be foreign on this machine too"
 
 
 def _monitor(display_name=None):

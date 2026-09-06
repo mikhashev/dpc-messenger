@@ -11,9 +11,17 @@ import os
 import sys
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from dpc_client_core.dpc_agent.tools.shell import _validate_command  # noqa: E402
+
+# A backslash is a path separator only on Windows; the gate's job is what the OS
+# would run, and on POSIX `.\x.py` names a file that does not exist.
+_windows_spelling = pytest.mark.skipif(
+    sys.platform != "win32", reason="a backslash is a path separator only on Windows"
+)
 
 
 class _Firewall:
@@ -138,6 +146,7 @@ def test_an_unreadable_script_is_refused_rather_than_waved_on(tmp_path):
     assert "could not read" in verdict[1], verdict[1]
 
 
+@_windows_spelling
 def test_a_script_run_by_its_shebang(tmp_path):
     """A script run without naming an interpreter.
 
@@ -218,14 +227,19 @@ def test_a_batch_file_is_a_script(tmp_path):
     assert "dl.cmd" in verdict[1] and "gaia-archive" in verdict[1], verdict[1]
 
 
-def test_the_cmd_wrappers_reach_the_batch_file(tmp_path):
+@pytest.mark.parametrize("spelling", [
+    "call dl.bat",
+    "start dl.bat",
+    pytest.param(r".\dl.bat", marks=_windows_spelling),
+])
+def test_the_cmd_wrappers_reach_the_batch_file(tmp_path, spelling):
     _script(tmp_path, "dl.bat", r"type C:\Users\mikha\gaia-archive\gold.parquet" + "\\n")
     ctx = _Ctx(tmp_path)
 
-    for spelling in ("call dl.bat", "start dl.bat", r".\dl.bat"):
-        verdict = _validate_command(spelling, ctx, str(tmp_path))
-        assert verdict is not None and verdict[0] == "tier1", spelling
-        assert "dl.bat" in verdict[1], (spelling, verdict[1])
+    verdict = _validate_command(spelling, ctx, str(tmp_path))
+
+    assert verdict is not None and verdict[0] == "tier1", spelling
+    assert "dl.bat" in verdict[1], (spelling, verdict[1])
 
 
 def test_a_bare_name_is_a_launch_on_both_platforms(tmp_path):
