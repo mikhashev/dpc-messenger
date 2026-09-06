@@ -2443,6 +2443,11 @@ PARTICIPANTS' CULTURAL CONTEXTS:
                           "preimage_version", "verification"):
                 if field in msg:
                     imported_msg[field] = msg[field]
+            # tool_calls is inside the hash the record was just verified
+            # against; dropped here, the re-export failed at the next receiver.
+            # Stored only when non-empty, as add_message does.
+            if msg.get("tool_calls"):
+                imported_msg["tool_calls"] = msg["tool_calls"]
             # msg_index and chain_hash are this node's, not the sender's.
             imported_msg = self._chain_locally(imported_msg)
             if "attachments" in msg:
