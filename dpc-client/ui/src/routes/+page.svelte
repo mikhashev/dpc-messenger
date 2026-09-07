@@ -4,6 +4,7 @@
 <script lang="ts">
   import { onMount, untrack } from "svelte";
   import { providerToRemember } from '$lib/utils/rememberedProvider';
+  import { voteStatusAppliesTo } from '$lib/utils/voteStatusIdentity';
   import { writable } from "svelte/store";
   import { connectionStatus, nodeStatus, sendCommand, resetReconnection, connectToCoreService, knowledgeCommitProposal, knowledgeVoteStatus, personalContext, tokenWarning, extractionFailure, availableProviders, peerProviders, unreadMessageCounts, resetUnreadCount, setActiveChat, newSessionProposal, proposeNewSession, voteNewSession, defaultProviders, providersList, groupChats, listAgents, agentsList, sleepStateChanged, sleepProgress, sleepAgentStates, tokenUsageUpdated, setGroupReasoningEffort, updateAgentConfig } from "$lib/coreService";
   import { confirmAsync } from "$lib/utils/dialog";
@@ -875,6 +876,13 @@
   $effect(() => {
     const held = $knowledgeVoteStatus;
     if (!held) return;
+    // Only about the proposal on screen. Written without this check, a refusal
+    // raised in one group stayed up over an unrelated vote in another and told
+    // its only member he could not vote in a group he is alone in. The store
+    // clears correctly; the text below is a plain variable nothing reconciles,
+    // so the identity has to be checked where it is written. ChatPanel gates
+    // the same store on conversation_id — this is the same rule, by proposal.
+    if (!voteStatusAppliesTo(held, $knowledgeCommitProposal)) return;
     if (held.status === "success") {
       commitVoteError = "";
       showCommitDialog = false;
@@ -1230,7 +1238,7 @@
 
       <ChatPanel
         bind:this={chatPanelRef}
-        onOpenVote={() => { if ($knowledgeCommitProposal) showCommitDialog = true; }}
+        onOpenVote={() => { if ($knowledgeCommitProposal) { commitVoteError = ""; showCommitDialog = true; } }}
         {activeChatId}
         {chatHistories}
         {commandToChatMap}
@@ -1618,7 +1626,7 @@
 
 <!-- KnowledgeEventsPanel: commit/token/extraction/context hash events -->
 <KnowledgeEventsPanel
-  onOpenCommitDialog={(conversationId) => { showCommitDialog = true; stopExtracting(conversationId); }}
+  onOpenCommitDialog={(conversationId) => { commitVoteError = ""; showCommitDialog = true; stopExtracting(conversationId); }}
   onUpdateTokenUsage={(convId, usage) => {
     tokenUsageMap = new Map(tokenUsageMap);
     tokenUsageMap.set(convId, usage);
@@ -1644,6 +1652,7 @@
     showCommitResultToast = true;
   }}
   onCloseCommitDialog={() => {
+    commitVoteError = "";
     showCommitDialog = false;
     knowledgeCommitProposal.set(null);
   }}

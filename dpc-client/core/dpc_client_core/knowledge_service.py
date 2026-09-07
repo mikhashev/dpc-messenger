@@ -122,6 +122,9 @@ class KnowledgeService:
         # Results cache for agent store-and-poll (proposal_id → result dict)
         self.pending_results: Dict[str, Dict] = {}
 
+        # Live L6 reindex tasks — see _start_reindex.
+        self._reindex_tasks: set = set()
+
         # Register all consensus callbacks on the manager we own
         self.consensus_manager.on_commit_applied = self._on_commit_applied
         self.consensus_manager.on_commit_signed = self._on_commit_signed
@@ -1007,9 +1010,6 @@ class KnowledgeService:
         denominator counted over participants an abstention is what stops the
         commit, and it carries the reason it stopped it.
         """
-        result = await self.vote_knowledge_commit(
-            proposal_id, "abstain", message, _allow_defer=False
-        )
         payload = {
             "proposal_id": proposal_id,
             "conversation_id": conversation_id,
@@ -1019,13 +1019,29 @@ class KnowledgeService:
             "message": message,
         }
         payload.update(extra or {})
+
+        # The reason goes out before the vote is cast, because casting can end
+        # the vote and finalising broadcasts knowledge_commit_result from
+        # inside that call — so with the order reversed the outcome arrived 19
+        # ms before the explanation of it, and a reader that clears on the
+        # result had nothing to clear yet. Third instance of one shape: see
+        # the session reset, where the result outran the vote it was made of.
+        await self._emit_vote_event("knowledge_vote_resolved", payload)
+
+        result = await self.vote_knowledge_commit(
+            proposal_id, "abstain", message, _allow_defer=False
+        )
         if result.get("status") != "success":
-            payload["abstention_failed"] = result.get("message", "")
             logger.warning(
                 "Could not record the abstention on %s: %s",
                 proposal_id, result.get("message", ""),
             )
-        await self._emit_vote_event("knowledge_vote_resolved", payload)
+            # A correction, not a repeat: the reason above still stands, and
+            # this says the abstention itself did not land.
+            await self._emit_vote_event(
+                "knowledge_vote_resolved",
+                {**payload, "abstention_failed": result.get("message", "")},
+            )
 
     async def _deferred_vote_timed_out(self, proposal_id: str) -> None:
         """Nobody answered in time: say so instead of holding the vote forever."""
@@ -1595,11 +1611,34 @@ Respond in JSON format:
         except Exception as e:
             logger.error("Error in _on_commit_approved: %s", e, exc_info=True)
 
-        # MEM-3.7 trigger #2: incremental reindex for Active Recall (L6)
+        # MEM-3.7 trigger #2: incremental reindex for Active Recall (L6).
+        # Off the request. Awaited here it cost 22 s on a 167-document index
+        # while the voter's click had no answer and the dialog still offered a
+        # live button — which is where the second click came from. Nothing in
+        # the reply depends on the index: the commit is already written and
+        # applied, and this path only ever logged its failures.
+        self._start_reindex(markdown_file, commit.commit_id)
+
+    def _start_reindex(self, markdown_file: str, commit_id: str) -> None:
+        """Run the L6 reindex in the background, keeping a reference to it.
+
+        A bare create_task is collectable while it runs, so the set is what
+        keeps it alive; the callback discards it when it is done.
+        """
+        async def _run() -> None:
+            try:
+                await self._reindex_commit_into_agents(markdown_file)
+            except Exception as e:
+                logger.warning("MEM-3.7 L6 reindex failed for commit %s: %s", commit_id, e)
+
         try:
-            await self._reindex_commit_into_agents(markdown_file)
-        except Exception as e:
-            logger.warning("MEM-3.7 L6 reindex failed for commit %s: %s", commit.commit_id, e)
+            task = asyncio.get_running_loop().create_task(_run())
+        except RuntimeError:
+            # No loop — a synchronous caller in a test. Nothing to schedule.
+            logger.debug("MEM-3.7 L6 reindex not scheduled for %s: no running loop", commit_id)
+            return
+        self._reindex_tasks.add(task)
+        task.add_done_callback(self._reindex_tasks.discard)
 
     async def _on_commit_rejected(self, proposal, votes: Dict[str, Any]) -> None:
         """Notify the UI that the proposal was rejected, including rejection reasons."""
