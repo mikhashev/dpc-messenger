@@ -239,3 +239,25 @@ async def test_an_arriving_abstention_without_a_reason_is_discarded():
     )
 
     assert not m.sessions[proposal.proposal_id].votes
+
+
+def test_a_stranger_cannot_fill_a_participant_seat():
+    """The early finish asks whether the roster answered, not how many votes.
+
+    Counting votes made a proposal finalisable while a real participant was
+    still silent, as soon as some other node's vote arrived — the same
+    confusion that put strangers into the fraction.
+    """
+    from dpc_client_core.consensus_manager import _everyone_answered
+
+    stranger = "dpc-node-" + "f" * 32
+    proposal = _proposal((A, B))
+    session = SimpleNamespace(
+        proposal=proposal,
+        votes={A: object(), stranger: object()},
+    )
+
+    assert not _everyone_answered(session)
+
+    session.votes[B] = object()
+    assert _everyone_answered(session)

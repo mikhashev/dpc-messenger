@@ -1558,6 +1558,14 @@ class CoreService:
                 except Exception as e:
                     logger.debug("Failed to send history status for %s: %s", group.group_id, e)
 
+        # A vote a peer never saw ends in a timeout it could have answered.
+        if self.knowledge_service:
+            for peer_id in list(self.p2p_manager.peers):
+                try:
+                    await self.knowledge_service.resend_open_proposals(peer_id)
+                except Exception as e:
+                    logger.debug("Could not re-offer open proposals to %s: %s", peer_id[:20], e)
+
         # v0.20.0: Exchange deleted group IDs for offline deletion notification
         deleted_groups = self.group_manager.get_deleted_group_ids()
         if deleted_groups:

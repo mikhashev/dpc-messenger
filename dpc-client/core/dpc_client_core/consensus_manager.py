@@ -39,6 +39,14 @@ class VotingSession:
 VOTE_VALUES = ("approve", "reject", "request_changes", "abstain")
 
 
+def _everyone_answered(session) -> bool:
+    """Has every participant of this proposal cast a vote?"""
+    roster = set(session.proposal.participants or ())
+    if not roster:
+        return False
+    return roster.issubset(set(session.votes or {}))
+
+
 class ConsensusManager:
     """Manages consensus voting for knowledge commits
 
@@ -155,7 +163,7 @@ class ConsensusManager:
     async def cast_vote(
         self,
         proposal_id: str,
-        vote: str,  # one of VOTE_VALUES, "abstain"
+        vote: str,  # one of VOTE_VALUES
         comment: Optional[str] = None,
         broadcast_func: Optional[Callable] = None
     ) -> bool:
@@ -229,8 +237,9 @@ class ConsensusManager:
                 'payload': vote_payload
             })
 
-        # Check if voting is complete
-        if len(session.votes) == len(session.proposal.participants):
+        # Every participant has answered — the deadline has nothing left
+        # to add. Votes from outside the roster do not fill a seat.
+        if _everyone_answered(session):
             await self._finalize_vote(session)
 
         # Trigger callback
@@ -333,8 +342,9 @@ class ConsensusManager:
         # Record vote
         session.votes[vote.voter_node_id] = vote
 
-        # Check if voting is complete
-        if len(session.votes) == len(session.proposal.participants):
+        # Every participant has answered — the deadline has nothing left
+        # to add. Votes from outside the roster do not fill a seat.
+        if _everyone_answered(session):
             await self._finalize_vote(session)
 
         # Trigger callback

@@ -704,6 +704,53 @@ class KnowledgeService:
     # A vote held back until the records it judges arrive
     # -------------------------------------------------------------
 
+    async def resend_open_proposals(self, peer_id: str) -> int:
+        """Offer a returning participant the proposals it has not answered.
+
+        A proposal is broadcast once. A node that was away when it went out, or
+        that dropped and came back, holds no session and shows no dialog — and
+        with approval counted over participants its silence can only end the
+        vote in a timeout. Re-offering costs one message and gives the vote back.
+
+        Skipped for a participant whose vote already arrived: the receiver
+        rebuilds its session from the proposal, which would discard the record
+        of the vote it has already cast.
+        """
+        sessions = getattr(self.consensus_manager, "sessions", None) or {}
+        open_ids = {
+            pid for pid, s in sessions.items() if getattr(s, "status", None) == "voting"
+        }
+        offered = getattr(self, "_reoffered_proposals", None)
+        if offered is None:
+            offered = self._reoffered_proposals = set()
+        offered.intersection_update({(p, pid) for p, pid in offered if pid in open_ids})
+
+        sent = 0
+        for proposal_id in open_ids:
+            session = sessions[proposal_id]
+            proposal = session.proposal
+            if peer_id not in (getattr(proposal, "participants", None) or ()):
+                continue
+            if peer_id in (getattr(session, "votes", None) or {}):
+                continue
+            if (peer_id, proposal_id) in offered:
+                continue
+            try:
+                await self.p2p_manager.send_message_to_peer(peer_id, {
+                    "command": "PROPOSE_KNOWLEDGE_COMMIT",
+                    "payload": proposal.to_dict(),
+                })
+            except Exception as e:
+                logger.debug("Could not re-offer %s to %s: %s", proposal_id, peer_id[:20], e)
+                continue
+            offered.add((peer_id, proposal_id))
+            sent += 1
+            logger.info(
+                "Re-offered open proposal %s to %s — it has not answered yet",
+                proposal_id, peer_id[:20],
+            )
+        return sent
+
     def _offline_participants(self, conversation_id: str) -> Dict[str, str]:
         """Members of this group that are not connected right now, by name.
 
