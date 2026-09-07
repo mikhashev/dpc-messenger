@@ -62,18 +62,43 @@
 
       chatHistories.update(map => {
         const newMap = new Map(map);
-        const restoredMessages = $historyRestored.messages.map((msg: any, index: number) => {
-          const isSelf = msg.sender_node_id ? msg.sender_node_id === selfNodeId : msg.role === 'user';
-          return {
-            id: `restored-${index}-${Date.now()}`,
-            sender: isSelf ? 'user' : ($historyRestored.conversation_id),
-            senderName: isSelf ? (msg.sender_name || 'You') : (msg.sender_name || getPeerDisplayName($historyRestored.conversation_id)),
-            text: msg.content,
-            timestamp: Date.now() - ($historyRestored.messages.length - index) * 1000,
-            attachments: msg.attachments || []
-          };
+        const conversationId = $historyRestored.conversation_id;
+        const incoming = $historyRestored.messages;
+        // The id must be the record's own, or the backfill that follows
+        // matches nothing and draws every message a second time. The wire
+        // spells it `id` and the backend `message_id`; mapBackendMessage reads
+        // both, and carries the sender identity with it. msg_index stays 0
+        // until the backfill supplies it — the export omits it deliberately.
+        let previousTimestamp: number | undefined;
+        const restoredMessages = incoming.map((msg: any, index: number) => {
+          const isAgent = msg.sender_type === 'agent' || msg.is_agent || false;
+          const isLocalHuman = !isAgent && (msg.sender_node_id
+            ? msg.sender_node_id === selfNodeId
+            : msg.role === 'user');
+          const mapped = mapBackendMessage(msg, {
+            fallbackSender: isLocalHuman ? 'user' : (msg.sender_node_id || conversationId),
+            fallbackSenderName: isLocalHuman
+              ? (msg.sender_name || 'You')
+              : (msg.sender_name || getPeerDisplayName(msg.sender_node_id || conversationId)),
+            index,
+            totalCount: incoming.length,
+            previousTimestamp,
+          });
+          previousTimestamp = mapped.timestamp;
+          return mapped;
         });
-        newMap.set($historyRestored.conversation_id, restoredMessages);
+
+        restoredMessages.forEach((m: any) => {
+          if (m.id && !m.id.startsWith('msg-')) processedMessageIds.add(m.id);
+        });
+
+        // Anything on screen the restore does not carry arrived while it was
+        // in flight; replacing outright would drop it.
+        const restoredIds = new Set(restoredMessages.map((m: any) => m.id).filter(Boolean));
+        const frontendOnly = (map.get(conversationId) || [])
+          .filter((m: any) => m.id && !restoredIds.has(m.id));
+        newMap.set(conversationId, [...restoredMessages, ...frontendOnly]
+          .sort((a: any, b: any) => a.timestamp - b.timestamp));
         return newMap;
       });
 
