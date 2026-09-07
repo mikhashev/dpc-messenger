@@ -6493,13 +6493,16 @@ class CoreService:
             )
             message = {"command": "VOTE_NEW_SESSION", "payload": vote_payload}
 
-            # Record our own vote from the same signed payload the peers get,
-            # so the evidence a session marker carries is one set of bytes and
-            # not a local paraphrase of it.
-            await self.session_manager.record_vote(
-                proposal_id, self.p2p_manager.node_id, vote, signed_payload=vote_payload
-            )
-
+            # Send before recording, because recording can end the vote. This
+            # call completes the tally whenever we are the last to answer, and
+            # finalising broadcasts NEW_SESSION_RESULT — so with the record
+            # first, the outcome left ahead of the vote it was made of. The
+            # peer then applied the result, deleted its session, and dropped
+            # our signed vote as «unknown proposal» 32 ms later; having never
+            # counted a vote it never reached _finalize_proposal, which is the
+            # only writer of the ADR-038 session marker, so the node that asked
+            # for the reset kept no boundary. Each send is guarded, so nothing
+            # here can stop the record below from happening.
             for node_id in proposal.participants:
                 if node_id == self.p2p_manager.node_id:
                     continue
@@ -6510,6 +6513,13 @@ class CoreService:
                         logger.debug("Sent VOTE_NEW_SESSION to %s", node_id[:20])
                     except Exception as e:
                         logger.error("Error sending vote to %s: %s", node_id[:20], e)
+
+            # Record our own vote from the same signed payload the peers get,
+            # so the evidence a session marker carries is one set of bytes and
+            # not a local paraphrase of it.
+            await self.session_manager.record_vote(
+                proposal_id, self.p2p_manager.node_id, vote, signed_payload=vote_payload
+            )
 
             vote_str = "approve" if vote else "reject"
             return {

@@ -65,6 +65,9 @@ class VotingSession:
         return all(self.proposal.votes.get(node_id) is True for node_id in participants)
 
 
+_FINALIZED_KEPT = 64
+
+
 class NewSessionProposalManager:
     """
     Manages new session proposals and voting lifecycle.
@@ -85,6 +88,11 @@ class NewSessionProposalManager:
         """
         self.core_service = core_service
         self.active_sessions: Dict[str, VotingSession] = {}  # proposal_id → session
+        # What this node decided, kept after the session is gone. A peer's
+        # NEW_SESSION_RESULT for a proposal we finalized ourselves is a
+        # confirmation, not an instruction, and without this record it is
+        # indistinguishable from a stranger naming a conversation to erase.
+        self.finalized_proposals: Dict[str, Dict[str, Any]] = {}
         self.logger = logging.getLogger(__name__)
 
         # Callbacks for notifications
@@ -356,6 +364,15 @@ class NewSessionProposalManager:
                 except Exception as e:
                     self.logger.error("Failed to trigger group sleep: %s", e)
 
+        # Remember the decision before the session goes: see finalized_proposals.
+        self.finalized_proposals[proposal_id] = {
+            "conversation_id": proposal.conversation_id,
+            "participants": set(proposal.participants),
+            "result": result,
+        }
+        for stale in list(self.finalized_proposals)[:-_FINALIZED_KEPT]:
+            del self.finalized_proposals[stale]
+
         # Remove from active sessions
         del self.active_sessions[proposal_id]
 
@@ -513,6 +530,24 @@ class NewSessionProposalManager:
             if session.proposal.conversation_id == conversation_id:
                 return session.proposal
         return None
+
+    def confirms_our_own_decision(
+        self, proposal_id: str, conversation_id: str, sender_node_id: str
+    ) -> bool:
+        """Is this result about a proposal this node already decided itself?
+
+        The same three questions the live gate asks — we know the proposal, it
+        names the conversation we decided, and the sender took part — answered
+        from the record left behind rather than the session that is gone. A
+        result that passes has nothing left to do: the history is already
+        cleared and the boundary already written.
+        """
+        decided = self.finalized_proposals.get(proposal_id)
+        if decided is None:
+            return False
+        if conversation_id != decided["conversation_id"]:
+            return False
+        return sender_node_id in decided["participants"]
 
     def get_session(self, proposal_id: str) -> Optional[VotingSession]:
         """

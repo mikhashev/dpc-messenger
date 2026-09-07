@@ -35,6 +35,7 @@ from types import SimpleNamespace
 import pytest
 
 from dpc_client_core.message_handlers.session_handler import NewSessionResultHandler
+from dpc_client_core.session_manager import NewSessionProposalManager
 
 ME = "dpc-node-" + "a" * 32
 BOB = "dpc-node-" + "b" * 32
@@ -44,7 +45,7 @@ GROUP = "group-1234567890ab"
 OTHER_GROUP = "group-ffffffffffff"
 
 
-def _service(session=None):
+def _service(session=None, finalized=None):
     cleared = []
     events = []
 
@@ -59,13 +60,23 @@ def _service(session=None):
         events.append((event, payload))
 
     active = {"p1": session} if session else {}
+    # The real predicate, on this double's own record: a stub that always said
+    # "no" would let the gate pass a test the manager would fail.
+    manager = SimpleNamespace(
+        get_session=lambda pid: active.get(pid),
+        active_sessions=active,
+        finalized_proposals=dict(finalized or {}),
+    )
+    manager.confirms_our_own_decision = (
+        lambda pid, cid, sender: NewSessionProposalManager.confirms_our_own_decision(
+            manager, pid, cid, sender
+        )
+    )
     service = SimpleNamespace(
         _get_or_create_conversation_monitor=_monitor_for,
         firewall=SimpleNamespace(get_history_settings=lambda cid: (True, 0)),
         _group_agent_context={},
-        session_manager=SimpleNamespace(
-            get_session=lambda pid: active.get(pid), active_sessions=active
-        ),
+        session_manager=manager,
         local_api=SimpleNamespace(broadcast_event=_broadcast),
         _processed_message_ids=set(),
         group_manager=SimpleNamespace(get_group=lambda gid: None),
