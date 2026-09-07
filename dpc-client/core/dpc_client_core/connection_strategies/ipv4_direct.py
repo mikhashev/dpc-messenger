@@ -85,15 +85,15 @@ class IPv4DirectStrategy(ConnectionStrategy):
 
         ipv4_info = endpoints.ipv4
 
-        # Determine connection order based on external address availability
-        addresses_to_try = []
+        # Local first, then external — the order ICE gives host candidates over
+        # server-reflexive ones (RFC 8445), and the order every stack that solved
+        # this uses. It is not a preference: a router without hairpin NAT drops a
+        # packet sent from inside to its own public address, so trying external
+        # first fails outright there and merely costs a round trip elsewhere.
+        addresses_to_try = [("local", ipv4_info.local)]
 
-        # Try external address first (if available)
         if ipv4_info.external:
             addresses_to_try.append(("external", ipv4_info.external))
-
-        # Then try local address
-        addresses_to_try.append(("local", ipv4_info.local))
 
         last_error = None
 
