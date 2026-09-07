@@ -138,10 +138,16 @@ class DHTRPCHandler:
         response = await self._send_rpc(ip, port, rpc)
 
         if response and response.get("type") == "PONG":
-            # Update routing table with responsive node
+            # A node that answered is responsive whatever happens next. Letting
+            # add_node's ValueError escape here made a seed that replied — and
+            # replied with our own node id, because it was us — indistinguishable
+            # from one that never answered at all.
             peer_id = response.get("node_id")
             if peer_id:
-                self.routing_table.add_node(peer_id, ip, port)
+                try:
+                    self.routing_table.add_node(peer_id, ip, port)
+                except ValueError as e:
+                    logger.info("PONG from %s:%d not recorded: %s", ip, port, e)
             return response
 
         return None
@@ -375,6 +381,10 @@ class DHTRPCHandler:
             try:
                 self.routing_table.add_node(sender_id, sender_ip, sender_port)
                 logger.debug("DHT: Added %s to routing table", sender_id[:20])
+            except ValueError as e:
+                # Our own packet came back to us — a seed pointing at this host,
+                # or a NAT hairpin. A fact about the topology, not a failure.
+                logger.info("DHT: PING from %s is this node itself: %s", addr, e)
             except Exception as e:
                 logger.error("DHT: Failed to add node to routing table: %s", e)
 

@@ -205,6 +205,7 @@ class DHTManager:
 
         start_time = time.time()
         responsive_seeds = 0
+        self_seeds = []
 
         # Step 1: Contact all seed nodes
         ping_tasks = [
@@ -218,17 +219,38 @@ class DHTManager:
                 timeout=self.config.bootstrap_timeout
             )
 
-            for result in results:
-                if result and not isinstance(result, Exception):
+            # Three outcomes, not two: a seed can answer and be added, answer and
+            # turn out to be this node, or not answer. Counting the middle one as
+            # silence is what produced «no responsive seed nodes» over a seed that
+            # had replied, and sent the reader after a network fault.
+            for (ip, port), result in zip(seed_nodes, results):
+                if not result or isinstance(result, Exception):
+                    continue
+                if result.get("node_id") == self.node_id:
+                    self_seeds.append((ip, port))
+                else:
                     responsive_seeds += 1
 
         except asyncio.TimeoutError:
             logger.warning("Bootstrap PING phase timed out after %.1fs", self.config.bootstrap_timeout)
 
         if responsive_seeds == 0:
-            logger.error("Bootstrap failed: no responsive seed nodes")
+            if self_seeds:
+                logger.info(
+                    "DHT cannot bootstrap: %d of %d seed(s) answered and are this node "
+                    "itself (%s). A seed has to be a node somewhere else.",
+                    len(self_seeds), len(seed_nodes),
+                    ", ".join(f"{ip}:{port}" for ip, port in self_seeds),
+                )
+            else:
+                logger.error("Bootstrap failed: no responsive seed nodes")
             return False
 
+        if self_seeds:
+            logger.info(
+                "Bootstrap: %d seed(s) are this node itself and were skipped (%s)",
+                len(self_seeds), ", ".join(f"{ip}:{port}" for ip, port in self_seeds),
+            )
         logger.info("Bootstrap: %d/%d seed nodes responsive", responsive_seeds, len(seed_nodes))
 
         # Step 2: Lookup self to discover nearby peers

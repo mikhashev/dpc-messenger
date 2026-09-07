@@ -24,6 +24,7 @@ from .hub_client import HubClient
 from .webrtc_peer import WebRTCPeerConnection
 from .dht import DHTManager, DHTConfig
 from .peer_cache import PeerCache
+from .own_addresses import OwnAddresses
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -106,6 +107,9 @@ class P2PManager:
 
         # Background task tracking for graceful shutdown
         self._peer_listener_tasks: Dict[str, asyncio.Task] = {}  # Track _listen_to_peer tasks
+
+        # Addresses that are this machine — see own_addresses.py
+        self.own_addresses = OwnAddresses()
 
         # DHT (Distributed Hash Table) for decentralized peer discovery
         self.dht_manager: DHTManager | None = None  # Initialized in start_server()
@@ -312,6 +316,12 @@ class P2PManager:
                 # Get local IP for DHT announcements (not 0.0.0.0)
                 dht_announce_ip = await self._get_primary_local_ip()
 
+                # What counts as "me". Consulted before a seed is dialled and
+                # before a cached endpoint is used; both have called this node's
+                # own address in the past and neither said so.
+                self.own_addresses.learn_local_interfaces()
+                self.own_addresses.learn(dht_announce_ip, "dht announce")
+
                 # DHT announces the configured P2P TLS port for connections, not the DHT UDP port
                 p2p_port = self.settings.get_p2p_listen_port()
 
@@ -328,6 +338,16 @@ class P2PManager:
 
                 # Bootstrap DHT from seed nodes if available
                 seed_nodes = self.settings.get_dht_seed_nodes()
+                mine = self.own_addresses.self_seeds(seed_nodes)
+                if mine:
+                    # A warning, not a filter: two machines behind one NAT
+                    # share an address, so this can be wrong about someone
+                    # else's node. The node id in the reply decides.
+                    logger.warning(
+                        "DHT seed(s) %s look like this node's own address(es) — "
+                        "a seed has to be a node somewhere else",
+                        ", ".join(f"{ip}:{port}" for ip, port in mine),
+                    )
                 if seed_nodes:
                     logger.info("Bootstrapping DHT from %d seed nodes", len(seed_nodes))
                     success = await self.dht_manager.bootstrap(seed_nodes)
@@ -1562,6 +1582,10 @@ class P2PManager:
         Args:
             external_ip: External/public IP address to announce
         """
+        # Learned before the guard: the peer-cache check needs this address
+        # even on a node whose DHT is switched off.
+        self.own_addresses.learn(external_ip, "stun")
+
         if not self.dht_manager:
             return
 

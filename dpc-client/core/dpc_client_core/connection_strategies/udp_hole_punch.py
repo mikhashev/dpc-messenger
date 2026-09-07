@@ -187,17 +187,24 @@ class UDPHolePunchStrategy(ConnectionStrategy):
 
             # Step 8: Upgrade to DTLS for encryption
             try:
+                # The configured timeout, which was defined, defaulted, exampled
+                # and documented while the call site used a literal.
+                settings = getattr(getattr(orchestrator, "p2p_manager", None), "settings", None)
+                handshake_timeout = (
+                    settings.get_hole_punch_dtls_handshake_timeout() if settings else 3.0
+                )
+
                 # Create DTLS connection wrapper
                 dtls_conn = DTLSPeerConnection(
                     udp_socket=sock,
                     remote_addr=peer_endpoint,
                     expected_node_id=node_id,
                     is_server=False,  # We initiated the connection (client role)
-                    handshake_timeout=3.0
+                    handshake_timeout=handshake_timeout
                 )
 
                 # Perform DTLS handshake
-                await dtls_conn.connect(timeout=3.0)
+                await dtls_conn.connect(timeout=handshake_timeout)
 
                 # Wrap in UDPPeerConnection for PeerConnection compatibility
                 peer_connection = UDPPeerConnection(node_id=node_id, dtls_conn=dtls_conn)
