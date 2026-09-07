@@ -246,3 +246,20 @@ async def test_a_pong_that_can_be_recorded_is_returned_too():
     response = await DHTRPCHandler.ping(handler, STRANGER, 8889)
 
     assert response["node_id"] == PEER
+
+
+def test_the_addresses_are_learned_even_with_the_dht_switched_off():
+    """The peer-cache check consults the set on every dial, DHT or no DHT.
+
+    Written after the learning sat inside `if get_dht_enabled():`, where a node
+    with the DHT off knew one address instead of eighteen.
+    """
+    import inspect
+
+    from dpc_client_core.p2p_manager import P2PManager
+
+    source = inspect.getsource(P2PManager.start_server)
+    learn = source.index("own_addresses.learn_local_interfaces()")
+    gate = source.index("if self.settings.get_dht_enabled():")
+
+    assert learn < gate, "the address set is learned inside the DHT block again"

@@ -295,6 +295,11 @@ class P2PManager:
             logger.info("P2PManager Direct TLS server listening on %s:%d for node %s",
                       formatted_host, port, self.node_id)
 
+        # Learned before the DHT block, not inside it: the peer-cache check
+        # consults this set on every dial, and a node with the DHT switched
+        # off knew one address instead of eighteen.
+        self.own_addresses.learn_local_interfaces()
+
         # Initialize DHT (Distributed Hash Table) for peer discovery
         if self.settings.get_dht_enabled():
             try:
@@ -316,10 +321,6 @@ class P2PManager:
                 # Get local IP for DHT announcements (not 0.0.0.0)
                 dht_announce_ip = await self._get_primary_local_ip()
 
-                # What counts as "me". Consulted before a seed is dialled and
-                # before a cached endpoint is used; both have called this node's
-                # own address in the past and neither said so.
-                self.own_addresses.learn_local_interfaces()
                 self.own_addresses.learn(dht_announce_ip, "dht announce")
 
                 # DHT announces the configured P2P TLS port for connections, not the DHT UDP port
