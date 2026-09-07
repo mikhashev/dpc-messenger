@@ -135,6 +135,19 @@
     onOpenVote?: (() => void) | null;
   } = $props();
 
+  // Where a recording can actually go. An AI or agent chat has no node to
+  // send audio to, and a group of one routes to dictation (ADR-032 Part B) —
+  // in both the "Send" button would quietly do the other thing.
+  function voiceAudioSinkExists(chatId: string): boolean {
+    if (!chatId || chatId === 'local_ai' || chatId.startsWith('ai_') || chatId.startsWith('agent_')) {
+      return false;
+    }
+    if (chatId.startsWith('group-')) {
+      return (get(groupChats).get(chatId)?.members?.length ?? 1) > 1;
+    }
+    return true;
+  }
+
   // Expose input value for GroupPanel's handleMentionSelect
   export function getInputValue(): string { return currentInput; }
   export function setInputValue(val: string) { currentInput = val; }
@@ -1067,7 +1080,9 @@
     onSendVoiceMessage={handleSendVoiceMessage}
     onTranscribeVoiceMessage={handleTranscribeVoiceMessage}
     {isTranscribing}
-    isLocalAIChat={activeChatId === 'local_ai' || activeChatId.startsWith('ai_')}
+    isLocalAIChat={activeChatId === 'local_ai' || activeChatId.startsWith('ai_')
+      || activeChatId.startsWith('agent_')}
+    canSendAudio={voiceAudioSinkExists(activeChatId)}
     showFileOfferDialog={showFileOfferDialog}
     currentFileOffer={currentFileOffer}
     onAcceptFile={handleAcceptFile}

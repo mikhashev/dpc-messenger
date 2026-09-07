@@ -247,6 +247,9 @@ export interface KnowledgeCommitProposal extends KnowledgeCommit {
 export interface VoiceTranscription {
     transfer_id: string;
     node_id: string;
+    // One voice message becomes one transfer per recipient, so the sender's own
+    // record carries no transfer id; the file name is minted once and joins them.
+    filename?: string;
     text: string;
     provider: string;
     confidence?: number;

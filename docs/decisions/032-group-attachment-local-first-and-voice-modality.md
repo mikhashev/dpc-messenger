@@ -206,6 +206,27 @@ Phased per Mike's S227 scope decision. Tasks tracked under
   **>1-node group**, where both modes are valid and a selector is needed (two buttons /
   long-press / toggle). Decide the selector form during implementation. — @Mike / CC
 
+## Amendment — 2026-09-07 (Mike): the dictation option is built after all
+
+Task 002 (mode selector UI) was cancelled in S227 with «pure node-count routing, no
+selector», and the body above was never brought into line — it still describes a user
+who picks a mode. A reader therefore got opposite answers from
+`tasks/adr-032-group-attachment-local-first/002-mode-selector-ui.md:3` and from the
+Part B table here, which is how the question came back on 2026-09-07: Mike, seeing only
+«Send» on a two-node group, reported the missing option as a defect.
+
+**Decided (Mike, 2026-09-07): build it.** The cancellation is reversed and the Part B
+table above is authoritative again — with >1 node the recorder offers both sinks:
+«Send» for a voice message and «📝 As text» for dictation into the message box. The
+≤1-node default is unchanged. Task 002 is un-cancelled by this amendment; the record of
+its cancellation stays where it is, because a decision that was reversed should show
+both states rather than only the last one.
+
+Q1 (transcribe once on the sender) remains **unimplemented** and is not changed here:
+what exists is one transcription per recipient transfer, and the sender's own copy is
+now joined to its message by file name rather than by transfer id, because one message
+becomes N transfers.
+
 ## Authors
 
 - **Mike** — Decision

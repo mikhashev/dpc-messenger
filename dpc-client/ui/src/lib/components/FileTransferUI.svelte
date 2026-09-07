@@ -20,6 +20,7 @@
     onTranscribeVoiceMessage,
     isTranscribing = false,
     isLocalAIChat = false,
+    canSendAudio = true,
 
     // File offer dialog state
     showFileOfferDialog = false,
@@ -57,6 +58,7 @@
     onTranscribeVoiceMessage?: () => Promise<void>;
     isTranscribing?: boolean;
     isLocalAIChat?: boolean;
+    canSendAudio?: boolean;
     showFileOfferDialog?: boolean;
     currentFileOffer?: any;
     onAcceptFile: () => void;
@@ -241,20 +243,25 @@
       duration={voicePreview.duration}
       compact={true}
     />
-    {#if isLocalAIChat && onTranscribeVoiceMessage}
+    {#if onTranscribeVoiceMessage}
       <button
         class="voice-transcribe-button"
         onclick={onTranscribeVoiceMessage}
         disabled={isTranscribing}
-        title={isTranscribing ? "Loading Whisper model…" : "Transcribe and send to AI"}
+        title={isTranscribing
+          ? "Loading Whisper model…"
+          : (isLocalAIChat ? "Transcribe and send to AI" : "Transcribe into the message box, send no audio")}
       >
         {#if isTranscribing}
           <span class="transcribe-spinner" aria-hidden="true"></span> Loading…
-        {:else}
+        {:else if isLocalAIChat}
           📝 Send
+        {:else}
+          📝 As text
         {/if}
       </button>
-    {:else}
+    {/if}
+    {#if canSendAudio}
       <button
         class="voice-send-button"
         onclick={onSendVoiceMessage}

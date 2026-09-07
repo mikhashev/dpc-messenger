@@ -3756,6 +3756,11 @@ class CoreService:
                 from datetime import datetime, timezone
                 transcription_data = {
                     "text": transcription_text,
+                    # One voice message becomes one transfer per recipient, so a
+                    # transfer id cannot name the message the sender itself
+                    # stored. The file name is minted once and travels with the
+                    # offer, so both sides can join on it.
+                    "filename": Path(file_path).name,
                     "transcriber_node_id": self.p2p_manager.node_id,  # Orchestrator
                     "provider": result.get("provider", "unknown"),
                     "confidence": result.get("confidence", 0.0),
@@ -4758,8 +4763,17 @@ class CoreService:
                         # Merge transcription data for voice messages
                         if attachment_copy.get("type") == "voice":
                             transfer_id = attachment_copy.get("transfer_id")
-                            if transfer_id and transfer_id in self._voice_transcriptions:
-                                transcription_data = self._voice_transcriptions[transfer_id]
+                            transcription_data = self._voice_transcriptions.get(transfer_id) if transfer_id else None
+                            if transcription_data is None:
+                                # The sender's own group record carries no transfer
+                                # id — one message, one transfer per recipient.
+                                name = attachment_copy.get("filename")
+                                transcription_data = next(
+                                    (t for t in self._voice_transcriptions.values()
+                                     if name and t.get("filename") == name),
+                                    None,
+                                )
+                            if transcription_data:
                                 attachment_copy["transcription"] = {
                                     "text": transcription_data.get("text", ""),
                                     "provider": transcription_data.get("provider", ""),

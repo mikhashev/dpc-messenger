@@ -63,6 +63,9 @@ class VoiceTranscriptionHandler(MessageHandler):
         # 2. Store transcription locally
         transcription_data = {
             "text": transcription_text,
+            # One message, one transfer per recipient: the file name is what
+            # names the message on a node that holds no transfer for it.
+            "filename": payload.get("filename"),
             "transcriber_node_id": transcriber_node_id,
             "provider": provider,
             "confidence": confidence,
@@ -87,7 +90,14 @@ class VoiceTranscriptionHandler(MessageHandler):
             for message in conversation_monitor.message_history:
                 attachments = message.get("attachments", [])
                 for attachment in attachments:
-                    if attachment.get("type") == "voice" and attachment.get("transfer_id") == transfer_id:
+                    # The sender's own group record carries no transfer id: one
+                    # message becomes one transfer per recipient. The file name
+                    # is minted once and travels with the offer.
+                    name = transcription_data.get("filename")
+                    if attachment.get("type") == "voice" and (
+                        attachment.get("transfer_id") == transfer_id
+                        or (name and attachment.get("filename") == name)
+                    ):
                         # Add transcription to attachment
                         attachment["transcription"] = transcription_data
                         self.logger.debug(f"Attached transcription to voice message in conversation history")
