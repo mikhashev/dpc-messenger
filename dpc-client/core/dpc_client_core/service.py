@@ -1639,10 +1639,36 @@ class CoreService:
 
         # Schedule auto-reconnect if this is a peer we keep a connection to
         if hasattr(self, 'connection_orchestrator') and self.connection_orchestrator:
-            if peer_id in self._peers_to_auto_connect():
+            if peer_id in self._peers_to_auto_connect() and self._worth_dialling(peer_id):
                 task = asyncio.create_task(self._auto_reconnect_peer(peer_id))
                 task.set_name(f"reconnect_{peer_id[:16]}")
                 self._background_tasks.add(task)
+
+    def _worth_dialling(self, peer_id: str) -> bool:
+        """Is a dial to this peer worth five attempts, or will it come back itself?
+
+        Decided by who placed the last connection that worked. A peer that
+        reached us and that we have never reached is behind something we cannot
+        cross — a firewall, an address that is not its listener — and it dials
+        us on its own schedule, so five attempts at it are five guaranteed
+        misses (Mike's call, 2026-09-07).
+
+        Unknown means yes. A peer we have not learned about yet, or one whose
+        situation changed, has to be tried at least once, or the rule would
+        only ever learn from failures.
+        """
+        cache = getattr(getattr(self, "p2p_manager", None), "peer_cache", None)
+        cached = cache.get_peer(peer_id) if cache else None
+        if cached is None:
+            return True
+        if getattr(cached, "last_connection_direction", None) != "in":
+            return True
+        logger.info(
+            "Not redialling %s: it reached us and we have never reached it — "
+            "it reconnects on its own",
+            peer_id[:20],
+        )
+        return False
 
     async def _auto_reconnect_peer(self, peer_id: str, max_attempts: int = 5):
         """Auto-reconnect to a known peer after disconnect with exponential backoff."""

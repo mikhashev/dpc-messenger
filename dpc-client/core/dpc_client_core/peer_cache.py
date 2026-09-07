@@ -20,6 +20,11 @@ class CachedPeer:
     last_direct_port: int = 8888
     supports_webrtc: bool = False
     supports_direct: bool = False
+    # Who placed the last connection that worked: "out" if we dialled the peer,
+    # "in" if it dialled us. Absent means neither has been recorded yet. Read by
+    # the reconnect decision — a peer that reaches us but cannot be reached will
+    # come back on its own, and dialling it is a guaranteed miss.
+    last_connection_direction: Optional[str] = None
     metadata: Dict[str, Any] = None  # Additional peer metadata
 
     def __post_init__(self):
@@ -113,6 +118,7 @@ class PeerCache:
         direct_port: int = 8888,
         supports_webrtc: bool = False,
         supports_direct: bool = False,
+        direction: Optional[str] = None,
         metadata: Optional[Dict[str, Any]] = None
     ):
         """
@@ -125,6 +131,10 @@ class PeerCache:
             direct_port: Direct TLS port
             supports_webrtc: Whether peer supports WebRTC
             supports_direct: Whether peer supports Direct TLS
+            direction: "out" when this node dialled the peer, "in" when the peer
+                dialled us; None leaves whatever was recorded before, so a
+                caller that does not know does not erase what a caller that did
+                know wrote.
             metadata: Additional metadata
         """
         if node_id in self._peers:
@@ -137,6 +147,8 @@ class PeerCache:
                 peer.last_direct_port = direct_port
             peer.supports_webrtc = supports_webrtc
             peer.supports_direct = supports_direct
+            if direction:
+                peer.last_connection_direction = direction
             peer.last_seen = datetime.now(timezone.utc).isoformat()
             if metadata:
                 peer.metadata.update(metadata)
@@ -150,6 +162,7 @@ class PeerCache:
                 last_direct_port=direct_port,
                 supports_webrtc=supports_webrtc,
                 supports_direct=supports_direct,
+                last_connection_direction=direction,
                 metadata=metadata or {}
             )
             self._peers[node_id] = peer

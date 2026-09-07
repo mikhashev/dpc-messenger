@@ -456,7 +456,8 @@ class P2PManager:
                     node_id=target_node_id,
                     direct_ip=cached_peer.last_direct_ip,
                     direct_port=cached_peer.last_direct_port,
-                    supports_direct=True
+                    supports_direct=True,
+                    direction="out",
                 )
                 return True
             except Exception as e:
@@ -476,7 +477,8 @@ class P2PManager:
                     node_id=target_node_id,
                     direct_ip=ip,
                     direct_port=port,
-                    supports_direct=True
+                    supports_direct=True,
+                    direction="out",
                 )
 
                 # Announce ourselves after successful connection
@@ -605,7 +607,8 @@ class P2PManager:
                     display_name=peer_name,
                     direct_ip=peer_ip,
                     direct_port=8888,  # Default port (peer connects FROM random port but listens ON 8888)
-                    supports_direct=True
+                    supports_direct=True,
+                    direction="in",
                 )
                 logger.debug("Cached peer %s at %s:8888", peer_node_id[:20], peer_ip)
 
@@ -895,7 +898,8 @@ class P2PManager:
                 node_id=target_node_id,
                 direct_ip=host,
                 direct_port=port,
-                supports_direct=True
+                supports_direct=True,
+                direction="out",
             )
 
             # Announce to DHT after successful connection
