@@ -2019,10 +2019,20 @@ PARTICIPANTS' CULTURAL CONTEXTS:
         proven, and claiming them would refuse honest voters forever.
         """
         by_id = {}
+        unprovable = 0
         for stored in self.message_history:
             content_hash = stored.get("content_hash")
-            if content_hash:
-                by_id[stored.get("id")] = content_hash
+            if not content_hash:
+                continue
+            if not self._hash_matches_record(stored):
+                unprovable += 1
+                continue
+            by_id[stored.get("id")] = content_hash
+        if unprovable:
+            logger.info(
+                "Window: left out %d record(s) whose stored hash does not recompute "
+                "(conversation %s)", unprovable, self.conversation_id,
+            )
 
         seen = set()
         window = []
@@ -2035,6 +2045,32 @@ PARTICIPANTS' CULTURAL CONTEXTS:
                 seen.add(content_hash)
                 window.append(content_hash)
         return window
+
+    def _hash_matches_record(self, stored: Dict[str, Any]) -> bool:
+        """Can a peer verify this record from the record itself?
+
+        A record signed before its `tool_calls` were stored carries a hash taken
+        without them, so every receiver recomputes a different value and refuses
+        it. Naming such a record in a window asks voters for something no honest
+        node can hold.
+        """
+        content_hash = stored.get("content_hash")
+        if not content_hash:
+            return False
+        return any(
+            content_hash == message_content_hash(
+                conversation_id=room,
+                message_id=stored.get("id"),
+                sender_node_id=stored.get("sender_node_id"),
+                sender_name=stored.get("sender_name"),
+                sender_type=stored.get("sender_type"),
+                agent_owner=stored.get("agent_owner"),
+                timestamp=stored.get("timestamp"),
+                content=stored.get("content") or "",
+                tool_calls=stored.get("tool_calls"),
+            )
+            for room in self._room_candidates()
+        )
 
     def get_last_msg_index(self) -> int:
         if self.message_history:

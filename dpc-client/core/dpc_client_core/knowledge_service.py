@@ -638,7 +638,9 @@ class KnowledgeService:
                     session.proposal.summary = summary
 
 
-            drift = self._history_drift(proposal_id)
+            # A refusal is «I do not sign this» and needs no evidence;
+            # approving and asking for changes judge the text and stay held.
+            drift = None if vote == "reject" else self._history_drift(proposal_id)
             if drift:
                 if _allow_defer:
                     return await self._defer_vote_for_missing_records(

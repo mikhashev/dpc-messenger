@@ -30,6 +30,7 @@ export const votingConversationId = writable<string | null>(null);
 // does not hold, and they have been requested from the peer.
 export const knowledgeVoteStatus = writable<{
     proposal_id: string;
+    conversation_id: string | null;
     status: 'pending' | 'success' | 'error';
     reason?: string;
     message: string;

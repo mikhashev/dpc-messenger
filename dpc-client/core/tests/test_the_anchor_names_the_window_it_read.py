@@ -21,20 +21,50 @@ from types import SimpleNamespace
 import pytest
 
 from dpc_client_core.conversation_monitor import ConversationMonitor
+from dpc_protocol.message_signing import message_content_hash
 
 GROUP = "group-1234567890ab"
+ALICE = "dpc-node-" + "a" * 32
 
 
 def _monitor(stored):
     monitor = ConversationMonitor.__new__(ConversationMonitor)
+    monitor.conversation_id = GROUP
+    monitor.participants = [{"node_id": ALICE}]
     monitor.message_history = stored
     return monitor
 
 
-def _stored(msg_id, content_hash, **extra):
-    row = {"id": msg_id, "content_hash": content_hash}
+def _stored(msg_id, **extra):
+    """A record holding the hash it would really have been signed with.
+
+    The hashes used to be invented ("h1", "h2"), which stopped working the day
+    the window began leaving out records whose hash does not reproduce.
+    """
+    row = {
+        "id": msg_id,
+        "sender_node_id": ALICE,
+        "sender_name": "Mike",
+        "timestamp": "2026-09-07T00:00:00+00:00",
+        "content": f"message {msg_id}",
+    }
     row.update(extra)
+    row["content_hash"] = message_content_hash(
+        conversation_id=GROUP,
+        message_id=msg_id,
+        sender_node_id=row.get("sender_node_id"),
+        sender_name=row.get("sender_name"),
+        sender_type=row.get("sender_type"),
+        agent_owner=row.get("agent_owner"),
+        timestamp=row.get("timestamp"),
+        content=row.get("content") or "",
+        tool_calls=row.get("tool_calls"),
+    )
     return row
+
+
+def _hash(stored, msg_id):
+    return next(r["content_hash"] for r in stored if r["id"] == msg_id)
 
 
 def _msg(msg_id):
@@ -45,28 +75,36 @@ def _msg(msg_id):
 
 
 def test_the_window_is_the_messages_the_extraction_read():
-    monitor = _monitor([_stored("m1", "h1"), _stored("m2", "h2"), _stored("m3", "h3")])
+    stored = [_stored("m1"), _stored("m2"), _stored("m3")]
+    monitor = _monitor(stored)
 
-    assert monitor.window_content_hashes([_msg("m1"), _msg("m3")]) == ["h1", "h3"]
+    assert monitor.window_content_hashes([_msg("m1"), _msg("m3")]) == [
+        _hash(stored, "m1"), _hash(stored, "m3")
+    ]
 
 
 def test_the_window_keeps_the_order_the_extraction_saw():
-    monitor = _monitor([_stored("m1", "h1"), _stored("m2", "h2")])
+    stored = [_stored("m1"), _stored("m2")]
+    monitor = _monitor(stored)
 
-    assert monitor.window_content_hashes([_msg("m2"), _msg("m1")]) == ["h2", "h1"]
+    assert monitor.window_content_hashes([_msg("m2"), _msg("m1")]) == [
+        _hash(stored, "m2"), _hash(stored, "m1")
+    ]
 
 
 def test_a_message_named_twice_is_claimed_once():
-    monitor = _monitor([_stored("m1", "h1")])
+    stored = [_stored("m1")]
+    monitor = _monitor(stored)
 
-    assert monitor.window_content_hashes([_msg("m1"), _msg("m1")]) == ["h1"]
+    assert monitor.window_content_hashes([_msg("m1"), _msg("m1")]) == [_hash(stored, "m1")]
 
 
 def test_messages_written_before_signing_are_left_out_not_faked():
     """Claiming a message that has no hash would refuse honest voters forever."""
-    monitor = _monitor([_stored("m1", "h1"), {"id": "m2"}])
+    stored = [_stored("m1"), {"id": "m2"}]
+    monitor = _monitor(stored)
 
-    assert monitor.window_content_hashes([_msg("m1"), _msg("m2")]) == ["h1"]
+    assert monitor.window_content_hashes([_msg("m1"), _msg("m2")]) == [_hash(stored, "m1")]
 
 
 def test_an_empty_extraction_anchors_nothing():
@@ -91,9 +129,11 @@ def _service(window, held):
         )
     )
     service.consensus_manager = SimpleNamespace(sessions={"p1": session})
+    # The voter compares sets of hashes and reads nothing else, so these rows
+    # stay minimal: the window's own construction is tested above.
     service.conversation_monitors = {
         GROUP: SimpleNamespace(
-            message_history=[_stored(f"m{i}", h) for i, h in enumerate(held)]
+            message_history=[{"id": f"m{i}", "content_hash": h} for i, h in enumerate(held)]
         )
     }
     return service

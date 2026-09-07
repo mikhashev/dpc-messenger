@@ -155,6 +155,38 @@ async def test_a_vote_with_nobody_to_ask_is_refused_and_says_so():
     assert not sent and not votes
 
 
+@pytest.mark.asyncio
+async def test_a_refusal_needs_no_evidence_and_is_cast_at_once():
+    """Rejecting is «I do not sign this»; it does not require holding the text."""
+    monitor = _monitor()
+    window = _window(monitor)
+    _drop_last_message(monitor)
+    svc, sent, _events, votes = _service(monitor, window)
+
+    result = await KnowledgeService.vote_knowledge_commit(svc, "p1", "reject")
+
+    assert [v["vote"] for v in votes] == ["reject"]
+    assert result["status"] == "success"
+    assert not sent, "a refusal asked the peer for records it does not need"
+    assert svc._pending_votes == {}
+
+
+@pytest.mark.asyncio
+async def test_asking_for_changes_is_a_judgement_and_stays_held():
+    """`request_changes` says something about the text, so it needs the text."""
+    monitor = _monitor()
+    window = _window(monitor)
+    _drop_last_message(monitor)
+    svc, sent, _events, votes = _service(monitor, window)
+
+    result = await KnowledgeService.vote_knowledge_commit(svc, "p1", "request_changes")
+
+    assert result["status"] == "pending"
+    assert not votes
+    assert [m["command"] for _peer, m in sent] == ["GROUP_HISTORY_REQUEST"]
+    await _cancel_pending(svc)
+
+
 # --- the answer -------------------------------------------------------------
 
 

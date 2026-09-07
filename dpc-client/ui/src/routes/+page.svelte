@@ -1230,6 +1230,7 @@
 
       <ChatPanel
         bind:this={chatPanelRef}
+        onOpenVote={() => { if ($knowledgeCommitProposal) showCommitDialog = true; }}
         {activeChatId}
         {chatHistories}
         {commandToChatMap}

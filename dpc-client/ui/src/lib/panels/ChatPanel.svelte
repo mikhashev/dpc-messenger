@@ -11,7 +11,7 @@
   import ProviderRetryBanner from '$lib/components/ProviderRetryBanner.svelte';
   import IntegrityWarningBanner from '$lib/components/IntegrityWarningBanner.svelte';
   import AgentTaskBoard from '$lib/components/AgentTaskBoard.svelte';
-  import { votingConversationId } from '$lib/services/knowledge';
+  import { votingConversationId, knowledgeVoteStatus } from '$lib/services/knowledge';
   import {
     connectionStatus,
     nodeStatus,
@@ -101,6 +101,7 @@
     showAgentBoard = $bindable(false),
     currentInput = $bindable(''),
     isSleeping = false,
+    onOpenVote = null,
   }: {
     activeChatId: string;
     chatHistories: Writable<Map<string, Message[]>>;
@@ -131,6 +132,7 @@
     chatPanelHeight?: number;
     showAgentBoard?: boolean;
     currentInput?: string;
+    onOpenVote?: (() => void) | null;
   } = $props();
 
   // Expose input value for GroupPanel's handleMentionSelect
@@ -1112,6 +1114,14 @@
       <div class="voting-notice" role="status">
         A knowledge commit is being voted on. Messages written now are not part
         of it — they will go into the next one.
+        {#if $knowledgeVoteStatus && $knowledgeVoteStatus.conversation_id === activeChatId && $knowledgeVoteStatus.status !== 'success'}
+          <div class="vote-held">
+            <span>{$knowledgeVoteStatus.message}</span>
+            {#if onOpenVote}
+              <button type="button" onclick={onOpenVote}>Open the vote</button>
+            {/if}
+          </div>
+        {/if}
       </div>
     {/if}
 
@@ -1193,6 +1203,24 @@
 
 <style>
   @import "./panels.css";
+
+  .vote-held {
+    margin-top: 0.4rem;
+    display: flex;
+    gap: 0.5rem;
+    align-items: baseline;
+    flex-wrap: wrap;
+  }
+
+  .vote-held button {
+    background: none;
+    border: 1px solid currentColor;
+    border-radius: 4px;
+    color: inherit;
+    cursor: pointer;
+    font: inherit;
+    padding: 0.1rem 0.5rem;
+  }
 
   .voting-notice {
     margin: 0 0 0.5rem;

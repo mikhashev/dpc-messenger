@@ -390,6 +390,7 @@ export async function connectToCoreService() {
                     console.log("Knowledge vote deferred:", message.payload);
                     knowledgeVoteStatus.set({
                         proposal_id: message.payload?.proposal_id,
+                        conversation_id: message.payload?.conversation_id ?? null,
                         status: "pending",
                         message: message.payload?.message ?? "",
                     });
@@ -397,6 +398,7 @@ export async function connectToCoreService() {
                     console.log("Knowledge vote resolved:", message.payload);
                     knowledgeVoteStatus.set({
                         proposal_id: message.payload?.proposal_id,
+                        conversation_id: message.payload?.conversation_id ?? null,
                         status: message.payload?.status === "success" ? "success" : "error",
                         reason: message.payload?.reason,
                         message: message.payload?.message ?? "",
@@ -405,6 +407,7 @@ export async function connectToCoreService() {
                     console.log("Knowledge commit result received:", message.payload);
                     knowledgeCommitResult.set(message.payload);
                     votingConversationId.set(null);
+                    knowledgeVoteStatus.set(null);
                 }
                 // New session proposal handlers (v0.11.3)
                 else if (message.event === "new_session_proposed") {
