@@ -13,6 +13,7 @@ verified, which turns a peer's result into a confirmation of what this node
 already decided.
 """
 
+import asyncio
 import logging
 from types import SimpleNamespace
 
@@ -282,3 +283,75 @@ async def test_finalising_leaves_the_decision_behind_for_the_confirmation_to_fin
     assert manager.confirms_our_own_decision(last, "group-ffffffffffff", PEER) is False
     assert len(manager.finalized_proposals) == _FINALIZED_KEPT
     assert "p0" not in manager.finalized_proposals
+
+
+# --------------------------------------------------------------------------
+# Who sleeps after a reset
+# --------------------------------------------------------------------------
+
+def _finalising_manager(is_initiator):
+    """A manager wired just enough to reach the sleep decision."""
+    from dpc_client_core.session_manager import NewSessionProposal, VotingSession
+
+    slept = []
+
+    async def _sleep(cid):
+        slept.append(cid)
+
+    async def _broadcast(event, payload):
+        pass
+
+    manager = NewSessionProposalManager.__new__(NewSessionProposalManager)
+    manager.logger = logging.getLogger("test")
+    manager.finalized_proposals = {}
+    manager.on_result_broadcast = None
+    manager.core_service = SimpleNamespace(
+        group_manager=SimpleNamespace(
+            get_group=lambda gid: SimpleNamespace(is_discord_bridge=False),
+            set_session_marker=lambda *a, **k: None,
+        ),
+        _get_or_create_conversation_monitor=lambda cid: SimpleNamespace(
+            reset_conversation=lambda preserve=True, max_sessions=0: None
+        ),
+        firewall=SimpleNamespace(get_history_settings=lambda cid: (True, 0)),
+        _group_agent_context={},
+        local_api=SimpleNamespace(broadcast_event=_broadcast),
+        trigger_group_sleep=_sleep,
+    )
+    manager.active_sessions = {
+        PROPOSAL: VotingSession(
+            proposal=NewSessionProposal(
+                proposal_id=PROPOSAL,
+                initiator_node_id=ME if is_initiator else PEER,
+                conversation_id=GROUP,
+                timestamp="2026-09-07T21:04:46Z",
+                participants={ME, PEER},
+                votes={ME: True, PEER: True},
+                deadline=0,
+            ),
+            is_initiator=is_initiator,
+        )
+    }
+    manager.slept = slept
+    return manager
+
+
+@pytest.mark.asyncio
+async def test_the_node_that_asked_for_the_reset_does_not_sleep_its_agents():
+    """Mike's call: the person who pressed the button is at the keyboard."""
+    manager = _finalising_manager(is_initiator=True)
+
+    await manager._finalize_proposal(PROPOSAL)
+    await asyncio.sleep(0)
+
+    assert manager.slept == []
+
+
+@pytest.mark.asyncio
+async def test_the_other_participant_still_sleeps():
+    manager = _finalising_manager(is_initiator=False)
+
+    await manager._finalize_proposal(PROPOSAL)
+    await asyncio.sleep(0)
+
+    assert manager.slept == [GROUP]

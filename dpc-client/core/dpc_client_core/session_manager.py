@@ -352,8 +352,13 @@ class NewSessionProposalManager:
             ui_payload
         )
 
-        # GROUP-SLEEP-1: auto-trigger sleep for all agents after group New Session
-        if is_approved and is_group:
+        # GROUP-SLEEP-1: auto-trigger sleep for all agents after group New Session.
+        # Not on the node that asked for the reset (Mike's call, 2026-09-07): the
+        # person who just pressed the button is at the keyboard, and putting their
+        # agents to sleep under them is a surprise. Until every participant counted
+        # its own votes this branch was unreachable for an initiator, so excluding
+        # it restores what a pair used to do rather than inventing a rule.
+        if is_approved and is_group and not session.is_initiator:
             group = self.core_service.group_manager.get_group(local_conversation_id)
             if group and group.is_discord_bridge:
                 self.logger.info("Skipping sleep for Discord bridge group: %s", local_conversation_id[:20])
@@ -363,6 +368,11 @@ class NewSessionProposalManager:
                     self.logger.info("Auto-triggered group sleep for %s", local_conversation_id[:20])
                 except Exception as e:
                     self.logger.error("Failed to trigger group sleep: %s", e)
+        elif is_approved and is_group:
+            self.logger.info(
+                "Skipping group sleep for %s: this node asked for the reset",
+                local_conversation_id[:20],
+            )
 
         # Remember the decision before the session goes: see finalized_proposals.
         self.finalized_proposals[proposal_id] = {
