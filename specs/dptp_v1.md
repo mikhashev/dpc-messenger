@@ -526,8 +526,8 @@ Casts a vote on a knowledge commit proposal.
 **Fields:**
 - `proposal_id` (string, required): Proposal identifier being voted on
 - `voter_node_id` (string, required): Node ID of voter
-- `vote` (string, required): Vote choice - `"approve"` | `"reject"` | `"request_changes"`
-- `comment` (string, optional): Optional comment/feedback
+- `vote` (string, required): Vote choice - `"approve"` | `"reject"` | `"request_changes"` | `"abstain"`
+- `comment` (string, optional; **required for `"abstain"`**): Comment/feedback. An abstention blocks the commit, so it must say why it could not be judged
 - `timestamp` (string, required): ISO 8601 timestamp of vote
 - `is_required_dissent` (boolean, required): True if voter is assigned devil's advocate
 
@@ -601,9 +601,11 @@ Notifies all participants of voting outcome after all votes are collected or the
   - `approve` (integer): Number of approve votes
   - `reject` (integer): Number of reject votes
   - `request_changes` (integer): Number of change requests
-  - `total` (integer): Total votes received
+  - `abstain` (integer): Number of participants that answered "I cannot judge this"
+  - `total` (integer): Votes received from participants (votes from other nodes are not counted)
+  - `participants` (integer): Size of the roster the proposal names — the denominator
   - `threshold` (number): Required approval threshold (e.g., 0.75)
-  - `approval_rate` (number): Actual approval rate (approve/total)
+  - `approval_rate` (number): Actual approval rate (approve/participants)
 - `votes` (array, required): All participant votes with details
   - `node_id` (string): Voter's node ID
   - `vote` (string): Vote choice
@@ -618,10 +620,11 @@ Notifies all participants of voting outcome after all votes are collected or the
 **UI Behavior:** Shows toast notification with outcome (✅ approved, ❌ rejected, ⏱️ timeout) and optional detailed vote breakdown dialog
 
 **Voting Rules:**
-- **Approval**: Requires ≥75% of participants to vote "approve"
+- **Approval**: Requires ≥75% of **participants** to vote "approve". The denominator is the roster the proposal names, never the votes that happen to have arrived; a vote from a node outside the roster is not counted at all.
 - **Rejection**: More "reject" votes than "request_changes"
 - **Revision Needed**: More "request_changes" than "reject" votes
-- **Timeout**: Deadline reached before all votes collected (finalizes with current votes)
+- **Abstention**: A participant that cannot judge the proposal — it does not hold the messages the extraction read — answers `"abstain"` with a mandatory `comment` giving the reason. An abstention stays in the denominator, so it cannot approve and it does not pretend to; with two or three participants it is enough to stop the commit on its own.
+- **Timeout**: Deadline reached with participants still unanswered. **A timeout never approves**: the proposal ends as `"timeout"` and the knowledge is not written. Otherwise the rule above could be bypassed by waiting, which is how two commits were applied on one voice of two on 2026-09-06 and 2026-09-07.
 
 ---
 

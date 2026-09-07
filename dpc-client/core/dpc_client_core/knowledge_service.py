@@ -115,6 +115,10 @@ class KnowledgeService:
         # request sent for exactly those messages. See _defer_vote_for_missing_records.
         self._pending_votes: Dict[str, Dict[str, Any]] = {}
 
+        # proposal_id -> did this node judge the text, or only abstain? Read by
+        # the apply path, which signs a commit only for a proposal it judged.
+        self._judged_proposals: Dict[str, bool] = {}
+
         # Results cache for agent store-and-poll (proposal_id → result dict)
         self.pending_results: Dict[str, Dict] = {}
 
@@ -638,9 +642,10 @@ class KnowledgeService:
                     session.proposal.summary = summary
 
 
-            # A refusal is «I do not sign this» and needs no evidence;
-            # approving and asking for changes judge the text and stay held.
-            drift = None if vote == "reject" else self._history_drift(proposal_id)
+            # Only a vote that asserts something about the text needs the text.
+            # A refusal is «I do not sign this»; an abstention is «I cannot
+            # judge this», which is the very state the guard detects.
+            drift = None if vote in ("reject", "abstain") else self._history_drift(proposal_id)
             if drift:
                 if _allow_defer:
                     return await self._defer_vote_for_missing_records(
@@ -667,6 +672,9 @@ class KnowledgeService:
                 )
 
             if success:
+                # Whether this node judged the text decides whether it signs the
+                # commit later: a signature is a judgement, not a receipt.
+                self._judged_proposals[proposal_id] = vote != "abstain"
                 return {"status": "success", "message": f"Vote cast: {vote}"}
 
             # "Not found or expired" was the answer to three different
@@ -695,6 +703,14 @@ class KnowledgeService:
     # -------------------------------------------------------------
     # A vote held back until the records it judges arrive
     # -------------------------------------------------------------
+
+    def judged_proposal(self, proposal_id: str) -> bool:
+        """Did this node judge that proposal's text, rather than abstain?
+
+        A proposal it never voted on counts as unjudged: silence is not a
+        reading either.
+        """
+        return bool(getattr(self, "_judged_proposals", {}).get(proposal_id, False))
 
     def _pending_vote_store(self) -> Dict[str, Dict[str, Any]]:
         """The deferred votes, tolerating a service built without __init__."""
@@ -900,19 +916,47 @@ class KnowledgeService:
                     f"proposal was read from. Your {pending['vote']} was not cast."
                 )
             logger.warning(
-                "Deferred vote on %s dropped: %s (%d record(s) still missing)",
+                "Deferred vote on %s becomes an abstention: %s (%d record(s) still missing)",
                 proposal_id, reason, len(still_missing),
             )
-            await self._emit_vote_event("knowledge_vote_resolved", {
-                "proposal_id": proposal_id,
-                "conversation_id": group_id,
-                "vote": pending["vote"],
-                "status": "error",
-                "reason": reason,
+            await self._abstain_with_reason(proposal_id, group_id, reason, message, extra={
                 "missing_messages": len(still_missing),
                 "unverifiable": [r.get("content_hash") for r in unverifiable],
-                "message": message,
             })
+
+    async def _abstain_with_reason(
+        self,
+        proposal_id: str,
+        conversation_id: Optional[str],
+        reason: str,
+        message: str,
+        extra: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """Say «I cannot judge this» in the vote itself, not only in a log line.
+
+        The records never arrived, or arrived and did not verify. Under a
+        denominator counted over participants an abstention is what stops the
+        commit, and it carries the reason it stopped it.
+        """
+        result = await self.vote_knowledge_commit(
+            proposal_id, "abstain", message, _allow_defer=False
+        )
+        payload = {
+            "proposal_id": proposal_id,
+            "conversation_id": conversation_id,
+            "vote": "abstain",
+            "status": "error",
+            "reason": reason,
+            "message": message,
+        }
+        payload.update(extra or {})
+        if result.get("status") != "success":
+            payload["abstention_failed"] = result.get("message", "")
+            logger.warning(
+                "Could not record the abstention on %s: %s",
+                proposal_id, result.get("message", ""),
+            )
+        await self._emit_vote_event("knowledge_vote_resolved", payload)
 
     async def _deferred_vote_timed_out(self, proposal_id: str) -> None:
         """Nobody answered in time: say so instead of holding the vote forever."""
@@ -928,19 +972,17 @@ class KnowledgeService:
             proposal_id, ", ".join(x[:20] for x in pending.get("asked", [])),
             PENDING_VOTE_TIMEOUT_SECONDS,
         )
-        await self._emit_vote_event("knowledge_vote_resolved", {
-            "proposal_id": proposal_id,
-            "conversation_id": pending.get("conversation_id"),
-            "vote": pending.get("vote"),
-            "status": "error",
-            "reason": "no_answer",
-            "missing_messages": len(pending.get("missing") or []),
-            "message": (
+        await self._abstain_with_reason(
+            proposal_id,
+            pending.get("conversation_id"),
+            "no_answer",
+            (
                 f"No peer sent the missing messages within "
-                f"{PENDING_VOTE_TIMEOUT_SECONDS} seconds. Your "
-                f"{pending.get('vote')} was not cast."
+                f"{PENDING_VOTE_TIMEOUT_SECONDS} seconds, so this node cannot judge "
+                f"the proposal and abstains."
             ),
-        })
+            extra={"missing_messages": len(pending.get("missing") or [])},
+        )
 
     async def _ai_agent_vote_on_proposal(
         self, proposal_id: str, ai_agent_node_id: str

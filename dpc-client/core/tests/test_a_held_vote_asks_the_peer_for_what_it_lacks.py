@@ -89,6 +89,7 @@ def _service(monitor, window, peers=(BOB,)):
     svc.local_api = SimpleNamespace(broadcast_event=_broadcast)
     svc.llm_manager = SimpleNamespace(providers={})
     svc._pending_votes = {}
+    svc._judged_proposals = {}
     return svc, sent, events, votes
 
 
@@ -209,7 +210,8 @@ async def test_the_held_vote_is_cast_once_the_records_arrive():
 
 
 @pytest.mark.asyncio
-async def test_an_answer_without_the_records_drops_the_vote():
+async def test_an_answer_without_the_records_turns_the_vote_into_an_abstention():
+    """«I cannot judge this» is a vote, and it carries the reason it is one."""
     monitor = _monitor()
     window = _window(monitor)
     _drop_last_message(monitor)
@@ -218,8 +220,10 @@ async def test_an_answer_without_the_records_drops_the_vote():
     await KnowledgeService.vote_knowledge_commit(svc, "p1", "approve")
     await svc.retry_pending_votes(GROUP, rejected=[])
 
-    assert not votes
+    assert [v["vote"] for v in votes] == ["abstain"]
+    assert votes[0]["comment"], "an abstention with no reason blocks the group silently"
     assert svc._pending_votes == {}
+    assert svc.judged_proposal("p1") is False
     resolved = [p for name, p in events if name == "knowledge_vote_resolved"]
     assert resolved[0]["reason"] == "records_not_held"
 

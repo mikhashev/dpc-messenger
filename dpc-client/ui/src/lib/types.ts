@@ -202,7 +202,9 @@ export interface VoteTally {
     approve: number;
     reject: number;
     request_changes?: number;  // Revision-requested votes
+    abstain?: number;          // Participants that could not judge the proposal
     total: number;
+    participants?: number;     // The denominator: the roster the proposal names
 }
 
 export interface KnowledgeCommit {

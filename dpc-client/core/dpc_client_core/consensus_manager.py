@@ -36,6 +36,9 @@ class VotingSession:
             self.votes = {}
 
 
+VOTE_VALUES = ("approve", "reject", "request_changes", "abstain")
+
+
 class ConsensusManager:
     """Manages consensus voting for knowledge commits
 
@@ -152,7 +155,7 @@ class ConsensusManager:
     async def cast_vote(
         self,
         proposal_id: str,
-        vote: str,  # "approve", "reject", "request_changes"
+        vote: str,  # one of VOTE_VALUES, "abstain"
         comment: Optional[str] = None,
         broadcast_func: Optional[Callable] = None
     ) -> bool:
@@ -168,6 +171,15 @@ class ConsensusManager:
             True if vote was cast, False if session not found
         """
         if proposal_id not in self.sessions:
+            return False
+
+        if vote not in VOTE_VALUES:
+            logger.warning("cast_vote: refusing unknown vote value %r", vote)
+            return False
+        # An abstention counts in the denominator and therefore blocks, so it
+        # has to say why.
+        if vote == "abstain" and not (comment or "").strip():
+            logger.warning("cast_vote: refusing an abstention with no reason")
             return False
 
         session = self.sessions[proposal_id]
@@ -344,21 +356,36 @@ class ConsensusManager:
             logger.debug("_finalize_vote called but session %s already in status '%s' — skipping",
                          session.proposal.proposal_id, session.status)
             return
+        deadline_fired = session.status == "timeout"
         # Mark as finalizing immediately (before any awaits) to block re-entry from the
         # other path. No await between this line and the check above — asyncio guarantees
         # no task switch between consecutive synchronous statements.
         session.status = "finalizing"
 
         proposal = session.proposal
-        votes = session.votes
+        # Only the participants decide. A vote relayed by a node the proposal
+        # does not name was counted before, on both sides of the fraction.
+        roster = set(proposal.participants or ())
+        votes = {
+            nid: v for nid, v in session.votes.items() if nid in roster
+        } if roster else session.votes
+        if len(votes) != len(session.votes):
+            logger.warning(
+                "Proposal %s: %d vote(s) from nodes that are not participants were not counted",
+                proposal.proposal_id, len(session.votes) - len(votes),
+            )
 
         # Count votes
         approve_count = sum(1 for v in votes.values() if v.vote == "approve")
         reject_count = sum(1 for v in votes.values() if v.vote == "reject")
         change_count = sum(1 for v in votes.values() if v.vote == "request_changes")
+        abstain_count = sum(1 for v in votes.values() if v.vote == "abstain")
 
         total_votes = len(votes)
-        approval_rate = approve_count / total_votes if total_votes > 0 else 0
+        # Participants, not votes cast: otherwise the group shrinks to whoever
+        # answered and one voice becomes unanimity.
+        participant_count = len(proposal.participants) or total_votes
+        approval_rate = approve_count / participant_count if participant_count else 0
 
         # No votes cast (timeout with no user action) — expire, don't treat as request_changes
         if total_votes == 0:
@@ -384,8 +411,18 @@ class ConsensusManager:
                 await self.on_result_broadcast(result_payload, proposal.participants)
             return
 
-        # Determine outcome
-        if approval_rate >= self.consensus_threshold:
+        # A deadline can no longer approve: otherwise the rule above is
+        # bypassed by waiting.
+        if deadline_fired:
+            session.status = "timeout"
+            proposal.status = "timeout"
+            logger.info(
+                "Proposal %s reached its deadline with %d of %d participants answered — "
+                "not approved", proposal.proposal_id, total_votes, participant_count,
+            )
+            if self.on_commit_rejected:
+                await self.on_commit_rejected(proposal, votes)
+        elif approval_rate >= self.consensus_threshold:
             # Approved!
             session.status = "approved"
             proposal.status = "approved"
@@ -393,12 +430,12 @@ class ConsensusManager:
             # Create finalized commit
             commit = KnowledgeCommit(
                 summary=proposal.summary,
-                description=f"Approved by {approve_count}/{total_votes} participants",
+                description=f"Approved by {approve_count}/{participant_count} participants",
                 topic=proposal.topic,
                 entries=proposal.entries,
                 conversation_id=proposal.conversation_id,
                 participants=proposal.participants,
-                consensus_type="unanimous" if approval_rate == 1.0 else "majority",
+                consensus_type="unanimous" if approve_count == participant_count else "majority",
                 approved_by=[nid for nid, v in votes.items() if v.vote == "approve"],
                 rejected_by=[nid for nid, v in votes.items() if v.vote == "reject"],
                 vote_comments={nid: v.comment for nid, v in votes.items() if v.comment},
@@ -462,7 +499,9 @@ class ConsensusManager:
                 "approve": approve_count,
                 "reject": reject_count,
                 "request_changes": change_count,
+                "abstain": abstain_count,
                 "total": total_votes,
+                "participants": participant_count,
                 "threshold": self.consensus_threshold,
                 "approval_rate": approval_rate
             },
@@ -492,14 +531,27 @@ class ConsensusManager:
                 proposal.proposal_id, len(proposal.participants),
             )
 
-    async def _apply_commit(self, commit: KnowledgeCommit, origin: str = "local") -> bool:
+    async def _apply_commit(
+        self,
+        commit: KnowledgeCommit,
+        origin: str = "local",
+        judged_here: bool = True,
+    ) -> bool:
         """Apply approved commit to local PCM; False on any error.
 
         `origin` is "local" or the verdict `verify_provenance()` gave a received
         commit: one from elsewhere keeps the hash it arrived with, and only a
         hash we could check is signed with our key (ADR-036 §4).
         """
-        attested = origin in ("local", "verified")
+        # A signature is a judgement, not a delivery receipt: a node that could
+        # not read the text the knowledge came from applies it and says so,
+        # rather than vouching for it.
+        attested = origin in ("local", "verified") and judged_here
+        if not judged_here:
+            logger.info(
+                "Applying commit %s without signing it: this node did not judge the proposal",
+                commit.commit_id[:12],
+            )
         try:
             import hashlib
             from dpc_protocol.crypto import load_identity
@@ -612,6 +664,7 @@ class ConsensusManager:
                 'version': topic.version,
                 'author': node_id if origin == "local" else (commit.proposed_by or "peer"),
                 'provenance': origin,
+                'verified_by_this_node': bool(judged_here),
                 'participants': commit.participants,
                 'approved_by': commit.approved_by,
                 'rejected_by': commit.rejected_by,
@@ -953,6 +1006,20 @@ class ConsensusManager:
                 caller could not establish it.
         """
         try:
+            # A value nobody counts still enters the tally and approves nothing,
+            # so it silently blocks the proposal it was sent about.
+            if payload.get('vote') not in VOTE_VALUES:
+                logger.warning(
+                    "Discarding vote from %s: %r is not a vote value",
+                    sender_node_id[:20], payload.get('vote'),
+                )
+                return
+            if payload.get('vote') == "abstain" and not (payload.get('comment') or "").strip():
+                logger.warning(
+                    "Discarding abstention from %s: no reason given", sender_node_id[:20],
+                )
+                return
+
             # Reconstruct vote from dict
             vote = CommitVote(
                 proposal_id=payload.get('proposal_id'),
