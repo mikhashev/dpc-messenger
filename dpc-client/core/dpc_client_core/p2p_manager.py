@@ -356,7 +356,11 @@ class P2PManager:
                         # Announce our presence to the DHT
                         await self.announce_to_dht()
                     else:
-                        logger.warning("DHT bootstrap failed (no responsive seeds)")
+                        # The reason lives in bootstrap(), which has just said
+                        # whether the seeds were silent or were us. Repeating a
+                        # guess here put the old lie back on the screen one line
+                        # under the correct answer.
+                        logger.info("DHT did not bootstrap — see the reason above")
             except Exception as e:
                 logger.error("Failed to initialize DHT: %s", e, exc_info=True)
                 self.dht_manager = None

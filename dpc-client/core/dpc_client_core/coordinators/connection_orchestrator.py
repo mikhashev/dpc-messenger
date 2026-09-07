@@ -161,13 +161,18 @@ class ConnectionOrchestrator:
             # inbound connection, which behind a shared NAT is our own door: the
             # dial then completes a TLS handshake with this node and reports a
             # connected peer that is not there.
+            # Warn, do not refuse. Behind a shared exit the address that reaches
+            # a peer IS our own external address — measured on this pair, where
+            # refusing blocked the one cached path to a node that was reachable
+            # through it. The dial settles it instead: reaching ourselves returns
+            # our own node_id, and the HELLO_ACK comparison rejects that already.
             own = getattr(self.p2p_manager, "own_addresses", None)
             if cached and cached.last_direct_ip and own and own.contains(cached.last_direct_ip):
                 logger.warning(
-                    "Cached endpoint for %s is this node's own address %s — not dialling it",
+                    "Cached endpoint for %s is also this node's own address %s — "
+                    "dialling anyway; a self-dial will be caught by the node id it answers with",
                     node_id[:20], cached.last_direct_ip,
                 )
-                cached = None
             if cached and cached.last_direct_ip:
                 from ..models.peer_endpoint import PeerEndpoint, IPv4Info
                 local_addr = f"{cached.last_direct_ip}:{cached.last_direct_port}"

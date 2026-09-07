@@ -162,7 +162,14 @@ def _orchestrator(own, cached_ip):
 
 
 @pytest.mark.asyncio
-async def test_a_cached_endpoint_that_is_our_own_door_is_refused(caplog):
+async def test_a_cached_endpoint_that_is_our_own_address_is_flagged_and_still_dialled(caplog):
+    """Behind a shared exit that address reaches the peer as well as us.
+
+    An earlier version of this refused the dial, which blocked the only cached
+    path to a node that was reachable through it. The address cannot tell the
+    two apart; the node id the far end answers with can, and the HELLO_ACK
+    comparison already does.
+    """
     from dpc_client_core.coordinators.connection_orchestrator import (
         ConnectionFailedError,
         ConnectionOrchestrator,
@@ -176,8 +183,9 @@ async def test_a_cached_endpoint_that_is_our_own_door_is_refused(caplog):
         with pytest.raises(ConnectionFailedError) as excinfo:
             await ConnectionOrchestrator.connect(orchestrator, PEER)
 
-    assert "own address" in caplog.text
-    assert "not found in DHT or peer cache" in str(excinfo.value)
+    assert "also this node's own address" in caplog.text
+    # Past the cache: it failed for want of a strategy, not for want of an endpoint.
+    assert "not found in DHT or peer cache" not in str(excinfo.value)
 
 
 @pytest.mark.asyncio
