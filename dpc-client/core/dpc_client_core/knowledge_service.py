@@ -704,6 +704,28 @@ class KnowledgeService:
     # A vote held back until the records it judges arrive
     # -------------------------------------------------------------
 
+    def _offline_participants(self, conversation_id: str) -> Dict[str, str]:
+        """Members of this group that are not connected right now, by name.
+
+        Empty for anything that is not a group, and for a group of one: a lone
+        member is the only voter and is trivially present.
+        """
+        if not str(conversation_id).startswith("group-"):
+            return {}
+        group = self.group_manager.get_group(conversation_id) if self.group_manager else None
+        if not group:
+            return {}
+        me = getattr(self.p2p_manager, "node_id", None)
+        others = [m for m in (group.members or []) if m != me]
+        if not others:
+            return {}
+        connected = set(getattr(self.p2p_manager, "peers", None) or {})
+        return {
+            m: (self.peer_metadata.get(m, {}).get("name") or m[:20])
+            for m in others
+            if m not in connected
+        }
+
     def judged_proposal(self, proposal_id: str) -> bool:
         """Did this node judge that proposal's text, rather than abstain?
 
@@ -1231,6 +1253,27 @@ Respond in JSON format:
                     ),
                 }
 
+            # Everyone who has to vote must be able to. Under a denominator
+            # counted over participants a missing member cannot be outvoted,
+            # only waited for, so the vote would spend its ten minutes and end
+            # as a timeout — after the extraction had already been paid for.
+            offline = self._offline_participants(conversation_id)
+            if offline:
+                names = ", ".join(offline.values())
+                logger.info(
+                    "Refusing extraction for %s — %d participant(s) offline: %s",
+                    conversation_id, len(offline), names,
+                )
+                return {
+                    "status": "error",
+                    "reason": "participants_offline",
+                    "offline": list(offline),
+                    "message": (
+                        f"All participants must be online to vote on a knowledge "
+                        f"commit. Offline: {names}"
+                    ),
+                }
+
             logger.info("End Session - attempting manual extraction for %s", conversation_id)
             logger.info(
                 "Full conversation: %d messages (incremental buffer: %d), Score: %.2f",
@@ -1315,6 +1358,34 @@ Respond in JSON format:
                         broadcast_func=_no_op_broadcast,
                     )
                 elif conversation_id.startswith("group-"):
+                    # Extraction takes a minute or more, and a member can drop
+                    # inside it. Opening a vote nobody can finish is the state
+                    # this whole path exists to avoid.
+                    left_meanwhile = self._offline_participants(conversation_id)
+                    if left_meanwhile:
+                        names = ", ".join(left_meanwhile.values())
+                        logger.warning(
+                            "Not opening a vote for %s — %s went offline during the extraction",
+                            conversation_id, names,
+                        )
+                        await self.local_api.broadcast_event(
+                            "knowledge_extraction_failed",
+                            {
+                                "conversation_id": conversation_id,
+                                "reason": "participants_offline",
+                                "message": (
+                                    f"{names} went offline while the knowledge was being "
+                                    f"extracted, so the vote was not opened. Try again when "
+                                    f"everyone is back."
+                                ),
+                            },
+                        )
+                        return {
+                            "status": "error",
+                            "reason": "participants_offline",
+                            "offline": list(left_meanwhile),
+                            "message": f"Not opening a vote: {names} went offline",
+                        }
                     logger.info(
                         "Group Chat - broadcasting knowledge proposal to group %s for consensus",
                         conversation_id,
