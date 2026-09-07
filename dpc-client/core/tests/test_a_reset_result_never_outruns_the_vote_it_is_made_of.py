@@ -355,3 +355,15 @@ async def test_the_other_participant_still_sleeps():
     await asyncio.sleep(0)
 
     assert manager.slept == [GROUP]
+
+
+def test_a_lone_member_ending_its_own_session_does_not_sleep_either():
+    """The second door: no vote, no initiator field — and the node that pressed
+    the button is the only one there, which is the whole of Mike's reason."""
+    import inspect
+
+    from dpc_client_core.service import CoreService
+
+    source = inspect.getsource(CoreService.propose_new_session)
+    assert "trigger_group_sleep" not in source
+    assert "this node asked for the reset" in source

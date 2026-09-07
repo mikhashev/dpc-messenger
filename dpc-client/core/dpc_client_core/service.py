@@ -4984,10 +4984,15 @@ class CoreService:
                         "tokens_after_last_response": 0,
                         "tokens_after_last_response_at": None,
                     })
-                    if not group.is_discord_bridge:
-                        asyncio.create_task(self.trigger_group_sleep(conversation_id))
-                    else:
-                        logger.info("Skipping sleep for Discord bridge group: %s", conversation_id)
+                    # No sleep here either. This branch is the lone member of a
+                    # group ending its own session, so the node that pressed the
+                    # button is the only one there — the same reason the voted
+                    # path excludes an initiator (Mike's call, 2026-09-07), and
+                    # for a single-node install this is the branch that runs.
+                    logger.info(
+                        "Skipping group sleep for %s: this node asked for the reset",
+                        conversation_id,
+                    )
                     return result
 
                 participants = set(group.members)

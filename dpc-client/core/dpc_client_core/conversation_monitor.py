@@ -2398,11 +2398,21 @@ PARTICIPANTS' CULTURAL CONTEXTS:
         wanted = set(authors) if authors is not None else None
         wanted_hashes = set(content_hashes) if content_hashes is not None else None
         exported = []
+        skipped_local_notes = 0
         for msg in self.message_history:
             if wanted_hashes is not None:
                 if (msg.get("content_hash") or "") not in wanted_hashes:
                     continue
             elif wanted is not None and (msg.get("sender_node_id") or "") not in wanted:
+                continue
+            # A note this node wrote about a peer's file is attributed to that
+            # peer and signed by us, so every other node refuses it on arrival —
+            # see _is_local_file_note. Sending it can only produce a rejection,
+            # and it produced one on every sync of one group for five days.
+            # Tested by shape rather than by the remembered ids: that set lives
+            # in memory and is empty after a restart.
+            if self._is_local_file_note(msg):
+                skipped_local_notes += 1
                 continue
             exported_msg = {
                 "id": msg.get("id"),  # Preserve ID so merge_history can deduplicate
@@ -2462,6 +2472,10 @@ PARTICIPANTS' CULTURAL CONTEXTS:
             logger.info(
                 "Exported %d of %d messages, limited to %d author(s)",
                 len(exported), len(self.message_history), len(wanted),
+            )
+        if skipped_local_notes:
+            logger.info(
+                "Held back %d local file note(s) the peer would refuse", skipped_local_notes
             )
         return exported
 
@@ -3415,7 +3429,13 @@ PARTICIPANTS' CULTURAL CONTEXTS:
                 continue
             # The transfer got here before the sender's record of it, and we
             # wrote a note of our own meanwhile. One file, one record.
-            if checked.get("attachments") and checked.get("id") not in self.message_ids:
+            #
+            # Attempted on every arrival, not only a new one. Gated on novelty,
+            # the drop had exactly one chance — the record's first arrival — and
+            # if the note was written after that, the record was never new again
+            # and the note stayed for good: one group re-synced twenty-eight
+            # times a day, merging nothing each time, because of it.
+            if checked.get("attachments"):
                 if self._drop_local_file_note(checked):
                     dropped += 1
             if self.add_message_with_id(checked):
