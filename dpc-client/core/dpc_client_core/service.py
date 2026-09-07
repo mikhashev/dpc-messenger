@@ -3463,12 +3463,40 @@ class CoreService:
                                 fallback_provider = provider
                                 break
 
-                        if not fallback_provider:
-                            raise ValueError("Local transcription failed and no OpenAI provider available for fallback") from local_error
+                        cloud_error = None
+                        if fallback_provider:
+                            try:
+                                # Use OpenAI API
+                                result = await self._transcribe_with_openai(temp_path, fallback_provider.config)
+                                result["fallback_reason"] = str(local_error)
+                            except Exception as openai_error:
+                                # A configured cloud provider that fails is not the
+                                # end of the chain either — it is one more step that
+                                # did not work.
+                                logger.warning("OpenAI fallback transcription failed: %s", openai_error)
+                                cloud_error = openai_error
+                                result = None
 
-                        # Use OpenAI API
-                        result = await self._transcribe_with_openai(temp_path, fallback_provider.config)
-                        result["fallback_reason"] = str(local_error)
+                        if result is None:
+                            # The peer is the last step, not the second: a cloud
+                            # provider the user configured by hand should not be
+                            # skipped in favour of sending their audio to another
+                            # person's machine. Reached when there is no such
+                            # provider, or when it failed too — both of which
+                            # ended here in a dead end before (Mike's call,
+                            # 2026-09-07).
+                            result = await self._transcribe_with_peer(temp_path, mime_type)
+                            if result is None:
+                                cloud = (
+                                    f"the OpenAI fallback failed ({cloud_error})"
+                                    if cloud_error is not None
+                                    else "no OpenAI provider is configured"
+                                )
+                                raise ValueError(
+                                    f"Local transcription failed, {cloud}, and no peer could "
+                                    f"be asked: {self._peer_transcription_refusal()}"
+                                ) from local_error
+                            result["fallback_reason"] = str(local_error)
                     else:
                         raise RuntimeError(f"Local transcription failed and fallback disabled: {local_error}") from local_error
 
@@ -7169,6 +7197,93 @@ class CoreService:
     ) -> Dict[str, Any]:
         """Delegated to P2PCoordinator."""
         return await self.p2p_coordinator.request_transcription_from_peer(peer_id, audio_base64, mime_type, model, provider, language, task, timeout)
+
+    def _peer_transcription_candidates(self) -> List[tuple]:
+        """Connected peers we may send audio to that say they can transcribe.
+
+        Three conditions, and all three are checked here rather than at the
+        call site so the refusal can name the one that failed: the peer is
+        connected right now, the firewall permits our audio to reach it, and
+        its last PROVIDERS_RESPONSE advertised a voice-capable alias.
+
+        Order follows `send_to_nodes` as written, because a list of peers a
+        person typed in order is a preference; peers allowed only by group
+        follow, sorted, so the choice does not depend on dict iteration order.
+        """
+        connected = set(getattr(self.p2p_manager, "peers", None) or {})
+        named = [n for n in self.firewall.transcription_send_to_nodes if n in connected]
+        by_group = sorted(
+            p for p in connected
+            if p not in named and self.firewall.can_send_audio_to(p)
+        )
+
+        candidates = []
+        for peer_id in named + by_group:
+            for provider in (self.peer_metadata.get(peer_id, {}).get("providers") or []):
+                if provider.get("supports_voice") and provider.get("alias"):
+                    candidates.append((peer_id, provider["alias"]))
+                    break
+        return candidates
+
+    def _peer_transcription_refusal(self) -> str:
+        """Why no peer was asked — counted, so the log names the missing condition."""
+        connected = set(getattr(self.p2p_manager, "peers", None) or {})
+        if not connected:
+            return "no peer is connected"
+        allowed = [p for p in connected if self.firewall.can_send_audio_to(p)]
+        if not allowed:
+            return (
+                f"{len(connected)} peer(s) connected, none permitted to receive this "
+                f"node's audio (privacy_rules.json: transcription.send_to_nodes / send_to_groups)"
+            )
+        return (
+            f"{len(allowed)} permitted peer(s) connected, none advertising a "
+            f"transcription provider in their last PROVIDERS_RESPONSE"
+        )
+
+    async def _transcribe_with_peer(self, audio_path, mime_type: str) -> Optional[Dict[str, Any]]:
+        """Ask a permitted peer to transcribe, or return None having said why.
+
+        Returns None rather than raising: this is the last step of a fallback
+        chain, and the caller still owes the user the original local failure.
+        """
+        import base64
+        from pathlib import Path as _Path
+
+        candidates = self._peer_transcription_candidates()
+        if not candidates:
+            logger.info("No peer available for transcription fallback: %s", self._peer_transcription_refusal())
+            return None
+
+        audio_base64 = base64.b64encode(_Path(audio_path).read_bytes()).decode()
+
+        for peer_id, alias in candidates:
+            logger.info(
+                "Falling back to peer transcription: %s via '%s' (audio leaves this node)",
+                peer_id[:20], alias,
+            )
+            try:
+                result = await self._request_transcription_from_peer(
+                    peer_id=peer_id,
+                    audio_base64=audio_base64,
+                    mime_type=mime_type,
+                    provider=alias,
+                    timeout=120.0,
+                )
+            except Exception as peer_error:
+                logger.warning("Peer transcription via %s failed: %s", peer_id[:20], peer_error)
+                continue
+
+            return {
+                "text": result.get("text", ""),
+                "language": result.get("language", "unknown"),
+                "duration": result.get("duration_seconds", 0),
+                "provider": f"remote_{result.get('provider', alias)}",
+                "remote_node_id": peer_id,
+            }
+
+        logger.warning("Every permitted peer refused or failed the transcription request")
+        return None
 
     async def _aggregate_contexts(self, query: str, peer_ids: List[str] = None) -> Dict[str, PersonalContext]:
         """Delegated to P2PCoordinator."""

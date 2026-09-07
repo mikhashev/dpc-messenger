@@ -197,6 +197,11 @@ class ContextFirewall:
         self.transcription_allowed_nodes: List[str] = transcription.get('allow_nodes', [])
         self.transcription_allowed_groups: List[str] = transcription.get('allow_groups', [])
         self.transcription_allowed_models: List[str] = transcription.get('allowed_models', [])
+        # The other direction. Letting a peer use our Whisper says nothing about
+        # whether our own microphone may leave this machine, so the outgoing
+        # permission is its own list and defaults to empty.
+        self.transcription_send_to_nodes: List[str] = transcription.get('send_to_nodes', [])
+        self.transcription_send_to_groups: List[str] = transcription.get('send_to_groups', [])
         logger.debug("Transcription sharing settings updated: enabled=%s, allowed_nodes=%d, allowed_groups=%d, allowed_models=%d",
                      self.transcription_enabled, len(self.transcription_allowed_nodes),
                      len(self.transcription_allowed_groups), len(self.transcription_allowed_models))
@@ -1017,7 +1022,10 @@ class ContextFirewall:
                     "enabled": False,
                     "allow_groups": [],
                     "allow_nodes": [],
-                    "allowed_models": ["openai/whisper-large-v3", "openai/whisper-medium"]
+                    "allowed_models": ["openai/whisper-large-v3", "openai/whisper-medium"],
+                    "_send_to": "The other direction: peers this node may send its OWN audio to when local transcription fails. Empty = never, and an automatic fallback is the only thing that reads these — a peer chosen by hand as 'remote:node:alias' is consent in itself and bypasses them.",
+                    "send_to_nodes": [],
+                    "send_to_groups": []
                 },
                 "nodes": {
                     "_comment": "Per-node access rules - Most specific, overrides group rules. Add entries like: \"dpc-node-xxxx\": {\"personal.json:profile.*\": \"allow\"}"
@@ -1556,6 +1564,29 @@ class ContextFirewall:
         # Not authorized
         return False
 
+    def can_send_audio_to(self, peer_node_id: str) -> bool:
+        """May this node hand its own audio to that peer to be transcribed?
+
+        The opposite direction from `can_request_transcription`, and a separate
+        list on purpose: a node that shares its Whisper with a friend has not
+        thereby agreed that its own microphone may leave the machine.
+
+        Empty lists mean never, and that is the whole safety of the automatic
+        fallback built on this: a chain that defaulted to "any connected peer"
+        would put a voice message on somebody else's disk on the strength of a
+        failed model load. A peer named by hand — the `remote:node:alias`
+        spelling — does not come through here at all, because choosing it is
+        the consent.
+        """
+        if peer_node_id in self.transcription_send_to_nodes:
+            return True
+
+        for group in self._get_groups_for_node(peer_node_id):
+            if group in self.transcription_send_to_groups:
+                return True
+
+        return False
+
     def get_available_models_for_peer(self, requester_node_id: str, all_models: List[str]) -> List[str]:
         """
         Returns the list of models that a peer is allowed to use.
@@ -1795,6 +1826,12 @@ class ContextFirewall:
 
                     if 'allowed_models' in transcription and not isinstance(transcription['allowed_models'], list):
                         errors.append("'transcription.allowed_models' must be a list")
+
+                    if 'send_to_nodes' in transcription and not isinstance(transcription['send_to_nodes'], list):
+                        errors.append("'transcription.send_to_nodes' must be a list")
+
+                    if 'send_to_groups' in transcription and not isinstance(transcription['send_to_groups'], list):
+                        errors.append("'transcription.send_to_groups' must be a list")
 
             # Validate nodes section
             if 'nodes' in config_dict:

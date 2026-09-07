@@ -30,6 +30,10 @@
       allow_nodes: string[];
       allow_groups: string[];
       allowed_models: string[];
+      // The other direction: who may receive THIS node's audio. Optional
+      // because a rules file written before it existed is still valid.
+      send_to_nodes?: string[];
+      send_to_groups?: string[];
     };
     dpc_agent?: {
       _comment?: string;
@@ -177,6 +181,8 @@
   let transcriptionAllowNodesText: string = '';
   let transcriptionAllowGroupsText: string = '';
   let transcriptionAllowedModelsText: string = '';
+  let transcriptionSendToNodesText: string = '';
+  let transcriptionSendToGroupsText: string = '';
 
   // Load rules when modal opens
   $: if (open && !rules) {
@@ -243,6 +249,8 @@
     transcriptionAllowNodesText = editedRules.transcription.allow_nodes.join('\n');
     transcriptionAllowGroupsText = editedRules.transcription.allow_groups.join('\n');
     transcriptionAllowedModelsText = editedRules.transcription.allowed_models.join('\n');
+    transcriptionSendToNodesText = (editedRules.transcription.send_to_nodes ?? []).join('\n');
+    transcriptionSendToGroupsText = (editedRules.transcription.send_to_groups ?? []).join('\n');
   }
 
   async function loadRules() {
@@ -264,6 +272,14 @@
     editMode = true;
     // Deep copy the rules for editing
     editedRules = JSON.parse(JSON.stringify(rules));
+
+    // A rules file written before the outgoing permission existed has neither
+    // key; without this the textareas below bind to undefined and the section
+    // cannot be filled in at all.
+    if (editedRules?.transcription) {
+      editedRules.transcription.send_to_nodes ??= [];
+      editedRules.transcription.send_to_groups ??= [];
+    }
 
     // Initialize agent_profiles if missing (Phase 4)
     if (editedRules && !editedRules.agent_profiles) {
@@ -1507,6 +1523,73 @@
                     {/if}
                   </div>
                 {/if}
+
+                <!-- The other direction. Deliberately outside the switch above:
+                     that one lets peers use our Whisper, and says nothing about
+                     whether our own audio may leave this machine. -->
+                <div class="subsection">
+                  <h4>Send My Audio To</h4>
+                  <p class="help-text-small">
+                    When local transcription fails and no cloud provider is configured, ask one of
+                    these peers instead. Empty means never — the audio stays on this machine and the
+                    voice message simply goes untranscribed. Choosing a peer by hand in the recorder
+                    is unaffected by this list.
+                  </p>
+
+                  <h5>Nodes</h5>
+                  {#if editMode && editedRules}
+                    <textarea
+                      id="transcription-send-to-nodes"
+                      name="transcription-send-to-nodes"
+                      class="edit-textarea"
+                      rows="3"
+                      placeholder="Enter node IDs (one per line) — asked in this order"
+                      bind:value={transcriptionSendToNodesText}
+                      on:blur={() => {
+                        if (editedRules?.transcription) {
+                          const nodes = transcriptionSendToNodesText.split('\n').map(s => s.trim()).filter(s => s.length > 0);
+                          editedRules.transcription.send_to_nodes = [...new Set(nodes)];
+                          transcriptionSendToNodesText = editedRules.transcription.send_to_nodes.join('\n');
+                        }
+                      }}
+                    ></textarea>
+                  {:else}
+                    <div class="tags">
+                      {#each displayRules.transcription.send_to_nodes ?? [] as nodeId}
+                        <span class="tag">{nodeId}</span>
+                      {:else}
+                        <span class="empty-small">No peer may receive this node's audio</span>
+                      {/each}
+                    </div>
+                  {/if}
+
+                  <h5>Groups</h5>
+                  {#if editMode && editedRules}
+                    <textarea
+                      id="transcription-send-to-groups"
+                      name="transcription-send-to-groups"
+                      class="edit-textarea"
+                      rows="2"
+                      placeholder="Enter group names (one per line)"
+                      bind:value={transcriptionSendToGroupsText}
+                      on:blur={() => {
+                        if (editedRules?.transcription) {
+                          const groups = transcriptionSendToGroupsText.split('\n').map(s => s.trim()).filter(s => s.length > 0);
+                          editedRules.transcription.send_to_groups = [...new Set(groups)];
+                          transcriptionSendToGroupsText = editedRules.transcription.send_to_groups.join('\n');
+                        }
+                      }}
+                    ></textarea>
+                  {:else}
+                    <div class="tags">
+                      {#each displayRules.transcription.send_to_groups ?? [] as groupName}
+                        <span class="tag">{groupName}</span>
+                      {:else}
+                        <span class="empty-small">No group may receive this node's audio</span>
+                      {/each}
+                    </div>
+                  {/if}
+                </div>
               </div>
             {:else}
               <p class="empty">Transcription sharing not configured.</p>
@@ -2521,6 +2604,12 @@
 
   .subsection h4 {
     margin-top: 0;
+  }
+
+  .subsection h5 {
+    margin: 0.75rem 0 0.25rem;
+    font-size: 0.85rem;
+    color: #555;
   }
 
   .tags {

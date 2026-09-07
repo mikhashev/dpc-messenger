@@ -1268,6 +1268,14 @@ Access control file format (`~/.dpc/privacy_rules.json`):
     "allow_groups": [],
     "allowed_models": []
   },
+  "transcription": {
+    "enabled": false,
+    "allow_nodes": [],
+    "allow_groups": [],
+    "allowed_models": [],
+    "send_to_nodes": [],
+    "send_to_groups": []
+  },
   "file_transfer": {
     "allow_nodes": ["dpc-node-alice-123"],
     "allow_groups": ["friends"],
@@ -1281,6 +1289,15 @@ Access control file format (`~/.dpc/privacy_rules.json`):
   }
 }
 ```
+
+**Transcription has two directions and two permissions.** `enabled` / `allow_nodes` /
+`allow_groups` / `allowed_models` govern *serving*: whether a peer may use this node's
+Whisper. `send_to_nodes` / `send_to_groups` govern the opposite — whether this node's own
+audio may leave the machine when local transcription fails and no cloud provider is
+configured, which is when the fallback chain asks a peer (Mike's call, 2026-09-07). They
+are separate because sharing a model with a friend is not consent to hand them your
+microphone. Both send lists default to empty, meaning never; a peer chosen by hand as
+`remote:<node>:<alias>` bypasses them, because choosing it is the consent.
 
 **Adding a new agent tool — `default_enabled` is required (S148):**
 
