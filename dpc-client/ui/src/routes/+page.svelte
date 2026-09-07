@@ -5,7 +5,7 @@
   import { onMount, untrack } from "svelte";
   import { providerToRemember } from '$lib/utils/rememberedProvider';
   import { writable } from "svelte/store";
-  import { connectionStatus, nodeStatus, sendCommand, resetReconnection, connectToCoreService, knowledgeCommitProposal, personalContext, tokenWarning, extractionFailure, availableProviders, peerProviders, unreadMessageCounts, resetUnreadCount, setActiveChat, newSessionProposal, proposeNewSession, voteNewSession, defaultProviders, providersList, groupChats, listAgents, agentsList, sleepStateChanged, sleepProgress, sleepAgentStates, tokenUsageUpdated, setGroupReasoningEffort, updateAgentConfig } from "$lib/coreService";
+  import { connectionStatus, nodeStatus, sendCommand, resetReconnection, connectToCoreService, knowledgeCommitProposal, knowledgeVoteStatus, personalContext, tokenWarning, extractionFailure, availableProviders, peerProviders, unreadMessageCounts, resetUnreadCount, setActiveChat, newSessionProposal, proposeNewSession, voteNewSession, defaultProviders, providersList, groupChats, listAgents, agentsList, sleepStateChanged, sleepProgress, sleepAgentStates, tokenUsageUpdated, setGroupReasoningEffort, updateAgentConfig } from "$lib/coreService";
   import { confirmAsync } from "$lib/utils/dialog";
   import { mapBackendMessage } from "$lib/utils/messageMapper";
   import KnowledgeCommitDialog from "$lib/components/KnowledgeCommitDialog.svelte";
@@ -863,9 +863,26 @@
       commitVoteError = "Not connected to the backend — vote was not sent";
       return;
     }
+    // Both keep the dialog open: a held vote is not a cast one either.
+    if (result?.status === "pending" || result?.status === "error") {
+      commitVoteError = result.message || "Vote could not be cast";
+      return;
+    }
     commitVoteError = "";
     showCommitDialog = false;
   }
+
+  $effect(() => {
+    const held = $knowledgeVoteStatus;
+    if (!held) return;
+    if (held.status === "success") {
+      commitVoteError = "";
+      showCommitDialog = false;
+      knowledgeCommitProposal.set(null);
+    } else {
+      commitVoteError = held.message;
+    }
+  });
 
   function closeCommitDialog() {
     commitVoteError = "";

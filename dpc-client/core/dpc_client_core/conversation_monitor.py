@@ -376,6 +376,7 @@ class ConversationMonitor:
         # Conversation history tracking (Phase 7: Conversation History)
         self.message_history: List[Dict[str, str]] = []  # List of {"role": "user/assistant", "content": "..."}
         self.message_ids: Set[str] = set()  # Track unique message IDs for deduplication
+        self.last_merge_rejected: List[Dict[str, Any]] = []  # what the last merge_history refused
         self._history_dirty: bool = False  # Track unsaved changes
         self._signer = None  # Lazy-loaded CommitSigner for message signing
         self._chain_rebuilt = False  # One-time local repair of a pre-local chain
@@ -2308,7 +2309,11 @@ PARTICIPANTS' CULTURAL CONTEXTS:
 
         return remapped
 
-    def export_history(self, authors: Optional[List[str]] = None) -> List[Dict[str, Any]]:
+    def export_history(
+        self,
+        authors: Optional[List[str]] = None,
+        content_hashes: Optional[List[str]] = None,
+    ) -> List[Dict[str, Any]]:
         """Export conversation history for syncing with peer
 
         Returns history in serializable format with timestamps added.
@@ -2324,14 +2329,22 @@ PARTICIPANTS' CULTURAL CONTEXTS:
                 the answering side used to ignore them and send everything, so
                 the property "sync asks only for what is missing" held in the
                 request and never in the transfer.
+            content_hashes: exact records wanted, by `content_hash`. A voter
+                whose history lacks messages of a proposal's extraction window
+                asks for those and nothing else. Takes precedence over
+                `authors`; an empty list exports nothing, as above.
 
         Returns:
             List of message dicts with 'role', 'content', 'timestamp', 'attachments'
         """
         wanted = set(authors) if authors is not None else None
+        wanted_hashes = set(content_hashes) if content_hashes is not None else None
         exported = []
         for msg in self.message_history:
-            if wanted is not None and (msg.get("sender_node_id") or "") not in wanted:
+            if wanted_hashes is not None:
+                if (msg.get("content_hash") or "") not in wanted_hashes:
+                    continue
+            elif wanted is not None and (msg.get("sender_node_id") or "") not in wanted:
                 continue
             exported_msg = {
                 "id": msg.get("id"),  # Preserve ID so merge_history can deduplicate
@@ -2378,7 +2391,12 @@ PARTICIPANTS' CULTURAL CONTEXTS:
                         exported_msg[field] = msg[field]
             exported.append(exported_msg)
 
-        if wanted is None:
+        if wanted_hashes is not None:
+            logger.info(
+                "Exported %d of %d messages, limited to %d content hash(es)",
+                len(exported), len(self.message_history), len(wanted_hashes),
+            )
+        elif wanted is None:
             logger.info(f"Exported {len(exported)} messages from conversation history")
         else:
             logger.info(
@@ -3319,17 +3337,27 @@ PARTICIPANTS' CULTURAL CONTEXTS:
             remote_messages: List of message dicts from peer
 
         Returns:
-            Count of new messages added
+            Count of new messages added. The records refused are left in
+            `last_merge_rejected` (id, content_hash, sender, verdict), so a
+            caller waiting for a specific record can learn it will never come.
         """
         added = 0
         rejected = 0
         legacy = 0
         dropped = 0
+        self.last_merge_rejected: List[Dict[str, Any]] = []
         for msg in remote_messages:
             checked, verdict = self._verify_incoming(msg)
             if checked is None:
                 logger.warning("Rejected message %s: %s", msg.get("id", "?"), verdict)
                 rejected += 1
+                self.last_merge_rejected.append({
+                    "id": msg.get("id"),
+                    "content_hash": msg.get("content_hash"),
+                    "sender_node_id": msg.get("sender_node_id"),
+                    "sender_name": msg.get("sender_name"),
+                    "verdict": verdict,
+                })
                 continue
             # The transfer got here before the sender's record of it, and we
             # wrote a note of our own meanwhile. One file, one record.

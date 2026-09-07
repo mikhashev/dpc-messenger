@@ -54,7 +54,7 @@ holds nothing but `deleted_registry.json`.
 | `GROUP_DELETE` | Creator deletes group (all members remove it) |
 | `GROUP_DELETED_STATUS` | Exchange deleted group IDs on connect (notify of deletions that happened while offline) |
 | `GROUP_SYNC` | Metadata reconciliation on connect — carries the full group dict (incl. `agents`/`agent_names`); version + content-hash tie-break |
-| `GROUP_HISTORY_REQUEST` / `GROUP_HISTORY_RESPONSE` | Chat-history reconciliation (hash-based, bidirectional) |
+| `GROUP_HISTORY_REQUEST` / `GROUP_HISTORY_RESPONSE` | Chat-history reconciliation (hash-based, bidirectional); the request may narrow to `authors` or to individual `content_hashes` |
 | `CHAT_HISTORY_RESPONSE` | Full-history push to a newly added member on join |
 | `cc_group_mention` *(local event)* | Broadcasts an `@CC` mention to the Claude Code CLI bridge |
 
@@ -99,6 +99,7 @@ On connect, nodes reconcile group history so all members converge.
 - **Disk as source of truth:** history is read from `history.json` on disk (not the in-memory monitor, which may be unloaded), and the disk fast-path exposes a stable `message_id` (normalised via `setdefault`) for dedup.
 - **message_id dedup:** both disk- and monitor-paths expose `message_id`; the frontend merges by it, fixing the post-sync double-render (GROUP-HISTORY-UI-DOUBLE-LOAD).
 - **GROUP_SYNC tie-break:** metadata convergence uses the version counter; equal versions resolve by deterministic content hash. Topic edits broadcast a `GROUP_SYNC` with an incremented version.
+- **Two selectors on `GROUP_HISTORY_REQUEST`:** `authors` narrows the answer to the authors whose per-author digests differ; `content_hashes` asks for individual records by their `content_hash` and takes precedence over `authors`. An empty list means "nothing", never "everything". A request that carries neither is answered with the whole history, which is what a node from before the fields sends. The hash selector exists for a voter missing records of a proposal's extraction window: see *Knowledge Commits* below.
 
 ## Features
 
@@ -113,6 +114,7 @@ On connect, nodes reconcile group history so all members converge.
 
 ### Knowledge Commits
 - "End Session & Save Knowledge" works for groups; a `ConversationMonitor` keyed by `group_id` tracks the conversation, and `consensus_manager` runs multi-party voting (devil's advocate for 3+ participants).
+- A proposal names every message its extraction read, by `content_hash`. A voter that does not hold all of them cannot judge the same text, so its vote is **held**: the missing records are requested from the connected participants through `GROUP_HISTORY_REQUEST` with `content_hashes`, and the vote is cast for real once they merge. If the answer arrives without them, or with records that fail their own signature, the vote is dropped and the person is told which of the two happened (`knowledge_vote_deferred` / `knowledge_vote_resolved`). A record refused by signature cannot be rescued this way: its author has to repost, and the new proposal is extracted after that.
 
 ### Group Sleep & Morning Briefs
 - A per-group **Sleep** button triggers sleep consolidation; agents post **morning briefs** into the group chat. `_delete_group_briefs` removes the previous briefs when new ones arrive.

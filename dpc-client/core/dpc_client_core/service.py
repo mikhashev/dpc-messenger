@@ -400,6 +400,12 @@ class CoreService:
         self._transcription_locks = self.voice_service._transcription_locks
         self._voice_transcription_settings = self.voice_service._voice_transcription_settings
 
+        # Which history we actually asked for, and of whom. A response replaces
+        # a whole conversation, so an unclaimed one is an assertion, not a reply.
+        # Built here because KnowledgeService below asks through it.
+        from .message_handlers.chat_history_handlers import HistoryRequestRegistry
+        self.history_requests = HistoryRequestRegistry()
+
         # Knowledge — managed by KnowledgeService (Phase 1b refactor)
         try:
             self.knowledge_service = KnowledgeService(
@@ -418,6 +424,7 @@ class CoreService:
                 broadcast_to_peers=self._broadcast_to_peers,
                 broadcast_to_group=self._broadcast_to_group,
                 compute_context_hash=self._compute_context_hash,
+                history_requests=self.history_requests,
             )
         except Exception as e:
             logger.error(
@@ -460,10 +467,6 @@ class CoreService:
         self.pending_certificate_requests = set()
         self._max_processed_ids = 1000  # Limit set size
         self._history_requested_peers = set()  # Track peers we've requested history from (prevents infinite loops)
-        # Which history we actually asked for, and of whom. A response replaces
-        # a whole conversation, so an unclaimed one is an assertion, not a reply.
-        from .message_handlers.chat_history_handlers import HistoryRequestRegistry
-        self.history_requests = HistoryRequestRegistry()
         # (peer, group) pairs a peer has refused us this session. Our roster is
         # what makes us ask, and removal never reaches the node being removed,
         # so without this every reconnect earns another refusal for the same

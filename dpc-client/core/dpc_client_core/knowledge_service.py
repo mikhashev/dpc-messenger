@@ -25,6 +25,7 @@ import asyncio
 import json
 import logging
 import re
+import uuid
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
@@ -35,6 +36,10 @@ from dpc_protocol.pcm_core import PCMCore
 logger = logging.getLogger(__name__)
 
 NODE_KEY = "node.key"
+
+# Slice of the ten-minute voting deadline a deferred vote spends waiting for the
+# records it asked for, before the person is told nobody answered.
+PENDING_VOTE_TIMEOUT_SECONDS = 90
 
 
 class KnowledgeService:
@@ -71,6 +76,7 @@ class KnowledgeService:
         broadcast_to_peers: Callable,
         broadcast_to_group: Callable,
         compute_context_hash: Callable,
+        history_requests=None,
     ):
         # Owned state
         self.pcm_core = pcm_core
@@ -99,6 +105,15 @@ class KnowledgeService:
         self._broadcast_to_peers_func = broadcast_to_peers
         self._broadcast_to_group_func = broadcast_to_group
         self._compute_context_hash = compute_context_hash
+        # The register of history requests this node has made. A response is
+        # only merged if it answers one of them, so a vote that asks for the
+        # records it is missing has to announce the request through it.
+        self.history_requests = history_requests
+
+        # proposal_id -> a vote that could not be cast because this history
+        # does not hold the messages the proposal was extracted from, plus the
+        # request sent for exactly those messages. See _defer_vote_for_missing_records.
+        self._pending_votes: Dict[str, Dict[str, Any]] = {}
 
         # Results cache for agent store-and-poll (proposal_id → result dict)
         self.pending_results: Dict[str, Dict] = {}
@@ -535,14 +550,17 @@ class KnowledgeService:
             return None
 
         logger.warning(
-            "Refusing vote on %s: %d of %d messages in the extraction window are "
-            "missing from this history",
+            "Vote on %s held back: %d of %d messages in the extraction window are "
+            "missing from this history (%s%s)",
             proposal_id, len(missing), len(window),
+            ", ".join(h[:12] for h in missing[:5]),
+            ", ..." if len(missing) > 5 else "",
         )
         return {
             "status": "error",
             "reason": "history_drift",
             "missing_messages": len(missing),
+            "missing_hashes": missing,
             "window_size": len(window),
             "message": (
                 f"This proposal was extracted from messages you do not have "
@@ -558,6 +576,7 @@ class KnowledgeService:
         comment: str = None,
         entries: list = None,
         summary: str = None,
+        _allow_defer: bool = True,
     ) -> Dict[str, Any]:
         """Cast vote on a knowledge commit proposal.
 
@@ -621,6 +640,10 @@ class KnowledgeService:
 
             drift = self._history_drift(proposal_id)
             if drift:
+                if _allow_defer:
+                    return await self._defer_vote_for_missing_records(
+                        proposal_id, drift, vote, comment
+                    )
                 return drift
 
             success = await self.consensus_manager.cast_vote(
@@ -666,6 +689,256 @@ class KnowledgeService:
         except Exception as e:
             logger.error("Error voting on knowledge commit: %s", e, exc_info=True)
             return {"status": "error", "message": str(e)}
+
+    # -------------------------------------------------------------
+    # A vote held back until the records it judges arrive
+    # -------------------------------------------------------------
+
+    def _pending_vote_store(self) -> Dict[str, Dict[str, Any]]:
+        """The deferred votes, tolerating a service built without __init__."""
+        store = getattr(self, "_pending_votes", None)
+        if store is None:
+            store = {}
+            self._pending_votes = store
+        return store
+
+    def _peers_to_ask(self, session) -> List[str]:
+        """Connected participants of this proposal, ourselves excluded.
+
+        Falls back to every connected peer when the proposal names none we hold
+        a connection to: any member of the group may hold the records.
+        """
+        p2p = getattr(self, "p2p_manager", None)
+        if p2p is None:
+            return []
+        connected = set(getattr(p2p, "peers", None) or {})
+        me = getattr(p2p, "node_id", None)
+        participants = list(getattr(session.proposal, "participants", None) or [])
+        asked = [n for n in participants if n != me and n in connected]
+        if asked:
+            return asked
+        return [n for n in connected if n != me]
+
+    async def _emit_vote_event(self, event: str, payload: Dict[str, Any]) -> None:
+        api = getattr(self, "local_api", None)
+        if api is None:
+            return
+        try:
+            await api.broadcast_event(event, payload)
+        except Exception as e:  # a UI that is not listening must not lose a vote
+            logger.debug("Could not broadcast %s: %s", event, e)
+
+    async def _defer_vote_for_missing_records(
+        self,
+        proposal_id: str,
+        drift: Dict[str, Any],
+        vote: str,
+        comment: Optional[str],
+    ) -> Dict[str, Any]:
+        """Ask the peers for the messages this vote is missing, and hold it.
+
+        The request names them by `content_hash`, so the answer is the
+        extraction window rather than a whole history.
+        `GroupHistoryResponseHandler` calls `retry_pending_votes` after every
+        answer, including an empty one.
+
+        Returns a `pending` result when the request went out, and the drift
+        refusal itself when there is nobody to ask.
+        """
+        session = self.consensus_manager.sessions.get(proposal_id)
+        conversation_id = (
+            getattr(session.proposal, "conversation_id", "") if session is not None else ""
+        )
+        missing = list(drift.get("missing_hashes") or [])
+        registry = getattr(self, "history_requests", None)
+        peers = self._peers_to_ask(session) if session is not None else []
+
+        if not (missing and peers and registry is not None
+                and str(conversation_id).startswith("group-")):
+            refused = dict(drift)
+            refused["retry"] = "no_peer_to_ask"
+            refused["message"] = drift.get("message", "") + (
+                " No connected peer could be asked for them."
+            )
+            return refused
+
+        store = self._pending_vote_store()
+        previous = store.get(proposal_id)
+        if previous is not None and previous.get("timeout_task") is not None:
+            previous["timeout_task"].cancel()
+
+        request_ids: List[str] = []
+        asked: List[str] = []
+        for peer in peers:
+            request_id = uuid.uuid4().hex[:8]
+            try:
+                registry.note(peer, conversation_id, request_id)
+                await self.p2p_manager.send_message_to_peer(peer, {
+                    "command": "GROUP_HISTORY_REQUEST",
+                    "payload": {
+                        "group_id": conversation_id,
+                        "content_hashes": missing,
+                        "request_id": request_id,
+                    },
+                })
+            except Exception as e:
+                logger.warning(
+                    "Could not ask %s for %d missing record(s): %s",
+                    peer[:20], len(missing), e,
+                )
+                continue
+            request_ids.append(request_id)
+            asked.append(peer)
+
+        if not asked:
+            refused = dict(drift)
+            refused["retry"] = "request_failed"
+            return refused
+
+        store[proposal_id] = {
+            "proposal_id": proposal_id,
+            "conversation_id": conversation_id,
+            "vote": vote,
+            "comment": comment,
+            "missing": missing,
+            "asked": asked,
+            "request_ids": request_ids,
+            "timeout_task": None,
+        }
+        store[proposal_id]["timeout_task"] = asyncio.create_task(
+            self._deferred_vote_timed_out(proposal_id)
+        )
+
+        logger.info(
+            "Vote %s on %s deferred: asked %d peer(s) for %d missing record(s)",
+            vote, proposal_id, len(asked), len(missing),
+        )
+        held = {
+            "proposal_id": proposal_id,
+            "conversation_id": conversation_id,
+            "vote": vote,
+            "missing_messages": len(missing),
+            "window_size": drift.get("window_size"),
+            "asked_peers": asked,
+            "message": (
+                f"{len(missing)} of {drift.get('window_size')} messages this proposal "
+                f"was read from are missing here. Asked {len(asked)} peer(s) for them; "
+                f"your {vote} is cast as soon as they arrive."
+            ),
+        }
+        await self._emit_vote_event("knowledge_vote_deferred", held)
+        return dict(held, status="pending", reason="history_drift")
+
+    async def retry_pending_votes(
+        self,
+        group_id: str,
+        rejected: Optional[List[Dict[str, Any]]] = None,
+        request_id: Optional[str] = None,
+    ) -> None:
+        """Re-try the votes deferred on this group after a history answer.
+
+        Args:
+            group_id: the conversation the answer belonged to
+            rejected: records the merge refused, from `last_merge_rejected`. A
+                record that arrived and failed its own signature is a different
+                verdict from one that never came, and the person is told which.
+            request_id: the request the answer echoed, for the log only
+        """
+        store = self._pending_vote_store()
+        waiting = [pid for pid, p in store.items() if p.get("conversation_id") == group_id]
+        if not waiting:
+            return
+
+        for proposal_id in waiting:
+            pending = store.pop(proposal_id, None)
+            if pending is None:
+                continue
+            task = pending.get("timeout_task")
+            if task is not None:
+                task.cancel()
+
+            drift = self._history_drift(proposal_id)
+            if drift is None:
+                logger.info(
+                    "Records for %s arrived (request %s), casting the held %s",
+                    proposal_id, request_id, pending["vote"],
+                )
+                result = await self.vote_knowledge_commit(
+                    proposal_id,
+                    pending["vote"],
+                    pending.get("comment"),
+                    _allow_defer=False,
+                )
+                await self._emit_vote_event("knowledge_vote_resolved", {
+                    "proposal_id": proposal_id,
+                    "conversation_id": group_id,
+                    "vote": pending["vote"],
+                    "status": result.get("status", "error"),
+                    "reason": result.get("reason"),
+                    "message": result.get("message", ""),
+                })
+                continue
+
+            still_missing = set(drift.get("missing_hashes") or [])
+            unverifiable = [
+                r for r in (rejected or [])
+                if r.get("content_hash") in still_missing
+            ]
+            if unverifiable:
+                reason = "unverifiable_record"
+                message = (
+                    f"{len(unverifiable)} of the missing messages arrived and did not "
+                    f"verify, so they were not stored. This proposal cannot be voted on "
+                    f"here: it was read from text this node cannot confirm."
+                )
+            else:
+                reason = "records_not_held"
+                message = (
+                    f"The peer answered without {len(still_missing)} of the messages this "
+                    f"proposal was read from. Your {pending['vote']} was not cast."
+                )
+            logger.warning(
+                "Deferred vote on %s dropped: %s (%d record(s) still missing)",
+                proposal_id, reason, len(still_missing),
+            )
+            await self._emit_vote_event("knowledge_vote_resolved", {
+                "proposal_id": proposal_id,
+                "conversation_id": group_id,
+                "vote": pending["vote"],
+                "status": "error",
+                "reason": reason,
+                "missing_messages": len(still_missing),
+                "unverifiable": [r.get("content_hash") for r in unverifiable],
+                "message": message,
+            })
+
+    async def _deferred_vote_timed_out(self, proposal_id: str) -> None:
+        """Nobody answered in time: say so instead of holding the vote forever."""
+        try:
+            await asyncio.sleep(PENDING_VOTE_TIMEOUT_SECONDS)
+        except asyncio.CancelledError:
+            return
+        pending = self._pending_vote_store().pop(proposal_id, None)
+        if pending is None:
+            return
+        logger.warning(
+            "Deferred vote on %s dropped: no answer from %s within %ds",
+            proposal_id, ", ".join(x[:20] for x in pending.get("asked", [])),
+            PENDING_VOTE_TIMEOUT_SECONDS,
+        )
+        await self._emit_vote_event("knowledge_vote_resolved", {
+            "proposal_id": proposal_id,
+            "conversation_id": pending.get("conversation_id"),
+            "vote": pending.get("vote"),
+            "status": "error",
+            "reason": "no_answer",
+            "missing_messages": len(pending.get("missing") or []),
+            "message": (
+                f"No peer sent the missing messages within "
+                f"{PENDING_VOTE_TIMEOUT_SECONDS} seconds. Your "
+                f"{pending.get('vote')} was not cast."
+            ),
+        })
 
     async def _ai_agent_vote_on_proposal(
         self, proposal_id: str, ai_agent_node_id: str

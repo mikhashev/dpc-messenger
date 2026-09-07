@@ -677,11 +677,16 @@ class GroupHistoryRequestHandler(MessageHandler):
         """
         group_id = payload.get("group_id")
         authors = payload.get("authors")
+        # Exact records by hash — a voter fetching a proposal's extraction
+        # window. Wins over `authors` when both are present.
+        content_hashes = payload.get("content_hashes")
 
         self.logger.info(
             "Received GROUP_HISTORY_REQUEST from %s for group %s (%s)",
             sender_node_id[:20], group_id,
-            "whole history" if authors is None else f"{len(authors)} author(s)",
+            f"{len(content_hashes)} content hash(es)" if content_hashes is not None
+            else "whole history" if authors is None
+            else f"{len(authors)} author(s)",
         )
 
         if not may_share_group(self.service.group_manager, group_id, sender_node_id):
@@ -700,11 +705,18 @@ class GroupHistoryRequestHandler(MessageHandler):
             return None
 
         # Export history and send back
-        history = monitor.export_history(authors=authors) if hasattr(monitor, "export_history") else []
+        if not hasattr(monitor, "export_history"):
+            history = []
+        elif content_hashes is not None:
+            history = monitor.export_history(content_hashes=content_hashes)
+        else:
+            history = monitor.export_history(authors=authors)
         response = {
             "group_id": group_id,
             "history": history,
         }
+        if content_hashes is not None:
+            response["content_hashes"] = content_hashes
         # Echoed so the asker can tell this answer from an assertion.
         request_id = payload.get("request_id")
         if request_id:
@@ -779,19 +791,33 @@ class GroupHistoryResponseHandler(MessageHandler):
             )
             return None
 
+        # A vote waiting on records of this group is re-tried after every
+        # answer, including an empty one: "the peer had nothing" is an outcome
+        # a deferred vote needs to hear too.
+        retry_votes = getattr(
+            getattr(self.service, "knowledge_service", None), "retry_pending_votes", None
+        )
+
         if not history:
+            if retry_votes is not None:
+                await retry_votes(group_id, rejected=[], request_id=request_id)
             return None
 
         monitor = self.service._get_or_create_conversation_monitor(group_id)
 
         # v0.20.0: Use merge_history instead of import_history
         # This handles duplicates and saves to disk
+        rejected = []
         if hasattr(monitor, "merge_history"):
             added = monitor.merge_history(history)
+            rejected = list(getattr(monitor, "last_merge_rejected", []) or [])
             self.logger.info("Merged %d new messages into group %s history", added, group_id)
         elif hasattr(monitor, "import_history"):
             # Fallback for older monitors
             monitor.import_history(history)
+
+        if retry_votes is not None:
+            await retry_votes(group_id, rejected=rejected, request_id=request_id)
 
         # Notify UI to refresh chat
         await self.service.local_api.broadcast_event("group_history_synced", {

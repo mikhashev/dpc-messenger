@@ -740,6 +740,14 @@ Send a voice message and it will be transcribed and processed\\.
                 # Edit the proposal message to show vote was cast; final result
                 # will arrive via notify_knowledge_result once all votes are in.
                 await query.edit_message_text(label, parse_mode="MarkdownV2")
+            elif status == "pending":
+                # Held, not failed: the records the proposal was read from are
+                # on their way, and the vote is cast when they arrive.
+                msg = escape_markdown(result.get("message", "Waiting for the missing messages"))
+                await query.edit_message_text(
+                    f"⏳ *Vote held:* {msg}",
+                    parse_mode="MarkdownV2",
+                )
             else:
                 msg = escape_markdown(result.get("message", "Unknown error"))
                 await query.edit_message_text(

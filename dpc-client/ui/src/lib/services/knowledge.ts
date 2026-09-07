@@ -26,6 +26,15 @@ export const knowledgeCommitResult = writable<KnowledgeCommitResultEvent | null>
 // only honest thing left is to say so where the person is typing.
 export const votingConversationId = writable<string | null>(null);
 
+// A vote the backend is holding: the proposal was read from messages this node
+// does not hold, and they have been requested from the peer.
+export const knowledgeVoteStatus = writable<{
+    proposal_id: string;
+    status: 'pending' | 'success' | 'error';
+    reason?: string;
+    message: string;
+} | null>(null);
+
 // Knowledge extraction failure (Phase 4)
 export const extractionFailure = writable<ExtractionFailureEvent | null>(null);
 
