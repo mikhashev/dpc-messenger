@@ -5169,7 +5169,14 @@ class CoreService:
         }
         # All four or none: a partial set proves nothing and invites a receiver
         # to improvise the rest.
-        return fields if len(fields) == 4 else {}
+        if len(fields) != 4:
+            return {}
+        # What v2 signs in place of the calls. Absent on a record with none,
+        # and absent on v1 records, where the calls themselves are the field.
+        digest = record.get("tool_calls_digest")
+        if digest:
+            fields["tool_calls_digest"] = digest
+        return fields
 
     async def send_group_message(self, group_id: str, text: str) -> Dict[str, Any]:
         """Send a text message to all group members.
@@ -5558,8 +5565,9 @@ class CoreService:
             "is_agent": True,
             "msg_index": msg_index,
             **self._signature_fields_for(monitor, message_id),
-            # The same list the record was signed with; [] and None hash alike
-            # (message_signing._canonical_json), so an empty one may travel as [].
+            # The calls are the owner's: they go to this node's own UI and no
+            # further. What a peer receives is their digest, which is what v2
+            # signs, so it can verify the record without holding them (ADR-042).
             "tool_calls": tool_calls or [],
         }
 
@@ -5575,7 +5583,8 @@ class CoreService:
                 self._processed_message_ids.discard(k)
 
         # Relay to P2P peers so remote members see the agent response
-        await self._broadcast_to_group(group_id, {"command": "GROUP_TEXT", "payload": payload})
+        for_peers = {k: v for k, v in payload.items() if k != "tool_calls"}
+        await self._broadcast_to_group(group_id, {"command": "GROUP_TEXT", "payload": for_peers})
 
         # Update token count — use agent's tokens_after_last_response if available
         history_tokens = sum(len(m.get("content", "") or "") for m in monitor.get_message_history()) // 4

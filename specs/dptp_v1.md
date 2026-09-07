@@ -1772,7 +1772,9 @@ authority participates.
 A message signature covers a **canonical preimage**, never the message dict
 and never a locally rebuilt string.
 
-**Version tag:** `dptp-msg-v1` (constant `PREIMAGE_VERSION`)
+**Version tag:** `dptp-msg-v2` (constant `PREIMAGE_VERSION`). `dptp-msg-v1` remains
+readable for good — a verifier builds the preimage for the version the record
+declares, never for the one it happens to run (`LEGACY_PREIMAGE_VERSIONS`).
 
 **Covered fields, in this order — the order is part of the format:**
 
@@ -1787,13 +1789,24 @@ and never a locally rebuilt string.
 | 7 | `agent_owner` | not an agent message |
 | 8 | `timestamp`, canonicalised | absent |
 | 9 | `content` | empty message |
-| 10 | `tool_calls`, canonical JSON | not an agent message |
+| 10 | **v2:** `sha256` of the canonical JSON of `tool_calls`, hex — **v1:** that JSON itself | no tool calls (both spell it as empty) |
+
+**Why the digest (ADR-042).** A verifier has to hold every field it checks, so
+covering the calls themselves meant shipping them: an agent's tool inputs, full
+outputs and round reasoning were replicated to every group member and kept on
+their disks. Under v2 only the digest travels — the author still binds what its
+agent did, and the record of the doing stays on the node that ran it. A peer that
+later needs the content asks for it and checks it against the digest it holds.
+
+`tool_calls` is therefore **not** a wire field of `GROUP_TEXT` in v2; the record
+carries `tool_calls_digest` beside `content_hash`, and history export ships the
+digest and never the calls.
 
 **Encoding.** Each field is UTF-8 encoded and emitted as
 `<byte-length>":"<bytes>`, concatenated in the order above:
 
 ```
-11:dptp-msg-v1 21:group-b88b65076b85 36:c0ffee00-… …
+11:dptp-msg-v2 21:group-b88b65076b85 36:c0ffee00-… …
 ```
 (spaces shown for readability only; the wire form has none)
 
@@ -2088,7 +2101,7 @@ DPTP is designed to be extensible. New commands can be added by:
 ## 9. Changelog
 
 ### v1.6 (August 2026)
-- **§4.1 Message Signing** — the canonical preimage (`dptp-msg-v1`), added with
+- **§4.1 Message Signing** — the canonical preimage (`dptp-msg-v2`; `v1` still read), added with
   the implementation in `d92f5012` and listed here only now
 - **§4.2 Verdicts on receipt (new)** — the four verdicts and the rules that
   follow: the verdict belongs to the receiver, absence of a signature is

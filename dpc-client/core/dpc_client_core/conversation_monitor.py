@@ -274,7 +274,12 @@ def _write_history_messages(
     except OSError as exc:
         logger.warning("Could not update the chain anchor beside %s: %s", path, exc)
 from dpc_protocol.knowledge_commit import KnowledgeCommitProposal
-from dpc_protocol.message_signing import PREIMAGE_VERSION, message_content_hash
+from dpc_protocol.message_signing import (
+    LEGACY_PREIMAGE_VERSIONS,
+    PREIMAGE_VERSION,
+    digest_of_tool_calls,
+    message_content_hash,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -1847,7 +1852,8 @@ PARTICIPANTS' CULTURAL CONTEXTS:
             # here is how a checked signature became the checker's own, which
             # is why signer_node_id used to name whoever stored the message
             # rather than whoever wrote it.
-            for field in ("content_hash", "signature", "signer_node_id", "preimage_version"):
+            for field in ("content_hash", "signature", "signer_node_id",
+                          "preimage_version", "tool_calls_digest"):
                 if signature_fields.get(field):
                     message_dict[field] = signature_fields[field]
         else:
@@ -1867,6 +1873,9 @@ PARTICIPANTS' CULTURAL CONTEXTS:
                 content=content,
                 tool_calls=tool_calls,
             )
+            # The value the preimage actually covers under v2. Stored, because a
+            # peer receives this and never the calls themselves (ADR-042).
+            message_dict["tool_calls_digest"] = digest_of_tool_calls(tool_calls)
             signer = self._get_signer()
             if signer:
                 message_dict["signature"] = signer.sign_commit(message_dict["content_hash"])
@@ -2058,18 +2067,31 @@ PARTICIPANTS' CULTURAL CONTEXTS:
         if not content_hash:
             return False
         return any(
-            content_hash == message_content_hash(
-                conversation_id=room,
-                message_id=stored.get("id"),
-                sender_node_id=stored.get("sender_node_id"),
-                sender_name=stored.get("sender_name"),
-                sender_type=stored.get("sender_type"),
-                agent_owner=stored.get("agent_owner"),
-                timestamp=stored.get("timestamp"),
-                content=stored.get("content") or "",
-                tool_calls=stored.get("tool_calls"),
-            )
+            content_hash == self._recompute_hash(stored, room)
             for room in self._room_candidates()
+        )
+
+    def _recompute_hash(self, record: Dict[str, Any], room: str) -> str:
+        """The record's own hash, under the preimage version it declares.
+
+        A v1 record is covered over its tool calls and a v2 record over their
+        digest, so the version has to be read from the record rather than
+        assumed — a verifier that assumes the current one rejects every record
+        written before it.
+        """
+        version = record.get("preimage_version") or LEGACY_PREIMAGE_VERSIONS[0]
+        return message_content_hash(
+            conversation_id=room,
+            message_id=record.get("id"),
+            sender_node_id=record.get("sender_node_id"),
+            sender_name=record.get("sender_name"),
+            sender_type=record.get("sender_type"),
+            agent_owner=record.get("agent_owner"),
+            timestamp=record.get("timestamp"),
+            content=record.get("content") or "",
+            tool_calls=record.get("tool_calls"),
+            tool_calls_digest=record.get("tool_calls_digest"),
+            version=version,
         )
 
     def get_last_msg_index(self) -> int:
@@ -2410,19 +2432,21 @@ PARTICIPANTS' CULTURAL CONTEXTS:
             # them for its own. Sending them made the receiver's chain break on
             # every load, and they never verified anything on the far side
             # because the hash covers `role`, which differs by reader.
-            # tool_calls is inside the hash; an export without it fails its
-            # own signature on the receiving side.
+            # tool_calls does not travel: what v2 signs is their digest, and
+            # the calls are the owner's (ADR-042). A v1 record's hash does cover
+            # them, so a v1 record that has any is unverifiable on the far side
+            # either way — the eleven this pair already carries.
             for field in ("sender_node_id", "sender_name", "sender_type", "agent_owner",
-                          "isAgent", "tool_calls"):
+                          "isAgent"):
                 if field in msg:
                     exported_msg[field] = msg[field]
             # Signature fields travel only when they were made over the current
             # preimage. A record predating it carries a hash of a different
             # shape, and shipping it would have the receiver recompute, find a
             # mismatch, and reject a legitimate message as tampered.
-            if msg.get("preimage_version") == PREIMAGE_VERSION:
+            if msg.get("preimage_version") in (PREIMAGE_VERSION, *LEGACY_PREIMAGE_VERSIONS):
                 for field in ("content_hash", "signature", "signer_node_id",
-                              "preimage_version"):
+                              "preimage_version", "tool_calls_digest"):
                     if field in msg:
                         exported_msg[field] = msg[field]
             exported.append(exported_msg)
@@ -2497,11 +2521,14 @@ PARTICIPANTS' CULTURAL CONTEXTS:
                           "preimage_version", "verification"):
                 if field in msg:
                     imported_msg[field] = msg[field]
-            # tool_calls is inside the hash the record was just verified
-            # against; dropped here, the re-export failed at the next receiver.
-            # Stored only when non-empty, as add_message does.
+            # The digest is what v2 signs, so it has to survive an import or the
+            # record fails its own signature on re-export. The calls themselves
+            # no longer travel at all (ADR-042); a v1 record that still carries
+            # some is kept as it arrived.
             if msg.get("tool_calls"):
                 imported_msg["tool_calls"] = msg["tool_calls"]
+            if msg.get("tool_calls_digest"):
+                imported_msg["tool_calls_digest"] = msg["tool_calls_digest"]
             # msg_index and chain_hash are this node's, not the sender's.
             imported_msg = self._chain_locally(imported_msg)
             if "attachments" in msg:
@@ -3272,11 +3299,12 @@ PARTICIPANTS' CULTURAL CONTEXTS:
                 return None, "unsigned, and reject_unsigned is on"
             return dict(message, verification="legacy"), "legacy"
 
-        if message.get("preimage_version") != PREIMAGE_VERSION:
+        if message.get("preimage_version") not in (PREIMAGE_VERSION, *LEGACY_PREIMAGE_VERSIONS):
             # Signed over a preimage we cannot recompute — a node one version
             # ahead or behind. Refusing that is not a security decision, it is
             # an outage, so it is treated as legacy exactly as the live path
-            # treats it.
+            # treats it. Versions we still know how to build are recomputed
+            # rather than waved through (ADR-042).
             if self._reject_unsigned():
                 return None, "preimage %s cannot be recomputed" % message.get("preimage_version")
             return dict(message, verification="legacy"), "legacy"
@@ -3286,17 +3314,7 @@ PARTICIPANTS' CULTURAL CONTEXTS:
         # inherits that. The room name comes from us, never from the message —
         # otherwise a signed message from another room verifies happily here.
         if not any(
-            content_hash == message_content_hash(
-                conversation_id=room,
-                message_id=message.get("id"),
-                sender_node_id=message.get("sender_node_id"),
-                sender_name=message.get("sender_name"),
-                sender_type=message.get("sender_type"),
-                agent_owner=message.get("agent_owner"),
-                timestamp=message.get("timestamp"),
-                content=message.get("content") or "",
-                tool_calls=message.get("tool_calls"),
-            )
+            content_hash == self._recompute_hash(message, room)
             for room in self._room_candidates()
         ):
             return None, "content does not match its hash"

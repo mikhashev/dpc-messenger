@@ -21,7 +21,7 @@ from types import SimpleNamespace
 import pytest
 
 from dpc_client_core.conversation_monitor import ConversationMonitor
-from dpc_protocol.message_signing import message_content_hash
+from dpc_protocol.message_signing import PREIMAGE_VERSION, message_content_hash
 
 GROUP = "group-1234567890ab"
 ALICE = "dpc-node-" + "a" * 32
@@ -49,6 +49,7 @@ def _stored(msg_id, **extra):
         "content": f"message {msg_id}",
     }
     row.update(extra)
+    row["preimage_version"] = PREIMAGE_VERSION
     row["content_hash"] = message_content_hash(
         conversation_id=GROUP,
         message_id=msg_id,

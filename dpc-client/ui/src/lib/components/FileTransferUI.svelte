@@ -250,14 +250,16 @@
         disabled={isTranscribing}
         title={isTranscribing
           ? "Loading Whisper model…"
-          : (isLocalAIChat ? "Transcribe and send to AI" : "Transcribe into the message box, send no audio")}
+          : (isLocalAIChat
+            ? "Transcribe and send to AI"
+            : "Put the words in the message box — nothing is sent, and you can edit them first")}
       >
         {#if isTranscribing}
           <span class="transcribe-spinner" aria-hidden="true"></span> Loading…
         {:else if isLocalAIChat}
           📝 Send
         {:else}
-          📝 As text
+          📝 To input box
         {/if}
       </button>
     {/if}

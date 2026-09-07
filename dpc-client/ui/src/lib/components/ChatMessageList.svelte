@@ -12,6 +12,16 @@
   import { agentsList } from '$lib/services/agents';
   import type { Message, Mention } from '$lib/types.js';
 
+  // Whose agent ran these calls. A tool call carries its input, its full
+  // output and the round's reasoning — the owner's data (ADR-042). Records
+  // that arrived before the calls stopped travelling are still on disk here;
+  // this is what keeps them folded away rather than one click from a reader.
+  function ownsToolCalls(msg: any): boolean {
+    const owner = msg?.agentOwner;
+    if (!owner) return true;            // our own local record, or one predating the field
+    return !selfNodeId || owner === selfNodeId;
+  }
+
   // Props (Svelte 5 runes mode)
   let {
     messages,
@@ -185,7 +195,7 @@
         {/if}
 
         <!-- Tool calls collapsible (ADR-030 v3 / UI-AGENT-ACTIONS-COLLAPSIBLE) -->
-        {#if isAiSender(msg.sender, msg) && msg.tool_calls && msg.tool_calls.length > 0}
+        {#if isAiSender(msg.sender, msg) && msg.tool_calls && msg.tool_calls.length > 0 && ownsToolCalls(msg)}
           <AgentProgressCollapsible
             toolCalls={msg.tool_calls}
             agentName={msg.senderName || ''}

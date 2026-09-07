@@ -16,6 +16,7 @@ a hash which does not reproduce.
 import pytest
 
 from dpc_client_core.conversation_monitor import ConversationMonitor
+from dpc_protocol.message_signing import message_content_hash
 
 GROUP = "group-window-test"
 ALICE = "dpc-node-" + "a" * 32
@@ -61,19 +62,54 @@ def test_a_record_edited_under_its_own_hash_is_left_out():
 
 
 def test_the_tool_calls_shape_is_the_one_that_matters():
-    """The live case: a hash taken before the calls were stored beside it.
+    """The live case, and it is a v1 case: a hash taken before the calls were
+    stored beside it.
 
-    This is what a peer refuses with «content does not match its hash», and it
-    is why a single old agent post could hold every other node's vote forever.
+    Under `dptp-msg-v1` the calls were inside the preimage, so appending them
+    after signing left a record no receiver could reproduce — the eleven this
+    pair still carries. Under v2 the preimage covers their digest, so the same
+    mistake is harmless; the rule this function enforces is unchanged, but the
+    records it now catches are the old ones.
     """
     m = _monitor()
     stored = m.message_history[1]
     assert m._hash_matches_record(stored)
 
+    stored["preimage_version"] = "dptp-msg-v1"
+    stored["content_hash"] = message_content_hash(
+        conversation_id=GROUP,
+        message_id=stored.get("id"),
+        sender_node_id=stored.get("sender_node_id"),
+        sender_name=stored.get("sender_name"),
+        sender_type=stored.get("sender_type"),
+        agent_owner=stored.get("agent_owner"),
+        timestamp=stored.get("timestamp"),
+        content=stored.get("content") or "",
+        tool_calls=None,
+        version="dptp-msg-v1",
+    )
+    assert m._hash_matches_record(stored), "a v1 record with no calls must still verify"
+
     stored["tool_calls"] = [{"function": {"name": "read_file"}, "round_text": "..."}]
 
     assert not m._hash_matches_record(stored)
     assert stored["content_hash"] not in _window(m)
+
+
+def test_appending_calls_after_signing_is_harmless_under_v2():
+    """The bug class that cost this pair two days cannot recur.
+
+    v2 signs the digest the record carries, so calls written into the record
+    afterwards change nothing a peer checks — which is also why they no longer
+    need to travel at all.
+    """
+    m = _monitor()
+    stored = m.message_history[1]
+
+    stored["tool_calls"] = [{"function": {"name": "read_file"}, "round_text": "..."}]
+
+    assert m._hash_matches_record(stored)
+    assert stored["content_hash"] in _window(m)
 
 
 def test_a_record_with_no_hash_at_all_is_still_left_out():

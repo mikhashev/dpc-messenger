@@ -1,7 +1,7 @@
 ---
 adr: 042
 title: "An agent's tool calls belong to the node that ran them: sign a digest, ship no blob"
-status: proposed
+status: accepted
 date: 2026-09-07
 axis: honesty, collective
 deciders: [Mike]
@@ -15,9 +15,10 @@ session: "DPC Project, 2026-09-07 — Mike: «tool calls не должны уе�
 
 # ADR-042 — An agent's tool calls belong to the node that ran them
 
-> **Proposed.** The requirement is Mike's and is not in question; what needs deciding is
-> which of four mechanisms delivers it, and what happens to the records that have already
-> travelled. CC — draft; CC_linux — measurement of the receiving side; Ark — review.
+> **Accepted (Mike, 2026-09-07): option C — sign the digest, ship no blob.** Implemented the
+> same day; the three open questions below stay open and are his. CC — draft and
+> implementation; CC_linux — measurement of the receiving side and the correction to what
+> the UI actually does; Ark — review.
 
 ## Context
 
@@ -30,12 +31,18 @@ Three facts, measured on both nodes on 2026-09-07:
 1. **It travels.** `service.py:5543-5564` builds one payload with `"tool_calls": tool_calls
    or []`, broadcasts it to the local UI (`:5568`) and relays **the same object** to peers
    as `GROUP_TEXT` (`:5577`). There is no separate shape for a peer.
-2. **It is stored and shown by the receiver.** On the Linux node's disk, `history.json` of
-   this group holds six records with `tool_calls`, all authored by the Windows node's agent
-   — 52 foreign calls with their outputs, one of them 13 512 bytes of `execute_skill` with
-   the skill name and request text inside (CC_linux). The render gate is
-   `ChatMessageList.svelte:188`, `isAiSender(...) && msg.tool_calls?.length` — no comparison
-   with `agent_owner`, although the field reaches the UI (`messageMapper.ts:115`).
+2. **It is stored by the receiver and is one click from being read.** On the Linux node's
+   disk, `history.json` of this group holds six records with `tool_calls`, all authored by
+   the Windows node's agent — 52 foreign calls with their outputs, one of them 13 512 bytes
+   of `execute_skill` with the skill name and request text inside (CC_linux). They reach the
+   UI: that node's `ui.log` records `DIAG mapped: total=130, agents=65, withToolCalls=6`.
+   The render gate is `ChatMessageList.svelte:188`, `isAiSender(...) &&
+   msg.tool_calls?.length` — no comparison with `agent_owner`. **Precisely: rendered, not
+   displayed.** `AgentProgressCollapsible` opens on `isLive`, which a stored message does
+   not pass (`:48`), so a foreign agent's calls appear as a collapsed strip that any group
+   member expands with one click. Mike, looking at that node, correctly reports not seeing
+   them; CC_linux's first formulation («rendered to everyone») was withdrawn by him and is
+   corrected here.
 3. **It is the bulk of what is signed.** On the Windows node, the same group's 130 records
    carry 341 226 bytes of `content` and **1 845 639 bytes of `tool_calls`**, of which
    1 019 764 are tool outputs; the largest single output is 66 351 bytes. The signature
@@ -48,7 +55,8 @@ chat and in the history.** Today the opposite happens, silently, in both directi
 
 - **D1 — a tool output is the owner's data.** It contains file contents, paths, skill
   inputs and errors from the owner's machine. In a privacy-first product it is the last
-  thing that should be replicated to every group member by default.
+  thing that should be replicated to every group member by default. That it currently
+  arrives folded rather than open changes who has noticed, not who holds it.
 - **D2 — the audit trail must stay signed.** `tool_calls` entered the preimage in
   `50b8b6b6` for a named reason: in a star topology the relay is a real node forwarding
   someone else's message, and an unsigned field is one a relay rewrites unpunished
@@ -108,6 +116,30 @@ already holds — the proof stays available, it is just no longer pushed by defa
 - A's own record still shows its calls, and still verifies on A after a restart.
 - A v1 record with a blob still verifies on both nodes after the change.
 - The signed preimage of a message with 31 calls is the same length as one with none.
+
+## What was built, 2026-09-07
+
+`dptp-msg-v2`: the tenth preimage field is `sha256(_canonical_json(tool_calls))` instead of
+that JSON. `LEGACY_PREIMAGE_VERSIONS` keeps v1 readable, and **every recomputation now reads
+the version off the record** rather than assuming the running one — a verifier that assumes
+its own version rejects everything written before it. The rule lives in one place,
+`ConversationMonitor._recompute_hash`, used by both the incoming verifier and the
+extraction-window check; two sites computing one hash their own way is the defect class this
+pair spent two days inside.
+
+The calls stop travelling: the agent post builds one payload for its own UI and relays a
+copy without `tool_calls`, history export ships `tool_calls_digest` and never the calls, and
+a receiver stores the digest beside the signature. The UI gate (Q2, taken as read) hides a
+collapsible whose `agent_owner` is another node — the 52 records already on disk cannot be
+unsent, but they can stop being one click from a reader.
+
+A consequence worth naming: under v2 **writing calls into a record after it is signed is
+harmless**, because the signature covers the digest taken at signing time. That is the exact
+bug class behind #42, the eleven unportable records and both voting incidents, and it cannot
+recur. Pinned by its own test.
+
+Eight mutations of eight red; the three test files that encoded the v1 contract were
+rewritten to the v2 one and keep a v1 case each, because eleven v1 records are still here.
 
 ## References
 

@@ -6,7 +6,11 @@ import uuid
 from typing import Dict, Any, Optional
 from datetime import datetime, timezone
 from . import MessageHandler
-from dpc_protocol.message_signing import PREIMAGE_VERSION, message_content_hash
+from dpc_protocol.message_signing import (
+    LEGACY_PREIMAGE_VERSIONS,
+    PREIMAGE_VERSION,
+    message_content_hash,
+)
 from ..conversation_monitor import (
     Message as ConvMessage,
     ConversationMonitor,
@@ -103,7 +107,8 @@ class GroupTextHandler(MessageHandler):
         if not (content_hash and signature and signer):
             return transport_node_id, "legacy", None
 
-        if payload.get("preimage_version") != PREIMAGE_VERSION:
+        version = payload.get("preimage_version")
+        if version not in (PREIMAGE_VERSION, *LEGACY_PREIMAGE_VERSIONS):
             # Signed over a preimage we do not know how to recompute. Treated
             # as legacy rather than rejected: this is what a node one version
             # ahead or behind looks like, and cutting it off is not a security
@@ -126,7 +131,11 @@ class GroupTextHandler(MessageHandler):
             agent_owner=payload.get("agent_owner"),
             timestamp=payload.get("timestamp"),
             content=payload.get("text") or "",
+            # v2 carries the digest and not the calls, so a peer verifies what
+            # it was sent rather than what it was never given (ADR-042).
             tool_calls=payload.get("tool_calls"),
+            tool_calls_digest=payload.get("tool_calls_digest"),
+            version=version,
         )
         if expected != content_hash:
             self.logger.warning(
@@ -156,7 +165,8 @@ class GroupTextHandler(MessageHandler):
             "content_hash": content_hash,
             "signature": signature,
             "signer_node_id": signer,
-            "preimage_version": PREIMAGE_VERSION,
+            "preimage_version": version,
+            "tool_calls_digest": payload.get("tool_calls_digest"),
         }
         if result is None:
             self.logger.info(

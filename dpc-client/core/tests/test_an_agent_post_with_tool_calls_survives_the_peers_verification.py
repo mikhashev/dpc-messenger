@@ -27,7 +27,11 @@ from cryptography.x509.oid import NameOID
 from dpc_protocol import commit_integrity
 from dpc_protocol.commit_integrity import CommitSigner
 from dpc_protocol.crypto import generate_node_id
-from dpc_protocol.message_signing import PREIMAGE_VERSION, message_content_hash
+from dpc_protocol.message_signing import (
+    PREIMAGE_VERSION,
+    digest_of_tool_calls,
+    message_content_hash,
+)
 from dpc_client_core.conversation_monitor import ConversationMonitor
 from dpc_client_core.message_handlers.group_handler import GroupTextHandler
 from dpc_client_core.service import CoreService
@@ -154,14 +158,19 @@ def _hash_of(record, tool_calls):
 
 
 @pytest.mark.asyncio
-async def test_the_stored_record_is_signed_over_its_tool_calls(author, monkeypatch):
+async def test_the_stored_record_is_signed_over_the_digest_of_its_tool_calls(author, monkeypatch):
+    """v2: the author binds what its agent did, and keeps the doing to itself."""
     record, payload = await _post(author, monkeypatch)
 
     assert record["tool_calls"] == TOOL_CALLS
-    assert payload["tool_calls"] == record["tool_calls"]
+    assert record["tool_calls_digest"] == digest_of_tool_calls(TOOL_CALLS)
     assert record["content_hash"] == _hash_of(record, record["tool_calls"])
-    # The old behaviour, named so the guard below is not vacuous.
+    # Not vacuous: a different set of calls is a different signature.
     assert record["content_hash"] != _hash_of(record, None)
+
+    # The calls do not travel; their digest does (ADR-042).
+    assert "tool_calls" not in payload
+    assert payload["tool_calls_digest"] == record["tool_calls_digest"]
 
 
 @pytest.mark.asyncio
@@ -183,7 +192,8 @@ async def test_a_post_without_tool_calls_still_verifies(author, monkeypatch):
     record, payload = await _post(author, monkeypatch, tool_calls=None)
 
     assert "tool_calls" not in record
-    assert payload["tool_calls"] == []
+    assert "tool_calls" not in payload
+    assert record["tool_calls_digest"] == ""
     _, verdict, _ = GroupTextHandler(service=None)._authenticate_author(RELAY, payload)
     assert verdict == "verified"
 
@@ -255,13 +265,15 @@ async def test_the_peers_stored_copy_carries_what_its_hash_covers(author, monkey
     monitor = receiver.conversation_monitors[GROUP]
     stored = monitor.get_message_history()[-1]
     assert stored["id"] == payload["message_id"]
-    assert stored["tool_calls"] == TOOL_CALLS
-    assert stored["content_hash"] == _hash_of(stored, stored["tool_calls"])
+    # The peer holds the digest and never the calls — that is the whole point.
+    assert "tool_calls" not in stored
+    assert stored["tool_calls_digest"] == digest_of_tool_calls(TOOL_CALLS)
+    assert stored["content_hash"] == _hash_of(stored, TOOL_CALLS)
     assert stored["signer_node_id"] == node_id
 
     # A third node receiving this history recomputes over the export.
     exported = monitor.export_history()[-1]
-    assert exported["tool_calls"] == TOOL_CALLS
+    assert "tool_calls" not in exported
+    assert exported["tool_calls_digest"] == stored["tool_calls_digest"]
     kept, verdict = monitor._verify_incoming(exported)
     assert verdict == "verified", verdict
-    assert kept["tool_calls"] == TOOL_CALLS
