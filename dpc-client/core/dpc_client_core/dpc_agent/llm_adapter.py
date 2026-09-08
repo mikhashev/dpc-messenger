@@ -156,24 +156,26 @@ class DpcLlmAdapter:
     def _images_for_peer(images: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """Copies of the images carrying only what DPTP §3.4 lets the peer read.
 
-        `base64` is required there and `path` is the original filename, which the
-        receiver is nowhere promised it can open — on the peer's disk it is
-        missing or a different file. An entry without `base64` is malformed, and
-        one malformed entry drops the set: a partial set would reach the model as
-        the whole set.
+        `base64` and `mime_type` are both required there, and `path` is the
+        original filename, which the receiver is nowhere promised it can open —
+        on the peer's disk it is missing or a different file. An entry lacking
+        either required field is malformed, and one malformed entry drops the
+        set: a partial set would reach the model as the whole set.
+
+        The builder refuses the same entry by raising, which is the difference in
+        role rather than in rule: refusing a malformed message is its job, while
+        choosing a route is this one's.
         """
         prepared: List[Dict[str, Any]] = []
         for img in images:
-            b64 = img.get("base64")
-            if not b64:
+            missing = [f for f in ("base64", "mime_type") if not img.get(f)]
+            if missing:
                 log.error(
-                    "Image has no base64 (DPTP §3.4 requires it) — not sending it to a peer"
+                    "Image is missing %s (DPTP §3.4 requires both) — not sending it to a peer",
+                    " and ".join(missing),
                 )
                 return []
-            row: Dict[str, Any] = {"base64": b64}
-            if img.get("mime_type"):
-                row["mime_type"] = img["mime_type"]
-            prepared.append(row)
+            prepared.append({"base64": img["base64"], "mime_type": img["mime_type"]})
         return prepared
 
     def default_model(self) -> str:

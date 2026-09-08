@@ -39,16 +39,18 @@ def _image_for_the_wire(img: Dict[str, Any]) -> Dict[str, Any]:
     machine, and on a like one possibly a different file that happens to sit at
     the same place. `path` is documented as the original filename and nothing
     on the far side reads it, so it does not travel and cannot be reached for.
+
+    `mime_type` is required there too, and an absent one is not harmless: a
+    receiver defaults it to PNG, so a JPEG would arrive announced as something
+    it is not rather than announced as unknown.
     """
-    b64 = img.get("base64")
-    if not b64:
+    missing = [f for f in ("base64", "mime_type") if not img.get(f)]
+    if missing:
         raise ValueError(
-            "image carries no base64; DPTP 3.4 requires it for a remote inference request"
+            f"image carries no {' and no '.join(missing)}; DPTP 3.4 requires both "
+            "for a remote inference request"
         )
-    prepared = {"base64": b64}
-    if img.get("mime_type"):
-        prepared["mime_type"] = img["mime_type"]
-    return prepared
+    return {"base64": img["base64"], "mime_type": img["mime_type"]}
 
 
 def create_remote_inference_request(request_id: str, prompt: str, model: str = None, provider: str = None, images: list = None, reasoning_effort: str = None) -> Dict[str, Any]:

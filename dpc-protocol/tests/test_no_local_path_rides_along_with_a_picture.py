@@ -50,5 +50,17 @@ def test_a_picture_with_no_pixels_is_refused_rather_than_sent_as_a_path():
         _images(images=[{"path": "/home/someone/shot.png", "mime_type": "image/png"}])
 
 
+def test_a_picture_that_does_not_say_what_it_is_is_refused_too():
+    """§3.4 makes mime_type required, and a receiver defaults an absent one to
+    PNG — so a JPEG would arrive announced as something it is not."""
+    with pytest.raises(ValueError, match="mime_type"):
+        _images(images=[{"base64": "aGVsbG8="}])
+
+
+def test_both_missing_are_named_together():
+    with pytest.raises(ValueError, match="base64 and no mime_type"):
+        _images(images=[{"path": "/home/someone/shot.png"}])
+
+
 def test_a_request_without_images_says_nothing_about_them():
     assert _images() is None

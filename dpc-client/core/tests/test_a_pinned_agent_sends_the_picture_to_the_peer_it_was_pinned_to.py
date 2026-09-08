@@ -212,10 +212,23 @@ def test_a_path_only_image_is_not_prepared_at_all():
     assert DpcLlmAdapter._images_for_peer([{"path": "/home/mike/shot.png"}]) == []
 
 
+def test_an_image_that_does_not_say_what_it_is_is_not_prepared_either():
+    """§3.4 makes mime_type required, and a receiver defaults an absent one to
+    PNG — so a JPEG would arrive announced as something it is not."""
+    assert DpcLlmAdapter._images_for_peer([{"base64": PIXEL}]) == []
+
+
 def test_one_unsendable_image_stops_the_whole_set():
-    """A partial set would reach the peer's model as the whole set."""
+    """A partial set would reach the peer's model as the whole set.
+
+    The first entry is complete on purpose: the drop has to be caused by the
+    second one, not by the entry the assertion is not about.
+    """
     prepared = DpcLlmAdapter._images_for_peer(
-        [{"base64": PIXEL}, {"path": "/home/mike/shot.png"}]
+        [
+            {"base64": PIXEL, "mime_type": "image/png"},
+            {"path": "/home/mike/shot.png"},
+        ]
     )
 
     assert prepared == []
