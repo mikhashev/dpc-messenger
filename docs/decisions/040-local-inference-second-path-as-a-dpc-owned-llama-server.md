@@ -630,6 +630,22 @@ Compliance, not progress — each item is a measurement with a stated failing re
       CPU; on macOS the Metal binary serves a GGUF the node's memory holds.
 - [ ] **Venv discipline** — `uv sync --dry-run` shows no change to `dpc-client/core/.venv` after
       Stage 2 lands.
+- [ ] **Moving an agent off the paid provider is a measurement, not a consequence of this ADR
+      (`added 2026-09-08` on Mike's word, from @Johnny's objection).** Everything above measures
+      whether the local path *works*; nothing here says an agent should be moved onto it, and the
+      standing intention to «run to $0 and move the agents local» has never been measured against
+      what it replaces. The cell: for each agent proposed for the move, run **our own** task material
+      on both providers and compare **cost per completed task** — not price per token, because a
+      cheaper model that needs more rounds, or fails and is re-run, is not cheaper — with a stated
+      quality floor per agent, decided before the run. Fail: the local path costs more per completed
+      task at the same floor, or misses the floor at any cost → that agent does not move, and the
+      reason is recorded beside its alias. Two conditions on the measurement itself, both from the
+      same source (Anthropic, «a guide to the anatomy of effective commerce agents», Part 2 —
+      external, and cited for its method rather than its numbers): the sweep runs the **whole** task
+      set on every candidate and effort level, and each candidate gets a few rounds of prompt
+      iteration on its failing cases first, because a prompt is tuned to the model it was written
+      against and a sweep with one prompt underrates every other model. What this cell does **not**
+      claim: nothing here bears on the numbers that article reports for its own fleet.
 
 ## Scope
 
