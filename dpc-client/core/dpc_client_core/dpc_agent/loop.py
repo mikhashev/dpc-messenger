@@ -242,8 +242,13 @@ def shutdown_shared_executor() -> None:
         )
 
 
+TOOL_RESULT_CHAR_CAP = 15000
+"""How much of a tool result reaches the model. Read by the tools that offer a
+continuation, so their advice cannot promise what this cap will take away."""
+
+
 def _truncate_tool_result(result: Any) -> str:
-    """Hard-cap tool result string to 15000 characters with scope metadata.
+    """Hard-cap tool result string to TOOL_RESULT_CHAR_CAP characters with scope metadata.
 
     The truncation marker is intentionally prominent (S24 audit found that
     the previous mild "... (truncated: ...)" was being missed by the agent,
@@ -262,13 +267,13 @@ def _truncate_tool_result(result: Any) -> str:
     much of what arrived is shown.
     """
     result_str = str(result)
-    if len(result_str) <= 15000:
+    if len(result_str) <= TOOL_RESULT_CHAR_CAP:
         return result_str
     # Count lines for scope context
     total_lines = result_str.count("\n") + 1
-    shown_lines = result_str[:15000].count("\n") + 1
+    shown_lines = result_str[:TOOL_RESULT_CHAR_CAP].count("\n") + 1
     return (
-        result_str[:15000]
+        result_str[:TOOL_RESULT_CHAR_CAP]
         + f"\n\n[!] OUTPUT TRUNCATED — showing {shown_lines:,} of {total_lines:,} lines"
         f" ({len(result_str):,} chars) of what the tool returned."
         f"\n[!] This is a PARTIAL view, and the number above is NOT the size"

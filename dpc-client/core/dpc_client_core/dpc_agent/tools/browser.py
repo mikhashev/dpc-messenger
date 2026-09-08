@@ -29,7 +29,7 @@ from datetime import datetime, timezone
 from html.parser import HTMLParser
 from io import StringIO
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from .registry import ToolEntry, ToolContext, agent_display_name, conversation_origin
 
@@ -229,6 +229,7 @@ def _completeness_header(
     total: int,
     preset: str,
     session: Optional[str] = None,
+    saved_to: Optional[str] = None,
 ) -> str:
     """The line the entry was opened for: three separate statements about
     completeness, never collapsed into one "truncated" or one silence.
@@ -291,17 +292,60 @@ def _completeness_header(
                 " before the end of the document"
             )
 
-    if shown < total:
+    # What the reader can actually do next. The old sentence offered a bigger
+    # preset and nothing else, which fails twice: it offers 'l' to a caller who
+    # already passed 'l', and every preset is cut again downstream at
+    # TOOL_RESULT_CHAR_CAP, so a bigger one can return a page the model still
+    # never sees. save_to is the only continuation that survives that second cut.
+    from ..loop import TOOL_RESULT_CHAR_CAP
+
+    if saved_to:
         parts.append(
-            f"preset {preset} kept {shown} of {total} chars — use size='l' or 'f' for more"
+            f"saved: all {total} chars written to {saved_to} — read it with"
+            f" read_file(path, offset=, limit=)"
+        )
+    elif shown < total:
+        bigger = {"s": "'m', 'l' or 'f'", "m": "'l' or 'f'", "l": "'f'"}.get(preset)
+        how = f"use size={bigger}, or " if bigger else "use "
+        parts.append(
+            f"preset {preset} kept {shown} of {total} chars — {how}"
+            f"save_to='page.md' to write the whole text to a file"
+        )
+    elif total > TOOL_RESULT_CHAR_CAP:
+        parts.append(
+            f"preset {preset} did not cut this: all {total} chars are here, but a tool"
+            f" result is cut again at {TOOL_RESULT_CHAR_CAP} chars before it reaches you"
+            f" — pass save_to='page.md' to read the rest with read_file"
         )
     else:
         parts.append(f"preset {preset} did not cut this: all {total} chars are here")
     return " | ".join(parts) + "]"
 
 
+def _save_page_markdown(
+    ctx, save_to: Optional[str], text: str,
+) -> Tuple[Optional[str], Optional[str]]:
+    """Write the whole markdown where `read_file` can page through it.
+
+    Returns (path, warning); a write that fails is reported in the header
+    rather than raised, because the page itself was fetched successfully.
+    """
+    if not save_to:
+        return None, None
+    try:
+        from .core import _resolve_file_path
+
+        target = _resolve_file_path(ctx, save_to, require_write=True)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(text, encoding="utf-8")
+        return str(target), None
+    except (PermissionError, OSError, ValueError) as exc:
+        return None, f"save_to '{save_to}' failed: {type(exc).__name__}: {exc}"
+
+
 def _rendered_page_answer(
     url: str, html: str, text: str, size: str, session: str,
+    saved_to: Optional[str] = None,
 ) -> str:
     """The same header for the two `browse_page` paths a real browser serves.
 
@@ -328,6 +372,7 @@ def _rendered_page_answer(
         text = text[:max_chars]
     header = _completeness_header(
         url, sig, "camoufox", total, shown, total, size, session=session,
+        saved_to=saved_to,
     )
     return f"{header}\n\n{text}"
 
@@ -2751,6 +2796,7 @@ async def browse_page(
     use_auth: Optional[str] = None,
     keep_open: bool = False,
     verify: bool = False,
+    save_to: Optional[str] = None,
 ) -> str:
     """
     Fetch a web page and extract content as structured markdown.
@@ -2769,6 +2815,9 @@ async def browse_page(
         ctx: Tool context (agent_root used to derive agent_id when use_auth set)
         url: URL to fetch
         size: Size preset (s/m/l/f)
+        save_to: write the whole markdown to this file and name it in the
+            header. The body of the answer is unchanged; the file is what
+            survives the tool-result cap, and read_file pages through it.
         use_auth: If set, fetch the page authenticated for this domain.
             Routes through restricted AuthBrowser with cookies from the
             agent's encrypted vault (ADR-028). The URL must be within
@@ -2946,12 +2995,14 @@ async def browse_page(
         _web_auth_mod.audit_append(
             agent_id, use_auth, url, status=200, bytes_size=len(text)
         )
+        saved_to, save_warning = _save_page_markdown(ctx, save_to, text)
         return _rendered_page_answer(
             url, html, text, size,
             session=(
                 f"{'headed' if keep_open else 'headless'} browser, "
                 f"auth domain {use_auth}"
             ),
+            saved_to=saved_to or save_warning,
         )
 
     if keep_open:
@@ -2963,9 +3014,11 @@ async def browse_page(
         except Exception as e:
             return f"⚠️ Camoufox browser failed: {e}"
         text = _html_to_markdown(html)
+        saved_to, save_warning = _save_page_markdown(ctx, save_to, text)
         return _rendered_page_answer(
             url, html, text, size,
             session="headed browser, no auth domain named",
+            saved_to=saved_to or save_warning,
         )
 
     result = await asyncio.to_thread(_browse_sync, url)
@@ -2989,11 +3042,16 @@ async def browse_page(
     max_chars = _SIZE_PRESETS.get(size, _SIZE_PRESETS["m"])
     total = len(text)
     shown = min(total, max_chars) if max_chars else total
+    # Saved before the preset cuts, so the file holds the page and not the
+    # window: a file that repeats what the answer already carries is no
+    # continuation at all.
+    saved_to, save_warning = _save_page_markdown(ctx, save_to, text)
     if max_chars and total > max_chars:
         text = text[:max_chars]
 
     header = _completeness_header(
         url, sig, renderer, rendered_chars, shown, total, size,
+        saved_to=saved_to or save_warning,
     )
     # The anonymous path wrote no audit record at all, so the two questions
     # this header now answers had no history behind them: 3 929 audit rows on
@@ -3603,7 +3661,7 @@ def get_tools() -> List[ToolEntry]:
             name="browse_page",
             schema={
                 "name": "browse_page",
-                "description": "Fetch a web page and extract content as structured markdown. Preserves headings, lists, tables, and links. Use size presets to control output length: s=5K, m=10K (default), l=25K, f=full. Set use_auth=<domain> to fetch authenticated content using stored cookies (requires prior login via the web-auth UI). Set keep_open=true to leave the headed Camoufox window open after returning (works for both anonymous and use_auth fetches) — useful for visual debugging and Task 002 stateful interactive flows.",
+                "description": "Fetch a web page and extract content as structured markdown. Preserves headings, lists, tables, and links. Use size presets to control output length: s=5K, m=10K (default), l=25K, f=full. A tool result is cut again at 15000 chars before it reaches you, so for a long page pass save_to=<filename>: the whole markdown is written there and read_file(offset=, limit=) pages through it. Set use_auth=<domain> to fetch authenticated content using stored cookies (requires prior login via the web-auth UI). Set keep_open=true to leave the headed Camoufox window open after returning (works for both anonymous and use_auth fetches) — useful for visual debugging and Task 002 stateful interactive flows.",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -3630,6 +3688,10 @@ def get_tools() -> List[ToolEntry]:
                             "type": "boolean",
                             "description": "When true, also render the page in a real browser and report how many characters JS produced against the static fetch. Costs a browser launch (~7-10s). Use when the response says the page runs JS and you need to know whether anything is missing — a static fetch cannot establish that a page has no more content.",
                             "default": False
+                        },
+                        "save_to": {
+                            "type": "string",
+                            "description": "Write the page's whole markdown to this file (relative names land in the agent sandbox) and name it in the header. The answer's body is unchanged — the file is the part that survives the tool-result cap, and read_file reads it with offset/limit. Use it for anything long enough that the size preset or the cap would cut."
                         }
                     },
                     "required": ["url"]
