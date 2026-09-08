@@ -349,8 +349,13 @@ def _markdown_toc(text: str, limit: int = _TOC_MAX_ENTRIES) -> str:
     a line number and lands past the end of any real page. An offset that points
     at nothing is the defect this whole entry is about, one level down.
     """
+    # `splitlines`, not `split("\n")`, because that is what `read_file` counts
+    # with (`_paginate_content` → `content.splitlines(keepends=True)`). They
+    # differ on a lone CR and on the other separators `splitlines` knows: a page
+    # carrying one shifts every offset below it, which is the same defect as
+    # counting characters, one layer smaller.
     entries = []
-    for offset, line in enumerate(text.split("\n")):
+    for offset, line in enumerate(text.splitlines()):
         stripped = line.lstrip()
         if stripped.startswith("#"):
             hashes = len(stripped) - len(stripped.lstrip("#"))
@@ -388,7 +393,12 @@ def _save_page_markdown(
 
         target = _resolve_file_path(ctx, save_to, require_write=True)
         target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(text, encoding="utf-8")
+        # newline="" so the page is stored as it arrived. The default translates
+        # "\n" to the platform's ending, which on Windows turns a page that
+        # already uses CRLF into "\r\r\n" — read back through universal newlines
+        # that is one blank line per line, and every TOC offset below the first
+        # one is wrong. The web decides this file's endings, not the host.
+        target.write_text(text, encoding="utf-8", newline="")
         return str(target), None
     except (PermissionError, OSError, ValueError) as exc:
         return None, f"save_to '{save_to}' failed: {type(exc).__name__}: {exc}"

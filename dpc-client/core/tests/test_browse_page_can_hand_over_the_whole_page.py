@@ -338,3 +338,36 @@ def test_the_tool_descriptions_follow_the_cap_instead_of_quoting_it(monkeypatch)
     assert "4242" in tools["browse_page"].schema["description"]
     extract = tools["browser_extract"].schema["parameters"]["properties"]["save_to"]
     assert "4242" in extract["description"]
+
+
+# --- line endings this page did not choose ----------------------------------
+
+
+CR_PAGE = "# A\rmid\n## Part B\ntail\n"
+CRLF_PAGE = "# A\r\nintro\r\n## Part B\r\nbody\r\n"
+
+
+@pytest.mark.parametrize("page", [CR_PAGE, CRLF_PAGE], ids=["lone-cr", "crlf"])
+def test_the_toc_counts_lines_the_way_read_file_counts_them(tmp_path, page):
+    """A web page brings whatever endings it likes, and a file written on one
+    platform is read on another. `split("\n")` and `splitlines` disagree on a
+    lone CR, which shifted every offset below it."""
+    from dpc_client_core.dpc_agent.tools.core import read_file
+
+    ctx = _ctx(tmp_path)
+    # Written by the tool itself: write_text translates newlines on Windows and
+    # read_text translates them back, so a test that writes the bytes by hand
+    # measures a round trip production never performs.
+    browser._save_page_markdown(ctx, "page.md", page)
+
+    offset = _toc_offset(browser._markdown_toc(page), "Part B")
+    got = read_file(ctx, "page.md", offset=offset, limit=1)
+
+    assert "Part B" in got, (offset, got)
+
+
+def test_a_heading_is_not_glued_to_the_next_line_by_a_cr():
+    toc = browser._markdown_toc(CR_PAGE)
+
+    assert "A @0" in toc
+    assert "Amid" not in toc
