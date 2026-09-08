@@ -230,6 +230,7 @@ def _completeness_header(
     preset: str,
     session: Optional[str] = None,
     saved_to: Optional[str] = None,
+    save_warning: Optional[str] = None,
 ) -> str:
     """The line the entry was opened for: three separate statements about
     completeness, never collapsed into one "truncated" or one silence.
@@ -299,6 +300,8 @@ def _completeness_header(
     # never sees. save_to is the only continuation that survives that second cut.
     from ..loop import TOOL_RESULT_CHAR_CAP
 
+    if save_warning:
+        parts.append(save_warning)
     if saved_to:
         parts.append(
             f"saved: all {total} chars written to {saved_to} — read it with"
@@ -320,6 +323,52 @@ def _completeness_header(
     else:
         parts.append(f"preset {preset} did not cut this: all {total} chars are here")
     return " | ".join(parts) + "]"
+
+
+def _page_answer(
+    header: str, full_text: str, body: str, saved_to: Optional[str],
+) -> str:
+    """Header, then the map of the saved file, then the body.
+
+    The table of contents rides only on a saved page: its offsets are into the
+    file, and printing them beside a body that was cut would point a reader at
+    positions the answer does not contain.
+    """
+    toc = _markdown_toc(full_text) if saved_to else ""
+    return f"{header}\n\n{toc}\n\n{body}" if toc else f"{header}\n\n{body}"
+
+
+_TOC_MAX_ENTRIES = 40
+
+
+def _markdown_toc(text: str, limit: int = _TOC_MAX_ENTRIES) -> str:
+    """Headings with the character offset each one starts at.
+
+    The offsets are into the same string `save_to` writes, so they are what
+    `read_file(offset=, limit=)` takes: without them a reader who wants one
+    section of a long page has to read the page to find out where it is.
+    """
+    entries = []
+    offset = 0
+    for line in text.split("\n"):
+        stripped = line.lstrip()
+        if stripped.startswith("#"):
+            hashes = len(stripped) - len(stripped.lstrip("#"))
+            rest = stripped[hashes:]
+            # ATX headings need the space. Without this a line of prose
+            # starting with a hashtag is filed as a section of the page.
+            if rest[:1].isspace() and rest.strip() and hashes <= 3:
+                entries.append((hashes, rest.strip(), offset))
+        offset += len(line) + 1
+    if not entries:
+        return ""
+    shown = entries[:limit]
+    lines = [
+        f"{'  ' * (level - 1)}{title} @{start}" for level, title, start in shown
+    ]
+    if len(entries) > limit:
+        lines.append(f"... and {len(entries) - limit} more headings")
+    return "[toc, offsets into the saved file]\n" + "\n".join(lines)
 
 
 def _save_page_markdown(
@@ -345,7 +394,7 @@ def _save_page_markdown(
 
 def _rendered_page_answer(
     url: str, html: str, text: str, size: str, session: str,
-    saved_to: Optional[str] = None,
+    saved_to: Optional[str] = None, save_warning: Optional[str] = None,
 ) -> str:
     """The same header for the two `browse_page` paths a real browser serves.
 
@@ -365,6 +414,7 @@ def _rendered_page_answer(
     than the static fetch's "JS NOT executed".
     """
     sig = _page_signals(html, text)
+    full_text = text
     max_chars = _SIZE_PRESETS.get(size, _SIZE_PRESETS["m"])
     total = len(text)
     shown = min(total, max_chars) if max_chars else total
@@ -372,9 +422,9 @@ def _rendered_page_answer(
         text = text[:max_chars]
     header = _completeness_header(
         url, sig, "camoufox", total, shown, total, size, session=session,
-        saved_to=saved_to,
+        saved_to=saved_to, save_warning=save_warning,
     )
-    return f"{header}\n\n{text}"
+    return _page_answer(header, full_text, text, saved_to)
 
 
 def _browse_sync(url: str) -> Dict[str, Any]:
@@ -3002,7 +3052,7 @@ async def browse_page(
                 f"{'headed' if keep_open else 'headless'} browser, "
                 f"auth domain {use_auth}"
             ),
-            saved_to=saved_to or save_warning,
+            saved_to=saved_to, save_warning=save_warning,
         )
 
     if keep_open:
@@ -3018,7 +3068,7 @@ async def browse_page(
         return _rendered_page_answer(
             url, html, text, size,
             session="headed browser, no auth domain named",
-            saved_to=saved_to or save_warning,
+            saved_to=saved_to, save_warning=save_warning,
         )
 
     result = await asyncio.to_thread(_browse_sync, url)
@@ -3046,12 +3096,13 @@ async def browse_page(
     # window: a file that repeats what the answer already carries is no
     # continuation at all.
     saved_to, save_warning = _save_page_markdown(ctx, save_to, text)
+    full_text = text
     if max_chars and total > max_chars:
         text = text[:max_chars]
 
     header = _completeness_header(
         url, sig, renderer, rendered_chars, shown, total, size,
-        saved_to=saved_to or save_warning,
+        saved_to=saved_to, save_warning=save_warning,
     )
     # The anonymous path wrote no audit record at all, so the two questions
     # this header now answers had no history behind them: 3 929 audit rows on
@@ -3078,7 +3129,7 @@ async def browse_page(
         except Exception as e:  # auditing must never break a fetch
             log.warning("anonymous fetch audit failed (%s): %s", url, e)
 
-    return f"{header}\n\n{text}"
+    return _page_answer(header, full_text, text, saved_to)
 
 
 FETCH_JSON_WINDOW = 10_000  # chars of pretty-printed JSON per call
@@ -3492,7 +3543,7 @@ async def browser_wait_for(
     return f"Element {ref_or_selector} is visible"
 
 
-async def browser_extract(ctx: ToolContext) -> str:
+async def browser_extract(ctx: ToolContext, save_to: Optional[str] = None) -> str:
     """Return the current page's full HTML (fallback inspection
     surface when the accessibility tree is insufficient)."""
     agent_id = ctx.agent_root.name
@@ -3509,7 +3560,35 @@ async def browser_extract(ctx: ToolContext) -> str:
                 agent_id, type(e).__name__, str(e).split(chr(10))[0],
             )
             return f"⚠️ Extract failed: {type(e).__name__}: {e}"
-    return html
+    saved_to, save_warning = _save_page_markdown(ctx, save_to, html)
+    return f"{_extract_header(len(html), saved_to, save_warning)}\n\n{html}"
+
+
+def _extract_header(
+    total: int, saved_to: Optional[str], save_warning: Optional[str],
+) -> str:
+    """Say how much HTML this is, and where the rest of it went.
+
+    Raw HTML is the largest thing any of these tools returns and it went back
+    with no size and no continuation at all, so a page of half a million
+    characters arrived as fifteen thousand with nothing to say the difference.
+    """
+    from ..loop import TOOL_RESULT_CHAR_CAP
+
+    parts = [f"[browser_extract | {total} chars of HTML"]
+    if save_warning:
+        parts.append(save_warning)
+    if saved_to:
+        parts.append(
+            f"saved: all {total} chars written to {saved_to} — read it with"
+            f" read_file(path, offset=, limit=)"
+        )
+    elif total > TOOL_RESULT_CHAR_CAP:
+        parts.append(
+            f"a tool result is cut at {TOOL_RESULT_CHAR_CAP} chars before it reaches"
+            f" you — pass save_to='page.html' to keep the rest"
+        )
+    return " | ".join(parts) + "]"
 
 
 async def browser_screenshot(
@@ -3860,7 +3939,12 @@ def get_tools() -> List[ToolEntry]:
                 },
             },
             handler=browser_scroll,
-            timeout_sec=15,
+            # A scroll on a lazy-loading page waits for what the scroll starts
+            # loading, and Playwright's own defaults are higher than this cap
+            # was — so the harness gave up first and reported TOOL_TIMEOUT
+            # instead of whatever went wrong. 60s is what the other tools that
+            # drive this browser already use.
+            timeout_sec=60,
             default_enabled=False,
         ),
 
@@ -3928,7 +4012,12 @@ def get_tools() -> List[ToolEntry]:
                 "description": "Return the current page's full HTML. Fallback inspection surface when the accessibility-tree snapshot is insufficient (canvas elements, shadow DOM, missing ARIA labels).",
                 "parameters": {
                     "type": "object",
-                    "properties": {},
+                    "properties": {
+                        "save_to": {
+                            "type": "string",
+                            "description": "Write the whole HTML to this file (relative names land in the agent sandbox) and name it in the header. Raw HTML is the largest thing these tools return; without this the answer is cut at 15000 chars with no way to read the rest."
+                        }
+                    },
                 },
             },
             handler=browser_extract,
