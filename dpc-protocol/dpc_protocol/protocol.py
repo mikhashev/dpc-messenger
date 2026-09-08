@@ -31,6 +31,26 @@ def create_send_text_message(text: str) -> Dict[str, Any]:
     # For now, we don't need a chat_id, the P2PManager knows the sender.
     return {"command": "SEND_TEXT", "payload": {"text": text}}
 
+def _image_for_the_wire(img: Dict[str, Any]) -> Dict[str, Any]:
+    """One image reduced to the two fields a receiver can act on (§3.4).
+
+    `base64` is required there; without it the receiving provider falls back to
+    opening `path`, which is the sender's own filesystem — missing on another
+    machine, and on a like one possibly a different file that happens to sit at
+    the same place. `path` is documented as the original filename and nothing
+    on the far side reads it, so it does not travel and cannot be reached for.
+    """
+    b64 = img.get("base64")
+    if not b64:
+        raise ValueError(
+            "image carries no base64; DPTP 3.4 requires it for a remote inference request"
+        )
+    prepared = {"base64": b64}
+    if img.get("mime_type"):
+        prepared["mime_type"] = img["mime_type"]
+    return prepared
+
+
 def create_remote_inference_request(request_id: str, prompt: str, model: str = None, provider: str = None, images: list = None, reasoning_effort: str = None) -> Dict[str, Any]:
     """
     Creates a remote inference request message.
@@ -40,8 +60,9 @@ def create_remote_inference_request(request_id: str, prompt: str, model: str = N
         prompt: Text prompt for the model
         model: Optional model name to use
         provider: Optional provider alias to use
-        images: Optional list of image dicts for vision models (Phase 2: Remote Vision)
-                Each image dict contains: {path: str, base64: str, mime_type: str}
+        images: Optional list of image dicts for vision models (Phase 2: Remote Vision).
+                Each is reduced by _image_for_the_wire before it travels; see there
+                for what a receiver is given and why a path is not part of it.
         reasoning_effort: How much thinking the caller wants (off/low/medium/high/max).
                 A request, not an instruction: the host clamps it downwards to what
                 it is willing to spend. Absent means the caller did not choose, and
@@ -56,7 +77,7 @@ def create_remote_inference_request(request_id: str, prompt: str, model: str = N
     if provider:
         payload["provider"] = provider
     if images:
-        payload["images"] = images
+        payload["images"] = [_image_for_the_wire(img) for img in images]
     if reasoning_effort:
         payload["reasoning_effort"] = reasoning_effort
     return {"command": "REMOTE_INFERENCE_REQUEST", "payload": payload}
