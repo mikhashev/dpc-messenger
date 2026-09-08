@@ -547,8 +547,9 @@ export interface TokenWarningEvent {
 
 export interface ExtractionFailureEvent {
     conversation_id: string;
-    error: string;
-    reason?: string;             // Alias for error in some payloads
+    reason: string;              // machine-readable: participants_offline, no_entries, ...
+    message?: string;            // the sentence written for a person; prefer it on screen
+    error?: string;              // legacy; no emitter in knowledge_service.py sends it
 }
 
 export interface KnowledgeCommitResultEvent {

@@ -97,8 +97,13 @@
   // Handle knowledge extraction failures (Phase 4)
   $effect(() => {
     if ($extractionFailure) {
-      const { conversation_id, reason } = $extractionFailure;
-      onShowExtractionFailure(`Knowledge extraction failed for ${conversation_id}: ${reason}`, conversation_id ?? null);
+      const { conversation_id, reason, message } = $extractionFailure;
+      // The backend writes a sentence for a person; `reason` is the machine's
+      // half of it and says nothing about what to do next.
+      onShowExtractionFailure(
+        message || `Knowledge extraction failed for ${conversation_id}: ${reason}`,
+        conversation_id ?? null
+      );
     }
   });
 

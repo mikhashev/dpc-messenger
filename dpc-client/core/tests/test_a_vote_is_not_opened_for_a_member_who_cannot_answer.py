@@ -144,6 +144,61 @@ async def test_a_member_leaving_during_the_extraction_stops_the_vote():
     result = await KnowledgeService.end_conversation_session(svc, GROUP)
 
     assert result["reason"] == "participants_offline"
-    assert [name for name, _ in svc.events] == [
-        "knowledge_commit_proposed", "knowledge_extraction_failed"
-    ]
+    # Only the refusal. The announcement used to go out first and could not be
+    # taken back: the dialog it opened accepted votes on a proposal
+    # `propose_commit` never received, and each was answered «Proposal not found».
+    assert [name for name, _ in svc.events] == ["knowledge_extraction_failed"]
+
+
+@pytest.mark.asyncio
+async def test_a_refusal_before_the_extraction_is_also_an_event():
+    """The response is not read by the caller; the button moves on events."""
+    svc = _extraction_service([ME, PEER], connected=(), monitor=_monitor_that_must_not_run())
+
+    result = await KnowledgeService.end_conversation_session(svc, GROUP)
+
+    assert [name for name, _ in svc.events] == ["knowledge_extraction_failed"]
+    event = svc.events[0][1]
+    assert event["conversation_id"] == GROUP
+    assert event["reason"] == "participants_offline"
+    assert event["message"] == result["message"]
+    assert "Mike Linux" in event["message"]
+
+
+@pytest.mark.asyncio
+async def test_an_open_vote_refuses_the_extraction_and_says_so_on_screen():
+    """The other early refusal had the same silence and the same cost."""
+    svc = _extraction_service([ME, PEER], connected=(PEER,),
+                              monitor=_monitor_that_must_not_run())
+    svc.consensus_manager.sessions = {
+        "s1": SimpleNamespace(
+            status="voting",
+            proposal=SimpleNamespace(conversation_id=GROUP, proposal_id="p9"),
+        )
+    }
+
+    result = await KnowledgeService.end_conversation_session(svc, GROUP)
+
+    assert result["reason"] == "vote_in_progress"
+    assert result["proposal_id"] == "p9"
+    assert [name for name, _ in svc.events] == ["knowledge_extraction_failed"]
+    assert svc.events[0][1]["message"] == result["message"]
+
+
+def test_a_member_offline_since_the_restart_is_named_from_the_peer_cache():
+    """`peer_metadata` is empty for exactly the peers this names."""
+    svc = _service(members=[ME, PEER], connected=())
+    svc.peer_metadata = {}
+    svc.p2p_manager.peer_cache = SimpleNamespace(
+        get_peer=lambda nid: SimpleNamespace(display_name="Mike (linux)") if nid == PEER else None
+    )
+
+    assert svc._offline_participants(GROUP) == {PEER: "Mike (linux)"}
+
+
+def test_a_peer_the_cache_has_never_seen_falls_back_to_the_node_id():
+    svc = _service(members=[ME, PEER], connected=())
+    svc.peer_metadata = {}
+    svc.p2p_manager.peer_cache = SimpleNamespace(get_peer=lambda nid: None)
+
+    assert svc._offline_participants(GROUP) == {PEER: PEER[:20]}

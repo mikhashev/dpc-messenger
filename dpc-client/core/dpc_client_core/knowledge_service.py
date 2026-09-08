@@ -770,11 +770,43 @@ class KnowledgeService:
         if not others:
             return {}
         connected = set(getattr(self.p2p_manager, "peers", None) or {})
-        return {
-            m: (self.peer_metadata.get(m, {}).get("name") or m[:20])
-            for m in others
-            if m not in connected
-        }
+        return {m: self._offline_name(m) for m in others if m not in connected}
+
+    def _offline_name(self, node_id: str) -> str:
+        """What to call a member who is not here.
+
+        `peer_metadata` is filled by a live HELLO, so it is empty for exactly
+        the peers this names — all of them, after a restart. The peer cache
+        outlives the process and keeps the name the peer introduced itself
+        with, so it is asked second. The truncated node id is the last resort.
+        """
+        name = (self.peer_metadata.get(node_id) or {}).get("name")
+        if name:
+            return name
+        cache = getattr(getattr(self, "p2p_manager", None), "peer_cache", None)
+        cached = cache.get_peer(node_id) if cache is not None else None
+        return getattr(cached, "display_name", None) or node_id[:20]
+
+    async def _refuse_extraction(
+        self, conversation_id: str, reason: str, message: str
+    ) -> Dict[str, Any]:
+        """Answer the caller, and tell the UI, which hears events only.
+
+        The response to this command is not read by its caller, and the button
+        leaves «Extracting…» only on `knowledge_commit_proposed` or
+        `knowledge_extraction_failed` — so a refusal must be an event too.
+        """
+        api = getattr(self, "local_api", None)
+        if api is not None:
+            await api.broadcast_event(
+                "knowledge_extraction_failed",
+                {
+                    "conversation_id": conversation_id,
+                    "reason": reason,
+                    "message": message,
+                },
+            )
+        return {"status": "error", "reason": reason, "message": message}
 
     def judged_proposal(self, proposal_id: str) -> bool:
         """Did this node judge that proposal's text, rather than abstain?
@@ -1306,15 +1338,13 @@ Respond in JSON format:
                     "Refusing extraction for %s — proposal %s is still being voted on",
                     conversation_id, open_session.proposal.proposal_id,
                 )
-                return {
-                    "status": "error",
-                    "reason": "vote_in_progress",
-                    "proposal_id": open_session.proposal.proposal_id,
-                    "message": (
-                        "A knowledge commit for this conversation is still being "
-                        "voted on. Finish that vote before extracting again."
-                    ),
-                }
+                refused = await self._refuse_extraction(
+                    conversation_id, "vote_in_progress",
+                    "A knowledge commit for this conversation is still being "
+                    "voted on. Finish that vote before extracting again.",
+                )
+                refused["proposal_id"] = open_session.proposal.proposal_id
+                return refused
 
             # Everyone who has to vote must be able to. Under a denominator
             # counted over participants a missing member cannot be outvoted,
@@ -1327,15 +1357,13 @@ Respond in JSON format:
                     "Refusing extraction for %s — %d participant(s) offline: %s",
                     conversation_id, len(offline), names,
                 )
-                return {
-                    "status": "error",
-                    "reason": "participants_offline",
-                    "offline": list(offline),
-                    "message": (
-                        f"All participants must be online to vote on a knowledge "
-                        f"commit. Offline: {names}"
-                    ),
-                }
+                refused = await self._refuse_extraction(
+                    conversation_id, "participants_offline",
+                    f"All participants must be online to vote on a knowledge "
+                    f"commit. Offline: {names}",
+                )
+                refused["offline"] = list(offline)
+                return refused
 
             logger.info("End Session - attempting manual extraction for %s", conversation_id)
             logger.info(
@@ -1397,6 +1425,29 @@ Respond in JSON format:
                         p for p in proposal.participants if p == user_node_id
                     ]
 
+                # Extraction takes a minute or more and a member can drop
+                # inside it, so the roster is read again here. This has to
+                # stand above the announcement rather than in the group branch
+                # below it: an announced proposal cannot be recalled, and the
+                # dialog it opens accepts votes on a proposal the consensus
+                # manager was never given.
+                if conversation_id.startswith("group-"):
+                    left_meanwhile = self._offline_participants(conversation_id)
+                    if left_meanwhile:
+                        names = ", ".join(left_meanwhile.values())
+                        logger.warning(
+                            "Not opening a vote for %s — %s went offline during the extraction",
+                            conversation_id, names,
+                        )
+                        refused = await self._refuse_extraction(
+                            conversation_id, "participants_offline",
+                            f"{names} went offline while the knowledge was being "
+                            f"extracted, so the vote was not opened. Try again when "
+                            f"everyone is back.",
+                        )
+                        refused["offline"] = list(left_meanwhile)
+                        return refused
+
                 await self.local_api.broadcast_event(
                     "knowledge_commit_proposed",
                     proposal.to_dict(),
@@ -1421,34 +1472,6 @@ Respond in JSON format:
                         broadcast_func=_no_op_broadcast,
                     )
                 elif conversation_id.startswith("group-"):
-                    # Extraction takes a minute or more, and a member can drop
-                    # inside it. Opening a vote nobody can finish is the state
-                    # this whole path exists to avoid.
-                    left_meanwhile = self._offline_participants(conversation_id)
-                    if left_meanwhile:
-                        names = ", ".join(left_meanwhile.values())
-                        logger.warning(
-                            "Not opening a vote for %s — %s went offline during the extraction",
-                            conversation_id, names,
-                        )
-                        await self.local_api.broadcast_event(
-                            "knowledge_extraction_failed",
-                            {
-                                "conversation_id": conversation_id,
-                                "reason": "participants_offline",
-                                "message": (
-                                    f"{names} went offline while the knowledge was being "
-                                    f"extracted, so the vote was not opened. Try again when "
-                                    f"everyone is back."
-                                ),
-                            },
-                        )
-                        return {
-                            "status": "error",
-                            "reason": "participants_offline",
-                            "offline": list(left_meanwhile),
-                            "message": f"Not opening a vote: {names} went offline",
-                        }
                     logger.info(
                         "Group Chat - broadcasting knowledge proposal to group %s for consensus",
                         conversation_id,

@@ -920,9 +920,20 @@
   async function handleEndSession(conversationId: string) {
     // No confirm dialog — user can Reject the proposal if extraction was accidental.
     extractingChats = new Set(extractingChats).add(conversationId);
-    sendCommand("end_conversation_session", {
-      conversation_id: conversationId
-    });
+    // The response is read, not only the events: the backend answers a refusal
+    // under an OK envelope, and a caller that ignores it leaves the button
+    // disabled at "Extracting..." with no way back.
+    try {
+      const answer: any = await sendCommand("end_conversation_session", {
+        conversation_id: conversationId
+      });
+      if (answer === false || answer?.status === "error") stopExtracting(conversationId);
+    } catch (e) {
+      // A timeout or a transport error produces no event at all.
+      stopExtracting(conversationId);
+      showExtractionFailure = true;
+      extractionFailureMessage = (e as Error).message;
+    }
   }
 
   // untrack is load-bearing: this is called from an $effect and reads
@@ -1639,6 +1650,13 @@
     showExtractionFailure = true;
     extractionFailureMessage = message;
     stopExtracting(conversationId);
+    // A proposal can be announced and then refused a few milliseconds later.
+    // A dialog left standing over it takes votes on a proposal no vote was
+    // opened for, and the backend answers every one of them "Proposal not found".
+    if ($knowledgeCommitProposal &&
+        (!conversationId || $knowledgeCommitProposal.conversation_id === conversationId)) {
+      closeCommitDialog();
+    }
   }}
   onShowCommitResult={(message, type, result) => {
     commitResultMessage = message;
