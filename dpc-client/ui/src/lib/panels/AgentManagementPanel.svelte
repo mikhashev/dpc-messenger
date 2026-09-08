@@ -235,6 +235,40 @@
       onAgentToast(`Error unlinking agent: ${error}`, 'error');
     }
   }
+
+  // Pause or resume a link without unlinking it: the configuration stays.
+  export async function handleSetAgentTelegramEnabled(agentId: string, enabled: boolean) {
+    try {
+      const result = await sendCommand('set_agent_telegram_enabled', {
+        agent_id: agentId,
+        enabled
+      });
+
+      if (result?.status === 'error') {
+        onAgentToast(`Failed to ${enabled ? 'enable' : 'disable'} Telegram: ${result.message}`, 'error');
+        return;
+      }
+
+      onAgentToast(
+        enabled
+          ? 'Telegram link enabled'
+          : 'Telegram link disabled — its configuration is kept',
+        'info'
+      );
+
+      try {
+        const agentsResult = await listAgents();
+        if (agentsResult?.status === 'success' && agentsResult.agents) {
+          agentsList.set(agentsResult.agents);
+        }
+      } catch (error) {
+        console.error('Failed to refresh agents list:', error);
+      }
+    } catch (error) {
+      console.error('Error changing Telegram link state:', error);
+      onAgentToast(`Error changing Telegram link state: ${error}`, 'error');
+    }
+  }
 </script>
 
 <!-- No markup — logic-only panel -->

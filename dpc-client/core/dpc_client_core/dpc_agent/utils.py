@@ -417,6 +417,27 @@ class AgentRegistry:
             "agent_message",
         ]
 
+    def set_agent_telegram_enabled(
+        self, agent_id: str, enabled: bool
+    ) -> Optional[Dict[str, Any]]:
+        """Pause or resume a link, leaving its configuration in place.
+
+        Unlinking is the destructive verb; this writes only the flag the bridge
+        is gated on. Raises ValueError on enabling what was never configured.
+        """
+        agent = self.get_agent(agent_id)
+        if not agent:
+            return None
+
+        if enabled and not (
+            agent.get("telegram_bot_token") and agent.get("telegram_allowed_chat_ids")
+        ):
+            raise ValueError(
+                "Agent has no Telegram configuration to enable; link it first"
+            )
+
+        return self.update_agent(agent_id, {"telegram_enabled": bool(enabled)})
+
     def unlink_agent_from_telegram(self, agent_id: str) -> Optional[Dict[str, Any]]:
         """
         Remove Telegram linkage for an agent (removes all Telegram config).

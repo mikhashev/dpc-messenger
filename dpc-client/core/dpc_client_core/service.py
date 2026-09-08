@@ -6456,6 +6456,14 @@ class CoreService:
             return
         await self.telegram_service._restart_agent_telegram_bridge(agent_id)
 
+    async def set_agent_telegram_enabled(
+        self, agent_id: str, enabled: bool
+    ) -> Dict[str, Any]:
+        """Delegates to TelegramService."""
+        if not self.telegram_service:
+            return {"status": "error", "message": "Telegram integration not enabled"}
+        return await self.telegram_service.set_agent_telegram_enabled(agent_id, enabled)
+
     async def unlink_agent_telegram(self, agent_id: str) -> Dict[str, Any]:
         """Delegates to TelegramService."""
         if not self.telegram_service:

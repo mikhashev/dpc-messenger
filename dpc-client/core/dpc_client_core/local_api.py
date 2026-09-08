@@ -156,6 +156,7 @@ ALLOWED_COMMANDS: frozenset = frozenset({
     "link_telegram_chat",
     "delete_telegram_conversation_link",
     "link_agent_telegram",
+    "set_agent_telegram_enabled",
     "unlink_agent_telegram",
     # Session archive
     "get_session_archive_info",

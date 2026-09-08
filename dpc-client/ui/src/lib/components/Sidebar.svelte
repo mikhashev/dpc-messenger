@@ -169,6 +169,17 @@
     }
   }
 
+  // Pause or resume the link from the dialog; the dialog stays open.
+  async function handleToggleEnabledFromDialog() {
+    if (!onSetAgentTelegramEnabled || !linkingAgentId) return;
+    try {
+      linkErrorMessage = '';
+      await onSetAgentTelegramEnabled(linkingAgentId, !linkingEnabled);
+    } catch (error: any) {
+      linkErrorMessage = error.message || 'Failed to change the Telegram link state';
+    }
+  }
+
   // Unlink agent from Telegram (from dialog)
   async function handleUnlinkFromDialog() {
     if (onUnlinkAgentTelegram && linkingAgentId) {
@@ -345,6 +356,7 @@
     onDeleteAgent,
     onLinkAgentTelegram,
     onUnlinkAgentTelegram,
+    onSetAgentTelegramEnabled,
     onGetAgentModelConfig,
     onSaveAgentModelConfig,
   }: {
@@ -391,9 +403,22 @@
       unified_conversation?: boolean;
     }) => Promise<void>;
     onUnlinkAgentTelegram?: (agentId: string) => Promise<void>;
+    onSetAgentTelegramEnabled?: (agentId: string, enabled: boolean) => Promise<void>;
     onGetAgentModelConfig: (agentId: string) => Promise<any>;
     onSaveAgentModelConfig: (agentId: string, config: { provider_alias: string; sleep_provider_alias: string | null; snapshot_summarize_provider?: string | null; snapshot_summarize_threshold?: number | null; compaction_enabled?: boolean; compaction_provider?: string | null; compaction_threshold?: number | null; retrieval_vector?: 'native' | 'grafeo'; retrieval_text?: 'native' | 'grafeo' }) => Promise<void>;
   } = $props();
+
+  // The agent whose dialog is open, and the two states it can be in. Being
+  // configured is not being enabled: a paused link keeps every field, so the
+  // dialog stays an editor and only the verb on the button changes.
+  // Unlink nulls all three, so this is false after one and true after a pause.
+  // Reading more than telegram_linked_at keeps agents linked before that field
+  // existed out of the "never configured" branch.
+  const isTelegramConfigured = (a?: AgentInfo) =>
+    !!(a?.telegram_linked_at || a?.telegram_bot_token || a?.telegram_enabled);
+  const linkingAgent = $derived(agents.find(a => a.agent_id === linkingAgentId));
+  const linkingConfigured = $derived(isTelegramConfigured(linkingAgent));
+  const linkingEnabled = $derived(!!linkingAgent?.telegram_enabled);
 </script>
 
 <div class="sidebar">
@@ -732,19 +757,22 @@
                   onclick={(e) => { e.stopPropagation(); handleModelConfig(agent.agent_id); }}
                   onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.stopPropagation(); handleModelConfig(agent.agent_id); } }}
                 >{agent.reasoning_effort || '—'}</span>
-                {#if agent.telegram_enabled}
+                {#if isTelegramConfigured(agent)}
                   <span
                     role="button"
                     tabindex="0"
                     class="telegram-link-badge"
-                    title="Linked to Telegram — click to edit settings"
+                    class:paused={!agent.telegram_enabled}
+                    title={agent.telegram_enabled
+                      ? 'Linked to Telegram — click to edit settings'
+                      : 'Telegram link disabled, settings kept — click to edit or enable'}
                     onclick={(e) => { e.stopPropagation(); handleLinkTelegram(agent.agent_id); }}
                     onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.stopPropagation(); handleLinkTelegram(agent.agent_id); } }}
-                  >✓ 📱</span>
+                  >{agent.telegram_enabled ? '✓ 📱' : '⏸ 📱'}</span>
                 {/if}
               </button>
               <div class="agent-actions">
-                {#if !agent.telegram_enabled && onLinkAgentTelegram}
+                {#if !isTelegramConfigured(agent) && onLinkAgentTelegram}
                   <button
                     type="button"
                     class="telegram-action-btn link-btn"
@@ -1035,7 +1063,7 @@
     <div class="telegram-link-dialog" role="dialog" aria-modal="true" aria-labelledby="telegram-dialog-title">
       <div class="dialog-header">
         <h3 id="telegram-dialog-title">
-          {agents.find(a => a.agent_id === linkingAgentId)?.telegram_enabled ? 'Edit Telegram Configuration' : 'Link Agent to Telegram'}
+          {linkingConfigured ? 'Edit Telegram Configuration' : 'Link Agent to Telegram'}
         </h3>
         <button
           type="button"
@@ -1047,18 +1075,24 @@
         </button>
       </div>
       <div class="dialog-content">
-        {#if agents.find(a => a.agent_id === linkingAgentId)?.telegram_enabled}
-          <div class="existing-link-info">
+        {#if linkingConfigured}
+          <div class="existing-link-info" class:paused={!linkingEnabled}>
             <p class="dialog-info">
-              ✓ This agent is already linked to Telegram with {agents.find(a => a.agent_id === linkingAgentId)?.telegram_allowed_chat_ids?.length || 0} chat(s)
+              {#if linkingEnabled}
+                ✓ This agent is already linked to Telegram with {linkingAgent?.telegram_allowed_chat_ids?.length || 0} chat(s)
+              {:else}
+                ⏸ This link is disabled. Its {linkingAgent?.telegram_allowed_chat_ids?.length || 0} chat(s) and every
+                setting below are kept — click "Enable" to resume.
+              {/if}
             </p>
             <p class="dialog-info small">
-              Linked at: {agents.find(a => a.agent_id === linkingAgentId)?.telegram_linked_at || 'Unknown'}
+              Linked at: {linkingAgent?.telegram_linked_at || 'Unknown'}
             </p>
           </div>
           <hr class="dialog-divider">
           <p class="dialog-info">
-            Update the configuration below or click "Unlink" to remove Telegram integration.
+            Update the configuration below, {linkingEnabled ? 'click "Disable" to pause the bot while keeping it' : 'click "Enable" to resume the bot'},
+            or click "Unlink" to remove Telegram integration and its settings.
           </p>
         {:else}
           <p class="dialog-info">
@@ -1177,7 +1211,19 @@
           >
             Cancel
           </button>
-          {#if agents.find(a => a.agent_id === linkingAgentId)?.telegram_enabled}
+          {#if linkingConfigured && onSetAgentTelegramEnabled}
+            <button
+              type="button"
+              class="dialog-btn dialog-btn-toggle"
+              onclick={handleToggleEnabledFromDialog}
+              title={linkingEnabled
+                ? 'Stop the bot and keep every setting'
+                : 'Start the bot again with the settings it already has'}
+            >
+              {linkingEnabled ? 'Disable' : 'Enable'}
+            </button>
+          {/if}
+          {#if linkingConfigured}
             <button
               type="button"
               class="dialog-btn dialog-btn-unlink"
@@ -1192,7 +1238,7 @@
             onclick={confirmTelegramLink}
             disabled={!telegramBotToken.trim() || !telegramAllowedChatIds.trim()}
           >
-            {agents.find(a => a.agent_id === linkingAgentId)?.telegram_enabled ? 'Update Configuration' : 'Link Agent'}
+            {linkingConfigured ? 'Update Configuration' : 'Link Agent'}
           </button>
         </div>
       </div>
@@ -2225,6 +2271,19 @@
   .dialog-btn-unlink {
     background: #d32f2f;
     color: white;
+  }
+  .dialog-btn-toggle {
+    background: #6d6d6d;
+    color: white;
+  }
+  .dialog-btn-toggle:hover {
+    background: #565656;
+  }
+  .telegram-link-badge.paused {
+    background: #8a8a8a;
+  }
+  .existing-link-info.paused {
+    background: #f1f1f1;
   }
 
   .dialog-btn-unlink:hover {
