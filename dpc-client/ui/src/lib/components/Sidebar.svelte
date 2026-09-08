@@ -1077,13 +1077,29 @@
       <div class="dialog-content">
         {#if linkingConfigured}
           <div class="existing-link-info" class:paused={!linkingEnabled}>
-            <p class="dialog-info">
-              {#if linkingEnabled}
-                ✓ This agent is already linked to Telegram with {linkingAgent?.telegram_allowed_chat_ids?.length || 0} chat(s)
-              {:else}
-                ⏸ This link is disabled. Its {linkingAgent?.telegram_allowed_chat_ids?.length || 0} chat(s) and every
-                setting below are kept — click "Enable" to resume.
+            <div class="link-state-row">
+              <p class="dialog-info link-state-text">
+                {#if linkingEnabled}
+                  ✓ Linked and running
+                {:else}
+                  ⏸ Linked but disabled — every setting below is kept
+                {/if}
+              </p>
+              {#if onSetAgentTelegramEnabled}
+                <button
+                  type="button"
+                  class="dialog-btn dialog-btn-toggle"
+                  onclick={handleToggleEnabledFromDialog}
+                  title={linkingEnabled
+                    ? 'Stop the bot and keep every setting'
+                    : 'Start the bot again with the settings it already has'}
+                >
+                  {linkingEnabled ? 'Disable' : 'Enable'}
+                </button>
               {/if}
+            </div>
+            <p class="dialog-info small">
+              Chats: {#if linkingAgent?.telegram_allowed_chat_ids?.length}{#each linkingAgent.telegram_allowed_chat_ids as chatId}<span class="chat-id-chip">{chatId}</span>{/each}{:else}none{/if}
             </p>
             <p class="dialog-info small">
               Linked at: {linkingAgent?.telegram_linked_at || 'Unknown'}
@@ -1091,8 +1107,8 @@
           </div>
           <hr class="dialog-divider">
           <p class="dialog-info">
-            Update the configuration below, {linkingEnabled ? 'click "Disable" to pause the bot while keeping it' : 'click "Enable" to resume the bot'},
-            or click "Unlink" to remove Telegram integration and its settings.
+            Update the configuration below, or click "Unlink" to remove Telegram integration
+            and its settings.
           </p>
         {:else}
           <p class="dialog-info">
@@ -1211,18 +1227,6 @@
           >
             Cancel
           </button>
-          {#if linkingConfigured && onSetAgentTelegramEnabled}
-            <button
-              type="button"
-              class="dialog-btn dialog-btn-toggle"
-              onclick={handleToggleEnabledFromDialog}
-              title={linkingEnabled
-                ? 'Stop the bot and keep every setting'
-                : 'Start the bot again with the settings it already has'}
-            >
-              {linkingEnabled ? 'Disable' : 'Enable'}
-            </button>
-          {/if}
           {#if linkingConfigured}
             <button
               type="button"
@@ -2278,6 +2282,28 @@
   }
   .dialog-btn-toggle:hover {
     background: #565656;
+  }
+  .link-state-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.75rem;
+  }
+  .link-state-text {
+    margin: 0;
+  }
+  .link-state-row .dialog-btn-toggle {
+    flex: 0 0 auto;
+    padding: 0.3rem 0.9rem;
+    font-size: 0.8rem;
+  }
+  .chat-id-chip {
+    display: inline-block;
+    background: rgba(0, 0, 0, 0.07);
+    border-radius: 4px;
+    padding: 0.05rem 0.35rem;
+    margin-right: 0.3rem;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   }
   .telegram-link-badge.paused {
     background: #8a8a8a;
