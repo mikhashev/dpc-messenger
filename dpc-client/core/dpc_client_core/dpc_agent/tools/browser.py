@@ -342,15 +342,15 @@ _TOC_MAX_ENTRIES = 40
 
 
 def _markdown_toc(text: str, limit: int = _TOC_MAX_ENTRIES) -> str:
-    """Headings with the character offset each one starts at.
+    """Headings with the line each one starts on, counted as `read_file` counts.
 
-    The offsets are into the same string `save_to` writes, so they are what
-    `read_file(offset=, limit=)` takes: without them a reader who wants one
-    section of a long page has to read the page to find out where it is.
+    Lines, not characters: `read_file` paginates with `lines[offset:offset+limit]`
+    (`core.py:_paginate_content`), so a character offset handed to it is read as
+    a line number and lands past the end of any real page. An offset that points
+    at nothing is the defect this whole entry is about, one level down.
     """
     entries = []
-    offset = 0
-    for line in text.split("\n"):
+    for offset, line in enumerate(text.split("\n")):
         stripped = line.lstrip()
         if stripped.startswith("#"):
             hashes = len(stripped) - len(stripped.lstrip("#"))
@@ -359,7 +359,6 @@ def _markdown_toc(text: str, limit: int = _TOC_MAX_ENTRIES) -> str:
             # starting with a hashtag is filed as a section of the page.
             if rest[:1].isspace() and rest.strip() and hashes <= 3:
                 entries.append((hashes, rest.strip(), offset))
-        offset += len(line) + 1
     if not entries:
         return ""
     shown = entries[:limit]
@@ -368,7 +367,10 @@ def _markdown_toc(text: str, limit: int = _TOC_MAX_ENTRIES) -> str:
     ]
     if len(entries) > limit:
         lines.append(f"... and {len(entries) - limit} more headings")
-    return "[toc, offsets into the saved file]\n" + "\n".join(lines)
+    return (
+        "[toc — line offsets into the saved file, for read_file(offset=, limit=)]\n"
+        + "\n".join(lines)
+    )
 
 
 def _save_page_markdown(
@@ -3735,12 +3737,17 @@ async def browser_close(ctx: ToolContext) -> str:
 
 def get_tools() -> List[ToolEntry]:
     """Export browser tools for registry."""
+    # The descriptions state the cap a tool result is trimmed to. Quoted as a
+    # literal they would go on saying 15000 after the cap moved, and a tool
+    # description is what the model plans against.
+    from ..loop import TOOL_RESULT_CHAR_CAP as cap
+
     return [
         ToolEntry(
             name="browse_page",
             schema={
                 "name": "browse_page",
-                "description": "Fetch a web page and extract content as structured markdown. Preserves headings, lists, tables, and links. Use size presets to control output length: s=5K, m=10K (default), l=25K, f=full. A tool result is cut again at 15000 chars before it reaches you, so for a long page pass save_to=<filename>: the whole markdown is written there and read_file(offset=, limit=) pages through it. Set use_auth=<domain> to fetch authenticated content using stored cookies (requires prior login via the web-auth UI). Set keep_open=true to leave the headed Camoufox window open after returning (works for both anonymous and use_auth fetches) — useful for visual debugging and Task 002 stateful interactive flows.",
+                "description": f"Fetch a web page and extract content as structured markdown. Preserves headings, lists, tables, and links. Use size presets to control output length: s=5K, m=10K (default), l=25K, f=full. A tool result is cut again at {cap} chars before it reaches you, so for a long page pass save_to=<filename>: the whole markdown is written there and read_file(offset=, limit=) pages through it. Set use_auth=<domain> to fetch authenticated content using stored cookies (requires prior login via the web-auth UI). Set keep_open=true to leave the headed Camoufox window open after returning (works for both anonymous and use_auth fetches) — useful for visual debugging and Task 002 stateful interactive flows.",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -4015,7 +4022,7 @@ def get_tools() -> List[ToolEntry]:
                     "properties": {
                         "save_to": {
                             "type": "string",
-                            "description": "Write the whole HTML to this file (relative names land in the agent sandbox) and name it in the header. Raw HTML is the largest thing these tools return; without this the answer is cut at 15000 chars with no way to read the rest."
+                            "description": f"Write the whole HTML to this file (relative names land in the agent sandbox) and name it in the header. Raw HTML is the largest thing these tools return; without this the answer is cut at {cap} chars with no way to read the rest."
                         }
                     },
                 },

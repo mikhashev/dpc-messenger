@@ -21,8 +21,11 @@ from dpc_client_core.dpc_agent.tools import browser
 
 
 def _ctx(tmp_path):
+    # agent_root is a real path: read_file reaches past `.name` into it, and a
+    # stand-in that only carries a name passes the tools that read the name and
+    # fails the one this file exists to check against.
     return SimpleNamespace(
-        agent_root=SimpleNamespace(name="agent_test"),
+        agent_root=tmp_path / "agent_test",
         repo_path=lambda rel: tmp_path / rel,
         firewall=None,
     )
@@ -190,15 +193,28 @@ PAGE = (
 )
 
 
-def test_the_toc_gives_the_offset_each_heading_starts_at():
+def _toc_offset(toc: str, title: str) -> int:
+    line = next(l for l in toc.split("\n") if l.strip().startswith(title))
+    return int(line.rsplit("@", 1)[1])
+
+
+def test_the_toc_offset_is_what_read_file_takes(tmp_path):
+    """Checked through the tool the header names, not against the string.
+
+    Against the string the offsets looked right while being character offsets
+    handed to a reader that counts lines — found by @Zcode, 2026-09-08,
+    reviewing the first version of this.
+    """
+    from dpc_client_core.dpc_agent.tools.core import read_file
+
+    (tmp_path / "page.md").write_text(PAGE, encoding="utf-8")
+    ctx = _ctx(tmp_path)
     toc = browser._markdown_toc(PAGE)
 
-    assert "Anatomy @0" in toc
-    for title in ("Part 1", "Deeper", "Part 3"):
-        line = next(l for l in toc.split("\n") if l.strip().startswith(title))
-        offset = int(line.rsplit("@", 1)[1])
-        assert PAGE[offset:].startswith("#"), title
-        assert title in PAGE[offset:offset + 40]
+    for title in ("Anatomy", "Part 1", "Deeper", "Part 3"):
+        got = read_file(ctx, "page.md", offset=_toc_offset(toc, title), limit=1)
+        assert title in got, (title, got)
+        assert got.rstrip().endswith(title), (title, got)
 
 
 def test_a_hash_with_no_space_is_not_a_heading():
@@ -230,7 +246,7 @@ def test_the_toc_rides_only_on_a_saved_page():
     with_file = browser._page_answer("[h]", PAGE, PAGE, "/a/page.md")
     without = browser._page_answer("[h]", PAGE, PAGE, None)
 
-    assert "[toc, offsets into the saved file]" in with_file
+    assert "[toc — line offsets into the saved file" in with_file
     assert "toc" not in without
     assert without == f"[h]\n\n{PAGE}"
 
@@ -309,3 +325,16 @@ def test_a_scroll_is_not_given_up_on_sooner_than_a_navigation():
     caps = {t.name: t.timeout_sec for t in browser.get_tools()}
 
     assert caps["browser_scroll"] >= caps["browser_navigate"], caps
+
+
+def test_the_tool_descriptions_follow_the_cap_instead_of_quoting_it(monkeypatch):
+    """A description is what the model plans against, so a stale number in it
+    misleads exactly the reader it is written for — @Zcode, 2026-09-08."""
+    import dpc_client_core.dpc_agent.loop as loop
+
+    monkeypatch.setattr(loop, "TOOL_RESULT_CHAR_CAP", 4242)
+    tools = {t.name: t for t in browser.get_tools()}
+
+    assert "4242" in tools["browse_page"].schema["description"]
+    extract = tools["browser_extract"].schema["parameters"]["properties"]["save_to"]
+    assert "4242" in extract["description"]
