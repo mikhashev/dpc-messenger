@@ -394,12 +394,28 @@ Returns a list of AI providers available on the peer's system.
       {
         "alias": "Llama 3.1 70B (Ollama)",
         "model": "llama3.1:70b",
-        "type": "ollama"
+        "type": "ollama",
+        "supports_vision": false,
+        "supports_voice": false,
+        "context_window": 131072
+      },
+      {
+        "alias": "gpt-oss-120b (llama.cpp)",
+        "model": "gpt-oss-120b",
+        "type": "llamacpp_server",
+        "supports_vision": false,
+        "supports_voice": false,
+        "context_window": 131072,
+        "reasoning_words": ["xhigh", "medium", "low"],
+        "reasoning_default": "xhigh"
       },
       {
         "alias": "GPT-4 Turbo",
         "model": "gpt-4-turbo-preview",
-        "type": "openai"
+        "type": "openai",
+        "supports_vision": true,
+        "supports_voice": false,
+        "context_window": null
       }
     ]
   }
@@ -411,6 +427,17 @@ Returns a list of AI providers available on the peer's system.
   - `alias` (string, required): Human-readable name
   - `model` (string, required): Model identifier
   - `type` (string, required): Provider type (ollama, openai, anthropic, etc.)
+  - `supports_vision` (boolean, required): Whether the provider accepts images (v0.12.0+)
+  - `supports_voice` (boolean, required): Whether the provider can transcribe audio (v0.13.0+)
+  - `context_window` (integer or null, required): Context window in tokens; `null` when
+    the model is unknown to the sender, which a receiver must distinguish from a real size
+  - `reasoning_words` (array of strings, optional): The reasoning-effort words this model
+    accepts. Present only when the sender read them from the model's own chat template;
+    absent when the sender fell back to a general scale, so a receiver may quote them as
+    the model's own whenever they are present
+  - `reasoning_default` (string or null, optional): The effort the model's template applies
+    when none is sent; `null` when the template names no default. Sent with
+    `reasoning_words` and under the same condition
 
 ---
 

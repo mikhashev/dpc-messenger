@@ -2242,8 +2242,12 @@ class CoreService:
 
         context_window is None when the model is unknown locally, so peers can
         distinguish "unknown" from a real window size.
+
+        reasoning_words/reasoning_default are absent unless this model's own
+        template named them — same guard as _provider_rows, so that a fallback
+        table never reaches a peer wearing the model's name.
         """
-        return {
+        info = {
             "alias": alias,
             "model": provider.model,
             "type": provider.config.get("type", "unknown"),
@@ -2251,6 +2255,12 @@ class CoreService:
             "supports_voice": self._provider_supports_voice(provider),
             "context_window": self.llm_manager.lookup_context_window(provider.model),
         }
+
+        if getattr(provider, "_template_efforts_source", None) == "model":
+            info["reasoning_words"] = list(provider._template_efforts)
+            info["reasoning_default"] = provider._template_default
+
+        return info
 
     async def set_voice_provider(self, provider_alias: str) -> Dict[str, Any]:
         """Delegated to VoiceService."""

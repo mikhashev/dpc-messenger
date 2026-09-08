@@ -170,7 +170,10 @@ def create_providers_response(providers: list) -> Dict[str, Any]:
     """Creates a response containing available AI providers.
 
     Args:
-        providers: List of provider dicts with keys: alias, model, type
+        providers: Provider rows as specs/dptp_v1.md §3.5 describes them. The
+            shape is owned by the sender's builder rather than by this helper,
+            which is why it is not restated here — it has grown from three keys
+            to eight, and a second list would be the one that goes stale.
     """
     return {"command": "PROVIDERS_RESPONSE", "payload": {"providers": providers}}
 
