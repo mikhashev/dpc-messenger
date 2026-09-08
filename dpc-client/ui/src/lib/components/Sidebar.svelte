@@ -2285,17 +2285,28 @@
   }
   .link-state-row {
     display: flex;
+    flex-wrap: wrap;
     align-items: center;
     justify-content: space-between;
-    gap: 0.75rem;
+    gap: 0.5rem 0.75rem;
+    max-width: 100%;
   }
   .link-state-text {
     margin: 0;
+    flex: 1 1 auto;
+    /* Without this a flex item refuses to shrink below its longest word, which
+       is what pushes a sibling out of the box. */
+    min-width: 0;
   }
   .link-state-row .dialog-btn-toggle {
+    /* width is spelled out because .dialog-btn is flex:1 for the footer row,
+       and a grown button here squeezes the sentence into one word per line. */
     flex: 0 0 auto;
+    width: auto;
+    max-width: 100%;
     padding: 0.3rem 0.9rem;
     font-size: 0.8rem;
+    white-space: nowrap;
   }
   .chat-id-chip {
     display: inline-block;
