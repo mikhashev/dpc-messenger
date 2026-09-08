@@ -136,7 +136,9 @@ def round_progress_payload(
 # calls inside one round are not among them — `run_llm_loop` awaits each in turn
 # (see "Execute tool calls"), and has since the first commit. Saying "tools run
 # in parallel" here without that half is what this line used to do, and a reader
-# of the round believed it.
+# of the round believed it — including the thread that decided what to do about
+# it: `~/.dpc/conversations/agent_001/archive/2026/04/2026-04-08T10-00-39_reset_session.json`,
+# messages 59-70, where the answer was to watch rather than to add a control.
 _TOOL_WORKERS = 4
 # Kept under run_service's own 5 s bound, so this returns and lets the caller
 # log rather than racing it.
