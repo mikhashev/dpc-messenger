@@ -127,6 +127,55 @@ class DpcLlmAdapter:
             return provider.supports_vision()
         return False
 
+    def _remote_provider_alias(self, dpc_agent_provider: Any) -> Optional[str]:
+        """The alias the peer will be asked to run — the per-agent pin, else the global row."""
+        if self._compute_host:
+            return self._provider_alias
+        return getattr(dpc_agent_provider, 'remote_provider', None) if dpc_agent_provider else None
+
+    def _peer_alias_supports_vision(self, dpc_agent_provider: Any, peer_id: str) -> bool:
+        """Whether the peer advertised vision for the alias this agent will ask it to run.
+
+        DPTP §3.14 makes `supports_vision: true` in PROVIDERS_RESPONSE the
+        condition for sending a vision query, so an unknown alias or an
+        unanswered PROVIDERS_RESPONSE reads as no.
+        """
+        alias = self._remote_provider_alias(dpc_agent_provider)
+        if not alias:
+            return False
+        service = getattr(dpc_agent_provider, '_service', None) if dpc_agent_provider else None
+        peer_providers = (getattr(service, 'peer_metadata', None) or {}).get(
+            peer_id, {}
+        ).get("providers") or []
+        for row in peer_providers:
+            if row.get("alias") == alias:
+                return bool(row.get("supports_vision"))
+        return False
+
+    @staticmethod
+    def _images_for_peer(images: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Copies of the images carrying only what DPTP §3.4 lets the peer read.
+
+        `base64` is required there and `path` is the original filename, which the
+        receiver is nowhere promised it can open — on the peer's disk it is
+        missing or a different file. An entry without `base64` is malformed, and
+        one malformed entry drops the set: a partial set would reach the model as
+        the whole set.
+        """
+        prepared: List[Dict[str, Any]] = []
+        for img in images:
+            b64 = img.get("base64")
+            if not b64:
+                log.error(
+                    "Image has no base64 (DPTP §3.4 requires it) — not sending it to a peer"
+                )
+                return []
+            row: Dict[str, Any] = {"base64": b64}
+            if img.get("mime_type"):
+                row["mime_type"] = img["mime_type"]
+            prepared.append(row)
+        return prepared
+
     def default_model(self) -> str:
         """Return the current DPC provider's model name."""
         try:
@@ -164,42 +213,63 @@ class DpcLlmAdapter:
         Returns:
             (response_message, usage_dict) tuple in Ouroboros format
         """
-        # Check if user message contains images (vision query)
-        user_images = self._extract_images_from_messages(messages)
-        if user_images:
-            log.debug(f"Vision query with {len(user_images)} images")
-
-            # Two-tier vision handling:
-            # 1. If agent's provider supports vision → use native vision support
-            # 2. If not → pre-analyze with vision model, inject description
-            if self._agent_provider_supports_vision():
-                log.info("Agent provider supports vision - using native vision")
-                # Get the agent's provider for native vision call
-                alias = self._get_agent_provider_alias()
-                if not alias:
-                    raise RuntimeError("No AI provider configured in DPC Messenger")
-                provider = self._llm_manager.providers[alias]
-                # Use native vision support (passes images directly to provider)
-                return await self._chat_with_native_vision(
-                    provider, messages, user_images, tools, on_stream_chunk, conversation_id
-                )
-            else:
-                log.info("Agent provider does not support vision - pre-analyzing image")
-                # Get user's text message for context
-                user_text = self._extract_user_text(messages)
-                # Pre-analyze the image with a vision model
-                description = await self._pre_analyze_image_for_agent(
-                    user_images, user_text
-                )
-                # Inject description into messages as text context
-                messages = self._inject_image_description_into_messages(messages, description)
-                # Continue with normal text-based agent flow
-
-        # Check for remote peer routing — per-agent compute_host takes priority over global peer_id
+        # Check for remote peer routing — per-agent compute_host takes priority over global peer_id.
+        # Resolved before the image branch, which has to know whether the image is
+        # leaving this node at all: handling it locally re-resolves the alias in
+        # the LOCAL registry, where a pinned agent's alias is absent, and the
+        # fallback to default_provider can hand the picture to a cloud vendor the
+        # user never chose for this agent.
         dpc_agent_provider = self._llm_manager.providers.get("dpc_agent")
         effective_peer_id = self._compute_host or (
             getattr(dpc_agent_provider, 'peer_id', None) if dpc_agent_provider else None
         )
+
+        # Check if user message contains images (vision query)
+        user_images = self._extract_images_from_messages(messages)
+        peer_images: List[Dict[str, Any]] = []
+        if user_images:
+            log.debug(f"Vision query with {len(user_images)} images")
+
+            if effective_peer_id and self._peer_alias_supports_vision(
+                dpc_agent_provider, effective_peer_id
+            ):
+                peer_images = self._images_for_peer(user_images)
+                if not peer_images:
+                    log.error(
+                        "Peer %s serves vision for this agent, but the image cannot be "
+                        "sent under DPTP §3.4; handling it locally instead",
+                        effective_peer_id,
+                    )
+
+            if not peer_images:
+                # Two-tier vision handling:
+                # 1. If agent's provider supports vision → use native vision support
+                # 2. If not → pre-analyze with vision model, inject description
+                if self._agent_provider_supports_vision():
+                    log.info("Agent provider supports vision - using native vision")
+                    # Get the agent's provider for native vision call
+                    alias = self._get_agent_provider_alias()
+                    if not alias:
+                        raise RuntimeError("No AI provider configured in DPC Messenger")
+                    provider = self._llm_manager.providers[alias]
+                    # Use native vision support (passes images directly to provider)
+                    return await self._chat_with_native_vision(
+                        provider, messages, user_images, tools, on_stream_chunk, conversation_id
+                    )
+                else:
+                    log.info("Agent provider does not support vision - pre-analyzing image")
+                    # Get user's text message for context
+                    user_text = self._extract_user_text(messages)
+                    # Pre-analyze the image with a vision model
+                    description, failure_reason = await self._pre_analyze_image_for_agent(
+                        user_images, user_text
+                    )
+                    # Inject description into messages as text context
+                    messages = self._inject_image_description_into_messages(
+                        messages, description, failure_reason
+                    )
+                    # Continue with normal text-based agent flow
+
         if effective_peer_id:
             if self._compute_host:
                 # Per-agent remote routing: build a context object from per-agent values
@@ -214,6 +284,7 @@ class DpcLlmAdapter:
                 log.debug(f"Routing to per-agent remote peer: {effective_peer_id} (provider={self._provider_alias})")
                 return await self._chat_via_remote_peer(
                     remote_ctx, messages, tools, on_stream_chunk, conversation_id,
+                    images=peer_images,
                     reasoning_effort=reasoning_effort,
                 )
             else:
@@ -221,6 +292,7 @@ class DpcLlmAdapter:
                 log.debug(f"Routing to remote peer: {effective_peer_id}")
                 return await self._chat_via_remote_peer(
                     dpc_agent_provider, messages, tools, on_stream_chunk, conversation_id,
+                    images=peer_images,
                     reasoning_effort=reasoning_effort,
                 )
 
@@ -427,8 +499,12 @@ class DpcLlmAdapter:
                     f"(model cannot process the image). Falling back to pre-analysis."
                 )
                 user_text = self._extract_user_text(messages)
-                description = await self._pre_analyze_image_for_agent(images, user_text)
-                messages = self._inject_image_description_into_messages(messages, description)
+                description, failure_reason = await self._pre_analyze_image_for_agent(
+                    images, user_text
+                )
+                messages = self._inject_image_description_into_messages(
+                    messages, description, failure_reason
+                )
                 # Re-build prompt with injected description and continue as text-only
                 prompt = self._messages_to_prompt(messages)
                 if tools:
@@ -700,7 +776,8 @@ class DpcLlmAdapter:
             tools: Optional list of tool schemas
             on_stream_chunk: Optional streaming callback
             conversation_id: Optional conversation ID
-            images: Optional list of image dicts for vision queries
+            images: Optional list of image dicts for vision queries; sent only
+                as DPTP §3.4 allows, i.e. carrying base64 rather than a path
 
         Returns:
             (response_message, usage_dict) tuple in Ouroboros format
@@ -730,7 +807,9 @@ class DpcLlmAdapter:
                 prompt=prompt,
                 model=dpc_agent_provider.remote_model,
                 provider=dpc_agent_provider.remote_provider,
-                images=[],
+                # Re-checked at the wire, not only at the caller: this is the last
+                # place a `path` could leave the machine (DPTP §3.4).
+                images=self._images_for_peer(images or []),
                 reasoning_effort=reasoning_effort,
                 timeout=timeout
             )
@@ -878,20 +957,23 @@ class DpcLlmAdapter:
         self,
         images: List[Dict[str, Any]],
         user_message: str,
-    ) -> str:
+    ) -> Tuple[Optional[str], Optional[str]]:
         """
-        Pre-analyze images using a vision model and return description.
+        Pre-analyze images using a vision model.
 
         This is used when the agent's provider doesn't support vision natively.
         The description is injected into the messages so the agent can reason
         about visual content using its tools.
+
+        The failure reason travels beside the description, never inside it: a
+        reason returned as the description reads to the model as one.
 
         Args:
             images: List of image dicts with base64 and mime_type keys
             user_message: The user's text message (for context)
 
         Returns:
-            Text description of the image content
+            (description, None) on success, (None, reason) on failure.
         """
         try:
             # Build analysis prompt
@@ -916,16 +998,17 @@ class DpcLlmAdapter:
 
             description = response_metadata.get("response", "")
             log.debug(f"Image analysis complete ({len(description)} chars)")
-            return description
+            return description, None
 
         except Exception as e:
             log.error(f"Image pre-analysis failed: {e}")
-            return f"[Image analysis failed: {e}]"
+            return None, str(e)
 
     def _inject_image_description_into_messages(
         self,
         messages: List[Dict[str, Any]],
-        description: str,
+        description: Optional[str],
+        failure_reason: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
         """
         Inject image description into the last user message.
@@ -935,7 +1018,8 @@ class DpcLlmAdapter:
 
         Args:
             messages: List of message dicts
-            description: Text description of the image
+            description: Text description of the image, None when it failed
+            failure_reason: Why the analysis failed, when it did
 
         Returns:
             Modified messages list with description injected
@@ -948,7 +1032,14 @@ class DpcLlmAdapter:
         # agent it has seen the image when it has not — the same substitution
         # the provider stopped making when it quit returning reasoning in the
         # answer's place, one layer up.
-        if not (description or "").strip():
+        if description is None:
+            because = f" ({failure_reason})" if failure_reason else ""
+            header = (
+                "[The user has shared an image. The visual analysis failed"
+                f"{because}, so you have not seen it — say the image could not "
+                "be analysed rather than guessing at its contents.]"
+            )
+        elif not description.strip():
             header = (
                 "[The user has shared an image. The vision model returned no "
                 "description, so you have not seen it — say so rather than "
