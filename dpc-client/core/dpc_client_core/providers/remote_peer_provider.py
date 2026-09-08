@@ -2,7 +2,7 @@
 
 import asyncio
 import logging
-from typing import Dict, Any, TYPE_CHECKING
+from typing import Any, Dict, List, TYPE_CHECKING
 
 from .base import AIProvider
 
@@ -110,6 +110,45 @@ class RemotePeerProvider(AIProvider):
             logger.error(f"RemotePeerProvider '{self.alias}': Remote inference failed: {e}")
             raise RuntimeError(f"Remote inference failed: {e}")
 
+    async def generate_with_vision(
+        self,
+        prompt: str,
+        images: List[Dict[str, Any]],
+        **kwargs
+    ) -> str:
+        """Vision entry point for llm_manager; the DPTP request carries images."""
+        return await self.generate_response(prompt, images=images, **kwargs)
+
     def supports_vision(self) -> bool:
-        """RemotePeerProvider supports vision if the remote model supports it."""
-        return True  # Assume remote peer can handle vision if model supports it
+        """Whether the peer's own provider row for this alias claims vision.
+
+        Unknown is answered as no: llm_manager refuses a no with a message
+        naming the provider, while a yes it cannot honour becomes a swallowed
+        failure that reaches the model as though it were an analysis.
+        """
+        if not self._service:
+            logger.debug(
+                f"RemotePeerProvider '{self.alias}': no vision claim: CoreService not injected"
+            )
+            return False
+
+        if not self.remote_provider:
+            logger.debug(
+                f"RemotePeerProvider '{self.alias}': no vision claim: "
+                f"config names no provider alias on peer {self.peer_id}"
+            )
+            return False
+
+        peer_providers = getattr(self._service, "peer_metadata", {}).get(
+            self.peer_id, {}
+        ).get("providers", [])
+        for p in peer_providers:
+            if p.get("alias") == self.remote_provider:
+                return bool(p.get("supports_vision"))
+
+        logger.debug(
+            f"RemotePeerProvider '{self.alias}': no vision claim: provider "
+            f"'{self.remote_provider}' not among the {len(peer_providers)} "
+            f"advertised by peer {self.peer_id}"
+        )
+        return False
