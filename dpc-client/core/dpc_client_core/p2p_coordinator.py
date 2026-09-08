@@ -167,7 +167,70 @@ class P2PCoordinator:
     # Incoming P2P request handlers (Phase C Step 5 Batch 1)
     # ─────────────────────────────────────────────────────────────
 
-    async def handle_inference_request(self, peer_id: str, request_id: str, prompt: str, model: str = None, provider: str = None, images: list = None):
+    def _effort_for_peer(
+        self, peer_id: str, requested: str, serving_alias: str,
+    ) -> str:
+        """How much thinking to serve a peer: its request, capped by ours.
+
+        The peer says what it wants and the host says what it will pay for, and
+        the smaller of the two wins — a request cannot make this node spend more
+        than it chose to. Both are named in the log when they differ, because a
+        peer that asked for `off` and was served `high` has no other way to find
+        out. An unknown word is not guessed at: `normalize_reasoning_effort`
+        returns None and this node answers at its own default.
+        """
+        from .providers.base import REASONING_EFFORTS, REASONING_OFF, normalize_reasoning_effort
+
+        ladder = (REASONING_OFF,) + REASONING_EFFORTS
+        wanted = normalize_reasoning_effort(requested)
+        if wanted is None:
+            if requested:
+                logger.info(
+                    "Peer %s asked for reasoning effort %r, which is not a word on the "
+                    "scale — serving at this node's default", peer_id, requested,
+                )
+            return None
+
+        configured = self._configured_effort_for_alias(serving_alias)
+        cap = normalize_reasoning_effort(configured)
+        if cap is None:
+            if configured:
+                # Configured, and not a word of the shared scale — a provider
+                # whose ladder is its own, such as llamacpp_server reading the
+                # model's jinja template. Serving the peer's wish here would be
+                # fail-open: this node stated a ceiling and we could not read
+                # it. Send nothing instead, which is the host's own default.
+                logger.info(
+                    "Peer %s asked for reasoning effort %s; %s is configured as %r, "
+                    "which is not a word of the shared scale — serving this node's "
+                    "default rather than the peer's request",
+                    peer_id, wanted, serving_alias, configured,
+                )
+                return None
+            return wanted
+
+        served = wanted if ladder.index(wanted) <= ladder.index(cap) else cap
+        if served != wanted:
+            logger.info(
+                "Peer %s asked for reasoning effort %s; this node caps %s at %s, serving %s",
+                peer_id, wanted, serving_alias, cap, served,
+            )
+        return served
+
+    def _configured_effort_for_alias(self, alias: str) -> str:
+        """The effort this node configured for the alias it serves peers from.
+
+        Read off the built provider's own `config` (`AIProvider.__init__` keeps
+        the providers.json entry there), because that is the only place the
+        alias's configured effort exists at run time — there is no separate
+        table of configs to consult.
+        """
+        manager = getattr(self.service, "llm_manager", None)
+        provider = (getattr(manager, "providers", None) or {}).get(alias)
+        config = getattr(provider, "config", None)
+        return config.get("reasoning_effort") if isinstance(config, dict) else None
+
+    async def handle_inference_request(self, peer_id: str, request_id: str, prompt: str, model: str = None, provider: str = None, images: list = None, reasoning_effort: str = None):
         """Handle incoming remote inference request from a peer."""
         from dpc_protocol.protocol import create_remote_inference_response
 
@@ -212,8 +275,14 @@ class P2PCoordinator:
             logger.info("Running inference for %s (requested model: %s, requested provider: %s, serving alias: %s)",
                         peer_id, model or 'default', provider or 'default', serving_alias)
 
+            served_effort = self._effort_for_peer(peer_id, reasoning_effort, serving_alias)
+            query_kwargs = {"reasoning_effort": served_effort} if served_effort else {}
+
             async with self._peer_inference_lock:
-                result = await self.service.llm_manager.query(prompt, provider_alias=serving_alias, images=images, return_metadata=True)
+                result = await self.service.llm_manager.query(
+                    prompt, provider_alias=serving_alias, images=images,
+                    return_metadata=True, **query_kwargs,
+                )
             logger.info("Inference completed successfully for %s", peer_id)
 
             actual_model = result.get("model", model)
@@ -469,7 +538,7 @@ class P2PCoordinator:
     # Outgoing P2P requests (Phase C Step 5 Batch 3)
     # ─────────────────────────────────────────────────────────────
 
-    async def request_inference_from_peer(self, peer_id: str, prompt: str, model: str = None, provider: str = None, images: list = None, timeout: float = 1200.0) -> str:
+    async def request_inference_from_peer(self, peer_id: str, prompt: str, model: str = None, provider: str = None, images: list = None, reasoning_effort: str = None, timeout: float = 1200.0) -> str:
         """Request remote inference from a specific peer."""
         import uuid
         from dpc_protocol.protocol import create_remote_inference_request
@@ -486,7 +555,8 @@ class P2PCoordinator:
 
             request_message = create_remote_inference_request(
                 request_id=request_id, prompt=prompt,
-                model=model, provider=provider, images=images
+                model=model, provider=provider, images=images,
+                reasoning_effort=reasoning_effort,
             )
             await self.p2p_manager.send_message_to_peer(peer_id, request_message)
 

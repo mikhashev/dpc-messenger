@@ -213,13 +213,15 @@ class DpcLlmAdapter:
                 )
                 log.debug(f"Routing to per-agent remote peer: {effective_peer_id} (provider={self._provider_alias})")
                 return await self._chat_via_remote_peer(
-                    remote_ctx, messages, tools, on_stream_chunk, conversation_id
+                    remote_ctx, messages, tools, on_stream_chunk, conversation_id,
+                    reasoning_effort=reasoning_effort,
                 )
             else:
                 # Global peer_id routing (legacy KISS approach)
                 log.debug(f"Routing to remote peer: {effective_peer_id}")
                 return await self._chat_via_remote_peer(
-                    dpc_agent_provider, messages, tools, on_stream_chunk, conversation_id
+                    dpc_agent_provider, messages, tools, on_stream_chunk, conversation_id,
+                    reasoning_effort=reasoning_effort,
                 )
 
         alias = self._get_agent_provider_alias()
@@ -684,6 +686,7 @@ class DpcLlmAdapter:
         on_stream_chunk: Optional[Callable[[str, str], None]] = None,
         conversation_id: Optional[str] = None,
         images: Optional[List[Dict[str, Any]]] = None,
+        reasoning_effort: Optional[str] = None,
     ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         """
         Route inference to remote peer when dpc_agent.peer_id is set.
@@ -728,6 +731,7 @@ class DpcLlmAdapter:
                 model=dpc_agent_provider.remote_model,
                 provider=dpc_agent_provider.remote_provider,
                 images=[],
+                reasoning_effort=reasoning_effort,
                 timeout=timeout
             )
 
@@ -738,18 +742,29 @@ class DpcLlmAdapter:
                 remote_tokens = result.get("tokens_used")
                 remote_prompt_tokens = result.get("prompt_tokens")
                 remote_response_tokens = result.get("response_tokens")
+                remote_thinking = result.get("thinking")
+                remote_thinking_tokens = result.get("thinking_tokens")
             else:
                 # Fallback if result is already a string (shouldn't happen but be safe)
                 response_text = str(result) if result else ""
                 remote_tokens = None
                 remote_prompt_tokens = None
                 remote_response_tokens = None
+                remote_thinking = None
+                remote_thinking_tokens = None
 
             # Build response message in Ouroboros format
             response_msg: Dict[str, Any] = {
                 "role": "assistant",
                 "content": response_text,
             }
+
+            # The peer sends its reasoning and the whole wire carries it; reading
+            # it here is what gives a remote agent the same channel a local one
+            # has. Without it the round falls back to `content`, which on a tool
+            # round is the tool_call block itself.
+            if remote_thinking:
+                response_msg["thinking"] = remote_thinking
 
             # Parse for tool calls if tools were provided
             if tools:
@@ -767,6 +782,11 @@ class DpcLlmAdapter:
                     "total_tokens": remote_tokens or (remote_prompt_tokens + remote_response_tokens),
                     "cost": compute_cost_usd(self._provider_alias or "", remote_prompt_tokens, remote_response_tokens),
                 }
+                # The loop sums this field across a task (OPTIONAL_USAGE_FIELDS);
+                # absent means «no round reported one», so it is set only when
+                # the peer sent a count rather than defaulted to zero.
+                if remote_thinking_tokens:
+                    usage["reasoning_tokens"] = remote_thinking_tokens
             elif self._token_counter:
                 # Count locally using TokenCountManager
                 model_name = self.default_model()

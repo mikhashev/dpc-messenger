@@ -132,7 +132,11 @@ def round_progress_payload(
 # changes nothing, and why the bounded wait in run_service cannot reach it:
 # the bound fires during shutdown, _python_exit fires after it.
 #
-# Four workers, as before, so tools still run in parallel.
+# Four workers, as before. They serve tools from different loops at once; the
+# calls inside one round are not among them — `run_llm_loop` awaits each in turn
+# (see "Execute tool calls"), and has since the first commit. Saying "tools run
+# in parallel" here without that half is what this line used to do, and a reader
+# of the round believed it.
 _TOOL_WORKERS = 4
 # Kept under run_service's own 5 s bound, so this returns and lets the caller
 # log rather than racing it.
@@ -333,6 +337,55 @@ def _sanitize_tool_result(result: str) -> str:
         )
 
     return sanitized
+
+
+_TOOL_CALL_FENCE = re.compile(r"```+\s*tool_call\b.*?```+", re.DOTALL | re.IGNORECASE)
+_BARE_TOOL_CALL_JSON = re.compile(
+    r'\{\s*"name"\s*:\s*"[^"]+"\s*,\s*"arguments"\s*:\s*\{.*?\}\s*\}', re.DOTALL
+)
+
+
+def _prose_outside_tool_calls(content: str) -> str:
+    """What the model said this round beside the calls it made.
+
+    A round whose whole message is the call has no reasoning to show, and
+    putting the call there labels a tool invocation as the agent's thinking.
+    The shapes stripped here are the ones `_parse_tool_calls` accepts, so the
+    two stay in step: fenced tool_call blocks first, then a bare
+    {"name": …, "arguments": …} object for the providers that emit no fence.
+    """
+    if not content:
+        return ""
+    stripped = _TOOL_CALL_FENCE.sub("", content)
+    stripped = _BARE_TOOL_CALL_JSON.sub("", stripped)
+    return stripped.strip()
+
+
+def _round_reasoning(
+    message_thinking: Optional[str],
+    provider_thinking: Optional[str],
+    content: Optional[str],
+    tool_calls: Optional[List[Dict[str, Any]]],
+) -> str:
+    """Everything the model produced this round for display, deduped.
+
+    `content` is in here because a model often writes a preamble before its
+    calls. On the remote path the whole message *is* the call — the peer's text
+    is returned as content and parsed into tool calls — and including it whole
+    put the tool_call JSON on screen labelled as the agent's thinking.
+
+    A function rather than four lines inside the loop so the rule can be tested:
+    as inline code the call-site could be reverted with every test still green,
+    which is how it was written the first time.
+    """
+    prose = _prose_outside_tool_calls(content) if tool_calls else content
+    return "\n\n".join(
+        dict.fromkeys(
+            s.strip()
+            for s in (message_thinking, provider_thinking, prose)
+            if s and s.strip()
+        )
+    )
 
 
 def _detect_reasoning_quality(thinking: str, tool_names: List[str]) -> Dict[str, Any]:
@@ -1095,10 +1148,8 @@ async def run_llm_loop(
             # CoT (extended thinking) + content preamble, deduped. Shown per-round in the
             # collapsible (round_text) and emitted live. Per Variant 2 this is the ONLY
             # home for intermediate text — it is no longer folded into the final answer.
-            round_reasoning = "\n\n".join(
-                dict.fromkeys(
-                    s.strip() for s in (msg.get("thinking"), thinking, content) if s and s.strip()
-                )
+            round_reasoning = _round_reasoning(
+                msg.get("thinking"), thinking, content, tool_calls
             )
 
             if round_reasoning:

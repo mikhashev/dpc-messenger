@@ -31,7 +31,7 @@ def create_send_text_message(text: str) -> Dict[str, Any]:
     # For now, we don't need a chat_id, the P2PManager knows the sender.
     return {"command": "SEND_TEXT", "payload": {"text": text}}
 
-def create_remote_inference_request(request_id: str, prompt: str, model: str = None, provider: str = None, images: list = None) -> Dict[str, Any]:
+def create_remote_inference_request(request_id: str, prompt: str, model: str = None, provider: str = None, images: list = None, reasoning_effort: str = None) -> Dict[str, Any]:
     """
     Creates a remote inference request message.
 
@@ -42,6 +42,10 @@ def create_remote_inference_request(request_id: str, prompt: str, model: str = N
         provider: Optional provider alias to use
         images: Optional list of image dicts for vision models (Phase 2: Remote Vision)
                 Each image dict contains: {path: str, base64: str, mime_type: str}
+        reasoning_effort: How much thinking the caller wants (off/low/medium/high/max).
+                A request, not an instruction: the host clamps it downwards to what
+                it is willing to spend. Absent means the caller did not choose, and
+                the host answers at its own default.
     """
     payload = {
         "request_id": request_id,
@@ -53,6 +57,8 @@ def create_remote_inference_request(request_id: str, prompt: str, model: str = N
         payload["provider"] = provider
     if images:
         payload["images"] = images
+    if reasoning_effort:
+        payload["reasoning_effort"] = reasoning_effort
     return {"command": "REMOTE_INFERENCE_REQUEST", "payload": payload}
 
 def create_remote_inference_response(

@@ -287,7 +287,10 @@ async def test_a_standing_pin_still_routes_to_the_peer():
     adapter = _adapter(PEER, providers={"dpc_agent": SimpleNamespace(peer_id=None)})
     seen = {}
 
-    async def _remote(ctx, messages, tools, on_stream_chunk, conversation_id):
+    async def _remote(ctx, messages, tools, on_stream_chunk, conversation_id, **kwargs):
+        # **kwargs so the double does not pin the caller's argument list: this
+        # test is about which peer is routed to, and it failed when the real
+        # signature gained reasoning_effort.
         seen["peer"] = ctx.peer_id
         return ({"role": "assistant", "content": "ok"}, {})
 

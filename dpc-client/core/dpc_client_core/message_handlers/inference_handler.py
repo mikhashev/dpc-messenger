@@ -27,9 +27,13 @@ class RemoteInferenceRequestHandler(MessageHandler):
         model = payload.get("model")
         provider = payload.get("provider")
         images = payload.get("images")  # Phase 2: Remote Vision support
+        # What the peer asked to spend on thinking. The host clamps it; absent
+        # means it did not choose.
+        reasoning_effort = payload.get("reasoning_effort")
 
         await self.service._handle_inference_request(
-            sender_node_id, request_id, prompt, model, provider, images
+            sender_node_id, request_id, prompt, model, provider, images,
+            reasoning_effort,
         )
         return None
 

@@ -6964,9 +6964,9 @@ class CoreService:
         """
         await self.context_coordinator.handle_device_context_request(peer_id, request_id)
 
-    async def _handle_inference_request(self, peer_id: str, request_id: str, prompt: str, model: str = None, provider: str = None, images: list = None):
+    async def _handle_inference_request(self, peer_id: str, request_id: str, prompt: str, model: str = None, provider: str = None, images: list = None, reasoning_effort: str = None):
         """Delegated to P2PCoordinator."""
-        await self.p2p_coordinator.handle_inference_request(peer_id, request_id, prompt, model, provider, images)
+        await self.p2p_coordinator.handle_inference_request(peer_id, request_id, prompt, model, provider, images, reasoning_effort)
 
     async def _handle_transcription_request(self, peer_id: str, request_id: str, audio_base64: str, mime_type: str, model: str = None, provider: str = None, language: str = "auto", task: str = "transcribe"):
         """Delegated to P2PCoordinator."""
@@ -7228,7 +7228,7 @@ class CoreService:
             logger.error("request_skill_from_peer error: %s", e, exc_info=True)
             return {"status": "error", "message": str(e)}
 
-    async def _request_inference_from_peer(self, peer_id: str, prompt: str, model: str = None, provider: str = None, images: list = None, timeout: float = None) -> str:
+    async def _request_inference_from_peer(self, peer_id: str, prompt: str, model: str = None, provider: str = None, images: list = None, reasoning_effort: str = None, timeout: float = None) -> str:
         """Delegated to P2PCoordinator.
 
         The UI door used to carry a hardcoded 240 s that no configuration could
@@ -7237,7 +7237,9 @@ class CoreService:
         """
         if timeout is None:
             timeout = self.settings.get_remote_inference_timeout()
-        return await self.p2p_coordinator.request_inference_from_peer(peer_id, prompt, model, provider, images, timeout)
+        return await self.p2p_coordinator.request_inference_from_peer(
+            peer_id, prompt, model, provider, images, reasoning_effort, timeout
+        )
 
     async def _request_transcription_from_peer(
         self, peer_id: str, audio_base64: str, mime_type: str,
