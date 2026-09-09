@@ -268,8 +268,13 @@ Qwen3.8-27B as a GGUF chosen per node, not a format.
   impossible, and it fails the request rather than degrading it (`Inferred` from the loop's shape,
   not measured against this build).
   **(ii) `925e1179` invalidates saved slot state**: `LLAMA_SESSION_VERSION` 9 → 10 and
-  `LLAMA_STATE_SEQ_VERSION` 2 → 3. We pass `--slot-save-path`, so slot state written by `b10566` is
-  rejected by this build rather than quietly misread (`Observed` in the constants).
+  `LLAMA_STATE_SEQ_VERSION` 2 → 3, so slot state written by `b10566` is rejected by this build
+  rather than quietly misread (`Observed` in the constants). **It does not reach us today, and the
+  first draft of this amendment said it did.** `--slot-save-path` is a supervisor option that
+  defaults to `None` (`llama_server_supervisor.py:110`) and is emitted only when set (`:610-611`);
+  no alias in `providers.json` sets it, and the live child command line of 2026-09-10 does not
+  carry it. So the break is real and conditional: it bites the first time someone turns the option
+  on and expects state from an older pin to load.
   **(iii) `e750b887` makes `preserve_reasoning` default to true — and it is a no-op for us**, which
   was checked rather than assumed: our loop never sends `reasoning_content` back (the llamacpp path
   passes `reasoning_echo=False`, and the agent adapter keeps `thinking` as a top-level key the
