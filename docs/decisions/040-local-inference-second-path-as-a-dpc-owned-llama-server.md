@@ -270,9 +270,13 @@ Qwen3.8-27B as a GGUF chosen per node, not a format.
   then tests the promoted value. A second, adjacent throw is new in the same block: two or more
   assistant messages at the end of the list (`:1281`). Our loop normally ends a request with a
   `role: "tool"` message, so the trigger stays narrow — resume-after-a-tool-call, a replay, or a
-  history truncated at the wrong boundary — but it fails the request rather than degrading it
-  (`Observed` in upstream source; the loop's shape is `Inferred`, and no request of that shape has
-  been sent to this build on purpose).
+  history truncated at the wrong boundary — but it fails the request rather than degrading it.
+  **Measured against the live child on 2026-09-10**, three requests, no `continue_final_message` in
+  any body: a tail of assistant-with-`tool_calls` → **HTTP 400**, «Cannot continue an assistant
+  message that contains tool calls»; the shape our loop actually sends, ending in a `role: "tool"`
+  message → **HTTP 200**, served; two assistant messages at the end → **HTTP 400**, «Cannot have 2
+  or more assistant messages at the end of the list». So both throws are reachable from a plain
+  OpenAI-shaped body and neither is reached by today's loop (`Observed`).
   **(ii) `925e1179` invalidates saved slot state**: `LLAMA_SESSION_VERSION` 9 → 10 and
   `LLAMA_STATE_SEQ_VERSION` 2 → 3, so slot state written by `b10566` is rejected by this build
   rather than quietly misread (`Observed` in the constants). **It does not reach us today, and the
