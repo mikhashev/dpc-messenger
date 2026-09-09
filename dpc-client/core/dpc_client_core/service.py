@@ -6020,9 +6020,15 @@ class CoreService:
             filename: Optional filename
             text: Optional text caption
             describe_for_agents: If True, run one vision-model pass over the image and
-                route a text description to the group agents (GROUP-CHAT-VISION-NOT-WIRED).
+                add its description to the message text (GROUP-CHAT-VISION-NOT-WIRED).
                 The image is shared with all members regardless; this only additionally
-                lets agents "see" it. Mentions in `text` drive which agents respond.
+                lets agents "see" it. Mentions in `text` drive which agents respond,
+                with or without a description.
+
+        Returns:
+            On success, `vl_description_status` says what became of the vision pass —
+            "not_requested", "produced", or "failed" — and a "failed" one carries the
+            reason in `warnings`. The image send itself succeeded either way.
         """
         from datetime import datetime, timezone
         import base64 as b64
@@ -6098,12 +6104,21 @@ class CoreService:
             # Computed BEFORE the message is built so the description becomes part of
             # the persisted, human-visible message text (not just ephemeral agent
             # context). Empty string if the option is off or the VL pass fails.
+            # A refusal is carried back to the caller in `vl_description_status` +
+            # `warnings`: the person who ticked the box was told nothing when the
+            # node had no working vision provider.
             vl_description = ""
+            vl_error = ""
             if describe_for_agents:
                 try:
                     vl_description = await self._describe_image_for_agents(encoded_data, mime_type, text)
                 except Exception as e:
+                    vl_error = str(e) or e.__class__.__name__
                     logger.warning("describe_for_agents (VL) failed for group image: %s", e)
+                if not vl_description and not vl_error:
+                    # A provider that answers with nothing refuses just as squarely
+                    # as one that raises; both must reach the caller.
+                    vl_error = "the vision provider returned an empty description"
 
             # Message text = user's caption + VL description (if any). This is exactly
             # what Mike wants persisted: file reference (attachment) + text.
@@ -6189,17 +6204,34 @@ class CoreService:
                 except Exception as e:
                     logger.warning("Failed to send group image to %s: %s", node_id[:20], e)
 
-            # If VL was requested, route the full text (caption + VL description) into
-            # the group agents so they can reason about the image. @mentions in the
-            # caption decide which agents respond, exactly as with plain text input.
-            if vl_description:
+            # Route the message text into the group agents so they can act on it.
+            # @mentions in the caption decide which agents respond, exactly as with
+            # plain text input. The VL description is an enrichment, not a condition:
+            # gating this on it meant a failed vision pass dropped the mention too,
+            # and the tagged agent never learned the message existed. `full_text` is
+            # caption + description when a description was produced, the bare caption
+            # otherwise. This is the only mention fan-out on the image path —
+            # send_group_image does not go through send_group_message — so routing it
+            # unconditionally cannot fire twice.
+            if full_text:
                 try:
                     sender_display = self.p2p_manager.get_display_name() or "User"
                     await self._handle_group_agent_mentions(group_id, full_text, sender_display)
                 except Exception as e:
-                    logger.warning("routing VL description to group agents failed: %s", e)
+                    logger.warning("routing group image text to group agents failed: %s", e)
 
-            return {
+            # The image send itself succeeded even when the VL pass refused, so the
+            # outcome of the description rides alongside "success" rather than
+            # replacing it: "not_requested" / "produced" / "failed", with the reason
+            # in `warnings` (same shape as save_providers_config above).
+            if not describe_for_agents:
+                vl_description_status = "not_requested"
+            elif vl_description:
+                vl_description_status = "produced"
+            else:
+                vl_description_status = "failed"
+
+            result = {
                 "status": "success",
                 "transfer_ids": transfer_ids,
                 "file_path": str(file_path),
@@ -6207,8 +6239,14 @@ class CoreService:
                 "size_bytes": len(image_data),
                 "width": width,
                 "height": height,
-                "mime_type": mime_type
+                "mime_type": mime_type,
+                "vl_description_status": vl_description_status,
             }
+            if vl_description_status == "failed":
+                result["warnings"] = [
+                    f"Image sent, but describe for agents (VL) produced no description: {vl_error}"
+                ]
+            return result
         except Exception as e:
             logger.error("Error sending group image: %s", e, exc_info=True)
             return {"status": "error", "message": str(e)}
