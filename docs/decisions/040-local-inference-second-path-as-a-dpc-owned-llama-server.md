@@ -262,11 +262,17 @@ Qwen3.8-27B as a GGUF chosen per node, not a format.
   Three things arrive with the bump, and each is narrower than its changelog line.
   **(i) `1729ed53` turns a prefill `b10566` accepted into an error.** llama-server now raises
   `invalid_argument` when the message array *ends* with an assistant message carrying a non-empty
-  `tool_calls`, where `b10566` silently stripped them; `--prefill-assistant` is on by default. Our
-  loop normally ends a request with a `role: "tool"` message, so the trigger is narrow —
-  resume-after-a-tool-call, a replay, or a history truncated at the wrong boundary — but it is not
-  impossible, and it fails the request rather than degrading it (`Inferred` from the loop's shape,
-  not measured against this build).
+  `tool_calls`, where `b10566` silently stripped them. **Sending no `continue_final_message` does not
+  exempt us, and a review argued it did.** `server-common.cpp:1275-1294` at `b10809` reads: the field
+  is `NONE` unless the body sets it (`:1275-1277`), but when it is `NONE`, `--prefill-assistant` is on
+  — the default, `arg.cpp:3806`, and we pass no `--no-prefill-assistant` — and the last message is an
+  assistant message, the server **promotes it to `AUTO` itself** (`:1283`); the throw at `:1289-1293`
+  then tests the promoted value. A second, adjacent throw is new in the same block: two or more
+  assistant messages at the end of the list (`:1281`). Our loop normally ends a request with a
+  `role: "tool"` message, so the trigger stays narrow — resume-after-a-tool-call, a replay, or a
+  history truncated at the wrong boundary — but it fails the request rather than degrading it
+  (`Observed` in upstream source; the loop's shape is `Inferred`, and no request of that shape has
+  been sent to this build on purpose).
   **(ii) `925e1179` invalidates saved slot state**: `LLAMA_SESSION_VERSION` 9 → 10 and
   `LLAMA_STATE_SEQ_VERSION` 2 → 3, so slot state written by `b10566` is rejected by this build
   rather than quietly misread (`Observed` in the constants). **It does not reach us today, and the
@@ -282,8 +288,9 @@ Qwen3.8-27B as a GGUF chosen per node, not a format.
   (`Observed`).
 
   **One sentence of the amendment above no longer describes the pin.** PR 27342 merged upstream on
-  **2026-08-27**, and `LLM_TENSOR_DFLASH_*` are declared in `src/llama-arch.h` at `b10809` (1
-  mention of dflash at `b10566`, 13 at `b10809`, `Observed`). `expected 81, got 58` is therefore a
+  **2026-08-27**, and `src/llama-arch.h` at `b10809` declares **7** `LLM_TENSOR_DFLASH_*` entries
+  against **0** at `b10566` (the 1-against-13 first written here counted every `dflash` substring —
+  7 tensors, 5 `LLM_KV`, 1 `LLM_ARCH` — which is a different quantity; caught in review, `Observed`). `expected 81, got 58` is therefore a
   measurement of `b10472`/`b10566`, not a property of this build; `ProvidersEditor.svelte` now says
   so, and marks `draft-dflash` **untried** here rather than broken, because nobody has started the
   drafter since the pin moved (`Not verified`). Two upstream citations in our own code were re-read
@@ -296,8 +303,9 @@ Qwen3.8-27B as a GGUF chosen per node, not a format.
   box (2026-09-09 23:33–23:35, `Observed`), and `llama-server --version` answers
   `0.4.0-dev (build 10809, commit 5266f24da)` against `b10566`'s `0.2.0-dev (build 10566, commit
   bb4caa754)`, same Clang 20.1.8. Read out of the shipped `ggml-cuda.dll` rather than from a banner:
-  **`ARCHS = 750,800,860,890,900,1200,1210` — the same literal in all four pins on this disk**
-  (b10472, b10566, b10684, b10809), so the declared arch list did not move; `BLACKWELL_NATIVE_FP4`
+  the arch list `750,800,860,890,900,1200,1210` — the value string beside the `ARCHS` key, and
+  **byte-identical, once each, in all four pins on this disk** (b10472, b10566, b10684, b10809), so
+  what the build declares did not move; `BLACKWELL_NATIVE_FP4`
   and `USE_GRAPHS` are present as keys, and their `= 1` values are built by code rather than sitting
   in a static table, so the `= 1` half stays `Not verified` until a banner is read. The flag surface
   grew and lost nothing: 336 → 345 flags, **0 removed**, 9 added (`--kv-unified-per-slot`,
