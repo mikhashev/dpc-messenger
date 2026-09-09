@@ -35,6 +35,8 @@ BACKLOG = f"""# Fixture backlog for the write verbs
 - **Observed.** Cross-ref: [[ALPHA-ENTRY-EXISTS]].
 - **axis:** honesty
 
+### DELTA-ENTRY-HAS-NO-BODY: a heading with nothing under it, which append has to open (LOW, open, 2026-08-01 — CC: verb fixture)
+
 ## IN PROGRESS
 
 ## DONE — AWAITING OBSERVATION
@@ -68,6 +70,11 @@ def run(work, *args, env=None):
     # inherits DPC_BACKLOG_BY would pass the "refuses without --by" case for the
     # wrong reason and report a guard that never fired.
     full.pop("DPC_BACKLOG_BY", None)
+    # Snapshots land inside the throwaway directory. A fixture that wrote into the real
+    # ~/.dpc/backlog-backups would put copies of a fixture board where the recovery of a
+    # real one is looked for, and its pruning would run against that directory too.
+    full["DPC_BACKLOG_BACKUP_DIR"] = str(work / "backups")
+    full.pop("DPC_BACKLOG_TMP_SUFFIX", None)
     full.update(env or {})
     r = subprocess.run([sys.executable, str(BUILD), *args, str(work / "backlog.md")],
                        capture_output=True, text=True, encoding="utf-8",
@@ -157,6 +164,91 @@ def main():
         text = (work / "backlog.md").read_text(encoding="utf-8")
         check("a write whose result would refuse is not written at all",
               code == 1 and "EPSILON-CYRILLIC" not in text, out[-400:])
+
+        # --- append ----------------------------------------------------------------
+        # The verb the tool did not have on 2026-09-09, which is why the board was edited
+        # by a hand-written script that truncated it.
+        code, out = run(work, "append", "GAMMA-ENTRY-WAS-ADDED",
+                        "--text=the observation this verb exists for", "--by=CC")
+        text = (work / "backlog.md").read_text(encoding="utf-8")
+        check("append writes a dated bullet naming the actor",
+              code == 0 and f"- **{TODAY}, CC:** the observation this verb exists for" in text,
+              out[-400:])
+        # Prose above the trailing metadata run, which is where every dated bullet already
+        # in the real board sits. Below `filed:` the bullet reads as metadata it is not.
+        body = text.split("### GAMMA-ENTRY-WAS-ADDED", 1)[1].split("###", 1)[0]
+        check("the bullet lands above the axis and filed bullets",
+              body.index(f"- **{TODAY}, CC:**") < body.index("- **axis:**")
+              < body.index("- **filed:**"), body)
+
+        run(work, "append", "GAMMA-ENTRY-WAS-ADDED", "--text=a second observation",
+            "--by=Ark")
+        text = (work / "backlog.md").read_text(encoding="utf-8")
+        body = text.split("### GAMMA-ENTRY-WAS-ADDED", 1)[1].split("###", 1)[0]
+        check("a second append lands under the first and still above the metadata",
+              body.index("the observation this verb exists for")
+              < body.index("a second observation") < body.index("- **axis:**"), body)
+
+        code, out = run(work, "append", "BETA-ENTRY-POINTS-AT-ALPHA",
+                        "--text=an entry whose only metadata bullet is the axis",
+                        "--by=CC", "--date=2026-01-02")
+        text = (work / "backlog.md").read_text(encoding="utf-8")
+        body = text.split("### BETA-ENTRY-POINTS-AT-ALPHA", 1)[1].split("###", 1)[0]
+        check("append honours --date",
+              code == 0 and "- **2026-01-02, CC:**" in body, out[-400:])
+
+        # An entry with no body at all: the bullet cannot land flush against the heading,
+        # or the heading and the first bullet become one paragraph in every renderer.
+        code, out = run(work, "append", "DELTA-ENTRY-HAS-NO-BODY",
+                        "--text=the first thing anybody wrote under it", "--by=CC")
+        text = (work / "backlog.md").read_text(encoding="utf-8")
+        check("append opens the body of an entry that had none",
+              code == 0 and re.search(
+                  r"### DELTA-ENTRY-HAS-NO-BODY:[^\n]*\n\n- \*\*" + TODAY
+                  + r", CC:\*\* the first thing anybody wrote under it\n", text),
+              out[-400:])
+
+        code, out = run(work, "--check")
+        check("the file the append verb produced passes its own check", code == 0, out[-400:])
+
+        before = (work / "backlog.md").read_text(encoding="utf-8")
+        code, out = run(work, "append", "GAMMA-ENTRY-WAS-ADDED", "--text=not written",
+                        "--by=CC", "--dry-run")
+        check("append --dry-run validates and writes nothing",
+              code == 0 and (work / "backlog.md").read_text(encoding="utf-8") == before,
+              out[-300:])
+
+        code, out = run(work, "append", "GAMMA-ENTRY-WAS-ADDED", "--by=CC")
+        check("append refuses with no --text",
+              code == 2 and (work / "backlog.md").read_text(encoding="utf-8") == before,
+              out[-300:])
+
+        code, out = run(work, "append", "GAMMA-ENTRY-WAS-ADDED", "--text=   ", "--by=CC")
+        check("append refuses whitespace-only --text", code == 2, out[-300:])
+
+        # A newline in the text can open a `###` of its own and split the entry in two.
+        code, out = run(work, "append", "GAMMA-ENTRY-WAS-ADDED",
+                        "--text=first line\n### SMUGGLED-HEADING: second", "--by=CC")
+        check("append refuses a newline in --text",
+              code == 2 and "SMUGGLED-HEADING" not in
+              (work / "backlog.md").read_text(encoding="utf-8"), out[-300:])
+
+        code, out = run(work, "append", "NO-SUCH-ENTRY", "--text=x", "--by=CC")
+        check("append refuses a name that is not in the file", code == 2, out[-300:])
+
+        code, out = run(work, "append", "GAMMA-ENTRY-WAS-ADDED", "--text=x")
+        check("append refuses when no actor is named", code == 2, out[-300:])
+
+        # --- snapshots -------------------------------------------------------------
+        snaps = sorted((work / "backups").glob("backlog.*.auto.md"))
+        check("the verbs took snapshots into the backup directory", bool(snaps),
+              str(list((work / "backups").glob("*")) if (work / "backups").exists() else
+                  "no backups directory at all"))
+        check("a snapshot is a whole board, not an empty file",
+              bool(snaps) and all(s.stat().st_size > 0 and
+                                  "## OPEN" in s.read_text(encoding="utf-8")
+                                  for s in snaps),
+              str([(s.name, s.stat().st_size) for s in snaps]))
 
         # --- move ------------------------------------------------------------------
         code, out = run(work, "move", "ALPHA-ENTRY-EXISTS", "--to=IN PROGRESS", "--by=CC")

@@ -472,7 +472,7 @@ The full list, and the fixture that watches each rule fire, live in
 ## 8a. Writing an entry with the tool
 
 Editing the file by hand stays correct and always will — §8 is what holds the format, and
-no script can be the only way in. The four verbs exist so that the common path is right by
+no script can be the only way in. The five verbs exist so that the common path is right by
 construction, and so that a rename cannot leave its inbound references behind (ADR-039).
 
 ```bash
@@ -484,6 +484,9 @@ uv run python tools/backlog/build.py move NAME --to='IN PROGRESS' --by=CC
 uv run python tools/backlog/build.py rename OLD-NAME NEW-NAME --by=CC
 uv run python tools/backlog/build.py close NAME --session=S72 --resolution=fixed --by=CC \
     --evidence='commit abc1234, observed in the 2026-08-11 startup log'
+
+uv run python tools/backlog/build.py append NAME --text='what was seen, with a file:line' \
+    --by=CC [--date=YYYY-MM-DD]
 ```
 
 What each one guarantees, beyond typing less:
@@ -512,11 +515,33 @@ What each one guarantees, beyond typing less:
   the same edit**, and leaves a trace line carrying `<!-- no-refs -->` — quoting the dead
   name without that marker would manufacture exactly the dangling reference this tool
   reports.
+- **`append` adds one dated bullet — `- **YYYY-MM-DD, who:** …` — to the body of an entry
+  that already exists**, above the trailing `axis:` / `filed:` / `taken:` bullets, because
+  those are metadata and this is prose. It is the commonest edit there is and the tool had
+  no verb for it until 2026-09-09, which is why that edit was being made by hand-written
+  scripts — and why one of them truncated `backlog.md` to zero bytes. The text is one
+  bullet and therefore one line; a newline in it is refused, because a newline can open a
+  `###` of its own and split the entry in two.
+
+**Every write is atomic, and every verb takes a snapshot first.** The bytes are built
+complete and then `os.replace`d onto the target, so a failure at any point leaves the
+previous file exactly as it was rather than half-written or empty. Before its first write
+a verb copies `backlog.md` — and `backlog_closed.md` when it touches it — into
+`~/.dpc/backlog-backups/` under a UTC-stamped name (`DPC_BACKLOG_BACKUP_DIR` moves that
+directory), skipping the copy when the content matches the newest snapshot already there,
+and keeping every snapshot for 7 days, then one a day for 30. A snapshot that cannot be
+written warns and lets the verb proceed: the write is already guarded by validation and by
+atomicity, and an unwritable `~/.dpc` must not make the board uneditable. Note what this
+does **not** cover — an edit made by a script that never calls the tool, which is the one
+that caused the loss; against that, the answer is `append`.
 
 The verbs are watched to fire: `uv run python tools/backlog/verbs_fixture.py` builds a
-throwaway backlog, runs all four plus every refusal path, and asserts what the file says
-afterwards. Same rule as the read fixture — a rule nobody has seen fire is written down,
-not enforced.
+throwaway backlog, runs all five plus every refusal path, and asserts what the file says
+afterwards. `uv run python tools/backlog/recovery_drill.py` is the other half — it
+reproduces the truncation against a throwaway board, then asserts that each verb
+snapshots, that a write failing part-way leaves the original byte-identical, that
+retention prunes what it should and nothing else, and that a snapshot restores. Same rule
+as the read fixture — a rule nobody has seen fire is written down, not enforced.
 
 ## 9. Who this binds
 

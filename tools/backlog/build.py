@@ -7,8 +7,9 @@
     uv run python tools/backlog/build.py rename OLD NEW --by=CC
     uv run python tools/backlog/build.py close NAME  --session=S72 --resolution=fixed \\
                                                      --evidence='…' --by=CC
+    uv run python tools/backlog/build.py append NAME --text='…' --by=CC
 
-`--by` is mandatory on all four write verbs and never falls back to the OS user: five
+`--by` is mandatory on all five write verbs and never falls back to the OS user: five
 actors share one account on this box, so a derived name would stamp one label on all of
 them and look authoritative doing it. It stood in brackets here — optional — for a day
 after the code stopped accepting it that way.
@@ -16,13 +17,18 @@ after the code stopped accepting it that way.
 The board and the graph are written in one pass, so the two artefacts can never disagree
 about how fresh they are.
 
-Rendering and `--check` never touch backlog.md. The four verbs do (ADR-039): each writes
+Rendering and `--check` never touch backlog.md. The five verbs do (ADR-039): each writes
 the file, re-runs `--check` over the result in a scratch copy first, and refuses to keep a
 write that would introduce a refusal. Add `--dry-run` to validate without writing.
+
+Every write in this script goes through `_atomic_write`, and every verb takes a snapshot
+into ~/.dpc/backlog-backups/ before its first write. Both were added on 2026-09-09, the
+day backlog.md was truncated to zero bytes — the note on that is above `_atomic_write`.
 
 The verbs are convenience, not the guarantee — the file opens in any editor, so `--check`
 is what actually holds the format. See docs/BACKLOG_FORMAT.md.
 """
+import hashlib
 import html
 import json
 import math
@@ -31,17 +37,22 @@ import re
 import sys
 import time
 from collections import Counter, defaultdict
-from datetime import date
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
 ROOT = Path(__file__).resolve().parents[2]   # tools/backlog/build.py -> repo root
 
-# ADR-039 item 1: the four mutations are subcommands of this script rather than a sibling,
+# ADR-039 item 1: the mutations are subcommands of this script rather than a sibling,
 # so the thing that writes an entry and the thing that validates it can never drift apart.
 # A verb is only ever argv[1]; anywhere else the word is an entry name, not a command.
-VERBS = ("add", "close", "move", "rename")
+#
+# `append` joined the four on 2026-09-09. Its absence is why the board was edited by a
+# hand-written script that truncated it: adding a dated observation to an existing entry
+# is the commonest edit there is, and the tool had no verb for it, so the common path led
+# straight out of the tool and past every guard in it.
+VERBS = ("add", "append", "close", "move", "rename")
 VERB = sys.argv[1] if len(sys.argv) > 1 and sys.argv[1] in VERBS else ""
 
 # An explicit path lets --check run against any project's backlog (and against a fixture,
@@ -640,8 +651,170 @@ adr_dep_edges = [(a, b, r) for a, b, r in road_deps if a in cited_adr or b in ci
 dependencies = sorted({(a, b, r) for a, b, r in edges + arc_edges + adr_edges + adr_dep_edges
                        if r in DEPENDENCY_RELS})
 
+# ------------------------------------------------------------------- writing safely
+# `open(path, "wb")` truncates at open, *before* the argument expression is evaluated, so
+# a guard written after the open cannot fire and a raising write leaves an empty file.
+# That is how this project's only copy of backlog.md was lost (2026-09-09). Hence: the
+# complete bytes exist as a value before anything on disk is touched, and the target is
+# replaced rather than opened.
+
+
+def _atomic_write_bytes(path: Path, data: bytes) -> None:
+    """Replace `path` with `data`, or leave `path` untouched. Never something between."""
+    # A sibling, so os.replace is a rename inside one filesystem rather than a copy — a
+    # copy would reopen the window this closes. The pid keeps two sessions off each
+    # other's temp file; the override is how the recovery drill forces a failure here.
+    suffix = os.environ.get("DPC_BACKLOG_TMP_SUFFIX") or f".tmp-{os.getpid()}"
+    tmp = path.with_name(path.name + suffix)
+    try:
+        with open(tmp, "wb") as fh:
+            fh.write(data)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+        raise
+
+
+def _atomic_write(path: Path, text: str, encoding: str = "utf-8") -> None:
+    """Text form: encoding first, so an unencodable character never opens the file."""
+    _atomic_write_bytes(path, text.encode(encoding))
+
+
+# ------------------------------------------------------------------------ snapshots
+# What this layer catches: a verb that writes a wrong-but-valid file — a `close` that took
+# the wrong entry, a `rename` that rewrote more than it meant to. The atomic write above
+# cannot, because such a write succeeds.
+#
+# What it does not catch, said plainly: the loss it was written after. That edit was a
+# hand-written script which never called this tool, and no guard inside the verbs reaches
+# code that does not run them. The answer to that one is the `append` verb below — the
+# edit that script was making now has a verb.
+BACKUP_DIR = Path(os.environ.get("DPC_BACKLOG_BACKUP_DIR")
+                  or Path.home() / ".dpc" / "backlog-backups")
+BACKUP_KEEP_ALL_DAYS = 7          # every snapshot for a week …
+BACKUP_KEEP_DAILY_DAYS = 30       # … then one a day for a month, then nothing
+# `.auto.md` marks a snapshot as this tool's. The same directory holds hand-made copies,
+# and the pruner must not be able to reach one of those.
+#
+# The stamp carries microseconds because two verbs inside one second are ordinary here,
+# and at one-second resolution the second snapshot silently overwrote the first — losing
+# exactly the older copy this exists to keep. The recovery drill caught that.
+SNAP_RE = re.compile(r"^(?P<stem>.+)\.(?P<ts>20\d{6}T\d{6}\.\d{6})Z\.auto\.md$")
+
+
+def _snapshot_warn(msg: str) -> None:
+    """A snapshot that cannot be taken warns; the verb proceeds.
+
+    Abort was weighed and rejected. The verb's own write is already protected by two
+    stronger things — the result is validated in a scratch copy first, and the write is
+    atomic — so the snapshot guards only the narrower valid-but-wrong write. Aborting
+    would let an unwritable ~/.dpc make the board uneditable, losing the edit the person
+    is holding while the file on disk was never in danger. Refusing to work is not a safe
+    default when the failing component is the backup rather than the write.
+    """
+    print(f"WARNING   {msg}")
+    print("WARNING   the write goes ahead without one — see _snapshot_warn for why.")
+
+
+def _newest_snapshot(stem: str):
+    """(timestamp, path) of the most recent auto snapshot for `stem`, or None."""
+    best = None
+    try:
+        candidates = list(BACKUP_DIR.glob("*.auto.md"))
+    except OSError:
+        return None
+    for f in candidates:
+        m = SNAP_RE.match(f.name)
+        if m and m.group("stem") == stem and (best is None or m.group("ts") > best[0]):
+            best = (m.group("ts"), f)
+    return best
+
+
+def _prune_snapshots() -> None:
+    """Every snapshot for BACKUP_KEEP_ALL_DAYS, then one a day to BACKUP_KEEP_DAILY_DAYS.
+
+    Age is read from the name, not the mtime: a restore or a copy rewrites mtimes while
+    the name still says when the content was taken.
+    """
+    today = datetime.now(timezone.utc).date()
+    by_stem = defaultdict(list)
+    try:
+        candidates = list(BACKUP_DIR.glob("*.auto.md"))
+    except OSError:
+        return
+    for f in candidates:
+        m = SNAP_RE.match(f.name)
+        if m:
+            by_stem[m.group("stem")].append((m.group("ts"), f))
+    for _stem, items in by_stem.items():
+        items.sort(reverse=True)                    # newest first
+        kept_days = set()
+        for ts, f in items:
+            when = date(int(ts[0:4]), int(ts[4:6]), int(ts[6:8]))
+            age = (today - when).days
+            if age <= BACKUP_KEEP_ALL_DAYS:
+                continue
+            if age <= BACKUP_KEEP_DAILY_DAYS and when not in kept_days:
+                kept_days.add(when)                 # the newest of that day, kept
+                continue
+            try:
+                f.unlink()
+            except OSError as exc:
+                print(f"note      could not prune {f.name}: {exc}")
+
+
+def _snapshot(paths) -> None:
+    """Copy each existing path into BACKUP_DIR under a UTC-stamped name, then prune."""
+    try:
+        BACKUP_DIR.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        _snapshot_warn(f"no snapshot: {BACKUP_DIR} could not be created ({exc}).")
+        return
+    now = datetime.now(timezone.utc)
+    for p in paths:
+        if not p.exists():
+            continue
+        try:
+            data = p.read_bytes()
+        except OSError as exc:
+            _snapshot_warn(f"no snapshot of {p.name}: it could not be read ({exc}).")
+            continue
+        # By content, not by mtime: an mtime moves when nothing changed and stays put on
+        # a same-second rewrite, so it answers a different question than this one.
+        newest = _newest_snapshot(p.stem)
+        if newest and newest[1].exists():
+            try:
+                same = hashlib.sha256(newest[1].read_bytes()).digest() == \
+                    hashlib.sha256(data).digest()
+            except OSError:
+                same = False
+            if same:
+                print(f"snapshot  {p.name} is unchanged since {newest[1].name} — "
+                      f"not copied again")
+                continue
+        # Never write over an existing snapshot: the one already there is the older board,
+        # which is the one worth having.
+        while True:
+            dst = BACKUP_DIR / f"{p.stem}.{now:%Y%m%dT%H%M%S.%f}Z.auto.md"
+            if not dst.exists():
+                break
+            now += timedelta(microseconds=1)
+        try:
+            _atomic_write_bytes(dst, data)
+        except OSError as exc:
+            _snapshot_warn(f"no snapshot of {p.name}: {dst} could not be written ({exc}).")
+            continue
+        print(f"snapshot  {dst}")
+    _prune_snapshots()
+
+
 # ------------------------------------------------------------------------ verbs
-# ADR-039 items 1, 5 and 7. Four mutations that write the file, then re-run this same
+# ADR-039 items 1, 5 and 7. Five mutations that write the file, then re-run this same
 # checker against the result and refuse to keep the write if the result carries a refusal.
 # Warnings never block: the live file carries 99 of them, and a `close` that recites them
 # every time is how people learn to stop reading the output.
@@ -802,8 +975,11 @@ def _commit(src_text, arc_text, announcement):
         print("dry run — validated, nothing written.")
         print("ANNOUNCE  " + announcement)
         return
-    SRC.write_text(src_text, encoding="utf-8")
-    ARCHIVE.write_text(arc_text, encoding="utf-8")
+    # Before the verb's first byte. The archive is snapshotted only when the verb changes
+    # it, which is `close` and nothing else.
+    _snapshot([SRC] + ([ARCHIVE] if arc_text != _ARC_TEXT else []))
+    _atomic_write(SRC, src_text)
+    _atomic_write(ARCHIVE, arc_text)
     # Part of the same write, not a chore left for later: the roadmap's status block is
     # rendered from what just changed, so leaving it for a separate command would put the
     # tree in the one state `--check` refuses — and it would be the verb that did it.
@@ -1038,6 +1214,41 @@ if VERB == "add":
             f"add {name} · {pri.lower()} · {sec_name.lower()} · {_by}")
     sys.exit(0)
 
+# Trailing metadata bullets, which prose goes above. Measured on backlog.md 2026-09-09:
+# in 610 of 642 entries with a body these four form one contiguous run at the end, and
+# every dated `- **YYYY-MM-DD, who:**` bullet already in the file sits immediately before
+# that run. `Renamed` is in the list because `rename` appends its trace below them all.
+META_BULLET_RE = re.compile(r"^\s*-\s*\*\*(?:axis|filed|taken|Renamed)\b")
+
+if VERB == "append":
+    # The commonest edit there is: one dated observation onto an entry that already
+    # exists. Its absence is what sent people to hand-written scripts.
+    if not ARGS:
+        _die("usage: build.py append NAME --text='…' --by=CC [--date=YYYY-MM-DD] "
+             "[--dry-run]")
+    e = _find(ARGS[0])
+    text = (_flag("text") or "").strip()
+    if not text:
+        _die("--text is mandatory: the observation to append.",
+             "  build.py append NAME --text='what was seen, with a file:line, a log line "
+             "or a measurement' --by=CC")
+    if "\n" in text or "\r" in text:
+        _die("--text is one bullet and so one line, and this text carries a newline.",
+             "A newline here can open a heading of its own and split the entry in two, "
+             "which is the graph corruption §8 refuses. Run the verb twice, or write the "
+             "second half as its own entry.")
+    start, end = _span(e)
+    block = lines[start:end]
+    j = len(block)
+    while j > 1 and (not block[j - 1].strip() or META_BULLET_RE.match(block[j - 1])):
+        j -= 1
+    # An entry with no body at all keeps the blank line under its heading.
+    block[j:j] = ([""] if j == 1 else []) + [f"- **{_when}, {_by}:** {text}"]
+    _commit("\n".join(lines[:start] + block + lines[end:]), _ARC_TEXT,
+            f"append {e['ref'] or e['name']} · {text[:60]} · {_by}")
+    sys.exit(0)
+
+
 def _status_block_now():
     """The block as the two source surfaces say it should read, right now."""
     mapping = section_status_map(lines)
@@ -1065,7 +1276,7 @@ if "--roadmap" in sys.argv:
     if new_doc == doc:
         print(f"{ROADMAP.name}: the generated block already matches the sources.")
         sys.exit(0)
-    ROADMAP.write_text(new_doc, encoding="utf-8")
+    _atomic_write(ROADMAP, new_doc)
     print(f"written   {ROADMAP.name}  (status block rendered from "
           f"{len(adr_front_matter())} decisions and {len(entries)} entries)")
     sys.exit(0)
@@ -1923,7 +2134,7 @@ doc = f"""<!doctype html>
 </html>
 """
 
-DST.write_text(doc, encoding="utf-8")
+_atomic_write(DST, doc)
 
 # ===================================================================== graph.html
 # The board answers "what is open". This answers "what leans on what" — the one thing a
@@ -2562,7 +2773,7 @@ gdoc = f"""<!doctype html>
 </html>
 """
 
-GRAPH_DST.write_text(gdoc, encoding="utf-8")
+_atomic_write(GRAPH_DST, gdoc)
 
 # The same graph, for readers who cannot click. Agents receive backlog entries as retrieval
 # chunks; an entry's own outgoing references are in the prose it was handed, but "what
@@ -2572,7 +2783,7 @@ backlinks = defaultdict(list)
 for a, b, _ in edges + arc_edges + adr_edges:
     backlinks[b].append(a)
 
-JSON_DST.write_text(json.dumps({
+_atomic_write(JSON_DST, json.dumps({
     "built": today,
     "source": SRC.name,
     "entries": len(entries),
@@ -2587,7 +2798,7 @@ JSON_DST.write_text(json.dumps({
     "unlinked": sorted(e["ref"] for e in orphans),
     "stale_references": [{"from": s, "token": t, "line": ln, "stated": bool(st)}
                          for s, t, ln, st in dangling],
-}, ensure_ascii=False, indent=1), encoding="utf-8")
+}, ensure_ascii=False, indent=1))
 
 print(f"entries: {len(entries)}  ->  {DST}  ({len(doc)} chars)")
 print("sections:", {s: sum(1 for e in entries if e['section'] == s) for s in sections})
