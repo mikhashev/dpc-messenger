@@ -1462,7 +1462,14 @@ class CoreService:
                 except Exception:
                     pass
 
-            # Update peer cache
+            # Update peer cache.
+            #
+            # direct_port is deliberately not passed: this loop sees dialled and
+            # accepted connections alike, and only the dialler knows the peer's
+            # listening port. peername[1] is that port outbound and an ephemeral
+            # source port inbound, so it cannot be used here either. Omitting it
+            # leaves the endpoint whoever did know wrote — connect_directly, the
+            # DHT result, or the inbound handler's assumption.
             self.p2p_manager.peer_cache.add_or_update_peer(
                 node_id=peer_id,
                 display_name=display_name,

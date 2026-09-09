@@ -9,6 +9,11 @@ from dataclasses import dataclass, asdict
 
 logger = logging.getLogger(__name__)
 
+# The port a node listens on when nobody has said otherwise — settings.py's
+# [p2p] listen_port default. It is what a peer we have never dialled is assumed
+# to be on, never what we overwrite a known endpoint with.
+DEFAULT_DIRECT_PORT = 8888
+
 
 @dataclass
 class CachedPeer:
@@ -17,7 +22,7 @@ class CachedPeer:
     display_name: Optional[str] = None
     last_seen: Optional[str] = None  # ISO format timestamp
     last_direct_ip: Optional[str] = None  # For Direct TLS fallback
-    last_direct_port: int = 8888
+    last_direct_port: int = DEFAULT_DIRECT_PORT
     supports_webrtc: bool = False
     supports_direct: bool = False
     # Who placed the last connection that worked: "out" if we dialled the peer,
@@ -115,7 +120,7 @@ class PeerCache:
         node_id: str,
         display_name: Optional[str] = None,
         direct_ip: Optional[str] = None,
-        direct_port: int = 8888,
+        direct_port: Optional[int] = None,
         supports_webrtc: bool = False,
         supports_direct: bool = False,
         direction: Optional[str] = None,
@@ -128,7 +133,16 @@ class PeerCache:
             node_id: Peer's node ID
             display_name: Peer's display name
             direct_ip: Last known IP for Direct TLS
-            direct_port: Direct TLS port
+            direct_port: Direct TLS port. None means "I do not know it" and
+                leaves whatever is recorded alone; it used to default to 8888,
+                which made a caller that could not know indistinguishable from
+                one asserting the default. CoreService.on_peer_list_change is
+                that caller — it reads the ip off the live socket and has no
+                way to learn the peer's listening port — so every dial to a
+                peer off 8888 was cached correctly and then flattened to 8888
+                milliseconds later, and the next reconnect dialled the wrong
+                door. A new peer with no port still starts at
+                DEFAULT_DIRECT_PORT.
             supports_webrtc: Whether peer supports WebRTC
             supports_direct: Whether peer supports Direct TLS
             direction: "out" when this node dialled the peer, "in" when the peer
@@ -144,6 +158,7 @@ class PeerCache:
                 peer.display_name = display_name
             if direct_ip:
                 peer.last_direct_ip = direct_ip
+            if direct_port is not None:
                 peer.last_direct_port = direct_port
             peer.supports_webrtc = supports_webrtc
             peer.supports_direct = supports_direct
@@ -159,7 +174,9 @@ class PeerCache:
                 display_name=display_name,
                 last_seen=datetime.now(timezone.utc).isoformat(),
                 last_direct_ip=direct_ip,
-                last_direct_port=direct_port,
+                last_direct_port=(
+                    direct_port if direct_port is not None else DEFAULT_DIRECT_PORT
+                ),
                 supports_webrtc=supports_webrtc,
                 supports_direct=supports_direct,
                 last_connection_direction=direction,
