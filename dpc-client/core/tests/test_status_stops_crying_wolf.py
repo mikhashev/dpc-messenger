@@ -59,6 +59,11 @@ def _monitor(rows):
         m.add_message(role=role, content=text, sender_node_id=author,
                       sender_name="whoever", message_id=f"m-{text}",
                       timestamp="2026-08-06T00:00:00+00:00")
+        # A peer's record carries the peer's own signature; adding it locally
+        # signs it with this node's key, and a record signed by one node and
+        # attributed to another is refused by every node (`_verify_incoming`),
+        # so it is not a message either side could be asked for.
+        m.message_history[-1]["signer_node_id"] = author
     return m
 
 

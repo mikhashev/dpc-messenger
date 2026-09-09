@@ -79,7 +79,45 @@ def merge_received_attachment(target: Dict[str, Any], source: Dict[str, Any]) ->
     return target
 
 
-def digest_for(messages: List[Dict[str, Any]]) -> Dict[str, Any]:
+def _local_node_id_from_disk() -> Optional[str]:
+    """This node's id as the identity file states it, or None when there is none.
+
+    The free digest path has no roster to read the local node id off, but it
+    has the same disk `peek_group_messages` reads the history from. Read at
+    call time and not cached, for the reason `signing.py` gives: tests point
+    `Path.home()` at their own directory, and a module-level cache filled by an
+    earlier test hands the next one the wrong identity.
+    """
+    try:
+        path = Path.home() / ".dpc" / "node.id"
+        if not path.exists():
+            return None
+        return path.read_text(encoding="utf-8").strip() or None
+    except OSError as exc:  # an unreadable identity file is not a crash
+        logger.debug("Could not read node.id: %s", exc)
+        return None
+
+
+def is_local_file_note(record: Dict[str, Any], local_node_id: Optional[str]) -> bool:
+    """A record this node wrote *about* a peer's file: attributed to the peer,
+    signed by us.
+
+    The one predicate for that shape, so the export and the digest cannot
+    disagree about it: a record the export refuses to ship must not be
+    advertised either, or the peer asks for a hash nobody can deliver and the
+    difference never closes.
+
+    With no `local_node_id` nothing is a note: the two halves of the shape are
+    "signed by us" and "not authored by us", so without knowing who we are, a
+    peer's genuine record is indistinguishable from our note about it, and
+    filtering on a guess would drop real history from both sides.
+    """
+    return bool(local_node_id) and record.get("signer_node_id") == local_node_id \
+        and record.get("sender_node_id") not in (None, local_node_id)
+
+
+def digest_for(messages: List[Dict[str, Any]],
+               local_node_id: Optional[str] = None) -> Dict[str, Any]:
     """Per-author counts and digests over a message list.
 
     A free function so a node can advertise what it holds without loading the
@@ -88,9 +126,17 @@ def digest_for(messages: List[Dict[str, Any]]) -> Dict[str, Any]:
     produce a digest falls back to comparing chain tips — a comparison that
     never matches between two honest nodes, because the tip covers arrival
     order and the per-reader `role`.
+
+    Records `export_history` will never ship are left out; see
+    `is_local_file_note`. `local_node_id` names this node, and when it is
+    omitted the identity file answers — so a caller holding only a list of
+    messages filters exactly as a loaded monitor does.
     """
+    local = local_node_id if local_node_id is not None else _local_node_id_from_disk()
     by_author: Dict[str, List[str]] = {}
     for msg in messages:
+        if is_local_file_note(msg, local):
+            continue
         author = msg.get("sender_node_id") or ""
         key = msg.get("content_hash") or f"id:{msg.get('id', '')}"
         by_author.setdefault(author, []).append(key)
@@ -2843,8 +2889,11 @@ PARTICIPANTS' CULTURAL CONTEXTS:
 
         Records written before `content_hash` existed fall back to their id, so
         a legacy history is compared as best it can be rather than dropped.
+
+        Notes this node wrote about a peer's files are left out, the same ones
+        `export_history` holds back — see `is_local_file_note`.
         """
-        return digest_for(self.message_history)
+        return digest_for(self.message_history, self._local_node_id())
 
     def authors_that_differ(self, remote_digest: Dict[str, Any]) -> List[str]:
         """Which authors the two sides disagree about; empty means agreement."""
@@ -3189,15 +3238,20 @@ PARTICIPANTS' CULTURAL CONTEXTS:
         return (self.conversation_id,)
 
     def _local_node_id(self) -> Optional[str]:
-        """This node's id, or None when the roster does not say.
+        """This node's id, or None when neither the roster nor the disk says.
 
         A group roster follows member order, so the local node is the entry
-        marked `context: local`, not necessarily the first one.
+        marked `context: local`, not necessarily the first one. A roster that
+        marks none answered with its first entry, which is somebody else: the
+        Telegram monitors carry one participant and no `context` at all, and a
+        group this node has been removed from lists only peers. The identity
+        file answers instead, so a monitor and a bare message list filter by
+        the same id.
         """
-        for p in self.participants or ():
+        for p in getattr(self, "participants", None) or ():
             if p.get("context") == "local" and p.get("node_id"):
                 return p["node_id"]
-        return self.participants[0].get("node_id") if self.participants else None
+        return _local_node_id_from_disk()
 
     def find_file_record(self, sender_node_id: str, filename: str,
                          size_bytes: Optional[int], file_hash: Optional[str]
@@ -3216,15 +3270,11 @@ PARTICIPANTS' CULTURAL CONTEXTS:
         self._local_file_notes.add(message_id)
 
     def _is_local_file_note(self, record: Dict[str, Any]) -> bool:
-        """A record this node wrote *about* a peer's file: attributed to the
-        peer, signed by us. That shape is exactly what every other node
-        rejects, and it puts our hash into the peer's author digest, so the
-        two copies never agree about that author until it goes."""
+        """`is_local_file_note` for a loaded monitor, which also remembers the
+        notes it wrote this session."""
         if record.get("id") in getattr(self, "_local_file_notes", ()):
             return True
-        local = self._local_node_id()
-        return bool(local) and record.get("signer_node_id") == local \
-            and record.get("sender_node_id") not in (None, local)
+        return is_local_file_note(record, self._local_node_id())
 
     def _drop_local_file_note(self, arriving: Dict[str, Any]) -> bool:
         """Drop our own note for a file once the sender's record of it arrives.
