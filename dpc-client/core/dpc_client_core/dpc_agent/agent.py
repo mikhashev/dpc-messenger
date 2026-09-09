@@ -164,8 +164,12 @@ class DpcAgent:
         self._run_gate = run_gate if run_gate is not None else asyncio.Lock()
         # Note: ensure_agent_dirs() is already called by DpcAgentManager, so we don't call it here
 
-        # Initialize components
-        self.llm = DpcLlmAdapter(llm_manager, provider_alias=provider_alias, compute_host=compute_host)
+        # Initialize components. The adapter writes a usage row per call and
+        # cannot know whose calls they are; the folder id is the agent id.
+        self.llm = DpcLlmAdapter(
+            llm_manager, provider_alias=provider_alias, compute_host=compute_host,
+            caller=self.agent_root.name, caller_kind="agent",
+        )
         self.tools = ToolRegistry(agent_root=self.agent_root)
         self.memory = Memory(agent_root=self.agent_root)
         generate_smart_index(self.agent_root / "knowledge")

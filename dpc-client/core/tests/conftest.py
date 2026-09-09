@@ -31,3 +31,17 @@ def signing_identity(_test_signing_key, monkeypatch):
     signer = CommitSigner("dpc-node-" + "a" * 32, _test_signing_key)
     monkeypatch.setattr(ConversationMonitor, "_get_signer", lambda self: signer)
     return signer
+
+
+@pytest.fixture(autouse=True)
+def _node_ledger_in_tmp(tmp_path, monkeypatch):
+    """Every model call leaves a usage row (ADR-041 D3), and the writer's
+    default directory is this machine's own ~/.dpc/ledger. A test that drives
+    `chat()` or a served peer request would otherwise write into the
+    developer's real ledger, so the default is pointed at the test's tmp_path.
+    A test that wants the rows hands the adapter or coordinator a ledger of
+    its own.
+    """
+    from dpc_client_core import node_ledger
+
+    monkeypatch.setattr(node_ledger, "ledger_dir", lambda: tmp_path / "ledger")

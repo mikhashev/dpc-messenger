@@ -8,8 +8,12 @@ Expanded in Phase C Step 5 with incoming P2P request handlers.
 
 import asyncio
 import logging
-from typing import Dict, List
+import time
+from datetime import datetime, timezone
+from typing import Any, Dict, List, Optional
 import websockets
+
+from .node_ledger import NodeLedger, default_ledger, usage_row
 
 logger = logging.getLogger(__name__)
 
@@ -17,16 +21,19 @@ logger = logging.getLogger(__name__)
 class P2PCoordinator:
     """Coordinates P2P connection lifecycle, messaging, and request handling."""
 
-    def __init__(self, service):
+    def __init__(self, service, ledger: Optional[NodeLedger] = None):
         """
         Initialize P2PCoordinator with reference to CoreService.
 
         Args:
             service: CoreService instance (provides access to managers, etc.)
+            ledger: Where a served peer call's usage row goes; default is the
+                node's own ledger
         """
         self.service = service
         self.p2p_manager = service.p2p_manager
         self.hub_client = service.hub_client
+        self._ledger = ledger
         # One peer generation at a time on the shared alias. The full queue with
         # priorities and a remote-share cap is D4-β of ADR-040; this is the half
         # that keeps two peers from paging the resident model out between them.
@@ -230,6 +237,59 @@ class P2PCoordinator:
         config = getattr(provider, "config", None)
         return config.get("reasoning_effort") if isinstance(config, dict) else None
 
+    def _record_peer_call(
+        self,
+        *,
+        peer_id: str,
+        request_id: str,
+        serving_alias: str,
+        result: Dict[str, Any],
+        model: Optional[str],
+        started_at: datetime,
+        duration_s: float,
+    ) -> float:
+        """Price a served call once, at the moment it was made, and write its
+        usage row under the peer's name (ADR-041 D3).
+
+        Returns the cost, which also travels to the peer as the informational
+        `cost_usd` of the response — attribution, not a price it owes. A row
+        that cannot be built is logged and does not fail the answer: the
+        tokens have already been generated and paid for.
+        """
+        from .dpc_agent.pricing import compute_cost_usd, get_billing_model
+
+        cost_usd = compute_cost_usd(
+            serving_alias,
+            result.get("prompt_tokens") or 0,
+            result.get("response_tokens") or 0,
+            model=model,
+            at=started_at,
+        )
+        try:
+            row = usage_row(
+                request_id=request_id,
+                caller=peer_id,
+                caller_kind="peer",
+                alias=serving_alias,
+                model=model,
+                route="local",
+                prompt_tokens=result.get("prompt_tokens"),
+                completion_tokens=result.get("response_tokens"),
+                thinking_tokens=result.get("thinking_tokens"),
+                counts_source="ours",
+                started_at=started_at,
+                duration_s=duration_s,
+                billing=get_billing_model(serving_alias, model),
+                cost_usd=cost_usd,
+            )
+        except Exception:
+            logger.error(
+                "Usage row for peer %s request %s was not built", peer_id, request_id, exc_info=True
+            )
+            return cost_usd
+        (self._ledger or default_ledger()).append(row)
+        return cost_usd
+
     async def handle_inference_request(self, peer_id: str, request_id: str, prompt: str, model: str = None, provider: str = None, images: list = None, reasoning_effort: str = None):
         """Handle incoming remote inference request from a peer."""
         from dpc_protocol.protocol import create_remote_inference_response
@@ -279,21 +339,34 @@ class P2PCoordinator:
             query_kwargs = {"reasoning_effort": served_effort} if served_effort else {}
 
             async with self._peer_inference_lock:
+                # Clocked inside the lock: the wait is not part of the call, and
+                # the price depends on the hour the call is made (ADR-041 D3).
+                started_at = datetime.now(timezone.utc)
+                clock = time.monotonic()
                 result = await self.service.llm_manager.query(
                     prompt, provider_alias=serving_alias, images=images,
                     return_metadata=True, **query_kwargs,
                 )
+            duration_s = time.monotonic() - clock
             logger.info("Inference completed successfully for %s", peer_id)
 
             actual_model = result.get("model", model)
-            # A peer's request belongs to no agent, so it writes no row in any
-            # events.jsonl and appears in no cost series. This line is the record.
-            # The counts are named `_est` because they are ours: llm_manager fills
-            # them with its own count_tokens over the prompt and the answer, not
-            # with what the engine reported. On an Ollama alias the daemon's own
-            # figures for the same call are on the neighbouring "Ollama usage:"
-            # line; whoever compares the two will find them close and different,
-            # and should not have to discover that from the numbers.
+            cost_usd = self._record_peer_call(
+                peer_id=peer_id, request_id=request_id, serving_alias=serving_alias,
+                result=result, model=actual_model, started_at=started_at,
+                duration_s=duration_s,
+            )
+            # The usage row above is the record of this call (ADR-041 D3): a
+            # peer's request belongs to no agent, so no events.jsonl carries it,
+            # and on a paid alias the vendor's own usage line lands in the
+            # owner's burn series wearing nobody's name. This line is a log line.
+            # The counts are named `_est` because they are ours: llm_manager
+            # fills them with its own count_tokens over the prompt and the
+            # answer, not with what the engine reported. On an Ollama alias the
+            # daemon's own figures for the same call are on the neighbouring
+            # "Ollama usage:" line; whoever compares the two will find them
+            # close and different, and should not have to discover that from
+            # the numbers.
             logger.info(
                 "Peer inference served: peer=%s alias=%s model=%s prompt_tokens_est=%s response_tokens_est=%s",
                 peer_id, serving_alias, actual_model,
@@ -309,7 +382,8 @@ class P2PCoordinator:
                 model=actual_model,
                 provider=result.get("provider"),
                 thinking=result.get("thinking"),
-                thinking_tokens=result.get("thinking_tokens")
+                thinking_tokens=result.get("thinking_tokens"),
+                cost_usd=cost_usd,
             )
             await self.p2p_manager.send_message_to_peer(peer_id, success_response)
             logger.debug("Sent inference result to %s", peer_id)

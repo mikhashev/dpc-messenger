@@ -17,9 +17,13 @@ from __future__ import annotations
 import json
 import logging
 import re
+import time
+import uuid
+from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple
 
-from .pricing import compute_cost_usd
+from ..node_ledger import NodeLedger, default_ledger, usage_row
+from .pricing import compute_cost_usd, get_billing_model
 
 if TYPE_CHECKING:
     from ..llm_manager import LLMManager
@@ -35,11 +39,21 @@ class DpcLlmAdapter:
     the embedded agent to use DPC's configured AI providers.
     """
 
+    # Class-level defaults, so an instance built without `__init__` still has
+    # them: no caller named, the node's own ledger, nothing noted yet.
+    _caller: Optional[str] = None
+    _caller_kind: str = "agent"
+    _ledger: Optional[NodeLedger] = None
+    _last_call: Optional[Dict[str, Any]] = None
+
     def __init__(
         self,
         llm_manager: "LLMManager",
         provider_alias: Optional[str] = None,
         compute_host: str = "",
+        caller: Optional[str] = None,
+        caller_kind: str = "agent",
+        ledger: Optional[NodeLedger] = None,
     ):
         """
         Initialize the adapter.
@@ -48,11 +62,17 @@ class DpcLlmAdapter:
             llm_manager: DPC's LLMManager instance (injected from CoreService)
             provider_alias: Specific provider to use (overrides agent_provider/default_provider)
             compute_host: Optional remote peer node_id — routes all LLM calls to that peer
+            caller: Whose calls these are (the agent id), written into every usage row
+            caller_kind: The row's `caller_kind`: agent, peer or gateway
+            ledger: Where the rows go; default is the node's own ledger
         """
         self._llm_manager = llm_manager
         self._provider_alias = provider_alias  # Per-agent provider override
         self._compute_host = compute_host  # Per-agent remote peer override
         self._default_model: Optional[str] = None
+        self._caller = caller
+        self._caller_kind = caller_kind
+        self._ledger = ledger
         # Reuse existing TokenCountManager for accurate token counting
         self._token_counter = getattr(llm_manager, 'token_count_manager', None)
         if self._token_counter is None:
@@ -76,6 +96,12 @@ class DpcLlmAdapter:
         """
         self._compute_host = compute_host or ""
         self._default_model = None
+
+    def set_caller(self, caller: Optional[str], caller_kind: str = "agent") -> None:
+        """Name whose calls the usage rows record — `set_provider_alias`'s
+        counterpart for the identity column."""
+        self._caller = caller
+        self._caller_kind = caller_kind
 
     def _get_agent_provider_alias(self) -> Optional[str]:
         """
@@ -198,6 +224,7 @@ class DpcLlmAdapter:
         max_tokens: int = 4096,
         on_stream_chunk: Optional[Callable[[str, str], None]] = None,
         conversation_id: Optional[str] = None,
+        task_id: Optional[str] = None,
     ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         """
         Send chat request through DPC's LLMManager.
@@ -211,10 +238,83 @@ class DpcLlmAdapter:
             max_tokens: Max completion tokens
             on_stream_chunk: Optional async callback for streaming: await on_stream_chunk(chunk, conversation_id)
             conversation_id: Optional conversation ID for streaming callbacks
+            task_id: The task this call belongs to, carried into its usage row (node_ledger)
 
         Returns:
             (response_message, usage_dict) tuple in Ouroboros format
         """
+        # One usage row per call, after whichever route `_chat` took (ADR-041
+        # D3). A call that raises leaves no row, as it leaves no usage.
+        started_at = datetime.now(timezone.utc)
+        clock = time.monotonic()
+        self._last_call = {}
+        response_msg, usage = await self._chat(
+            messages, model=model, tools=tools, reasoning_effort=reasoning_effort,
+            max_tokens=max_tokens, on_stream_chunk=on_stream_chunk,
+            conversation_id=conversation_id,
+        )
+        self._write_usage_row(
+            usage, started_at=started_at, duration_s=time.monotonic() - clock,
+            task_id=task_id, conversation_id=conversation_id,
+        )
+        return response_msg, usage
+
+    def _note_call(self, **facts: Any) -> None:
+        """What only the route knows — where the counts came from, and on the
+        peer route which model answered — for the row `chat` writes."""
+        if self._last_call is None:
+            self._last_call = {}
+        self._last_call.update(facts)
+
+    def _write_usage_row(
+        self,
+        usage: Dict[str, Any],
+        *,
+        started_at: datetime,
+        duration_s: float,
+        task_id: Optional[str],
+        conversation_id: Optional[str],
+    ) -> None:
+        facts = self._last_call or {}
+        try:
+            alias = facts.get("alias") or self._provider_alias
+            model = facts["model"] if "model" in facts else self.default_model()
+            row = usage_row(
+                request_id=str(uuid.uuid4()),
+                caller=self._caller,
+                caller_kind=self._caller_kind,
+                alias=alias,
+                model=model,
+                route=facts.get("route", "local"),
+                prompt_tokens=usage.get("prompt_tokens"),
+                completion_tokens=usage.get("completion_tokens"),
+                # `reasoning_tokens` in the usage dict; `thinking_tokens` on the wire and in D3.
+                thinking_tokens=usage.get("reasoning_tokens"),
+                counts_source=facts.get("counts_source", "ours"),
+                started_at=started_at,
+                duration_s=duration_s,
+                # Priced by the route already; `billing` names the pool that price belongs to.
+                billing=get_billing_model(alias or "", model),
+                cost_usd=usage.get("cost", 0.0),
+                task_id=task_id,
+                conversation_id=conversation_id,
+            )
+        except Exception:
+            log.error("Usage row for caller %s was not built", self._caller, exc_info=True)
+            return
+        (self._ledger or default_ledger()).append(row)
+
+    async def _chat(
+        self,
+        messages: List[Dict[str, Any]],
+        model: Optional[str] = None,
+        tools: Optional[List[Dict[str, Any]]] = None,
+        reasoning_effort: Optional[str] = None,
+        max_tokens: int = 4096,
+        on_stream_chunk: Optional[Callable[[str, str], None]] = None,
+        conversation_id: Optional[str] = None,
+    ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+        """`chat` without the usage row: picks the route and makes the call."""
         # Check for remote peer routing — per-agent compute_host takes priority over global peer_id.
         # Resolved before the image branch, which has to know whether the image is
         # leaving this node at all: handling it locally re-resolves the alias in
@@ -254,6 +354,7 @@ class DpcLlmAdapter:
                     if not alias:
                         raise RuntimeError("No AI provider configured in DPC Messenger")
                     provider = self._llm_manager.providers[alias]
+                    self._note_call(route="local", alias=alias)
                     # Use native vision support (passes images directly to provider)
                     return await self._chat_with_native_vision(
                         provider, messages, user_images, tools, on_stream_chunk, conversation_id
@@ -273,6 +374,9 @@ class DpcLlmAdapter:
                     # Continue with normal text-based agent flow
 
         if effective_peer_id:
+            # This node did not run the call; the row says so, under the alias
+            # the peer was asked for.
+            self._note_call(route="peer", alias=self._remote_provider_alias(dpc_agent_provider))
             if self._compute_host:
                 # Per-agent remote routing: build a context object from per-agent values
                 from types import SimpleNamespace
@@ -302,6 +406,7 @@ class DpcLlmAdapter:
         if not alias:
             raise RuntimeError("No AI provider configured in DPC Messenger (check agent_provider or default_provider)")
         provider = self._llm_manager.providers[alias]
+        self._note_call(route="local", alias=alias)
 
         # Native tool calling path — use when provider supports it and tools are requested.
         # This eliminates the text-based tool injection pattern that causes GLM-4.7 to
@@ -385,6 +490,7 @@ class DpcLlmAdapter:
             # usage dict privately while this reader priced its own estimate.
             reported = provider.get_last_usage()
             if reported:
+                self._note_call(counts_source="engine")
                 usage: Dict[str, Any] = dict(reported)
                 usage.setdefault(
                     "cost",
@@ -419,6 +525,7 @@ class DpcLlmAdapter:
                 "cost": compute_cost_usd(self._provider_alias or "", prompt_tokens, completion_tokens, model=model_name),
             }
 
+            self._note_call(counts_source="ours")
             return response_msg, usage
 
         except Exception as e:
@@ -544,6 +651,7 @@ class DpcLlmAdapter:
                 "cost": compute_cost_usd(self._provider_alias or "", prompt_tokens, completion_tokens, model=model_name),
             }
 
+            self._note_call(counts_source="ours")
             return response_msg, usage
 
         except Exception as e:
@@ -630,7 +738,9 @@ class DpcLlmAdapter:
                 "total_tokens": prompt_tokens + completion_tokens,
                 "cost": compute_cost_usd(self._provider_alias or "", prompt_tokens, completion_tokens, model=model_name),
             }
+            self._note_call(counts_source="ours")
         else:
+            self._note_call(counts_source="engine")
             usage.setdefault(
                 "cost",
                 compute_cost_usd(
@@ -854,6 +964,14 @@ class DpcLlmAdapter:
                 if tool_calls:
                     response_msg["tool_calls"] = tool_calls
                     log.info(f"Found {len(tool_calls)} tool call(s) from remote peer")
+
+            # For the row: which model answered — the peer says, else what was
+            # asked for — and whether the counts are the peer's report or ours.
+            self._note_call(
+                model=(result.get("model") if isinstance(result, dict) else None)
+                or getattr(dpc_agent_provider, "remote_model", None),
+                counts_source="engine" if remote_prompt_tokens and remote_response_tokens else "ours",
+            )
 
             # Use actual token counts from remote if available, otherwise count locally
             if remote_prompt_tokens and remote_response_tokens:

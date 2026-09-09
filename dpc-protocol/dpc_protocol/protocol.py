@@ -95,9 +95,16 @@ def create_remote_inference_response(
     model: str = None,
     provider: str = None,
     thinking: str = None,
-    thinking_tokens: int = None
+    thinking_tokens: int = None,
+    cost_usd: float = None,
 ) -> Dict[str, Any]:
-    """Creates a remote inference response message with optional token, model, and thinking metadata."""
+    """Creates a remote inference response message with optional token, model, and thinking metadata.
+
+    `cost_usd` is what the call cost the serving node, priced by it at the
+    time of the call (ADR-041 D3, DPTP v1.7). Optional, so an older client
+    reads the message unchanged; informational to the requester — it
+    attributes a cost, it does not bill one.
+    """
     payload = {"request_id": request_id}
     if response is not None:
         payload["response"] = response
@@ -121,6 +128,8 @@ def create_remote_inference_response(
             payload["thinking"] = thinking
         if thinking_tokens is not None:
             payload["thinking_tokens"] = thinking_tokens
+        if cost_usd is not None:
+            payload["cost_usd"] = cost_usd
     else:
         payload["error"] = error or "Unknown error"
         payload["status"] = "error"

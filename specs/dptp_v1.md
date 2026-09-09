@@ -1,8 +1,8 @@
-# DPTP Specification: D-PC Transfer Protocol v1.6
+# DPTP Specification: D-PC Transfer Protocol v1.7
 
-**Version:** 1.6
+**Version:** 1.7
 **Status:** Draft / PoC
-**Date:** August 2026
+**Date:** September 2026
 **License:** CC0 1.0 Universal (Public Domain)
 
 ## 1. Overview
@@ -237,7 +237,8 @@ Returns the result of a remote inference request.
     "response_tokens": 144,
     "model_max_tokens": 128000,
     "thinking": "Let me think about this question...",
-    "thinking_tokens": 50
+    "thinking_tokens": 50,
+    "cost_usd": 0.0041
   }
 }
 ```
@@ -264,6 +265,7 @@ Returns the result of a remote inference request.
 - `model_max_tokens` (integer, optional): Model's context window size
 - `thinking` (string, optional): Thinking/reasoning content from models with extended reasoning (DeepSeek R1, Claude Extended Thinking, OpenAI o1/o3)
 - `thinking_tokens` (integer, optional): Tokens used for thinking/reasoning
+- `cost_usd` (number, optional, v1.7+): What the call cost the serving node, in USD, priced by that node at the moment of the call and never re-derived (ADR-041 D3). Absent when the host did not count it. Informational to the requester: it attributes a cost, it does not bill one.
 
 **Fields (Error):**
 - `request_id` (string, required): Matches request UUID
@@ -2126,6 +2128,12 @@ DPTP is designed to be extensible. New commands can be added by:
 - **Privacy Rules Format**: Firewall configuration - See `~/.dpc/privacy_rules.json`
 
 ## 9. Changelog
+
+### v1.7 (September 2026)
+- **§3.4 REMOTE_INFERENCE_RESPONSE** — optional `cost_usd`: what the call cost
+  the serving node, priced by it at the time of the call (ADR-041 D3). In v1 of
+  the field set on purpose: a cost field added later is the one kind of
+  addition an older client cannot read
 
 ### v1.6 (August 2026)
 - **§4.1 Message Signing** — the canonical preimage (`dptp-msg-v2`; `v1` still read), added with

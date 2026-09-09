@@ -140,7 +140,7 @@ class _Llm:
         self._usage = usage
 
     async def chat(self, messages, tools=None, on_stream_chunk=None,
-                   conversation_id=None, reasoning_effort=None):
+                   conversation_id=None, reasoning_effort=None, **kwargs):
         return {"content": "done", "tool_calls": []}, self._usage
 
 
@@ -308,7 +308,7 @@ class TestTheContextGuardIsActuallyFedByTheLoop:
             self.calls = 0
 
         async def chat(self, messages, tools=None, on_stream_chunk=None,
-                       conversation_id=None, reasoning_effort=None):
+                       conversation_id=None, reasoning_effort=None, **kwargs):
             self.calls += 1
             if tools is None:
                 self.seen_final_messages = list(messages)

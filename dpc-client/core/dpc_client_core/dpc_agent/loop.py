@@ -793,6 +793,7 @@ async def _finalize_after_guard_stop(
     accumulated_usage: Dict[str, Any],
     llm_trace: Dict[str, Any],
     fallback_reason: str,
+    task_id: str = "",
 ) -> Tuple[str, Dict[str, Any], Dict[str, Any]]:
     """Shared "guard fired → graceful termination" sequence.
 
@@ -813,6 +814,7 @@ async def _finalize_after_guard_stop(
             tools=None,
             on_stream_chunk=on_stream_chunk,
             conversation_id=conversation_id,
+            task_id=task_id or None,
         )
         if final_msg and final_msg.get("content"):
             return final_msg["content"], accumulated_usage, llm_trace
@@ -964,6 +966,7 @@ async def run_llm_loop(
                     hooks, messages, llm, on_stream_chunk, conversation_id,
                     accumulated_usage, llm_trace,
                     fallback_reason=f"⚠️ Task exceeded MAX_ROUNDS ({max_rounds}).",
+                    task_id=task_id,
                 )
 
             # Compact old tool history when needed (ADR-033). last_prompt_tokens is the
@@ -986,6 +989,7 @@ async def run_llm_loop(
                     on_stream_chunk=on_stream_chunk,
                     conversation_id=conversation_id,
                     reasoning_effort=reasoning_effort,
+                    task_id=task_id or None,
                 )
                 round_prompt_tokens = usage.get("prompt_tokens", 0)
                 accumulated_usage["prompt_tokens"] += round_prompt_tokens
@@ -1069,6 +1073,7 @@ async def run_llm_loop(
                     hooks, messages, llm, on_stream_chunk, conversation_id,
                     accumulated_usage, llm_trace,
                     fallback_reason="⚠️ Agent loop stopped by guard.",
+                    task_id=task_id,
                 )
 
             # No tool calls — final response or empty-response retry

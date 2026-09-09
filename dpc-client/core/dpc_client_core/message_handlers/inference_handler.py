@@ -74,6 +74,10 @@ class RemoteInferenceResponseHandler(MessageHandler):
         thinking = payload.get("thinking")
         thinking_tokens = payload.get("thinking_tokens")
 
+        # What the call cost the host, when the host counted it (v1.7). Absent
+        # stays absent: a zero here would read as free, not as not counted.
+        cost_usd = payload.get("cost_usd")
+
         if request_id in self.service._pending_inference_requests:
             future = self.service._pending_inference_requests[request_id]
             if not future.done():
@@ -90,6 +94,8 @@ class RemoteInferenceResponseHandler(MessageHandler):
                         "thinking": thinking,
                         "thinking_tokens": thinking_tokens,
                     }
+                    if cost_usd is not None:
+                        result_data["cost_usd"] = cost_usd
                     future.set_result(result_data)
                 else:
                     future.set_exception(RuntimeError(error or "Remote inference failed"))
