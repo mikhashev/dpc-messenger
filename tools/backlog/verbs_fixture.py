@@ -12,6 +12,7 @@ Stdlib only and no virtualenv, the same constraint build.py itself carries.
 import os
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -64,6 +65,19 @@ def check(label, condition, detail=""):
     print(f"  {'ok  ' if condition else 'FAIL'}  {label}" + (f"\n          {detail}" if not condition and detail else ""))
 
 
+def rmtree(path):
+    """shutil.rmtree cannot delete a read-only file on Windows and ignore_errors hides
+    that: the boards are read-only between edits, so every fixture run would leak its
+    temp directory. Write bits are added rather than set, so a directory stays
+    traversable on POSIX."""
+    for f in sorted(path.rglob("*"), reverse=True):
+        try:
+            os.chmod(f, stat.S_IMODE(f.stat().st_mode) | 0o200)
+        except OSError:
+            pass
+    shutil.rmtree(path, ignore_errors=True)
+
+
 def run(work, *args, env=None):
     full = dict(os.environ)
     # The fallback must not leak in from the developer's own shell: a fixture that
@@ -75,6 +89,9 @@ def run(work, *args, env=None):
     # real one is looked for, and its pruning would run against that directory too.
     full["DPC_BACKLOG_BACKUP_DIR"] = str(work / "backups")
     full.pop("DPC_BACKLOG_TMP_SUFFIX", None)
+    # Same reason as DPC_BACKLOG_BY: inherited from the developer's shell it would turn
+    # the tripwire off and every case about it would pass for the wrong reason.
+    full.pop("DPC_BACKLOG_NO_PROTECT", None)
     full.update(env or {})
     r = subprocess.run([sys.executable, str(BUILD), *args, str(work / "backlog.md")],
                        capture_output=True, text=True, encoding="utf-8",
@@ -325,7 +342,7 @@ def main():
         code, out = run(work, "--check")
         check("the file is still clean after every verb has run", code == 0, out[-400:])
     finally:
-        shutil.rmtree(work, ignore_errors=True)
+        rmtree(work)
 
     print(f"\n{len(passed)} passed, {len(failed)} failed")
     return 1 if failed else 0

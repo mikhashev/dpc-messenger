@@ -2,6 +2,7 @@
 
     uv run python tools/backlog/build.py                 # rebuild board + graph
     uv run python tools/backlog/build.py --check         # validate, write nothing
+    uv run python tools/backlog/build.py --snapshot      # copy the board if it is due
     uv run python tools/backlog/build.py add NAME    --desc=… --priority=… --origin=… --by=CC
     uv run python tools/backlog/build.py move NAME   --to='IN PROGRESS' --by=CC
     uv run python tools/backlog/build.py rename OLD NEW --by=CC
@@ -22,8 +23,11 @@ the file, re-runs `--check` over the result in a scratch copy first, and refuses
 write that would introduce a refusal. Add `--dry-run` to validate without writing.
 
 Every write in this script goes through `_atomic_write`, and every verb takes a snapshot
-into ~/.dpc/backlog-backups/ before its first write. Both were added on 2026-09-09, the
-day backlog.md was truncated to zero bytes — the note on that is above `_atomic_write`.
+into ~/.dpc/backlog-backups/ before its first write. Between edits backlog.md and
+backlog_closed.md are held read-only, so a write that does not come through this tool is
+refused rather than obeyed; `--check` and the render also copy the board when the newest
+copy is over an hour old. To edit by hand, clear the bit (`attrib -R` / `chmod u+w`) — the
+next run of this script puts it back. DPC_BACKLOG_NO_PROTECT=1 turns the layer off.
 
 The verbs are convenience, not the guarantee — the file opens in any editor, so `--check`
 is what actually holds the format. See docs/BACKLOG_FORMAT.md.
@@ -34,6 +38,7 @@ import json
 import math
 import os
 import re
+import stat
 import sys
 import time
 from collections import Counter, defaultdict
@@ -659,6 +664,72 @@ dependencies = sorted({(a, b, r) for a, b, r in edges + arc_edges + adr_edges + 
 # replaced rather than opened.
 
 
+# ---------------------------------------------------------- the read-only tripwire
+# The atomic write below guards a verb. This guards the file against everything that is
+# not a verb, which is what lost the board: `open(path, "wb")` on a read-only file raises
+# before it truncates. Every claim about how the bit behaves is asserted in
+# recovery_drill.py rather than stated here, including the two counter-intuitive ones: it
+# does not survive an os.replace, and on POSIX it does not stop one.
+BOARD_NAMES = ("backlog.md", "backlog_closed.md")
+PROTECT = not os.environ.get("DPC_BACKLOG_NO_PROTECT")     # the per-environment way out
+
+
+def _is_board(path: Path) -> bool:
+    """Only the board pair is protected: `--check` also reads fixtures and other files."""
+    return path.name in BOARD_NAMES
+
+
+def _protected(path: Path) -> bool:
+    """The state of the bit, not what this caller may do with the file — root may write a
+    0o444 one, so os.access would report every run as needing to be armed again."""
+    try:
+        return not (stat.S_IMODE(path.stat().st_mode) & 0o222)
+    except OSError:
+        return False
+
+
+def _protect(path: Path) -> None:
+    if not (PROTECT and _is_board(path)):
+        return
+    try:
+        os.chmod(path, stat.S_IMODE(path.stat().st_mode) & ~0o222)
+    except OSError as exc:
+        print(f"WARNING   {path.name} could not be made read-only ({exc}); the tripwire "
+              f"is not armed on this file.")
+
+
+def _unprotect(path: Path) -> None:
+    if not (PROTECT and _is_board(path)) or not path.exists():
+        return
+    try:
+        os.chmod(path, stat.S_IMODE(path.stat().st_mode) | 0o200)
+    except OSError as exc:
+        # Not fatal: the replace then fails with the board intact, which is the outcome
+        # this layer exists to produce.
+        print(f"WARNING   the read-only bit on {path.name} could not be cleared ({exc}).")
+
+
+def _arm_boards() -> None:
+    """Assert protection on the boards, whatever state they are in. Idempotent.
+
+    Runs on every invocation, because this is the case no `finally` reaches: a process
+    killed inside the one syscall the bit is cleared for. Protection is a property of the
+    file rather than a transaction, so there is nothing to remember and a kill costs it
+    until the next run of this script rather than for good. The same path is why an
+    unprotected board is armed rather than refused — every board predates this, and a hand
+    edit is meant to work (§8a).
+    """
+    if not PROTECT:
+        return
+    for p in (SRC, ARCHIVE):
+        if _is_board(p) and p.exists() and not _protected(p):
+            _protect(p)
+            if _protected(p):
+                print(f"protect   {p.name} is now read-only between edits — a write that "
+                      f"does not come through this tool is refused, not obeyed "
+                      f"(hand edit: docs/BACKLOG_FORMAT.md §8a).")
+
+
 def _atomic_write_bytes(path: Path, data: bytes) -> None:
     """Replace `path` with `data`, or leave `path` untouched. Never something between."""
     # A sibling, so os.replace is a rename inside one filesystem rather than a copy — a
@@ -671,7 +742,17 @@ def _atomic_write_bytes(path: Path, data: bytes) -> None:
             fh.write(data)
             fh.flush()
             os.fsync(fh.fileno())
-        os.replace(tmp, path)
+        # The bytes went to a sibling, so the replace is the only moment the target has to
+        # be writable: one syscall wide rather than one command long, and a verb that
+        # refuses earlier never touches the bit.
+        _unprotect(path)
+        try:
+            os.replace(tmp, path)
+        finally:
+            # Unconditional and addressed to the path: on success a different inode
+            # carrying the temp file's mode, on failure the original still needing its bit
+            # back, and one call covers both.
+            _protect(path)
     except BaseException:
         try:
             tmp.unlink()
@@ -813,6 +894,55 @@ def _snapshot(paths) -> None:
     _prune_snapshots()
 
 
+# --------------------------------------------------------------- the hourly snapshot
+# _snapshot above is taken *by* a verb, so an edit that never calls a verb is never
+# copied — which is the edit that lost the board. This one is taken on the clock.
+SNAPSHOT_EVERY_SEC = 3600
+
+
+def _hourly_snapshot() -> int:
+    """Copy the boards if the newest copy is older than SNAPSHOT_EVERY_SEC. Count copied.
+
+    Age comes from the snapshot name; whether the content changed stays with _snapshot,
+    which answers it by hash. This decides only when to ask.
+    """
+    due = []
+    for q in (SRC, ARCHIVE):
+        if not (_is_board(q) and q.exists()):
+            continue
+        newest = _newest_snapshot(q.stem)
+        if not newest:
+            due.append(q)
+            continue
+        try:
+            when = datetime.strptime(newest[0], "%Y%m%dT%H%M%S.%f").replace(
+                tzinfo=timezone.utc)
+        except ValueError:
+            due.append(q)
+            continue
+        if (datetime.now(timezone.utc) - when).total_seconds() >= SNAPSHOT_EVERY_SEC:
+            due.append(q)
+    before = len(list(BACKUP_DIR.glob("*.auto.md"))) if BACKUP_DIR.is_dir() else 0
+    if due:
+        _snapshot(due)
+    after = len(list(BACKUP_DIR.glob("*.auto.md"))) if BACKUP_DIR.is_dir() else 0
+    return max(0, after - before)
+
+
+_arm_boards()
+
+# Triggered by the commands that already run whenever somebody is working, rather than by
+# a scheduler; what that buys and what it misses is weighed in §8a. `--roadmap` is
+# excluded because a verb runs it as a subprocess, which would snapshot twice per command.
+if not VERB and "--roadmap" not in sys.argv:
+    _copied = _hourly_snapshot()
+    if "--snapshot" in sys.argv:
+        print(f"snapshot  {_copied} board(s) copied · one is taken at most every "
+              f"{SNAPSHOT_EVERY_SEC // 60} minutes, and skipped when the content already "
+              f"matches the newest copy.")
+        sys.exit(0)
+
+
 # ------------------------------------------------------------------------ verbs
 # ADR-039 items 1, 5 and 7. Five mutations that write the file, then re-run this same
 # checker against the result and refuse to keep the write if the result carries a refusal.
@@ -937,10 +1067,13 @@ def _validate(src_text, arc_text):
         # the code and the first `add` after И2 confirmed it. The block is regenerated
         # here, against the candidate, before the check runs, and again on the real file
         # in `_commit`: the writer and the checker see one state or the guard is a wall.
+        # The scratch copy is not armed: a read-only file defeats shutil.rmtree on
+        # Windows, so every verb would leak a temp directory.
+        _env = dict(os.environ, DPC_BACKLOG_NO_PROTECT="1")
         _g = subprocess.run([sys.executable, str(Path(__file__).resolve()),
                              "--roadmap", str(tmp / SRC.name)],
                             capture_output=True, text=True, encoding="utf-8",
-                            errors="replace")
+                            errors="replace", env=_env)
         if _g.returncode != 0:
             # Discarding this code left a trap armed: a scratch regeneration that failed
             # for its own reason would surface one step later as a mismatch, or — with the
@@ -952,7 +1085,7 @@ def _validate(src_text, arc_text):
         r = subprocess.run([sys.executable, str(Path(__file__).resolve()),
                             "--check", str(tmp / SRC.name)],
                            capture_output=True, text=True, encoding="utf-8",
-                           errors="replace")
+                           errors="replace", env=_env)
         return r.returncode, (r.stdout or "") + (r.stderr or "")
     finally:
         shutil.rmtree(tmp, ignore_errors=True)

@@ -439,8 +439,12 @@ the envelope would measure the wrong interval. Implementing it honestly needs a 
 written when the entry moves; until that exists, the rule stays out rather than shipping a
 number that looks like an answer.
 
-**It never rewrites a file.** Every automated classifier in this repository's history has
-documented its own false positives — including this one, on its first day: a non-nesting
+**It never rewrites a file.** The claim is about content, and two things added on
+2026-09-09 sit just outside it, so they are said here rather than left to surprise
+somebody: a `--check` run holds `backlog.md` and `backlog_closed.md` read-only between
+edits (§8a), and it copies the board into the snapshot directory when the newest copy is
+over an hour old. Neither changes a byte of the file. Every automated classifier in this
+repository's history has documented its own false positives — including this one, on its first day: a non-nesting
 regex read the envelope of the first entry written to this standard and reported a complete
 entry as missing its priority and origin, because the origin quoted Mike verbatim and the
 quote contained parentheses. Report, never auto-fix.
@@ -531,17 +535,79 @@ a verb copies `backlog.md` — and `backlog_closed.md` when it touches it — in
 directory), skipping the copy when the content matches the newest snapshot already there,
 and keeping every snapshot for 7 days, then one a day for 30. A snapshot that cannot be
 written warns and lets the verb proceed: the write is already guarded by validation and by
-atomicity, and an unwritable `~/.dpc` must not make the board uneditable. Note what this
-does **not** cover — an edit made by a script that never calls the tool, which is the one
-that caused the loss; against that, the answer is `append`.
+atomicity, and an unwritable `~/.dpc` must not make the board uneditable.
+
+Neither of those reaches the edit that actually emptied the file, because that edit never
+called the tool: a hand-written script, whose `open(p, "wb")` truncated the board at open
+and then raised, with every guard it carried sitting after the open. `append` gives that
+edit a verb. The two layers below are what stands in the way when somebody writes the
+script anyway — both Mike's call, 2026-09-09, taken after the trade-offs were put to him.
+
+**The board is read-only between edits.** `backlog.md` and `backlog_closed.md` are held
+without their write bits, and a verb clears the bit for exactly one `os.replace` and puts
+it back. It works because of what a protected file does to that exact line: `open(p, "wb")`
+raises **before it truncates**, so the incident dies loudly with the file intact —
+measured 2026-09-09 on Windows 11/NTFS (`PermissionError`, 130 bytes before and after) and
+on POSIX as a non-root owner (`EACCES`, 14 bytes before and after). Three properties of it
+are worth knowing before relying on it:
+
+- **It is re-asserted on every run** — a verb, `--check`, `--snapshot` or a render —
+  because the bit does not survive an `os.replace` on either platform: what the replace
+  leaves behind is the temp file's inode carrying the temp file's mode. That same
+  re-assertion is the answer to a process killed outright inside the one-syscall window,
+  which no `finally` survives: protection is a property of the file rather than a
+  transaction, so a kill costs it until the next run of the tool rather than for good.
+- **A board that is not protected is armed, not refused.** Every board predates this, and
+  refusing would turn a legitimate hand edit into a broken tool.
+- **It stops a write, not a rename.** On POSIX a rename is governed by the directory's
+  mode, so `os.replace` onto a protected board succeeds there (it is refused on Windows).
+  Another tool that writes atomically the way this one does is not stopped by this layer
+  on Linux. Neither is `root`, who ignores mode bits entirely.
+
+**To edit by hand, clear the bit** — `attrib -R backlog.md` on Windows, `chmod u+w
+backlog.md` on POSIX — edit, and the next run of `build.py` arms it again without
+complaining. That is the escape hatch, and it is deliberately the same code path as the
+recovery from a kill. `DPC_BACKLOG_NO_PROTECT=1` turns the layer off for one environment
+(a filesystem where the bit means nothing, a shared checkout). A protection with no
+documented way out is disabled permanently the first time it is inconvenient, so there are
+two, and this is where they are written down.
+
+**A snapshot is also taken on the clock, at most hourly**, so an edit that bypasses the
+tool is at most an hour from a copy. It reuses the same `_snapshot` and the same
+retention: the clock decides only *when to ask*, and the existing content hash decides
+whether to copy, so a due-but-unchanged board is not copied twice.
+
+*What triggers it, and why that one.* It hangs on the commands that already run whenever
+somebody is working — `--check` and the render — rather than on a scheduler. A scheduled
+task has to be installed on each of the six machines this standard serves, runs at 3am
+when the board cannot have changed, and stops silently the day somebody disables it or the
+machine sleeps; and nothing would notice. A `--snapshot` mode on its own is a scheduled
+task by another name, since something has to call it. Hanging it on the frequent commands
+costs nothing when nothing changed, needs no installation anywhere, and is visible — it
+prints the copy it took. `build.py --snapshot` exists too, so anyone who does want a
+scheduler can drive it without this project having to own one.
+
+**What the two layers still do not cover.** A hand edit is captured only when somebody
+next runs the tool, so a machine where nobody runs it is a machine with no hourly
+snapshots at all — the trigger is honest about being tied to work, not to time. An edit
+made and reverted between two runs is invisible. The window is up to an hour wide by
+design, and what a bad hand edit is recovered from is the *previous* copy, which may be an
+hour older than the edit. On POSIX the bit stops an `open()` and not another tool's
+atomic rename, and it stops nobody running as root. And the snapshot directory is per
+user, not per project: six boards named `backlog.md` share one stem there, so a machine
+that runs the tool against more than one of them wants `DPC_BACKLOG_BACKUP_DIR` set per
+project.
 
 The verbs are watched to fire: `uv run python tools/backlog/verbs_fixture.py` builds a
 throwaway backlog, runs all five plus every refusal path, and asserts what the file says
 afterwards. `uv run python tools/backlog/recovery_drill.py` is the other half — it
-reproduces the truncation against a throwaway board, then asserts that each verb
-snapshots, that a write failing part-way leaves the original byte-identical, that
-retention prunes what it should and nothing else, and that a snapshot restores. Same rule
-as the read fixture — a rule nobody has seen fire is written down, not enforced.
+reproduces the truncation against a throwaway board, both unprotected and protected, then
+asserts that each verb snapshots, that a verb works against a read-only board and leaves
+it read-only, that the board stays protected when a verb refuses, that a write failing
+part-way leaves the original byte-identical, that retention prunes what it should and
+nothing else, that the hourly snapshot copies a changed board and not an unchanged one,
+and that a snapshot restores. Same rule as the read fixture — a rule nobody has seen fire
+is written down, not enforced.
 
 ## 9. Who this binds
 
