@@ -527,15 +527,52 @@ What each one guarantees, beyond typing less:
   bullet and therefore one line; a newline in it is refused, because a newline can open a
   `###` of its own and split the entry in two.
 
-**Every write is atomic, and every verb takes a snapshot first.** The bytes are built
-complete and then `os.replace`d onto the target, so a failure at any point leaves the
-previous file exactly as it was rather than half-written or empty. Before its first write
-a verb copies `backlog.md` — and `backlog_closed.md` when it touches it — into
-`~/.dpc/backlog-backups/` under a UTC-stamped name (`DPC_BACKLOG_BACKUP_DIR` moves that
-directory), skipping the copy when the content matches the newest snapshot already there,
-and keeping every snapshot for 7 days, then one a day for 30. A snapshot that cannot be
-written warns and lets the verb proceed: the write is already guarded by validation and by
-atomicity, and an unwritable `~/.dpc` must not make the board uneditable.
+**Every write is atomic, and every verb copies the board twice — before and after.** The
+bytes are built complete and then `os.replace`d onto the target, so a failure at any point
+leaves the previous file exactly as it was rather than half-written or empty. Around that
+write a verb copies `backlog.md` — and `backlog_closed.md` when it touches it — into
+`~/.dpc/backlog-backups/<project>/` under a UTC-stamped name, skipping the copy when the
+content matches the newest snapshot already there, and keeping every snapshot for 7 days,
+then one a day for 30. A snapshot that cannot be written warns and lets the verb proceed:
+the write is already guarded by validation and by atomicity, and an unwritable `~/.dpc`
+must not make the board uneditable.
+
+**The two copies answer different questions.** The one before a write preserves the state
+that write is about to destroy — the `close` that took the wrong entry. The one after it
+preserves the state the *next* accident destroys, so the newest copy is never older than
+the last successful edit. Only the first existed until 2026-09-09, which is why a board
+edited through the tool all week was recovered from a copy five days old: every guard was
+aimed at the edit in flight and nothing captured a good state on the way past. The copy
+after the write cannot lose the edit — the bytes are already on disk when it runs — so a
+failure there warns and does nothing else; a verb that reported failure after a successful
+write would invite the operator to run it again and apply it twice. The content hash keeps
+the pair from doubling the directory: the copy before a write is skipped whenever the copy
+after the last one already holds that state, which is every verb run in a row. Retention
+is unaffected by the doubling except inside the 7-day window, where keeping everything is
+the point — 7-to-30 days keeps one copy a day whether that day held two copies or eight
+(Mike's call, 2026-09-09).
+
+**The copies live under a per-project segment, and the project comes from the
+repository.** Six projects use this script and all six boards are called `backlog.md`, so
+one flat directory gave them one stem: dedup compared this board against another
+project's copy and skipped the copy as unchanged, and the pruner thinned six histories as
+if they were one. The segment is the name of the repository the board sits in — walked up
+from the board's own location, looking for a `.git` entry rather than running `git`, since
+this script has no dependencies and must work where git is absent. **Outside a repository
+the board's own directory names the segment**, which is the case for the projects that are
+not repositories; it is never taken from a config value, which goes stale on the first
+rename with nothing to say so, and never from the current working directory.
+`DPC_BACKLOG_BACKUP_DIR` still moves the root and the segment is appended *under* it: the
+override says where the copies live, the segment says whose they are, and conditioning one
+on the other would arm the collision guard only for people who had not thought about it.
+Two clones of one repository share a segment, and the override is what separates them.
+
+**Copies taken before the segment existed stay where they are**, one level up in the root.
+They are outside `_newest_snapshot`, so the first copy under a segment is taken even
+though nothing changed — one extra copy, once — and outside the pruner, so they are kept
+for good; reaching up into the shared root to delete would put one project's pruner back
+over five other projects' files. The tool says once per run how many are sitting there.
+Hand-made copies were never touched by the pruner and still are not.
 
 Neither of those reaches the edit that actually emptied the file, because that edit never
 called the tool: a hand-written script, whose `open(p, "wb")` truncated the board at open
@@ -572,6 +609,15 @@ recovery from a kill. `DPC_BACKLOG_NO_PROTECT=1` turns the layer off for one env
 documented way out is disabled permanently the first time it is inconvenient, so there are
 two, and this is where they are written down.
 
+**The candidate a verb validates is not the board.** A verb checks its result by
+running `--check` over a scratch copy, and that copy is also called `backlog.md` — so the
+hourly trigger fired on it and filed it under the board's own stem. Measured against the
+verb fixture on 2026-09-09: a write the checker *refused* left a copy of the refused
+content sitting among the copies of the board, indistinguishable from one, and a restore
+could not tell them apart. The validation subprocess now runs with
+`DPC_BACKLOG_NO_SNAPSHOT=1` beside the `DPC_BACKLOG_NO_PROTECT=1` it already carried, for
+the same reason: the scratch copy is not the board and must be treated as neither.
+
 **A snapshot is also taken on the clock, at most hourly**, so an edit that bypasses the
 tool is at most an hour from a copy. It reuses the same `_snapshot` and the same
 retention: the clock decides only *when to ask*, and the existing content hash decides
@@ -593,20 +639,22 @@ snapshots at all — the trigger is honest about being tied to work, not to time
 made and reverted between two runs is invisible. The window is up to an hour wide by
 design, and what a bad hand edit is recovered from is the *previous* copy, which may be an
 hour older than the edit. On POSIX the bit stops an `open()` and not another tool's
-atomic rename, and it stops nobody running as root. And the snapshot directory is per
-user, not per project: six boards named `backlog.md` share one stem there, so a machine
-that runs the tool against more than one of them wants `DPC_BACKLOG_BACKUP_DIR` set per
-project.
+atomic rename, and it stops nobody running as root. And a board that sits in no repository
+is filed under the name of the directory holding it, so moving that directory starts a
+second history rather than continuing the first.
 
 The verbs are watched to fire: `uv run python tools/backlog/verbs_fixture.py` builds a
 throwaway backlog, runs all five plus every refusal path, and asserts what the file says
 afterwards. `uv run python tools/backlog/recovery_drill.py` is the other half — it
 reproduces the truncation against a throwaway board, both unprotected and protected, then
 asserts that each verb snapshots, that a verb works against a read-only board and leaves
-it read-only, that the board stays protected when a verb refuses, that a write failing
-part-way leaves the original byte-identical, that retention prunes what it should and
-nothing else, that the hourly snapshot copies a changed board and not an unchanged one,
-and that a snapshot restores. Same rule as the read fixture — a rule nobody has seen fire
+it read-only, that the board stays protected when a verb refuses and that nothing the
+checker refused is left behind as a copy of the board, that a write failing part-way
+leaves the original byte-identical, that retention prunes what it should and nothing else,
+that the hourly snapshot copies a changed board and not an unchanged one, that a verb
+copies the state it wrote as well as the state it replaced while a verb that writes
+nothing copies neither, that the copies land under the project's own segment and two
+boards called `backlog.md` do not collide, and that a snapshot restores. Same rule as the read fixture — a rule nobody has seen fire
 is written down, not enforced.
 
 ## 9. Who this binds

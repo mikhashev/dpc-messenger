@@ -257,7 +257,10 @@ def main():
         check("append refuses when no actor is named", code == 2, out[-300:])
 
         # --- snapshots -------------------------------------------------------------
-        snaps = sorted((work / "backups").glob("backlog.*.auto.md"))
+        # rglob: the copies sit under a per-project segment inside this directory, and
+        # what the fixture asserts is that they were taken, not where the segment landed
+        # — the recovery drill is what watches the segment itself.
+        snaps = sorted((work / "backups").rglob("backlog.*.auto.md"))
         check("the verbs took snapshots into the backup directory", bool(snaps),
               str(list((work / "backups").glob("*")) if (work / "backups").exists() else
                   "no backups directory at all"))

@@ -22,8 +22,9 @@ Rendering and `--check` never touch backlog.md. The five verbs do (ADR-039): eac
 the file, re-runs `--check` over the result in a scratch copy first, and refuses to keep a
 write that would introduce a refusal. Add `--dry-run` to validate without writing.
 
-Every write in this script goes through `_atomic_write`, and every verb takes a snapshot
-into ~/.dpc/backlog-backups/ before its first write. Between edits backlog.md and
+Every write in this script goes through `_atomic_write`, and every verb copies the board
+into ~/.dpc/backlog-backups/<project>/ twice — before its first write and after its last,
+so the newest copy is never older than the last successful edit. Between edits backlog.md and
 backlog_closed.md are held read-only, so a write that does not come through this tool is
 refused rather than obeyed; `--check` and the render also copy the board when the newest
 copy is over an hour old. To edit by hand, clear the bit (`attrib -R` / `chmod u+w`) — the
@@ -775,8 +776,42 @@ def _atomic_write(path: Path, text: str, encoding: str = "utf-8") -> None:
 # hand-written script which never called this tool, and no guard inside the verbs reaches
 # code that does not run them. The answer to that one is the `append` verb below — the
 # edit that script was making now has a verb.
-BACKUP_DIR = Path(os.environ.get("DPC_BACKLOG_BACKUP_DIR")
-                  or Path.home() / ".dpc" / "backlog-backups")
+BACKUP_ROOT = Path(os.environ.get("DPC_BACKLOG_BACKUP_DIR")
+                   or Path.home() / ".dpc" / "backlog-backups")
+
+
+def _project_segment(board: Path) -> str:
+    """Which project's board this is: the repository it sits in, else its own directory.
+
+    Six projects share this script and all six boards are called `backlog.md`, so one
+    flat directory gives them one stem: dedup compares this board against another
+    project's copy and skips the copy as unchanged, and the pruner thins six histories as
+    if they were one.
+
+    Derived from the board's own location, never from a config value (which goes stale on
+    the first move, silently) and never from the cwd. The walk looks for a `.git` entry
+    rather than running git: this script has no dependencies and must work where git is
+    absent, and `.exists()` covers the worktree spelling where `.git` is a file.
+
+    Outside a repository the board's directory names the segment — two of the six
+    projects may not be repositories, and no separation is worse than a coarse one. Two
+    clones of one repository share a segment; `DPC_BACKLOG_BACKUP_DIR` separates them.
+    """
+    start = board.resolve().parent
+    for d in [start, *start.parents]:
+        if (d / ".git").exists():
+            start = d
+            break
+    # Sanitise rather than refuse: an unwritable snapshot path must not be able to make
+    # the board uneditable (see _snapshot_warn). A drive root has no name at all.
+    seg = re.sub(r"[^A-Za-z0-9._-]+", "-", start.name).strip("-.")
+    return seg or "board"
+
+
+# Appended under the override rather than replacing it: the override says where copies
+# live, the segment says whose they are. Conditioning the segment on the override would
+# arm the collision guard only for people who had not thought about it.
+BACKUP_DIR = BACKUP_ROOT / _project_segment(SRC)
 BACKUP_KEEP_ALL_DAYS = 7          # every snapshot for a week …
 BACKUP_KEEP_DAILY_DAYS = 30       # … then one a day for a month, then nothing
 # `.auto.md` marks a snapshot as this tool's. The same directory holds hand-made copies,
@@ -797,9 +832,12 @@ def _snapshot_warn(msg: str) -> None:
     would let an unwritable ~/.dpc make the board uneditable, losing the edit the person
     is holding while the file on disk was never in danger. Refusing to work is not a safe
     default when the failing component is the backup rather than the write.
+
+    The same holds for the copy taken after the write, where the edit is already on disk
+    and there is nothing left to abort — hence one wording for both sides.
     """
     print(f"WARNING   {msg}")
-    print("WARNING   the write goes ahead without one — see _snapshot_warn for why.")
+    print("WARNING   the edit is not held up by this — see _snapshot_warn for why.")
 
 
 def _newest_snapshot(stem: str):
@@ -849,13 +887,41 @@ def _prune_snapshots() -> None:
                 print(f"note      could not prune {f.name}: {exc}")
 
 
-def _snapshot(paths) -> None:
+_LEGACY_SAID = []
+
+
+def _mention_legacy_snapshots() -> None:
+    """Say once that copies from before the project segment are sitting one level up.
+
+    They stay where they are, and both halves of that are deliberate. They are outside
+    `_newest_snapshot`, so the first copy taken under the segment is taken even though
+    the content has not changed — one extra copy, once. They are outside the pruner too,
+    so they are kept for good: reaching up into the shared root to delete would put this
+    project's pruner back over five other projects' files, which is the collision the
+    segment exists to end.
+    """
+    if _LEGACY_SAID or BACKUP_ROOT == BACKUP_DIR:
+        return
+    _LEGACY_SAID.append(True)
+    try:
+        loose = [f for f in BACKUP_ROOT.glob("*.auto.md") if SNAP_RE.match(f.name)]
+    except OSError:
+        return
+    if loose:
+        print(f"note      {len(loose)} snapshot(s) from before the per-project directory "
+              f"sit in {BACKUP_ROOT} itself. They are not read for dedup and never "
+              f"pruned; move or delete them by hand if you want them gone.")
+
+
+def _snapshot(paths, moment: str = "") -> None:
     """Copy each existing path into BACKUP_DIR under a UTC-stamped name, then prune."""
     try:
         BACKUP_DIR.mkdir(parents=True, exist_ok=True)
     except OSError as exc:
         _snapshot_warn(f"no snapshot: {BACKUP_DIR} could not be created ({exc}).")
         return
+    _mention_legacy_snapshots()
+    tag = f" ({moment})" if moment else ""
     now = datetime.now(timezone.utc)
     for p in paths:
         if not p.exists():
@@ -876,7 +942,7 @@ def _snapshot(paths) -> None:
                 same = False
             if same:
                 print(f"snapshot  {p.name} is unchanged since {newest[1].name} — "
-                      f"not copied again")
+                      f"not copied again{tag}")
                 continue
         # Never write over an existing snapshot: the one already there is the older board,
         # which is the one worth having.
@@ -890,7 +956,7 @@ def _snapshot(paths) -> None:
         except OSError as exc:
             _snapshot_warn(f"no snapshot of {p.name}: {dst} could not be written ({exc}).")
             continue
-        print(f"snapshot  {dst}")
+        print(f"snapshot  {dst}{tag}")
     _prune_snapshots()
 
 
@@ -898,6 +964,12 @@ def _snapshot(paths) -> None:
 # _snapshot above is taken *by* a verb, so an edit that never calls a verb is never
 # copied — which is the edit that lost the board. This one is taken on the clock.
 SNAPSHOT_EVERY_SEC = 3600
+# A verb validates its result by running `--check` over a scratch copy, and that copy is
+# also called backlog.md — so the clock trigger below fired on it and filed the candidate
+# under the board's own stem. Measured on this fixture: a write the checker refused left a
+# copy of the refused content sitting among the copies of the board, and a restore could
+# not tell them apart. _validate sets this; nothing else should.
+SNAPSHOT_ON_CLOCK = not os.environ.get("DPC_BACKLOG_NO_SNAPSHOT")
 
 
 def _hourly_snapshot() -> int:
@@ -934,12 +1006,12 @@ _arm_boards()
 # Triggered by the commands that already run whenever somebody is working, rather than by
 # a scheduler; what that buys and what it misses is weighed in §8a. `--roadmap` is
 # excluded because a verb runs it as a subprocess, which would snapshot twice per command.
-if not VERB and "--roadmap" not in sys.argv:
+if not VERB and "--roadmap" not in sys.argv and SNAPSHOT_ON_CLOCK:
     _copied = _hourly_snapshot()
     if "--snapshot" in sys.argv:
-        print(f"snapshot  {_copied} board(s) copied · one is taken at most every "
-              f"{SNAPSHOT_EVERY_SEC // 60} minutes, and skipped when the content already "
-              f"matches the newest copy.")
+        print(f"snapshot  {_copied} board(s) copied into {BACKUP_DIR} · one is taken at "
+              f"most every {SNAPSHOT_EVERY_SEC // 60} minutes, and skipped when the "
+              f"content already matches the newest copy.")
         sys.exit(0)
 
 
@@ -1067,9 +1139,10 @@ def _validate(src_text, arc_text):
         # the code and the first `add` after И2 confirmed it. The block is regenerated
         # here, against the candidate, before the check runs, and again on the real file
         # in `_commit`: the writer and the checker see one state or the guard is a wall.
-        # The scratch copy is not armed: a read-only file defeats shutil.rmtree on
-        # Windows, so every verb would leak a temp directory.
-        _env = dict(os.environ, DPC_BACKLOG_NO_PROTECT="1")
+        # The candidate is not the board: it must not be armed (a read-only file
+        # defeats shutil.rmtree on Windows, so every verb would leak a temp directory)
+        # and it must not be copied into the board's history either.
+        _env = dict(os.environ, DPC_BACKLOG_NO_PROTECT="1", DPC_BACKLOG_NO_SNAPSHOT="1")
         _g = subprocess.run([sys.executable, str(Path(__file__).resolve()),
                              "--roadmap", str(tmp / SRC.name)],
                             capture_output=True, text=True, encoding="utf-8",
@@ -1108,11 +1181,29 @@ def _commit(src_text, arc_text, announcement):
         print("dry run — validated, nothing written.")
         print("ANNOUNCE  " + announcement)
         return
-    # Before the verb's first byte. The archive is snapshotted only when the verb changes
-    # it, which is `close` and nothing else.
-    _snapshot([SRC] + ([ARCHIVE] if arc_text != _ARC_TEXT else []))
+    # The archive is snapshotted only when the verb changes it, which is `close` and
+    # nothing else — and the same list is copied on both sides, so the pair always
+    # describes the same files.
+    _touched = [SRC] + ([ARCHIVE] if arc_text != _ARC_TEXT else [])
+    # Before the verb's first byte: this is the copy a mistaken verb is undone from.
+    _snapshot(_touched, "before the write")
     _atomic_write(SRC, src_text)
     _atomic_write(ARCHIVE, arc_text)
+    # And after it. The copy above preserves the state this verb destroyed; this one
+    # preserves the state the *next* accident destroys, so the newest copy is never older
+    # than the last successful edit. The loss of 2026-09-09 was recovered from a copy five
+    # days old for exactly the want of this: every guard was aimed at the edit in flight
+    # and nothing captured a good state on the way past.
+    #
+    # It cannot lose the edit, because the edit is already on disk when it runs. So a
+    # failure here must not raise: a verb that reported failure after a successful write
+    # invites the operator to run it again and apply it twice. _snapshot warns on its own
+    # errors; this catches the rest for the same reason.
+    try:
+        _snapshot(_touched, "after the write")
+    except Exception as exc:                                    # noqa: BLE001
+        _snapshot_warn(f"the board was written, but no copy of the new state was taken "
+                       f"({exc}). The edit is on disk; the next run will copy it.")
     # Part of the same write, not a chore left for later: the roadmap's status block is
     # rendered from what just changed, so leaving it for a separate command would put the
     # tree in the one state `--check` refuses — and it would be the verb that did it.
@@ -2439,12 +2530,9 @@ if JSON_DST.exists():
         previous = {}                    # a corrupt or hand-edited file just means cold start
 
 orphans = [e for e in entries if e["is_name"] and e["ref"] not in idx]
-# Unlinked entries are drawn too, as their own class (Mike, 2026-09-04: «сделай тоже для
-# них отдельный фильтр, чтобы я мог выбирать»). They stay ordinary task nodes — priority
-# colour, section, line — with one flag, `lone`, that the page's visible() reads as one
-# more class key; their chip starts hidden on a first visit, so the picture is the one it
-# was until somebody asks. One node per name: an id is a key, and a fixture may repeat a
-# name on purpose — the `unlinked` list below keeps every occurrence.
+# One node per name, because the id is a key and a fixture may repeat a name on purpose;
+# the `unlinked` list below keeps every occurrence.
+# why a class and not a kind: git log -S'"lone"' -- tools/backlog/build.py
 for ref in sorted({e["ref"] for e in orphans}):
     e = live[ref]
     g_nodes.append({

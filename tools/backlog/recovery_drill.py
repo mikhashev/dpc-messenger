@@ -16,10 +16,17 @@ What is watched here:
      for: the write is refused before it can truncate, and the board is byte-identical;
   3. every verb takes a snapshot and leaves the board whole;
   4. a verb still works against a protected board, and leaves it protected;
-  5. the board is left protected when a verb refuses, and when one fails mid-write;
+  5. the board is left protected when a verb refuses, and when one fails mid-write, and
+     nothing the checker refused is left behind as a copy of the board;
   6. a write that fails part-way leaves the original byte-identical;
   7. the hourly snapshot: due and changed copies, due and unchanged does not;
-  8. a snapshot restores to exactly what was there before.
+  8. a snapshot restores to exactly what was there before;
+  9. a verb copies the board after it wrote as well as before, so the newest copy is
+     never older than the last successful edit — and a verb that writes nothing copies
+     nothing, on either side;
+ 10. the copies live under a segment named for the project, so two boards called
+     backlog.md do not share one history; the segment is the repository the board sits
+     in, and its own directory when there is no repository.
 
 Stdlib only and no virtualenv, the same constraint build.py itself carries. The fixture
 board and the subprocess runner are imported from verbs_fixture rather than copied — one
@@ -37,6 +44,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from verbs_fixture import ARCHIVE, BACKLOG, ROADMAP, rmtree, run   # noqa: E402
 
 BLOCKED_SUFFIX = ".blocked-tmp"
+NEWLINE = chr(10)
+PARA = NEWLINE * 2
 passed, failed = [], []
 
 
@@ -47,7 +56,19 @@ def check(label, condition, detail=""):
 
 
 def snaps(work):
-    return sorted((work / "backups").glob("backlog.*.auto.md"))
+    """Every auto copy of `work`'s board, wherever the project segment put it."""
+    return sorted((work / "backups").rglob("backlog.*.auto.md"))
+
+
+def backup_dir(work):
+    """The directory the copies actually landed in — discovered, never recomputed, so
+    the drill cannot agree with build.py by repeating build.py's rule."""
+    found = snaps(work)
+    return found[0].parent if found else work / "backups"
+
+
+def no_repository_above(path):
+    return not any((d / ".git").exists() for d in [path, *path.parents])
 
 
 def stamp(days_ago, hhmmss="120000"):
@@ -71,7 +92,7 @@ def unprotect(path):
 def board_beside(work, name, roadmap=True):
     """A second throwaway board in its own directory, with its own snapshot dir."""
     d = work / name
-    d.mkdir(exist_ok=True)
+    d.mkdir(parents=True, exist_ok=True)
     files = ("backlog.md", "backlog_closed.md") + (("ROADMAP.md",) if roadmap else ())
     for f in files:
         shutil.copyfile(work / f, d / f)
@@ -208,6 +229,19 @@ def a_refusal_leaves_the_board_protected(work):
     check("a write the checker refuses is not written", code == 1
           and b"REFUSED-BY-THE-CHECKER" not in board.read_bytes(), out[-300:])
     check("the board is still read-only after that refusal too", not writable(board))
+    # A verb validates its result by running --check over a scratch copy that is also
+    # called backlog.md, so the clock trigger fired on the candidate and filed it under
+    # the board's own stem. A restore could not then tell a refused draft from a board.
+    check("no copy anywhere holds the content the checker refused",
+          not [s for s in snaps(work)
+               if b"REFUSED-BY-THE-CHECKER" in s.read_bytes()],
+          str([s.name for s in snaps(work)
+               if b"REFUSED-BY-THE-CHECKER" in s.read_bytes()]))
+    # At most one: the project's own segment. A second would be the scratch copy's,
+    # named after whatever temp directory the validation run happened to get.
+    check("and no scratch directory of its own was left in the backup root",
+          len([q for q in (work / "backups").iterdir() if q.is_dir()]) <= 1,
+          str(sorted(q.name for q in (work / "backups").iterdir())))
 
 
 def verbs_snapshot_and_keep_the_board_whole(work):
@@ -235,8 +269,8 @@ def verbs_snapshot_and_keep_the_board_whole(work):
         check(f"{name} left a whole board behind",
               board.strip() and "## OPEN" in board, out[-300:])
     check("close snapshotted the archive it was about to rewrite",
-          bool(sorted((work / "backups").glob("backlog_closed.*.auto.md"))),
-          str([p.name for p in (work / "backups").glob("*")]))
+          bool(sorted((work / "backups").rglob("backlog_closed.*.auto.md"))),
+          str([p.name for p in (work / "backups").rglob("*")]))
     code, out = run(work, "--check")
     check("the board every verb touched still passes --check", code == 0, out[-400:])
 
@@ -266,9 +300,13 @@ def a_failing_write_leaves_the_original(work):
           b"this write is going to fail" not in after)
     check("backlog_closed.md is byte-identical too",
           (work / "backlog_closed.md").read_bytes() == before_arc)
-    check("the snapshot was still taken before the write failed",
-          len(snaps(work)) == n_snaps + 1,
-          f"{n_snaps} -> {len(snaps(work))}")
+    # Not a count: the copy taken after the *previous* verb already holds this exact
+    # state, so the copy this verb takes first is skipped by the content hash. What has
+    # to hold is the property rather than the file — the state the failed write was about
+    # to replace is recoverable. Section 10 is where the copy-before is watched to fire.
+    check("the state the failed write was about to replace is on disk in a copy",
+          any(s.read_bytes() == before for s in snaps(work)),
+          f"{n_snaps} -> {len(snaps(work))} copies, none of them the board")
     check("no temporary file was left lying beside the board",
           not [p for p in work.glob("backlog.md.tmp-*")],
           str([p.name for p in work.glob("backlog.md.*")]))
@@ -283,17 +321,27 @@ def an_unchanged_board_is_not_snapshotted_twice(work):
     code, out = run(work, "append", "BETA-ENTRY-POINTS-AT-ALPHA",
                     "--text=an observation that does change the board", "--by=CC")
     check("the verb ran", code == 0, out[-300:])
-    check("no second copy of identical content",
-          len(snaps(work)) == n_snaps and "unchanged since" in out,
+    # The board is byte-identical to the newest copy, so the copy before the write is
+    # skipped; the write then changes it, so the copy after is taken. One new file, not
+    # two — this is the dedup keeping the pair from doubling the directory.
+    check("no second copy of identical content before the write",
+          "unchanged since" in out, out[-400:])
+    check("exactly one new copy, and it is the state after the write",
+          len(snaps(work)) == n_snaps + 1
+          and snaps(work)[-1].read_bytes() == (work / "backlog.md").read_bytes(),
           f"{n_snaps} -> {len(snaps(work))}\n{out[-400:]}")
 
 
 def retention_keeps_a_week_then_a_month(work):
     print("\n-- 7b. retention: every snapshot for 7 days, one a day for 30, then nothing --")
-    back = work / "backups"
+    back = backup_dir(work)
+    # Four copies on the one day inside the daily window, because a verb now takes two:
+    # this is what "twice as often" looks like once it has aged past the 7-day line.
     planted = {
         "old":        back / f"backlog.{stamp(40)}.auto.md",
         "window_old": back / f"backlog.{stamp(15, '010000')}.auto.md",
+        "window_2":   back / f"backlog.{stamp(15, '010001')}.auto.md",
+        "window_3":   back / f"backlog.{stamp(15, '015959')}.auto.md",
         "window_new": back / f"backlog.{stamp(15, '020000')}.auto.md",
         "recent_a":   back / f"backlog.{stamp(3, '010000')}.auto.md",
         "recent_b":   back / f"backlog.{stamp(3, '020000')}.auto.md",
@@ -304,9 +352,12 @@ def retention_keeps_a_week_then_a_month(work):
     run(work, "append", "BETA-ENTRY-POINTS-AT-ALPHA",
         "--text=a write whose only job is to run the pruner", "--by=CC")
     check("a snapshot older than 30 days is pruned", not planted["old"].exists())
-    check("in the 7-to-30-day window only the newest of a day survives",
-          planted["window_new"].exists() and not planted["window_old"].exists(),
-          f"new={planted['window_new'].exists()} old={planted['window_old'].exists()}")
+    one_day = ("window_old", "window_2", "window_3", "window_new")
+    check("in the 7-to-30-day window only the newest of a day survives, whether that "
+          "day held two copies or four",
+          planted["window_new"].exists()
+          and not any(planted[k].exists() for k in one_day[:-1]),
+          f"kept={[k for k in one_day if planted[k].exists()]}")
     check("inside 7 days every snapshot is kept",
           planted["recent_a"].exists() and planted["recent_b"].exists())
     check("a hand-made copy in the same directory is never touched",
@@ -326,7 +377,6 @@ def the_hourly_snapshot(work):
     """
     print("\n-- 8. the hourly snapshot --")
     d = board_beside(work, "hourly")
-    back = d / "backups"
     board = d / "backlog.md"
 
     def age_the_newest():
@@ -334,7 +384,7 @@ def the_hourly_snapshot(work):
         # loop is a guard, not a loop: with the trigger disabled there is nothing to age,
         # and the checks below have to report that rather than die and hide what follows.
         for newest in snaps(d)[-1:]:
-            newest.rename(back / f"backlog.{hours_ago(2)}.auto.md")
+            newest.rename(newest.with_name(f"backlog.{hours_ago(2)}.auto.md"))
 
     def hand_edit(marker):
         unprotect(board)
@@ -379,9 +429,17 @@ def a_snapshot_restores_what_was_there(work):
                     "--text=the edit a restore has to undo", "--by=CC")
     check("the verb that takes the snapshot ran", code == 0, out[-300:])
     newest = max(snaps(work), key=lambda p: p.name)
-    check("the newest snapshot holds the board as it was before that verb",
-          newest.read_bytes() == before,
-          f"{newest.name}: {len(newest.read_bytes())} bytes vs {len(before)} before")
+    check("the newest copy holds the board as the verb left it",
+          newest.read_bytes() == (work / "backlog.md").read_bytes(),
+          f"{newest.name}: {len(newest.read_bytes())} bytes vs "
+          f"{(work / 'backlog.md').stat().st_size} on the board")
+    # The state before the verb is held either by the copy this verb took first or by the
+    # copy the previous verb took last; which of the two is an implementation detail, that
+    # one of them holds it is the guarantee.
+    held = [s for s in snaps(work) if s.read_bytes() == before]
+    check("the state before that verb is still held by a copy of its own", bool(held),
+          f"{len(snaps(work))} copies, none matching the {len(before)} bytes")
+    newest = held[-1] if held else newest
 
     # Now lose it the way it was lost, and put it back. The loss has to be staged by
     # hand — with the tripwire armed the board cannot be emptied at all, which is case 2.
@@ -395,6 +453,140 @@ def a_snapshot_restores_what_was_there(work):
           (work / "backlog.md").read_bytes() == before)
     code, out = run(work, "--check")
     check("the restored board passes --check", code == 0, out[-400:])
+
+
+def hand_edit(board, marker):
+    """A state no copy holds yet, made the way the tool cannot see it being made."""
+    unprotect(board)
+    board.write_text(
+        board.read_text(encoding="utf-8").replace(
+            "## IN PROGRESS", f"- **2026-09-09, CC:** {marker}" + PARA + "## IN PROGRESS"),
+        encoding="utf-8")
+
+
+def the_copy_taken_after_the_write(work):
+    """The half of the pair added on 2026-09-09, and the half that was already there.
+
+    The copy before a write preserves the state that write is about to destroy. The copy
+    after it preserves the state the *next* accident destroys — which is the one that was
+    missing when the board was truncated, and why the recovery came from a copy five days
+    old while every edit in between had gone through the tool.
+    """
+    print("\n-- 10. a copy after the write, as well as before --")
+    root = work / "segmented-backups"
+    env = {"DPC_BACKLOG_BACKUP_DIR": str(root)}
+    d = board_beside(work, "after-the-write")
+    board = d / "backlog.md"
+    seg = root / "after-the-write"
+
+    run(d, "--check", env=env)
+    check("the copies land under a segment named for the board's own directory",
+          bool(sorted(seg.glob("backlog.*.auto.md"))) and not list(root.glob("*.auto.md")),
+          str(sorted(q.name for q in root.rglob("*"))))
+
+    hand_edit(board, "a hand edit no copy holds yet")
+    before = board.read_bytes()
+    n = len(sorted(seg.glob("backlog.*.auto.md")))
+    code, out = run(d, "append", "BETA-ENTRY-POINTS-AT-ALPHA",
+                    "--text=the edit the copy after the write has to hold", "--by=CC",
+                    env=env)
+    after = board.read_bytes()
+    got = sorted(seg.glob("backlog.*.auto.md"))
+    check("the verb ran and changed the board", code == 0 and after != before, out[-400:])
+    check("one verb, two copies: the state before it and the state after it",
+          len(got) == n + 2, f"{n} -> {len(got)}" + NEWLINE + out[-500:])
+    check("the older of the two holds the state the verb was about to replace",
+          len(got) >= 2 and got[-2].read_bytes() == before,
+          f"{got[-2].name if len(got) >= 2 else 'no second copy'} vs {len(before)} bytes")
+    check("the newer holds what the board says now, so the newest copy is never older "
+          "than the last successful edit",
+          bool(got) and got[-1].read_bytes() == after,
+          f"{got[-1].name if got else 'no copy at all'} vs {len(after)} bytes")
+
+    # The point of holding it is that it goes back. Guarded, not assumed: with the copy
+    # after the write removed there is nothing here to restore from, and a drill that
+    # dies at that line reports none of the cases below it.
+    if got:
+        unprotect(board)
+        board.write_bytes(b"")
+        unprotect(board)
+        shutil.copyfile(got[-1], board)
+    check("and the board restores from it, byte for byte",
+          bool(got) and board.read_bytes() == after, "no copy to restore from")
+    code, out = run(d, "--check", env=env)
+    check("the restored board passes --check", code == 0, out[-400:])
+
+    # Nothing written, nothing copied — on either side.
+    n = len(sorted(seg.glob("backlog.*.auto.md")))
+    code, out = run(d, "append", "BETA-ENTRY-POINTS-AT-ALPHA", "--text=validated only",
+                    "--by=CC", "--dry-run", env=env)
+    check("a verb that writes nothing takes no copy on either side",
+          code == 0 and len(sorted(seg.glob("backlog.*.auto.md"))) == n,
+          f"{n} -> {len(sorted(seg.glob('backlog.*.auto.md')))}" + NEWLINE + out[-400:])
+
+    # And the pair never becomes two identical files: the board now matches the copy the
+    # last verb took after itself, so this verb's first copy is skipped by the hash.
+    n = len(sorted(seg.glob("backlog.*.auto.md")))
+    code, out = run(d, "append", "BETA-ENTRY-POINTS-AT-ALPHA",
+                    "--text=a second observation", "--by=CC", env=env)
+    got = sorted(seg.glob("backlog.*.auto.md"))
+    check("a copy the newest one already holds is not taken twice",
+          code == 0 and len(got) == n + 1 and "unchanged since" in out,
+          f"{n} -> {len(got)}" + NEWLINE + out[-500:])
+    check("the one that was taken is the state after the write",
+          bool(got) and got[-1].read_bytes() == board.read_bytes(),
+          got[-1].name if got else "no copy at all")
+
+
+def two_projects_do_not_collide(work):
+    """Six projects, six boards, one filename. The segment is what keeps them apart."""
+    print("\n-- 11. two boards named backlog.md, in two projects --")
+    root = work / "collision-backups"
+    env = {"DPC_BACKLOG_BACKUP_DIR": str(root)}
+    a, b = board_beside(work, "project-alpha"), board_beside(work, "project-beta")
+    run(a, "append", "BETA-ENTRY-POINTS-AT-ALPHA", "--text=alpha wrote this", "--by=CC",
+        env=env)
+    run(b, "append", "BETA-ENTRY-POINTS-AT-ALPHA", "--text=beta wrote this", "--by=CC",
+        env=env)
+    sa = sorted((root / "project-alpha").glob("backlog.*.auto.md"))
+    sb = sorted((root / "project-beta").glob("backlog.*.auto.md"))
+    check("each project keeps its copies in its own directory", bool(sa) and bool(sb),
+          str(sorted(q.name for q in root.rglob("*"))))
+    check("nothing is left loose in the shared root", not list(root.glob("*.auto.md")),
+          str(sorted(q.name for q in root.glob("*.auto.md"))))
+    check("alpha's newest copy holds alpha's edit and not beta's",
+          bool(sa) and "alpha wrote this" in sa[-1].read_text(encoding="utf-8")
+          and "beta wrote this" not in sa[-1].read_text(encoding="utf-8"),
+          sa[-1].name if sa else "no copy at all")
+    check("and beta's the other way round",
+          bool(sb) and "beta wrote this" in sb[-1].read_text(encoding="utf-8")
+          and "alpha wrote this" not in sb[-1].read_text(encoding="utf-8"),
+          sb[-1].name if sb else "no copy at all")
+
+
+def the_segment_names_the_repository(work):
+    """Derived from the repository the board sits in, and from its directory otherwise."""
+    print("\n-- 12. the segment is the repository, not the directory --")
+    root = work / "repository-backups"
+    env = {"DPC_BACKLOG_BACKUP_DIR": str(root)}
+    check("the drill's own temp directory sits in no repository, so the fallback below "
+          "means what it says", no_repository_above(work),
+          f"a .git above {work} would name every segment here after that repository")
+
+    d = board_beside(work, "a-repository/docs")
+    (work / "a-repository" / ".git").mkdir(exist_ok=True)
+    run(d, "--check", env=env)
+    check("a board inside a repository is filed under the repository, not under the "
+          "directory it sits in",
+          (root / "a-repository").is_dir() and not (root / "docs").exists(),
+          str(sorted(q.name for q in root.glob("*"))))
+
+    e = board_beside(work, "no-repository-here")
+    run(e, "--check", env=env)
+    check("a board in no repository at all is filed under its own directory",
+          (root / "no-repository-here").is_dir(),
+          str(sorted(q.name for q in root.glob("*"))))
+
 
 
 def main():
@@ -416,6 +608,9 @@ def main():
         retention_keeps_a_week_then_a_month(work)
         the_hourly_snapshot(work)
         a_snapshot_restores_what_was_there(work)
+        the_copy_taken_after_the_write(work)
+        two_projects_do_not_collide(work)
+        the_segment_names_the_repository(work)
     finally:
         rmtree(work)
 
