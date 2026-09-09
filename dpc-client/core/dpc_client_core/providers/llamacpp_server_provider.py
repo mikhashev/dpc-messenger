@@ -24,7 +24,6 @@ dictionary comes from the model's jinja file.
 """
 
 import asyncio
-import base64
 import json
 import logging
 from pathlib import Path
@@ -33,7 +32,7 @@ from typing import Any, Dict, Iterable, Optional, List, Tuple, Union
 
 from openai import AsyncOpenAI
 
-from .base import AIProvider, REASONING_OFF
+from .base import AIProvider, REASONING_OFF, image_base64
 from .deepseek_provider import DeepSeekProvider
 
 from ..managers.llama_server_supervisor import DEFAULTS as SUPERVISOR_DEFAULTS
@@ -950,26 +949,21 @@ class LlamaServerProvider(DeepSeekProvider):
         self._last_thinking = None
         self._last_usage = None
 
+        # Built before `_call`, so a refusal is about the request and is not
+        # reported as the server having failed. An image with no base64 stops
+        # the whole call: the alternative this replaced dropped it and answered
+        # text-only, which answers a question about a picture as though none had
+        # been asked about, and reached for `path` — the sender's filename, which
+        # DPTP §3.4 promises the receiver nothing about — to avoid doing so.
         content: List[Dict[str, Any]] = [{"type": "text", "text": prompt}]
         for img in images:
-            b64 = img.get("base64") or self._read_image_as_base64(img.get("path"))
-            if not b64:
-                # A dropped image is a silent text-only answer unless someone
-                # says so here — the caller asked about a picture it will not
-                # receive (review note, 2026-08-20).
-                logging.getLogger(__name__).warning(
-                    "llamacpp_server '%s': vision call dropped an unreadable image "
-                    "(path=%s) — answering text-only",
-                    self.alias, img.get("path"),
-                )
-                continue
-            if b64.startswith("data:"):
-                content.append({"type": "image_url", "image_url": {"url": b64}})
-            else:
-                mime = img.get("mime_type") or "image/png"
-                content.append(
-                    {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{b64}"}}
-                )
+            mime = img.get("mime_type") or "image/png"
+            content.append({
+                "type": "image_url",
+                "image_url": {
+                    "url": f"data:{mime};base64,{image_base64(img, self.alias)}"
+                },
+            })
 
         async def _call():
             client = await self._ensure()
@@ -1025,15 +1019,6 @@ class LlamaServerProvider(DeepSeekProvider):
                 f"llamacpp_server vision failed for '{self.alias}': "
                 f"{type(e).__name__}: {e}"
             ) from e
-
-    @staticmethod
-    def _read_image_as_base64(path: Optional[str]) -> Optional[str]:
-        if not path:
-            return None
-        try:
-            return base64.b64encode(Path(path).read_bytes()).decode("ascii")
-        except OSError:
-            return None
 
     def _model_name(self) -> str:
         """The server serves exactly one -m model and ignores this field, but
