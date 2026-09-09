@@ -53,9 +53,13 @@ def test_supports_thinking_detection():
     assert _make({"model": "lfm2.5:latest"}).supports_thinking() is False
 
 
-def test_supports_vision_detection():
-    assert _make({"model": "qwen3.6:27b"}).supports_vision() is True
-    assert _make({"model": "qwen3.5:9b"}).supports_vision() is True
+def test_supports_vision_says_no_with_no_daemon_to_ask():
+    """Vision no longer has a fallback list for silence — a name in a config
+    file is not a model that can be reached. The list still decides for a
+    daemon that answers without the capabilities field, which is
+    test_ollama_asks_the_daemon.py's ground."""
+    assert _make({"model": "qwen3.6:27b"}).supports_vision() is False
+    assert _make({"model": "qwen3.5:9b"}).supports_vision() is False
     assert _make({"model": "ornith:9b-q8_0"}).supports_vision() is False
 
 

@@ -286,6 +286,34 @@ def parse_thinking_tags(content: str) -> Tuple[str, Optional[str]]:
     return content, None
 
 
+# --- Shared image handling ---
+
+
+def image_base64(img: Dict[str, Any], alias: str) -> str:
+    """The pixels of one image, or a refusal naming the provider and the missing field.
+
+    An image can arrive here straight off the wire (REMOTE_INFERENCE_REQUEST,
+    through `llm_manager.query(images=…)`), and `path` there is the sender's
+    original filename — DPTP §3.4 requires `base64` and promises the receiver
+    nothing about `path`. Opening it resolves nowhere on another machine and, on
+    a like one, may resolve to a different file, which the model would then
+    describe as though it were the image that was sent. So no base64 is a refusal
+    rather than a local file, and the refusal names the alias because it reaches
+    the caller through `llm_manager`.
+
+    The returned string is the raw base64: a `data:` prefix is stripped here so
+    each call site does not carry its own copy of that.
+    """
+    data = img.get("base64")
+    if not data:
+        raise ValueError(
+            f"Provider '{alias}' was given an image carrying no base64 data "
+            f"(keys present: {sorted(img)}). DPTP §3.4 requires base64; 'path' is "
+            f"the sender's original filename, not a file this machine may open."
+        )
+    return data.split(",", 1)[1] if data.startswith("data:") else data
+
+
 # --- Shared network bounds ---
 
 # The openai and anthropic SDKs default to read=600 with two automatic retries;

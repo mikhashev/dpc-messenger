@@ -2,7 +2,6 @@
 
 import os
 import json
-import base64
 import asyncio
 import time
 import logging
@@ -11,7 +10,8 @@ from typing import Dict, Any, Optional, List, Union
 
 from openai import AsyncOpenAI
 
-from .base import AIProvider, REASONING_OFF, network_client_bounds, normalize_reasoning_effort
+from .base import (AIProvider, REASONING_OFF, image_base64, network_client_bounds,
+                   normalize_reasoning_effort)
 
 logger = logging.getLogger(__name__)
 
@@ -687,17 +687,12 @@ class DeepSeekProvider(AIProvider):
         will not route vision here."""
         content: List[Dict[str, Any]] = [{"type": "text", "text": prompt}]
         for img in images:
-            if "base64" in img:
-                base64_data = img["base64"]
-                if base64_data.startswith("data:"):
-                    base64_data = base64_data.split(",", 1)[1]
-            else:
-                with open(img["path"], "rb") as f:
-                    base64_data = base64.b64encode(f.read()).decode("utf-8")
             mime_type = img.get("mime_type", "image/png")
             content.append({
                 "type": "image_url",
-                "image_url": {"url": f"data:{mime_type};base64,{base64_data}"},
+                "image_url": {
+                    "url": f"data:{mime_type};base64,{image_base64(img, self.alias)}"
+                },
             })
 
         async def _call():

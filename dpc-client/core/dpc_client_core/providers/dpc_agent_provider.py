@@ -309,13 +309,18 @@ class DpcAgentProvider(AIProvider):
             raise RuntimeError(f"Embedded agent streaming failed: {e}") from e
 
     def supports_vision(self) -> bool:
-        """
-        The agent supports vision through VLM tools.
+        """No: `generate_with_vision` below hands the model a sentence naming
+        the image, never the image.
 
-        Returns:
-            True (agent has analyze_screenshot and vlm_query tools)
+        `llm_manager.query` takes the first provider that answers yes when an
+        image query names none, so a yes here routes a group image or a document
+        page to a model that is told a filename and answers as though it had
+        looked. A no makes the same call raise, naming this provider.
+
+        It becomes a yes when the pixels reach a model — the agent's own VLM
+        tools would be what carries them.
         """
-        return True
+        return False
 
     async def generate_with_vision(
         self, prompt: str, images: List[Dict[str, Any]], conversation_id: str = None, **kwargs

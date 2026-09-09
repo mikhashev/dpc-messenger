@@ -12,7 +12,7 @@ from typing import Dict, Any, Optional, List, Union
 import httpx
 import ollama
 
-from .base import AIProvider, REASONING_OFF, normalize_reasoning_effort
+from .base import AIProvider, REASONING_OFF, image_base64, normalize_reasoning_effort
 
 logger = logging.getLogger(__name__)
 
@@ -227,12 +227,31 @@ class OllamaProvider(AIProvider):
                 )
 
     def supports_vision(self) -> bool:
-        """Whether this model takes images — the daemon's answer if there is
-        one, the name list only when there is not."""
-        caps = _reported_capabilities(self.model, self.config.get("host"))
-        if caps is not None:
-            return "vision" in caps
-        return any(vm in self.model.lower() for vm in OLLAMA_VISION_MODELS)
+        """Whether this model takes images — the daemon's answer, the name list
+        only for a daemon too old to carry the field, and no for a daemon that
+        could not be asked at all.
+
+        A yes decides routing: `llm_manager` takes the first provider that
+        answers it, so a name list answering for an unreachable daemon sends
+        image work to a connection that is not there rather than to a provider
+        that could do it. Unknown reads as no, as in `RemotePeerProvider` — a
+        refusal names the provider, a yes we cannot honour does not.
+
+        `supports_thinking` still falls back to its list on the same silence:
+        it is read after a provider is chosen and only shapes `think` on a call
+        already going there, so a wrong yes diverts nothing."""
+        info = _describe(self.model, self.config.get("host"))
+        if info is None:
+            logger.debug(
+                "OllamaProvider '%s': no vision claim — the daemon at %s did not "
+                "describe %s", self.alias,
+                self.config.get("host") or "the default host", self.model,
+            )
+            return False
+        reported = getattr(info, "capabilities", None)
+        if reported is None:
+            return any(vm in self.model.lower() for vm in OLLAMA_VISION_MODELS)
+        return "vision" in reported
 
     def supports_thinking(self) -> bool:
         """Whether this model can reason before answering. Can, not should —
@@ -539,23 +558,12 @@ class OllamaProvider(AIProvider):
             str: AI response text
         """
         self._last_thinking = None
-        try:
-            # Build image list (Ollama accepts paths or base64)
-            image_inputs = []
-            for img in images:
-                if "base64" in img:
-                    # Use base64 data if available
-                    base64_data = img["base64"]
-                    # Strip data URL prefix if present (data:image/png;base64,...)
-                    if base64_data.startswith("data:"):
-                        base64_data = base64_data.split(",", 1)[1]
-                    image_inputs.append(base64_data)
-                elif "path" in img:
-                    # Use file path (Ollama SDK handles reading)
-                    image_inputs.append(str(img["path"]))
-                else:
-                    raise ValueError("Image must have 'path' or 'base64' key")
+        # The SDK also takes a file path, and that is the one thing not passed
+        # on: the path in an image belongs to whoever sent it. Built before the
+        # try, so a refusal is not reported as the daemon having failed.
+        image_inputs = [image_base64(img, self.alias) for img in images]
 
+        try:
             # Build message with images
             message = {
                 'role': 'user',

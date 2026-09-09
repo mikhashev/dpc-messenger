@@ -1,13 +1,12 @@
 # dpc_client_core/providers/anthropic_provider.py
 
 import os
-import base64
 import logging
 from typing import Dict, Any, Optional, List
 
 from anthropic import AsyncAnthropic
 
-from .base import AIProvider, ANTHROPIC_THINKING_MODELS, network_client_bounds
+from .base import AIProvider, ANTHROPIC_THINKING_MODELS, image_base64, network_client_bounds
 
 logger = logging.getLogger(__name__)
 
@@ -134,35 +133,21 @@ class AnthropicProvider(AIProvider):
         Anthropic vision API using multimodal content blocks.
         Docs: https://docs.anthropic.com/claude/docs/vision
         """
+        # Built before the try: a refusal here is about the request, not about
+        # the API, and must not be reported as the API having failed.
+        content = []
+        for img in images:
+            content.append({
+                "type": "image",
+                "source": {
+                    "type": "base64",
+                    "media_type": img.get("mime_type", "image/png"),
+                    "data": image_base64(img, self.alias),
+                }
+            })
+        content.append({"type": "text", "text": prompt})
+
         try:
-            # Build multimodal content array
-            content = []
-
-            # Add images first
-            for img in images:
-                # Encode image to base64 if not already
-                if "base64" in img:
-                    base64_data = img["base64"]
-                    # Strip data URL prefix if present
-                    if base64_data.startswith("data:"):
-                        base64_data = base64_data.split(",", 1)[1]
-                else:
-                    with open(img["path"], "rb") as f:
-                        base64_data = base64.b64encode(f.read()).decode("utf-8")
-
-                mime_type = img.get("mime_type", "image/png")
-                content.append({
-                    "type": "image",
-                    "source": {
-                        "type": "base64",
-                        "media_type": mime_type,
-                        "data": base64_data
-                    }
-                })
-
-            # Add text prompt after images
-            content.append({"type": "text", "text": prompt})
-
             response = await self.client.messages.create(
                 model=self.model,
                 messages=[{"role": "user", "content": content}],

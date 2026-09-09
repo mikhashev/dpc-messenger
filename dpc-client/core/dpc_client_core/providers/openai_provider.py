@@ -1,13 +1,12 @@
 # dpc_client_core/providers/openai_provider.py
 
 import os
-import base64
 import logging
 from typing import Dict, Any, List
 
 from openai import AsyncOpenAI
 
-from .base import AIProvider, OPENAI_THINKING_MODELS, network_client_bounds
+from .base import AIProvider, OPENAI_THINKING_MODELS, image_base64, network_client_bounds
 
 logger = logging.getLogger(__name__)
 
@@ -54,31 +53,20 @@ class OpenAICompatibleProvider(AIProvider):
         OpenAI vision API using multimodal content arrays.
         Docs: https://platform.openai.com/docs/guides/vision
         """
+        # Built before the try: a refusal here is about the request, not about
+        # the API, and must not be reported as the API having failed.
+        content = [{"type": "text", "text": prompt}]
+        for img in images:
+            mime_type = img.get("mime_type", "image/png")
+            content.append({
+                "type": "image_url",
+                "image_url": {
+                    "url": f"data:{mime_type};base64,{image_base64(img, self.alias)}",
+                    "detail": "high"  # or "low" for faster/cheaper processing
+                }
+            })
+
         try:
-            # Build multimodal message content
-            content = [{"type": "text", "text": prompt}]
-
-            for img in images:
-                # Encode image to base64 if not already
-                if "base64" in img:
-                    base64_data = img["base64"]
-                    # Strip data URL prefix if present
-                    if base64_data.startswith("data:"):
-                        base64_data = base64_data.split(",", 1)[1]
-                else:
-                    with open(img["path"], "rb") as f:
-                        base64_data = base64.b64encode(f.read()).decode("utf-8")
-
-                # OpenAI expects data URL format
-                mime_type = img.get("mime_type", "image/png")
-                content.append({
-                    "type": "image_url",
-                    "image_url": {
-                        "url": f"data:{mime_type};base64,{base64_data}",
-                        "detail": "high"  # or "low" for faster/cheaper processing
-                    }
-                })
-
             response = await self.client.chat.completions.create(
                 model=self.model,
                 messages=[{"role": "user", "content": content}],
