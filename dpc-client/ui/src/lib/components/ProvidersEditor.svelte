@@ -1491,14 +1491,15 @@
                           >
                             <!-- The eleven values `--spec-type` accepts on the pin, with the
                                  same honesty the KV menu above got. A name in the parser's
-                                 list is not a working implementation: draft-dflash is in this
-                                 list and cannot load on the pinned build at all. The list was
-                                 read off b10472's own --help on 2026-08-22; three values were
-                                 missing from this menu until then. -->
+                                 list is not a working implementation, and every label here says
+                                 how far each one has actually been taken on this machine. The
+                                 list was read off b10472's own --help on 2026-08-22; the value
+                                 list is character-identical on b10809, re-read 2026-09-09, so
+                                 the menu still matches the binary. -->
                             <option value="">default (draft-mtp)</option>
                             <option value="none">none — plain decoding</option>
                             <option value="draft-mtp">draft-mtp — head inside the GGUF, measured here</option>
-                            <option value="draft-dflash">draft-dflash — DOES NOT LOAD ON THE PINNED BUILD</option>
+                            <option value="draft-dflash">draft-dflash — this is DFlash2; loads on this pin, but kills image requests beside an mmproj</option>
                             <option value="draft-eagle3">draft-eagle3 — needs a drafter file (unverified here)</option>
                             <option value="draft-simple">draft-simple — needs a drafter file (unverified here)</option>
                             <option value="draft-dspark">draft-dspark — needs a drafter file (unverified here)</option>
@@ -1517,16 +1518,27 @@
                             flags below — and a drafter beside an mmproj kills every request
                             carrying an image on this build.
                             <br />
-                            <strong><code>draft-dflash</code> is untried on the pinned
-                            binary.</strong> The DFlash2 drafter declares 81 tensors, and on
-                            b10472 and b10566 the build made 58 of them, so the child died with
-                            <code>expected 81, got 58</code> before serving anything — the 20
-                            convolution and 3 selector tensors were what PR&nbsp;27342 adds.
-                            That PR merged upstream on 2026-08-27 and its tensors are declared
-                            in the pin from b10809 (<code>LLM_TENSOR_DFLASH_*</code> in
-                            <code>src/llama-arch.h</code>), so the refusal above no longer
-                            describes this build — but nobody has started the drafter here since
-                            the pin moved, so it is unverified rather than working. Everything
+                            <strong><code>draft-dflash</code> is DFlash2 — upstream never put
+                            the 2 in the value name — and it loads on this pin.</strong> On
+                            b10472 and b10566 the child died with
+                            <code>expected 81, got 58</code> before serving anything: the
+                            drafter declares 81 tensors and those builds made 58, the missing
+                            ones being what PR&nbsp;27342 adds. That PR merged upstream on
+                            2026-08-27. Measured here on 2026-09-10, CPU-only on a spare port so
+                            the live child was not disturbed: the target plus
+                            <code>--spec-draft-model</code> pointing at the DFlash2 GGUF reaches
+                            <code>model loaded</code> and <code>listening on</code>, and the
+                            tensor-count refusal is gone.
+                            <br />
+                            <strong>What has not changed is the reason not to switch this alias
+                            to it.</strong> A drafter beside an
+                            <code>mmproj</code> kills every request carrying an image on this
+                            build — measured on b10684, and nothing in the range to b10809
+                            touches it. So <code>draft-dflash</code> belongs on a text-only
+                            alias, it needs its own drafter file named through
+                            <code>--spec-draft-model</code> in Extra flags below, and its speed
+                            against <code>draft-mtp</code> is <strong>unmeasured</strong>: it
+                            has been loaded here, never benchmarked. Everything
                             else here is accepted by the parser and
                             <strong>unverified on this build</strong>: the parser's list is not
                             evidence that the path works, which is the same trap the KV menu
