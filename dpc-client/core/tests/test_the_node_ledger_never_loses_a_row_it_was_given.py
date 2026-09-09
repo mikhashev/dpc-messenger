@@ -142,3 +142,25 @@ def test_the_default_directory_follows_the_nodes_home(monkeypatch, tmp_path):
     monkeypatch.setenv("DPC_HOME", str(tmp_path / "elsewhere"))
 
     assert _LEDGER_DIR_UNPATCHED() == tmp_path / "elsewhere" / "ledger"
+
+
+def test_a_partition_is_byte_identical_on_every_platform(tmp_path):
+    """Measured on Windows before this test existed: os.open without O_BINARY
+    hands the newline to the CRT, which writes CRLF, so a partition written on
+    one node was not the same bytes as one written on another. The ledger is a
+    record that travels; its bytes may not depend on the OS that wrote them."""
+    from datetime import datetime, timezone
+    from dpc_client_core.node_ledger import NodeLedger, usage_row
+
+    ledger = NodeLedger(tmp_path / "ledger")
+    row = usage_row(
+        request_id="r1", caller="a", caller_kind="agent", alias="x", model="m",
+        route="local", prompt_tokens=1, completion_tokens=1, thinking_tokens=None,
+        counts_source="ours", started_at=datetime.now(timezone.utc), duration_s=0.1,
+        billing="subscription", cost_usd=0.0,
+    )
+    path = ledger.append(row)
+    ledger.append(row)
+    raw = path.read_bytes()
+    assert b"\r" not in raw
+    assert raw.count(b"\n") == 2 and raw.endswith(b"\n")

@@ -199,7 +199,12 @@ class NodeLedger:
             with _partition_lock(path):
                 if _ends_mid_line(path):
                     data = b"\n" + data
-                fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o644)
+                # O_BINARY where it exists: without it the Windows CRT turns the
+                # newline into CRLF on the way out, and a partition written on one
+                # node would not be byte-identical to one written on another.
+                # Measured 2026-09-10 on this box; events.jsonl carries the same CRLF.
+                flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND | getattr(os, "O_BINARY", 0)
+                fd = os.open(str(path), flags, 0o644)
                 try:
                     os.write(fd, data)
                 finally:
