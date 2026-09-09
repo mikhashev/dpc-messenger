@@ -2,10 +2,11 @@
 
 import os
 import asyncio
+import base64
 import logging
 from typing import Dict, Any, List
 
-from .base import AIProvider
+from .base import AIProvider, image_base64
 
 logger = logging.getLogger(__name__)
 
@@ -102,12 +103,17 @@ class GeminiProvider(AIProvider):
         images: List[Dict[str, Any]],
         **kwargs,
     ) -> str:
+        # `Part.from_bytes` is typed `data: bytes` and the SDK offers no
+        # from-base64 constructor, so the guard's base64 is decoded here. Not
+        # left undecoded: `Blob` does accept base64 text, through pydantic's
+        # val_json_bytes rather than the signature, and refuses a bad one in
+        # pydantic's words instead of ours.
         parts = []
         for img in images:
             parts.append(
                 self._types.Part.from_bytes(
-                    data=img["data"],
-                    mime_type=img.get("media_type", "image/jpeg"),
+                    data=base64.b64decode(image_base64(img, self.alias)),
+                    mime_type=img.get("mime_type", "image/jpeg"),
                 )
             )
         parts.append(prompt)

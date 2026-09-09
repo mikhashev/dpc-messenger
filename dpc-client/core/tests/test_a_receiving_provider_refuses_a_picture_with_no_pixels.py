@@ -8,11 +8,17 @@ spelled the read `self._read_image_as_base64(img.get("path"))` and then dropped
 the image and answered text-only when the read failed — a question about a
 picture answered as though no picture had been asked about.
 
+A seventh, `gemini_provider.py`, is under the same promise for a failure of its
+own: it read `data` and `media_type`, keys nothing in this project writes, so no
+image ever reached it — a provider answering `supports_vision()` yes and raising
+`KeyError` on every picture routed to it.
+
 The promise in the title is what these tests check, provider by provider: every
 class in `BUILDERS` is driven through `generate_with_vision` with an image
 carrying a path to a real local file and no base64, and has to refuse. A
 provider absent from `BUILDERS` is outside the promise; the note at the foot of
-this file says which those are and why.
+this file says which those are and why. Two tests below reach past that promise
+to google alone, because it is the one API handed the image dict's own keys.
 
 That path is the *sender's*. DPTP §3.4 makes `base64` required and documents
 `path` as the original filename; nothing promises the receiver it can open it.
@@ -40,6 +46,7 @@ import pytest
 
 from dpc_client_core.providers.anthropic_provider import AnthropicProvider
 from dpc_client_core.providers.deepseek_provider import DeepSeekProvider
+from dpc_client_core.providers.gemini_provider import GeminiProvider
 from dpc_client_core.providers.llamacpp_server_provider import LlamaServerProvider
 from dpc_client_core.providers.ollama_provider import OllamaProvider
 from dpc_client_core.providers.openai_provider import OpenAICompatibleProvider
@@ -94,6 +101,14 @@ class _Sent:
             self.calls.append(kwargs)
             return dict(message=_Msg())
         return chat
+
+    def as_gemini(self):
+        # Synchronous on purpose: the google SDK call is blocking, and the
+        # provider runs it through `loop.run_in_executor`.
+        def generate_content(**kwargs):
+            self.calls.append(kwargs)
+            return SimpleNamespace(text="a cat")
+        return generate_content
 
 
 class _FakeOllamaClient:
@@ -169,6 +184,24 @@ def _llamacpp(sent, monkeypatch, tmp_path):
     return p
 
 
+def _gemini(sent, monkeypatch, tmp_path):
+    """Google AI Studio, with a key from the config and no network.
+
+    `genai.Client` opens nothing at construction, and the SDK's own `types` are
+    left in place: `Part.from_bytes` is typed `data: bytes`, so it is where a
+    wrong read shows, and stubbing it away would hide exactly what is under
+    test. Only the transport is replaced, as with every builder above.
+    """
+    p = GeminiProvider("gemini_vision", {
+        "model": "gemini-2.0-flash",
+        "api_key": "test-key",
+    })
+    p.client = SimpleNamespace(
+        models=SimpleNamespace(generate_content=sent.as_gemini())
+    )
+    return p
+
+
 BUILDERS = {
     "anthropic_vision": _anthropic,
     "openai_vision": _openai,
@@ -176,40 +209,65 @@ BUILDERS = {
     "zai_vision": _zai,
     "ollama_vision": _ollama,
     "llamacpp_vision": _llamacpp,
+    "gemini_vision": _gemini,
 }
 
-# The one shape each API takes the pixels in: a bare base64 field, or exactly
-# one data URL. Asserting the exact payload rather than «the base64 is in there
+# The pixels of this test, in the two forms an API can take them in.
+PIXELS_B64 = "aGVsbG8="
+PIXELS_RAW = b"hello"
+
+# The one shape each API takes the pixels in: a bare base64 field, exactly one
+# data URL, or — google alone — the decoded bytes, which is why `PIXELS_RAW`
+# exists. Asserting the exact payload rather than «the base64 is in there
 # somewhere» is what makes the `data:` strip in `image_base64` load-bearing for
-# the providers that do not re-wrap what they are handed.
+# the providers that do not re-wrap what they are handed, and what shows a
+# decode that ran twice or not at all.
 PIXELS_ON_THE_WIRE = {
-    "anthropic_vision": "aGVsbG8=",
-    "ollama_vision": "aGVsbG8=",
-    "openai_vision": "data:image/png;base64,aGVsbG8=",
-    "deepseek_vision": "data:image/png;base64,aGVsbG8=",
-    "zai_vision": "data:image/png;base64,aGVsbG8=",
-    "llamacpp_vision": "data:image/png;base64,aGVsbG8=",
+    "anthropic_vision": PIXELS_B64,
+    "ollama_vision": PIXELS_B64,
+    "openai_vision": f"data:image/png;base64,{PIXELS_B64}",
+    "deepseek_vision": f"data:image/png;base64,{PIXELS_B64}",
+    "zai_vision": f"data:image/png;base64,{PIXELS_B64}",
+    "llamacpp_vision": f"data:image/png;base64,{PIXELS_B64}",
+    "gemini_vision": PIXELS_RAW,
 }
 
 
-def _strings_carrying(node, needle):
-    """Every string anywhere in the recorded call that contains `needle`.
+def _carrying_the_pixels(node, _seen=None):
+    """Every value anywhere in the recorded call that carries these pixels.
 
     A walk rather than `repr()`: repr flattens the body into one string in which
     a doubled prefix and a correct one are both merely substrings, and the
     question is what each individual field holds.
+
+    Bytes count as well as text, and the walk descends through objects as well
+    as containers, because one API takes neither: the google SDK wants the
+    decoded bytes and carries them inside a `types.Part`, so whether the decode
+    happened exactly once is visible only in there.
     """
+    _seen = set() if _seen is None else _seen
+    if id(node) in _seen:
+        return []
     found = []
     if isinstance(node, str):
-        if needle in node:
+        if PIXELS_B64 in node:
             found.append(node)
+    elif isinstance(node, (bytes, bytearray)):
+        if PIXELS_RAW in node:
+            found.append(bytes(node))
     elif isinstance(node, dict):
+        _seen.add(id(node))
         for key, value in node.items():
-            found += _strings_carrying(key, needle)
-            found += _strings_carrying(value, needle)
+            found += _carrying_the_pixels(key, _seen)
+            found += _carrying_the_pixels(value, _seen)
     elif isinstance(node, (list, tuple, set)):
+        _seen.add(id(node))
         for value in node:
-            found += _strings_carrying(value, needle)
+            found += _carrying_the_pixels(value, _seen)
+    elif hasattr(node, "__dict__"):
+        _seen.add(id(node))
+        for value in vars(node).values():
+            found += _carrying_the_pixels(value, _seen)
     return found
 
 
@@ -286,22 +344,77 @@ def test_pixels_still_reach_the_model(alias, monkeypatch, tmp_path):
 
     out = asyncio.run(provider.generate_with_vision(
         "what is in this?",
-        [{"base64": "data:image/png;base64,aGVsbG8=", "mime_type": "image/png"}],
+        [{"base64": f"data:image/png;base64,{PIXELS_B64}", "mime_type": "image/png"}],
     ))
 
     assert out == "a cat"
     assert len(sent.calls) == 1
-    carriers = _strings_carrying(sent.calls[0], "aGVsbG8=")
+    carriers = _carrying_the_pixels(sent.calls[0])
     assert carriers == [PIXELS_ON_THE_WIRE[alias]], (
         f"{alias} put the pixels on the wire as {carriers!r}, expected exactly "
         f"[{PIXELS_ON_THE_WIRE[alias]!r}]"
     )
 
 
-# Vision providers outside `BUILDERS`, and why the promise above does not reach
-# them: `gemini_provider.py` raises NotImplementedError, so there is no body to
-# build; `remote_peer_provider.py` hands the image to a peer rather than to a
-# model, pinned instead by
-# `test_a_provider_that_claims_no_vision_while_it_forwards_a_filename.py`; and
-# `dpc_agent_provider.py` answers `supports_vision()` no, so routing sends it
-# none.
+def test_the_type_the_sender_declared_reaches_google(monkeypatch, tmp_path):
+    """Google is the one API handed the mime key as it stands in the image dict,
+    so the key read has to be the key this project writes.
+
+    It read `media_type`, which nothing here writes: DPTP §3.4 puts `mime_type`
+    on the wire, and so does every local producer — `service.py`,
+    `dpc_agent/tools/vision.py`, `dpc_agent/tools/document.py`,
+    `dpc_agent/llm_adapter.py`. A webp was therefore announced to google as the
+    default guess. What that default should be when the key really is absent is
+    the separate open entry A-RECEIVER-ANNOUNCES-A-PICTURE-OF-UNKNOWN-TYPE-AS-A-PNG,
+    and is deliberately not asserted here.
+    """
+    sent = _Sent()
+    provider = _gemini(sent, monkeypatch, tmp_path)
+
+    asyncio.run(provider.generate_with_vision(
+        "what is in this?",
+        [{"base64": PIXELS_B64, "mime_type": "image/webp"}],
+    ))
+
+    part = sent.calls[0]["contents"][0]
+    assert part.inline_data.mime_type == "image/webp"
+
+
+def test_google_is_handed_the_bytes_its_signature_asks_for(monkeypatch, tmp_path):
+    """`Part.from_bytes` is typed `data: bytes`, and the guard returns base64
+    text, so the decode has to happen in the provider.
+
+    The recorded payload cannot show this: `Blob` carries pydantic's
+    `val_json_bytes="base64"`, so text handed in comes out as the same bytes and
+    the assertions above stay green either way. This reads the argument instead
+    of the result. It matters because the coercion is model config rather than
+    the signature, and it answers a malformed value in pydantic's words rather
+    than with a refusal naming this provider.
+    """
+    sent = _Sent()
+    provider = _gemini(sent, monkeypatch, tmp_path)
+    handed = []
+    from_bytes = provider._types.Part.from_bytes
+
+    def spy(*, data, mime_type):
+        handed.append(data)
+        return from_bytes(data=data, mime_type=mime_type)
+
+    monkeypatch.setattr(provider._types.Part, "from_bytes", spy)
+
+    asyncio.run(provider.generate_with_vision(
+        "what is in this?",
+        [{"base64": PIXELS_B64, "mime_type": "image/png"}],
+    ))
+
+    assert handed == [PIXELS_RAW]
+
+
+# The two vision entry points outside `BUILDERS`, each checkable in the file
+# named. `remote_peer_provider.py`: `generate_with_vision` forwards the images
+# to the peer and opens nothing here, so there is no local read to refuse — its
+# own risk, a vision claim the peer never made, is pinned by
+# `test_a_remote_peer_does_not_claim_vision_it_cannot_do.py`.
+# `dpc_agent_provider.py`: `supports_vision()` returns False, so routing hands
+# it no image, pinned by
+# `test_the_embedded_agent_claims_no_vision_while_it_forwards_a_filename.py`.
