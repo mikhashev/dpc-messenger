@@ -249,6 +249,79 @@ Qwen3.8-27B as a GGUF chosen per node, not a format.
   Measurements in this document taken on `b10472` stay as they are: they are dated observations, not
   claims about the current pin.)*
 
+  *(**Amendment, 2026-09-09 — the pin moves to `b10809`, and the rule above is what moved it.**
+  Upstream's newest non-prerelease is **`v0.4.0`** (published 2026-09-04); its sole asset
+  `nightly-tag.txt` holds exactly `b10809`. So the tag was read rather than picked, and the three
+  asset rows in `llama_server_fetcher.py` were re-digested from the release API (the `cudart` asset
+  is byte-identical and unchanged). The newest nightly on the day was **`b10878`**, 69 commits
+  further on, and it was deliberately **not** taken: leaving the versioned tag is a decision about
+  which channel we sit on — the one the amendment above settled — not a bump. The range
+  `b10566...b10809` is **243 commits**, walked through the GitHub compare API paged to exhaustion
+  (`Observed`; nothing sampled).
+
+  Three things arrive with the bump, and each is narrower than its changelog line.
+  **(i) `1729ed53` turns a prefill `b10566` accepted into an error.** llama-server now raises
+  `invalid_argument` when the message array *ends* with an assistant message carrying a non-empty
+  `tool_calls`, where `b10566` silently stripped them; `--prefill-assistant` is on by default. Our
+  loop normally ends a request with a `role: "tool"` message, so the trigger is narrow —
+  resume-after-a-tool-call, a replay, or a history truncated at the wrong boundary — but it is not
+  impossible, and it fails the request rather than degrading it (`Inferred` from the loop's shape,
+  not measured against this build).
+  **(ii) `925e1179` invalidates saved slot state**: `LLAMA_SESSION_VERSION` 9 → 10 and
+  `LLAMA_STATE_SEQ_VERSION` 2 → 3. We pass `--slot-save-path`, so slot state written by `b10566` is
+  rejected by this build rather than quietly misread (`Observed` in the constants).
+  **(iii) `e750b887` makes `preserve_reasoning` default to true — and it is a no-op for us**, which
+  was checked rather than assumed: our loop never sends `reasoning_content` back (the llamacpp path
+  passes `reasoning_echo=False`, and the agent adapter keeps `thinking` as a top-level key the
+  converter never reads), and on this model's template `undefined` and `true` take the same branch
+  (`Observed`).
+
+  **One sentence of the amendment above no longer describes the pin.** PR 27342 merged upstream on
+  **2026-08-27**, and `LLM_TENSOR_DFLASH_*` are declared in `src/llama-arch.h` at `b10809` (1
+  mention of dflash at `b10566`, 13 at `b10809`, `Observed`). `expected 81, got 58` is therefore a
+  measurement of `b10472`/`b10566`, not a property of this build; `ProvidersEditor.svelte` now says
+  so, and marks `draft-dflash` **untried** here rather than broken, because nobody has started the
+  drafter since the pin moved (`Not verified`). Two upstream citations in our own code were re-read
+  at `b10809` and their line numbers corrected — `server-context.cpp:284 → :328`,
+  `llama-context.cpp:3596-3605 → :3698-3707`; the cited code is byte-identical, only the file moved
+  under it.
+
+  **The half of the re-shoot that needs no card was done; the half that needs one was not.** The
+  `win-cuda-13.3-x64` assets were fetched and their sha256 verified against the pinned table on this
+  box (2026-09-09 23:33–23:35, `Observed`), and `llama-server --version` answers
+  `0.4.0-dev (build 10809, commit 5266f24da)` against `b10566`'s `0.2.0-dev (build 10566, commit
+  bb4caa754)`, same Clang 20.1.8. Read out of the shipped `ggml-cuda.dll` rather than from a banner:
+  **`ARCHS = 750,800,860,890,900,1200,1210` — the same literal in all four pins on this disk**
+  (b10472, b10566, b10684, b10809), so the declared arch list did not move; `BLACKWELL_NATIVE_FP4`
+  and `USE_GRAPHS` are present as keys, and their `= 1` values are built by code rather than sitting
+  in a static table, so the `= 1` half stays `Not verified` until a banner is read. The flag surface
+  grew and lost nothing: 336 → 345 flags, **0 removed**, 9 added (`--kv-unified-per-slot`,
+  `--n-cpu-ffn`, `--spec-synth-len`, `--spec-synth-rates`, three `--video-*`, `-lzm`), and all 25
+  flags the supervisor emits were passed to the new binary and accepted, the harness first falsified
+  on an invented flag (`Observed`).
+
+  **And the reading corrects G2's instrument rather than its verdict.** `GGML_CUDA_FORCE_MMQ` and
+  `GGML_CUDA_FORCE_CUBLAS` are **CMake options**, not environment variables:
+  `ggml/CMakeLists.txt:201-202` declares both `OFF` by default, and `ggml-cuda.cu:5626-5631` consumes
+  them as `#ifdef`, pushing the feature keys `FORCE_MMQ` / `FORCE_CUBLAS`. Neither key is present in
+  the shipped DLL at `b10566` or at `b10809`, and neither name is read through `getenv` anywhere in
+  the CUDA backend. The one occurrence of the string is inside a diagnostic advising a `-D` compile
+  flag. So `GGML_CUDA_FORCE_MMQ=1` in the environment forced nothing, and the G2 pair — 886.2/879.5
+  at 77 876 tokens, 707.9/707.5 at 139 490 — was **two runs of one configuration**; what it measured
+  is run-to-run spread, which is a useful number and not the one it was labelled with. The 2026-08-19
+  entry had already caught this for `FORCE_CUBLAS` and drew the boundary one variable too narrow.
+  What survives untouched: the server did not crash, the banner was byte-identical, and no
+  cuBLAS-fallback signature appeared — but «forcing MMQ moves nothing» is now vacuous rather than
+  evidential, and G2's question is **open again** (`Observed` in upstream's own source; the
+  falsification is filed on the board).
+
+  **What still needs the card.** No prefill at our own depth, no startup banner, and therefore no
+  runtime confirmation of `BLACKWELL_NATIVE_FP4 = 1` on this build; the live child is still the
+  `b10566` binary (`Observed`, the running process's own path). Q4 below says why that is not a
+  formality: the G2 check is a property of a build and does not transfer between them. **No speed
+  number from `b10809` exists**, and every figure in this document stays what it was — a dated
+  observation on the build it was taken on.)*
+
   *(Post-acceptance, 2026-08-19: the pin was fetched and verified, gates G1/G2 closed, steps 1–4
   of the implementation plan shipped, and the provider answered its first live calls. The
   chronicle of that day — every measurement, error and fix — lives in

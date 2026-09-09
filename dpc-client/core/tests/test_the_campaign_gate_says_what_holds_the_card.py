@@ -160,7 +160,7 @@ def test_only_compute_processes_are_named(monkeypatch):
     """The card lists every windowed app; naming explorer.exe helps nobody."""
     monkeypatch.setattr(subprocess, "run", lambda *a, **k: types.SimpleNamespace(
         stdout="14248, C:\\Windows\\explorer.exe\n"
-               "32848, C:\\Users\\mikha\\.dpc\\bin\\llama.cpp\\b10566\\llama-server.exe\n"
+               "32848, C:\\Users\\mikha\\.dpc\\bin\\llama.cpp\\b10809\\llama-server.exe\n"
                "45312, C:\\Python312\\python.exe\n"))
 
     named = campaign.gpu_holder_candidates()

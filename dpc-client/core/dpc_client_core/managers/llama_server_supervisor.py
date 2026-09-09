@@ -165,7 +165,7 @@ def _flash_attn_effective(value: Any, type_v: Any) -> str:
 
     `auto` is the binary's default, and on a quantised V cache the pin
     resolves it to on and refuses to start when it is off
-    (`src/llama-context.cpp:3596-3605`, b10566). So the one configuration
+    (`src/llama-context.cpp:3698-3707`, b10809). So the one configuration
     production runs — no flag, `-ctv q4_0` — is the one a reader of the start
     line could not resolve without opening llama.cpp; the child's own log
     never names flash_attn at any verbosity.

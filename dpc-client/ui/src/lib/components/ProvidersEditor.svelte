@@ -1517,13 +1517,17 @@
                             flags below — and a drafter beside an mmproj kills every request
                             carrying an image on this build.
                             <br />
-                            <strong><code>draft-dflash</code> cannot start on the pinned
-                            binary.</strong> The DFlash2 drafter declares 81 tensors and the pin
-                            builds 58 of them — measured on b10472 and unchanged on b10566, because PR&nbsp;27342 is still unmerged — the 20 convolution and 3 selector tensors are
-                            what PR&nbsp;27342 adds — so the child dies with
-                            <code>expected 81, got 58</code> before serving anything. It loads
-                            only under a <code>binary_path</code> pointing at a build carrying
-                            that PR. Everything else here is accepted by the parser and
+                            <strong><code>draft-dflash</code> is untried on the pinned
+                            binary.</strong> The DFlash2 drafter declares 81 tensors, and on
+                            b10472 and b10566 the build made 58 of them, so the child died with
+                            <code>expected 81, got 58</code> before serving anything — the 20
+                            convolution and 3 selector tensors were what PR&nbsp;27342 adds.
+                            That PR merged upstream on 2026-08-27 and its tensors are declared
+                            in the pin from b10809 (<code>LLM_TENSOR_DFLASH_*</code> in
+                            <code>src/llama-arch.h</code>), so the refusal above no longer
+                            describes this build — but nobody has started the drafter here since
+                            the pin moved, so it is unverified rather than working. Everything
+                            else here is accepted by the parser and
                             <strong>unverified on this build</strong>: the parser's list is not
                             evidence that the path works, which is the same trap the KV menu
                             above documents.

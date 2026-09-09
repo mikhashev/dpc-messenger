@@ -612,7 +612,7 @@ class LlamaServerProvider(DeepSeekProvider):
                 # What the engine re-evaluated against what we sent. The
                 # response states the reused count outright; from the log it can
                 # only be derived, because the child logs a prompt-cache load
-                # solely when it FAILS (server-context.cpp:284, b10566).
+                # solely when it FAILS (server-context.cpp:328, b10809).
                 prefilled = timings.get("engine_prompt_tokens")
                 if prefilled is not None and usage["prompt_tokens"] > 0:
                     usage["prefilled_tokens"] = prefilled

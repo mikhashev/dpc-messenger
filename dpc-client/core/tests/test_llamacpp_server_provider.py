@@ -1168,7 +1168,7 @@ class TestTheStreamCarriesAnEffort:
 class TestTheUsageLineSaysHowMuchOfThePromptWasReused:
     """The prompt cache had no success signal at all until 2026-08-30.
 
-    llama.cpp warns on a failed load (`server-context.cpp:284`, b10566) and
+    llama.cpp warns on a failed load (`server-context.cpp:328`, b10809) and
     saves at TRACE, so the production log read «two loads, ever, both
     refusals» over 74 starts — a meter that can only report bad news. The
     engine's own `prompt eval time = ... / N tokens` says what it actually
