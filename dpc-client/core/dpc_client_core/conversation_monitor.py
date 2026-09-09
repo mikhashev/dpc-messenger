@@ -107,13 +107,31 @@ def is_local_file_note(record: Dict[str, Any], local_node_id: Optional[str]) -> 
     advertised either, or the peer asks for a hash nobody can deliver and the
     difference never closes.
 
-    With no `local_node_id` nothing is a note: the two halves of the shape are
-    "signed by us" and "not authored by us", so without knowing who we are, a
-    peer's genuine record is indistinguishable from our note about it, and
-    filtering on a guess would drop real history from both sides.
+    With no `local_node_id` nothing is a note: two of the three parts of the
+    shape are "signed by us" and "not authored by us", so without knowing who
+    we are, a peer's genuine record is indistinguishable from our note about
+    it, and filtering on a guess would drop real history from both sides.
+
+    The third part is the file. "Signed by us, attributed to somebody else" is
+    also what this node stores for a message it did not write but did have to
+    sign: one bridged in from Telegram, which `telegram_coordinator` attributes
+    to `telegram-bot-<chat_id>`, and a peer's group message that arrived
+    unsigned or under a preimage this build cannot recompute, which
+    `group_handler._authenticate_author` hands on with no signature fields.
+    Neither says anything about a file and neither carries an attachment, so
+    the attachment is what tells them from a note — `_drop_local_file_note`
+    already matches on one, and a note with no attachment would be a note about
+    nothing.
+
+    It does not separate a note from a *bridged* message that carries a file;
+    by shape those are the same record, and only a mark made where the note is
+    written can part them. `note_local_file_record` is that mark and is not
+    enough on its own: it lives in memory, so it is empty after a restart, and
+    `file_transfer_manager` fills it for group transfers only.
     """
     return bool(local_node_id) and record.get("signer_node_id") == local_node_id \
-        and record.get("sender_node_id") not in (None, local_node_id)
+        and record.get("sender_node_id") not in (None, local_node_id) \
+        and bool(record.get("attachments"))
 
 
 def digest_for(messages: List[Dict[str, Any]],
