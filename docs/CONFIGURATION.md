@@ -227,7 +227,7 @@ As of schema version **1.1**, device context includes a `special_instructions` b
 
 <!-- BEGIN GENERATED CONFIG REFERENCE -->
 
-Every section and key `_create_default_config` writes into a fresh `~/.dpc/config.ini`: **25 sections, 150 keys**. Generated from `settings.py` by `tools/config_reference.py` — edit the code, then re-run it; do not hand-edit between the markers.
+Every section and key `_create_default_config` writes into a fresh `~/.dpc/config.ini`: **25 sections, 152 keys**. Generated from `settings.py` by `tools/config_reference.py` — edit the code, then re-run it; do not hand-edit between the markers.
 
 An empty default means the key is written blank and the feature stays off until you fill it in. Every key also accepts an environment variable named `DPC_<SECTION>_<KEY>` in upper case.
 
@@ -263,6 +263,8 @@ An empty default means the key is written blank and the feature stays off until 
 | `relay_timeout` | `20` |  |
 | `gossip_timeout` | `5` | How long to wait before falling back to gossip |
 | `remote_inference_timeout` | `1200` |  |
+| `hello_timeout` | `10` | Seconds the listener waits for HELLO after its challenge |
+| `max_pending_hellos_per_ip` | `8` | Inbound connections one address may hold before HELLO_ACK |
 
 #### `[conversations]`
 
@@ -1089,6 +1091,25 @@ hole_punch_timeout = 15    # UDP hole punching timeout
 relay_timeout = 20         # Volunteer relay timeout
 gossip_timeout = 5         # Gossip fallback timeout
 ```
+
+#### `hello_timeout`
+- **Description:** Seconds the listener waits for `HELLO` after issuing its
+  `HELLO_CHALLENGE`. A peer that completes TLS and then says nothing is hung up on
+  when this expires, and the expiry counts as a failed HELLO for the per-address
+  rate limiter (10 failures in 300 s close that address silently)
+- **Default:** `10`
+- **Note:** ADR-041 D8. Raise it only for peers on very high-latency links; the
+  dial side budgets `ipv4_timeout` / `ipv6_timeout` for the whole exchange, so
+  this has no reason to be longer than those
+
+#### `max_pending_hellos_per_ip`
+- **Description:** Inbound connections one address may hold between accept and
+  `HELLO_ACK`. The next one is closed silently, as a rate-limited address is, and
+  is not counted as a failed HELLO
+- **Default:** `8`
+- **Note:** ADR-041 D8. A NAT puts many honest peers behind one address, which is
+  why this counts connections *still waiting for HELLO* rather than connections:
+  an honest peer holds a slot for one round trip and releases it
 
 **Example Configuration** — this is what a fresh install writes, so copying it changes
 nothing. Two strategies ship off; turn them on deliberately, not by pasting a block.

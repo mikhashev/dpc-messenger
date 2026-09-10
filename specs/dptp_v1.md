@@ -62,7 +62,7 @@ All DPTP messages follow a fixed binary framing format:
 
 - **Encoding**: UTF-8 JSON
 - **Structure**: Object with `command` or `status` field
-- **Maximum Size**: Unlimited (implementation may impose limits)
+- **Maximum Size**: 67 108 864 bytes (64 MiB) per payload — `MAX_FRAME_BYTES` in `dpc_protocol/protocol.py` (v1.7). A header declaring more is refused before any of the payload is read: the receiver logs the declared length and the cap, and closes the connection. A sender refuses to frame a larger payload at all, raising at the origin rather than failing silently at the far end. The cap must clear a whole conversation history in one `CHAT_HISTORY_RESPONSE` (3 885 616 bytes at the largest measured) and a base64-encoded image at `vision.max_image_size_mb`; the measurements behind the number are kept beside the constant, and the two move together
 
 ### Example Wire Format
 
@@ -2058,7 +2058,7 @@ Every arriving record leaves verification carrying exactly one verdict:
 ### Attack Mitigation
 
 - **Message Flooding**: Implementations should rate-limit incoming messages
-- **Resource Exhaustion**: Limit maximum payload size, enforce timeouts
+- **Resource Exhaustion**: Limit maximum payload size, enforce timeouts — §2 states the cap; the reference listener also bounds its wait for HELLO after the challenge (`[connection] hello_timeout`) and counts connections still before `HELLO_ACK` per address (`max_pending_hellos_per_ip`), since a peer that never finishes a HELLO never fails one
 - **MITM Attacks**: Certificate pinning on first connection (TOFU - Trust On First Use)
 - **Gossip Attacks**:
   - Message replay prevention via vector clocks and message IDs
@@ -2134,6 +2134,10 @@ DPTP is designed to be extensible. New commands can be added by:
   the serving node, priced by it at the time of the call (ADR-041 D3). In v1 of
   the field set on purpose: a cost field added later is the one kind of
   addition an older client cannot read
+- **§2 Payload Format** — the frame cap is stated: 64 MiB per payload, refused
+  before it is read rather than allocated, and refused at the sender too
+  (ADR-041 D8). Was «Unlimited (implementation may impose limits)»; the
+  implementation now does, and says so
 
 ### v1.6 (August 2026)
 - **§4.1 Message Signing** — the canonical preimage (`dptp-msg-v2`; `v1` still read), added with

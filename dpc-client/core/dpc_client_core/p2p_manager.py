@@ -119,6 +119,13 @@ class P2PManager:
         self._rate_limit_max_failures = 10
         self._rate_limit_window_seconds = 300  # 5 minutes
 
+        # What the failed-HELLO count cannot see (ADR-041 D8): a peer that
+        # completes TLS and never sends HELLO fails nothing, so its read is
+        # bounded and its connections are counted while they wait.
+        self._pending_hello_counts: Dict[str, int] = {}  # ip -> connections before HELLO_ACK
+        self._hello_timeout = settings.get_hello_timeout() if settings else 10.0
+        self._max_pending_hellos_per_ip = settings.get_max_pending_hellos_per_ip() if settings else 8
+
         # Peer cache for faster reconnection (stores last known IP/port)
         cache_file = Path.home() / ".dpc" / "peer_cache.json"
         self.peer_cache = PeerCache(cache_file)
@@ -510,18 +517,34 @@ class P2PManager:
             self._failed_hello_counts[ip] = []
         self._failed_hello_counts[ip].append(time.monotonic())
 
+    def _release_pending_hello(self, ip: str):
+        """One connection from `ip` is past HELLO_ACK, or gone."""
+        left = self._pending_hello_counts.get(ip, 0) - 1
+        if left > 0:
+            self._pending_hello_counts[ip] = left
+        else:
+            self._pending_hello_counts.pop(ip, None)
+
     async def _handle_direct_connection(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
         """Handles an incoming raw TLS connection (Server-side)."""
         peer_node_id = None
         peer_addr = writer.get_extra_info('peername')
         peer_addr_str = f"{peer_addr[0]}:{peer_addr[1]}" if peer_addr else "unknown"
         peer_ip = peer_addr[0] if peer_addr else "unknown"
-        try:
-            if self._is_rate_limited(peer_ip):
-                logger.debug("Rate-limited connection from %s, closing silently", peer_ip)
-                writer.close()
-                return
+        if self._is_rate_limited(peer_ip):
+            logger.debug("Rate-limited connection from %s, closing silently", peer_ip)
+            writer.close()
+            return
+        # Silent like the rate limit: whoever holds eight connections open
+        # before HELLO_ACK learns nothing from a ninth.
+        if self._pending_hello_counts.get(peer_ip, 0) >= self._max_pending_hellos_per_ip:
+            logger.debug("%s already holds %d connections before HELLO_ACK, closing silently",
+                         peer_ip, self._max_pending_hellos_per_ip)
+            writer.close()
+            return
 
+        self._pending_hello_counts[peer_ip] = self._pending_hello_counts.get(peer_ip, 0) + 1
+        try:
             logger.info("Received a direct TLS connection attempt from %s", peer_addr_str)
             await asyncio.sleep(0.01)
 
@@ -536,7 +559,14 @@ class P2PManager:
             }
             await write_message(writer, challenge)
 
-            hello_msg = await read_message(reader)
+            # Bounded, and the expiry lands in the except below as one more
+            # failed HELLO; the dial side's _handshake_read has the same shape.
+            try:
+                hello_msg = await asyncio.wait_for(read_message(reader), timeout=self._hello_timeout)
+            except asyncio.TimeoutError:
+                raise ConnectionError(
+                    f"No HELLO within {self._hello_timeout}s of the challenge"
+                ) from None
             if not hello_msg or hello_msg.get("command") != "HELLO":
                 raise ConnectionError("Invalid HELLO message received.")
 
@@ -633,6 +663,8 @@ class P2PManager:
                     await writer.wait_closed()
                 except (ConnectionResetError, BrokenPipeError, OSError):
                     pass
+        finally:
+            self._release_pending_hello(peer_ip)
 
     async def test_port_connectivity(self, host: str, port: int, timeout: float = 10.0) -> tuple[bool, str]:
         """

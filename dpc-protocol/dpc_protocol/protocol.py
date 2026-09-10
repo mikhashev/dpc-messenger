@@ -429,10 +429,33 @@ def create_group_text_message(
     return {"command": "GROUP_TEXT", "payload": payload}
 
 
-async def read_message(reader: asyncio.StreamReader) -> dict | None:
+# The most a frame may declare, read or written. Ten ASCII digits allow
+# 9 999 999 999 bytes and readexactly() buffers whatever is declared — the
+# 64 KiB StreamReader limit guards readline()/readuntil() only — so the cap is
+# checked before the allocation. What it must clear, measured 2026-09-10:
+#   CHAT_HISTORY_RESPONSE carries a whole history in one frame; the largest
+#     seen is 3 885 616 bytes, and histories grow
+#   an image in REMOTE_INFERENCE_REQUEST or a group image frame: capped at
+#     vision.max_image_size_mb = 5, about 6.7 MB once base64-encoded
+#   a FILE_CHUNK: 64 KiB raw, about 88 KB framed
+# Stated in specs/dptp_v1.md §2 as well; move the two together.
+MAX_FRAME_BYTES = 64 * 1024 * 1024
+
+
+async def read_message(
+    reader: asyncio.StreamReader, *, max_frame_bytes: int = MAX_FRAME_BYTES
+) -> dict | None:
     try:
         header = await reader.readexactly(10)
         payload_length = int(header.decode())
+
+        # Refused before the allocation: the declared length is the stranger's.
+        if payload_length > max_frame_bytes:
+            logger.warning(
+                "Refusing a frame declaring %d bytes: the cap is %d bytes - closing the connection",
+                payload_length, max_frame_bytes,
+            )
+            return None
 
         payload = await reader.readexactly(payload_length)
 
@@ -459,11 +482,19 @@ async def read_message(reader: asyncio.StreamReader) -> dict | None:
             logger.warning("Protocol error: invalid message format (%s)", e)
         return None
 
-async def write_message(writer: asyncio.StreamWriter, data: dict):
+async def write_message(
+    writer: asyncio.StreamWriter, data: dict, *, max_frame_bytes: int = MAX_FRAME_BYTES
+):
     try:
         payload = json.dumps(data).encode()
         payload_length = len(payload)
-        
+
+        # Loud here, at the origin, rather than a silent close at the far end.
+        if payload_length > max_frame_bytes:
+            raise ValueError(
+                f"Message of {payload_length} bytes exceeds the {max_frame_bytes}-byte frame cap"
+            )
+
         header = f"{payload_length:010d}".encode()
         
         writer.write(header)

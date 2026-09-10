@@ -146,7 +146,11 @@ class Settings:
             'gossip_timeout': '5',  # How long to wait before falling back to gossip
             # Remote inference: the host budgets 900s for the work, so a
             # requester that gives up sooner pays for tokens it never sees
-            'remote_inference_timeout': '1200'
+            'remote_inference_timeout': '1200',
+            # Inbound handshake (ADR-041 D8): a peer that completes TLS and never
+            # sends HELLO fails no HELLO, so the rate limiter alone never sees it
+            'hello_timeout': '10',  # Seconds the listener waits for HELLO after its challenge
+            'max_pending_hellos_per_ip': '8'  # Inbound connections one address may hold before HELLO_ACK
         }
 
         self._config['hole_punch'] = {
@@ -736,6 +740,14 @@ class Settings:
         not a handshake: the host's own ceiling is 900 s (ADR-040 D4-0).
         """
         return float(self.get('connection', 'remote_inference_timeout', '1200'))
+
+    def get_hello_timeout(self) -> float:
+        """How long the listener waits for HELLO after issuing its challenge."""
+        return float(self.get('connection', 'hello_timeout', '10'))
+
+    def get_max_pending_hellos_per_ip(self) -> int:
+        """How many inbound connections one address may hold before HELLO_ACK."""
+        return int(self.get('connection', 'max_pending_hellos_per_ip', '8'))
 
     def get_hole_punch_port(self) -> int:
         """Get UDP port for hole punching."""
