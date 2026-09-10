@@ -164,3 +164,20 @@ def test_a_partition_is_byte_identical_on_every_platform(tmp_path):
     raw = path.read_bytes()
     assert b"\r" not in raw
     assert raw.count(b"\n") == 2 and raw.endswith(b"\n")
+
+
+def test_a_row_nobody_priced_says_null_not_zero(tmp_path, caplog):
+    """`float(None or 0.0)` turned "not counted" into "free". A null stays
+    null through the file, and a pay-per-use row without a price is logged:
+    that is a price that should have been computed."""
+    ledger = NodeLedger(tmp_path / "ledger")
+    with caplog.at_level(logging.WARNING, logger="dpc_client_core.node_ledger"):
+        unpriced = _row(SEPTEMBER, request_id="unpriced", billing="pay_per_use", cost_usd=None)
+        free = _row(SEPTEMBER, request_id="free", billing="subscription", cost_usd=None)
+    ledger.append(unpriced)
+    ledger.append(free)
+
+    assert unpriced["cost_usd"] is None and free["cost_usd"] is None
+    assert [r["cost_usd"] for r in ledger.rows()] == [None, None]
+    warned = [r.message for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warned) == 1 and "unpriced" in warned[0]

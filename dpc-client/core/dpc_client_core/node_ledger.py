@@ -7,7 +7,8 @@ kept by the node, not by the caller. A row says who called (`caller`,
 (`prompt_tokens`, `completion_tokens`, `thinking_tokens`, `duration_s`), whose
 numbers those are (`counts_source`) and what it cost (`billing`, `cost_usd`) —
 priced at `started_at` by the node that made the call and never re-priced,
-which is the invariant `dpc_agent/pricing.py` states for itself.
+which is the invariant `dpc_agent/pricing.py` states for itself. A null
+`cost_usd` is a call nobody priced; a zero is a price.
 
 Two columns beyond D3's list, both optional: `task_id` and `conversation_id`.
 D3's own consistency rule — the sum of a task's rows equals the
@@ -114,8 +115,10 @@ def usage_row(
         "started_at": started_at.astimezone(timezone.utc).isoformat(),
         "duration_s": round(float(duration_s), 3),
         "billing": billing,
-        "cost_usd": float(cost_usd or 0.0),
+        "cost_usd": None if cost_usd is None else float(cost_usd),
     }
+    if billing == "pay_per_use" and cost_usd is None:
+        log.warning("Usage row %s is pay_per_use with no cost: the price was not computed", request_id)
     if task_id:
         row["task_id"] = task_id
     if conversation_id:

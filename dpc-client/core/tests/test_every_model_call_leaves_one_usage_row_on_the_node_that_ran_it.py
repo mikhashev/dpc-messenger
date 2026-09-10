@@ -8,6 +8,7 @@ made it and never re-priced.
 """
 
 import asyncio
+import logging
 import uuid
 from datetime import datetime
 from types import SimpleNamespace
@@ -125,12 +126,15 @@ async def test_counts_source_says_who_counted(tmp_path):
 
 @pytest.mark.asyncio
 async def test_a_call_routed_to_a_peer_is_this_agents_row_marked_peer(tmp_path):
-    """This node's row says the agent here called and a peer ran it; the peer
-    writes its own row under this node's name."""
+    """This node's row says the agent here called and a peer ran it, under the
+    wire's request id and with the host's own price and billing model; the
+    peer writes its own row under this node's name. The billing model on the
+    wire wins over what this node's table would guess from the model name."""
     ledger = NodeLedger(tmp_path / "ledger")
     service = SimpleNamespace(_request_inference_from_peer=AsyncMock(return_value={
-        "response": "from afar", "prompt_tokens": 40, "response_tokens": 12,
-        "tokens_used": 52, "model": "qwen-on-the-peer", "cost_usd": 0.0,
+        "request_id": "req-from-the-wire", "response": "from afar",
+        "prompt_tokens": 40, "response_tokens": 12, "tokens_used": 52,
+        "model": "qwen-on-the-peer", "cost_usd": 0.0041, "billing": "pay_per_use",
     }))
     adapter = _adapter(_PricedProvider(), ledger, compute_host=PEER)
     adapter._llm_manager.providers["dpc_agent"] = SimpleNamespace(
@@ -145,7 +149,36 @@ async def test_a_call_routed_to_a_peer_is_this_agents_row_marked_peer(tmp_path):
     assert row["alias"] == "ds_flash" and row["model"] == "qwen-on-the-peer"
     assert row["counts_source"] == "engine"
     assert row["prompt_tokens"] == 40 and row["completion_tokens"] == 12
-    assert row["cost_usd"] == pytest.approx(usage["cost"])
+    assert row["request_id"] == "req-from-the-wire"
+    assert row["billing"] == "pay_per_use"
+    assert row["cost_usd"] == 0.0041 == usage["cost"]
+
+
+@pytest.mark.asyncio
+async def test_a_peer_answer_without_a_price_leaves_the_row_unpriced_not_free(tmp_path, caplog):
+    """A host that sent no cost and no billing model (pre-v1.7) leaves a row
+    whose cost is null, not zero, and no cost in the usage the loop sums. The
+    billing model falls back to this node's own table for the model that
+    answered, and a paid model with no price is said out loud."""
+    ledger = NodeLedger(tmp_path / "ledger")
+    service = SimpleNamespace(_request_inference_from_peer=AsyncMock(return_value={
+        "response": "from afar", "prompt_tokens": 40, "response_tokens": 12,
+        "tokens_used": 52, "model": "deepseek-v4-flash",
+    }))
+    adapter = _adapter(_PricedProvider(), ledger, compute_host=PEER)
+    adapter._llm_manager.providers["dpc_agent"] = SimpleNamespace(
+        peer_id=None, remote_model=None, timeout=5, _service=service,
+    )
+
+    with caplog.at_level(logging.WARNING, logger="dpc_client_core.node_ledger"):
+        _msg, usage = await adapter.chat(MESSAGES, task_id="task-remote")
+
+    (row,) = list(ledger.rows())
+    assert row["cost_usd"] is None
+    assert "cost" not in usage
+    uuid.UUID(row["request_id"])
+    assert row["billing"] == "pay_per_use"
+    assert [r.message for r in caplog.records if row["request_id"] in r.message and "pay_per_use" in r.message]
 
 
 def test_the_loop_hands_its_task_id_to_every_round(tmp_path, monkeypatch):
@@ -224,6 +257,7 @@ async def test_a_served_peer_call_is_written_under_the_peers_name_with_the_wires
     )
     sent = svc.p2p_manager.send_message_to_peer.call_args[0][1]
     assert sent["payload"]["cost_usd"] == pytest.approx(row["cost_usd"])
+    assert sent["payload"]["billing"] == "pay_per_use"
 
 
 @pytest.mark.asyncio
@@ -242,6 +276,7 @@ async def test_a_served_call_on_a_local_alias_costs_the_host_nothing_and_says_so
     assert row["cost_usd"] == 0.0
     sent = svc.p2p_manager.send_message_to_peer.call_args[0][1]
     assert sent["payload"]["cost_usd"] == 0.0
+    assert sent["payload"]["billing"] == "subscription"
 
 
 @pytest.mark.asyncio
@@ -256,9 +291,14 @@ async def test_the_hosts_price_reaches_the_requester_only_when_the_host_sent_it(
     service._pending_inference_requests.update({"req-priced": priced, "req-unpriced": unpriced})
 
     await handler.handle(PEER, {
-        "request_id": "req-priced", "status": "success", "response": "ok", "cost_usd": 0.0041,
+        "request_id": "req-priced", "status": "success", "response": "ok",
+        "cost_usd": 0.0041, "billing": "pay_per_use",
     })
     await handler.handle(PEER, {"request_id": "req-unpriced", "status": "success", "response": "ok"})
 
     assert priced.result()["cost_usd"] == 0.0041
-    assert "cost_usd" not in unpriced.result()
+    assert priced.result()["billing"] == "pay_per_use"
+    assert "cost_usd" not in unpriced.result() and "billing" not in unpriced.result()
+    # The wire id comes back either way: it is what the two nodes' rows join on.
+    assert priced.result()["request_id"] == "req-priced"
+    assert unpriced.result()["request_id"] == "req-unpriced"

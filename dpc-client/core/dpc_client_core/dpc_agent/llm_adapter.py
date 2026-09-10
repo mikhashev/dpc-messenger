@@ -244,7 +244,8 @@ class DpcLlmAdapter:
             (response_message, usage_dict) tuple in Ouroboros format
         """
         # One usage row per call, after whichever route `_chat` took (ADR-041
-        # D3). A call that raises leaves no row, as it leaves no usage.
+        # D3). A call that raises leaves no row: a named gap, since a paid call
+        # that fails after the vendor answered has spent money recorded nowhere.
         started_at = datetime.now(timezone.utc)
         clock = time.monotonic()
         self._last_call = {}
@@ -280,7 +281,8 @@ class DpcLlmAdapter:
             alias = facts.get("alias") or self._provider_alias
             model = facts["model"] if "model" in facts else self.default_model()
             row = usage_row(
-                request_id=str(uuid.uuid4()),
+                # The wire id on the peer route, so both nodes' rows join on it.
+                request_id=facts.get("request_id") or str(uuid.uuid4()),
                 caller=self._caller,
                 caller_kind=self._caller_kind,
                 alias=alias,
@@ -293,9 +295,10 @@ class DpcLlmAdapter:
                 counts_source=facts.get("counts_source", "ours"),
                 started_at=started_at,
                 duration_s=duration_s,
-                # Priced by the route already; `billing` names the pool that price belongs to.
-                billing=get_billing_model(alias or "", model),
-                cost_usd=usage.get("cost", 0.0),
+                # Priced by the route; on the peer route both are the host's copy
+                # from the wire, or absent: this node did not run the call (D3).
+                billing=facts.get("billing") or get_billing_model(alias or "", model),
+                cost_usd=usage.get("cost"),
                 task_id=task_id,
                 conversation_id=conversation_id,
             )
@@ -965,12 +968,14 @@ class DpcLlmAdapter:
                     response_msg["tool_calls"] = tool_calls
                     log.info(f"Found {len(tool_calls)} tool call(s) from remote peer")
 
-            # For the row: which model answered — the peer says, else what was
-            # asked for — and whether the counts are the peer's report or ours.
+            # For the row: which model answered, whose counts these are, and the
+            # host's own id and billing model for the call (ADR-041 D3).
+            _peer = result if isinstance(result, dict) else {}
             self._note_call(
-                model=(result.get("model") if isinstance(result, dict) else None)
-                or getattr(dpc_agent_provider, "remote_model", None),
+                model=_peer.get("model") or getattr(dpc_agent_provider, "remote_model", None),
                 counts_source="engine" if remote_prompt_tokens and remote_response_tokens else "ours",
+                request_id=_peer.get("request_id"),
+                billing=_peer.get("billing"),
             )
 
             # Use actual token counts from remote if available, otherwise count locally
@@ -979,7 +984,6 @@ class DpcLlmAdapter:
                     "prompt_tokens": remote_prompt_tokens,
                     "completion_tokens": remote_response_tokens,
                     "total_tokens": remote_tokens or (remote_prompt_tokens + remote_response_tokens),
-                    "cost": compute_cost_usd(self._provider_alias or "", remote_prompt_tokens, remote_response_tokens),
                 }
                 # The loop sums this field across a task (OPTIONAL_USAGE_FIELDS);
                 # absent means «no round reported one», so it is set only when
@@ -995,7 +999,6 @@ class DpcLlmAdapter:
                     "prompt_tokens": prompt_tokens,
                     "completion_tokens": completion_tokens,
                     "total_tokens": prompt_tokens + completion_tokens,
-                    "cost": compute_cost_usd(self._provider_alias or "", prompt_tokens, completion_tokens, model=model_name),
                 }
             else:
                 # Final fallback to character estimation
@@ -1005,8 +1008,10 @@ class DpcLlmAdapter:
                     "prompt_tokens": est_prompt_tokens,
                     "completion_tokens": est_completion_tokens,
                     "total_tokens": est_prompt_tokens + est_completion_tokens,
-                    "cost": compute_cost_usd(self._provider_alias or "", est_prompt_tokens, est_completion_tokens),
                 }
+            # The host priced the call, or nobody did; this node does not (D3).
+            if _peer.get("cost_usd") is not None:
+                usage["cost"] = _peer["cost_usd"]
 
             return response_msg, usage
 

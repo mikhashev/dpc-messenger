@@ -247,17 +247,18 @@ class P2PCoordinator:
         model: Optional[str],
         started_at: datetime,
         duration_s: float,
-    ) -> float:
+    ) -> tuple[float, str]:
         """Price a served call once, at the moment it was made, and write its
         usage row under the peer's name (ADR-041 D3).
 
-        Returns the cost, which also travels to the peer as the informational
-        `cost_usd` of the response — attribution, not a price it owes. A row
+        Returns `(cost_usd, billing)`, which also travel to the peer as the
+        informational tail of the response — attribution, not a price it owes. A row
         that cannot be built is logged and does not fail the answer: the
         tokens have already been generated and paid for.
         """
         from .dpc_agent.pricing import compute_cost_usd, get_billing_model
 
+        billing = get_billing_model(serving_alias, model)
         cost_usd = compute_cost_usd(
             serving_alias,
             result.get("prompt_tokens") or 0,
@@ -279,16 +280,16 @@ class P2PCoordinator:
                 counts_source="ours",
                 started_at=started_at,
                 duration_s=duration_s,
-                billing=get_billing_model(serving_alias, model),
+                billing=billing,
                 cost_usd=cost_usd,
             )
         except Exception:
             logger.error(
                 "Usage row for peer %s request %s was not built", peer_id, request_id, exc_info=True
             )
-            return cost_usd
+            return cost_usd, billing
         (self._ledger or default_ledger()).append(row)
-        return cost_usd
+        return cost_usd, billing
 
     async def handle_inference_request(self, peer_id: str, request_id: str, prompt: str, model: str = None, provider: str = None, images: list = None, reasoning_effort: str = None):
         """Handle incoming remote inference request from a peer."""
@@ -351,7 +352,7 @@ class P2PCoordinator:
             logger.info("Inference completed successfully for %s", peer_id)
 
             actual_model = result.get("model", model)
-            cost_usd = self._record_peer_call(
+            cost_usd, billing = self._record_peer_call(
                 peer_id=peer_id, request_id=request_id, serving_alias=serving_alias,
                 result=result, model=actual_model, started_at=started_at,
                 duration_s=duration_s,
@@ -384,6 +385,7 @@ class P2PCoordinator:
                 thinking=result.get("thinking"),
                 thinking_tokens=result.get("thinking_tokens"),
                 cost_usd=cost_usd,
+                billing=billing,
             )
             await self.p2p_manager.send_message_to_peer(peer_id, success_response)
             logger.debug("Sent inference result to %s", peer_id)

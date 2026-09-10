@@ -238,7 +238,8 @@ Returns the result of a remote inference request.
     "model_max_tokens": 128000,
     "thinking": "Let me think about this question...",
     "thinking_tokens": 50,
-    "cost_usd": 0.0041
+    "cost_usd": 0.0041,
+    "billing": "pay_per_use"
   }
 }
 ```
@@ -266,6 +267,7 @@ Returns the result of a remote inference request.
 - `thinking` (string, optional): Thinking/reasoning content from models with extended reasoning (DeepSeek R1, Claude Extended Thinking, OpenAI o1/o3)
 - `thinking_tokens` (integer, optional): Tokens used for thinking/reasoning
 - `cost_usd` (number, optional, v1.7+): What the call cost the serving node, in USD, priced by that node at the moment of the call and never re-derived (ADR-041 D3). Absent when the host did not count it. Informational to the requester: it attributes a cost, it does not bill one.
+- `billing` (string, optional, v1.7+): The billing model the host priced the call under, `pay_per_use` or `subscription`, so the requester's own usage row copies the host's answer instead of guessing one from the model's name. Absent when the host did not say. Never sent on an error, like `cost_usd`.
 
 **Fields (Error):**
 - `request_id` (string, required): Matches request UUID
@@ -2130,10 +2132,11 @@ DPTP is designed to be extensible. New commands can be added by:
 ## 9. Changelog
 
 ### v1.7 (September 2026)
-- **§3.4 REMOTE_INFERENCE_RESPONSE** — optional `cost_usd`: what the call cost
-  the serving node, priced by it at the time of the call (ADR-041 D3). In v1 of
-  the field set on purpose: a cost field added later is the one kind of
-  addition an older client cannot read
+- **§3.4 REMOTE_INFERENCE_RESPONSE** — optional `cost_usd` and `billing`: what
+  the call cost the serving node, priced by it at the time of the call, and the
+  billing model it priced under (ADR-041 D3). In v1 of the field set on
+  purpose: a cost field added later is the one kind of addition an older
+  client cannot read
 - **§2 Payload Format** — the frame cap is stated: 64 MiB per payload, refused
   before it is read rather than allocated, and refused at the sender too
   (ADR-041 D8). Was «Unlimited (implementation may impose limits)»; the

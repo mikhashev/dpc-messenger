@@ -1,8 +1,9 @@
 """A served answer may say what it cost the host, and says nothing when it was not counted.
 
-DPTP v1.7 adds `cost_usd` to REMOTE_INFERENCE_RESPONSE (ADR-041 D3). The field
-is in v1 of the field set on purpose: a cost added later is the one kind of
-addition an older client cannot read. It is optional both ways — absent is
+DPTP v1.7 adds `cost_usd` and, beside it, `billing` to REMOTE_INFERENCE_RESPONSE
+(ADR-041 D3). The fields are in v1 of the field set on purpose: a cost added
+later is the one kind of addition an older client cannot read. Each is optional
+both ways — absent is
 «not counted», never «free» — and it never rides on an error.
 """
 
@@ -33,3 +34,13 @@ def test_an_error_carries_no_cost():
     message = create_remote_inference_response("req-1", error="refused", cost_usd=0.5)
 
     assert "cost_usd" not in message["payload"]
+
+
+def test_the_billing_model_travels_beside_the_price_and_never_on_an_error():
+    priced = create_remote_inference_response("req-1", response="ok", cost_usd=0.0041, billing="pay_per_use")
+    silent = create_remote_inference_response("req-1", response="ok")
+    failed = create_remote_inference_response("req-1", error="refused", cost_usd=0.5, billing="pay_per_use")
+
+    assert priced["payload"]["billing"] == "pay_per_use"
+    assert "billing" not in silent["payload"]
+    assert "billing" not in failed["payload"]
