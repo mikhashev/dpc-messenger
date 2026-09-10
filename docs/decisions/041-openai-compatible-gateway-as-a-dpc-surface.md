@@ -354,6 +354,51 @@ the ledger records that a call happened, whose it was, and what it cost *the
 host*. What it is worth to the guest is a policy above it, and M5 is why the two
 cannot be one field.
 
+*(**Amendment, 2026-09-10 — the owner's tariff is the guest's money column set,
+the wire carries the tariff and not the host's cost, and a row freezes its
+currency.** Mike, #95 («даю добро» on `tariff`, `free_nodes` with `free_groups`)
+and #110, after the consensus the three agents reached in #68–#109. The owner of
+a shared model sets a price for it, so «attribution, not price» becomes two
+column sets rather than one. `cost_usd` stays what the call cost the host — a
+vendor's USD, or 0 by construction for a local model (M5) — and stays on the
+host's row. Beside it: `tariff_in` and `tariff_out`, the owner's rates per 1M
+tokens as **applied values**, never a reference to a configuration that may
+have changed; `tariff_currency`, the host's `compute.currency` (ISO 4217,
+validated), frozen into the row because rows are forever and configuration is
+not; `tariff_at`, the dated tariff entry applied; and the call's amount in that
+currency, whose column name is open (`tariff_amount` proposed — `charge` is
+reserved for the act of settlement, which does not exist yet). Three states,
+distinct on purpose: `null` — no tariff declared, the v1 gift; `0` — declared
+free, which is what a member of `free_nodes` / `free_groups` gets; `>0` — paid.
+The wire (§3.4) carries the tariff fields and no longer the host's `cost_usd`;
+the guest's row copies them and writes `cost_usd = null`, because it spent
+nothing of its own and prices nothing (the `f7490460` rule, kept). `request_id`
+is minted by the caller and travels with the call, so the host's row and the
+guest's row are a double entry that joins on it. The currency is a property of
+the node, not of the protocol: «what I owe X» sums in one unit, sums across
+hosts do not, and parity between two units is the pair's own agreement,
+recorded at reconciliation, outside the protocol. Not built, and said so:
+a Merkle or transparency log; a `settlement_asset` field, which nothing would
+write; any payment rail — settlement is outside the protocol, by hand or by
+whatever the pair chooses. Stage 2, decided in shape and not in time: a prepaid
+balance per guest, derived as credits minus debits from ledger rows rather
+than kept as a counter, with a threshold or a reservation before the call;
+whether it is v1 or v2, and who tops it up, are open questions below. Adopted
+from the outside review Mike brought (#128, checked by Ark in #106–#109), in
+cost order and each as its own card: `request_id` mapped to a saved answer with
+a TTL, so a retry after a timeout does not run the card twice; `prev_row_hash`
+and a row signature, decided before the first signature is written — a signed
+field set is never crossed, the `dptp-msg-v2` rule; `max_cost`, `expires_at`
+and `tariff_version` carried in the request itself, one round rather than a
+402 and a retry, with a reservation by maximum before the queue, which also
+closes the race between the menu and the call; `model_digest`, engine and
+quant in the receipt to the guest and not in the menu; revocation of a peer's
+key beside its proved identity. The tariff's home is the `compute` block of
+`privacy_rules.json` as `serving_tariff`, dated entries per alias, with a
+validator in the same commit; `free_nodes` / `free_groups` sit beside
+`allow_nodes` / `allow_groups`, the `allow` / `send_to` pattern the
+transcription block already has.)*
+
 ### D4 — Shipping order, and the colleague is served at step 4
 
 Replaces the earlier «narrow first version», which GLM showed contradicted
@@ -379,6 +424,21 @@ Deferred beyond this list, explicitly: `/v1/embeddings`, which Continue wants
 for indexing; streaming over P2P; `/v1/completions` for tab autocomplete
 (`Not verified` against Continue's documentation — both reviewers flagged it
 from memory).
+
+*(**Amendment, 2026-09-10 — steps 3 and 4 ship without streaming, and the
+gateway speaks two forms.** Step 3 shipped as `1ebe8441`: `GET /v1/models` and
+`POST /v1/chat/completions` on `127.0.0.1:9997`, off by default, opened by a
+static key. `stream: true` is honoured with the whole answer in one SSE chunk
+followed by `[DONE]`, because `LLMManager.query` has no streaming form (M1) and
+bypassing it would lose the counts a usage row is made of; that narrowing is
+recorded here rather than in a chat message, as Zcode asked in review. Mike
+decided (#68, «обе формы») that the gateway also speaks the Anthropic Messages
+form — `POST /v1/messages`, what Claude Code speaks — as a step of its own
+between 3 and 4, over the same listener, key, lists, quota and row writer: it
+answers with one text block and one `text_delta`, and tools sent by the client
+are accepted and ignored in v1, a named narrowing rather than an omission. Step
+4 keeps its shape — one chunk — and the re-chunked buffer is said in
+`docs/CONFIGURATION.md` under `[gateway]`.)*
 
 ### D5 — API-backed models are shareable, and the quota is a financial control
 
@@ -412,6 +472,18 @@ pays real money.**
 happened — `backlog.md` records that the shared path carried two requests ever
 and both were relayed to the paid `deepseek_flash`, which is the measured origin
 of ADR-040 D4-0. `Observed` as a board entry; the incident is the board's claim.
+
+*(**Amendment, 2026-09-10 — the names.** Shipped with step 3 (`1ebe8441`): the
+two lists are `compute.serving_local` and `compute.serving_vendor` in
+`privacy_rules.json`; `compute.serving_alias` is folded into `serving_local` at
+load with a deprecation warning and the P2P door serves `serving_local[0]`, so
+one truth feeds both doors; the quota is `compute.vendor_quotas`, USD per day
+**per caller** — a ceiling for each caller separately, read from the node
+ledger by `NodeLedger.spent_today`. A vendor alias with no ceiling, an alias in
+both lists, a `remote_peer` or `dpc_agent` alias in either (D7), or a type under
+the wrong list is refused at load and at save with the reason. The names were
+put to Mike on 2026-09-10 and taken as decided when the reviews converged on
+them and he did not object.)*
 
 ### D6 — `aiohttp.web`, declared explicitly
 
@@ -546,8 +618,12 @@ exposure; 8888 is the large one.
 
 ## Open Questions
 
-None. D6 was the last, and the two outside reviews decided it: `aiohttp.web`,
-declared in the base dependencies.
+Three, all Mike's, from the tariff amendment of 2026-09-10 (Ark #107): whether
+the prepaid balance of stage 2 is v1 or v2; who tops a balance up — the host by
+hand or the guest in advance; whether an artifact hash of the answer joins the
+receipt in v1. And one name: the column for a call's amount in the host's
+currency (`tariff_amount` proposed). D6 was closed by the two outside reviews:
+`aiohttp.web`, declared in the base dependencies.
 
 ## Falsifiers
 
