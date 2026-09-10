@@ -167,10 +167,11 @@ host = 127.0.0.1
 
 ### Gateway Settings (`[gateway]`)
 
-The OpenAI-compatible gateway (ADR-041 D1): a second loopback listener that serves
-`GET /v1/models` and `POST /v1/chat/completions` to tools on this machine — an IDE
-plugin such as Continue, a CLI, a script — from the aliases this node names in
-`privacy_rules.json`. Off by default: a new open port is opt-in.
+The gateway (ADR-041 D1): a second loopback listener that serves `GET /v1/models`,
+`POST /v1/chat/completions` (the OpenAI form) and `POST /v1/messages` (the Anthropic
+Messages form) to tools on this machine — an IDE plugin such as Continue, Claude Code,
+a CLI, a script — from the aliases this node names in `privacy_rules.json`. Off by
+default: a new open port is opt-in.
 
 #### `enabled`
 - **Description:** Start the gateway with the client
@@ -196,6 +197,8 @@ answered `401`. **Rotation is manual:** stop the client, delete `~/.dpc/.gateway
 start the client — a new key is written — and paste the new value into the tool's
 config. On Linux/macOS the file is written with mode `0600`; on Windows the mode bits
 are advisory and the file inherits the ACL of your home directory, as `.ws_token` does.
+The Anthropic form's clients send the same key as `x-api-key: <key>` instead; both
+header forms open every route.
 
 **What it serves.** Only the aliases in the two serving lists of `privacy_rules.json`;
 an alias outside them is `404`, and the gateway never falls back to `default_provider`:
@@ -245,6 +248,29 @@ answered `400`.
   }]
 }
 ```
+
+**The Anthropic Messages form.** `POST /v1/messages` takes the request as the Anthropic
+SDKs and Claude Code send it — `model` is the alias, `system` a string or text blocks,
+`messages` the user/assistant turns — and answers with one `message` object holding one
+text block; an error is the Anthropic envelope (`not_found_error` for an alias outside
+the lists, `rate_limit_error` for a spent vendor ceiling, `api_error` for a provider
+failure). Two caveats, both ADR-041 M1: **tools are ignored in v1** — a request carrying
+`tools` is answered with text and `stop_reason: "end_turn"`, never a `tool_use` block,
+so Claude Code can chat through the gateway but cannot run its tools on the model behind
+it; and **the stream is one delta** — `stream: true` yields the six Messages events with
+the whole answer in a single `text_delta`, nothing arrives token by token. `max_tokens`,
+`temperature`, `thinking` and the rest are accepted and ignored: sampling is the alias's
+own configuration on this node.
+
+**Example** (Claude Code, environment):
+```bash
+export ANTHROPIC_BASE_URL=http://127.0.0.1:9997
+export ANTHROPIC_API_KEY=<contents of ~/.dpc/.gateway_key>
+export ANTHROPIC_MODEL=ollama_local        # the alias name, as in /v1/models
+```
+`ANTHROPIC_AUTH_TOKEN=<key>` (sent as `Authorization: Bearer`) works in place of
+`ANTHROPIC_API_KEY`. Not verified against a live Claude Code run at the time of writing;
+the shape is verified by the test suite.
 
 ---
 

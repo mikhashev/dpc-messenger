@@ -1,19 +1,25 @@
-"""The OpenAI-compatible gateway: outside tools reach this node's models over loopback.
+"""The gateway: outside tools reach this node's models over loopback, in two forms.
 
 ADR-041. An IDE plugin or a CLI that speaks OpenAI's `/v1/chat/completions`
-talks to `127.0.0.1:9997` on the consumer's own machine (D1) and is let in by
-a static key in `~/.dpc/.gateway_key`. What it may ask for is exactly the two
-serving lists in `privacy_rules.json` (D5): `compute.serving_local`, whose
-scarce resource is the card, and `compute.serving_vendor`, whose scarce
-resource is money and which is therefore refused past its per-caller daily
-ceiling. Every completion is one `LLMManager.query` and one usage row with
-`caller_kind="gateway"` on this node's ledger (D3).
+or Anthropic's `/v1/messages` talks to `127.0.0.1:9997` on the consumer's
+own machine (D1) and is let in by a static key in `~/.dpc/.gateway_key`.
+What it may ask for is exactly the two serving lists in `privacy_rules.json`
+(D5): `compute.serving_local`, whose scarce resource is the card, and
+`compute.serving_vendor`, whose scarce resource is money and which is
+therefore refused past its per-caller daily ceiling. Every completion is one
+`LLMManager.query` and one usage row with `caller_kind="gateway"` on this
+node's ledger (D3).
 
 Two layers, on purpose. `Gateway` is the internal one — alias, serving
 class, quota or card, one call, one row — and knows nothing about HTTP.
-`GatewayServer` is the OpenAI shape over it: the listener, the key, the
-Host check, request parsing and response rendering. The Anthropic Messages
-form is a second shape over the same `Gateway`, not a second listener.
+`GatewayServer` is the HTTP surface over it — the listener, the key, the
+Host check, parsing and rendering — in two wire shapes: the OpenAI one and,
+over the same `Gateway`, listener, key, lists, quota and row writer, the
+Anthropic Messages one (D4 amendment). Two narrowings are named rather than
+discovered (M1): a stream in either shape is the whole answer in one chunk
+or one `text_delta`, because `LLMManager.query` has no streaming form; and
+`tools` in a Messages request are accepted and ignored — the answer is a
+text block with `stop_reason: "end_turn"`, never a `tool_use` block.
 """
 
 from __future__ import annotations
@@ -37,6 +43,10 @@ from .dpc_agent.llm_adapter import messages_to_prompt
 from .dpc_agent.pricing import compute_cost_usd, get_billing_model
 from .firewall import ServingLists
 from .node_ledger import NodeLedger, default_ledger, usage_row
+# The one Anthropic-to-OpenAI message converter this module reuses (a
+# staticmethod, called without an instance): the providers already carry it,
+# and a fourth copy here would drift from the three that exist.
+from .providers.ollama_provider import OllamaProvider
 
 if TYPE_CHECKING:
     from .service import CoreService
@@ -61,6 +71,20 @@ _ERROR_TYPES = {
     502: "server_error",
     503: "server_error",
 }
+# The same statuses in the Anthropic vocabulary: the message text is shared,
+# only the envelope and the type word differ between the two shapes.
+_ANTHROPIC_ERROR_TYPES = {
+    400: "invalid_request_error",
+    401: "authentication_error",
+    404: "not_found_error",
+    429: "rate_limit_error",
+    502: "api_error",
+    503: "api_error",
+}
+# Requests under this prefix are answered in the Anthropic envelope, the rest
+# in the OpenAI one; the guard chooses by path because it answers before any
+# handler runs.
+MESSAGES_PATH = "/v1/messages"
 
 
 class GatewayError(Exception):
@@ -370,8 +394,10 @@ class GatewayServer:
         self._key = self._load_or_create_key()
 
         app = web.Application(middlewares=[self._guard])
+        # One models list for both shapes: Claude Code does not need a models route.
         app.router.add_get("/v1/models", self._models)
         app.router.add_post("/v1/chat/completions", self._chat_completions)
+        app.router.add_post(MESSAGES_PATH, self._messages)
         runner = web.AppRunner(app, access_log=None)
         await runner.setup()
         site = web.TCPSite(runner, self.host, self.port)
@@ -382,7 +408,10 @@ class GatewayServer:
             raise
         self._runner, self._site = runner, site
         self.port = self.bound_address()[1]
-        logger.info("OpenAI-compatible gateway listening on http://%s:%d", self.host, self.port)
+        logger.info(
+            "Gateway listening on http://%s:%d (OpenAI /v1/chat/completions and Anthropic /v1/messages)",
+            self.host, self.port,
+        )
 
     async def stop(self) -> None:
         runner, self._runner, self._site = self._runner, None, None
@@ -393,28 +422,46 @@ class GatewayServer:
     def _accepted_hosts(self) -> Tuple[str, ...]:
         return tuple(f"{name}:{self.port}" for name in HOST_NAMES)
 
+    @staticmethod
+    def _presented_key(request: web.Request) -> str:
+        """The key as either shape's clients send it: `x-api-key: <key>` (the
+        Anthropic SDKs, Claude Code with ANTHROPIC_API_KEY) or
+        `Authorization: Bearer <key>` (OpenAI clients, Claude Code with
+        ANTHROPIC_AUTH_TOKEN). Both forms open every route; `anthropic-version`
+        and `anthropic-beta` are read by nobody."""
+        presented = request.headers.get("x-api-key", "")
+        if presented:
+            return presented
+        authorization = request.headers.get("Authorization", "")
+        return authorization[len("Bearer "):] if authorization.startswith("Bearer ") else ""
+
     @web.middleware
     async def _guard(self, request: web.Request, handler):
-        """Host, then the key, then the handler; a `GatewayError` becomes its status."""
+        """Host, then the key, then the handler; a `GatewayError` becomes its status.
+
+        The envelope is chosen by path: under `/v1/messages` a refusal is the
+        Anthropic error object, elsewhere the OpenAI one, so a client of
+        either shape parses what it expects even when no handler ran.
+        """
+        error = _anthropic_error if request.path.startswith(MESSAGES_PATH) else _error
         host = request.headers.get("Host", "")
         if host not in self._accepted_hosts():
             accepted = " or ".join(self._accepted_hosts())
-            return _error(400, f"Host {host!r} is not this gateway: it answers to {accepted} only", "invalid_host")
-        authorization = request.headers.get("Authorization", "")
-        presented = authorization[len("Bearer "):] if authorization.startswith("Bearer ") else ""
+            return error(400, f"Host {host!r} is not this gateway: it answers to {accepted} only", "invalid_host")
+        presented = self._presented_key(request)
         if not presented or not secrets.compare_digest(presented, self._key):
-            return _error(
+            return error(
                 401,
-                "no gateway key, or the wrong one: send 'Authorization: Bearer <key>' with the contents "
-                f"of {self.key_path.name} in the DPC home directory",
+                "no gateway key, or the wrong one: send 'x-api-key: <key>' or 'Authorization: Bearer <key>' "
+                f"with the contents of {self.key_path.name} in the DPC home directory",
                 "invalid_api_key",
             )
         try:
             return await handler(request)
         except GatewayError as e:
-            return _error(e.status, e.message, e.code)
+            return error(e.status, e.message, e.code)
         except GatewayConfigError as e:
-            return _error(503, f"the gateway's serving lists are refused: {e}", "serving_lists_refused")
+            return error(503, f"the gateway's serving lists are refused: {e}", "serving_lists_refused")
 
     async def _models(self, request: web.Request) -> web.Response:
         lists = self.gateway.serving_lists()
@@ -459,3 +506,144 @@ class GatewayServer:
         await response.write(b"data: [DONE]\n\n")
         await response.write_eof()
         return response
+
+    async def _messages(self, request: web.Request) -> web.StreamResponse:
+        try:
+            body = await request.json()
+        except Exception:
+            raise GatewayError(400, "the request body is not JSON", "invalid_request_error")
+        if not isinstance(body, dict):
+            raise GatewayError(400, "the request body must be a JSON object", "invalid_request_error")
+        alias = body.get("model")
+        if not isinstance(alias, str) or not alias:
+            raise GatewayError(400, "'model' must name a provider alias this node serves", "invalid_request_error")
+        prompt = messages_to_prompt(_anthropic_messages(body))
+        if not prompt:
+            raise GatewayError(400, "no message carries text", "invalid_request_error")
+        # `max_tokens` is required by the Messages API and read by nobody here:
+        # sampling (max_tokens, temperature, top_p, stop_sequences, thinking) is
+        # the alias's own configuration on this node, as on the OpenAI route.
+        # `tools` and `tool_choice` are accepted and ignored (ADR-041 M1): the
+        # answer is a text block, never a `tool_use` block.
+        completion = await self.gateway.complete(alias, prompt)
+        if body.get("stream"):
+            return await self._stream_messages(request, completion)
+        return web.json_response(_message_json(completion))
+
+    async def _stream_messages(self, request: web.Request, completion: Completion) -> web.StreamResponse:
+        # ADR-041 M1, as in `_stream`: the answer is complete before the first
+        # byte leaves, so the six Messages events carry the whole text in one
+        # `text_delta`. A client that sent stream=true parses what it expects.
+        response = web.StreamResponse(
+            status=200, headers={"Content-Type": "text/event-stream", "Cache-Control": "no-cache"},
+        )
+        await response.prepare(request)
+        for event in (
+            _message_start(completion),
+            _content_block_start(),
+            _content_block_delta(completion),
+            _content_block_stop(),
+            _message_delta(completion),
+            _message_stop(),
+        ):
+            await response.write(_sse_event(event))
+        await response.write_eof()
+        return response
+
+
+# --- the Anthropic Messages shape ------------------------------------------------
+
+
+def _anthropic_error(status: int, message: str, code: str = "") -> web.Response:
+    """The same refusal `_error` renders, in the Anthropic envelope; `code` is
+    accepted so the guard can call either renderer alike, and is not sent —
+    the envelope has no field for it."""
+    body = {"type": "error", "error": {"type": _ANTHROPIC_ERROR_TYPES.get(status, "api_error"), "message": message}}
+    return web.json_response(body, status=status)
+
+
+def _anthropic_usage(completion: Completion) -> Dict[str, int]:
+    return {"input_tokens": completion.prompt_tokens or 0, "output_tokens": completion.completion_tokens or 0}
+
+
+def _message_json(completion: Completion) -> Dict[str, Any]:
+    # `model` echoes the alias, as the OpenAI shape does; one text block, end_turn.
+    return {
+        "id": f"msg_{completion.request_id}",
+        "type": "message",
+        "role": "assistant",
+        "model": completion.alias,
+        "content": [{"type": "text", "text": completion.text}],
+        "stop_reason": "end_turn",
+        "stop_sequence": None,
+        "usage": _anthropic_usage(completion),
+    }
+
+
+# The six stream events, in the order the wire wants them.
+
+
+def _message_start(completion: Completion) -> Dict[str, Any]:
+    message = dict(_message_json(completion), content=[], stop_reason=None)
+    message["usage"] = {"input_tokens": completion.prompt_tokens or 0, "output_tokens": 0}
+    return {"type": "message_start", "message": message}
+
+
+def _content_block_start() -> Dict[str, Any]:
+    return {"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}}
+
+
+def _content_block_delta(completion: Completion) -> Dict[str, Any]:
+    return {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": completion.text}}
+
+
+def _content_block_stop() -> Dict[str, Any]:
+    return {"type": "content_block_stop", "index": 0}
+
+
+def _message_delta(completion: Completion) -> Dict[str, Any]:
+    return {
+        "type": "message_delta",
+        "delta": {"stop_reason": "end_turn", "stop_sequence": None},
+        "usage": {"output_tokens": completion.completion_tokens or 0},
+    }
+
+
+def _message_stop() -> Dict[str, Any]:
+    return {"type": "message_stop"}
+
+
+def _sse_event(event: Dict[str, Any]) -> bytes:
+    """One event as two lines and a blank one; the event name is its `type`."""
+    return f"event: {event['type']}\ndata: {json.dumps(event)}\n\n".encode("utf-8")
+
+
+def _anthropic_messages(body: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """The request's `system` and `messages` as the OpenAI-shaped list the
+    adapter flattens, or a 400 saying what is wrong with them.
+
+    Only the shape is checked here. The conversion — a string or block-list
+    `system` to one system turn, text blocks to text, `tool_use` to the
+    assistant's tool calls, `tool_result` to a tool turn, an `image` block to
+    nothing — is the providers' own converter, so the flattened prompt is the
+    one the OpenAI route produces for the same conversation.
+    """
+    system = body.get("system")
+    if system is not None and not isinstance(system, (str, list)):
+        raise GatewayError(400, "'system' must be a string or an array of text blocks", "invalid_request_error")
+    messages = body.get("messages")
+    if not isinstance(messages, list) or not messages:
+        raise GatewayError(400, "'messages' must be a non-empty array", "invalid_request_error")
+    for message in messages:
+        if not isinstance(message, dict):
+            raise GatewayError(400, "each message must be an object with 'role' and 'content'", "invalid_request_error")
+        if message.get("role") not in ("user", "assistant"):
+            raise GatewayError(
+                400, "each message's 'role' must be 'user' or 'assistant'; the system prompt goes in 'system'",
+                "invalid_request_error",
+            )
+        if not isinstance(message.get("content"), (str, list)):
+            raise GatewayError(
+                400, "each message's 'content' must be a string or an array of blocks", "invalid_request_error",
+            )
+    return OllamaProvider._anthropic_to_openai_messages(system, messages)
