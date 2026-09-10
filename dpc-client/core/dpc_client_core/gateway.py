@@ -20,6 +20,19 @@ discovered (M1): a stream in either shape is the whole answer in one chunk
 or one `text_delta`, because `LLMManager.query` has no streaming form; and
 `tools` in a Messages request are accepted and ignored — the answer is a
 text block with `stop_reason: "end_turn"`, never a `tool_use` block.
+
+A third kind of name, `remote:<node_id>:<alias>`, is a connected peer's
+alias as that peer serves it to this node (D4 step 4): `/v1/models` lists
+one row per alias on each proved peer's menu, owned by the peer, and a
+completion on such a name is one `request_inference_from_peer` over a
+connection whose key was proved (D2 — direct TLS only; WebRTC, relay and
+gossip prove no sender, and a peer on one of them is refused by name, never
+fallen back from). The card and the vendor key are the host's, so the peer
+route takes no local lock and reads no local quota; the row it leaves is the
+requester's half of a double entry (D3): the wire's `request_id`, the host's
+counts, the host's billing model and cost copied or left absent — this node
+did not run the call and does not price it. The host attributes the call to
+the proved sender, which is this node; nothing here declares anyone else (D7).
 """
 
 from __future__ import annotations
@@ -70,6 +83,7 @@ _ERROR_TYPES = {
     429: "insufficient_quota",
     502: "server_error",
     503: "server_error",
+    504: "server_error",
 }
 # The same statuses in the Anthropic vocabulary: the message text is shared,
 # only the envelope and the type word differ between the two shapes.
@@ -80,7 +94,16 @@ _ANTHROPIC_ERROR_TYPES = {
     429: "rate_limit_error",
     502: "api_error",
     503: "api_error",
+    504: "api_error",
 }
+# A model name under this prefix is a peer's alias, `remote:<node_id>:<alias>`
+# — the form this node already gives a peer's provider for transcription and
+# in `remote_peer` configs, so one name means one thing everywhere.
+REMOTE_PREFIX = "remote:"
+# The connection types on which the peer's key has been proved (ADR-041 D2).
+# `PeerConnection` is direct TLS both ways; the WebRTC, relay, gossip and
+# hole-punched wrappers carry other values and are not served.
+PROVED_CONNECTION_TYPES = ("direct_tls",)
 # Requests under this prefix are answered in the Anthropic envelope, the rest
 # in the OpenAI one; the guard chooses by path because it answers before any
 # handler runs.
@@ -103,10 +126,17 @@ class GatewayConfigError(ValueError):
 
 @dataclass(frozen=True)
 class Completion:
-    """One answered call, in the terms both HTTP shapes render from."""
+    """One answered call, in the terms both HTTP shapes render from.
+
+    `alias` is the name the client asked for and both shapes echo — on the
+    peer route the `remote:` form, while the row carries the alias as the
+    peer names it. `cost_usd` is None on the peer route when the host sent
+    no price: this node did not run the call and does not price it (D3).
+    """
     request_id: str
     alias: str
-    owner: str  # "local" | "vendor"
+    owner: str  # "local" | "vendor" | the peer's node id
+    route: str  # "local" | "peer"
     model: Optional[str]
     text: str
     prompt_tokens: Optional[int]
@@ -115,7 +145,24 @@ class Completion:
     started_at: datetime
     duration_s: float
     billing: str
-    cost_usd: float
+    cost_usd: Optional[float]
+
+
+def parse_remote_name(name: str) -> Optional[Tuple[str, str]]:
+    """`(node_id, alias)` for a `remote:<node_id>:<alias>` name, None for any
+    other name, and a 404 for a name that starts the form and does not finish
+    it — a half-written peer name must not fall through to the local lookup.
+    """
+    if not name.startswith(REMOTE_PREFIX):
+        return None
+    parts = name.split(":", 2)
+    if len(parts) != 3 or not parts[1] or not parts[2]:
+        raise GatewayError(
+            404,
+            f"model '{name}' is not a peer alias: the form is remote:<node_id>:<alias>",
+            "model_not_found",
+        )
+    return parts[1], parts[2]
 
 
 class Gateway:
@@ -160,7 +207,34 @@ class Gateway:
         except ValueError as e:
             raise GatewayConfigError(str(e)) from e
 
+    def peer_menu(self) -> Dict[str, List[Dict[str, Any]]]:
+        """What each peer serves us, for the peers the door can reach: the
+        provider rows a `PROVIDERS_RESPONSE` left in `peer_metadata`, kept
+        only for peers connected right now on a proved connection.
+        `peer_metadata` outlives the connection, so without the second filter
+        the menu would list what the door would then refuse."""
+        metadata = getattr(self._core, "peer_metadata", None) or {}
+        menu: Dict[str, List[Dict[str, Any]]] = {}
+        for peer_id, meta in metadata.items():
+            rows = [row for row in (meta or {}).get("providers") or [] if row.get("alias")]
+            if rows and self._connection_type(peer_id) in PROVED_CONNECTION_TYPES:
+                menu[peer_id] = rows
+        return menu
+
+    def _connection_type(self, peer_id: str) -> Optional[str]:
+        """The connection's own claim about itself, or None when the peer is
+        not connected; a wrapper without the attribute is `"unknown"`, which
+        is not proved."""
+        peers = getattr(self._core.p2p_manager, "peers", None) or {}
+        connection = peers.get(peer_id)
+        if connection is None:
+            return None
+        return getattr(connection, "connection_type", "unknown")
+
     async def complete(self, alias: str, prompt: str, *, request_id: Optional[str] = None) -> Completion:
+        remote = parse_remote_name(alias)
+        if remote is not None:
+            return await self._complete_via_peer(alias, *remote, prompt)
         try:
             lists = self.serving_lists()
         except GatewayConfigError as e:
@@ -258,12 +332,118 @@ class Gateway:
         else:
             ledger.append(row)
         return Completion(
-            request_id=request_id, alias=alias, owner=owner, model=model,
+            request_id=request_id, alias=alias, owner=owner, route="local", model=model,
             text=result.get("response") or "",
             prompt_tokens=prompt_tokens, completion_tokens=completion_tokens,
             thinking_tokens=result.get("thinking_tokens"),
             started_at=started_at, duration_s=duration_s, billing=billing, cost_usd=cost_usd,
         )
+
+    async def _complete_via_peer(self, name: str, peer_id: str, remote_alias: str, prompt: str) -> Completion:
+        """The peer route: connected, proved, on the menu, one call, one row.
+
+        No local lock and no local quota on purpose: the card the call runs on
+        and the key it may spend are the host's, and the host serialises and
+        refuses on its own side. Every refusal here is named and none falls
+        back to a local alias (D2).
+        """
+        connection_type = self._connection_type(peer_id)
+        if connection_type is None:
+            raise GatewayError(503, f"peer {peer_id} is not connected", "peer_unavailable")
+        if connection_type not in PROVED_CONNECTION_TYPES:
+            raise GatewayError(
+                503,
+                f"peer {peer_id} is not on a proved connection: it is connected over "
+                f"{connection_type!r}, and peer inference is served over direct TLS only, "
+                "where the peer's key has been proved (ADR-041 D2)",
+                "peer_unproved",
+            )
+        menu = self.peer_menu().get(peer_id) or []
+        if not any(row.get("alias") == remote_alias for row in menu):
+            served = ", ".join(row["alias"] for row in menu) or "nothing yet"
+            raise GatewayError(
+                404,
+                f"peer {peer_id} does not serve alias '{remote_alias}' to this node; "
+                f"its menu lists: {served}",
+                "model_not_found",
+            )
+
+        timeout = float(self._core.settings.get_remote_inference_timeout())
+        # Clocked before the send: the row's duration is the round trip as this node saw it.
+        started_at = datetime.now(timezone.utc)
+        clock = time.monotonic()
+        try:
+            result = await self._core.p2p_coordinator.request_inference_from_peer(
+                peer_id, prompt, provider=remote_alias, timeout=timeout,
+            )
+        except ConnectionError as e:
+            raise GatewayError(503, f"peer {peer_id} is not connected: {e}", "peer_unavailable")
+        except TimeoutError:
+            raise GatewayError(
+                504,
+                f"peer {peer_id} did not answer within {timeout:g}s ([connection] remote_inference_timeout)",
+                "peer_timeout",
+            )
+        except RuntimeError as e:
+            # The host's own refusal — alias not served, firewall, quota — in its words.
+            raise GatewayError(502, f"peer {peer_id} refused: {e}", "peer_refused")
+        duration_s = time.monotonic() - clock
+
+        result = result if isinstance(result, dict) else {"response": str(result or "")}
+        text = result.get("response") or ""
+        model = result.get("model") or remote_alias
+        prompt_tokens = result.get("prompt_tokens")
+        completion_tokens = result.get("response_tokens")
+        if prompt_tokens and completion_tokens:
+            counts_source = "engine"
+        else:
+            counts_source = "ours"
+            prompt_tokens, completion_tokens = self._count_here(prompt, text, model)
+        # The host's billing model and price travel on the wire when it counted
+        # them; absent, the billing model is this node's table for the model the
+        # host named and the cost stays null — never 0.0, which would read as free.
+        billing = result.get("billing") or get_billing_model(remote_alias, model)
+        cost_usd = result.get("cost_usd")
+        # The wire id, never one minted here: the host's row joins this one on it.
+        request_id = result.get("request_id") or ""
+        try:
+            row = usage_row(
+                request_id=request_id,
+                caller=self.caller,
+                caller_kind=CALLER_KIND,
+                alias=remote_alias,
+                model=model,
+                route="peer",
+                prompt_tokens=prompt_tokens,
+                completion_tokens=completion_tokens,
+                thinking_tokens=result.get("thinking_tokens"),
+                counts_source=counts_source,
+                started_at=started_at,
+                duration_s=duration_s,
+                billing=billing,
+                cost_usd=cost_usd,
+            )
+        except Exception:
+            logger.error("Usage row for gateway request %r via peer %s was not built", request_id, peer_id, exc_info=True)
+        else:
+            (self._ledger or default_ledger()).append(row)
+        return Completion(
+            request_id=request_id, alias=name, owner=peer_id, route="peer", model=model, text=text,
+            prompt_tokens=prompt_tokens, completion_tokens=completion_tokens,
+            thinking_tokens=result.get("thinking_tokens"),
+            started_at=started_at, duration_s=duration_s, billing=billing, cost_usd=cost_usd,
+        )
+
+    def _count_here(self, prompt: str, text: str, model: str) -> Tuple[int, int]:
+        """Counts for a host that sent none, as the adapter counts on its peer
+        route: the node's tokenizer when it has one, else four characters a token."""
+        counter = getattr(self._core.llm_manager, "token_count_manager", None)
+        if counter is not None:
+            try:
+                return counter.count_tokens(prompt, model), counter.count_tokens(text, model)
+            except Exception as e:
+                logger.debug("Local token count for %s failed, estimating: %s", model, e)
+        return len(prompt) // 4, len(text) // 4
 
 
 # --- the OpenAI shape ------------------------------------------------------------
@@ -470,6 +650,12 @@ class GatewayServer:
             for owner, aliases in (("local", lists.local), ("vendor", lists.vendor))
             for alias in aliases
         ]
+        # After the two local lists, each proved peer's menu under the peer's name.
+        data.extend(
+            {"id": f"{REMOTE_PREFIX}{peer_id}:{row['alias']}", "object": "model", "created": 0, "owned_by": peer_id}
+            for peer_id, rows in self.gateway.peer_menu().items()
+            for row in rows
+        )
         return web.json_response({"object": "list", "data": data})
 
     async def _chat_completions(self, request: web.Request) -> web.StreamResponse:

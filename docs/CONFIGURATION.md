@@ -272,6 +272,26 @@ export ANTHROPIC_MODEL=ollama_local        # the alias name, as in /v1/models
 `ANTHROPIC_API_KEY`. Not verified against a live Claude Code run at the time of writing;
 the shape is verified by the test suite.
 
+**A peer's model, through your own gateway.** After the two local lists, `/v1/models`
+shows one row per alias each connected peer serves to this node, named
+`remote:<node_id>:<alias>` and owned by that node — the same form a peer's provider has
+everywhere else on this node. A completion on such a name travels the P2P path to that
+peer (`REMOTE_INFERENCE_REQUEST`) and is served only while the peer is connected over
+direct TLS, where its key has been proved (ADR-041 D2); a peer reached over WebRTC, a
+relay or gossip is answered `503` naming the rule, never served from a local alias
+instead. The peer's own firewall decides what it serves you (`404` when the alias is
+not on its menu, `502` carrying the peer's refusal), the peer's card and quota bound
+the call — this node's card lock and `vendor_quotas` are not consulted — and a peer
+that does not answer within `[connection] remote_inference_timeout` is `504`. The row
+this node writes says `route = peer` under the request id both nodes share, with the
+peer's token counts and its price copied when it sent them and `cost_usd` left null
+when it did not: this node did not run the call and does not price it. **One caveat to
+know before you file it (ADR-041 M1): a peer-routed answer arrives whole.** The P2P
+path has no streaming, so with `stream: true` the entire reply is emitted as one chunk
+(or one `text_delta`) the moment it lands — your editor shows seconds-old text all at
+once rather than token by token. That is the shape of the path today, not a fault in
+the peer or the plugin.
+
 ---
 
 ### System Settings (`[system]`)
