@@ -3,9 +3,11 @@
 import json
 import logging
 import os
+import re
 from dataclasses import dataclass
+from datetime import date, datetime, timezone
 from pathlib import Path
-from typing import List, Dict, Mapping, Tuple, Any, Iterable, Optional, Set
+from typing import List, Dict, Mapping, Tuple, Any, Iterable, Optional, Set, Union
 import fnmatch
 from copy import deepcopy
 
@@ -91,6 +93,72 @@ VENDOR_PROVIDER_TYPES = frozenset({
     'openai_compatible', 'anthropic', 'zai', 'deepseek', 'gemini', 'github_models', 'gigachat',
 })
 UNSERVABLE_PROVIDER_TYPES = frozenset({'dpc_agent', 'remote_peer'})
+
+# The owner's tariff (ADR-041 D3, amendment): rates per 1M tokens in the
+# node's currency, dated per alias, and the subset of the allowed peers who
+# get them at zero. Beside the serving lists because they answer the next
+# question about the same aliases — what a call on them costs the caller.
+COMPUTE_CURRENCY_KEY = 'currency'
+SERVING_TARIFF_KEY = 'serving_tariff'
+FREE_NODES_KEY = 'free_nodes'
+FREE_GROUPS_KEY = 'free_groups'
+
+# ISO 4217 List One (current currencies and funds) as published by SIX, the
+# standard's maintenance agency: list-one.xml, Pblshd="2026-01-01", 178 codes.
+# Two of them are left out on purpose — XXX «no currency» and XTS «for
+# testing» are placeholders, not a unit an owner can price in. Fund codes
+# (BOV, CHE, …) and the X-codes for metals and units of account are kept: the
+# table says what the standard says, and the owner chooses.
+ISO_4217_CODES = frozenset((
+    'AED', 'AFN', 'ALL', 'AMD', 'AOA', 'ARS', 'AUD', 'AWG', 'AZN', 'BAM', 'BBD', 'BDT',
+    'BHD', 'BIF', 'BMD', 'BND', 'BOB', 'BOV', 'BRL', 'BSD', 'BTN', 'BWP', 'BYN', 'BZD',
+    'CAD', 'CDF', 'CHE', 'CHF', 'CHW', 'CLF', 'CLP', 'CNY', 'COP', 'COU', 'CRC', 'CUP',
+    'CVE', 'CZK', 'DJF', 'DKK', 'DOP', 'DZD', 'EGP', 'ERN', 'ETB', 'EUR', 'FJD', 'FKP',
+    'GBP', 'GEL', 'GHS', 'GIP', 'GMD', 'GNF', 'GTQ', 'GYD', 'HKD', 'HNL', 'HTG', 'HUF',
+    'IDR', 'ILS', 'INR', 'IQD', 'IRR', 'ISK', 'JMD', 'JOD', 'JPY', 'KES', 'KGS', 'KHR',
+    'KMF', 'KPW', 'KRW', 'KWD', 'KYD', 'KZT', 'LAK', 'LBP', 'LKR', 'LRD', 'LSL', 'LYD',
+    'MAD', 'MDL', 'MGA', 'MKD', 'MMK', 'MNT', 'MOP', 'MRU', 'MUR', 'MVR', 'MWK', 'MXN',
+    'MXV', 'MYR', 'MZN', 'NAD', 'NGN', 'NIO', 'NOK', 'NPR', 'NZD', 'OMR', 'PAB', 'PEN',
+    'PGK', 'PHP', 'PKR', 'PLN', 'PYG', 'QAR', 'RON', 'RSD', 'RUB', 'RWF', 'SAR', 'SBD',
+    'SCR', 'SDG', 'SEK', 'SGD', 'SHP', 'SLE', 'SOS', 'SRD', 'SSP', 'STN', 'SVC', 'SYP',
+    'SZL', 'THB', 'TJS', 'TMT', 'TND', 'TOP', 'TRY', 'TTD', 'TWD', 'TZS', 'UAH', 'UGX',
+    'USD', 'USN', 'UYI', 'UYU', 'UYW', 'UZS', 'VED', 'VES', 'VND', 'VUV', 'WST', 'XAD',
+    'XAF', 'XAG', 'XAU', 'XBA', 'XBB', 'XBC', 'XBD', 'XCD', 'XCG', 'XDR', 'XOF', 'XPD',
+    'XPF', 'XPT', 'XSU', 'XUA', 'YER', 'ZAR', 'ZMW', 'ZWG',
+))
+
+# `from` is a calendar day and nothing looser: `date.fromisoformat` would also
+# take `20260901`, which is not what a hand edit means to write.
+_ISO_DATE = re.compile(r'^\d{4}-\d{2}-\d{2}$')
+
+
+def parse_iso_date(text: Any) -> Optional[date]:
+    """`YYYY-MM-DD` as a date, or None for anything else."""
+    if not isinstance(text, str) or not _ISO_DATE.match(text):
+        return None
+    try:
+        return date.fromisoformat(text)
+    except ValueError:
+        return None
+
+
+@dataclass(frozen=True)
+class TariffEntry:
+    """One dated line of an alias's tariff: rates per 1M tokens from a day on."""
+    from_date: date
+    in_per_1m: float
+    out_per_1m: float
+
+
+@dataclass(frozen=True)
+class AppliedTariff:
+    """What a call is charged at: the entry that applied on its day, in the
+    node's currency. `at` is that entry's `from`, so a row can name which line
+    of the declaration priced it."""
+    in_per_1m: float
+    out_per_1m: float
+    currency: str
+    at: date
 
 
 @dataclass(frozen=True)
@@ -193,6 +261,37 @@ class ContextFirewall:
             for alias, quota in (compute.get(VENDOR_QUOTAS_KEY) or {}).items()
             if not alias.startswith('_')
         }
+        # The tariff (ADR-041 D3, amendment). The shape was checked above; here
+        # it is only read. Entries stay in the order written — `tariff_for`
+        # sorts — and a free list is a subset of its allow list by the check
+        # above, so membership below needs no second look at the door.
+        self.compute_currency: Optional[str] = compute.get(COMPUTE_CURRENCY_KEY)
+        self.compute_serving_tariff: Dict[str, Tuple[TariffEntry, ...]] = {
+            alias: tuple(
+                TariffEntry(parse_iso_date(entry['from']), float(entry['in']), float(entry['out']))
+                for entry in entries
+            )
+            for alias, entries in (compute.get(SERVING_TARIFF_KEY) or {}).items()
+            if not alias.startswith('_')
+        }
+        self.compute_free_nodes: List[str] = list(compute.get(FREE_NODES_KEY) or [])
+        self.compute_free_groups: List[str] = list(compute.get(FREE_GROUPS_KEY) or [])
+        if self.compute_serving_tariff and self.compute_currency is None:
+            logger.warning(
+                "compute.%s names %d alias(es) but compute.%s is not set, so no tariff is "
+                "declared and every call is a gift (tariff null). Set the ISO 4217 code of the "
+                "unit the rates are in, in privacy_rules.json under compute.%s.",
+                SERVING_TARIFF_KEY, len(self.compute_serving_tariff), COMPUTE_CURRENCY_KEY,
+                COMPUTE_CURRENCY_KEY,
+            )
+        served = set(self.compute_serving_local) | set(self.compute_serving_vendor)
+        for alias in self.compute_serving_tariff:
+            if alias not in served:
+                logger.warning(
+                    "compute.%s prices '%s', which is in neither compute.%s nor compute.%s: the "
+                    "tariff is kept, but nothing is served at it until the alias is listed",
+                    SERVING_TARIFF_KEY, alias, SERVING_LOCAL_KEY, SERVING_VENDOR_KEY,
+                )
         logger.debug("Compute sharing settings updated: enabled=%s, allowed_nodes=%d, allowed_groups=%d, allowed_models=%d, serving_local=%s, serving_vendor=%s",
                      self.compute_enabled, len(self.compute_allowed_nodes),
                      len(self.compute_allowed_groups), len(self.compute_allowed_models),
@@ -276,7 +375,113 @@ class ContextFirewall:
                     f"the P2P door serves the first local entry, so put the alias first in the list and drop "
                     f"{SERVING_ALIAS_KEY}"
                 )
+
+        errors.extend(ContextFirewall._tariff_errors(compute))
         return errors
+
+    @staticmethod
+    def _tariff_errors(compute: Dict[str, Any]) -> List[str]:
+        """Why the tariff block cannot be read, or nothing (ADR-041 D3, amendment).
+
+        The currency is checked against the bundled ISO table and not only
+        its shape, so `XYZ` is refused with the same sentence as `rub`. A
+        free list must be a subset of its allow list: it distinguishes among
+        the admitted, it does not admit. An alias priced but not served is
+        not an error here — the load path warns about it.
+        """
+        errors: List[str] = []
+
+        currency = compute.get(COMPUTE_CURRENCY_KEY)
+        if currency is not None and (not isinstance(currency, str) or currency not in ISO_4217_CODES):
+            errors.append(
+                f"'compute.{COMPUTE_CURRENCY_KEY}' must be an ISO 4217 code — three upper-case letters "
+                f"from the standard's list, such as 'USD' or 'RUB' — got {currency!r}"
+            )
+
+        tariff = compute.get(SERVING_TARIFF_KEY)
+        if tariff is not None and not isinstance(tariff, dict):
+            errors.append(
+                f"'compute.{SERVING_TARIFF_KEY}' must be an object of alias -> list of dated entries "
+                "{from, in, out}"
+            )
+        elif tariff:
+            for alias, entries in tariff.items():
+                if alias.startswith('_'):
+                    continue
+                where = f"compute.{SERVING_TARIFF_KEY}.{alias}"
+                if not isinstance(entries, list):
+                    errors.append(f"'{where}' must be a list of dated entries {{from, in, out}}")
+                    continue
+                seen: Set[str] = set()
+                for index, entry in enumerate(entries):
+                    if not isinstance(entry, dict):
+                        errors.append(f"'{where}[{index}]' must be an object {{from, in, out}}, got {entry!r}")
+                        continue
+                    day = entry.get('from')
+                    if parse_iso_date(day) is None:
+                        errors.append(f"'{where}[{index}].from' must be an ISO date YYYY-MM-DD, got {day!r}")
+                    elif day in seen:
+                        errors.append(f"'{where}' has two entries from {day}; one day has one rate")
+                    else:
+                        seen.add(day)
+                    for field in ('in', 'out'):
+                        rate = entry.get(field)
+                        if isinstance(rate, bool) or not isinstance(rate, (int, float)) or rate < 0:
+                            errors.append(
+                                f"'{where}[{index}].{field}' must be a non-negative number per 1M tokens, "
+                                f"got {rate!r}"
+                            )
+
+        for free_key, allow_key in ((FREE_NODES_KEY, 'allow_nodes'), (FREE_GROUPS_KEY, 'allow_groups')):
+            free = compute.get(free_key)
+            if free is None:
+                continue
+            if not isinstance(free, list) or not all(isinstance(entry, str) and entry for entry in free):
+                errors.append(f"'compute.{free_key}' must be a list of non-empty strings")
+                continue
+            allowed = compute.get(allow_key)
+            allowed = allowed if isinstance(allowed, list) else []
+            for entry in free:
+                if entry not in allowed:
+                    errors.append(
+                        f"'{entry}' is in compute.{free_key} but not in compute.{allow_key}: a free list "
+                        "distinguishes among the peers already allowed, it does not admit (ADR-041 D3)"
+                    )
+        return errors
+
+    def _is_free_for(self, peer_id: str) -> bool:
+        """In `free_nodes`, or in a group `free_groups` names — resolved the way
+        `can_request_inference` resolves the allow groups."""
+        if peer_id in self.compute_free_nodes:
+            return True
+        return any(group in self.compute_free_groups for group in self._get_groups_for_node(peer_id))
+
+    def tariff_for(self, alias: str, *, peer_id: str, at: Union[datetime, date]) -> Optional[AppliedTariff]:
+        """The tariff a call on `alias` by `peer_id` on the day of `at` is charged at.
+
+        None is «not declared» — no currency, or no entry for the alias whose
+        `from` is on or before the day — and the call is a gift. The newest
+        such entry applies; a free peer gets the same entry at zero, and only
+        then: with nothing declared a free peer gets None like everyone else,
+        because a free list says who pays nothing of a price, not that there
+        is one (ADR-041 D3, amendment). The day is taken in UTC, so a naive
+        moment is refused rather than read in whatever zone the process has.
+        """
+        if isinstance(at, datetime):
+            if at.tzinfo is None:
+                raise ValueError("tariff_for needs an aware moment; the day is taken in UTC")
+            day = at.astimezone(timezone.utc).date()
+        else:
+            day = at
+        if self.compute_currency is None:
+            return None
+        applicable = [entry for entry in self.compute_serving_tariff.get(alias, ()) if entry.from_date <= day]
+        if not applicable:
+            return None
+        entry = max(applicable, key=lambda e: e.from_date)
+        if self._is_free_for(peer_id):
+            return AppliedTariff(0.0, 0.0, self.compute_currency, entry.from_date)
+        return AppliedTariff(entry.in_per_1m, entry.out_per_1m, self.compute_currency, entry.from_date)
 
     def classify_serving_lists(self, provider_types: Mapping[str, Optional[str]]) -> ServingLists:
         """The two lists checked against what each alias's provider is.
@@ -1186,7 +1391,14 @@ class ContextFirewall:
                     "_allowed_models": "Empty = every model. Since the host designates serving_alias, this list can only refuse a peer that names a model; it never chooses one. A non-empty list that does not contain the serving alias's own model makes this node advertise nothing and refuse everything.",
                     "allowed_models": [],
                     "_serving_alias": "Deprecated single form of serving_local, still read. What this node serves is serving_local (aliases on this machine; the first is what peers get) and serving_vendor (paid APIs, each needing a USD-per-day ceiling in vendor_quotas). Empty = share nothing (the opposite of allowed_models, where empty = all).",
-                    "serving_alias": None
+                    "serving_alias": None,
+                    "_currency": "ISO 4217 code of the unit the tariff below is priced in, e.g. \"USD\" or \"RUB\". Null = no tariff declared: every call served is a gift, whatever serving_tariff says.",
+                    "currency": None,
+                    "_serving_tariff": "Rates per 1M input / output tokens, in currency, dated per alias: {\"alias\": [{\"from\": \"2026-09-01\", \"in\": 20, \"out\": 60}]}. The newest entry on or before the call's day (UTC) applies; an alias with no entry is a gift.",
+                    "serving_tariff": {},
+                    "_free_nodes": "Peers among allow_nodes / allow_groups who get the tariff at zero. Each entry must also be in the matching allow list: these lists distinguish, they do not admit.",
+                    "free_nodes": [],
+                    "free_groups": []
                 },
                 "transcription": {
                     "_comment": "Transcription sharing settings - Allow peers to use your Whisper model for voice transcription",

@@ -225,11 +225,12 @@ def _rename_registry(home: Path, old: str, new: str) -> Tuple[int, List[str]]:
     return len(entries), []
 
 
-# The serving lists and the quota table are keyed by alias too. A rename that
-# followed `serving_alias` alone would leave `serving_local` naming the old
-# alias, and the next load refuses two keys that disagree.
+# The serving lists, the quota table and the tariff are keyed by alias too. A
+# rename that followed `serving_alias` alone would leave `serving_local` naming
+# the old alias, and the next load refuses two keys that disagree; a tariff
+# left under the old name would price nothing and warn on every load.
 _FIREWALL_LISTS = ("serving_local", "serving_vendor")
-_FIREWALL_QUOTAS = "vendor_quotas"
+_FIREWALL_KEYED_BY_ALIAS = ("vendor_quotas", "serving_tariff")
 
 
 def _scan_firewall(home: Path) -> List[Tuple[str, str]]:
@@ -246,11 +247,12 @@ def _scan_firewall(home: Path) -> List[Tuple[str, str]]:
         for value in compute.get(key) or []:
             if isinstance(value, str) and value:
                 found.append((f"privacy_rules.json:compute.{key}", value))
-    quotas = compute.get(_FIREWALL_QUOTAS)
-    if isinstance(quotas, dict):
-        for value in quotas:
-            if isinstance(value, str) and value and not value.startswith("_"):
-                found.append((f"privacy_rules.json:compute.{_FIREWALL_QUOTAS}", value))
+    for key in _FIREWALL_KEYED_BY_ALIAS:
+        table = compute.get(key)
+        if isinstance(table, dict):
+            for value in table:
+                if isinstance(value, str) and value and not value.startswith("_"):
+                    found.append((f"privacy_rules.json:compute.{key}", value))
     return found
 
 
@@ -271,11 +273,12 @@ def _rename_firewall(home: Path, old: str, new: str) -> Tuple[int, List[str]]:
         if isinstance(values, list) and old in values:
             compute[key] = [new if value == old else value for value in values]
             changed += 1
-    quotas = compute.get(_FIREWALL_QUOTAS)
-    if isinstance(quotas, dict) and old in quotas:
-        # Rebuilt in order so the entry keeps its place beside its comment.
-        compute[_FIREWALL_QUOTAS] = {(new if k == old else k): v for k, v in quotas.items()}
-        changed += 1
+    for key in _FIREWALL_KEYED_BY_ALIAS:
+        table = compute.get(key)
+        if isinstance(table, dict) and old in table:
+            # Rebuilt in order so the entry keeps its place beside its comment.
+            compute[key] = {(new if k == old else k): v for k, v in table.items()}
+            changed += 1
     if not changed:
         return 0, []
     try:

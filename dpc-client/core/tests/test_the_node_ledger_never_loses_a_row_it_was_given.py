@@ -203,3 +203,59 @@ def test_spent_today_sums_this_callers_rows_on_this_alias_for_the_utc_day(tmp_pa
     assert ledger.spent_today("ds_flash", caller="us", now=noon) == pytest.approx(4.75)
     assert ledger.spent_today("ds_flash", caller="nobody", now=noon) == 0.0
     assert ledger.spent_today("ds_flash", caller="us", caller_kind="gateway", now=just_before_midnight) == pytest.approx(32.0)
+
+
+def test_the_tariff_columns_travel_as_one_group_or_not_at_all(tmp_path):
+    """The owner's tariff (ADR-041 D3, amendment): a row carries the applied
+    rates frozen with their currency and the dated entry they came from, or
+    none of the four. A row with half a tariff would be read as a price by one
+    reader and as a gift by another, so a partial group is refused. `cost_usd`
+    stays what the call cost the host, in USD, beside them."""
+    ledger = NodeLedger(tmp_path / "ledger")
+    priced = _row(SEPTEMBER, request_id="priced", tariff_in=20.0, tariff_out=60, tariff_currency="RUB",
+                  tariff_at="2026-09-01", task_id="task-1")
+    free = _row(SEPTEMBER, request_id="free", tariff_in=0, tariff_out=0, tariff_currency="USD", tariff_at="2026-08-15")
+    gift = _row(SEPTEMBER, request_id="gift")
+    for row in (priced, free, gift):
+        ledger.append(row)
+
+    assert list(priced) == [
+        "request_id", "caller", "caller_kind", "alias", "model", "route",
+        "prompt_tokens", "completion_tokens", "thinking_tokens", "counts_source",
+        "started_at", "duration_s", "billing", "cost_usd",
+        "tariff_in", "tariff_out", "tariff_currency", "tariff_at", "task_id",
+    ]
+    assert (priced["tariff_in"], priced["tariff_out"]) == (20.0, 60.0)
+    assert isinstance(priced["tariff_out"], float) and priced["cost_usd"] == 0.0041
+    assert (free["tariff_in"], free["tariff_out"], free["tariff_currency"], free["tariff_at"]) == (0.0, 0.0, "USD", "2026-08-15")
+    assert not [k for k in gift if k.startswith("tariff_")]
+
+    read_back = list(ledger.rows())
+    assert read_back == [priced, free, gift]
+    assert [r.get("tariff_in") for r in read_back] == [20.0, 0.0, None]
+
+
+@pytest.mark.parametrize("partial", [
+    dict(tariff_in=20.0, tariff_out=60.0, tariff_currency="RUB"),
+    dict(tariff_in=20.0, tariff_currency="RUB", tariff_at="2026-09-01"),
+    dict(tariff_in=20.0, tariff_out=60.0, tariff_at="2026-09-01"),
+    dict(tariff_out=60.0, tariff_currency="RUB", tariff_at="2026-09-01"),
+    dict(tariff_currency="RUB"),
+])
+def test_a_partial_tariff_group_is_refused(partial):
+    with pytest.raises(ValueError) as refused:
+        _row(SEPTEMBER, **partial)
+    assert "tariff" in str(refused.value)
+
+
+@pytest.mark.parametrize("bad", [
+    dict(tariff_currency="rub"), dict(tariff_currency="XYZ"), dict(tariff_currency="RUB "),
+    dict(tariff_at="September 1st"), dict(tariff_at="2026-9-1"), dict(tariff_at=20260901),
+    dict(tariff_in=-1.0), dict(tariff_out=True), dict(tariff_in="20"),
+])
+def test_a_wrong_currency_date_or_rate_is_refused_rather_than_written(bad):
+    fields = dict(tariff_in=20.0, tariff_out=60.0, tariff_currency="RUB", tariff_at="2026-09-01")
+    fields.update(bad)
+    with pytest.raises(ValueError) as refused:
+        _row(SEPTEMBER, **fields)
+    assert "tariff" in str(refused.value)

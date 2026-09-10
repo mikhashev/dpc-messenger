@@ -19,6 +19,15 @@ chat path a row's `task_id` is the conversation, and the join to
 `task_complete` goes through `conversation_id` and the task's start and
 completion timestamps until that call passes the id it minted.
 
+Four more, optional and travelling as one group: `tariff_in`, `tariff_out`,
+`tariff_currency`, `tariff_at` — the applied values of the owner's tariff
+(`compute.serving_tariff`) at the moment of the call, frozen with their
+currency, because rows are forever and the declaration is not: the rates per
+1M tokens, the ISO 4217 unit they are in, and the `from` day of the entry that
+applied. Absent is «not declared», the gift; zero is «declared free»; more is
+paid (ADR-041 D3, amendment). `cost_usd` beside them is the host's own cost
+and stays USD — what the call cost this node, not what it charges for it.
+
 Storage is `<DPC_HOME>/ledger/usage-YYYY-MM.jsonl`, one partition per month of
 `started_at`. Not `dpc_agent.utils.append_jsonl`: that rotates at 5 MB by
 renaming the file to `.1` and deleting the previous `.1`, and a financial
@@ -39,9 +48,11 @@ import json
 import logging
 import os
 import time
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional
+
+from .firewall import ISO_4217_CODES, parse_iso_date
 
 log = logging.getLogger(__name__)
 
@@ -82,15 +93,24 @@ def usage_row(
     cost_usd: Any,
     task_id: Optional[str] = None,
     conversation_id: Optional[str] = None,
+    tariff_in: Any = None,
+    tariff_out: Any = None,
+    tariff_currency: Optional[str] = None,
+    tariff_at: Any = None,
 ) -> Dict[str, Any]:
     """One row in D3's column order.
 
     A value outside the vocabulary is refused here rather than written: a row
     saying `caller_kind=stranger` would be read by nothing. `gateway` is
     accepted and emitted by nothing yet — it is reserved for the gateway child.
+
+    The four `tariff_*` columns are written when `tariff_in` is given and
+    then all together: half a tariff would be a price to one reader and a
+    gift to another, so a group with a member missing is refused.
     """
     if not request_id:
         raise ValueError("a usage row needs a request_id")
+    tariff = _tariff_columns(tariff_in, tariff_out, tariff_currency, tariff_at)
     for name, value, allowed in (
         ("caller_kind", caller_kind, CALLER_KINDS),
         ("route", route, ROUTES),
@@ -119,11 +139,41 @@ def usage_row(
     }
     if billing == "pay_per_use" and cost_usd is None:
         log.warning("Usage row %s is pay_per_use with no cost: the price was not computed", request_id)
+    row.update(tariff)
     if task_id:
         row["task_id"] = task_id
     if conversation_id:
         row["conversation_id"] = conversation_id
     return row
+
+
+def _tariff_columns(tariff_in: Any, tariff_out: Any, tariff_currency: Any, tariff_at: Any) -> Dict[str, Any]:
+    """The four tariff columns as a group, or an empty dict when none was given."""
+    given = {
+        "tariff_in": tariff_in, "tariff_out": tariff_out,
+        "tariff_currency": tariff_currency, "tariff_at": tariff_at,
+    }
+    if all(value is None for value in given.values()):
+        return {}
+    missing = [name for name, value in given.items() if value is None]
+    if missing:
+        raise ValueError(f"a tariff is written whole or not at all; missing {missing}")
+    for name in ("tariff_in", "tariff_out"):
+        rate = given[name]
+        if isinstance(rate, bool) or not isinstance(rate, (int, float)) or rate < 0:
+            raise ValueError(f"{name}={rate!r} is not a non-negative number per 1M tokens")
+    if tariff_currency not in ISO_4217_CODES:
+        raise ValueError(f"tariff_currency={tariff_currency!r} is not an ISO 4217 code")
+    if isinstance(tariff_at, date) and not isinstance(tariff_at, datetime):
+        tariff_at = tariff_at.isoformat()
+    if parse_iso_date(tariff_at) is None:
+        raise ValueError(f"tariff_at={tariff_at!r} is not an ISO date YYYY-MM-DD")
+    return {
+        "tariff_in": float(tariff_in),
+        "tariff_out": float(tariff_out),
+        "tariff_currency": tariff_currency,
+        "tariff_at": tariff_at,
+    }
 
 
 def _ends_mid_line(path: Path) -> bool:
