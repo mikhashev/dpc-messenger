@@ -225,14 +225,33 @@ def _rename_registry(home: Path, old: str, new: str) -> Tuple[int, List[str]]:
     return len(entries), []
 
 
+# The serving lists and the quota table are keyed by alias too. A rename that
+# followed `serving_alias` alone would leave `serving_local` naming the old
+# alias, and the next load refuses two keys that disagree.
+_FIREWALL_LISTS = ("serving_local", "serving_vendor")
+_FIREWALL_QUOTAS = "vendor_quotas"
+
+
 def _scan_firewall(home: Path) -> List[Tuple[str, str]]:
     rules = _read_json(home / "privacy_rules.json")
     if not isinstance(rules, dict):
         return []
     compute = rules.get("compute")
-    if isinstance(compute, dict) and compute.get("serving_alias"):
-        return [("privacy_rules.json:compute.serving_alias", compute["serving_alias"])]
-    return []
+    if not isinstance(compute, dict):
+        return []
+    found: List[Tuple[str, str]] = []
+    if compute.get("serving_alias"):
+        found.append(("privacy_rules.json:compute.serving_alias", compute["serving_alias"]))
+    for key in _FIREWALL_LISTS:
+        for value in compute.get(key) or []:
+            if isinstance(value, str) and value:
+                found.append((f"privacy_rules.json:compute.{key}", value))
+    quotas = compute.get(_FIREWALL_QUOTAS)
+    if isinstance(quotas, dict):
+        for value in quotas:
+            if isinstance(value, str) and value and not value.startswith("_"):
+                found.append((f"privacy_rules.json:compute.{_FIREWALL_QUOTAS}", value))
+    return found
 
 
 def _rename_firewall(home: Path, old: str, new: str) -> Tuple[int, List[str]]:
@@ -241,15 +260,30 @@ def _rename_firewall(home: Path, old: str, new: str) -> Tuple[int, List[str]]:
     if not isinstance(rules, dict):
         return 0, []
     compute = rules.get("compute")
-    if not isinstance(compute, dict) or compute.get("serving_alias") != old:
+    if not isinstance(compute, dict):
         return 0, []
-    compute["serving_alias"] = new
+    changed = 0
+    if compute.get("serving_alias") == old:
+        compute["serving_alias"] = new
+        changed += 1
+    for key in _FIREWALL_LISTS:
+        values = compute.get(key)
+        if isinstance(values, list) and old in values:
+            compute[key] = [new if value == old else value for value in values]
+            changed += 1
+    quotas = compute.get(_FIREWALL_QUOTAS)
+    if isinstance(quotas, dict) and old in quotas:
+        # Rebuilt in order so the entry keeps its place beside its comment.
+        compute[_FIREWALL_QUOTAS] = {(new if k == old else k): v for k, v in quotas.items()}
+        changed += 1
+    if not changed:
+        return 0, []
     try:
         _write_json(path, rules)
     except OSError as exc:
         logger.warning("Could not rewrite %s: %s", path, exc)
         return 0, []
-    return 1, []
+    return changed, []
 
 
 def _ini_place(section: str, key: str, is_list: bool, legacy: str = "",

@@ -39,6 +39,7 @@ from . import provider_alias_refs
 from .providers.base import REASONING_EFFORTS, REASONING_OFF
 from .local_api import LocalApiServer, sends_own_response, slow_command
 from .file_server import FileServer
+from .gateway import GATEWAY_KEY_NAME, GatewayConfigError, GatewayServer
 from .context_cache import ContextCache
 from .settings import Settings
 from .token_cache import TokenCache
@@ -313,6 +314,11 @@ class CoreService:
 
         # P2P coordinator (coordinates P2P connection lifecycle)
         self.p2p_coordinator = P2PCoordinator(self)
+
+        # The OpenAI-compatible gateway follows the coordinator because a local
+        # alias queues on the coordinator's card lock (ADR-041 D1, D5). None
+        # unless [gateway] enabled: a new listener is opt-in.
+        self.gateway: Optional[GatewayServer] = self._build_gateway()
 
         # File transfer manager (handles P2P file transfers)
         self.file_transfer_manager = FileTransferManager(
@@ -821,6 +827,10 @@ class CoreService:
         api_task.set_name("local_api")
         self._background_tasks.add(api_task)
 
+        # Awaited rather than tracked: `start()` returns once bound, like
+        # `websockets.serve`, and a refusal has to be logged where it happens.
+        await self._start_gateway()
+
         # Start file server for browser file access (v0.13.3+)
         self.file_server.start()
         logger.info("File server started on http://127.0.0.1:9998")
@@ -1213,9 +1223,51 @@ class CoreService:
         # Shutdown core components
         await self.p2p_manager.shutdown_all()
         await self.local_api.stop()
+        await self._stop_gateway()
         self.file_server.stop()  # Stop HTTP file server
         await self.hub_client.close()
         logger.info("D-PC Core Service shut down")
+
+    def _build_gateway(self) -> Optional[GatewayServer]:
+        """The OpenAI-compatible gateway, or None when `[gateway] enabled` is off.
+
+        A host other than 127.0.0.1 is refused here by name (ADR-041 D1) the
+        same way a refused serving list is in `_start_gateway`: the door stays
+        shut, the reason is logged, the messenger runs.
+        """
+        if not self.settings.get_gateway_enabled():
+            return None
+        coordinator = getattr(self, "p2p_coordinator", None)
+        try:
+            return GatewayServer(
+                self,
+                host=self.settings.get_gateway_host(),
+                port=self.settings.get_gateway_port(),
+                key_path=DPC_HOME_DIR / GATEWAY_KEY_NAME,
+                inference_lock=coordinator._peer_inference_lock if coordinator is not None else None,
+            )
+        except GatewayConfigError as e:
+            logger.error("OpenAI-compatible gateway refused to start: %s", e)
+            return None
+
+    async def _start_gateway(self) -> None:
+        """Open the gateway if there is one; a refused list or a taken port
+        keeps the door shut and the messenger running, with the reason logged."""
+        if self.gateway is None:
+            return
+        try:
+            await self.gateway.start()
+        except GatewayConfigError as e:
+            logger.error("OpenAI-compatible gateway refused to start: %s", e)
+            self.gateway = None
+        except OSError as e:
+            logger.error("OpenAI-compatible gateway could not listen on %s:%d: %s",
+                         self.gateway.host, self.gateway.port, e)
+            self.gateway = None
+
+    async def _stop_gateway(self) -> None:
+        if self.gateway is not None:
+            await self.gateway.stop()
 
     async def _discover_external_ip(self):
         """

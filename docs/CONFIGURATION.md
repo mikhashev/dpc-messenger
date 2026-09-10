@@ -165,6 +165,89 @@ host = 127.0.0.1
 
 ---
 
+### Gateway Settings (`[gateway]`)
+
+The OpenAI-compatible gateway (ADR-041 D1): a second loopback listener that serves
+`GET /v1/models` and `POST /v1/chat/completions` to tools on this machine — an IDE
+plugin such as Continue, a CLI, a script — from the aliases this node names in
+`privacy_rules.json`. Off by default: a new open port is opt-in.
+
+#### `enabled`
+- **Description:** Start the gateway with the client
+- **Default:** `false`
+- **Environment Variable:** `DPC_GATEWAY_ENABLED`
+
+#### `port`
+- **Description:** Port the gateway listens on. 9998 is the file server and 9999 the
+  local API, so the three loopback listeners are neighbours
+- **Default:** `9997`
+- **Environment Variable:** `DPC_GATEWAY_PORT`
+
+#### `host`
+- **Description:** Read, not chosen: the gateway listens on `127.0.0.1` only, and any
+  other value is refused at start with a message naming it (ADR-041 D1)
+- **Default:** `127.0.0.1`
+
+**The key.** The first start writes `~/.dpc/.gateway_key` (`secrets.token_urlsafe(32)`)
+and never rewrites it: a tool keeps the key in its own config, so a key that changed on
+every restart would break it on every restart. Every request carries it as
+`Authorization: Bearer <key>`; a request without it, or with a different one, is
+answered `401`. **Rotation is manual:** stop the client, delete `~/.dpc/.gateway_key`,
+start the client — a new key is written — and paste the new value into the tool's
+config. On Linux/macOS the file is written with mode `0600`; on Windows the mode bits
+are advisory and the file inherits the ACL of your home directory, as `.ws_token` does.
+
+**What it serves.** Only the aliases in the two serving lists of `privacy_rules.json`;
+an alias outside them is `404`, and the gateway never falls back to `default_provider`:
+
+```json
+"compute": {
+  "serving_local": ["ollama_local"],
+  "serving_vendor": ["ds_flash"],
+  "vendor_quotas": {"ds_flash": 2.0}
+}
+```
+
+- `serving_local` — aliases whose provider runs on this machine (`ollama`,
+  `llamacpp_server`, `local_whisper`). The card is the scarce resource: a request queues
+  behind peer inference on the same lock, and one that would wait longer than
+  `[connection] remote_inference_timeout` is answered `503` (the card is busy). The
+  first entry is also what the P2P door serves peers from; the older `serving_alias`
+  key is still read and folded into this list with a warning, and a file carrying both
+  keys with different values is refused at load.
+- `serving_vendor` — aliases whose provider is a paid API (`anthropic`, `deepseek`,
+  `zai`, `openai_compatible`, `gemini`, `github_models`, `gigachat`). Money is the
+  scarce resource, so **every entry needs a ceiling in `vendor_quotas`** — USD per UTC
+  calendar day, per caller; a vendor alias without one is a configuration error refused
+  at load with a message naming it (ADR-041 D5). The day's spend is read from the node
+  ledger (`~/.dpc/ledger/`), so it survives a restart; at or over the ceiling the
+  gateway answers `429` naming the alias, the ceiling and the spend.
+- A `remote_peer` or `dpc_agent` alias may stand in neither list: what is shared is not
+  shared onward (ADR-041 D7).
+
+**Shape and limits.** `model` in a request is the alias; `/v1/models` lists the aliases
+with `owned_by` `local` or `vendor`. `stream: true` is honoured on the wire as one
+`data:` chunk carrying the whole answer followed by `data: [DONE]` — the provider layer
+has no streaming entry point yet (ADR-041 M1), so nothing arrives token by token. Every
+completion leaves one usage row with `caller_kind = gateway` in the node ledger. A
+request whose `Host` header is neither `127.0.0.1:<port>` nor `localhost:<port>` is
+answered `400`.
+
+**Example** (Continue, `config.json`):
+```json
+{
+  "models": [{
+    "title": "DPC ollama_local",
+    "provider": "openai",
+    "apiBase": "http://127.0.0.1:9997/v1",
+    "apiKey": "<contents of ~/.dpc/.gateway_key>",
+    "model": "ollama_local"
+  }]
+}
+```
+
+---
+
 ### System Settings (`[system]`)
 
 #### `auto_collect_device_info`
@@ -227,7 +310,7 @@ As of schema version **1.1**, device context includes a `special_instructions` b
 
 <!-- BEGIN GENERATED CONFIG REFERENCE -->
 
-Every section and key `_create_default_config` writes into a fresh `~/.dpc/config.ini`: **25 sections, 152 keys**. Generated from `settings.py` by `tools/config_reference.py` — edit the code, then re-run it; do not hand-edit between the markers.
+Every section and key `_create_default_config` writes into a fresh `~/.dpc/config.ini`: **26 sections, 155 keys**. Generated from `settings.py` by `tools/config_reference.py` — edit the code, then re-run it; do not hand-edit between the markers.
 
 An empty default means the key is written blank and the feature stays off until you fill it in. Every key also accepts an environment variable named `DPC_<SECTION>_<KEY>` in upper case.
 
@@ -311,6 +394,14 @@ An empty default means the key is written blank and the feature stays off until 
 | `preparation_timeout_per_gb` | `40` | Additional timeout per GB (40s/GB) |
 | `preparation_progress_interval_mb` | `100` | Emit progress every N MB during SHA256 |
 | `preparation_progress_interval_chunks` | `10000` | Emit progress every N chunks during CRC32 |
+
+#### `[gateway]`
+
+| Key | Default | Notes |
+|---|---|---|
+| `enabled` | `false` | Serve /v1/models and /v1/chat/completions to local tools (ADR-041) |
+| `port` | `9997` | 9998 is the file server, 9999 the local API |
+| `host` | `127.0.0.1` | Not configurable: any other value is refused at start (ADR-041 D1) |
 
 #### `[gossip]`
 

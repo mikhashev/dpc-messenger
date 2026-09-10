@@ -244,6 +244,39 @@ class NodeLedger:
             except FileNotFoundError:
                 continue
 
+    def spent_today(
+        self,
+        alias: str,
+        *,
+        caller: Optional[str],
+        caller_kind: Optional[str] = None,
+        now: Optional[datetime] = None,
+    ) -> float:
+        """USD this caller has spent on this alias in the current UTC day.
+
+        The first reader of the ledger, and the one a vendor quota is checked
+        against (ADR-041 D5). The ceiling is per caller — each caller's own
+        sum, never a total over callers — so the caller is a required
+        argument even where it has one value. `caller_kind` narrows further
+        when given. A null `cost_usd` is a call nobody priced and adds
+        nothing; the row's `started_at` is already UTC, so the day is its
+        first ten characters.
+        """
+        moment = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+        day = moment.date().isoformat()
+        total = 0.0
+        for row in self.rows(month=day[:7]):
+            if row.get("alias") != alias or row.get("caller") != caller:
+                continue
+            if caller_kind is not None and row.get("caller_kind") != caller_kind:
+                continue
+            if not str(row.get("started_at", "")).startswith(day):
+                continue
+            cost = row.get("cost_usd")
+            if cost is not None:
+                total += float(cost)
+        return total
+
 
 def default_ledger() -> NodeLedger:
     """The node's own ledger, resolved when asked so a moved home is honoured."""

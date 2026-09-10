@@ -73,6 +73,14 @@ class Settings:
             'host': '127.0.0.1'
         }
 
+        # The OpenAI-compatible gateway (ADR-041 D1): a second loopback listener
+        # for tools on this machine, off until asked for because it is a new port.
+        self._config['gateway'] = {
+            'enabled': 'false',  # Serve /v1/models and /v1/chat/completions to local tools (ADR-041)
+            'port': '9997',  # 9998 is the file server, 9999 the local API
+            'host': '127.0.0.1'  # Not configurable: any other value is refused at start (ADR-041 D1)
+        }
+
         # A fresh config ships with no TURN relay at all: empty here means the same
         # thing the getters already return for a missing key, so "the default" has one
         # answer instead of two. Relaying is opt-in by name — nobody's traffic should
@@ -420,6 +428,20 @@ class Settings:
     def get_api_host(self) -> str:
         """Get the local API server host."""
         return self.get('api', 'host', '127.0.0.1')
+
+    def get_gateway_enabled(self) -> bool:
+        """Whether the OpenAI-compatible gateway listens at all (off by default)."""
+        value = self.get('gateway', 'enabled', 'false')
+        return value.lower() in ('true', '1', 'yes')
+
+    def get_gateway_port(self) -> int:
+        """Get the OpenAI-compatible gateway port."""
+        return int(self.get('gateway', 'port', '9997'))
+
+    def get_gateway_host(self) -> str:
+        """The gateway's bind address as written; the gateway itself refuses
+        anything but 127.0.0.1 (ADR-041 D1), so this is read, not chosen."""
+        return self.get('gateway', 'host', '127.0.0.1')
 
     def get_hub_auto_connect(self) -> bool:
         """Check if Hub should auto-connect on startup."""

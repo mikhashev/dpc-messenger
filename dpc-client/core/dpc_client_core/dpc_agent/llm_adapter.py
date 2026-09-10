@@ -31,6 +31,63 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 
+def messages_to_prompt(messages: List[Dict[str, Any]]) -> str:
+    """
+    Convert message list to single prompt string for DPC providers.
+
+    DPC's AI providers expect a prompt string, not a message list.
+    This function preserves the structure by using role markers. Module-level
+    because the gateway flattens an OpenAI `messages` array the same way, and
+    `loop._sanitize_tool_result` guards tool output against these same
+    markers: one scheme, one definition.
+    """
+    parts = []
+
+    for msg in messages:
+        role = msg.get("role", "")
+        content = msg.get("content", "")
+
+        # Handle multipart content (system messages with cache_control blocks)
+        if isinstance(content, list):
+            text_parts = []
+            for block in content:
+                if isinstance(block, dict) and block.get("type") == "text":
+                    text = block.get("text", "")
+                    if text:
+                        text_parts.append(text)
+            content = "\n\n".join(text_parts)
+
+        # Skip empty content
+        if not content or not str(content).strip():
+            continue
+
+        # Format based on role
+        if role == "system":
+            parts.append(f"[SYSTEM]\n{content}")
+        elif role == "user":
+            parts.append(f"[USER]\n{content}")
+        elif role == "assistant":
+            tool_calls = msg.get("tool_calls") or []
+            if tool_calls:
+                tc_lines = []
+                for tc in tool_calls:
+                    fn = tc.get("function", {})
+                    tc_lines.append(f'```tool_call\n{{"name": "{fn.get("name", "")}", "arguments": {fn.get("arguments", "{}")}}}\n```')
+                tc_text = "\n".join(tc_lines)
+                if content:
+                    parts.append(f"[ASSISTANT]\n{content}\n{tc_text}")
+                else:
+                    parts.append(f"[ASSISTANT]\n{tc_text}")
+            elif content:
+                parts.append(f"[ASSISTANT]\n{content}")
+        elif role == "tool":
+            # Include tool results
+            tool_call_id = msg.get("tool_call_id", "unknown")
+            parts.append(f"[TOOL RESULT: {tool_call_id}]\n{content}")
+
+    return "\n\n".join(parts)
+
+
 class DpcLlmAdapter:
     """
     Adapts DPC's LLMManager to the interface expected by the Ouroboros agent loop.
@@ -1205,57 +1262,9 @@ class DpcLlmAdapter:
         return messages
 
     def _messages_to_prompt(self, messages: List[Dict[str, Any]]) -> str:
-        """
-        Convert message list to single prompt string for DPC providers.
-
-        DPC's AI providers expect a prompt string, not a message list.
-        This method preserves the structure by using role markers.
-        """
-        parts = []
-
-        for msg in messages:
-            role = msg.get("role", "")
-            content = msg.get("content", "")
-
-            # Handle multipart content (system messages with cache_control blocks)
-            if isinstance(content, list):
-                text_parts = []
-                for block in content:
-                    if isinstance(block, dict) and block.get("type") == "text":
-                        text = block.get("text", "")
-                        if text:
-                            text_parts.append(text)
-                content = "\n\n".join(text_parts)
-
-            # Skip empty content
-            if not content or not str(content).strip():
-                continue
-
-            # Format based on role
-            if role == "system":
-                parts.append(f"[SYSTEM]\n{content}")
-            elif role == "user":
-                parts.append(f"[USER]\n{content}")
-            elif role == "assistant":
-                tool_calls = msg.get("tool_calls") or []
-                if tool_calls:
-                    tc_lines = []
-                    for tc in tool_calls:
-                        fn = tc.get("function", {})
-                        tc_lines.append(f'```tool_call\n{{"name": "{fn.get("name", "")}", "arguments": {fn.get("arguments", "{}")}}}\n```')
-                    tc_text = "\n".join(tc_lines)
-                    if content:
-                        parts.append(f"[ASSISTANT]\n{content}\n{tc_text}")
-                    else:
-                        parts.append(f"[ASSISTANT]\n{tc_text}")
-                elif content:
-                    parts.append(f"[ASSISTANT]\n{content}")
-            elif role == "tool":
-                # Include tool results
-                tool_call_id = msg.get("tool_call_id", "unknown")
-                parts.append(f"[TOOL RESULT: {tool_call_id}]\n{content}")
-
-        return "\n\n".join(parts)
+        """The adapter's prompt flattening; the shared function does the work
+        so the gateway speaks the same role markers without a second copy."""
+        return messages_to_prompt(messages)
 
     def _format_tools_for_prompt(self, tools: List[Dict[str, Any]]) -> str:
         """Format tool schemas as text descriptions for prompt injection."""

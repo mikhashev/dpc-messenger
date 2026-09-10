@@ -181,3 +181,25 @@ def test_a_row_nobody_priced_says_null_not_zero(tmp_path, caplog):
     assert [r["cost_usd"] for r in ledger.rows()] == [None, None]
     warned = [r.message for r in caplog.records if r.levelno == logging.WARNING]
     assert len(warned) == 1 and "unpriced" in warned[0]
+
+
+def test_spent_today_sums_this_callers_rows_on_this_alias_for_the_utc_day(tmp_path):
+    """The first reader of the ledger (ADR-041 D5): a vendor alias's daily
+    ceiling is per caller, so the day's spend is the sum over rows carrying
+    this alias *and* this caller, on the UTC calendar day, and a null cost —
+    a call nobody priced — adds nothing rather than raising."""
+    ledger = NodeLedger(tmp_path / "ledger")
+    noon = datetime(2026, 9, 10, 12, 0, tzinfo=timezone.utc)
+    just_before_midnight = datetime(2026, 9, 9, 23, 59, 59, tzinfo=timezone.utc)
+    ledger.append(_row(noon, request_id="ours-1", caller="us", caller_kind="gateway", cost_usd=0.25))
+    ledger.append(_row(noon, request_id="ours-2", caller="us", caller_kind="gateway", cost_usd=0.5))
+    ledger.append(_row(noon, request_id="ours-peer", caller="us", caller_kind="peer", cost_usd=4.0))
+    ledger.append(_row(noon, request_id="theirs", caller="them", caller_kind="gateway", cost_usd=8.0))
+    ledger.append(_row(noon, request_id="other-alias", caller="us", caller_kind="gateway", alias="ds_pro", cost_usd=16.0))
+    ledger.append(_row(just_before_midnight, request_id="yesterday", caller="us", caller_kind="gateway", cost_usd=32.0))
+    ledger.append(_row(noon, request_id="unpriced", caller="us", caller_kind="gateway", cost_usd=None))
+
+    assert ledger.spent_today("ds_flash", caller="us", caller_kind="gateway", now=noon) == pytest.approx(0.75)
+    assert ledger.spent_today("ds_flash", caller="us", now=noon) == pytest.approx(4.75)
+    assert ledger.spent_today("ds_flash", caller="nobody", now=noon) == 0.0
+    assert ledger.spent_today("ds_flash", caller="us", caller_kind="gateway", now=just_before_midnight) == pytest.approx(32.0)

@@ -40,6 +40,7 @@ dependencies = [
     "trafilatura>=1.12,<3.0",
     "stopwordsiso>=0.6",
     "discord.py>=2.7.0,<3.0.0",
+    "aiohttp>=3.14,<4",  # the gateway's HTTP server; declared, not inherited from discord.py (ADR-041 D6)
     "keyring>=24.0",
     "cryptography>=50.0.0",
 ]
