@@ -449,3 +449,99 @@ def test_the_predicate_reads_through_the_sdk_wrapper():
     """The failure never arrives bare — the wrapper's own message says only
     'Request timed out.'"""
     assert never_connected(_wrapped_connect_failure()) is True
+
+
+# --- the notice outlives the loop that opened it --------------------------------
+
+def test_a_wait_cancelled_from_outside_still_closes_its_notice(observed):
+    """The banner that never clears.
+
+    `asyncio.wait_for` cancels the task it is waiting on, and a cancellation is
+    a `BaseException`: it passes through the loop's `except Exception` without
+    reaching any of the exits that close the notice. A snapshot summarisation
+    that outran its bound left one row on screen for the life of the process.
+    """
+    p = _provider(budget=600)
+
+    async def never_answers():
+        await asyncio.sleep(600)
+
+    async def run_until_the_caller_gives_up():
+        with pytest.raises(asyncio.TimeoutError):
+            await asyncio.wait_for(
+                p._retry_with_backoff(never_answers, RuntimeError("Connection error")),
+                timeout=0.5,
+            )
+
+    asyncio.run(run_until_the_caller_gives_up())
+
+    opened = [pl for ev, pl in observed if ev == "provider_retry"]
+    closed = [pl for ev, pl in observed if ev == "provider_retry_finished"]
+    assert opened, "no row was ever opened, so this run proves nothing"
+    assert len(closed) == 1, (
+        f"{len(opened)} rows opened and {len(closed)} closed — what is left "
+        f"on screen cannot be removed by anything"
+    )
+    assert closed[0]["retry_id"] == opened[0]["retry_id"]
+    assert closed[0]["attempts"] == opened[-1]["attempt"], (
+        "the closing notice does not carry the attempt the last row showed"
+    )
+    assert closed[0]["retry_id"] not in base._retry_announced, (
+        "the id never leaves the registry, which then grows with every wait"
+    )
+
+
+def test_the_closing_notice_cannot_be_sent_twice(observed):
+    """Why this is idempotence rather than a «did I already speak?» flag.
+
+    Such a flag would have to be set at every speaking exit, and the exit added
+    next would forget it. A repeat call that is a no-op cannot be forgotten.
+    """
+    base.announce_retry({"retry_id": "deepseek_flash:4242", "attempt": 2})
+    base.announce_retry_finished("deepseek_flash:4242", "deepseek_flash", "cancelled", 2)
+    base.announce_retry_finished("deepseek_flash:4242", "deepseek_flash", "abandoned")
+
+    closed = [pl for ev, pl in observed if ev == "provider_retry_finished"]
+    assert [pl["outcome"] for pl in closed] == ["cancelled"], (
+        f"the second close was not swallowed: {closed}"
+    )
+
+
+def test_a_wait_that_never_spoke_closes_nothing(observed):
+    """The flicker an unconditional close would otherwise create.
+
+    A budget already spent when the loop is entered never reaches an
+    announcement. Closing a row nobody opened would put a banner on screen and
+    delete it in the same breath, for a wait that never happened.
+    """
+    p = _provider(budget=0)
+
+    async def always_busy():
+        raise RuntimeError("503 service unavailable")
+
+    with pytest.raises(RuntimeError):
+        asyncio.run(p._retry_with_backoff(always_busy, RuntimeError("503 service unavailable")))
+
+    assert observed == [], f"a wait that never announced itself was closed: {observed}"
+
+
+def test_a_cancellation_before_the_first_notice_closes_nothing(observed):
+    """The same guard against the shape that will arrive later: an exit taken
+    between registering the waiter and the first announcement. There is no such
+    exit in the loop today, so the loop is stood in for rather than raced."""
+    p = _provider(budget=600)
+
+    async def cancelled_before_speaking(*args, **kwargs):
+        raise asyncio.CancelledError()
+
+    p._backoff_loop = cancelled_before_speaking
+
+    async def never_called():
+        raise AssertionError("the loop was stood in for; this must not run")
+
+    async def run():
+        with pytest.raises(asyncio.CancelledError):
+            await p._retry_with_backoff(never_called, RuntimeError("Connection error"))
+
+    asyncio.run(run())
+    assert observed == [], f"a wait that never announced itself was closed: {observed}"

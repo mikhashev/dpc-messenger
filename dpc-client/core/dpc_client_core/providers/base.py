@@ -134,6 +134,13 @@ def set_retry_observer(observer: Optional[Any]) -> None:
 _retry_waiters: Dict[str, Any] = {}
 _retry_seq = itertools.count(1)
 
+# The waits that have announced themselves, by the same id, holding the attempt
+# number the last notice carried. An id enters on the first `announce_retry` and
+# leaves on the first `announce_retry_finished`; that pairing is what makes the
+# closing notice idempotent, and is what bounds this — `_retry_with_backoff`
+# closes in a `finally` every id its loop opened.
+_retry_announced: Dict[str, int] = {}
+
 
 def register_retry_waiter(retry_id: str, flag: Any) -> None:
     """Remember the flag this wait watches, so `cancel_retry` can set it."""
@@ -229,26 +236,37 @@ def announce_retry(payload: Dict[str, Any]) -> None:
     """Say that an attempt is about to wait, and for how long."""
     if _retry_observer is None:
         return
+    retry_id = payload.get("retry_id")
+    if retry_id:
+        # Before the notice goes out, not after: an observer that raises may
+        # still have left a row on screen, and an unneeded close deletes a key
+        # that is not there while a missing one leaves the row forever.
+        _retry_announced[retry_id] = int(payload.get("attempt") or 0)
     try:
         _retry_observer("provider_retry", payload)
     except Exception:
         logger.debug("retry observer raised on provider_retry", exc_info=True)
 
 
-def announce_retry_finished(retry_id: str, alias: str, outcome: str, attempts: int) -> None:
-    """Say how a run of retries ended: `recovered` or `failed`.
+def announce_retry_finished(retry_id: str, alias: str, outcome: str,
+                            attempts: Optional[int] = None) -> None:
+    """Close the notice a run of retries opened: `recovered`, `failed`,
+    `cancelled`, or `abandoned` when the surrounding task was cancelled.
 
-    Sent when the loop ends, so an interface showing "retry 3" always has
-    something that clears it: `recovered`, `failed`, or `cancelled`. The one
-    ending that sends nothing is the surrounding task being cancelled, which
-    happens at shutdown, when there is no interface left to tell.
+    Idempotent by `retry_id`, and silent for an id that never announced a wait
+    — so the caller may be a `finally` that announces unconditionally, and a
+    wait abandoned before its first notice opens no row to clear.
+
+    `attempts` defaults to the number the last notice carried, which is what
+    such a `finally` does not know.
     """
-    if _retry_observer is None:
+    announced = _retry_announced.pop(retry_id, None)
+    if announced is None or _retry_observer is None:
         return
     try:
         _retry_observer("provider_retry_finished",
-                        {"retry_id": retry_id, "alias": alias,
-                         "outcome": outcome, "attempts": attempts})
+                        {"retry_id": retry_id, "alias": alias, "outcome": outcome,
+                         "attempts": announced if attempts is None else attempts})
     except Exception:
         logger.debug("retry observer raised on provider_retry_finished", exc_info=True)
 
@@ -420,6 +438,11 @@ class AIProvider:
             )
         finally:
             forget_retry_waiter(retry_id)
+            # Every exit passes here, including the one the loop cannot catch:
+            # a task cancelled from outside raises `BaseException` straight
+            # through its `except Exception`. The call is idempotent, so a loop
+            # that already closed its own notice is not closed twice.
+            announce_retry_finished(retry_id, self.alias, "abandoned")
 
     def _cancelled(self, retry_id: str, attempt: int, started: float) -> "ProviderRetryCancelled":
         """Close the notice and build the error the chat will show.
