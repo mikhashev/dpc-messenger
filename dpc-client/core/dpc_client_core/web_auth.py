@@ -343,13 +343,13 @@ def save_cookies(
     else is not a refresh. See `_identity_changed` for what that can and
     cannot see.
 
-    No production path passes `approved_via` any more: a decision is
-    recorded by `record_approval`, which is reached only from the branch
-    where a person answered yes. Keeping the parameter here is for test
-    setup that needs an approved jar in one call — every writer of cookie
-    *bytes* (navigate writeback, close, login-window polling) leaves it
-    None, which is what makes "cookies appeared" incapable of authorising
-    anything.
+    One production path passes `approved_via`: `commit_login_cookies`, the
+    single writer reached from the branch where a person answered yes,
+    which lands the cookies and the decision in this one call. Every writer
+    of cookie *bytes* alone — navigate writeback, close — leaves it None,
+    which is what makes "cookies appeared" incapable of authorising
+    anything. A login window's poll is no longer among them: it snapshots
+    into memory, so an unanswered window writes nothing here at all.
 
     Raises ValueError when `domain` has no registrable domain: a jar keyed
     `com` is one jar holding every `.com` login, handed to any `.com` host
@@ -437,6 +437,10 @@ def record_approval(
     Takes no cookie argument on purpose: an approval that arrives together
     with a cookie snapshot is one a browser can mint by loading a page. The
     caller must already hold an explicit answer from a person.
+
+    This is the path for a yes that arrives over a jar already on disk. A
+    login window is not one: it holds its cookies in memory and a yes puts
+    both down at once, through `save_cookies(approved_via=...)`.
 
     Returns the stored `{"at", "via"}` block, or None when `domain` has no
     registrable domain or no jar — an approval over no cookies passes the

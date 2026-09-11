@@ -1570,9 +1570,12 @@ class AuthBrowser:
         # person may be shown when asked, and is read by nothing that grants.
         self._login_baseline_cookies: set[tuple[str, str]] | None = None
         self._login_seen_cookies: set[tuple[str, str]] = set()
-        # In-scope cookies THIS window wrote, which is what distinguishes a
-        # window that captured something from a jar that was already there.
-        self._login_written = 0
+        # What THIS window collected, by jar — held here and nowhere on disk
+        # until `commit_login_cookies` writes it under a human's yes. A
+        # window is clean at the start, so a site hands it guest cookies
+        # unasked; writing before the answer would replace a real jar with
+        # an anonymous one for anybody who opened a window and walked away.
+        self._login_pending: dict[str, list[dict]] | None = None
         # Normalize: accept either `domains=[...]` (new multi-domain) or
         # `domain="..."` (legacy single-domain). Both produce a list.
         if domain is not None and domains is None:
@@ -1841,13 +1844,13 @@ class AuthBrowser:
             )
         )
 
-    def _sync_cookies_to_vault(self, cookies: list[dict]) -> int:
-        """Write the session's in-scope cookies to the vault; return how
-        many were written.
+    def _scope_cookies_by_etld1(self, cookies: list[dict]) -> dict[str, list[dict]]:
+        """Group the in-scope cookies by their jar, in vault shape.
 
-        Cookies only. No call here can create an approval — `save_cookies`
-        is invoked without `approved_via`, so a jar that was never approved
-        stays unapproved however many times a page load refreshes it.
+        Writes nothing: the one place that says which of a browser's
+        cookies belong to this session's scope, shared by the writer below
+        and by the login window's in-memory snapshot, so a widened route
+        gate cannot widen what a session stores.
 
         A login window with an empty `_etld1s` would save nothing and say
         nothing — window closes, cookies exist, vault stays empty — so the
@@ -1859,15 +1862,14 @@ class AuthBrowser:
                     "— nothing can be saved and no approval recorded",
                     self._agent_id, self._domains,
                 )
-            return 0
+            return {}
         if not cookies:
             if self._login_window:
                 log.info(
                     "login window (agent=%s, %s) holds no cookies yet",
                     self._agent_id, sorted(self._etld1s),
                 )
-            return 0
-        from dpc_client_core import web_auth
+            return {}
 
         by_etld1: dict[str, list[dict]] = {}
         for c in cookies:
@@ -1883,27 +1885,56 @@ class AuthBrowser:
                 continue
             by_etld1.setdefault(matched, []).append(c)
 
-        snake = {d: _from_playwright_cookies(items) for d, items in by_etld1.items()}
-        written = 0
-        for domain, items in snake.items():
-            web_auth.save_cookies(self._agent_id, domain, items)
-            written += len(items)
-        if self._login_window and not snake:
+        if self._login_window and not by_etld1:
             log.warning(
-                "login window (agent=%s, %s) closed with cookies for other "
-                "hosts only — no approval recorded",
+                "login window (agent=%s, %s) holds cookies for other hosts "
+                "only — it has nothing of its own to save",
                 self._agent_id, sorted(self._etld1s),
             )
+        return {
+            d: _from_playwright_cookies(items) for d, items in by_etld1.items()
+        }
+
+    def _sync_cookies_to_vault(self, cookies: list[dict]) -> int:
+        """Write the session's in-scope cookies to the vault; return how
+        many were written.
+
+        Cookies only. No call here can create an approval — `save_cookies`
+        is invoked without `approved_via`, so a jar that was never approved
+        stays unapproved however many times a page load refreshes it.
+
+        Refuses a login window: that window's cookies belong in memory
+        until a person approves them (`commit_login_cookies`), because a
+        clean window is handed guest cookies by the site itself and this
+        call replaces a jar."""
+        if self._login_window:
+            log.error(
+                "refusing a vault write from a login window (agent=%s, %s) — "
+                "a login window writes only through commit_login_cookies, "
+                "once a human has approved it",
+                self._agent_id, sorted(self._etld1s),
+            )
+            return 0
+        from dpc_client_core import web_auth
+
+        written = 0
+        for domain, items in self._scope_cookies_by_etld1(cookies).items():
+            web_auth.save_cookies(self._agent_id, domain, items)
+            written += len(items)
         return written
 
     def capture_login_cookies(self) -> int:
-        """Snapshot a live login window's cookies into the vault.
+        """Snapshot a live login window's cookies **into memory**.
 
-        Polled rather than done once at close, because the human closing
-        the window is exactly the case where `close()` finds the context
-        already dead and skips every live-only step. Returns the number of
-        in-scope cookies written, 0 when nothing changed since the last
-        capture."""
+        Polled rather than done once at close, because the human closing the
+        window is exactly the case where `close()` finds the context already
+        dead and skips every live-only step; polling is equally what keeps a
+        sign-in outlasting the window timeout, and a jar rotating
+        mid-session, from being lost. The snapshot replaces the last one and
+        reaches no disk — `commit_login_cookies` is the only writer.
+
+        Returns the number of in-scope cookies captured, 0 when nothing
+        changed since the last capture."""
         if not self._login_window:
             raise RuntimeError("capture_login_cookies is for login windows only")
         if self._context is None or self._disconnected:
@@ -1935,8 +1966,39 @@ class AuthBrowser:
         if fingerprint == self._login_cookie_fingerprint:
             return 0
         self._login_cookie_fingerprint = fingerprint
-        written = self._sync_cookies_to_vault(cookies)
-        self._login_written += written
+        snapshot = self._scope_cookies_by_etld1(cookies)
+        captured = sum(len(items) for items in snapshot.values())
+        # Replaced only by a non-empty snapshot: a site that clears its
+        # cookies as the window dies must not erase what the sign-in
+        # produced a moment earlier.
+        if captured:
+            self._login_pending = snapshot
+        return captured
+
+    def commit_login_cookies(self, via: str | None = None) -> int:
+        """Write the captured snapshot and the human's approval in one go.
+
+        The only path by which a login window reaches the vault, and it is
+        reached only from the branch where a person answered yes — so a
+        refusal, a silence and an absent UI are all true no-ops on disk.
+        `approved_via` makes the cookies and the decision one write: an
+        approval can never stand over bytes some other act put there.
+
+        Returns the number of cookies written; 0 means there was nothing in
+        scope to attach an approval to."""
+        if not self._login_window:
+            raise RuntimeError("commit_login_cookies is for login windows only")
+        if not self._login_pending:
+            return 0
+        from dpc_client_core import web_auth
+
+        written = 0
+        for domain, items in self._login_pending.items():
+            web_auth.save_cookies(
+                self._agent_id, domain, items,
+                approved_via=via or web_auth.APPROVAL_VIA_LOGIN_WINDOW,
+            )
+            written += len(items)
         return written
 
     def login_cookie_evidence(self) -> dict:
@@ -1954,7 +2016,9 @@ class AuthBrowser:
             "baseline_count": len(baseline),
             "now_count": len(self._login_seen_cookies),
             "new_cookie_names": new,
-            "written": self._login_written,
+            "captured": sum(
+                len(items) for items in (self._login_pending or {}).values()
+            ),
         }
 
     def _persist_session_cookies(self) -> None:
@@ -3390,9 +3454,8 @@ def _login_not_approved_message(
     )
     if outcome == APPROVAL_NO_UI:
         tail = (
-            "no UI client was connected to ask, so nobody approved it. The "
-            "cookies were saved but cannot be used. Open D-PC Messenger and "
-            "run open_login_window again."
+            "no UI client was connected to ask, so nobody approved it. Open "
+            "D-PC Messenger and run open_login_window again."
         )
     elif outcome == APPROVAL_TIMEOUT:
         tail = (
@@ -3405,7 +3468,8 @@ def _login_not_approved_message(
             "the user declined the confirmation. No approval was recorded."
         )
     return (
-        f"⚠️ No approved login for {etld1}: {window}{tail}"
+        f"⚠️ No approved login for {etld1}: {window}{tail} Nothing was "
+        f"written — any login already stored for {etld1} is untouched."
     )
 
 
@@ -3416,13 +3480,13 @@ async def open_login_window(
 ) -> str:
     """Open a headed browser for the human to log into `domain` by hand.
 
-    The window starts with nothing to steal: no `storage_state`, no vault
-    cookies. Cookies appearing in it are saved to `domain`'s jar as data.
+    The window starts with nothing to steal — no `storage_state`, no vault
+    cookies — and what appears in it is held in memory while it is open.
 
-    The approval is a separate act: when the window is finished the person
-    is asked in the UI whether they logged in, and only their yes writes the
-    `approved` block `browse_page(use_auth=...)` requires. Cookies prove
-    nothing — a site hands guest cookies to any anonymous visitor.
+    Nothing reaches `domain`'s jar until the person answers. Their yes
+    writes the cookies and the `approved` block together; a no, a silence
+    or an absent UI writes nothing, so an existing login survives a window
+    somebody opened and walked away from.
     """
     agent_id = ctx.agent_root.name
     from dpc_client_core import web_auth as _wa
@@ -3503,11 +3567,6 @@ async def open_login_window(
             if gone:
                 timed_out = False
                 break
-        evidence: dict = {}
-        try:
-            evidence = session.login_cookie_evidence()
-        except Exception as e:  # never lose the window over its own summary
-            log.debug("login window evidence failed (agent=%s): %s", agent_id, e)
     finally:
         try:
             await _run_in_session(session, "close", _touch=False)
@@ -3515,9 +3574,17 @@ async def open_login_window(
             log.debug("login window close failed (agent=%s): %s", agent_id, e)
         _login_windows.pop(agent_id, None)
 
-    # What THIS window wrote, not what the jar happens to hold: an older jar
-    # for the same site would otherwise make an empty window look successful.
-    if not evidence.get("written"):
+    # After the close, which takes the last snapshot of a window still alive.
+    evidence: dict = {}
+    try:
+        evidence = session.login_cookie_evidence()
+    except Exception as e:  # never lose the window over its own summary
+        log.debug("login window evidence failed (agent=%s): %s", agent_id, e)
+
+    # What THIS window collected, not what the jar happens to hold: an older
+    # jar for the same site would otherwise make an empty window look
+    # successful.
+    if not evidence.get("captured"):
         _wa.audit_append(agent_id, etld1, url, status="login_window_no_cookies")
         reason = (
             f"the window was still open after {timeout_sec}s and was closed"
@@ -3530,10 +3597,11 @@ async def open_login_window(
             f"and complete the sign-in."
         )
 
-    # The window is finished and a jar exists. Whether the person actually
-    # logged in is not something the jar can answer — guest cookies look
-    # like this too — so it is asked, and the diff below travels as context
-    # for the person, not as a reason to skip asking anyone.
+    # The window is finished and holds a snapshot — in memory, not on disk.
+    # Whether the person actually logged in is not something cookies can
+    # answer, guest cookies look like this too, so it is asked; the diff
+    # below travels as context for the person, not as a reason to skip
+    # asking anyone.
     _wa.log_browser_action(
         agent_id, etld1, "login_approval_requested", url, result="ok",
         closed_by="timeout" if timed_out else "human",
@@ -3570,9 +3638,10 @@ async def open_login_window(
             etld1, outcome, timed_out, timeout_sec,
         )
 
-    approval = _wa.record_approval(
-        agent_id, etld1, via=_wa.APPROVAL_VIA_LOGIN_WINDOW,
-    )
+    # The yes is what puts this window on disk at all: cookies and approval
+    # in one write, so everything above this line left the vault as it was.
+    written = session.commit_login_cookies(via=_wa.APPROVAL_VIA_LOGIN_WINDOW)
+    approval = _wa.get_approval(agent_id, etld1) if written else None
     if approval is None:
         _wa.audit_append(agent_id, etld1, url, status="login_window_no_jar")
         return (
@@ -4577,17 +4646,23 @@ def get_tools() -> List[ToolEntry]:
                 "name": "open_login_window",
                 "description": (
                     "Ask the human to log into a site by hand. Opens a headed "
-                    "browser window on that site with a clean profile — none of "
-                    "the agent's saved logins are loaded into it and no other "
-                    "site is reachable from it — so nothing can be taken from "
-                    "the window and the only cookies that can appear are the "
-                    "ones the person types in. Closing the window saves those "
-                    "cookies and records the approval that "
-                    "browse_page(use_auth=...) requires. Use this when "
-                    "browse_page says there is no approved login for a domain. "
-                    "Requires a connected UI client — a window nobody is "
-                    "looking at is refused. This call blocks until the person "
-                    "closes the window or the timeout elapses."
+                    "browser window on that site with a clean profile — none "
+                    "of the agent's saved logins are loaded into it, so there "
+                    "is nothing in it to take. The window is deliberately "
+                    "ungated and can reach any host: a sign-in goes through "
+                    "identity providers and anti-bot gates, and blocking them "
+                    "would stop the login it exists for. Cookies it collects "
+                    "are held in memory. When the window is finished the "
+                    "person is asked in the UI whether they signed in, and "
+                    "only their yes writes those cookies together with the "
+                    "approval that browse_page(use_auth=...) requires — a no, "
+                    "an unanswered question or a closed UI writes nothing at "
+                    "all, leaving any login already stored for the site "
+                    "untouched. Use this when browse_page says there is no "
+                    "approved login for a domain. Requires a connected UI "
+                    "client — a window nobody is looking at is refused. This "
+                    "call blocks until the person closes the window or the "
+                    "timeout elapses, and then until they answer."
                 ),
                 "parameters": {
                     "type": "object",
@@ -4605,8 +4680,8 @@ def get_tools() -> List[ToolEntry]:
                             "description": (
                                 "How long to wait for the person to finish, "
                                 "30-1800 seconds. The window is closed when it "
-                                "elapses; anything already signed in by then is "
-                                "kept."
+                                "elapses, and they are still asked to confirm "
+                                "whatever was signed in by then."
                             ),
                             "default": _LOGIN_WINDOW_TIMEOUT_SEC,
                         },

@@ -209,22 +209,20 @@ def test_a_login_window_with_no_scope_says_so_instead_of_saving_nothing(
 
     ab = AuthBrowser(agent_id="agent_a", domains=[], headed=True, login_window=True)
     with caplog.at_level(logging.ERROR):
-        written = ab._sync_cookies_to_vault(_pw_cookies())
+        scoped = ab._scope_cookies_by_etld1(_pw_cookies())
 
-    assert written == 0
+    assert scoped == {}
     assert any("no eTLD+1 scope" in r.getMessage() for r in caplog.records)
 
 
 # ── the write: cookies are data, approval is a decision ─────────────────
 
 
-def test_closing_a_login_window_saves_cookies_and_approves_nothing(
-    vault_home, monkeypatch,
-):
-    """The first live run destroyed the old premise: the eight cookies that
-    appeared were the guest jar x.com hands any anonymous visitor, and the
-    human had not logged in at all. Cookies are data; the approval is a
-    separate act, asked for by open_login_window."""
+def test_closing_a_login_window_writes_nothing_at_all(vault_home, monkeypatch):
+    """Cookies are data, the approval is a decision — and for a login window
+    neither is written by the browser. What the window collected sits in
+    memory until a person says yes, so a window that reaches its close with
+    nobody answering has touched no jar."""
     from dpc_client_core import web_auth
 
     ctx = _StubContext(cookies_payload=_pw_cookies())
@@ -233,8 +231,11 @@ def test_closing_a_login_window_saves_cookies_and_approves_nothing(
     )
     ab.close()
 
-    assert web_auth.get_auth_status("agent_a", TEST_DOMAIN)["has_cookies"]
+    assert web_auth.get_auth_status("agent_a", TEST_DOMAIN)["has_cookies"] is False
     assert web_auth.get_approval("agent_a", TEST_DOMAIN) is None
+    assert [c["name"] for c in ab._login_pending[TEST_DOMAIN]] == ["s"], (
+        "and yet the window did collect it — into memory"
+    )
 
 
 def test_no_browser_path_writes_an_approval_row(vault_home, monkeypatch):
@@ -431,6 +432,24 @@ def test_the_browse_page_description_names_no_deleted_ui():
     text = entry.schema["description"]
     assert "web-auth UI" not in text
     assert "open_login_window" in text
+
+
+def test_the_open_login_window_description_says_what_the_tool_does():
+    """Two sentences of it were false, and one of them taught the model the
+    misconception this mechanism was built to remove: that closing the
+    window records the approval. The other claimed no other site is
+    reachable from a window that is deliberately ungated, so a sign-in can
+    reach its identity provider. A description is read every turn."""
+    from dpc_client_core.dpc_agent.tools.browser import get_tools
+
+    entry = next(t for t in get_tools() if t.name == "open_login_window")
+    text = entry.schema["description"]
+
+    assert "no other site is reachable" not in text
+    assert "ungated" in text or "any host" in text
+    assert "Closing the window saves those cookies" not in text
+    assert "only their yes" in text
+    assert "writes nothing" in text
 
 
 def test_list_auth_domains_no_longer_speaks_of_a_whitelist():

@@ -228,7 +228,7 @@ def test_guest_cookies_alone_never_produce_an_approval(vault_home, monkeypatch):
         monkeypatch, vault_home, api=api, cookies=_guest_cookies(),
     )
 
-    assert web_auth.get_auth_status("agent_a", TEST_DOMAIN)["has_cookies"]
+    assert web_auth.get_auth_status("agent_a", TEST_DOMAIN)["has_cookies"] is False
     assert web_auth.get_approval("agent_a", TEST_DOMAIN) is None
     assert "No approved login" in out
 
@@ -321,7 +321,7 @@ def test_a_ui_that_leaves_mid_window_cannot_be_asked(vault_home, monkeypatch):
     )
 
     assert api.events == [], "the UI was gone by the time the question arose"
-    assert web_auth.get_auth_status("agent_a", TEST_DOMAIN)["has_cookies"]
+    assert web_auth.get_auth_status("agent_a", TEST_DOMAIN)["has_cookies"] is False
     assert web_auth.get_approval("agent_a", TEST_DOMAIN) is None
     assert "no UI client" in out
     assert "login_window_no_ui" in _statuses(vault_home)
@@ -492,11 +492,12 @@ def _navigable(monkeypatch, cookies, **kwargs):
     return ab
 
 
-def test_navigating_a_login_window_records_no_approval(vault_home, monkeypatch):
+def test_navigating_a_login_window_writes_nothing(vault_home, monkeypatch):
     """The mechanical half of the defect. `_persist_session_cookies` runs
     after every navigate, so an approval written there landed on the first
     page load — ten minutes before the person had finished, and regardless of
-    whether they ever did."""
+    whether they ever did. The cookies followed the same route, and for a
+    login window they now go no further than memory."""
     from dpc_client_core import web_auth
 
     ab = _navigable(
@@ -505,10 +506,9 @@ def test_navigating_a_login_window_records_no_approval(vault_home, monkeypatch):
     )
     ab.navigate(f"https://{TEST_DOMAIN}/")
 
-    assert web_auth.get_auth_status("agent_a", TEST_DOMAIN)["has_cookies"], (
-        "the cookies are data and still land"
-    )
+    assert web_auth.get_auth_status("agent_a", TEST_DOMAIN)["has_cookies"] is False
     assert web_auth.get_approval("agent_a", TEST_DOMAIN) is None
+    assert ab._login_pending, "captured, not written"
 
 
 def test_navigating_an_ordinary_session_records_no_approval(vault_home, monkeypatch):
@@ -615,24 +615,48 @@ def test_the_widening_belongs_to_login_windows_only(vault_home):
     assert route.aborted is True
 
 
-def test_an_ungated_login_window_still_writes_only_its_own_site(vault_home):
+def test_an_ungated_login_window_still_keeps_only_its_own_site(vault_home):
     """The read side widened; the write side did not. A window that walks to
-    an identity provider stores nothing for it."""
+    an identity provider carries nothing of it into the snapshot, so a yes
+    cannot commit one."""
     from dpc_client_core import web_auth
     from dpc_client_core.dpc_agent.tools.browser import AuthBrowser
 
     ab = AuthBrowser(
         agent_id="agent_a", domains=[TEST_DOMAIN], headed=True, login_window=True,
     )
-    written = ab._sync_cookies_to_vault(_pw([
+    scoped = ab._scope_cookies_by_etld1(_pw([
         {"name": "SID", "value": "g", "domain": ".google.com", "path": "/"},
         {"name": "auth_token", "value": "t", "domain": f".{TEST_DOMAIN}",
          "path": "/"},
     ]))
+    ab._login_pending = scoped
+    written = ab.commit_login_cookies()
 
-    assert written == 1
+    assert list(scoped) == [TEST_DOMAIN] and written == 1
     assert [r["domain"] for r in web_auth.list_domains("agent_a")] == [TEST_DOMAIN]
     assert web_auth.load_cookies("agent_a", "google.com") is None
+
+
+def test_a_login_window_cannot_reach_the_ordinary_cookie_writeback(
+    vault_home, caplog,
+):
+    """One writer, and it is the one a yes goes through. `_sync_cookies_to
+    _vault` is the path every other session uses on navigate and on close;
+    reached from a login window it refuses and says so, so a future caller
+    wiring the two together cannot quietly restore the ordering defect."""
+    from dpc_client_core import web_auth
+    from dpc_client_core.dpc_agent.tools.browser import AuthBrowser
+
+    ab = AuthBrowser(
+        agent_id="agent_a", domains=[TEST_DOMAIN], headed=True, login_window=True,
+    )
+    with caplog.at_level("ERROR"):
+        written = ab._sync_cookies_to_vault(_pw(_logged_in_cookies()))
+
+    assert written == 0
+    assert web_auth.list_domains("agent_a") == []
+    assert any("commit_login_cookies" in r.getMessage() for r in caplog.records)
 
 
 def test_the_pre_navigation_check_agrees_with_the_widened_gate(vault_home):
