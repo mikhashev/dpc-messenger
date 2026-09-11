@@ -109,7 +109,9 @@ def test_etld1_resolution_subdomain(vault_home, sample_cookies):
 
 
 def test_etld1_resolution_unknown_domain_passthrough(vault_home, sample_cookies):
-    """An unknown domain should map to itself (no eTLD+1 entry exists)."""
+    """A hostname under a TLD the list has never heard of is still its own
+    registrable domain: the spec's implicit `*` rule makes `example` the
+    public suffix, so `unmapped.example` keys its own jar."""
     from dpc_client_core import web_auth
 
     web_auth.save_cookies("agent_a", "unmapped.example", sample_cookies)
@@ -131,29 +133,29 @@ def test_resolve_etld1_accepts_full_urls():
     assert web_auth.resolve_etld1(f"www.{TEST_DOMAIN}") == f"{TEST_DOMAIN}"
     assert web_auth.resolve_etld1(f"{TEST_DOMAIN}") == f"{TEST_DOMAIN}"
     assert web_auth.resolve_etld1(TEST_DOMAIN.upper()) == f"{TEST_DOMAIN}"
-    # Unmapped host but valid URL — eTLD+1 unknown so the bare
-    # hostname is the vault key.
     assert web_auth.resolve_etld1("https://example.com/path") == "example.com"
 
 
 def test_resolve_etld1_empty_or_hostnameless_input():
-    """Inputs that yield no hostname after parsing → empty string so
-    callers can reject. `javascript:alert(1)` is NOT in this bucket —
-    urlsplit treats `javascript` as the host-like part of the authority
-    when no `//` is present; the downstream dot-check (`add_domain`
-    requires a `.` in the result) is what rejects it as a real domain.
+    """Inputs with no registrable domain resolve to None so callers can
+    reject them.
+
+    2026-09-11: this used to expect a passthrough — `""` for a hostname-less
+    input, and the input verbatim for `javascript` and `localhost`. Under a
+    real Public Suffix List a bare label IS the public suffix, and the value
+    is spent as a security boundary, so there is one answer for all of them.
     """
     from dpc_client_core import web_auth
 
-    assert web_auth.resolve_etld1("") == ""
-    assert web_auth.resolve_etld1("   ") == ""
+    assert web_auth.resolve_etld1("") is None
+    assert web_auth.resolve_etld1("   ") is None
     # scheme-only URLs: urlsplit returns no hostname.
-    assert web_auth.resolve_etld1("http://") == ""
-    assert web_auth.resolve_etld1("https://") == ""
-    # Bare token with no dot: parses to a hostname-like string but the
-    # add_domain caller rejects via dot-check, not here.
-    assert web_auth.resolve_etld1("javascript:alert(1)") == "javascript"
-    assert web_auth.resolve_etld1("localhost") == "localhost"
+    assert web_auth.resolve_etld1("http://") is None
+    assert web_auth.resolve_etld1("https://") is None
+    # Bare token with no dot: urlsplit hands back `javascript` as the
+    # authority, and one label is a public suffix under the implicit `*`.
+    assert web_auth.resolve_etld1("javascript:alert(1)") is None
+    assert web_auth.resolve_etld1("localhost") is None
 
 
 def test_etld1_resolution_via_url_reaches_existing_jar(vault_home, sample_cookies):
@@ -171,7 +173,8 @@ def test_get_auth_status_empty(vault_home):
     from dpc_client_core import web_auth
 
     status = web_auth.get_auth_status("agent_a", f"{TEST_DOMAIN}")
-    assert status == {"has_cookies": False, "expires": None, "authenticated_at": None}
+    assert status == {"has_cookies": False, "expires": None,
+                      "authenticated_at": None, "approved": None}
 
 
 def test_get_auth_status_populated(vault_home, sample_cookies):

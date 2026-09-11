@@ -15,6 +15,16 @@ import { writable } from "svelte/store";
 
 export interface WebAuthApprovalRequest {
   request_id: string;
+  /** Which decision is being asked for: "headless_use" or "login_window". */
+  kind?: string;
+  /** The question in the backend's own words; the card falls back if absent. */
+  question?: string;
+  /** Context for the person — never the reason anything is granted. */
+  evidence?: {
+    baseline_count?: number;
+    now_count?: number;
+    new_cookie_names?: string[];
+  };
   agent_id: string;
   /** The agent under the name it uses in chat; falls back to its id. */
   agent_name?: string;

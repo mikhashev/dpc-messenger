@@ -210,6 +210,10 @@ ALLOWED_COMMANDS: frozenset = frozenset({
     # Web auth headless approval (ADR-029 Task 008)
     "web_auth_approve_headless",
     "web_auth_reject_headless",
+    # Web auth vault: see an agent's stored logins, and take one back. The
+    # revoke half is here and not in the agent's tool registry on purpose.
+    "web_auth_list_domains",
+    "web_auth_revoke_domain",
     # Shell approval (ADR-030 v2)
     "resolve_schedule_approval",
     "shell_approve_command",

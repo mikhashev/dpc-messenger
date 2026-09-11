@@ -463,11 +463,16 @@ class TestTheOtherTwoBrowsePagePathsAnnounceTheSameThings:
     """
 
     def _ctx(self):
+        from .conftest import service_with_ui
+
         class _Root:
             name = "agent_x"
 
         class _Ctx:
             agent_root = _Root()
+            # The auth path is headless, and a headless browse with no
+            # UI to approve it is refused before any header is built.
+            dpc_service = service_with_ui()
 
         return _Ctx()
 
@@ -495,6 +500,10 @@ class TestTheOtherTwoBrowsePagePathsAnnounceTheSameThings:
         from dpc_client_core.dpc_agent.tools import browser as b
 
         monkeypatch.setattr(wa, "audit_append", lambda *a, **k: None)
+        # An approved login is the gate. This class is about the answer
+        # header, not the gate, so the approval is asserted into existence
+        # rather than earned through a login window.
+        monkeypatch.setattr(wa, "is_approved", lambda agent_id, domain: True)
         monkeypatch.setattr(
             b, "_auth_browse_html", lambda agent_id, domain, url, headed: html,
         )

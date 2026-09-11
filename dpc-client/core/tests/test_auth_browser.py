@@ -308,12 +308,28 @@ def test_screenshot_save_to_returns_path(vault_home, tmp_path):
 
 
 class _FakeRoute:
-    """Minimal Playwright Route stub — exposes `request.url`, records
-    whether continue_ or abort was called. Mirrors only the surface our
-    `_domain_route_gate` touches."""
+    """Playwright Route stub carrying every field the gate reads, and
+    recording whether continue_ or abort was called.
 
-    def __init__(self, url: str):
-        self.request = types.SimpleNamespace(url=url)
+    It has to answer `method`, `resource_type`, `is_navigation_request`
+    and `frame` even where a test does not care about them: a stub that
+    exposes only `url` sends every off-allowlist decision into the gate's
+    fail-closed `except`, so the test passes by exercising the error
+    handler rather than the branch its name claims.
+
+    Defaults are a top-level navigation, which is what `navigate()`
+    produces; `_FakeSubresourceRoute` flips them to a page asset."""
+
+    def __init__(self, url: str, *, method="GET", resource_type="document",
+                 nav=True, frame_url=None):
+        frame = types.SimpleNamespace(url=frame_url) if frame_url else None
+        self.request = types.SimpleNamespace(
+            url=url,
+            method=method,
+            resource_type=resource_type,
+            is_navigation_request=lambda: nav,
+            frame=frame,
+        )
         self.continued = False
         self.aborted = False
 
@@ -402,6 +418,130 @@ def test_route_gate_blocks_lookalike(vault_home):
     assert ab._domain_blocks == 3
 
 
+# ─────────────────────────────────────────────────────────────
+# CDN passthrough — a page may fetch its own static, nothing else
+# (x.com boots from abs.twimg.com; ozon.ru styles from st.ozone.ru)
+# ─────────────────────────────────────────────────────────────
+
+
+class _FakeSubresourceRoute(_FakeRoute):
+    """`_FakeRoute` with a page asset's defaults instead of a navigation's."""
+
+    def __init__(self, url, *, method="GET", resource_type="script",
+                 nav=False, frame_url=None):
+        super().__init__(
+            url, method=method, resource_type=resource_type,
+            nav=nav, frame_url=frame_url,
+        )
+
+
+def _gate_audit(home):
+    path = home / "agents" / "agent_a" / "web_audit.jsonl"
+    if not path.exists():
+        return []
+    return [json.loads(line) for line in
+            path.read_text(encoding="utf-8").splitlines() if line.strip()]
+
+
+def _seed_manifest(home, site, hosts):
+    """Write the node-level CDN manifest `vault_home` will be read against."""
+    from dpc_client_core import web_auth
+
+    (home / "web_cdn_manifest.json").write_text(
+        json.dumps({"sites": {site: list(hosts)}}), encoding="utf-8"
+    )
+    web_auth.load_cdn_manifest(force=True)
+
+
+def _refusals(home, agent_id="agent_a"):
+    from dpc_client_core import web_auth
+
+    return web_auth.load_cdn_refusals(agent_id)
+
+
+def test_route_gate_passes_a_pages_own_cdn_subresource(vault_home):
+    """The reason this whole branch exists: a site's bundle lives on a CDN
+    host the allowlist never names, and a name-by-name list can only render
+    sites partially (x.com died on abs.twimg.com for months). A GET/HEAD
+    subresource initiated by a frame inside the allowlist passes."""
+    from dpc_client_core.dpc_agent.tools.browser import AuthBrowser
+
+    _seed_manifest(vault_home, TEST_DOMAIN, ["cdn-static.foreign-cdn.net"])
+    ab = AuthBrowser(agent_id="agent_a", domains=[f"{TEST_DOMAIN}"])
+    route = _FakeSubresourceRoute(
+        f"https://cdn-static.foreign-cdn.net/main.7313c867.js",
+        method="GET",
+        resource_type="script",
+        frame_url=f"https://{TEST_DOMAIN}/home",
+    )
+    ab._domain_route_gate(route)
+    assert route.continued is True
+    assert route.aborted is False
+    assert ab._domain_blocks == 0
+    entries = [e for e in _gate_audit(vault_home)
+               if e.get("action") == "subresource_passthrough"]
+    assert len(entries) == 1
+    assert entries[0]["result"] == "ok"
+
+
+def test_route_gate_still_blocks_navigation_to_a_foreign_host(vault_home):
+    """Johnny's main-frame clause: a document navigation carries the
+    *current* frame too, so `location.href = "evil.com"` from an allowed
+    page must stay denied — navigation is excluded explicitly, never by
+    method alone."""
+    from dpc_client_core.dpc_agent.tools.browser import AuthBrowser
+
+    ab = AuthBrowser(agent_id="agent_a", domains=[f"{TEST_DOMAIN}"])
+    route = _FakeSubresourceRoute(
+        "https://evil.example/",
+        method="GET",
+        resource_type="document",
+        nav=True,
+        frame_url=f"https://{TEST_DOMAIN}/home",
+    )
+    ab._domain_route_gate(route)
+    assert route.aborted is True
+    assert route.continued is False
+    assert ab._domain_blocks == 1
+
+
+def test_route_gate_blocks_post_subresource_even_from_an_allowed_frame(vault_home):
+    """POST never passes: the passthrough may let static in, but must not
+    become a channel for data to leave."""
+    from dpc_client_core.dpc_agent.tools.browser import AuthBrowser
+
+    ab = AuthBrowser(agent_id="agent_a", domains=[f"{TEST_DOMAIN}"])
+    route = _FakeSubresourceRoute(
+        "https://collector.foreign-cdn.net/collect",
+        method="POST",
+        resource_type="xhr",
+        frame_url=f"https://{TEST_DOMAIN}/home",
+    )
+    ab._domain_route_gate(route)
+    assert route.aborted is True
+    assert route.continued is False
+    assert ab._domain_blocks == 1
+
+
+def test_route_gate_blocks_a_foreign_subresource_from_a_foreign_frame(vault_home):
+    """Initiator must be inside the allowlist: third-party scripts embedded
+    by the CDN itself get no free ride — the allowed page's assets pass,
+    not everything the loaded asset wants to pull next."""
+    from dpc_client_core.dpc_agent.tools.browser import AuthBrowser
+
+    ab = AuthBrowser(agent_id="agent_a", domains=[f"{TEST_DOMAIN}"])
+    route = _FakeSubresourceRoute(
+        "https://tracker.foreign-cdn.net/pixel.gif",
+        method="GET",
+        resource_type="image",
+        frame_url="https://foreign-cdn.net/embed",
+    )
+    ab._domain_route_gate(route)
+    assert route.aborted is True
+    assert route.continued is False
+    assert ab._domain_blocks == 1
+
+
 def test_route_gate_multi_domain(vault_home):
     from dpc_client_core.dpc_agent.tools.browser import AuthBrowser
 
@@ -420,11 +560,15 @@ def test_route_gate_multi_domain(vault_home):
     assert ab._domain_blocks == 1
 
 
-def test_route_gate_fail_closed_when_empty(vault_home):
-    """Empty whitelist → every request aborted (no domains authorized)."""
+def test_route_gate_fail_closed_when_a_requested_scope_resolves_to_nothing(vault_home):
+    """A scope was asked for and none of it names a registrable domain →
+    every request aborted. `domains=["com"]` must not read as "all of .com",
+    and it must not read as "no scope" either — see the open-scope test for
+    what `domains=[]` means."""
     from dpc_client_core.dpc_agent.tools.browser import AuthBrowser
 
-    ab = AuthBrowser(agent_id="agent_a", domains=[])
+    ab = AuthBrowser(agent_id="agent_a", domains=["com"])
+    assert ab._etld1s == set()
     route = _FakeRoute(f"https://{TEST_DOMAIN}/my")
     ab._domain_route_gate(route)
     assert route.aborted is True
@@ -575,17 +719,6 @@ def test_from_playwright_cookies_roundtrip(vault_home):
     assert rt[0]["expires"] == 1735689600
 
 
-def test_state_path_uses_dpc_home(vault_home):
-    """`_state_path` resolves to ~/.dpc/agents/<id>/browser_state.json
-    under the DPC_HOME env override (set by vault_home fixture)."""
-    from dpc_client_core.dpc_agent.tools.browser import AuthBrowser
-
-    ab = AuthBrowser(agent_id="agent_a", domain=f"{TEST_DOMAIN}")
-    state = ab._state_path()
-    expected = vault_home / "agents" / "agent_a" / "browser_state.json"
-    assert state == expected
-
-
 def test_inject_vault_cookies_calls_add_cookies(vault_home, fresh_cookies):
     """`_inject_vault_cookies` reads vault via _load_all_cookies and
     pushes the camelCase-converted cookies into the active context."""
@@ -644,241 +777,97 @@ def test_sync_cookies_to_vault_empty_input_no_op(vault_home):
     assert web_auth.load_cookies("agent_a", f"{TEST_DOMAIN}") is None
 
 
-def test_save_storage_state_writes_atomically_and_syncs_vault(vault_home):
-    """`_save_storage_state` writes to a `.tmp` sibling then os.replaces,
-    final file exists, vault has the synced cookies."""
+def test_persist_session_cookies_syncs_the_vault(vault_home):
+    """The writeback keeps its one job: the session's in-scope cookies land
+    in the vault jar, in the vault's own snake_case shape."""
     from dpc_client_core import web_auth
     from dpc_client_core.dpc_agent.tools.browser import AuthBrowser
 
     ab = AuthBrowser(agent_id="agent_a", domains=[f"{TEST_DOMAIN}"])
+    ab._context = _FakeStateContext(cookies_payload=[
+        {
+            "name": "s", "value": "v", "domain": f".{TEST_DOMAIN}",
+            "path": "/", "secure": True, "httpOnly": True,
+            "sameSite": "Lax", "expires": 1735689600,
+        },
+    ])
+    ab._persist_session_cookies()
 
-    state_dict = {
-        "cookies": [
-            {
-                "name": "s", "value": "v", "domain": f".{TEST_DOMAIN}",
-                "path": "/", "secure": True, "httpOnly": True,
-                "sameSite": "Lax", "expires": 1735689600,
-            },
-        ],
-        "origins": [],
-    }
-
-    def _write_state(path: str):
-        Path(path).write_text(json.dumps(state_dict), encoding="utf-8")
-        return state_dict
-
-    ab._context = _FakeStateContext(
-        on_storage_state=_write_state,
-        cookies_payload=state_dict["cookies"],
-    )
-    ab._save_storage_state()
-
-    state_path = ab._state_path()
-    assert state_path.exists()
-    # tmp was os.replaced — no .tmp leftover
-    assert not state_path.with_suffix(".json.tmp").exists()
     saved = web_auth.load_cookies("agent_a", f"{TEST_DOMAIN}")
     assert saved is not None
     assert saved[0]["name"] == "s"
-    assert saved[0]["httponly"] is True  # snake_case vault format
+    assert saved[0]["httponly"] is True
 
 
-def test_save_storage_state_uses_return_value_not_disk_read(vault_home, monkeypatch):
-    """ADR-029 Task 004 follow-up — `_save_storage_state` consumes the
-    dict returned by `storage_state(path=...)` instead of reading the
-    file back. Verified by stubbing read_text to raise: the save still
-    completes and vault sync runs from the in-memory dict."""
-    from dpc_client_core import web_auth
-    from dpc_client_core.dpc_agent.tools import browser as mod
+def test_the_writeback_creates_no_browser_state_file(vault_home):
+    """browser_state.json held every cookie the agent had ever collected and
+    was loaded into authenticated sessions, so an unapproved identity came in
+    through it. Nothing reads it now; writing it would only rebuild it."""
     from dpc_client_core.dpc_agent.tools.browser import AuthBrowser
 
     ab = AuthBrowser(agent_id="agent_a", domains=[f"{TEST_DOMAIN}"])
-    state_dict = {
-        "cookies": [
-            {
-                "name": "s", "value": "v", "domain": f".{TEST_DOMAIN}",
-                "path": "/", "secure": True, "httpOnly": True,
-                "expires": 1735689600,
-            },
-        ],
-        "origins": [],
-    }
+    ctx = _FakeStateContext(cookies_payload=[
+        {"name": "s", "value": "v", "domain": f".{TEST_DOMAIN}", "path": "/"},
+    ])
+    ab._context = ctx
+    ab._persist_session_cookies()
 
-    def _write_state(path: str):
-        Path(path).write_text("not-used-because-we-return-dict", encoding="utf-8")
-        return state_dict
-
-    # Make Path.read_text raise so a regression (reading the file back)
-    # would fail loudly instead of silently passing on disk content.
-    original_read = Path.read_text
-
-    def _no_read(self, *args, **kwargs):
-        raise AssertionError(f"unexpected read_text on {self}")
-
-    monkeypatch.setattr(Path, "read_text", _no_read)
-    try:
-        ab._context = _FakeStateContext(
-        on_storage_state=_write_state,
-        cookies_payload=state_dict["cookies"],
-    )
-        ab._save_storage_state()
-    finally:
-        monkeypatch.setattr(Path, "read_text", original_read)
-
-    saved = web_auth.load_cookies("agent_a", f"{TEST_DOMAIN}")
-    assert saved is not None and saved[0]["name"] == "s"
+    state = vault_home / "agents" / "agent_a" / "browser_state.json"
+    assert not state.exists()
+    assert ctx.storage_state_calls == []
 
 
-def _patch_browser_os(monkeypatch, name: str, chmod_handler):
-    """Replace the `os` reference inside the browser module with a
-    SimpleNamespace fake so `os.name` / `os.chmod` patches stay scoped
-    to browser.py and don't bleed into web_auth.py (where the real
-    `Path.home()` would crash if we forced os.name='posix' on a
-    Windows host — eager default in `_vault_path` triggers PosixPath
-    construction)."""
-    import os as real_os
-    from dpc_client_core.dpc_agent.tools import browser as mod
-
-    fake_os = types.SimpleNamespace(
-        name=name,
-        chmod=chmod_handler,
-        replace=real_os.replace,
-        environ=real_os.environ,
-    )
-    monkeypatch.setattr(mod, "os", fake_os)
-
-
-def test_save_storage_state_chmod_on_posix(vault_home, monkeypatch):
-    """ADR-029 Task 004 follow-up — restrict `browser_state.json` to
-    owner (0o600) on POSIX so other users on the machine can't read
-    plaintext session cookies."""
+def test_an_existing_browser_state_file_is_left_untouched(vault_home):
+    """A user's file is not ours to rewrite or empty — freezing it is what
+    leaves the decision about deleting it to its owner."""
     from dpc_client_core.dpc_agent.tools.browser import AuthBrowser
 
-    ab = AuthBrowser(agent_id="agent_a", domains=[f"{TEST_DOMAIN}"])
-    state_dict = {"cookies": [], "origins": []}
-
-    def _write_state(path: str):
-        Path(path).write_text(json.dumps(state_dict), encoding="utf-8")
-        return state_dict
-
-    chmod_calls: list[tuple[str, int]] = []
-
-    def _capture_chmod(path, mode):
-        chmod_calls.append((str(path), mode))
-
-    _patch_browser_os(monkeypatch, "posix", _capture_chmod)
-
-    ab._context = _FakeStateContext(
-        on_storage_state=_write_state,
-        cookies_payload=state_dict["cookies"],
-    )
-    ab._save_storage_state()
-
-    state_path = ab._state_path()
-    assert chmod_calls == [(str(state_path), 0o600)]
-
-
-def test_save_storage_state_no_chmod_on_non_posix(vault_home, monkeypatch):
-    """`os.chmod(_, 0o600)` is POSIX-only — must not run on Windows
-    (where NTFS ACLs inherit from the parent dir)."""
-    from dpc_client_core.dpc_agent.tools.browser import AuthBrowser
+    state = vault_home / "agents" / "agent_a" / "browser_state.json"
+    state.parent.mkdir(parents=True, exist_ok=True)
+    state.write_text('{"cookies": [{"name": "keep"}], "origins": []}', encoding="utf-8")
 
     ab = AuthBrowser(agent_id="agent_a", domains=[f"{TEST_DOMAIN}"])
+    ab._context = _FakeStateContext(cookies_payload=[
+        {"name": "s", "value": "v", "domain": f".{TEST_DOMAIN}", "path": "/"},
+    ])
+    ab._persist_session_cookies()
+    ab.close()
 
-    def _write_state(path: str):
-        Path(path).write_text(json.dumps({"cookies": [], "origins": []}), encoding="utf-8")
-        return {"cookies": [], "origins": []}
-
-    chmod_called: list = []
-
-    def _record_chmod(path, mode):
-        chmod_called.append((path, mode))
-
-    _patch_browser_os(monkeypatch, "nt", _record_chmod)
-
-    ab._context = _FakeStateContext(
-        on_storage_state=_write_state,
-        cookies_payload=[],
-    )
-    ab._save_storage_state()
-
-    assert chmod_called == []
+    assert json.loads(state.read_text(encoding="utf-8"))["cookies"] == [{"name": "keep"}]
 
 
-def test_save_storage_state_swallows_chmod_oserror(vault_home, monkeypatch, caplog):
-    """A failing `os.chmod` (e.g. filesystem doesn't support it — FAT32
-    USB drive) must not break the save flow. Vault sync still happens,
-    warning is logged."""
-    import logging as _logging
-    from dpc_client_core import web_auth
-    from dpc_client_core.dpc_agent.tools.browser import AuthBrowser
-
-    ab = AuthBrowser(agent_id="agent_a", domains=[f"{TEST_DOMAIN}"])
-    state_dict = {
-        "cookies": [
-            {"name": "x", "value": "y", "domain": f".{TEST_DOMAIN}", "path": "/",
-             "secure": False, "httpOnly": False, "expires": 1735689600},
-        ],
-        "origins": [],
-    }
-
-    def _write_state(path: str):
-        Path(path).write_text(json.dumps(state_dict), encoding="utf-8")
-        return state_dict
-
-    def _raise_chmod(path, mode):
-        raise OSError("filesystem does not support chmod")
-
-    _patch_browser_os(monkeypatch, "posix", _raise_chmod)
-
-    ab._context = _FakeStateContext(
-        on_storage_state=_write_state,
-        cookies_payload=state_dict["cookies"],
-    )
-    with caplog.at_level(_logging.WARNING):
-        ab._save_storage_state()
-
-    saved = web_auth.load_cookies("agent_a", f"{TEST_DOMAIN}")
-    assert saved is not None and saved[0]["name"] == "x"
-    assert any(
-        "storage_state chmod failed" in rec.getMessage()
-        for rec in caplog.records
-    )
-
-
-def test_save_storage_state_swallows_errors(vault_home, caplog):
-    """`_save_storage_state` must not raise on context errors — close()
-    relies on this so subprocess cleanup runs to completion."""
+def test_persist_session_cookies_swallows_errors(vault_home, caplog):
+    """close() relies on this so subprocess cleanup runs to completion."""
     import logging as _logging
     from dpc_client_core.dpc_agent.tools.browser import AuthBrowser
 
     ab = AuthBrowser(agent_id="agent_a", domains=[f"{TEST_DOMAIN}"])
 
     class _BrokenContext:
-        def storage_state(self, path=None):
+        def cookies(self):
             raise RuntimeError("context already closed")
 
     ab._context = _BrokenContext()
     with caplog.at_level(_logging.WARNING):
-        ab._save_storage_state()  # must not raise
+        ab._persist_session_cookies()  # must not raise
     assert any(
-        "storage_state save failed" in rec.getMessage()
-        for rec in caplog.records
+        "cookie writeback failed" in rec.getMessage() for rec in caplog.records
     )
 
 
-def test_save_storage_state_no_op_when_context_none(vault_home):
+def test_persist_session_cookies_no_op_when_context_none(vault_home):
+    from dpc_client_core import web_auth
     from dpc_client_core.dpc_agent.tools.browser import AuthBrowser
 
     ab = AuthBrowser(agent_id="agent_a", domains=[f"{TEST_DOMAIN}"])
     assert ab._context is None
-    ab._save_storage_state()  # must not raise
-    assert not ab._state_path().exists()
+    ab._persist_session_cookies()  # must not raise
+    assert web_auth.list_domains("agent_a") == []
 
 
-def test_close_triggers_save_when_context_live(vault_home):
-    """close() must call _save_storage_state before tearing down so
-    Playwright storage_state() has a live context to read from."""
+def test_close_triggers_writeback_when_context_live(vault_home):
+    """close() must write back before tearing down, while the context can
+    still answer."""
     from dpc_client_core.dpc_agent.tools.browser import AuthBrowser
 
     ab = AuthBrowser(agent_id="agent_a", domains=[f"{TEST_DOMAIN}"])
@@ -887,33 +876,29 @@ def test_close_triggers_save_when_context_live(vault_home):
     def _record_save():
         saved.append(ab._context is not None)
 
-    # Stub _save_storage_state to record when it was called relative to cm
-    original = ab._save_storage_state
-    ab._save_storage_state = _record_save
+    ab._persist_session_cookies = _record_save
     ab._context = _FakeStateContext()
 
-    # No Camoufox cm — close should still call save (early branch)
     ab.close()
     assert saved == [True]
 
 
-def test_save_storage_state_skips_quietly_when_disconnected(vault_home, caplog):
-    """When the browser already disconnected (e.g. user closed the window),
-    `_save_storage_state` must skip without raising and WITHOUT a WARNING —
-    the dead context is unreadable, so the failure is expected, not a fault."""
+def test_persist_session_cookies_skips_quietly_when_disconnected(vault_home, caplog):
+    """A dead context is unreadable, so the failure is expected, not a fault
+    — a WARNING here is noise at every manual window close."""
     import logging as _logging
     from dpc_client_core.dpc_agent.tools.browser import AuthBrowser
 
     ab = AuthBrowser(agent_id="agent_a", domains=[f"{TEST_DOMAIN}"])
 
     class _BrokenContext:
-        def storage_state(self, path=None):
+        def cookies(self):
             raise RuntimeError("Target page, context or browser has been closed")
 
     ab._context = _BrokenContext()
     ab._disconnected = True
     with caplog.at_level(_logging.DEBUG):
-        ab._save_storage_state()  # must not raise
+        ab._persist_session_cookies()  # must not raise
     assert not any(rec.levelno >= _logging.WARNING for rec in caplog.records)
 
 
@@ -939,17 +924,19 @@ def test_close_runs_cm_exit_even_when_disconnected(vault_home):
     assert ab._cm is None
 
 
-def test_open_uses_storage_state_when_file_valid(vault_home, monkeypatch):
-    """When `browser_state.json` exists + parses, _open() passes
-    `storage_state=<path>` to new_context() and skips the vault
-    injection path."""
+def test_open_never_loads_the_saved_browser_state(vault_home, monkeypatch):
+    """The second source of identity, closed. A `use_auth=S` session used to
+    start from browser_state.json — every cookie the agent had ever collected
+    — and only then overlay S's vault jar, so it browsed as accounts nobody
+    had approved while the gate guarded the jar."""
     from dpc_client_core.dpc_agent.tools.browser import AuthBrowser
 
-    # Pre-create the state file
     state_dir = vault_home / "agents" / "agent_a"
     state_dir.mkdir(parents=True, exist_ok=True)
-    state_path = state_dir / "browser_state.json"
-    state_path.write_text(json.dumps({"cookies": [], "origins": []}), encoding="utf-8")
+    (state_dir / "browser_state.json").write_text(
+        json.dumps({"cookies": [{"name": "auth_token"}], "origins": []}),
+        encoding="utf-8",
+    )
 
     new_context_kwargs: list[dict] = []
     injected: list[int] = []
@@ -966,13 +953,9 @@ def test_open_uses_storage_state_when_file_valid(vault_home, monkeypatch):
         def __exit__(self, *args):
             return False
 
-    # Patch Camoufox to return our stub instead of launching a real browser
-    import dpc_client_core.dpc_agent.tools.browser as mod
     monkeypatch.setattr(
-        "camoufox.sync_api.Camoufox", lambda **kw: _StubCm(),
-        raising=False,
+        "camoufox.sync_api.Camoufox", lambda **kw: _StubCm(), raising=False,
     )
-    # Patch _inject_vault_cookies so we can detect if it was called
     original = AuthBrowser._inject_vault_cookies
     AuthBrowser._inject_vault_cookies = lambda self, **kw: injected.append(1)
     try:
@@ -980,17 +963,12 @@ def test_open_uses_storage_state_when_file_valid(vault_home, monkeypatch):
         ab._open()
     finally:
         AuthBrowser._inject_vault_cookies = original
-        # Best-effort cleanup of process-wide registry the stub joined
         from dpc_client_core.dpc_agent.tools.browser import _active_camoufox_browsers
         _active_camoufox_browsers.discard(ab)
 
     assert len(new_context_kwargs) == 1
-    assert new_context_kwargs[0].get("storage_state") == str(state_path)
-    # Vault is canonical: even with a valid storage_state, vault cookies are
-    # always overlaid on top (browser.py — "always overlay vault cookies"),
-    # so _inject_vault_cookies still runs. storage_state is a starting point
-    # for localStorage/sessionStorage, not an either/or with the vault.
-    assert injected == [1]
+    assert "storage_state" not in new_context_kwargs[0]
+    assert injected == [1], "the vault jar for the scope is the whole identity"
 
 
 def test_open_falls_back_to_vault_when_state_missing(vault_home, monkeypatch, fresh_cookies):
@@ -1035,9 +1013,9 @@ def test_open_falls_back_to_vault_when_state_missing(vault_home, monkeypatch, fr
     assert injected == [1]
 
 
-def test_open_falls_back_to_vault_when_state_corrupt(vault_home, monkeypatch, fresh_cookies, caplog):
-    """Corrupt JSON in browser_state.json → warning logged, fallback to
-    vault, next close will overwrite the file."""
+def test_a_corrupt_browser_state_file_is_not_even_read(vault_home, monkeypatch, fresh_cookies, caplog):
+    """It used to be parsed and warned about. Nothing opens it now, so the
+    warning that named it would be a claim the code no longer makes."""
     import logging as _logging
     from dpc_client_core import web_auth
     from dpc_client_core.dpc_agent.tools.browser import AuthBrowser
@@ -1049,7 +1027,6 @@ def test_open_falls_back_to_vault_when_state_corrupt(vault_home, monkeypatch, fr
     (state_dir / "browser_state.json").write_text("not-valid-json{", encoding="utf-8")
 
     new_context_kwargs: list[dict] = []
-    injected: list[int] = []
 
     class _StubBrowser:
         def new_context(self, **kwargs):
@@ -1064,25 +1041,19 @@ def test_open_falls_back_to_vault_when_state_corrupt(vault_home, monkeypatch, fr
             return False
 
     monkeypatch.setattr(
-        "camoufox.sync_api.Camoufox", lambda **kw: _StubCm(),
-        raising=False,
+        "camoufox.sync_api.Camoufox", lambda **kw: _StubCm(), raising=False,
     )
-    original = AuthBrowser._inject_vault_cookies
-    AuthBrowser._inject_vault_cookies = lambda self, **kw: injected.append(1)
+    ab = AuthBrowser(agent_id="agent_a", domains=[f"{TEST_DOMAIN}"])
     try:
-        ab = AuthBrowser(agent_id="agent_a", domains=[f"{TEST_DOMAIN}"])
         with caplog.at_level(_logging.WARNING):
             ab._open()
     finally:
-        AuthBrowser._inject_vault_cookies = original
         from dpc_client_core.dpc_agent.tools.browser import _active_camoufox_browsers
         _active_camoufox_browsers.discard(ab)
 
     assert "storage_state" not in new_context_kwargs[0]
-    assert injected == [1]
-    assert any(
-        "storage_state parse error" in rec.getMessage()
-        for rec in caplog.records
+    assert not any(
+        "storage_state" in rec.getMessage() for rec in caplog.records
     )
 
 
@@ -1195,15 +1166,23 @@ def test_to_playwright_cookies_omits_empty_samesite():
 # ─────────────────────────────────────────────────────────────
 
 
-def _make_ctx(agent_root: Path):
+def _make_ctx(agent_root: Path, ui: bool = False):
     """Minimal ToolContext stub — only agent_root is read by browse_page
-    when use_auth is set."""
+    when use_auth is set.
+
+    `ui=True` attaches a connected UI that approves. A headless
+    authenticated browse refuses outright without one, so a test that means
+    to reach the browser has to name who is at the screen."""
     ns = types.SimpleNamespace()
     ns.agent_root = agent_root
+    if ui:
+        from .conftest import service_with_ui
+
+        ns.dpc_service = service_with_ui()
     return ns
 
 
-def test_browse_page_use_auth_returns_relogin_on_auth_required(vault_home):
+def test_browse_page_use_auth_returns_relogin_on_auth_required(vault_home, fresh_cookies):
     """When the auth path raises AuthRequiredError (cookies missing or
     rejected at a protected resource), browse_page must surface it as a
     ⚠️ re-login prompt — not a raw stack trace.
@@ -1215,6 +1194,7 @@ def test_browse_page_use_auth_returns_relogin_on_auth_required(vault_home):
     rejected), so this test drives the error path directly.
     """
     import dpc_client_core.dpc_agent.tools.browser as mod
+    from dpc_client_core import web_auth
     from dpc_client_core.dpc_agent.tools.browser import (
         AuthRequiredError,
         browse_page,
@@ -1222,7 +1202,10 @@ def test_browse_page_use_auth_returns_relogin_on_auth_required(vault_home):
 
     agent_root = vault_home / "agents" / "agent_a"
     agent_root.mkdir(parents=True, exist_ok=True)
-    ctx = _make_ctx(agent_root)
+    ctx = _make_ctx(agent_root, ui=True)
+    # An approved login is the authorisation — without it the call is
+    # refused before the stub below can raise.
+    web_auth.save_cookies("agent_a", TEST_DOMAIN, fresh_cookies, approved_via=web_auth.APPROVAL_VIA_LOGIN_WINDOW)
 
     def _raise_auth_required(agent_id, domain, url, headed=True):
         raise AuthRequiredError(
@@ -1254,8 +1237,8 @@ def test_browse_page_use_auth_rejects_off_domain_url(vault_home, fresh_cookies):
 
     agent_root = vault_home / "agents" / "agent_a"
     agent_root.mkdir(parents=True, exist_ok=True)
-    web_auth.save_cookies("agent_a", f"{TEST_DOMAIN}", fresh_cookies)
-    ctx = _make_ctx(agent_root)
+    web_auth.save_cookies("agent_a", f"{TEST_DOMAIN}", fresh_cookies, approved_via=web_auth.APPROVAL_VIA_LOGIN_WINDOW)
+    ctx = _make_ctx(agent_root, ui=True)
     # Patch _auth_browse_html to simulate AuthBrowser raising ValueError
     # from the domain check (we can't open Camoufox in the test runner).
     # T9 split moved the auth-path entry point from _auth_browse to
@@ -1360,7 +1343,7 @@ def _browser_for_navigate(status: int, monkeypatch):
     monkeypatch.setattr(ab, "_check_domain", lambda url: None)
     monkeypatch.setattr(ab, "_wait_for_content_stable", lambda: None)
     monkeypatch.setattr(ab, "a11y_snapshot", lambda: ("button 'Subscribe'", {"@e1": {}}))
-    monkeypatch.setattr(ab, "_save_storage_state", lambda: None)
+    monkeypatch.setattr(ab, "_persist_session_cookies", lambda: None)
     monkeypatch.setattr(
         ab, "_audit_action",
         lambda action, url, result, **kw: ab.audit.append((action, result, kw)),
@@ -1601,15 +1584,17 @@ def test_fetch_js_text_without_agent_uses_one_shot(monkeypatch):
     assert launched == [("https://a/x", "<anonymous>")]
 
 
-def test_browse_page_auth_without_keep_open_is_headless(vault_home):
+def test_browse_page_auth_without_keep_open_is_headless(vault_home, fresh_cookies):
     """The gate above this call asks the user to approve *headless*
     access and audits it as such; the browse must not be headed."""
     import dpc_client_core.dpc_agent.tools.browser as mod
+    from dpc_client_core import web_auth
     from dpc_client_core.dpc_agent.tools.browser import browse_page
 
     agent_root = vault_home / "agents" / "agent_a"
     agent_root.mkdir(parents=True, exist_ok=True)
-    ctx = _make_ctx(agent_root)
+    ctx = _make_ctx(agent_root, ui=True)
+    web_auth.save_cookies("agent_a", TEST_DOMAIN, fresh_cookies, approved_via=web_auth.APPROVAL_VIA_LOGIN_WINDOW)
 
     seen: dict = {}
 
@@ -1859,7 +1844,7 @@ def test_audit_error_records_the_message():
     assert len(fields["error_message"]) <= 300
 
 
-def test_headless_gate_fails_fast_without_a_ui(vault_home):
+def test_headless_gate_fails_fast_without_a_ui(vault_home, fresh_cookies):
     """The gate broadcasts a request and waits 120s for an answer. When no UI
     client is connected the broadcast is dropped, so the wait could only end
     in a timeout — and the agent was told "not approved", as though a human
@@ -1867,11 +1852,13 @@ def test_headless_gate_fails_fast_without_a_ui(vault_home):
     dialog existed."""
     import time
     import dpc_client_core.dpc_agent.tools.browser as mod
+    from dpc_client_core import web_auth
     from dpc_client_core.dpc_agent.tools.browser import browse_page
 
     agent_root = vault_home / "agents" / "agent_a"
     agent_root.mkdir(parents=True, exist_ok=True)
     ctx = _make_ctx(agent_root)
+    web_auth.save_cookies("agent_a", TEST_DOMAIN, fresh_cookies, approved_via=web_auth.APPROVAL_VIA_LOGIN_WINDOW)
 
     broadcasts = []
 
@@ -1894,15 +1881,17 @@ def test_headless_gate_fails_fast_without_a_ui(vault_home):
     assert broadcasts == [], "no point broadcasting to nobody"
 
 
-def test_headless_gate_still_waits_when_a_ui_is_connected(vault_home):
+def test_headless_gate_still_waits_when_a_ui_is_connected(vault_home, fresh_cookies):
     """With a UI attached the request is real: broadcast, then wait for the
     answer the dialog sends back."""
     import dpc_client_core.dpc_agent.tools.browser as mod
+    from dpc_client_core import web_auth
     from dpc_client_core.dpc_agent.tools.browser import browse_page
 
     agent_root = vault_home / "agents" / "agent_a"
     agent_root.mkdir(parents=True, exist_ok=True)
     ctx = _make_ctx(agent_root)
+    web_auth.save_cookies("agent_a", TEST_DOMAIN, fresh_cookies, approved_via=web_auth.APPROVAL_VIA_LOGIN_WINDOW)
 
     broadcasts = []
 
@@ -1949,10 +1938,11 @@ def test_fetch_browser_carries_no_login(vault_home):
     assert interactive._anonymous is False
 
 
-def test_anonymous_browser_never_writes_the_shared_state(vault_home):
-    """Second half of the same defect: both browsers resolve the same
-    ~/.dpc/agents/{id}/browser_state.json, so an anonymous one closing last
-    would overwrite the interactive session's login with a blank one."""
+def test_anonymous_browser_writes_nothing_back(vault_home):
+    """Second half of the same defect: an anonymous fetch browser shares the
+    agent id with the interactive session, so anything it wrote would land on
+    the interactive session's storage."""
+    from dpc_client_core import web_auth
     from dpc_client_core.dpc_agent.tools.browser import AuthBrowser
 
     state = vault_home / "agents" / "agent_a" / "browser_state.json"
@@ -1962,40 +1952,33 @@ def test_anonymous_browser_never_writes_the_shared_state(vault_home):
     fetch = AuthBrowser(agent_id="agent_a", domains=[], anonymous=True)
 
     class _Ctx:
+        def cookies(self):
+            raise AssertionError("anonymous browser must not read cookies out")
+
         def storage_state(self, **_kw):
             raise AssertionError("anonymous browser must not read state out")
 
     fetch._context = _Ctx()
-    fetch._save_storage_state()  # must be a no-op, not an exception
+    fetch._persist_session_cookies()  # must be a no-op, not an exception
 
     assert json.loads(state.read_text(encoding="utf-8"))["cookies"] == [{"name": "SID"}]
+    assert web_auth.list_domains("agent_a") == []
 
 
-def test_save_does_not_collect_origins(vault_home):
-    """Measured cause of the windows that opened and vanished: saving via
-    storage_state() collects localStorage, and Firefox reads it by opening a
-    window on each origin — a save with two origins peaked at two extra
-    visible windows. This runs after every navigate and at close.
-
-    Nothing is lost by skipping it: the load path strips origins before
-    handing state to new_context, for the same reason in reverse."""
+def test_the_writeback_does_not_call_storage_state(vault_home):
+    """Measured cause of the windows that opened and vanished: storage_state()
+    collects localStorage, and Firefox reads it by opening a window on each
+    origin. The writeback asks for cookies and nothing else."""
     from dpc_client_core.dpc_agent.tools.browser import AuthBrowser
 
     ab = AuthBrowser(agent_id="agent_a", domains=[f"{TEST_DOMAIN}"])
-    cookies = [{
+    ctx = _FakeStateContext(cookies_payload=[{
         "name": "SID", "value": "v", "domain": f".{TEST_DOMAIN}",
         "path": "/", "secure": True, "httpOnly": True,
         "sameSite": "Lax", "expires": 1735689600,
-    }]
-    ctx = _FakeStateContext(cookies_payload=cookies)
+    }])
     ab._context = ctx
-    ab._save_storage_state()
+    ab._persist_session_cookies()
 
-    assert ctx.storage_state_calls == [], (
-        "storage_state() opens a window per origin — the save must not call it"
-    )
+    assert ctx.storage_state_calls == []
     assert ctx.cookies_calls == 1
-
-    saved = json.loads(ab._state_path().read_text(encoding="utf-8"))
-    assert saved["origins"] == []
-    assert [c["name"] for c in saved["cookies"]] == ["SID"], "the login must survive"

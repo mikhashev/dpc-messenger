@@ -321,6 +321,87 @@
     }
   }
 
+  // Web logins (per-agent credential vault).
+  //
+  // `approved` is what browse_page(use_auth=...) reads; cookies alone buy the
+  // agent nothing, so the two are rendered as different words here.
+  interface WebAuthDomain {
+    domain: string;
+    has_cookies: boolean;
+    approved: { at?: string; via?: string } | null;
+    authenticated_at: string | null;
+    last_used_at: string | null;
+  }
+
+  let webAuthDomains: WebAuthDomain[] = [];
+  let webAuthLoadedFor = '';   // guard: keeps the reactive load from re-firing
+  let webAuthLoading = false;
+  let webAuthError = '';
+  let webAuthMessage = '';
+  let revokingDomain = '';
+
+  async function loadWebAuthDomains(agentId: string) {
+    webAuthLoadedFor = agentId;
+    webAuthLoading = true;
+    webAuthError = '';
+    try {
+      const result = await sendCommand('web_auth_list_domains', { agent_id: agentId });
+      if (result === false) {
+        webAuthError = 'Backend not connected.';
+        webAuthDomains = [];
+      } else if (result.status === 'success') {
+        webAuthDomains = result.domains ?? [];
+      } else {
+        webAuthError = result.message || 'Could not read the vault.';
+        webAuthDomains = [];
+      }
+    } catch (e) {
+      webAuthError = `${e}`;
+      webAuthDomains = [];
+    }
+    webAuthLoading = false;
+  }
+
+  $: if (!isGlobal && conversationId && conversationId !== webAuthLoadedFor) {
+    webAuthMessage = '';   // another agent's outcome is not this one's
+    loadWebAuthDomains(conversationId);
+  }
+
+  async function handleRevokeWebAuth(domain: string) {
+    if (!conversationId || revokingDomain) return;
+    const agentLabel = agentName || conversationId;
+    if (!confirm(
+      `Revoke ${domain} for ${agentLabel}?\n\n` +
+      `Its stored cookies and your approval are deleted. The agent cannot ` +
+      `reach that site again until you open a login window and approve it.`
+    )) return;
+    revokingDomain = domain;
+    webAuthMessage = '';
+    try {
+      const result = await sendCommand('web_auth_revoke_domain', {
+        agent_id: conversationId,
+        domain,
+      });
+      if (result !== false && result.status === 'success') {
+        await loadWebAuthDomains(conversationId);
+        // The backend distinguishes a deletion from a no-op; repeat its own
+        // sentence rather than announcing work that may not have happened.
+        webAuthMessage = result.message;
+      } else {
+        webAuthMessage = `Error: ${result === false ? 'backend not connected' : result.message}`;
+      }
+    } catch (e) {
+      webAuthMessage = `Error: ${e}`;
+    }
+    revokingDomain = '';
+  }
+
+  function webAuthWhen(iso: string | null | undefined): string {
+    if (!iso) return 'unknown';
+    const d = new Date(iso);
+    return isNaN(d.getTime()) ? iso : d.toLocaleString();
+  }
+
   // Permissions summary (loaded on demand for transparency)
   let permissionsSummary: any = null;
   let permissionsLoading = false;
@@ -733,6 +814,63 @@
             {:else if !editMode}
               <p class="help-text-small" style="font-style: italic; margin-top: 0.5rem;">No archive data — select an individual agent to view stats.</p>
             {/if}
+          {/if}
+        </div>
+      {/if}
+
+      {#if !isGlobal && conversationId && !editMode}
+        <!-- Web Logins Section (per-agent credential vault, ADR-028).
+             Actions only, like the archive controls: revoking hits the vault
+             at once and has nothing to do with the unsaved firewall edit. -->
+        <div class="subsection">
+          <h4>Web Logins</h4>
+          <p class="help-text-small">
+            Sites this agent holds cookies for. Only an <strong>approved</strong> site can be
+            used by <code>browse_page(use_auth=…)</code> — cookies on their own are not access.
+            Revoke to put the agent back to signed-out, e.g. before signing it into a different
+            account.
+          </p>
+
+          {#if webAuthLoading}
+            <p class="help-text-small">Reading the vault…</p>
+          {:else if webAuthError}
+            <p class="help-text-small" style="color: var(--danger);">{webAuthError}</p>
+          {:else if webAuthDomains.length === 0}
+            <p class="help-text-small" style="font-style: italic;">
+              No stored logins. The agent's <code>open_login_window</code> opens a browser for
+              you to sign in; your answer afterwards is what approves it.
+            </p>
+          {:else}
+            <div class="web-auth-list">
+              {#each webAuthDomains as row (row.domain)}
+                <div class="web-auth-row">
+                  <div class="web-auth-facts">
+                    <span class="web-auth-domain">{row.domain}</span>
+                    {#if row.approved}
+                      <span class="web-auth-approved">Approved {webAuthWhen(row.approved.at)}</span>
+                    {:else}
+                      <span class="web-auth-unapproved">Not approved — the agent cannot use this jar</span>
+                    {/if}
+                    <p class="help-text-small" style="margin: 0;">
+                      {row.has_cookies ? 'Cookies stored' : 'No cookies stored'}
+                      · saved {webAuthWhen(row.authenticated_at)}
+                      · last read {webAuthWhen(row.last_used_at)}
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    class="btn-archive-action btn-archive-danger"
+                    on:click={() => handleRevokeWebAuth(row.domain)}
+                    disabled={revokingDomain !== ''}
+                    title="Delete the cookies and the approval for {row.domain}"
+                  >{revokingDomain === row.domain ? 'Revoking…' : 'Revoke'}</button>
+                </div>
+              {/each}
+            </div>
+          {/if}
+
+          {#if webAuthMessage}
+            <p class="help-text-small" style="margin-top: 0.5rem; color: var(--text-secondary);">{webAuthMessage}</p>
           {/if}
         </div>
       {/if}
@@ -1504,6 +1642,45 @@
 
   .btn-archive-danger {
     background: var(--danger, #ef4444);
+  }
+
+  .web-auth-list {
+    display: flex;
+    flex-direction: column;
+    gap: 0.4rem;
+    margin-top: 0.6rem;
+  }
+
+  .web-auth-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.75rem;
+    padding: 0.5rem 0.6rem;
+    border: 1px solid var(--border, #333);
+    border-radius: 4px;
+  }
+
+  .web-auth-facts {
+    display: flex;
+    flex-direction: column;
+    gap: 0.1rem;
+    min-width: 0;
+  }
+
+  .web-auth-domain {
+    font-weight: 600;
+    word-break: break-all;
+  }
+
+  .web-auth-approved {
+    font-size: 0.82rem;
+    color: var(--success, #22c55e);
+  }
+
+  .web-auth-unapproved {
+    font-size: 0.82rem;
+    color: var(--warning, #f59e0b);
   }
 
   .whitelist-section {

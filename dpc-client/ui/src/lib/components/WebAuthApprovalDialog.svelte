@@ -38,7 +38,11 @@
             <div class="webauth-approval-card">
                 <div class="approval-header">
                     <span class="approval-icon">🔑</span>
-                    <span class="approval-title">Headless Login Access</span>
+                    <span class="approval-title">
+                        {request.kind === "login_window"
+                            ? "Confirm Login"
+                            : "Headless Login Access"}
+                    </span>
                 </div>
                 <!-- At full contrast and on its own line: approving a headless
                      login without knowing who asked and from where is approving
@@ -57,9 +61,18 @@
                 </div>
                 <div class="approval-url" title={request.url}>{request.url}</div>
                 <div class="approval-reason">
-                    Uses your saved cookies in a browser you will not see.
-                    Expires in 2 minutes.
+                    {request.question ||
+                        "Uses your saved cookies in a browser you will not see."}
                 </div>
+                <!-- Context, deliberately not a verdict: a site hands guest
+                     cookies to any anonymous visitor, so what appeared is
+                     something to look at, never a reason to click yes. -->
+                {#if request.evidence?.new_cookie_names?.length}
+                    <div class="approval-evidence">
+                        New since the page first loaded:
+                        <code>{request.evidence.new_cookie_names.join(", ")}</code>
+                    </div>
+                {/if}
                 <div class="approval-actions">
                     <button class="btn-approve" on:click={() => approve(request.request_id)}>
                         ✓ Allow once
@@ -166,6 +179,13 @@
         font-size: 0.85em;
         opacity: 0.7;
         margin-bottom: 12px;
+    }
+
+    .approval-evidence {
+        font-size: 0.8em;
+        opacity: 0.7;
+        margin-bottom: 12px;
+        word-break: break-word;
     }
 
     .approval-actions {
