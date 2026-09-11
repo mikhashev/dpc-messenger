@@ -22,7 +22,6 @@ hook (T6), tools/web_auth_tools.py (T7).
 from __future__ import annotations
 
 import encodings.idna
-import hashlib
 import ipaddress
 import json
 import logging
@@ -258,98 +257,27 @@ def _now_iso() -> str:
     )
 
 
-APPROVAL_VIA_LOGIN_WINDOW = "login_window"
-
-
-# A credential is a secret, not a setting: `lang=en` is httpOnly on some
-# sites and identical for every account, so a short value must not become
-# the anchor that makes two accounts look like one.
-IDENTITY_MIN_VALUE_LEN = 8
-
-
-def _is_identity_bearing(cookie: dict) -> bool:
-    """True for a cookie that could be carrying the login itself.
-
-    `httponly` is the site-independent mark of one: the server sets it and
-    the page's own JavaScript cannot read it, which is what a session
-    credential is built to be. A property of the cookie, not a name in a
-    list — a list of names is wrong for every site not on it.
-    """
-    if not cookie.get("httponly"):
-        return False
-    return len(str(cookie.get("value") or "")) >= IDENTITY_MIN_VALUE_LEN
-
-
-def identity_marks(cookies: list[dict] | None) -> list[str]:
-    """Sorted hashes of the identity-bearing (name, value) pairs — the
-    identity an approval was granted for, stored beside it.
-
-    Hashed rather than plain: this is copied forward on every writeback,
-    and a session token is the one thing here worth stealing."""
-    marks = {
-        hashlib.sha256(
-            f"{c.get('name', '')}\x00{c.get('value', '')}".encode("utf-8")
-        ).hexdigest()
-        for c in cookies or []
-        if _is_identity_bearing(c)
-    }
-    return sorted(marks)
-
-
-def _identity_changed(previous: dict, cookies: list[dict]) -> bool:
-    """Did the login these cookies carry stop being the approved one?
-
-    Intersection, not equality, and that is the design: anything in common
-    is the same identity refreshed, nothing in common is a different one.
-    Equality would read a rotation as a switch — a site re-issuing one of
-    its own session cookies leaves the long-lived one alone, so a mark
-    survives, while a sign-in as another account comes through a login
-    window that starts empty, so no mark does.
-
-    Three things it does not catch. A site rotating every identity-bearing
-    cookie at once reads as a switch and costs one extra dialog — the
-    direction this is optimised to fail in. A jar with no identity-bearing
-    cookie on either side yields no signal and the approval is carried as
-    before: the empty/empty branch, which must stay, or such a site would
-    demand re-approval on every writeback. And two accounts handed the same
-    httpOnly value read as one identity, which no jar can see from
-    outside."""
-    before = set(previous.get("approved_identity") or [])
-    after = set(identity_marks(cookies))
-    if not before and not after:
-        return False
-    return not (before & after)
-
-
 def save_cookies(
     agent_id: str,
     domain: str,
     cookies: list[dict],
-    *,
-    approved_via: str | None = None,
 ) -> None:
     """Persist cookies for agent+domain. Replaces any existing jar for
     that domain — partial merges are not supported (cookies arrive as a
     full snapshot).
 
-    Cookies are data; approval is a decision, and the two live in separate
-    fields. `authenticated_at` says when these cookie *bytes* were written
-    — the ordinary navigate/close writeback moves it, so it can never mean
-    "a human approved this login". The `approved` block, `{"at", "via"}`,
-    is written only when `approved_via` is passed. Without it none is
-    created, and an existing one is carried forward only while these
-    cookies still carry the identity it was granted for — refreshed bytes
-    are neither a re-approval nor a revocation, but a sign-in as somebody
-    else is not a refresh. See `_identity_changed` for what that can and
-    cannot see.
+    `authenticated_at` says when these cookie *bytes* were written, and
+    nothing more: the ordinary navigate/close writeback moves it.
 
-    One production path passes `approved_via`: `commit_login_cookies`, the
-    single writer reached from the branch where a person answered yes,
-    which lands the cookies and the decision in this one call. Every writer
-    of cookie *bytes* alone — navigate writeback, close — leaves it None,
-    which is what makes "cookies appeared" incapable of authorising
-    anything. A login window's poll is no longer among them: it snapshots
-    into memory, so an unanswered window writes nothing here at all.
+    There is no approval field. The visible window is the act, so nothing
+    here tries to establish after the fact that a person logged in — a jar
+    cannot answer that question, because a site hands guest cookies to any
+    anonymous visitor.
+
+    A non-empty jar being replaced is kept under `previous`, one generation
+    deep, and `restore_previous_cookies` puts it back. Every guard in front
+    of this call is a judgement about a page, and a judgement can be wrong;
+    this is the part that does not depend on being right.
 
     Raises ValueError when `domain` has no registrable domain: a jar keyed
     `com` is one jar holding every `.com` login, handed to any `.com` host
@@ -362,102 +290,63 @@ def save_cookies(
         )
     vault = _load_vault(agent_id)
     now = _now_iso()
-    previous = vault["domains"].get(key) or {}
     entry: dict[str, Any] = {
         "cookies": cookies,
         "authenticated_at": now,
         "last_used_at": now,
     }
-    if approved_via is not None:
-        entry["approved"] = {"at": now, "via": approved_via}
-        entry["approved_identity"] = identity_marks(cookies)
-    elif previous.get("approved") is not None:
-        if _identity_changed(previous, cookies):
-            logging.getLogger(__name__).info(
-                "dropping the approval for %s (agent %s): these cookies carry "
-                "a different identity from the one that was approved",
-                key, agent_id,
-            )
-            # Into the audit as well, because the next thing that happens is
-            # a person being asked to approve a site they already approved.
-            # Without a row, the only answer available to them is a guess.
-            _append_audit(agent_id, {
-                "timestamp": now,
-                "agent_id": agent_id,
-                "domain": key,
-                "action": "approval_dropped",
-                "url": "",
-                "result": "ok",
-                "reason": "identity_changed",
-            })
-        else:
-            entry["approved"] = previous["approved"]
-            # Re-stamped, not copied: the marks describe the cookies now in
-            # the jar, so a rotation that keeps one mark also keeps the new
-            # ones for the next comparison.
-            entry["approved_identity"] = identity_marks(cookies)
+    displaced = vault["domains"].get(key)
+    if displaced and displaced.get("cookies"):
+        # One generation, not a history: the older copy is dropped with the
+        # one that displaces it, so a jar overwritten twice by the same
+        # mistake cannot bury the good one out of reach.
+        entry["previous"] = {
+            k: v for k, v in displaced.items() if k != "previous"
+        }
     vault["domains"][key] = entry
     _save_vault(agent_id, vault)
 
 
-def get_approval(agent_id: str, domain: str) -> dict | None:
-    """The recorded human approval for the eTLD+1 of `domain`, or None.
+def restore_previous_cookies(agent_id: str, domain: str) -> bool:
+    """Put back the jar the last `save_cookies` displaced. True if one was
+    there to put back.
 
-    None covers no jar, an unresolvable input, and a jar written before
-    approvals existed — all three mean "no human has been observed logging
-    in here", which is what the gate asks. Pre-existing jars are
-    deliberately not grandfathered: grandfathering re-imports the defect
-    that the jar's mere presence was the approval."""
+    Swaps rather than pops: the jar being undone becomes the `previous` of
+    the restored one, so a restore aimed at the wrong generation is itself
+    undoable by calling this again."""
     key = resolve_etld1(domain)
     if key is None:
-        return None
-    entry = _load_vault(agent_id)["domains"].get(key)
-    if entry is None:
-        return None
-    approved = entry.get("approved")
-    return approved if isinstance(approved, dict) else None
-
-
-def is_approved(agent_id: str, domain: str) -> bool:
-    """True iff a human login for this eTLD+1 was recorded as approved."""
-    return get_approval(agent_id, domain) is not None
-
-
-def record_approval(
-    agent_id: str,
-    domain: str,
-    via: str = APPROVAL_VIA_LOGIN_WINDOW,
-) -> dict | None:
-    """Write a human's yes onto an existing jar, touching no cookie.
-
-    It does read them: the identity marks of the jar as it stands are
-    recorded beside the approval, so a later sign-in as a different account
-    cannot inherit this yes.
-
-    Takes no cookie argument on purpose: an approval that arrives together
-    with a cookie snapshot is one a browser can mint by loading a page. The
-    caller must already hold an explicit answer from a person.
-
-    This is the path for a yes that arrives over a jar already on disk. A
-    login window is not one: it holds its cookies in memory and a yes puts
-    both down at once, through `save_cookies(approved_via=...)`.
-
-    Returns the stored `{"at", "via"}` block, or None when `domain` has no
-    registrable domain or no jar — an approval over no cookies passes the
-    gate only to fail at the first request."""
-    key = resolve_etld1(domain)
-    if key is None:
-        return None
+        return False
     vault = _load_vault(agent_id)
     entry = vault["domains"].get(key)
-    if entry is None:
-        return None
-    approved = {"at": _now_iso(), "via": via}
-    entry["approved"] = approved
-    entry["approved_identity"] = identity_marks(entry.get("cookies"))
-    vault["domains"][key] = entry
+    if not entry or not entry.get("previous"):
+        return False
+    restored = dict(entry["previous"])
+    displaced = {k: v for k, v in entry.items() if k != "previous"}
+    restored["previous"] = displaced
+    restored["last_used_at"] = _now_iso()
+    vault["domains"][key] = restored
     _save_vault(agent_id, vault)
-    return approved
+    return True
+
+
+def has_session(agent_id: str, domain: str) -> bool:
+    """Does the vault hold unexpired cookies for the eTLD+1 of `domain`?
+
+    A pure read: unlike `load_cookies` it does not stamp `last_used_at`, so
+    asking cannot make a stale jar look freshly used.
+
+    It answers "is there anything to send", not "is the session still alive
+    on the server" — only the site can say that. The headless path asks it
+    because there a dead session arrives as a login page nobody can see;
+    the visible path asks nothing, because a person is looking at it."""
+    key = resolve_etld1(domain)
+    if key is None:
+        return False
+    entry = _load_vault(agent_id)["domains"].get(key)
+    if entry is None:
+        return False
+    return bool(filter_expired(entry.get("cookies") or []))
 
 
 def load_cookies(agent_id: str, domain: str) -> list[dict] | None:
@@ -486,19 +375,16 @@ def load_cookies(agent_id: str, domain: str) -> list[dict] | None:
 
 
 def get_auth_status(agent_id: str, domain: str) -> dict:
-    """Return {has_cookies, expires, authenticated_at, approved} for the
-    eTLD+1 jar. `expires` is the earliest cookie expiry (Unix epoch
-    seconds), or None for session-only jars or empty jars. `approved` is
-    the human-approval block or None — having cookies and being approved
-    are independent facts. An unresolvable `domain` reports the same shape
-    as an absent jar — no jar can exist for it."""
+    """Return {has_cookies, expires, authenticated_at} for the eTLD+1 jar.
+    `expires` is the earliest cookie expiry (Unix epoch seconds), or None
+    for session-only jars or empty jars. An unresolvable `domain` reports
+    the same shape as an absent jar — no jar can exist for it."""
     key = resolve_etld1(domain)
     vault = _load_vault(agent_id) if key is not None else {"domains": {}}
     entry = vault["domains"].get(key)
     if entry is None:
         return {
-            "has_cookies": False, "expires": None,
-            "authenticated_at": None, "approved": None,
+            "has_cookies": False, "expires": None, "authenticated_at": None,
         }
     cookies = entry.get("cookies", [])
     expires = min(
@@ -510,7 +396,6 @@ def get_auth_status(agent_id: str, domain: str) -> dict:
         "has_cookies": bool(cookies),
         "expires": expires,
         "authenticated_at": entry.get("authenticated_at"),
-        "approved": entry.get("approved"),
     }
 
 
@@ -523,7 +408,6 @@ def list_domains(agent_id: str) -> list[dict]:
         rows.append({
             "domain": domain,
             "has_cookies": bool(entry.get("cookies")),
-            "approved": entry.get("approved"),
             "authenticated_at": entry.get("authenticated_at"),
             "last_used_at": entry.get("last_used_at"),
         })
@@ -531,10 +415,14 @@ def list_domains(agent_id: str) -> list[dict]:
     return rows
 
 
-def revoke(agent_id: str, domain: str) -> None:
-    """Remove the jar for the eTLD+1 of `domain`. Silent no-op if absent,
-    or if `domain` has no registrable domain. Does NOT delete the per-agent
-    Fernet key (other domains may still be encrypted with it)."""
+def forget_cookies(agent_id: str, domain: str) -> None:
+    """Delete this machine's copy of the jar for the eTLD+1 of `domain`.
+
+    Not a logout: the session on the site is untouched and stays valid
+    until the person signs out there, in the visible window. What this
+    removes is the agent's ability to send those cookies. Silent no-op if
+    the jar is absent or `domain` has no registrable domain. Does NOT
+    delete the per-agent Fernet key (other domains still use it)."""
     key = resolve_etld1(domain)
     if key is None:
         return

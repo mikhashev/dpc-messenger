@@ -48,14 +48,11 @@ def _node_ledger_in_tmp(tmp_path, monkeypatch):
 
 
 class ConnectedUi:
-    """A UI client at the other end of `local_api`, answering the web-auth
-    approval dialog the way the real one does.
+    """A UI client at the other end of `local_api`, recording what it is sent.
 
-    `browse_page` and `open_login_window` refuse outright when there is no
-    UI to ask — an absent service is not permission to skip the question —
-    so any test that drives those past their gate has to supply one. The
-    default answer is yes; `ConnectedUi("reject")` says no and
-    `ConnectedUi("ignore")` broadcasts and never answers.
+    It answers nothing: the web-auth approval dialog it used to answer is
+    gone, and no browse path asks a question any more. `answer` survives for
+    callers that still pass it and is inert.
     """
 
     def __init__(self, answer: str = "approve"):
@@ -64,18 +61,7 @@ class ConnectedUi:
         self.events: list = []
 
     async def broadcast_event(self, name, payload):
-        from dpc_client_core.dpc_agent.tools import browser as browser_mod
-
         self.events.append((name, payload))
-        if self.answer == "ignore" or not isinstance(payload, dict):
-            return
-        entry = browser_mod.get_pending_auth_approvals().get(
-            payload.get("request_id")
-        )
-        if entry is None:
-            return
-        entry["approved"] = self.answer == "approve"
-        entry["event"].set()
 
 
 def service_with_ui(answer: str = "approve", **extra):

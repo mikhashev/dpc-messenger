@@ -4260,30 +4260,8 @@ class CoreService:
             logger.error("Error reloading firewall: %s", e, exc_info=True)
             return {"status": "error", "message": str(e)}
 
-    # --- Web auth headless approval (ADR-029 Task 008) ---
-
-    async def web_auth_approve_headless(self, request_id: str) -> Dict[str, Any]:
-        from .dpc_agent.tools.browser import get_pending_auth_approvals
-        pending = get_pending_auth_approvals()
-        entry = pending.get(request_id)
-        if not entry:
-            return {"status": "error", "message": f"Unknown request_id: {request_id}"}
-        entry["approved"] = True
-        entry["event"].set()
-        return {"status": "approved", "request_id": request_id}
-
-    async def web_auth_reject_headless(self, request_id: str) -> Dict[str, Any]:
-        from .dpc_agent.tools.browser import get_pending_auth_approvals
-        pending = get_pending_auth_approvals()
-        entry = pending.get(request_id)
-        if not entry:
-            return {"status": "error", "message": f"Unknown request_id: {request_id}"}
-        entry["approved"] = False
-        entry["event"].set()
-        return {"status": "rejected", "request_id": request_id}
-
-    # --- Web auth vault (UI only: an agent that can delete the approval
-    #     gating it can delete the one it dislikes) ---
+    # --- Web auth vault (UI only: an agent that can delete a stored login
+    #     can delete the one it dislikes) ---
 
     @staticmethod
     def _web_auth_agent_id(agent_id: str) -> str:
@@ -4302,11 +4280,8 @@ class CoreService:
     async def web_auth_list_domains(self, agent_id: str) -> Dict[str, Any]:
         """`web_auth.list_domains` rows for one agent, unchanged.
 
-        `has_cookies` and `approved` stay separate facts — the gate reads
-        the approval, so a jar without one is not a login and must not be
-        shown as one. A pure read: unlike `load_cookies` it does not stamp
-        `last_used_at`, so opening the panel cannot make a stale jar look
-        freshly used.
+        A pure read: unlike `load_cookies` it does not stamp `last_used_at`,
+        so opening the panel cannot make a stale jar look freshly used.
         """
         try:
             agent_id = self._web_auth_agent_id(agent_id)
@@ -4324,15 +4299,19 @@ class CoreService:
             )
             return {"status": "error", "message": str(e)}
 
-    async def web_auth_revoke_domain(self, agent_id: str, domain: str) -> Dict[str, Any]:
-        """Delete one agent's cookie jar for one site, and the approval on it.
+    async def web_auth_forget_cookies(self, agent_id: str, domain: str) -> Dict[str, Any]:
+        """Delete this machine's copy of one agent's cookie jar for one site.
+
+        Not a logout, and named so it cannot be read as one: the session on
+        the site stays valid until the person signs out there, in the visible
+        window. What this takes away is the agent's ability to send those
+        cookies.
 
         `domain` is resolved to the eTLD+1 the vault files jars under, so
-        `mail.example.com` revokes the `example.com` jar; an input with no
+        `mail.example.com` addresses the `example.com` jar; an input with no
         eTLD+1 addresses no jar and is an error rather than a quiet success.
-        `revoked` is False when there was no jar — the end state is the same
-        either way, but reporting a no-op as a deletion claims work not done.
-        Audited either way. The per-agent Fernet key survives (`web_auth.revoke`).
+        `forgotten` is False when there was no jar — reporting a no-op as a
+        deletion claims work not done. Audited either way.
         """
         try:
             agent_id = self._web_auth_agent_id(agent_id)
@@ -4355,47 +4334,44 @@ class CoreService:
                  if row["domain"] == etld1),
                 None,
             )
-            web_auth.revoke(agent_id, etld1)
+            web_auth.forget_cookies(agent_id, etld1)
 
             if before is None:
                 web_auth.audit_append(
-                    agent_id, etld1, url, status="web_auth_revoke_no_jar",
+                    agent_id, etld1, url, status="web_auth_forget_no_jar",
                 )
                 return {
                     "status": "success",
                     "agent_id": agent_id,
                     "domain": etld1,
-                    "revoked": False,
-                    "was_approved": False,
+                    "forgotten": False,
                     "message": (
-                        f"{agent_id} held no stored login for {etld1} — "
-                        f"nothing to revoke."
+                        f"{agent_id} held no stored cookies for {etld1} — "
+                        f"nothing to forget."
                     ),
                 }
 
-            was_approved = before.get("approved") is not None
             web_auth.audit_append(
-                agent_id, etld1, url, status="web_auth_revoked",
+                agent_id, etld1, url, status="web_auth_forgotten",
             )
             logger.info(
-                "web auth revoked: agent=%s domain=%s was_approved=%s",
-                agent_id, etld1, was_approved,
+                "web auth cookies forgotten: agent=%s domain=%s",
+                agent_id, etld1,
             )
             return {
                 "status": "success",
                 "agent_id": agent_id,
                 "domain": etld1,
-                "revoked": True,
-                "was_approved": was_approved,
+                "forgotten": True,
                 "message": (
-                    f"Revoked {etld1} for {agent_id}: cookies and approval "
-                    f"deleted. A new login there needs open_login_window and "
-                    f"your approval again."
+                    f"Deleted this machine's copy of {agent_id}'s {etld1} "
+                    f"cookies. You are still signed in on {etld1} itself — "
+                    f"sign out there if that is what you meant."
                 ),
             }
         except Exception as e:
             logger.error(
-                "web_auth_revoke_domain failed for %s/%s: %s",
+                "web_auth_forget_cookies failed for %s/%s: %s",
                 agent_id, domain, e, exc_info=True,
             )
             return {"status": "error", "message": str(e)}

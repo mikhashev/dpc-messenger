@@ -217,14 +217,13 @@ def _fresh_cookies(domain):
 def test_the_no_jar_refusal_no_longer_doubles_the_www(vault_home):
     """The old message interpolated `'www.{resolved}'` on a value that was
     the unresolved input, so a `www.` request read back `'www.www.host'` —
-    and it told the agent to log in a second time at a spelling that shares
+    and it told the agent to sign in a second time at a spelling that shares
     the jar it already has."""
     from dpc_client_core import web_auth
     from dpc_client_core.dpc_agent.tools import browser as browser_mod
 
     web_auth.save_cookies(
         "agent_a", "real-site.net", _fresh_cookies("real-site.net"),
-        approved_via=web_auth.APPROVAL_VIA_LOGIN_WINDOW,
     )
 
     root = vault_home / "agents" / "agent_a"
@@ -238,7 +237,7 @@ def test_the_no_jar_refusal_no_longer_doubles_the_www(vault_home):
     assert "www.www." not in answer
     assert "other-site.net" in answer
     assert "real-site.net" in answer, (
-        "the refusal must name the approved logins that exist"
+        "the refusal must name the sites that do have cookies"
     )
 
 

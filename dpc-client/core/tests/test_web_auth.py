@@ -5,7 +5,7 @@ Covers:
 - per-agent isolation (agent_b cannot read agent_a's vault)
 - eTLD+1 resolution (subdomain → root jar)
 - get_auth_status fields (has_cookies / expires / authenticated_at)
-- revoke removes the jar
+- forget_cookies removes the jar
 - is_expired correctness (session vs expired vs valid)
 - vault file is not readable as plaintext
 """
@@ -174,7 +174,7 @@ def test_get_auth_status_empty(vault_home):
 
     status = web_auth.get_auth_status("agent_a", f"{TEST_DOMAIN}")
     assert status == {"has_cookies": False, "expires": None,
-                      "authenticated_at": None, "approved": None}
+                      "authenticated_at": None}
 
 
 def test_get_auth_status_populated(vault_home, sample_cookies):
@@ -200,18 +200,18 @@ def test_list_domains(vault_home, sample_cookies):
         assert entry["authenticated_at"] is not None
 
 
-def test_revoke_removes_jar(vault_home, sample_cookies):
+def test_forget_cookies_removes_jar(vault_home, sample_cookies):
     from dpc_client_core import web_auth
 
     web_auth.save_cookies("agent_a", f"{TEST_DOMAIN}", sample_cookies)
-    web_auth.revoke("agent_a", f"{TEST_DOMAIN}")
+    web_auth.forget_cookies("agent_a", f"{TEST_DOMAIN}")
     assert web_auth.load_cookies("agent_a", f"{TEST_DOMAIN}") is None
 
 
-def test_revoke_missing_silent(vault_home):
+def test_forget_cookies_missing_silent(vault_home):
     from dpc_client_core import web_auth
 
-    web_auth.revoke("agent_a", "never_saved.com")  # must not raise
+    web_auth.forget_cookies("agent_a", "never_saved.com")  # must not raise
 
 
 def test_is_expired_with_expired_cookie():

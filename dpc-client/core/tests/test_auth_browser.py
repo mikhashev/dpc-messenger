@@ -627,6 +627,29 @@ def test_route_gate_resilient_to_broken_request(vault_home):
 # ─────────────────────────────────────────────────────────────
 
 
+SIGNED_IN_HTML = (
+    "<html><body><h1>Your account</h1><p>Signed in. Here is a paragraph of "
+    "ordinary page content, long enough for an extractor to return "
+    "something, which is what the writeback asks for before it stores "
+    "anything.</p></body></html>"
+)
+
+
+class _SignedInPage:
+    """A page that proves a session: no sign-in step on it, and readable
+    content when extracted. The writeback refuses without both."""
+
+    def __init__(self, html: str = SIGNED_IN_HTML, url: str = "https://example/"):
+        self._html = html
+        self.url = url
+
+    def content(self) -> str:
+        return self._html
+
+    def is_closed(self) -> bool:
+        return False
+
+
 class _FakeStateContext:
     """Mock of Playwright BrowserContext that captures storage_state()
     + add_cookies() calls and writes JSON when storage_state(path=...)
@@ -791,6 +814,7 @@ def test_persist_session_cookies_syncs_the_vault(vault_home):
             "sameSite": "Lax", "expires": 1735689600,
         },
     ])
+    ab._page = _SignedInPage()
     ab._persist_session_cookies()
 
     saved = web_auth.load_cookies("agent_a", f"{TEST_DOMAIN}")
@@ -848,6 +872,7 @@ def test_persist_session_cookies_swallows_errors(vault_home, caplog):
             raise RuntimeError("context already closed")
 
     ab._context = _BrokenContext()
+    ab._page = _SignedInPage()
     with caplog.at_level(_logging.WARNING):
         ab._persist_session_cookies()  # must not raise
     assert any(
@@ -1203,9 +1228,9 @@ def test_browse_page_use_auth_returns_relogin_on_auth_required(vault_home, fresh
     agent_root = vault_home / "agents" / "agent_a"
     agent_root.mkdir(parents=True, exist_ok=True)
     ctx = _make_ctx(agent_root, ui=True)
-    # An approved login is the authorisation — without it the call is
-    # refused before the stub below can raise.
-    web_auth.save_cookies("agent_a", TEST_DOMAIN, fresh_cookies, approved_via=web_auth.APPROVAL_VIA_LOGIN_WINDOW)
+    # A stored session is what lets the headless path run at all — without
+    # it the call is refused before the stub below can raise.
+    web_auth.save_cookies("agent_a", TEST_DOMAIN, fresh_cookies)
 
     def _raise_auth_required(agent_id, domain, url, headed=True):
         raise AuthRequiredError(
@@ -1237,7 +1262,7 @@ def test_browse_page_use_auth_rejects_off_domain_url(vault_home, fresh_cookies):
 
     agent_root = vault_home / "agents" / "agent_a"
     agent_root.mkdir(parents=True, exist_ok=True)
-    web_auth.save_cookies("agent_a", f"{TEST_DOMAIN}", fresh_cookies, approved_via=web_auth.APPROVAL_VIA_LOGIN_WINDOW)
+    web_auth.save_cookies("agent_a", f"{TEST_DOMAIN}", fresh_cookies)
     ctx = _make_ctx(agent_root, ui=True)
     # Patch _auth_browse_html to simulate AuthBrowser raising ValueError
     # from the domain check (we can't open Camoufox in the test runner).
@@ -1585,8 +1610,8 @@ def test_fetch_js_text_without_agent_uses_one_shot(monkeypatch):
 
 
 def test_browse_page_auth_without_keep_open_is_headless(vault_home, fresh_cookies):
-    """The gate above this call asks the user to approve *headless*
-    access and audits it as such; the browse must not be headed."""
+    """keep_open is what makes a window visible, and a visible window is the
+    ungated one. Without it the browse must not be headed."""
     import dpc_client_core.dpc_agent.tools.browser as mod
     from dpc_client_core import web_auth
     from dpc_client_core.dpc_agent.tools.browser import browse_page
@@ -1594,7 +1619,7 @@ def test_browse_page_auth_without_keep_open_is_headless(vault_home, fresh_cookie
     agent_root = vault_home / "agents" / "agent_a"
     agent_root.mkdir(parents=True, exist_ok=True)
     ctx = _make_ctx(agent_root, ui=True)
-    web_auth.save_cookies("agent_a", TEST_DOMAIN, fresh_cookies, approved_via=web_auth.APPROVAL_VIA_LOGIN_WINDOW)
+    web_auth.save_cookies("agent_a", TEST_DOMAIN, fresh_cookies)
 
     seen: dict = {}
 
@@ -1844,85 +1869,6 @@ def test_audit_error_records_the_message():
     assert len(fields["error_message"]) <= 300
 
 
-def test_headless_gate_fails_fast_without_a_ui(vault_home, fresh_cookies):
-    """The gate broadcasts a request and waits 120s for an answer. When no UI
-    client is connected the broadcast is dropped, so the wait could only end
-    in a timeout — and the agent was told "not approved", as though a human
-    had refused. 19 requests across three agents expired that way before the
-    dialog existed."""
-    import time
-    import dpc_client_core.dpc_agent.tools.browser as mod
-    from dpc_client_core import web_auth
-    from dpc_client_core.dpc_agent.tools.browser import browse_page
-
-    agent_root = vault_home / "agents" / "agent_a"
-    agent_root.mkdir(parents=True, exist_ok=True)
-    ctx = _make_ctx(agent_root)
-    web_auth.save_cookies("agent_a", TEST_DOMAIN, fresh_cookies, approved_via=web_auth.APPROVAL_VIA_LOGIN_WINDOW)
-
-    broadcasts = []
-
-    class _NoUiApi:
-        has_clients = False
-
-        async def broadcast_event(self, name, payload):
-            broadcasts.append(name)
-
-    ctx.dpc_service = types.SimpleNamespace(local_api=_NoUiApi())
-
-    started = time.monotonic()
-    out = asyncio.run(
-        browse_page(ctx, url=f"https://{TEST_DOMAIN}/x", use_auth=f"{TEST_DOMAIN}")
-    )
-    elapsed = time.monotonic() - started
-
-    assert "no UI client is connected" in out
-    assert elapsed < 5, "must not wait out the 120s approval window"
-    assert broadcasts == [], "no point broadcasting to nobody"
-
-
-def test_headless_gate_still_waits_when_a_ui_is_connected(vault_home, fresh_cookies):
-    """With a UI attached the request is real: broadcast, then wait for the
-    answer the dialog sends back."""
-    import dpc_client_core.dpc_agent.tools.browser as mod
-    from dpc_client_core import web_auth
-    from dpc_client_core.dpc_agent.tools.browser import browse_page
-
-    agent_root = vault_home / "agents" / "agent_a"
-    agent_root.mkdir(parents=True, exist_ok=True)
-    ctx = _make_ctx(agent_root)
-    web_auth.save_cookies("agent_a", TEST_DOMAIN, fresh_cookies, approved_via=web_auth.APPROVAL_VIA_LOGIN_WINDOW)
-
-    broadcasts = []
-
-    class _LiveApi:
-        has_clients = True
-
-        async def broadcast_event(self, name, payload):
-            broadcasts.append(name)
-            # Answer immediately, the way the dialog does.
-            entry = mod.get_pending_auth_approvals()[payload["request_id"]]
-            entry["approved"] = True
-            entry["event"].set()
-
-    ctx.dpc_service = types.SimpleNamespace(local_api=_LiveApi())
-
-    def _html(agent_id, domain, url, headed=True):
-        return "<html><body><p>ok</p></body></html>"
-
-    original = mod._auth_browse_html
-    mod._auth_browse_html = _html
-    try:
-        out = asyncio.run(
-            browse_page(ctx, url=f"https://{TEST_DOMAIN}/x", use_auth=f"{TEST_DOMAIN}")
-        )
-    finally:
-        mod._auth_browse_html = original
-
-    assert broadcasts == ["web_auth_headless_approval_request"]
-    assert "not approved" not in out
-
-
 def test_fetch_browser_carries_no_login(vault_home):
     """The regression this closes: the browse_page JS fallback opened with
     the agent's whole saved login and ran as a second, concurrent browser
@@ -1978,6 +1924,7 @@ def test_the_writeback_does_not_call_storage_state(vault_home):
         "sameSite": "Lax", "expires": 1735689600,
     }])
     ab._context = ctx
+    ab._page = _SignedInPage()
     ab._persist_session_cookies()
 
     assert ctx.storage_state_calls == []

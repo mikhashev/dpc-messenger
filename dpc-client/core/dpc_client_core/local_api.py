@@ -207,13 +207,11 @@ ALLOWED_COMMANDS: frozenset = frozenset({
     # Reload from disk
     "reload_personal_context",
     "reload_firewall",
-    # Web auth headless approval (ADR-029 Task 008)
-    "web_auth_approve_headless",
-    "web_auth_reject_headless",
-    # Web auth vault: see an agent's stored logins, and take one back. The
-    # revoke half is here and not in the agent's tool registry on purpose.
+    # Web auth vault: see an agent's stored cookies, and delete this
+    # machine's copy. The deleting half is here and not in the agent's tool
+    # registry on purpose.
     "web_auth_list_domains",
-    "web_auth_revoke_domain",
+    "web_auth_forget_cookies",
     # Shell approval (ADR-030 v2)
     "resolve_schedule_approval",
     "shell_approve_command",

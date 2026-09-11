@@ -7,7 +7,7 @@ current cookie status (logged in or not, expiry).
 Kept in a dedicated module rather than `browser.py` because:
   - depends on `web_auth.py` (DPAPI/keyring) which `browser.py` doesn't
   - keeps `browser.py` focused on the browse path
-  - future auth-introspection tools (`revoke_auth_domain`, etc.) go here
+  - future auth-introspection tools go here
 
 Per-agent scope: returns only the calling agent's own vault entries
 (resolved via `ctx.agent_root.name`). The agent cannot see another
@@ -50,22 +50,15 @@ async def list_auth_domains(ctx: ToolContext) -> str:
     rows = web_auth.list_domains(agent_id)
     if not rows:
         return (
-            "No auth domains in this agent's vault yet. Call "
-            "open_login_window(domain=\"example.com\") and log in there; "
-            "that is what records an approved login."
+            "No stored sessions in this agent's vault yet. Open the site in "
+            "a visible window — browse_page(url=..., use_auth=\"example.com\", "
+            "keep_open=true) — and have the person sign in there; what they "
+            "sign into is stored as they do it."
         )
 
-    lines = ["Auth domains in this agent's vault:"]
+    lines = ["Sites with cookies stored for this agent:"]
     for row in rows:
         domain = row["domain"]
-        # Cookies and approval are separate facts, and the gate reads the
-        # approval. Reporting only the cookies would make this tool a
-        # mirror of the jar again rather than of what browse_page will do.
-        approved = row.get("approved")
-        mark = (
-            f"approved {approved.get('at')}" if approved
-            else "NOT approved — call open_login_window to log in by hand"
-        )
         status = web_auth.get_auth_status(agent_id, domain)
         if status.get("has_cookies"):
             expires = status.get("expires")
@@ -93,9 +86,9 @@ async def list_auth_domains(ctx: ToolContext) -> str:
                     )
                 else:
                     tail = f"earliest cookie expires in {days:.0f} day(s) ({when})"
-            lines.append(f"  - {domain}: {mark}; cookies present, {tail}")
+            lines.append(f"  - {domain}: cookies present, {tail}")
         else:
-            lines.append(f"  - {domain}: {mark}; no cookies stored")
+            lines.append(f"  - {domain}: no cookies stored")
     return "\n".join(lines)
 
 
@@ -107,12 +100,12 @@ def get_tools() -> List[ToolEntry]:
             schema={
                 "name": "list_auth_domains",
                 "description": (
-                    "List the web domains in this agent's own vault: whether "
-                    "each carries an approved human login (which is what "
-                    "browse_page(use_auth=...) requires) and whether its cookies "
-                    "are still fresh. Use this before calling browse_page with "
-                    "use_auth to see which sites are usable and which need "
-                    "open_login_window."
+                    "List the web sites this agent has cookies stored for, and "
+                    "whether those cookies are still fresh. Use it before "
+                    "browse_page(use_auth=...) to see which sites a background "
+                    "fetch can reach. Freshness is not liveness — only the site "
+                    "can say whether a session still works, and a visible "
+                    "window (keep_open=true) is where that is found out."
                 ),
                 "parameters": {
                     "type": "object",

@@ -145,8 +145,10 @@ def _make_ctx(agent_root: Path, firewall=None, ui=False):
 
 
 def _gate_rows(entries):
-    """The two rows the headless approval writes before the browse itself."""
-    return [e["status"] for e in entries[:2]]
+    """Rows the headless path writes before the browse itself. There are
+    none left: what used to gate it was an approval dialog, and the only
+    pre-flight now is a refusal when no session is stored."""
+    return [e["status"] for e in entries[:-1]]
 
 
 def _fresh_cookies():
@@ -168,45 +170,10 @@ def test_browse_page_audit_on_vault_denied(vault_home):
     ))
     entries = _read_audit(vault_home, "agent_a")
     assert len(entries) == 1
-    # Cookies in the jar are not approval: the browser's own writeback
-    # puts them there. The refusal names the missing approval, headed or
-    # headless alike.
-    assert entries[0]["status"] == "auth_denied:no_approved_login"
+    # An empty vault means a headless fetch would download a login page
+    # into a window nobody can see. Refused before a browser is launched.
+    assert entries[0]["status"] == "auth_denied:no_session"
     assert entries[0]["domain"] == f"{TEST_DOMAIN}"
-
-
-@pytest.mark.xfail(
-    reason=(
-        "The empty-vault case is undecided, and this suite contradicts itself "
-        "about it. This test says an empty vault must produce 'auth_required'; "
-        "test_auth_browser.py's own docstring records the opposite as intended "
-        "- AuthBrowser._open() calls _load_all_cookies(skip_missing=True), so "
-        "re-login surfaces only when a protected request is rejected. ADR-028 "
-        "specifies the domain whitelist (:179, implemented 2026-08-25) and is "
-        "silent on the vault. Marked xfail rather than left red so the "
-        "disagreement is stated instead of accumulating as an unread alarm; see "
-        "the board entry THE-EMPTY-VAULT-CASE-HAS-TWO-TESTS-ASSERTING-OPPOSITE-"
-        "THINGS. Whoever owns ADR-028 decides, and then one of the two tests "
-        "changes."
-    ),
-    strict=True,
-)
-def test_browse_page_audit_on_auth_required(vault_home):
-    """No cookies in vault → AuthRequiredError → audit 'auth_required'.
-    Firewall is None here so the firewall layer is bypassed; the
-    AuthBrowser construction layer raises AuthRequiredError."""
-    from dpc_client_core.dpc_agent.tools import browser as browser_mod
-
-    agent_root = vault_home / "agents" / "agent_a"
-    agent_root.mkdir(parents=True, exist_ok=True)
-    ctx = _make_ctx(agent_root)
-
-    asyncio.run(browser_mod.browse_page(
-        ctx, url=f"https://{TEST_DOMAIN}/my", use_auth=f"{TEST_DOMAIN}"
-    ))
-    entries = _read_audit(vault_home, "agent_a")
-    assert len(entries) == 1
-    assert entries[0]["status"] == "auth_required"
 
 
 def test_browse_page_audit_on_success(vault_home):
@@ -215,7 +182,7 @@ def test_browse_page_audit_on_success(vault_home):
     from dpc_client_core import web_auth
     from dpc_client_core.dpc_agent.tools import browser as browser_mod
 
-    web_auth.save_cookies("agent_a", f"{TEST_DOMAIN}", _fresh_cookies(), approved_via=web_auth.APPROVAL_VIA_LOGIN_WINDOW)
+    web_auth.save_cookies("agent_a", f"{TEST_DOMAIN}", _fresh_cookies())
 
     agent_root = vault_home / "agents" / "agent_a"
     agent_root.mkdir(parents=True, exist_ok=True)
@@ -233,8 +200,8 @@ def test_browse_page_audit_on_success(vault_home):
         browser_mod._auth_browse_html = original
 
     entries = _read_audit(vault_home, "agent_a")
-    assert _gate_rows(entries) == ["headless_requested", "headless_approved"]
-    assert len(entries) == 3
+    assert _gate_rows(entries) == []
+    assert len(entries) == 1
     assert entries[-1]["status"] == 200
     assert entries[-1]["bytes"] == len(expected_markdown)
 
@@ -244,7 +211,7 @@ def test_browse_page_audit_on_browser_error(vault_home):
     from dpc_client_core import web_auth
     from dpc_client_core.dpc_agent.tools import browser as browser_mod
 
-    web_auth.save_cookies("agent_a", f"{TEST_DOMAIN}", _fresh_cookies(), approved_via=web_auth.APPROVAL_VIA_LOGIN_WINDOW)
+    web_auth.save_cookies("agent_a", f"{TEST_DOMAIN}", _fresh_cookies())
 
     agent_root = vault_home / "agents" / "agent_a"
     agent_root.mkdir(parents=True, exist_ok=True)
@@ -263,8 +230,8 @@ def test_browse_page_audit_on_browser_error(vault_home):
         browser_mod._auth_browse_html = original
 
     entries = _read_audit(vault_home, "agent_a")
-    assert _gate_rows(entries) == ["headless_requested", "headless_approved"]
-    assert len(entries) == 3
+    assert _gate_rows(entries) == []
+    assert len(entries) == 1
     assert entries[-1]["status"] == "browser_error"
 
 

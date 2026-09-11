@@ -500,10 +500,10 @@ class TestTheOtherTwoBrowsePagePathsAnnounceTheSameThings:
         from dpc_client_core.dpc_agent.tools import browser as b
 
         monkeypatch.setattr(wa, "audit_append", lambda *a, **k: None)
-        # An approved login is the gate. This class is about the answer
-        # header, not the gate, so the approval is asserted into existence
-        # rather than earned through a login window.
-        monkeypatch.setattr(wa, "is_approved", lambda agent_id, domain: True)
+        # A stored session is what a headless browse needs. This class is
+        # about the answer header, not that check, so it is asserted into
+        # existence rather than earned by signing in.
+        monkeypatch.setattr(wa, "has_session", lambda agent_id, domain: True)
         monkeypatch.setattr(
             b, "_auth_browse_html", lambda agent_id, domain, url, headed: html,
         )
@@ -562,7 +562,7 @@ class TestTheOtherTwoBrowsePagePathsAnnounceTheSameThings:
     # --- and what the old line did carry is not lost ----------------------
 
     def test_the_session_that_served_the_page_is_still_named(self, monkeypatch):
-        assert "headed browser, no auth domain named" in self._headed(monkeypatch, _APP_SHELL)
+        assert "visible browser, no auth domain named" in self._headed(monkeypatch, _APP_SHELL)
         assert "auth domain example.test" in self._auth(monkeypatch, _APP_SHELL)
 
 

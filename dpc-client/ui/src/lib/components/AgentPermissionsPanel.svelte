@@ -321,14 +321,10 @@
     }
   }
 
-  // Web logins (per-agent credential vault).
-  //
-  // `approved` is what browse_page(use_auth=...) reads; cookies alone buy the
-  // agent nothing, so the two are rendered as different words here.
+  // Stored web cookies (per-agent credential vault).
   interface WebAuthDomain {
     domain: string;
     has_cookies: boolean;
-    approved: { at?: string; via?: string } | null;
     authenticated_at: string | null;
     last_used_at: string | null;
   }
@@ -338,7 +334,7 @@
   let webAuthLoading = false;
   let webAuthError = '';
   let webAuthMessage = '';
-  let revokingDomain = '';
+  let forgettingDomain = '';
 
   async function loadWebAuthDomains(agentId: string) {
     webAuthLoadedFor = agentId;
@@ -367,18 +363,20 @@
     loadWebAuthDomains(conversationId);
   }
 
-  async function handleRevokeWebAuth(domain: string) {
-    if (!conversationId || revokingDomain) return;
+  async function handleForgetWebAuth(domain: string) {
+    if (!conversationId || forgettingDomain) return;
     const agentLabel = agentName || conversationId;
+    // The wording is the point: this deletes our copy of the cookies. Signing
+    // out of the account happens on the site, in the visible window.
     if (!confirm(
-      `Revoke ${domain} for ${agentLabel}?\n\n` +
-      `Its stored cookies and your approval are deleted. The agent cannot ` +
-      `reach that site again until you open a login window and approve it.`
+      `Forget ${agentLabel}'s stored ${domain} cookies?\n\n` +
+      `This deletes D-PC's copy, so the agent can no longer send them. ` +
+      `It does NOT sign you out of ${domain} — do that on the site itself.`
     )) return;
-    revokingDomain = domain;
+    forgettingDomain = domain;
     webAuthMessage = '';
     try {
-      const result = await sendCommand('web_auth_revoke_domain', {
+      const result = await sendCommand('web_auth_forget_cookies', {
         agent_id: conversationId,
         domain,
       });
@@ -393,7 +391,7 @@
     } catch (e) {
       webAuthMessage = `Error: ${e}`;
     }
-    revokingDomain = '';
+    forgettingDomain = '';
   }
 
   function webAuthWhen(iso: string | null | undefined): string {
@@ -819,16 +817,16 @@
       {/if}
 
       {#if !isGlobal && conversationId && !editMode}
-        <!-- Web Logins Section (per-agent credential vault, ADR-028).
-             Actions only, like the archive controls: revoking hits the vault
+        <!-- Stored web cookies (per-agent credential vault, ADR-028).
+             Actions only, like the archive controls: forgetting hits the vault
              at once and has nothing to do with the unsaved firewall edit. -->
         <div class="subsection">
-          <h4>Web Logins</h4>
+          <h4>Stored Web Cookies</h4>
           <p class="help-text-small">
-            Sites this agent holds cookies for. Only an <strong>approved</strong> site can be
-            used by <code>browse_page(use_auth=…)</code> — cookies on their own are not access.
-            Revoke to put the agent back to signed-out, e.g. before signing it into a different
-            account.
+            Sites this agent holds cookies for, saved from a visible browser window.
+            <strong>Forget</strong> deletes D-PC's copy so the agent can no longer send them —
+            it does not sign you out of the account. To do that, sign out on the site itself
+            in the visible window.
           </p>
 
           {#if webAuthLoading}
@@ -837,8 +835,9 @@
             <p class="help-text-small" style="color: var(--danger);">{webAuthError}</p>
           {:else if webAuthDomains.length === 0}
             <p class="help-text-small" style="font-style: italic;">
-              No stored logins. The agent's <code>open_login_window</code> opens a browser for
-              you to sign in; your answer afterwards is what approves it.
+              No stored cookies. Ask the agent to open the site with
+              <code>keep_open=true</code>: a window appears on screen, you sign in there by
+              hand, and what you sign into is stored as you do it.
             </p>
           {:else}
             <div class="web-auth-list">
@@ -846,11 +845,6 @@
                 <div class="web-auth-row">
                   <div class="web-auth-facts">
                     <span class="web-auth-domain">{row.domain}</span>
-                    {#if row.approved}
-                      <span class="web-auth-approved">Approved {webAuthWhen(row.approved.at)}</span>
-                    {:else}
-                      <span class="web-auth-unapproved">Not approved — the agent cannot use this jar</span>
-                    {/if}
                     <p class="help-text-small" style="margin: 0;">
                       {row.has_cookies ? 'Cookies stored' : 'No cookies stored'}
                       · saved {webAuthWhen(row.authenticated_at)}
@@ -860,10 +854,10 @@
                   <button
                     type="button"
                     class="btn-archive-action btn-archive-danger"
-                    on:click={() => handleRevokeWebAuth(row.domain)}
-                    disabled={revokingDomain !== ''}
-                    title="Delete the cookies and the approval for {row.domain}"
-                  >{revokingDomain === row.domain ? 'Revoking…' : 'Revoke'}</button>
+                    on:click={() => handleForgetWebAuth(row.domain)}
+                    disabled={forgettingDomain !== ''}
+                    title="Delete D-PC's copy of the {row.domain} cookies. You stay signed in on {row.domain} itself."
+                  >{forgettingDomain === row.domain ? 'Forgetting…' : 'Forget'}</button>
                 </div>
               {/each}
             </div>
@@ -1671,16 +1665,6 @@
   .web-auth-domain {
     font-weight: 600;
     word-break: break-all;
-  }
-
-  .web-auth-approved {
-    font-size: 0.82rem;
-    color: var(--success, #22c55e);
-  }
-
-  .web-auth-unapproved {
-    font-size: 0.82rem;
-    color: var(--warning, #f59e0b);
   }
 
   .whitelist-section {
