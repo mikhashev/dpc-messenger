@@ -29,7 +29,7 @@ from datetime import datetime, timezone
 from html.parser import HTMLParser
 from io import StringIO
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, NamedTuple, Optional, Tuple
 # Bound here rather than imported inside the callee: the route gate resolves
 # a host per request, and that is the hot path.
 from urllib.parse import urlparse as _urlparse
@@ -683,6 +683,24 @@ def _from_playwright_cookies(cookies: list[dict]) -> list[dict]:
             sc["samesite"] = c["sameSite"]
         out.append(sc)
     return out
+
+
+class _WritebackTally(NamedTuple):
+    """What one cookie writeback did, in the terms its audit row carries.
+
+    Counts and one flag, never a cookie: enough to answer whether a
+    sign-in reached the vault without opening the jar, which is the thing
+    the audit exists to replace. `jars` is here because a scope of two
+    domains writes two of them and a cookie count alone cannot say both
+    were reached. `session_cookie` takes the vault's own word — a cookie
+    with no live `expires`, which `web_auth.filter_expired` keeps for that
+    reason — and stays a flag, since a count of them reads as a number of
+    logins, which no jar can say."""
+
+    cookies: int
+    refused: list[str]
+    jars: int
+    session_cookie: bool
 
 
 # Hostname per origin, for the route gate: one page load asks for the same
@@ -1753,9 +1771,16 @@ class AuthBrowser:
             d: _from_playwright_cookies(items) for d, items in by_etld1.items()
         }
 
-    def _sync_cookies_to_vault(self, cookies: list[dict]) -> tuple[int, list[str]]:
-        """Write the session's in-scope cookies to the vault. Returns how
-        many cookies were written and which jars refused the write.
+    def _sync_cookies_to_vault(self, cookies: list[dict]) -> _WritebackTally:
+        """Write the session's in-scope cookies to the vault. Returns what
+        the write did, in the terms the audit row carries: how many cookies
+        landed, which jars refused, how many jars took them, and whether a
+        session cookie is among what was written.
+
+        The tally is counted here because this is the only place holding
+        the cookies in vault shape; counting it again at the call site
+        would mean asking the context for its cookies twice and could
+        answer about a different snapshot than the one that was stored.
 
         This is how a sign-in the person performed in a visible window
         reaches the vault: they log in, the page sets its cookies, and the
@@ -1769,13 +1794,36 @@ class AuthBrowser:
         from dpc_client_core import web_auth
 
         written = 0
+        jars = 0
+        session_cookie = False
         refused: list[str] = []
         for domain, items in self._scope_cookies_by_etld1(cookies).items():
             if web_auth.save_cookies(self._agent_id, domain, items):
                 written += len(items)
+                jars += 1
+                session_cookie = session_cookie or any(
+                    c.get("expires") is None for c in items
+                )
             else:
                 refused.append(domain)
-        return written, refused
+        return _WritebackTally(written, refused, jars, session_cookie)
+
+    def _audit_cookie_writeback(self, result: str, **fields: Any) -> None:
+        """One `cookie_writeback` row per writeback, taken or refused, so
+        an empty audit means no writeback ran rather than none succeeded.
+        `result` separates them: `ok` beside the refusals' `declined`.
+
+        The row names no cookie and no host the scope does not already
+        name: the page URL and the eTLD+1 `_audit_action` attaches are the
+        two the refusal rows carry."""
+        url = ""
+        page = self._page
+        if page is not None:
+            try:
+                url = page.url
+            except Exception:
+                pass
+        self._audit_action("cookie_writeback", url, result, **fields)
 
     def _decline_cookie_writeback(self, reason: str, *, notify: bool = True) -> None:
         """Record a snapshot that was not written, and leave the reason
@@ -1785,22 +1833,13 @@ class AuthBrowser:
         case the person already knows about: they closed the window."""
         if notify:
             self._last_writeback_decline = reason
-        url = ""
-        page = self._page
-        if page is not None:
-            try:
-                url = page.url
-            except Exception:
-                pass
         log.log(
             logging.DEBUG if not notify else logging.WARNING,
             "cookie writeback declined for agent=%s (%s) — the stored jar is "
             "left as it was",
             self._agent_id, reason,
         )
-        self._audit_action(
-            "cookie_writeback", url, "declined", reason=reason,
-        )
+        self._audit_cookie_writeback("declined", reason=reason)
 
     def _persist_session_cookies(self) -> str:
         """Copy this session's in-scope cookies into the vault. Returns the
@@ -1829,9 +1868,7 @@ class AuthBrowser:
             # Carries no identity and owns no jar, so it has nothing to say.
             return "no_scope"
         try:
-            written, refused = self._sync_cookies_to_vault(
-                self._context.cookies()
-            )
+            tally = self._sync_cookies_to_vault(self._context.cookies())
         except Exception as e:
             if self._disconnected:
                 log.debug(
@@ -1848,13 +1885,21 @@ class AuthBrowser:
                 "write_failed", notify=not self._disconnected,
             )
             return "write_failed"
-        if refused:
-            reason = "nothing_sendable_in_snapshot:" + ",".join(sorted(refused))
+        if tally.refused:
+            reason = (
+                "nothing_sendable_in_snapshot:" + ",".join(sorted(tally.refused))
+            )
             self._decline_cookie_writeback(reason)
             return reason
-        if not written:
+        if not tally.cookies:
             self._decline_cookie_writeback("no_cookies_in_scope")
             return "no_cookies_in_scope"
+        self._audit_cookie_writeback(
+            "ok",
+            cookies_written=tally.cookies,
+            jars=tally.jars,
+            has_session_cookie=tally.session_cookie,
+        )
         self._last_writeback_decline = None
         return "written"
 

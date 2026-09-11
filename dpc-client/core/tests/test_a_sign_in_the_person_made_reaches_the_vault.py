@@ -128,6 +128,23 @@ def _session_cookies(domain=TEST_DOMAIN, value="real-session-token", expires=Non
     ]
 
 
+# Distinctive enough that finding it anywhere in an audit row is proof the
+# row carried it, not a coincidence of formatting.
+SECRET_VALUE = "kFq7-the-login-itself-9Zx"
+
+
+def _cookie_that_expires_with_the_window(domain=TEST_DOMAIN):
+    """A session cookie in the vault's sense: Playwright hands it back with
+    `expires` at -1, and `_from_playwright_cookies` drops the field."""
+    return [
+        {
+            "name": "csrf_token", "value": "per-window", "domain": f".{domain}",
+            "path": "/", "expires": -1,
+            "secure": True, "httpOnly": True, "sameSite": "Strict",
+        },
+    ]
+
+
 def _to_playwright(cookies):
     return [
         {**c, "httpOnly": c.pop("httpOnly", False)} for c in (dict(x) for x in cookies)
@@ -371,6 +388,70 @@ def test_a_window_carrying_nothing_for_its_own_site_says_so(vault_home):
     assert _vault_bytes(vault_home) == before
     assert ab._last_writeback_decline == "no_cookies_in_scope"
     assert web_auth.load_cookies(AGENT, "example.net") is None
+
+
+def test_a_written_snapshot_leaves_a_row_of_its_own(vault_home):
+    """The audit used to record only refusals, so a day of successful
+    writebacks and a day with no writeback at all left the same file, and
+    six `declined` rows beside a fresh jar read as a lost login. A write
+    that reached the vault leaves a row a reader can tell from a refusal,
+    carrying how many cookies landed and whether one of them expires with
+    the window."""
+    ab = _browser(
+        cookies=_session_cookies() + _cookie_that_expires_with_the_window()
+    )
+
+    assert ab._persist_session_cookies() == "written"
+
+    rows = [
+        r for r in _audit_rows(vault_home)
+        if r.get("action") == "cookie_writeback"
+    ]
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["result"] == "ok"
+    assert row["result"] != "declined"
+    assert "reason" not in row
+    assert row["cookies_written"] == 2
+    assert row["jars"] == 1
+    assert row["has_session_cookie"] is True
+
+
+def test_the_flag_is_read_from_the_jar_and_not_assumed(vault_home):
+    """The counterpart, so neither field can be a constant: a jar of
+    cookies that all outlive the window says so."""
+    ab = _browser(cookies=_session_cookies())
+
+    assert ab._persist_session_cookies() == "written"
+
+    row = [
+        r for r in _audit_rows(vault_home)
+        if r.get("action") == "cookie_writeback"
+    ][0]
+    assert row["cookies_written"] == 1
+    assert row["has_session_cookie"] is False
+
+
+def test_the_written_row_names_no_cookie(vault_home):
+    """The row is evidence that a write happened, not a copy of what was
+    written: a value in it would put the login in a file the vault
+    deliberately keeps in plain text inside the sandbox."""
+    ab = _browser(
+        cookies=_session_cookies(value=SECRET_VALUE)
+        + _cookie_that_expires_with_the_window()
+    )
+    ab._persist_session_cookies()
+
+    row = [
+        r for r in _audit_rows(vault_home)
+        if r.get("action") == "cookie_writeback"
+    ][0]
+    written = json.dumps(row)
+
+    assert SECRET_VALUE not in written
+    for cookie in _session_cookies() + _cookie_that_expires_with_the_window():
+        assert cookie["name"] not in written
+        assert cookie["value"] not in written
 
 
 def test_a_written_snapshot_announces_nothing(vault_home, monkeypatch):
