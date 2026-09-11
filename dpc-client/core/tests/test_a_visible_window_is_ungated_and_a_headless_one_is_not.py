@@ -59,6 +59,7 @@ class _StubContext:
     def __init__(self, cookies_payload=None):
         self.added: list[list[dict]] = []
         self.routes: list[tuple] = []
+        self.listeners: list[tuple] = []
         self.cookies_payload = list(cookies_payload or [])
 
     def add_cookies(self, cookies):
@@ -66,6 +67,9 @@ class _StubContext:
 
     def route(self, pattern, handler):
         self.routes.append((pattern, handler))
+
+    def on(self, event, handler):
+        self.listeners.append((event, handler))
 
     def new_page(self):
         return _SignedInPage()
@@ -77,14 +81,18 @@ class _StubContext:
         pass
 
 
+def _request(url, *, method="GET", resource_type="script",
+             nav=False, frame_url=None):
+    frame = types.SimpleNamespace(url=frame_url) if frame_url else None
+    return types.SimpleNamespace(
+        url=url, method=method, resource_type=resource_type,
+        is_navigation_request=lambda: nav, frame=frame,
+    )
+
+
 class _Route:
-    def __init__(self, url, *, method="GET", resource_type="script",
-                 nav=False, frame_url=None):
-        frame = types.SimpleNamespace(url=frame_url) if frame_url else None
-        self.request = types.SimpleNamespace(
-            url=url, method=method, resource_type=resource_type,
-            is_navigation_request=lambda: nav, frame=frame,
-        )
+    def __init__(self, url, **kw):
+        self.request = _request(url, **kw)
         self.continued = False
         self.aborted = False
 
@@ -184,24 +192,67 @@ def _no_browser(monkeypatch):
 # ── the gate, and which side of it a window is on ───────────────────────
 
 
-def test_a_visible_window_installs_no_gate_on_what_it_may_reach(vault_home):
+_SIGN_IN_DELEGATES_TO = (
+    ("https://accounts.google.com/gsi/client", "GET", "script"),
+    ("https://appleid.cdn-apple.com/appleauth/static/jsapi/appleid.auth.js",
+     "GET", "script"),
+    ("https://edge.prelude.dev/v1/signals", "POST", "fetch"),
+)
+
+
+def test_a_visible_window_installs_no_route_handler_at_all(
+    vault_home, monkeypatch,
+):
+    """Not "the gate passes it" — nothing intercepts it. A route parks the
+    request until Python answers, and this session's Python is parked itself
+    between calls, so interception is what made a visible window advance one
+    30 s window probe at a time. The trail moves to an event, which never
+    holds anything up."""
+    ctx = _StubContext()
+    _ab, _seen = _open_browser(
+        monkeypatch, ctx, domains=[TEST_DOMAIN], headed=True,
+    )
+
+    assert ctx.routes == []
+    assert [event for event, _h in ctx.listeners] == ["request"]
+
+    # The other half, or the test passes by wiring nothing anywhere.
+    blind = _StubContext()
+    _open_browser(monkeypatch, blind, domains=[TEST_DOMAIN], headed=False)
+    assert [pattern for pattern, _h in blind.routes] == ["**/*"]
+    assert blind.listeners == []
+
+
+def test_a_visible_window_reaches_what_a_sign_in_delegates_to(
+    vault_home, monkeypatch,
+):
     """The hosts measured as refused inside a window built for logging in:
     two identity providers as unlisted scripts, and an anti-bot gate on POST
-    that no manifest can ever admit."""
+    that no manifest can ever admit. Each is recorded and none is asked
+    about — the same gate, reached headless, aborts all three."""
     from dpc_client_core.dpc_agent.tools.browser import AuthBrowser
 
-    ab = AuthBrowser(agent_id="agent_a", domains=[TEST_DOMAIN], headed=True)
-    for url, method, kind in (
-        ("https://accounts.google.com/gsi/client", "GET", "script"),
-        ("https://appleid.cdn-apple.com/appleauth/static/jsapi/appleid.auth.js",
-         "GET", "script"),
-        ("https://edge.prelude.dev/v1/signals", "POST", "fetch"),
-    ):
+    ctx = _StubContext()
+    _ab, _seen = _open_browser(
+        monkeypatch, ctx, domains=[TEST_DOMAIN], headed=True,
+    )
+    _event, on_request = ctx.listeners[0]
+
+    for url, method, kind in _SIGN_IN_DELEGATES_TO:
+        on_request(_request(url, method=method, resource_type=kind,
+                            frame_url=f"https://{TEST_DOMAIN}/login"))
+
+    rows = {r["dest_host"] for r in _audit(vault_home)
+            if r.get("action") == AuthBrowser.GATE_ACTION_VISIBLE_PASSTHROUGH}
+    assert rows == {"accounts.google.com", "appleid.cdn-apple.com",
+                    "edge.prelude.dev"}
+
+    blind = AuthBrowser(agent_id="agent_a", domains=[TEST_DOMAIN], headed=False)
+    for url, method, kind in _SIGN_IN_DELEGATES_TO:
         route = _Route(url, method=method, resource_type=kind,
                        frame_url=f"https://{TEST_DOMAIN}/login")
-        ab._domain_route_gate(route)
-        assert route.continued is True, url
-        assert route.aborted is False, url
+        blind._domain_route_gate(route)
+        assert route.aborted is True, url
 
 
 def test_a_headless_session_is_still_gated(vault_home):
@@ -311,7 +362,7 @@ def test_where_an_ungated_window_went_is_recorded_with_its_initiator(
     from dpc_client_core.dpc_agent.tools.browser import AuthBrowser
 
     ab = AuthBrowser(agent_id="agent_a", domains=[TEST_DOMAIN], headed=True)
-    ab._domain_route_gate(_Route(
+    ab._note_visible_request(_request(
         "https://accounts.google.com/gsi/client",
         frame_url=f"https://{TEST_DOMAIN}/login",
     ))
@@ -331,7 +382,7 @@ def test_a_request_with_no_readable_frame_records_an_empty_initiator(
     from dpc_client_core.dpc_agent.tools.browser import AuthBrowser
 
     ab = AuthBrowser(agent_id="agent_a", domains=[TEST_DOMAIN], headed=True)
-    ab._domain_route_gate(_Route("https://elsewhere.example/beacon"))
+    ab._note_visible_request(_request("https://elsewhere.example/beacon"))
 
     row = next(r for r in _audit(vault_home)
                if r.get("action") == AuthBrowser.GATE_ACTION_VISIBLE_PASSTHROUGH)
@@ -366,19 +417,9 @@ def test_a_repeat_of_the_same_decision_is_counted_without_re_reading_it(
             frame_reads.append(self.url)
             return self._frame
 
-    class _CountingRoute:
-        def __init__(self, url, frame_url):
-            self.request = _CountingRequest(url, frame_url)
-
-        def continue_(self):
-            pass
-
-        def abort(self):
-            raise AssertionError("a visible window gates nothing")
-
     ab = AuthBrowser(agent_id="agent_a", domains=[TEST_DOMAIN], headed=True)
     for n in range(5):
-        ab._domain_route_gate(_CountingRoute(
+        ab._note_visible_request(_CountingRequest(
             f"https://cdn.example/asset-{n}.js", f"https://{TEST_DOMAIN}/home",
         ))
 

@@ -1435,12 +1435,13 @@ class AuthBrowser:
         in via the Tauri WebView popup (T2) before this works.
       AuthExpiredError — cookies present but expired. Same fix.
 
-    Domain restriction is enforced by a Playwright route handler that sees
-    every request (redirects and XHR included), with `_check_domain` as a
-    cheap pre-navigation agreement in front of it. **A headed session is
-    ungated**: a person is watching it, and a gate narrow enough to be one
-    also blocks the identity providers a sign-in has to reach. What a headed
-    session may *write* is unchanged — only cookies inside `_etld1s`.
+    Domain restriction is enforced by a Playwright route handler on every
+    headless context, seeing every request (redirects and XHR included), with
+    `_check_domain` as a cheap pre-navigation agreement in front of it. **A
+    headed session is ungated** and carries no route handler at all: a person
+    is watching it, and a gate narrow enough to be one also blocks the
+    identity providers a sign-in has to reach. What a headed session may
+    *write* is unchanged — only cookies inside `_etld1s`.
     """
 
     def __init__(
@@ -1858,7 +1859,14 @@ class AuthBrowser:
         return "written"
 
     def _install_domain_route_handler(self) -> None:
-        """Install the gate on every context, scoped or not.
+        """A headless context takes the route gate; a headed one takes events.
+
+        An intercepted request is parked in Firefox until Python answers, and
+        the sync Playwright API pumps its dispatcher only from inside an API
+        call (`_sync_base.py::_sync`) — so an idle session answers nothing
+        until the `sweep_closed_windows` probe re-enters Playwright, and the
+        window advances one probe interval at a time. A visible window is
+        ungated anyway, so it takes the same rows from an event instead.
 
         Returning early for an unscoped session left the one path where a
         browser carried the agent's saved cookies and answered to nobody.
@@ -1866,7 +1874,46 @@ class AuthBrowser:
         is why `_domain_route_gate` answers that case first."""
         if self._context is None:
             return
+        if self._headed:
+            self._install_visible_window_trail()
+            return
         self._context.route("**/*", self._domain_route_gate)
+
+    def _install_visible_window_trail(self) -> None:
+        """`request`, not `requestfinished`/`requestfailed`: the trail answers
+        where the window went, and an outcome-based pair would fold both
+        results under one `_note_gate_event` key, of which only the first is
+        written. Outcomes are already logged by `_attach_page_diagnostics`."""
+        if self._context is None:
+            return
+        try:
+            self._context.on("request", self._note_visible_request)
+        except Exception as e:
+            log.debug(
+                "attach visible-window trail failed (agent=%s): %s",
+                self._agent_id, e,
+            )
+
+    def _note_visible_request(self, request) -> None:
+        """The rows the gate wrote for a visible window, under the same two
+        filters it applied first. Runs inside Playwright's dispatcher fiber,
+        where a raise would land in its pump — so every read is guarded."""
+        try:
+            url = request.url
+        except Exception:
+            return
+        if self._open_scope or not url.startswith(("http://", "https://")):
+            return
+        try:
+            self._note_gate_event(
+                self.GATE_ACTION_VISIBLE_PASSTHROUGH, url, "ok",
+                site=self._etld1 or "", host=_url_host(url),
+                method=_request_method(request),
+                resource_type=_request_resource_type(request),
+                initiator_of=request,
+            )
+        except Exception as e:
+            log.debug("visible-window trail row failed (%s): %s", url, e)
 
     @property
     def _open_scope(self) -> bool:
@@ -1892,30 +1939,6 @@ class AuthBrowser:
             return
 
         if self._open_scope or not url.startswith(("http://", "https://")):
-            try:
-                route.continue_()
-            except Exception:
-                pass
-            return
-
-        if self._headed:
-            # Mike's call, 2026-09-11: a visible window is ungated, and what
-            # is not visible stays gated. A person is watching this one and
-            # can close it; a sign-in reaches whatever the site delegates to,
-            # including identity providers and anti-bot gates that POST, and
-            # a gate narrow enough to be a gate is narrow enough to prevent
-            # the login it was opened for.
-            #
-            # The *write* stays scoped: `_sync_cookies_to_vault` stores only
-            # cookies matching `_etld1s`, so a window that walks to an
-            # identity provider saves nothing for it.
-            self._note_gate_event(
-                self.GATE_ACTION_VISIBLE_PASSTHROUGH, url, "ok",
-                site=self._etld1 or "", host=_url_host(url),
-                method=_request_method(request),
-                resource_type=_request_resource_type(request),
-                initiator_of=request,
-            )
             try:
                 route.continue_()
             except Exception:
@@ -2217,7 +2240,7 @@ class AuthBrowser:
         if self._open_scope:
             return  # nothing was scoped, so nothing is off-scope
         if self._headed:
-            return  # the gate lets a visible window anywhere; agreeing here
+            return  # no gate is installed on a visible window; agreeing here
             # is what keeps the two layers saying the same thing
         if not self._etld1s:
             # A scope was asked for and none of it resolved to a registrable
