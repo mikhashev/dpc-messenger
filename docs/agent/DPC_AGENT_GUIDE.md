@@ -390,10 +390,12 @@ The agent registry tracks all created agents in `~/.dpc/agents/_registry.json`:
 
 | Tool | Description | Default |
 |------|-------------|---------|
-| `browse_page` | Fetch a web page, extract readable content as markdown (trafilatura); optional `use_auth` path drives a headed Camoufox session for logged-in pages | ✅ |
+| `browse_page` | Fetch a web page, extract readable content as markdown (trafilatura). Headless unless `keep_open=true`; `use_auth=<domain>` fetches the page as the logged-in user | ⛔ opt-in |
 | `fetch_json` | Fetch JSON from an API endpoint | ✅ |
 | `check_url` | Check URL accessibility | ✅ |
 | `search_web` | Multi-engine web search (ddgs) | ✅ |
+
+> `browse_page` is in `CORE_TOOL_NAMES` but registers `default_enabled=False`, so it is **off** until enabled per agent — being core decides what a core-only run may offer, not what the firewall permits. Its `use_auth` path needs more than the tool: the vault must hold an approved human login for that domain, which only `open_login_window` can create. Stored cookies are not approval; without one the call is refused with `auth_denied:no_approved_login`. Headless `use_auth` also asks the person once per request (ADR-029 Task 008).
 
 ### Browser Automation Tools (ADR-029, Camoufox)
 
@@ -419,11 +421,16 @@ Interactive headed/headless browser driven via Camoufox + Playwright. Disabled b
 |------|-------------|---------|
 | `run_shell` | Run a shell command with 3-tier safety guardrails (Tier-0/2 blocklist, Tier-1 user approval + per-agent whitelist, cwd sandbox). Restricted to 1:1 chats by default. | ⛔ opt-in |
 
-### Web Auth Tools (ADR-028)
+### Web Auth Tools (ADR-028, ADR-029 Task 7)
 
 | Tool | Description | Default |
 |------|-------------|---------|
-| `list_auth_domains` | List the per-agent domains with stored auth credentials (cookie vault, per-domain firewall gate) | ⛔ opt-in |
+| `list_auth_domains` | List the domains in this agent's own vault: which carry an approved human login, and whether their cookies are still fresh | ✅ |
+| `open_login_window` | Ask the human to log into a site by hand, in a headed window with a clean profile, then ask them whether they signed in — their yes is what writes the cookies and the approval | ⛔ opt-in |
+
+> **How a login becomes an approved one.** `open_login_window(domain)` opens a window carrying none of the agent's saved logins, so there is nothing in it to take; cookies it collects stay in memory. When the window closes, the person is asked in the UI whether they signed in, and **only their yes** writes those cookies together with the approval `browse_page(use_auth=...)` requires. A no, an unanswered question or a closed UI writes nothing and leaves any existing login for the site untouched. The call blocks until the window closes or `timeout_sec` (30–1800) elapses, and then until the person answers — so it needs a connected UI client and is refused without one.
+>
+> `list_auth_domains` is read-only introspection over the agent's own vault and registers `default_enabled=True`; there is no per-domain firewall gate any more — the whitelist it once read was removed, and the authorisation is the recorded approval (ADR-028, Amendment 2026-09-11). Call it before `browse_page(use_auth=...)` to see which sites are usable and which need `open_login_window`. Revoking a login is deliberately **not** an agent tool: it is in the UI only.
 
 ### Memory & Knowledge Tools
 

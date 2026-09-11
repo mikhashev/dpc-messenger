@@ -20,6 +20,10 @@ supersedes: []
 (§1, §3) and the hardcoded eTLD+1 map (§4) are all gone from the code. A recorded human
 approval in the vault is the gate now. See the amendment below; the superseded passages are
 kept where they are, each marked.
+**Amended:** 2026-09-11 (second reading) — two sentences of that amendment have themselves gone
+stale: the UI approval channel it calls unfinished is wired, and `browser_state.json` is no
+longer a second store of anything. Repaired by a second dated amendment, not by editing the
+first.
 
 <!-- Status and date moved into the front matter above, 2026-08-10, when --check began
      reading docs/decisions/. This was the one file between 027 and 039 without it. -->
@@ -359,8 +363,10 @@ A new agent tool `open_login_window(domain, timeout_sec)` opens a **headed** Cam
 with a clean profile — no `storage_state`, no vault cookies, and a route gate scoped to the one
 site (`AuthBrowser._start_clean` is true for a login window, an anonymous session, or a session
 with no scope at all). The human types the password there; `AuthBrowser.capture_login_cookies`
-polls the live context and writes what appears, because the human closing the window is exactly
-the case where `close()` finds the context already dead.
+polls the live context and ~~writes what appears~~ *(**amended 2026-09-11 (second reading)**: holds
+what appears in memory — `commit_login_cookies` is the only writer, and it runs only after the
+person answers yes)*, because the human closing the window is exactly the case where `close()`
+finds the context already dead.
 
 It is registered with `default_enabled=False` (its `ToolEntry` in `browser.py`), per the S148
 rule in CLAUDE.md: it puts a password prompt on the user's screen and is the one act that can
@@ -374,6 +380,12 @@ page". `AuthBrowser._sync_cookies_to_vault` calls `save_cookies` without `approv
 path that writes cookie bytes can create an approval. See §5: this split is the repair of a
 defect found on the first live run, and at the time of writing `record_approval` had no caller
 in the tree.
+
+> **Amended 2026-09-11 (second reading).** The split holds, but the function that writes an
+> approval is not `record_approval` — the yes and the cookies go down together through
+> `commit_login_cookies` → `save_cookies(approved_via=…)`, reached only after the person
+> answers. What guards the rule is that the *ordinary* writeback still passes no `approved_via`.
+> See the second amendment below, §2.
 
 ### 3. The route gate now constrains the destination, not only the initiator
 
@@ -433,20 +445,30 @@ was made is that entry's question, not this section's answer.
   cookie argument on purpose", and the login window's own summary says a jar of guest cookies
   and a jar carrying a real session "both take the same route to the same question, and only the
   answer grants". Approval is being moved to an explicit human answer over the existing UI
-  approval channel. **At the last reading, `record_approval` had no caller: the receiving half
-  of that channel was not yet wired. Not finished — do not read this section as done.**
-- **`browser_state.json` is a second store of logins that no approval governs.** It holds the
+  approval channel. ~~**At the last reading, `record_approval` had no caller: the receiving half
+  of that channel was not yet wired. Not finished — do not read this section as done.**~~
+  > **Amended 2026-09-11 (second reading).** The move landed: the login window asks through
+  > `_ask_human_to_approve` and writes nothing on any answer but yes, and the reply comes back
+  > over `web_auth_approve_headless` / `web_auth_reject_headless`. The channel is finished; the
+  > function named here is not the one that writes. Second amendment below, §2.
+- ~~**`browser_state.json` is a second store of logins that no approval governs.** It holds the
   cookies of every site the session's scope covered, is rewritten after every navigate and at
   close, and is plaintext — `chmod 0600` runs under `if os.name == "posix"` only, so on Windows
   it inherits the directory ACL. Nothing in it carries an `approved` field, and the vault gate
   does not read it. Two things verified in the 2026-09-11 tree narrow the board's description:
   a session with no scope now starts clean and carries no identity, and `_save_storage_state`
-  refuses to write for an anonymous or unscoped session. The other half of board entry
+  refuses to write for an anonymous or unscoped session.~~ The other half of board entry
   `A-HEADED-SESSION-OPENED-WITHOUT-USE-AUTH-INSTALLS-NO-ROUTE-GATE-AND-STILL-LOADS-EVERY-COOKIE`
   — session reuse deciding reuse without comparing the domain argument — was **not** checked
   here. The two-store question is older than today:
   `LIST-AUTH-DOMAINS-REPORTS-ON-A-STORE-THAT-NO-LONGER-RECEIVES-LOGINS` and
   `KEYS-AND-API-TOKENS-LIE-IN-PLAINTEXT-WITH-DEFAULT-PERMISSIONS`.
+  > **Void since 2026-09-11 (second reading).** The struck sentences describe a file that is now
+  > neither read nor written, and a function, `_save_storage_state`, that no longer exists.
+  > There is no second store: a session's identity is the vault jar for its own scope and
+  > nothing else. Kept as written because it is the description the repair was made against.
+  > Second amendment below, §1. The unstruck sentences still stand — the session-reuse half was
+  > not checked then and is not checked now.
 - **The suite that guards all of this was falsified and leaked** — board
   `THE-NEW-WEB-AUTH-TESTS-SURVIVE-THE-DELETION-OF-WHAT-THEY-ARE-NAMED-FOR`: four deliberate
   breakages out of fourteen left the suite green. Nothing in this amendment should be read as
@@ -458,6 +480,62 @@ was made is that entry's question, not this section's answer.
 key in keyring — §2 above says "DPAPI", which is what `keyring` uses as its Windows backend, not
 what the file format is), §7's audit trail (`web_audit.jsonl`, now with rotation), §8's
 replace-the-whole-jar semantic, and the READ-only scope.
+
+---
+
+## Amendment 2026-09-11 (second reading) — the channel is wired, and the second store is not a store
+
+The amendment above is left exactly as written: an amendment edited in place stops being a record
+of what was believed when it was made. This one records the two of its sentences that the same
+day's code has since made false — one of them in the direction that understates what was built.
+
+The same caution applies, more sharply: `browser.py` and `web_auth.py` were **being edited by a
+parallel task while this was written**, so code is cited **by symbol, not by line**, and §2 says
+which half of its claim is settled and which was moving under it. The reading was taken after
+`974309a9`.
+
+### 1. `browser_state.json` is neither read nor written
+
+§5's second bullet describes it as a plaintext store of every scope's cookies, rewritten after
+every navigate and at close. Nothing writes it and nothing reads it:
+
+- `AuthBrowser._open` passes no `storage_state` when it creates the context, for any session.
+- A session's identity is `_inject_vault_cookies` — the vault jar for the scope it was opened
+  with. A clean-start session gets nothing.
+- The close-time writeback is `_persist_session_cookies`, whose whole effect is
+  `_sync_cookies_to_vault`: in-scope cookies into the encrypted vault. Its docstring says the
+  rest in its own words — the file "is neither read nor written any more".
+- `_save_storage_state`, named in that bullet, no longer exists.
+
+A `browser_state.json` left over from before the change sits there inert. Deleting it is
+housekeeping; nothing depends on it either way. What is *not* closed by this reading is the other
+half of the board entry that bullet cites — session reuse deciding reuse without comparing the
+domain argument — nor `LIST-AUTH-DOMAINS-REPORTS-ON-A-STORE-THAT-NO-LONGER-RECEIVES-LOGINS`.
+
+### 2. The approval channel is wired; which function writes is a smaller question
+
+§5's first bullet says approval "is being moved" to an explicit human answer, that
+`record_approval` had no caller, and "Not finished". The move has landed:
+
+- `open_login_window` puts the question through `_ask_human_to_approve` with
+  `kind=APPROVAL_KIND_LOGIN` and writes to the vault on no other answer than yes.
+- The answer returns over the channel that already existed for the headless gate:
+  `web_auth_approve_headless` / `web_auth_reject_headless` in `service.py`, both on the
+  `local_api.py` command allowlist, sent by `WebAuthApprovalDialog.svelte`.
+
+§2 above says "writing cookies and recording the approval are two functions, deliberately", and
+names `record_approval` as the second. The **rule** holds — the ordinary writeback passes no
+`approved_via`, so no path that writes cookie bytes can mint an approval. The **function** does
+not: the login window's yes writes both at once through `commit_login_cookies` →
+`save_cookies(approved_via=…)`, and at this reading `record_approval` again had no production
+caller. It had one at `974309a9`; the parallel task's uncommitted edit replaced that call with a
+read. Which function performs the write was moving while this was written. That a human answer,
+and only a human answer, is what grants is the part that is settled and the part worth reading.
+
+### 3. Not checked here
+
+The suite caveat in §5's third bullet is unchanged: nothing in either amendment should be read as
+"verified by tests". Neither reading exercised a live login.
 
 ---
 
