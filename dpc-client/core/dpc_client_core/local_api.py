@@ -212,6 +212,7 @@ ALLOWED_COMMANDS: frozenset = frozenset({
     # registry on purpose.
     "web_auth_list_domains",
     "web_auth_forget_cookies",
+    "web_auth_restore_previous_cookies",
     # Shell approval (ADR-030 v2)
     "resolve_schedule_approval",
     "shell_approve_command",

@@ -338,6 +338,63 @@ def test_a_request_with_no_readable_frame_records_an_empty_initiator(
     assert row["initiator"] == ""
 
 
+def test_a_repeat_of_the_same_decision_is_counted_without_re_reading_it(
+    vault_home,
+):
+    """A page like the one this was measured on makes hundreds of requests
+    per load, and every one of them lands in this callback. The first of a
+    (site, host, method, kind) is written and the rest are counted, so a
+    repeat must reach its count without asking the request for anything the
+    count does not need — the frame, here, whose URL only a written row
+    carries."""
+    from dpc_client_core.dpc_agent.tools.browser import AuthBrowser
+
+    frame_reads = []
+
+    class _CountingRequest:
+        def __init__(self, url, frame_url):
+            self.url = url
+            self.method = "GET"
+            self.resource_type = "script"
+            self._frame = types.SimpleNamespace(url=frame_url)
+
+        def is_navigation_request(self):
+            return False
+
+        @property
+        def frame(self):
+            frame_reads.append(self.url)
+            return self._frame
+
+    class _CountingRoute:
+        def __init__(self, url, frame_url):
+            self.request = _CountingRequest(url, frame_url)
+
+        def continue_(self):
+            pass
+
+        def abort(self):
+            raise AssertionError("a visible window gates nothing")
+
+    ab = AuthBrowser(agent_id="agent_a", domains=[TEST_DOMAIN], headed=True)
+    for n in range(5):
+        ab._domain_route_gate(_CountingRoute(
+            f"https://cdn.example/asset-{n}.js", f"https://{TEST_DOMAIN}/home",
+        ))
+
+    assert len(frame_reads) == 1
+    rows = [r for r in _audit(vault_home)
+            if r.get("action") == AuthBrowser.GATE_ACTION_VISIBLE_PASSTHROUGH]
+    assert len(rows) == 1
+
+    ab._flush_gate_audit()
+    summary = next(
+        r for r in _audit(vault_home)
+        if str(r.get("action")).endswith(AuthBrowser.GATE_SUMMARY_SUFFIX)
+    )
+    assert summary["count"] == 5
+
+
 # ── the headless refusal ────────────────────────────────────────────────
 
 

@@ -30,6 +30,9 @@ from html.parser import HTMLParser
 from io import StringIO
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
+# Bound here rather than imported inside the callee: the route gate resolves
+# a host per request, and that is the hot path.
+from urllib.parse import urlparse as _urlparse
 
 from .registry import ToolEntry, ToolContext
 
@@ -682,36 +685,55 @@ def _from_playwright_cookies(cookies: list[dict]) -> list[dict]:
     return out
 
 
+# Hostname per origin, for the route gate: one page load asks for the same
+# few origins hundreds of times and the parse is the bulk of what a repeated
+# request costs. Bounded because the asking is driven by the page.
+_HOST_CACHE: dict[str, str] = {}
+_HOST_CACHE_MAX = 512
+
+
 def _url_host(url: str) -> str:
     """Lowercased hostname, or "" for anything that has none."""
     try:
-        from urllib.parse import urlparse
-        return (urlparse(url).hostname or "").lower()
+        # Everything up to the path; the authority alone decides the host, so
+        # every URL sharing this prefix shares the answer `urlparse` gives.
+        end = url.find("/", 8)
+        origin = url if end == -1 else url[:end]
+        host = _HOST_CACHE.get(origin)
+        if host is None:
+            host = (_urlparse(url).hostname or "").lower()
+            if len(_HOST_CACHE) >= _HOST_CACHE_MAX:
+                _HOST_CACHE.clear()
+            _HOST_CACHE[origin] = host
+        return host
     except Exception:
         return ""
 
 
-def _route_method(route) -> str:
+# These take the request, not the route: the gate runs per request and
+# resolving `route.request` again for each field is work the repeat case
+# does not need.
+def _request_method(request) -> str:
     try:
-        return route.request.method or ""
+        return request.method or ""
     except Exception:
         return ""
 
 
-def _route_resource_type(route) -> str:
+def _request_resource_type(request) -> str:
     try:
-        return route.request.resource_type or ""
+        return request.resource_type or ""
     except Exception:
         return ""
 
 
-def _route_initiator(route) -> str:
+def _request_initiator(request) -> str:
     """URL of the frame that made this request, or "" when none is readable.
 
     In an ungated window this is the only field separating "the site called
     its identity provider" from "something went out on its own"."""
     try:
-        frame = route.request.frame
+        frame = request.frame
         return (frame.url if frame is not None else "") or ""
     except Exception:
         return ""
@@ -722,9 +744,7 @@ def _domain_matches(url: str, etld1: str) -> bool:
     subdomain of it). Prevents leaking cookies to unrelated hosts that
     happen to embed the auth-domain string in their URL (path / query
     params / fragments)."""
-    from urllib.parse import urlparse
-
-    host = urlparse(url).hostname
+    host = _urlparse(url).hostname
     if not host:
         return False
     host = host.lower()
@@ -1732,57 +1752,38 @@ class AuthBrowser:
             d: _from_playwright_cookies(items) for d, items in by_etld1.items()
         }
 
-    def _sync_cookies_to_vault(self, cookies: list[dict]) -> int:
-        """Write the session's in-scope cookies to the vault; return how
-        many were written.
+    def _sync_cookies_to_vault(self, cookies: list[dict]) -> tuple[int, list[str]]:
+        """Write the session's in-scope cookies to the vault. Returns how
+        many cookies were written and which jars refused the write.
 
         This is how a sign-in the person performed in a visible window
         reaches the vault: they log in, the page sets its cookies, and the
         writeback after each navigate and at close copies the ones inside
         `_etld1s`. Nothing else is stored, and nothing is inferred from
-        what appears."""
+        what appears.
+
+        A jar refuses when the snapshot holds nothing sendable for it.
+        `web_auth.save_cookies` owns that condition, because it is about the
+        cookies and not about this session."""
         from dpc_client_core import web_auth
 
         written = 0
+        refused: list[str] = []
         for domain, items in self._scope_cookies_by_etld1(cookies).items():
-            web_auth.save_cookies(self._agent_id, domain, items)
-            written += len(items)
-        return written
+            if web_auth.save_cookies(self._agent_id, domain, items):
+                written += len(items)
+            else:
+                refused.append(domain)
+        return written, refused
 
-    def _page_proves_a_session(self) -> tuple[bool, str]:
-        """Is the page this session is on evidence that somebody is signed
-        in? Returns (proven, reason) and reads nothing but the page.
-
-        The one question `save_cookies` cannot answer for itself. A site
-        hands guest cookies to any anonymous visitor, so a full jar proves
-        nothing; what proves something is the page in front of the person.
-
-        Two halves, and the positive one is not optional. A page that shows
-        no sign-in step might equally be blank, a 404, or a challenge, and
-        none of those is a session — so the page must also yield readable
-        content. Proof, not the absence of counter-evidence.
-
-        Unreadable resolves to *not proven*. "Cannot tell" answered as
-        "write" is the whole failure being removed, and the cost of the
-        other direction is one snapshot skipped for a browser that is
-        already dying — whose next navigate would write it anyway."""
-        page = self._page
-        if page is None:
-            return False, "page_unreadable:no_page"
-        try:
-            html = page.content()
-        except Exception as exc:
-            return False, f"page_unreadable:{type(exc).__name__}"
-        if _page_wants_a_login(html):
-            return False, "login_page_shown"
-        if not _page_shows_content(html):
-            return False, "page_shows_no_content"
-        return True, "page_shows_content"
-
-    def _decline_cookie_writeback(self, reason: str) -> None:
+    def _decline_cookie_writeback(self, reason: str, *, notify: bool = True) -> None:
         """Record a snapshot that was not written, and leave the reason
-        where `browser_close` can turn it into a sentence in the chat."""
-        self._last_writeback_decline = reason
+        where `browser_close` can turn it into a sentence in the chat.
+
+        `notify=False` keeps the audit row and drops the sentence, for the
+        case the person already knows about: they closed the window."""
+        if notify:
+            self._last_writeback_decline = reason
         url = ""
         page = self._page
         if page is not None:
@@ -1790,13 +1791,8 @@ class AuthBrowser:
                 url = page.url
             except Exception:
                 pass
-        # An unreadable page is the ordinary end of a window somebody
-        # closed, so it goes to DEBUG; a live page that failed the test is
-        # a decision, and decisions are worth a line in the log. Both get
-        # the audit row — that is the record the person can be shown.
         log.log(
-            logging.DEBUG if reason.startswith("page_unreadable")
-            else logging.WARNING,
+            logging.DEBUG if not notify else logging.WARNING,
             "cookie writeback declined for agent=%s (%s) — the stored jar is "
             "left as it was",
             self._agent_id, reason,
@@ -1806,15 +1802,22 @@ class AuthBrowser:
         )
 
     def _persist_session_cookies(self) -> str:
-        """Copy this session's in-scope cookies into the vault, but only
-        when the page proves there is a session to copy. Returns the reason
-        it took, written or not.
+        """Copy this session's in-scope cookies into the vault. Returns the
+        reason it took, written or not.
 
-        Both call sites — the writeback after a navigate and the one at
-        close — go through here, so the condition cannot hold at one and
-        not the other. Close is the one that matters most: a window opened
-        on a site whose login is already stored, left on a sign-in screen
-        and shut, used to replace that login with the site's guest cookies.
+        Nothing about the page conditions this write, and a page test must
+        not be put back: a marker search over HTML that is almost all inline
+        script answers about the site's infrastructure, not about the page,
+        and it declined a real sign-in every time it was asked.
+
+        A window arriving with no session must still not write the site's
+        guest cookies over a stored login, and two facts prevent that
+        instead, neither reachable from a page. A scoped window opens
+        carrying the vault's own jar for its scope (see `_open`), so its
+        snapshot already holds the login it might displace; and
+        `web_auth.save_cookies` refuses a snapshot with nothing sendable in
+        it over a jar that has something, with `restore_previous_cookies`
+        behind that.
 
         browser_state.json is neither read (see `_open`) nor written any
         more — the file on disk is left alone, but nothing here maintains
@@ -1824,15 +1827,10 @@ class AuthBrowser:
         if self._anonymous or self._open_scope:
             # Carries no identity and owns no jar, so it has nothing to say.
             return "no_scope"
-        if self._disconnected:
-            self._decline_cookie_writeback("page_unreadable:disconnected")
-            return "page_unreadable:disconnected"
-        proven, reason = self._page_proves_a_session()
-        if not proven:
-            self._decline_cookie_writeback(reason)
-            return reason
         try:
-            self._sync_cookies_to_vault(self._context.cookies())
+            written, refused = self._sync_cookies_to_vault(
+                self._context.cookies()
+            )
         except Exception as e:
             if self._disconnected:
                 log.debug(
@@ -1845,9 +1843,19 @@ class AuthBrowser:
                     "cookie writeback failed for agent=%s: %s",
                     self._agent_id, e,
                 )
+            self._decline_cookie_writeback(
+                "write_failed", notify=not self._disconnected,
+            )
             return "write_failed"
+        if refused:
+            reason = "nothing_sendable_in_snapshot:" + ",".join(sorted(refused))
+            self._decline_cookie_writeback(reason)
+            return reason
+        if not written:
+            self._decline_cookie_writeback("no_cookies_in_scope")
+            return "no_cookies_in_scope"
         self._last_writeback_decline = None
-        return reason
+        return "written"
 
     def _install_domain_route_handler(self) -> None:
         """Install the gate on every context, scoped or not.
@@ -1873,7 +1881,8 @@ class AuthBrowser:
 
     def _domain_route_gate(self, route) -> None:
         try:
-            url = route.request.url
+            request = route.request
+            url = request.url
         except Exception:
             # Unknown Route shape — fail-closed rather than let request through.
             try:
@@ -1903,9 +1912,9 @@ class AuthBrowser:
             self._note_gate_event(
                 self.GATE_ACTION_VISIBLE_PASSTHROUGH, url, "ok",
                 site=self._etld1 or "", host=_url_host(url),
-                initiator=_route_initiator(route),
-                method=_route_method(route),
-                resource_type=_route_resource_type(route),
+                method=_request_method(request),
+                resource_type=_request_resource_type(request),
+                initiator_of=request,
             )
             try:
                 route.continue_()
@@ -1941,7 +1950,6 @@ class AuthBrowser:
         # `<script src>` running foreign code inside the authenticated origin.
         # Navigation is excluded explicitly rather than by method, because a
         # document request carries the current frame too.
-        request = route.request
         _method = ""
         _resource_type = ""
         try:
@@ -2008,7 +2016,8 @@ class AuthBrowser:
 
     def _note_gate_event(
         self, action: str, url: str, result: str, *,
-        site: str, host: str, initiator: str, method: str, resource_type: str,
+        site: str, host: str, method: str, resource_type: str,
+        initiator: str = "", initiator_of=None,
     ) -> bool:
         """Write the first of a repeating gate decision and count the rest.
 
@@ -2018,12 +2027,20 @@ class AuthBrowser:
         is always written — a count that arrives at close is no substitute
         for knowing when a host first appeared — and the repeats are folded
         into one summary row by `_flush_gate_audit`. Returns True when this
-        was the first occurrence."""
+        was the first occurrence.
+
+        A repeat must reach its count having done as little as possible, so
+        anything not in the key is read after the lookup. `initiator_of`
+        takes the Playwright request and is asked for its frame URL only
+        when a row is written; a caller already holding the string passes
+        `initiator` instead."""
         key = (action, site, host, method, resource_type)
         rec = self._gate_events.get(key)
         if rec is not None:
             rec["count"] += 1
             return False
+        if initiator_of is not None and not initiator:
+            initiator = _request_initiator(initiator_of)
         self._gate_events[key] = {
             "action": action, "result": result, "site": site, "host": host,
             "method": method, "resource_type": resource_type,
@@ -3197,12 +3214,18 @@ def _auth_browse(
     return _html_to_markdown(_auth_browse_html(agent_id, domain, url, headed))
 
 
-# A sign-in is more than its first screen. The password markers are
-# attributes a form must carry to work; the rest name the steps that come
-# after it, where there is no password field to find — a code prompt, a
-# "verify it's you" interstitial, an anti-bot challenge. The Cloudflare
-# spellings are used rather than the bare word `challenge`, which is
-# ordinary English and appears on pages that are nothing of the kind.
+# THE RULE FOR THIS LIST: a marker may match text a person can see on the
+# page, or an attribute a form must carry to function — never the URL of a
+# script, a path segment or a JSON key. Every page of a site serves the same
+# script URLs, so such a marker describes the site's infrastructure and
+# answers the same on a login page and a signed-in one, which is no signal
+# at all. `challenge-platform` matched Cloudflare's own script tag on every
+# page of a site and came out for it; `checking your browser` is the
+# Cloudflare marker that stays, being a sentence somebody reads.
+#
+# Do not widen the list to catch one more page. Where HTML runs to hundreds
+# of kilobytes around a few hundred characters of text, any token in any
+# list eventually appears on any page.
 _LOGIN_PAGE_MARKERS = (
     'type="password"',
     "type='password'",
@@ -3214,13 +3237,7 @@ _LOGIN_PAGE_MARKERS = (
     "name='password'",
     'autocomplete="one-time-code"',
     "autocomplete='one-time-code'",
-    "two_factor",
-    "two-factor",
     "verification code",
-    "cf-challenge",
-    "cf_chl",
-    "challenge-form",
-    "challenge-platform",
     "checking your browser",
 )
 
@@ -3228,33 +3245,22 @@ _LOGIN_PAGE_MARKERS = (
 def _page_wants_a_login(html: str) -> bool:
     """Does this page show a sign-in, or an unfinished step of one?
 
-    Half of a decision, never the whole of one. Read alone it answers "no"
-    for a blank page, a 404 and an error, none of which is a signed-in
-    session — which is why `_page_proves_a_session` requires readable
-    content as well, and why nothing may be inferred from this returning
-    False.
+    It decides one thing: whether the tool result tells the agent to say in
+    the chat that a sign-in is needed. It gates no write — the vault write
+    is unconditional, and what stands in front of it are facts about
+    cookies, not readings of a page (see `_persist_session_cookies`).
 
-    Tuned to over-report. It gates a vault write now, so a login missed here
-    is a stored login replaced by a guest one with nobody told; a page
-    wrongly called a sign-in costs a sentence in the chat and a snapshot not
-    written, both of which the person sees and the next navigate undoes."""
+    So both ways of being wrong cost a sentence and nothing else. A sign-in
+    missed here costs a notice the person did not need, as they are looking
+    at the window; a page wrongly called a sign-in costs the opposite, the
+    agent telling a signed-in person to sign in and stopping there. That
+    second cost does not correct itself — the next navigate runs the same
+    markers over the same site's HTML and answers the same.
+
+    Read alone it answers "no" for a blank page, a 404 and an error, none of
+    which is a signed-in session, so nothing may be inferred from it
+    returning False."""
     return any(marker in (html or "").lower() for marker in _LOGIN_PAGE_MARKERS)
-
-
-def _page_shows_content(html: str) -> bool:
-    """Did anything readable come out of this page?
-
-    The positive half. Absence of a login form is not presence of a session
-    — a challenge page, an empty render and a 404 all have no password
-    field — so the write condition asks for evidence rather than for the
-    lack of counter-evidence. Extraction is what the rest of this module
-    already treats as "there is a page here"; an extractor that raises
-    answers no, because it has said nothing either way."""
-    try:
-        return bool(_html_to_markdown(html).strip())
-    except Exception as exc:
-        log.debug("content check could not extract: %s", exc)
-        return False
 
 
 def _no_session_message(domain: str, etld1: str, agent_id: str) -> str:
@@ -3275,8 +3281,8 @@ def _no_session_message(domain: str, etld1: str, agent_id: str) -> str:
         f"Call browse_page(url=..., use_auth=\"{etld1}\", keep_open=true) "
         f"instead: that opens a window on screen, and if the site asks for a "
         f"sign-in you tell the person in the chat and wait while they do it. "
-        f"A finished sign-in is saved — a page still showing a login, a code "
-        f"prompt or a challenge is not — and this call works afterwards."
+        f"What the window holds for '{etld1}' is saved as they go, so this "
+        f"call works once the sign-in is finished."
     )
 
 
@@ -3294,33 +3300,31 @@ def _login_needed_notice(etld1: str) -> str:
         f"that the window is open, and that they should sign in there and "
         f"reply here when they are done. Then STOP and wait for their reply "
         f"— do not retry this page, and do not call any other tool, until "
-        f"they answer. Tell them the sign-in has to be finished — through "
-        f"any code or verification step — before it is saved: a window left "
-        f"part-way through stores nothing, and leaves whatever was already "
-        f"stored for {site} exactly as it was.\n---"
+        f"they answer. Tell them to finish the sign-in through any code or "
+        f"verification step before replying: what the window holds is saved "
+        f"as they go, so a sign-in stopped half way stores half a sign-in "
+        f"and {site} will ask again.\n---"
     )
 
 
 def _sign_in_not_saved_notice(site: str, reason: str) -> str:
-    """What to say when a window's cookies were not written to the vault.
+    """What to say when a window's cookies did not reach the vault.
 
-    The counterpart of `_login_needed_notice`, and it carries the same
-    instruction, because the person's next act is the same one: finish the
-    sign-in. What it adds is that nothing was stored and nothing was lost —
-    a refusal the person is not told about is indistinguishable from the
-    silent overwrite this replaces."""
+    Every reason that arrives here is about the snapshot or the write and
+    none is a reading of the page: the window held nothing for this site,
+    the snapshot held nothing sendable and the stored jar was kept instead,
+    or the write itself failed. A refusal the person is not told about is
+    indistinguishable from a silent overwrite."""
     site = site or "this site"
     return (
-        f"\n\n---\nTHE SIGN-IN WAS NOT SAVED for {site} ({reason}).\n"
-        f"Whatever this window held was not written: the page was not "
-        f"showing a signed-in session when the cookies would have been "
-        f"stored. Anything already stored for {site} is untouched — a "
-        f"half-finished sign-in has not replaced it.\n"
-        f"Say so in the chat in your own words: that {site} still wants a "
-        f"login, that nothing was saved and nothing was lost, and that they "
-        f"should sign in — all the way through any code or verification "
-        f"step — and reply here when they are done. Then STOP and wait for "
-        f"their reply.\n---"
+        f"\n\n---\nNOTHING WAS SAVED for {site} ({reason}).\n"
+        f"The cookies in this window were not written, and whatever was "
+        f"already stored for {site} is untouched — nothing was lost.\n"
+        f"Say so in the chat in your own words: that nothing was saved and "
+        f"nothing was lost, and that if they meant to sign in to {site} they "
+        f"should do it in the window — all the way through any code or "
+        f"verification step — and reply here when they are done. Then STOP "
+        f"and wait for their reply.\n---"
     )
 
 
@@ -3480,9 +3484,9 @@ async def browse_page(
         elif keep_open and (
             declined := getattr(session, "_last_writeback_decline", None)
         ):
-            # The page carries no sign-in step and still could not be
-            # written — blank, a 404, or gone. Same instruction, different
-            # reason, and the person hears it either way.
+            # The page asks for no sign-in and the snapshot still did not
+            # reach the vault — it held nothing for this site, or nothing
+            # sendable. Different reason, same next act by the person.
             answer += _sign_in_not_saved_notice(_requested_etld1, declined)
         return answer
 
@@ -4165,10 +4169,10 @@ async def browser_close(ctx: ToolContext) -> str:
             return f"⚠️ Close failed: {type(e).__name__}: {e}"
     _session_locks.pop(agent_id, None)
     answer = "Browser session closed"
-    # The close-time snapshot is the one that used to overwrite a working
-    # login. When it is declined there is a tool result to say so in, and
-    # this is it; a close nobody asked for (idle sweep, window gone) has
-    # only the audit row.
+    # The close-time snapshot is the last one a window gets, so a refusal
+    # here is the person's last chance to hear about it. This is the close
+    # with a tool result to say it in; a close nobody asked for (idle sweep,
+    # window gone) has only the audit row.
     declined = getattr(session, "_last_writeback_decline", None)
     if declined:
         answer += _sign_in_not_saved_notice(session._etld1 or "", declined)

@@ -325,6 +325,7 @@
   interface WebAuthDomain {
     domain: string;
     has_cookies: boolean;
+    has_previous?: boolean;
     authenticated_at: string | null;
     last_used_at: string | null;
   }
@@ -335,6 +336,7 @@
   let webAuthError = '';
   let webAuthMessage = '';
   let forgettingDomain = '';
+  let restoringDomain = '';
 
   async function loadWebAuthDomains(agentId: string) {
     webAuthLoadedFor = agentId;
@@ -392,6 +394,39 @@
       webAuthMessage = `Error: ${e}`;
     }
     forgettingDomain = '';
+  }
+
+  async function handleRestoreWebAuth(domain: string) {
+    if (!conversationId || restoringDomain || forgettingDomain) return;
+    const agentLabel = agentName || conversationId;
+    // Say what it does, not what it is for: it swaps the two sets, so the
+    // person can press it again to come straight back.
+    if (!confirm(
+      `Put back the previous ${domain} cookies for ${agentLabel}?\n\n` +
+      `This swaps the stored set with the one kept behind it. Press it again ` +
+      `and you are back where you started. Only one earlier set is kept — ` +
+      `there is nothing older than the two.`
+    )) return;
+    restoringDomain = domain;
+    webAuthMessage = '';
+    try {
+      const result = await sendCommand('web_auth_restore_previous_cookies', {
+        agent_id: conversationId,
+        domain,
+      });
+      if (result !== false && result.status === 'success') {
+        await loadWebAuthDomains(conversationId);
+        // The backend distinguishes a swap from "nothing was kept"; repeat
+        // its own sentence rather than announcing work that may not have
+        // happened.
+        webAuthMessage = result.message;
+      } else {
+        webAuthMessage = `Error: ${result === false ? 'backend not connected' : result.message}`;
+      }
+    } catch (e) {
+      webAuthMessage = `Error: ${e}`;
+    }
+    restoringDomain = '';
   }
 
   function webAuthWhen(iso: string | null | undefined): string {
@@ -827,6 +862,9 @@
             <strong>Forget</strong> deletes D-PC's copy so the agent can no longer send them —
             it does not sign you out of the account. To do that, sign out on the site itself
             in the visible window.
+            <strong>Restore previous</strong> swaps the stored cookies with the one set kept
+            behind them, so pressing it twice returns you where you started. Only that one
+            earlier set is kept — there is nothing older than the two.
           </p>
 
           {#if webAuthLoading}
@@ -851,13 +889,24 @@
                       · last read {webAuthWhen(row.last_used_at)}
                     </p>
                   </div>
-                  <button
-                    type="button"
-                    class="btn-archive-action btn-archive-danger"
-                    on:click={() => handleForgetWebAuth(row.domain)}
-                    disabled={forgettingDomain !== ''}
-                    title="Delete D-PC's copy of the {row.domain} cookies. You stay signed in on {row.domain} itself."
-                  >{forgettingDomain === row.domain ? 'Forgetting…' : 'Forget'}</button>
+                  <div class="web-auth-actions">
+                    <button
+                      type="button"
+                      class="btn-archive-action"
+                      on:click={() => handleRestoreWebAuth(row.domain)}
+                      disabled={restoringDomain !== '' || forgettingDomain !== '' || row.has_previous === false}
+                      title={row.has_previous === false
+                        ? `No earlier set of ${row.domain} cookies is kept — there is nothing to put back.`
+                        : `Swap the stored ${row.domain} cookies with the one set kept behind them. Press it twice and you are back where you started.`}
+                    >{restoringDomain === row.domain ? 'Restoring…' : 'Restore previous'}</button>
+                    <button
+                      type="button"
+                      class="btn-archive-action btn-archive-danger"
+                      on:click={() => handleForgetWebAuth(row.domain)}
+                      disabled={forgettingDomain !== '' || restoringDomain !== ''}
+                      title="Delete D-PC's copy of the {row.domain} cookies. You stay signed in on {row.domain} itself."
+                    >{forgettingDomain === row.domain ? 'Forgetting…' : 'Forget'}</button>
+                  </div>
                 </div>
               {/each}
             </div>
@@ -1653,6 +1702,13 @@
     padding: 0.5rem 0.6rem;
     border: 1px solid var(--border, #333);
     border-radius: 4px;
+  }
+
+  .web-auth-actions {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    flex-shrink: 0;
   }
 
   .web-auth-facts {

@@ -261,10 +261,11 @@ def save_cookies(
     agent_id: str,
     domain: str,
     cookies: list[dict],
-) -> None:
+) -> bool:
     """Persist cookies for agent+domain. Replaces any existing jar for
     that domain — partial merges are not supported (cookies arrive as a
-    full snapshot).
+    full snapshot). True when the jar was written, False when the write
+    was refused.
 
     `authenticated_at` says when these cookie *bytes* were written, and
     nothing more: the ordinary navigate/close writeback moves it.
@@ -274,10 +275,18 @@ def save_cookies(
     cannot answer that question, because a site hands guest cookies to any
     anonymous visitor.
 
+    One write is refused: a snapshot with nothing sendable in it does not
+    replace a jar that has something — the case being a site that clears
+    its own cookies. "Nothing sendable" is `filter_expired` coming back
+    empty, so a snapshot of nothing but elapsed cookies counts as empty
+    too. The condition is a fact about the cookies in hand, never a
+    judgement about a page, which is why no page can defeat it; and it is
+    deliberately not a count threshold, because "how few is too few" would
+    be a guess again.
+
     A non-empty jar being replaced is kept under `previous`, one generation
-    deep, and `restore_previous_cookies` puts it back. Every guard in front
-    of this call is a judgement about a page, and a judgement can be wrong;
-    this is the part that does not depend on being right.
+    deep, and `restore_previous_cookies` puts it back — recovery for when
+    prevention is not enough.
 
     Raises ValueError when `domain` has no registrable domain: a jar keyed
     `com` is one jar holding every `.com` login, handed to any `.com` host
@@ -289,14 +298,23 @@ def save_cookies(
             f"store cookies under a public suffix or an address"
         )
     vault = _load_vault(agent_id)
+    displaced = vault["domains"].get(key)
+    holds_something = bool(displaced and displaced.get("cookies"))
+    if holds_something and not filter_expired(cookies):
+        logging.getLogger(__name__).warning(
+            "refusing to replace the stored %s jar for agent=%s with a "
+            "snapshot of %d cookies, none of them sendable — the stored jar "
+            "is left as it was",
+            key, agent_id, len(cookies),
+        )
+        return False
     now = _now_iso()
     entry: dict[str, Any] = {
         "cookies": cookies,
         "authenticated_at": now,
         "last_used_at": now,
     }
-    displaced = vault["domains"].get(key)
-    if displaced and displaced.get("cookies"):
+    if holds_something:
         # One generation, not a history: the older copy is dropped with the
         # one that displaces it, so a jar overwritten twice by the same
         # mistake cannot bury the good one out of reach.
@@ -305,6 +323,7 @@ def save_cookies(
         }
     vault["domains"][key] = entry
     _save_vault(agent_id, vault)
+    return True
 
 
 def restore_previous_cookies(agent_id: str, domain: str) -> bool:
@@ -401,13 +420,17 @@ def get_auth_status(agent_id: str, domain: str) -> dict:
 
 def list_domains(agent_id: str) -> list[dict]:
     """All eTLD+1 jars for an agent. Used by T7 (list_auth_domains tool)
-    and the per-agent UI. Returns oldest-first by authenticated_at."""
+    and the per-agent UI. Returns oldest-first by authenticated_at.
+
+    `has_previous` says whether `restore_previous_cookies` has anything to
+    put back, so the control offering it can be offered truthfully."""
     vault = _load_vault(agent_id)
     rows = []
     for domain, entry in vault["domains"].items():
         rows.append({
             "domain": domain,
             "has_cookies": bool(entry.get("cookies")),
+            "has_previous": bool((entry.get("previous") or {}).get("cookies")),
             "authenticated_at": entry.get("authenticated_at"),
             "last_used_at": entry.get("last_used_at"),
         })

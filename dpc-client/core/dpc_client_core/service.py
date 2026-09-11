@@ -4376,6 +4376,75 @@ class CoreService:
             )
             return {"status": "error", "message": str(e)}
 
+    async def web_auth_restore_previous_cookies(
+        self, agent_id: str, domain: str
+    ) -> Dict[str, Any]:
+        """Swap one agent's stored jar for the one set kept behind it.
+
+        A swap, not a pop: the jar being undone becomes the kept one, so
+        pressing this twice returns to where it started. One generation is
+        all there is — there is nothing older behind the pair.
+
+        `restored` is False when no previous set is kept, because saying a
+        restore happened when nothing moved is how a person stops trusting
+        the control. Audited either way.
+        """
+        try:
+            agent_id = self._web_auth_agent_id(agent_id)
+            from . import web_auth
+
+            etld1 = web_auth.resolve_etld1(domain)
+            if etld1 is None:
+                return {
+                    "status": "error",
+                    "message": (
+                        f"'{domain}' has no registrable domain — no jar can "
+                        f"be filed under it. Pass the site itself, e.g. "
+                        f"'example.com'."
+                    ),
+                }
+
+            url = f"https://{etld1}/"
+            restored = web_auth.restore_previous_cookies(agent_id, etld1)
+            web_auth.audit_append(
+                agent_id, etld1, url,
+                status=("web_auth_restored" if restored
+                        else "web_auth_restore_nothing_kept"),
+            )
+            if not restored:
+                return {
+                    "status": "success",
+                    "agent_id": agent_id,
+                    "domain": etld1,
+                    "restored": False,
+                    "message": (
+                        f"No earlier {etld1} cookies are kept for {agent_id} "
+                        f"— only the set in use. Nothing was changed."
+                    ),
+                }
+            logger.info(
+                "web auth cookies restored: agent=%s domain=%s",
+                agent_id, etld1,
+            )
+            return {
+                "status": "success",
+                "agent_id": agent_id,
+                "domain": etld1,
+                "restored": True,
+                "message": (
+                    f"Swapped {agent_id}'s {etld1} cookies with the set kept "
+                    f"behind them. The pair has changed places, so doing this "
+                    f"again puts back what was there a moment ago — one "
+                    f"earlier set is kept, and nothing older than that."
+                ),
+            }
+        except Exception as e:
+            logger.error(
+                "web_auth_restore_previous_cookies failed for %s/%s: %s",
+                agent_id, domain, e, exc_info=True,
+            )
+            return {"status": "error", "message": str(e)}
+
     # --- Shell approval (ADR-030 v2) ---
 
     async def resolve_schedule_approval(self, request_id: str, approved: bool) -> Dict[str, Any]:
