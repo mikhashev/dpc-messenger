@@ -37,6 +37,13 @@ session: S146-S147
 > amendments above stay as written, each superseded passage now carrying a second marker.
 > Mike's call, 2026-09-11 — see
 > *[Amendment 2026-09-11 (third)](#amendment-2026-09-11-third--the-window-is-the-act-and-it-is-not-gated)*.
+>
+> **Amended a fourth time, 2026-09-12 — a mechanism correction, not a reversal.** The window is
+> still ungated and the rows it records are still the same rows. What three passages here get
+> wrong is the route: a headed context installs no route handler at all, and the trail comes
+> from a context `request` event. See
+> *[Amendment 2026-09-12](#amendment-2026-09-12--the-headed-path-takes-an-event-not-a-route)*,
+> and ADR-028's amendment of the same date for the measurement and the trade.
 
 ## Context and Problem Statement
 
@@ -195,7 +202,7 @@ Decomposition under [`tasks/adr-029-headed-camoufox/`](../../tasks/adr-029-heade
 |-----------------|------|-------------|------------|
 | 0 | Remove popup code | Delete `popup_*` tools, Rust handlers, frontend `keep_open=true` paths | — |
 | 1 | Extend AuthBrowser | Add headed mode, navigation, click, type, scroll, screenshot, extract, close methods + `browser.headed` config | Task 0 |
-| 2 | Domain restriction | Playwright `context.route("**/*")` with eTLD+1 gate, ~~fail-closed empty whitelist~~ — **amended 2026-09-11**: the whitelist is gone; the gate's scope is the session's own eTLD+1 list, widened for GET/HEAD subresources by a node-level CDN manifest (Amendment §3); **amended again 2026-09-11 (third)**: that gate runs on the headless path only, and a headed session continues every request (Amendment (third) §3) | Task 1 |
+| 2 | Domain restriction | Playwright `context.route("**/*")` with eTLD+1 gate, ~~fail-closed empty whitelist~~ — **amended 2026-09-11**: the whitelist is gone; the gate's scope is the session's own eTLD+1 list, widened for GET/HEAD subresources by a node-level CDN manifest (Amendment §3); **amended again 2026-09-11 (third)**: that gate runs on the headless path only, and a headed session continues every request (Amendment (third) §3); **mechanism corrected 2026-09-12**: a headed session's requests never reach that gate — `context.route` is not installed on a headed context at all (Amendment 2026-09-12) | Task 1 |
 | 3 | Storage state | ~~Load/save `storage_state`~~, vault sync, no auto-expiry — **amended 2026-09-11 (second reading)**: the load and the save are both gone; the vault sync is the whole of it (Amendment §1) | Task 1 |
 | 4 | Audit trail | Structured log of browser actions, privacy-preserving field filtering | Task 1 |
 | 5 | Tool registry | Register 9 `browser_*` tools + firewall defaults; **accessibility-tree snapshot + ref-based interaction + auto-snapshot after navigate + LLM-Manager-routed summarization** for snapshots beyond a size threshold (S154 decision matrix) | Task 1, 2, 3 |
@@ -368,6 +375,10 @@ a registrable domain (board `RESOLVE-ETLD1-IS-THE-IDENTITY-FUNCTION-FOR-EVERY-RE
 > runs: `_domain_route_gate` returns early for a headed session, so all of it applies to the
 > **headless** path only and a visible window records `visible_window_passthrough` instead.
 > *Amendment 2026-09-11 (third)* §3.
+>
+> **Mechanism corrected 2026-09-12.** Headless-only still holds, and so do the rows. The gate
+> does not "return early for a headed session": a headed context installs no route handler, so
+> the gate never sees the request. *Amendment 2026-09-12* below.
 
 ### 4. Open, and not closed by this amendment
 
@@ -551,12 +562,14 @@ cannot widen through session reuse. Full statement in ADR-028 *Amendment (third)
 
 ### 4. Where the gate went, and the one refusal left
 
-`_domain_route_gate` continues every request when the session is headed, recording it as
-`visible_window_passthrough` with `initiator`, `dest_host`, `method` and `resource_type` —
-deliberately not called a passthrough *through* a gate, because nothing was enforced.
-`_check_domain`, the pre-navigation layer, returns early for the same case: two layers
-disagreeing is how a hole hides. Everything in *Amendment 2026-09-11* §3 survives for the
-headless path.
+~~`_domain_route_gate` continues every request when the session is headed, recording it as
+`visible_window_passthrough`~~ *(**mechanism corrected 2026-09-12**: no route handler is
+installed on a headed context, and the row is written by `_note_visible_request` off the
+context's `request` event — *Amendment 2026-09-12* below)* with `initiator`, `dest_host`,
+`method` and `resource_type` — deliberately not called a passthrough *through* a gate, because
+nothing was enforced. `_check_domain`, the pre-navigation layer, returns early for the same
+case: two layers disagreeing is how a hole hides. Everything in *Amendment 2026-09-11* §3
+survives for the headless path.
 
 The one refusal on the auth path is about capability rather than permission: a headless
 `browse_page(use_auth=D)` with no unexpired jar for `D` is refused in words —
@@ -600,6 +613,31 @@ still says PENDING and was outside what this pass was allowed to edit.
   §3. No measurement in this record bears on it.
 - Q2 and Q4 are untouched by all three amendments.
 
+## Amendment 2026-09-12 — the headed path takes an event, not a route
+
+**[ADR-028's *Amendment 2026-09-12*](028-agent-web-auth-cookie-sharing.md#amendment-2026-09-12--the-visible-windows-trail-is-an-event-not-a-route)
+is the primary record** and carries the measurement, the reason and the trade in full. This
+section records only which of *this* file's own sentences are wrong, and how far.
+
+Three passages here — Task 2's row in the Task Breakdown, *Amendment 2026-09-11* §3's narrowing
+marker, and §4 above — say that `_domain_route_gate` continues a headed session's requests. It
+never sees them. `_install_domain_route_handler` returns for `self._headed` after calling
+`_install_visible_window_trail`, which attaches `_note_visible_request` to the context's
+`request` event; no `context.route` is installed on a headed context at all, and the
+`if self._headed:` branch inside the gate is deleted (`354bc6b4`, 2026-09-12).
+
+**The outcome those passages state is unchanged and is not revisited.** The visible window is
+ungated — Mike's call, 2026-09-11 — every request passes, the same `visible_window_passthrough`
+rows are recorded with `initiator`, `dest_host`, `method` and `resource_type`, and
+`_check_domain` still agrees by returning early. The Confirmation box added 2026-09-11 (third)
+is therefore still the right box to tick and is left exactly as written. Key Property 3's
+marker is likewise narrowed in wording only: the gate is headless-only either way.
+
+The one thing the earlier text did not have to say, because interception forced a continuous
+read: an event is delivered on the dispatcher's next pump, so the trail is complete but a row
+may arrive after the request it describes. Nothing in this file's Confirmation turns on when a
+row is written, and nothing here was exercised live or under test.
+
 ## Authors
 
 Workflow roles per Protocol 13:
@@ -616,6 +654,8 @@ Workflow roles per Protocol 13:
 - [`dpc-client/core/dpc_client_core/web_auth.py`](../../dpc-client/core/dpc_client_core/web_auth.py) — `resolve_etld1()` used by Task 2 (domain restriction); since 2026-09-11 a real Public Suffix List resolver, ~~and the home of the vault approval (`record_approval`, `is_approved`)~~ — **amended 2026-09-11 (third):** the approval functions are deleted; what lives here besides the resolver is the vault (`save_cookies`, `has_session`, `forget_cookies`) and the CDN manifest
 - [ADR-028 — Amendment 2026-09-11](028-agent-web-auth-cookie-sharing.md#amendment-2026-09-11--the-whitelist-is-gone-a-recorded-approval-is-the-gate) — the mechanism that replaced the whitelist, in full
 - [ADR-028 — Amendment 2026-09-11 (third)](028-agent-web-auth-cookie-sharing.md#amendment-2026-09-11-third--the-approval-is-withdrawn-the-visible-window-is-the-act) — the withdrawal of that mechanism, the arc that led to it step by step, and the price of the ungated visible window stated in full
+- [ADR-028 — Amendment 2026-09-12](028-agent-web-auth-cookie-sharing.md#amendment-2026-09-12--the-visible-windows-trail-is-an-event-not-a-route) — why the headed path lost its route handler, the 30-second probe grid it was advancing on, and what an event costs that a route did not
+- Commit `354bc6b4` (2026-09-12) — a visible window takes an event trail, not a route gate
 - Commit `c2cfab07` (2026-06-05) — ADR-029 Task 008: Tauri login popup deleted, per-request headless approval added. Task file: `tasks/adr-029-headed-camoufox/008-tauri-login-removal-and-headless-gate.md` (gitignored)
 - backlog `THE-DECISION-RECORD-STILL-SPECIFIES-THE-WEB-AUTH-GATE-THAT-WAS-DELETED` — the entry this amendment closes
 - backlog `THE-VAULT-STAMPS-A-FRESH-LOGIN-EVERY-TIME-THE-BROWSER-CLOSES` — why `authenticated_at` could not be the approval

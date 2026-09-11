@@ -29,6 +29,10 @@ login window and the per-request headless prompt are all gone from the code; a v
 window is the act, and it is not gated. Mike's call. The two amendments above stay as written
 and each superseded passage carries a forward pointer; the reversal is the third dated
 amendment at the end.
+**Amended:** 2026-09-12 — the outcome of that third amendment is unchanged and is not
+revisited; three of its sentences name a mechanism the code no longer has. A headed context
+installs no route handler at all, and the `visible_window_passthrough` rows come from a context
+`request` event. Fourth dated amendment at the end; the three passages are marked in place.
 
 <!-- Status and date moved into the front matter above, 2026-08-10, when --check began
      reading docs/decisions/. This was the one file between 027 and 039 without it. -->
@@ -459,6 +463,12 @@ so a record a human was meant to promote from survives the rename; the old file 
 > every request for a headed session before it reaches either the allowlist or the manifest.
 > A visible window therefore produces no CDN refusals at all. *Amendment 2026-09-11 (third)*
 > §§2 and 3 below.
+>
+> **Mechanism corrected 2026-09-12.** The narrowing holds — everything in this section is
+> headless-only, and a visible window still produces no CDN refusals. What is wrong is the
+> route: `_domain_route_gate` does not continue a headed session's requests, because a headed
+> context installs no route handler at all and the gate is never reached.
+> *Amendment 2026-09-12* below.
 
 ### 4. Why the whitelist could not be the gate
 
@@ -684,7 +694,9 @@ What the split login window bought was not its cleanliness but its **poverty**: 
 its own registry, no `browser_*` tool could reach it, and it held no stored login. Merging the
 windows gives the visible window four properties at once:
 
-- **ungated** — `_domain_route_gate` continues every request when `self._headed`, and
+- **ungated** — ~~`_domain_route_gate` continues every request when `self._headed`~~
+  *(**mechanism corrected 2026-09-12**: no route handler is installed on a headed context at
+  all, so the gate is never reached — *Amendment 2026-09-12* below; ungated is unchanged)*, and
   `_check_domain`, the pre-navigation layer, returns early for the same case;
 - **driveable by the agent** — it is an ordinary entry in `_active_browser_sessions`, so
   `browser_click`, `browser_fill` and `browser_navigate` all operate on it;
@@ -736,10 +748,12 @@ name: it is the only way to take a login away from an agent without touching the
 
 **New.**
 
-- A headed session installs no gate. `_domain_route_gate` continues the request and records it
-  as `visible_window_passthrough` — deliberately not named a passthrough *through* a gate,
-  since nothing was enforced. `_check_domain` returns early for the same case; two layers
-  disagreeing is how a hole hides.
+- A headed session installs no gate. ~~`_domain_route_gate` continues the request and records
+  it as `visible_window_passthrough`~~ *(**mechanism corrected 2026-09-12**: the route handler
+  is not installed at all on a headed context, and the same row is written by
+  `_note_visible_request` off the context's `request` event — *Amendment 2026-09-12* below)* —
+  deliberately not named a passthrough *through* a gate, since nothing was enforced.
+  `_check_domain` returns early for the same case; two layers disagreeing is how a hole hides.
 - A headless `use_auth` browse with no live session is refused in words before anything opens:
   `web_auth.has_session` (a pure read — it does not stamp `last_used_at`, and an all-expired
   jar answers no), audit status `auth_denied:no_session`, and a message that names
@@ -787,6 +801,76 @@ section rather than folded into §4 so that a reader comparing the amendments ca
 - `LIST-AUTH-DOMAINS-REPORTS-ON-A-STORE-THAT-NO-LONGER-RECEIVES-LOGINS` is untouched.
 - Whether an ungated visible window is the right trade is the owner's call and is recorded as
   one (§3). It is not a question this record answers, and no measurement in it bears on it.
+
+---
+
+## Amendment 2026-09-12 — the visible window's trail is an event, not a route
+
+**The decision of the amendment above is unchanged; three of its sentences name a mechanism the
+code no longer has.** A headed context installs **no** `context.route` at all.
+`_install_domain_route_handler` is what branches: for `self._headed` it calls
+`_install_visible_window_trail`, which attaches `self._context.on("request",
+self._note_visible_request)`, and returns. The `if self._headed:` branch inside
+`_domain_route_gate` is deleted. The three passages stay where they are, each marked, as the
+three amendments above do.
+
+`354bc6b4` (2026-09-12 00:12) carries the change, so this is the first passage in this file
+whose code is on `dev` rather than in the working tree. It is cited **by symbol, not by line**
+all the same, for the reason the earlier amendments give.
+
+### 1. What is unchanged
+
+A visible window is ungated — Mike's call, 2026-09-11 — and nothing here reopens that. Every
+request passes; a `visible_window_passthrough` row is recorded for it carrying `initiator`,
+`dest_host`, `method` and `resource_type`; `_check_domain` agrees by returning early for a
+headed session, so the two layers still say the same thing. `_note_visible_request` applies the
+same two filters the gate applied first — an unscoped session and a non-`http(s)` URL record
+nothing — so the rows are the same rows. What a headed session may *write* is unchanged: only
+cookies inside `_etld1s`.
+
+### 2. Why the mechanism changed
+
+Route interception parks a request inside Firefox until Python answers it, and the synchronous
+Playwright API pumps its dispatcher only from inside an API call. The library says so in its own
+comment: control passes to the dispatcher fiber "every time we block while waiting for a
+response" (`playwright/sync_api/_context_manager.py`, read in this project's venv). A session
+thread sits on a blocking queue between agent calls, so an idle session answered no routes, and
+the only thing re-entering Playwright was the window probe in
+`CoreService._browser_idle_cleanup_loop` — `WINDOW_PROBE_INTERVAL_SECONDS = 30`. The window
+advanced one batch per probe.
+
+Measured in `~/.dpc/logs/dpc-client.log` over 2026-09-11 23:40–23:59, a visible window on
+`x.com`: the 243 `camoufox.<event>` lines in that span fall into 38 bursts when a gap of more
+than 2 s is taken as a break, and of the 37 intervals between burst starts, 33 are 30.0 s and 3
+are 30.1 s — one is 35.1 s. The page was advancing on the probe's grid, not the site's.
+*Counted here from the log; `354bc6b4`'s own message reports 216 of 219 over the same span on a
+narrower line filter — the same run seen through two filters, not two measurements.*
+
+An event, unlike a route, never holds the request. A page in a visible window now advances as
+the site serves it, whatever the session thread is doing.
+
+### 3. The trade, which the earlier text did not have to state
+
+Interception forced a continuous read: a row could not be late, because the request was not
+allowed to proceed until the row had been written. An event is delivered on the dispatcher's
+next pump instead. The trail stays **complete** — every request raises the event — but a row may
+be written after the request it describes has already been served, and a session idle at the
+moment of the request writes its rows when Playwright is next entered. For a record that
+enforces nothing this is the right side of the trade; it is stated because it changes what the
+audit's timestamps mean. They are when the trail saw the request, never when anything decided
+about it.
+
+### 4. Not settled here
+
+- **No live run under the new mechanism.** The clustering above was counted from a log of a run
+  made *before* the change — it is the evidence of the defect, not of the repair. Nothing here
+  observed a window under the event trail.
+- **No test run.** `354bc6b4` landed
+  `test_a_visible_window_installs_no_route_handler_at_all` and
+  `test_where_an_ungated_window_went_is_recorded_with_its_initiator`; neither was executed in
+  this pass, and *Amendment (third)* §6's caveat about the suite is untouched.
+- Everything *Amendment (third)* §6 leaves open stays open. None of it turns on which mechanism
+  writes the rows.
 
 ---
 
