@@ -29,6 +29,14 @@ session: S146-S147
 > describe. And one sentence of the amendment above has itself gone stale — the UI approval
 > channel it calls unfinished is wired. Both are in
 > *[Amendment 2026-09-11 (second reading)](#amendment-2026-09-11-second-reading--the-disk-cache-is-gone-and-the-approval-channel-is-wired)*.
+>
+> **Amended a third time, 2026-09-11 — and this one is a reversal back to the body.** The
+> approval, the clean login window and the per-request headless prompt are gone from the code.
+> Key Property 1 is live again: the person signs in in the window the agent is using, and that
+> window is **not gated**. Key Property 3's route gate survives on the headless path only. Both
+> amendments above stay as written, each superseded passage now carrying a second marker.
+> Mike's call, 2026-09-11 — see
+> *[Amendment 2026-09-11 (third)](#amendment-2026-09-11-third--the-window-is-the-act-and-it-is-not-gated)*.
 
 ## Context and Problem Statement
 
@@ -128,14 +136,36 @@ Option A keeps the broken popup pipeline alive; Option C adds a second LLM in th
 > nowhere else. Login is also not "the same window" — it has its own tool and its own clean one
 > (Key Property 1's marker above). Kept as drawn, because it is the architecture that was
 > decided; what replaced it is in *Amendment 2026-09-11 (second reading)* §1 below.
+>
+> **Half restored 2026-09-11 (third).** Steps 1 and 4 stay void — nothing checks for or saves
+> `storage_state`, and the vault is the only store. The rest of the drawing is live again: the
+> branch "no cookies → open the login URL in the headed window, the human enters credentials
+> in the same window" is what `browse_page(keep_open=true)` does, except that the agent now
+> also says so in the chat and waits. *Amendment 2026-09-11 (third)* §2.
 
 ### Key Properties
 
 1. **Login in Camoufox** — Agent opens login URL in headed Camoufox; human enters credentials in the same Firefox window the agent will use for subsequent navigation. Cookies stay in the same browser context — no cross-browser session transfer, no single-session invalidation race. ~~Tauri WebView2 popup login path (ADR-028 T2) deprecated for auth-domain sites; retained only as legacy fallback.~~ *(The popup was not retained as a fallback: `c2cfab07` deleted `web_auth.rs` entirely, 2026-06-05.)*
    > **Amended 2026-09-11 — "the same window" is now deliberately a different one.** Login has its own tool, `open_login_window`, which opens a **clean** window: no `storage_state`, no vault cookies, one site reachable. The reason is in Amendment §2 below — a window that already carries the agent's logins is a window a login page can be made to hand them to.
+   >
+   > **Restored 2026-09-11 (third) — the body's text is live again, and the amendment above is
+   > the void one.** `open_login_window` is gone, tool and function both; login happens in the
+   > ordinary visible window, `browse_page(keep_open=true)`, which opens with whatever the
+   > vault holds. What the clean window bought was proof that a person had acted, and that
+   > proof was falsified twice (ADR-028 *Amendment (third)* §1, steps 4 and 6). Its price is
+   > named rather than argued away: the window is now ungated, driveable and readable by the
+   > agent, and carries the person's cookies, all four at once — *Amendment 2026-09-11 (third)*
+   > §3 below, and ADR-028 *Amendment (third)* §3 in full.
 2. **Headed Camoufox for agent actions** — All browsing, login, extraction, and interaction happens in a visible Firefox window via Playwright APIs. Human can observe everything the agent does.
 3. ~~**Domain restriction** — Navigation is gated to authorized domains only (`privacy_rules.json` whitelist). Fail-closed: if no whitelist, agent cannot browse.~~
-   > **Void since 2026-09-10.** There is no `privacy_rules.json` whitelist: `agent_profiles.<id>.web_auth.allowed_domains` is gone, and so is the firewall method that read it. Navigation is still gated, but by the session's own eTLD+1 scope and a per-site CDN manifest at node level, and the authorisation to spend a stored login is a recorded approval in the vault. See Amendment §1 and §3 below.
+   > **Void since 2026-09-10.** There is no `privacy_rules.json` whitelist: `agent_profiles.<id>.web_auth.allowed_domains` is gone, and so is the firewall method that read it. Navigation is still gated, but by the session's own eTLD+1 scope and a per-site CDN manifest at node level, and the authorisation to spend a stored login is a recorded approval in the vault.
+   >
+   > **Amended again 2026-09-11 (third).** The whitelist is still gone and does not come back.
+   > What changed is the reach of what replaced it: the session's eTLD+1 scope and the CDN
+   > manifest gate the **headless** path only, and the recorded approval is withdrawn
+   > entirely. A visible window is not gated at all, because the person at it is the act —
+   > which is what Key Property 1 said in the first place. *Amendment 2026-09-11 (third)*
+   > §§1 and 3 below. Original pointer: Amendment §1 and §3 below.
 4. ~~**Storage state persistence** — Playwright `context.storage_state()` saved to disk as fast-restore cache. Vault stores encrypted backup. No auto-expiry (Q3 decision).~~
 > **Void since 2026-09-11 (second reading).** There is no disk cache and no second store. `browser_state.json` is **neither read nor written**: `AuthBrowser._open` creates the context with no `storage_state` at all and takes the session's identity from `_inject_vault_cookies` — the vault jar for its own scope — while the close-time writeback, renamed `_persist_session_cookies`, syncs in-scope cookies to the vault and maintains no file. The vault is not a backup of a cache; it is the only store. An existing `browser_state.json` on disk is left where it lies and read by nothing. See Amendment §1 below.
 5. **Audit trail** — All browser actions logged with action type, URL, selector, timestamp. Privacy: `fill` logs `text_length`, not content; `screenshot` logs `byte_size`, not pixels.
@@ -165,12 +195,12 @@ Decomposition under [`tasks/adr-029-headed-camoufox/`](../../tasks/adr-029-heade
 |-----------------|------|-------------|------------|
 | 0 | Remove popup code | Delete `popup_*` tools, Rust handlers, frontend `keep_open=true` paths | — |
 | 1 | Extend AuthBrowser | Add headed mode, navigation, click, type, scroll, screenshot, extract, close methods + `browser.headed` config | Task 0 |
-| 2 | Domain restriction | Playwright `context.route("**/*")` with eTLD+1 gate, ~~fail-closed empty whitelist~~ — **amended 2026-09-11**: the whitelist is gone; the gate's scope is the session's own eTLD+1 list, widened for GET/HEAD subresources by a node-level CDN manifest (Amendment §3) | Task 1 |
+| 2 | Domain restriction | Playwright `context.route("**/*")` with eTLD+1 gate, ~~fail-closed empty whitelist~~ — **amended 2026-09-11**: the whitelist is gone; the gate's scope is the session's own eTLD+1 list, widened for GET/HEAD subresources by a node-level CDN manifest (Amendment §3); **amended again 2026-09-11 (third)**: that gate runs on the headless path only, and a headed session continues every request (Amendment (third) §3) | Task 1 |
 | 3 | Storage state | ~~Load/save `storage_state`~~, vault sync, no auto-expiry — **amended 2026-09-11 (second reading)**: the load and the save are both gone; the vault sync is the whole of it (Amendment §1) | Task 1 |
 | 4 | Audit trail | Structured log of browser actions, privacy-preserving field filtering | Task 1 |
 | 5 | Tool registry | Register 9 `browser_*` tools + firewall defaults; **accessibility-tree snapshot + ref-based interaction + auto-snapshot after navigate + LLM-Manager-routed summarization** for snapshots beyond a size threshold (S154 decision matrix) | Task 1, 2, 3 |
 | 6 | Interrupt mechanism | Stop button + agent inbox check between browser steps | Task 1 |
-| 7 | Camoufox login flow | Agent opens login URL in headed Camoufox; ~~human authenticates in same window~~ — **amended 2026-09-11: in a separate clean window, `open_login_window`** (Amendment §2); cookies saved from that context. Replaces Tauri popup for auth-domain sites. Eliminates cross-browser session race (S181 Yarche+ incident). | Task 1, 3 |
+| 7 | Camoufox login flow | Agent opens login URL in headed Camoufox; ~~human authenticates in same window~~ — **amended 2026-09-11: in a separate clean window, `open_login_window`** (Amendment §2); cookies saved from that context. Replaces Tauri popup for auth-domain sites. Eliminates cross-browser session race (S181 Yarche+ incident). **Amended again 2026-09-11 (third): back to the same window.** `open_login_window` is deleted; login is `browse_page(keep_open=true)`, and the agent asks the person in the chat when the page shows a login form (Amendment (third) §2) | Task 1, 3 |
 
 ## Consequences
 
@@ -203,11 +233,13 @@ How to verify the decision was implemented correctly:
 - [ ] Agent can open authenticated page, scroll, click, extract — all via headed Camoufox
 - [ ] Human can observe Firefox window in real time during agent action
 - [ ] ~~Cookies and localStorage persist across browser restart (via `storage_state`)~~ — **replaced 2026-09-11 (second reading):** the writeback carries cookies, and only those in the session's own scope, into the vault; `localStorage` is not in what it saves. The check is now "a second session for the same scope arrives logged in, and `browser_state.json` is neither created nor read" (Amendment §1)
-- [ ] Domain restriction enforced — agent cannot navigate outside auth domain (eTLD+1 + subdomains). **Amended 2026-09-11:** navigation, yes; a GET/HEAD *subresource* may also reach a host named in this site's CDN manifest, so the check is "no navigation outside the scope, and no subresource to a host the manifest does not name" (Amendment §3)
-- [ ] **Added 2026-09-11:** `browse_page(use_auth=D)` is refused with `auth_denied:no_approved_login` when the vault holds no approval for `D` — **with `keep_open=true` as well as without it**
+- [ ] Domain restriction enforced — agent cannot navigate outside auth domain (eTLD+1 + subdomains). **Amended 2026-09-11:** navigation, yes; a GET/HEAD *subresource* may also reach a host named in this site's CDN manifest, so the check is "no navigation outside the scope, and no subresource to a host the manifest does not name" (Amendment §3). **Amended again 2026-09-11 (third):** this check belongs to the headless path; a headed session reaches any host, and the box to tick there is the one below about where it went
+- [ ] ~~**Added 2026-09-11:** `browse_page(use_auth=D)` is refused with `auth_denied:no_approved_login` when the vault holds no approval for `D` — **with `keep_open=true` as well as without it**~~ — **void 2026-09-11 (third)**, the approval is withdrawn. Replaced by two checks: a **headless** `browse_page(use_auth=D)` with no unexpired jar for `D` is refused with `auth_denied:no_session` and a message naming `keep_open=true`; the same call with `keep_open=true` is **not** refused, because that is the window a person can act in (Amendment (third) §4)
+- [ ] **Added 2026-09-11 (third):** a headed session's requests are recorded as `visible_window_passthrough` with `initiator`, `dest_host`, `method` and `resource_type` — enforcing nothing is not the same as seeing nothing, and in a window the agent can drive, `initiator` is the field that separates "the site called its identity provider" from "something went out on its own"
+- [ ] **Added 2026-09-11 (third):** a visible page showing a login form makes `browse_page` return the notice that tells the agent to say so in the chat and wait, audited as `login_page_shown`
 - [ ] All agent browser actions recorded in `web_audit.jsonl` (extends ADR-028 audit schema)
 - [ ] Agent can trigger Camoufox login flow: opens login URL in headed window, human authenticates, cookies saved to vault from same context (Task 7)
-- [ ] Stop button appears when browser session live; pressing it halts current tool call without closing Firefox window
+- [x] Stop button appears when browser session live; ~~pressing it halts current tool call~~ without closing Firefox window — **corrected 2026-09-11 (third):** the button is built and works, but it is the agent-wide Stop, not a browser-session one, and it halts the loop **between** steps, not a tool call already in flight. Chain and remaining gap in *Amendment 2026-09-11 (third)* §5
 - [ ] Cross-platform smoke test: Windows + at least one of Linux/macOS
 
 ## Open Questions
@@ -231,10 +263,11 @@ How to verify the decision was implemented correctly:
 | Task 3 — domain restriction (eTLD+1) | Done | `83353ac` |
 | Task 4 — audit trail extension | Done | `50e52dd` |
 | Task 5 — agent tool registry rewire | Pending | — |
-| Task 6 — interrupt mechanism (Stop button) | Pending | — |
+| Task 6 — interrupt mechanism (Stop button) | ~~Pending~~ **Done, partly** — verified 2026-09-11 (third): the Stop path exists end to end and halts the loop between steps; interruption *inside* a tool call already running is what is missing. Chain in Amendment (third) §5 | — (predates this reading; not bisected) |
 | Task 7 — Camoufox login flow | ~~Pending~~ **Done** — checked 2026-09-11 (second reading): `open_login_window` is a function and a registered tool in `browser.py`, `default_enabled=False` | `974309a9` |
 | Task 008 — remove Tauri login popup + per-request headless auth gate | Done (2026-06-05) | `c2cfab07` |
 | Web-auth whitelist removal + approval-in-vault gate + PSL resolver + CDN manifest | In the working tree, **uncommitted** as of 2026-09-11 | — |
+| Approval withdrawn: login back in the visible window, visible window ungated, headless refused without a session, `revoke` renamed `forget_cookies` | In the working tree, **uncommitted** as of 2026-09-11 | — |
 
 > **Amended 2026-09-11.** Task 008 exists only in `tasks/adr-029-headed-camoufox/008-…md`
 > (gitignored) and was never listed here; its own header still reads `**Status:** PENDING`
@@ -244,6 +277,15 @@ How to verify the decision was implemented correctly:
 >
 > **Amended 2026-09-11 (second reading).** Task 7 has now been checked, and it is done:
 > `974309a9` carries `open_login_window` and its registration. The row above says so.
+>
+> **Amended 2026-09-11 (third).** Task 7 is done and stays done, but not by the tool named
+> here: `open_login_window` was deleted the same day and the login flow is the ordinary
+> visible window again. And one more task file misreports itself, the same way Task 008 did.
+> `tasks/adr-029-headed-camoufox/007-interrupt-mechanism.md` reads `**Status:** PENDING`, and
+> two readers concluded from it that the Stop button had never been built. It has been; the
+> chain is verified in *Amendment 2026-09-11 (third)* §5. The task file is gitignored and
+> outside the scope this pass was allowed to edit, so the correction lives here and in the
+> row above, and the file itself is still wrong.
 
 ## Amendment 2026-09-11 — the whitelist is gone, and headed is no longer exempt
 
@@ -273,6 +315,15 @@ as headless does, and a window being visible does not make the account's owner t
 to spend it. A human watching a browser window is evidence that something is happening, not
 consent that it should.
 
+> **Reversed 2026-09-11 (third), and the last sentence is the one to keep.** `is_approved` and
+> the whole `approved` mechanism are deleted; a headed session is gated by nothing, and Task
+> 008's per-request headless prompt is gone as well (ADR-028 *Amendment (third)* §5). The
+> sentence above about watching not being consent is **not** retracted — it is true, and it is
+> exactly why the reversal is recorded as the owner's product decision with its price named,
+> rather than as a security property this project derived (*Amendment 2026-09-11 (third)* §3).
+> What changed is the judgement of which failure costs more: the gate this section installed
+> refused a person who was at the keyboard and admitted a jar with nothing in it.
+
 ### 2. Login moved out of the browsing window
 
 Key Property 1 makes it a virtue that the human logs in *in the same window the agent will keep
@@ -285,6 +336,13 @@ CLAUDE.md.
 
 The cross-browser race that Key Property 1 was answering does not come back, because both windows
 are Camoufox and the cookies pass through the vault, not through a second browser engine.
+
+> **Reversed 2026-09-11 (third).** `open_login_window` and `_start_clean`-for-login are gone;
+> the visible window opens with the vault's cookies for its scope and is where the person signs
+> in, as Key Property 1 said. The hazard this section names is real and is not denied — it is
+> the price, named as such in *Amendment 2026-09-11 (third)* §3 and in ADR-028 *Amendment
+> (third)* §3. What the clean window was actually protecting was the claim that a cookie could
+> prove a person acted, and that claim was falsified twice inside two days.
 
 ### 3. What the route gate checks now
 
@@ -304,6 +362,13 @@ separate act. The same shape as the vault: what the agent can write is never wha
 real Public Suffix List resolver and returns `None` — never its input — for anything that is not
 a registrable domain (board `RESOLVE-ETLD1-IS-THE-IDENTITY-FUNCTION-FOR-EVERY-REAL-DOMAIN`).
 
+> **Narrowed 2026-09-11 (third).** Every mechanism in this section survives intact — the
+> eTLD+1 scope, the GET/HEAD subresource widening, the node-level manifest, the per-agent
+> refusal file that authorises nothing, and the PSL resolver. What is narrower is where it
+> runs: `_domain_route_gate` returns early for a headed session, so all of it applies to the
+> **headless** path only and a visible window records `visible_window_passthrough` instead.
+> *Amendment 2026-09-11 (third)* §3.
+
 ### 4. Open, and not closed by this amendment
 
 - Approval is being moved to an explicit human answer over the UI approval channel, because a
@@ -312,6 +377,11 @@ a registrable domain (board `RESOLVE-ETLD1-IS-THE-IDENTITY-FUNCTION-FOR-EVERY-RE
   run, 2026-09-11 (*reported from that run, not reproduced here*). `web_auth.record_approval`
   exists and takes no cookie argument on purpose; at the last reading it had **no caller**. Not
   finished.
+  > **Void since 2026-09-11 (third).** The move landed (second reading, §2) and was then
+  > withdrawn whole: `record_approval` and every sibling are deleted, and so is the UI channel.
+  > The explicit human answer failed in its turn on 2026-09-11 at 09:43, on a window that timed
+  > out while the person was on a two-factor screen. ADR-028 *Amendment (third)* §1, steps 5
+  > to 7.
 - `browser_state.json` in the agent sandbox is a second, plaintext store of logins that the
   approval gate does not read — board
   `A-HEADED-SESSION-OPENED-WITHOUT-USE-AUTH-INSTALLS-NO-ROUTE-GATE-AND-STILL-LOADS-EVERY-COOKIE`
@@ -359,6 +429,18 @@ The board entries `A-HEADED-SESSION-OPENED-WITHOUT-USE-AUTH-INSTALLS-NO-ROUTE-GA
 and `LIST-AUTH-DOMAINS-REPORTS-ON-A-STORE-THAT-NO-LONGER-RECEIVES-LOGINS` are not closed by this
 note: the loading half is what was checked here.
 
+> **Still true 2026-09-11 (third), and this is the part of the two days that was not reversed.**
+> `_open` still passes no `storage_state`, `_inject_vault_cookies` is still the whole of a
+> session's identity, `_persist_session_cookies` is still the whole of the writeback, and a
+> saved `browser_state.json` is asserted inert by
+> `test_no_session_loads_a_saved_browser_state`. One phrase above has lost its subject: there
+> is no approval gate to guard one door, so the sentence now reads as the plain point that a
+> session must carry only its own scope's identity. The session-reuse half of
+> `A-HEADED-SESSION-OPENED-WITHOUT-USE-AUTH-INSTALLS-NO-ROUTE-GATE-AND-STILL-LOADS-EVERY-COOKIE`
+> was read this time: `_session_scope_matches` compares requested and live scope by equality in
+> both directions and `_get_or_create_session` replaces a mis-scoped session rather than serving
+> it. Read in code, not measured.
+
 ### 2. The UI approval channel is wired; "not finished" no longer holds
 
 The first bullet of *Amendment 2026-09-11* §4 says approval "is being moved" to an explicit human
@@ -382,6 +464,15 @@ that call with a read. Which function writes the approval was moving while this 
 may have moved again; that a human answer, and only a human answer, is what grants is the part
 that is settled.
 
+> **Void since 2026-09-11 (third).** The channel this section reports as finished was removed
+> the same day: `web_auth_approve_headless` and `web_auth_reject_headless` are deleted from
+> `service.py` and from the `local_api.py` allowlist, `WebAuthApprovalDialog.svelte` and
+> `services/webAuthApproval.ts` are deleted from the UI, and `_ask_human_to_approve`,
+> `APPROVAL_KIND_LOGIN`, `commit_login_cookies` and `record_approval` no longer exist. Nothing
+> grants, so nothing writes a grant. What the timeout failure of 09:43 showed is that a human
+> answer is not self-validating either: the person answered about a sign-in they had begun, and
+> the answer landed on a jar with no session in it. ADR-028 *Amendment (third)* §1, step 6.
+
 ### 3. What this reading did not check
 
 - What the person sees when the wait runs out. The backend sends no event at that moment —
@@ -389,10 +480,125 @@ that is settled.
   gate, which broadcasts `shell_approval_expired` — so the card retires itself from the
   `timeout_sec` the request carries (`dpc-client/ui/src/lib/services/webAuthApproval.ts`,
   2026-09-11). A backend emitter would be the better half of that pair and does not exist.
+  > **Moot since 2026-09-11 (third):** there is no approval card and no wait to run out. The
+  > file named here is deleted. The failure it was worrying about happened anyway, one layer
+  > up: the window's budget expired mid-login and the person's yes was collected as if it
+  > meant a finished sign-in.
 - Session reuse deciding reuse without comparing the domain argument — the other half of
   `A-HEADED-SESSION-OPENED-WITHOUT-USE-AUTH-INSTALLS-NO-ROUTE-GATE-AND-STILL-LOADS-EVERY-COOKIE`.
+  > **Read 2026-09-11 (third), in code:** `_session_scope_matches` compares the requested scope
+  > with the live one by equality in both directions, and `_get_or_create_session` closes and
+  > replaces a mis-scoped session rather than serving it. Not measured, and the board entry is
+  > not closed from here.
 - Q4 (session adoption across DPC restart) and Q2 (headless server), untouched by either
   amendment.
+
+## Amendment 2026-09-11 (third) — the window is the act, and it is not gated
+
+**Mike's call, 2026-09-11.** The two amendments above moved authorisation away from this ADR's
+body and into a recorded approval; this one withdraws it and returns to what the body decided
+on 2026-05-24. Both stay exactly as written, each superseded passage now carrying a second
+dated marker — three reversals in two days is the history worth keeping, and an amendment
+edited in place stops being a record of what was believed when.
+
+**ADR-028's *Amendment 2026-09-11 (third)* is the primary record and carries the whole arc, the
+mechanism and the price in full.** This section records only what *this* ADR's own text gets
+back, what it loses, and one correction to its Implementation Status that has misled two
+readers. Code read in the **uncommitted** working tree of 2026-09-11 and cited **by symbol, not
+by line**.
+
+### 1. What came back, and what did not
+
+Back: Key Property 1 — the person signs in in the window the agent is using, and that window
+carries the vault's cookies for its scope. Key Property 2, which never moved. The architecture
+diagram's login branch.
+
+Not back: `storage_state` and the `browser_state.json` cache, which stay gone (the second
+reading's §1 is the one part of the two days that was not reversed). The `privacy_rules.json`
+whitelist, which stays gone. The eTLD+1 scope, the CDN manifest and the PSL resolver, which stay
+— on the headless path.
+
+Withdrawn: the recorded approval in the vault, the clean login window and its tool, and Task
+008's per-request headless prompt. The audit statuses `auth_denied:no_approved_login`,
+`headless_approved`, `headless_rejected` and `headless_no_ui` appear nowhere in the tree.
+
+### 2. What the agent does when the page asks for a login
+
+Key Property 1 says the human enters credentials in the same window. What the code adds is the
+handoff, because a tool cannot speak into the chat: when a visible page shows a login form
+(`_page_wants_a_login`, decided on the page's own markup), `browse_page` appends
+`_login_needed_notice` — the words the agent is to say and an instruction to stop and wait for
+the person's reply — and audits `login_page_shown`. The person signs in by hand, replies in the
+chat, and the agent continues. The sign-in is saved as they make it, by the ordinary writeback.
+
+The branch is decided by **what the page showed**, never by whether the vault holds cookies.
+That second signal is what misled every step of the two days ADR-028 records.
+
+### 3. The price, named
+
+**The owner's product decision, with its cost stated — not a security property this project
+derived.** *Amendment 2026-09-11* §1 above wrote that a human watching a window is evidence,
+not consent, and that sentence is not retracted. What changed is the judgement of which failure
+costs more.
+
+The split login window was ungated because it was **poor**: its own registry, unreachable by any
+`browser_*` tool, holding no stored login. Merging the windows makes the visible window ungated,
+driveable by the agent, readable by the agent, and a carrier of the person's cookies — four
+properties at once. What limits it is the firewall over which agents may use the browser tools
+at all, a person watching a window they can close, and the audit; none of the three refuses a
+request. Two mechanisms do still hold: the write side stays scoped to `_etld1s`, and scope
+cannot widen through session reuse. Full statement in ADR-028 *Amendment (third)* §3.
+
+### 4. Where the gate went, and the one refusal left
+
+`_domain_route_gate` continues every request when the session is headed, recording it as
+`visible_window_passthrough` with `initiator`, `dest_host`, `method` and `resource_type` —
+deliberately not called a passthrough *through* a gate, because nothing was enforced.
+`_check_domain`, the pre-navigation layer, returns early for the same case: two layers
+disagreeing is how a hole hides. Everything in *Amendment 2026-09-11* §3 survives for the
+headless path.
+
+The one refusal on the auth path is about capability rather than permission: a headless
+`browse_page(use_auth=D)` with no unexpired jar for `D` is refused in words —
+`web_auth.has_session`, audit `auth_denied:no_session` — because the alternative is downloading
+a login page into a window nobody can see and reporting it as the answer. `keep_open=True` is
+exempt because that is the visible window, and a window with nothing stored is precisely how a
+person signs in for the first time.
+
+### 5. Task 6 was built; the Implementation Status row and the task file both said otherwise
+
+`tasks/adr-029-headed-camoufox/007-interrupt-mechanism.md` reads `**Status:** PENDING`, and the
+Implementation Status row above said `Pending`. Two readers concluded from that pair that the
+Stop button had never been built. It has been. The chain, verified by reading each link in this
+session:
+
+1. `interrupt_agent` is on the `local_api.py` `ALLOWED_COMMANDS` allowlist, and
+   `AgentProgressCollapsible.svelte` sends it.
+2. `CoreService.interrupt_agent` (`service.py`) resolves an empty `agent_id` to the default
+   agent, reaches the `dpc_agent` provider's manager and calls `manager.interrupt(conversation_id)`.
+3. `AgentManager.interrupt` sets the per-conversation `asyncio.Event` held in
+   `_interrupt_events`, created and passed into the loop as `stop_event` and popped when the
+   loop returns.
+4. `loop.py` checks `stop_event.is_set()` twice: at the top of each round, and again before
+   each tool call inside a round. Both return "Stopped by user" and mark the trace
+   `stopped_by_user`.
+
+**What is genuinely missing is what Task 007 specified and this ADR's Confirmation still
+promised: interruption *inside* a tool call already in flight.** The task file's design — an
+`AuthBrowser._stop_requested` flag, `request_stop`, `_check_stop`, an `AgentInterrupted`
+exception and a `stop_browser_session` command — exists nowhere in the tree; none of those five
+names appears anywhere. So a Stop pressed while a page is loading or a shell command is running
+takes effect when that call returns, and the Stop is agent-wide rather than scoped to a live
+browser session. The row and the Confirmation box above now say this; the gitignored task file
+still says PENDING and was outside what this pass was allowed to edit.
+
+### 6. Not settled here
+
+- No live run and no test run: this is a reading of code and of the suite that landed beside
+  it. Neither earlier amendment claimed otherwise and neither does this one.
+- Whether an ungated visible window is the right trade is the owner's call, recorded as one in
+  §3. No measurement in this record bears on it.
+- Q2 and Q4 are untouched by all three amendments.
 
 ## Authors
 
@@ -407,8 +613,9 @@ Workflow roles per Protocol 13:
 - [ADR-028](028-agent-web-auth-cookie-sharing.md) — Cookie Sharing foundation (this ADR depends on ADR-028 Phase 1 cookie handoff infrastructure)
 - [TEMPLATE.md](TEMPLATE.md) — ADR template this document follows
 - [`dpc-client/core/dpc_client_core/dpc_agent/tools/browser.py:353-466`](../../dpc-client/core/dpc_client_core/dpc_agent/tools/browser.py#L353) — current `AuthBrowser` implementation
-- [`dpc-client/core/dpc_client_core/web_auth.py`](../../dpc-client/core/dpc_client_core/web_auth.py) — `resolve_etld1()` used by Task 2 (domain restriction); since 2026-09-11 a real Public Suffix List resolver, and the home of the vault approval (`record_approval`, `is_approved`) and the CDN manifest
+- [`dpc-client/core/dpc_client_core/web_auth.py`](../../dpc-client/core/dpc_client_core/web_auth.py) — `resolve_etld1()` used by Task 2 (domain restriction); since 2026-09-11 a real Public Suffix List resolver, ~~and the home of the vault approval (`record_approval`, `is_approved`)~~ — **amended 2026-09-11 (third):** the approval functions are deleted; what lives here besides the resolver is the vault (`save_cookies`, `has_session`, `forget_cookies`) and the CDN manifest
 - [ADR-028 — Amendment 2026-09-11](028-agent-web-auth-cookie-sharing.md#amendment-2026-09-11--the-whitelist-is-gone-a-recorded-approval-is-the-gate) — the mechanism that replaced the whitelist, in full
+- [ADR-028 — Amendment 2026-09-11 (third)](028-agent-web-auth-cookie-sharing.md#amendment-2026-09-11-third--the-approval-is-withdrawn-the-visible-window-is-the-act) — the withdrawal of that mechanism, the arc that led to it step by step, and the price of the ungated visible window stated in full
 - Commit `c2cfab07` (2026-06-05) — ADR-029 Task 008: Tauri login popup deleted, per-request headless approval added. Task file: `tasks/adr-029-headed-camoufox/008-tauri-login-removal-and-headless-gate.md` (gitignored)
 - backlog `THE-DECISION-RECORD-STILL-SPECIFIES-THE-WEB-AUTH-GATE-THAT-WAS-DELETED` — the entry this amendment closes
 - backlog `THE-VAULT-STAMPS-A-FRESH-LOGIN-EVERY-TIME-THE-BROWSER-CLOSES` — why `authenticated_at` could not be the approval

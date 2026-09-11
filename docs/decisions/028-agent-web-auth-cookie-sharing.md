@@ -24,6 +24,11 @@ kept where they are, each marked.
 stale: the UI approval channel it calls unfinished is wired, and `browser_state.json` is no
 longer a second store of anything. Repaired by a second dated amendment, not by editing the
 first.
+**Amended:** 2026-09-11 (third) — the approval is withdrawn. The recorded approval, the clean
+login window and the per-request headless prompt are all gone from the code; a visible browser
+window is the act, and it is not gated. Mike's call. The two amendments above stay as written
+and each superseded passage carries a forward pointer; the reversal is the third dated
+amendment at the end.
 
 <!-- Status and date moved into the front matter above, 2026-08-10, when --check began
      reading docs/decisions/. This was the one file between 027 and 039 without it. -->
@@ -59,6 +64,13 @@ Three approaches were considered in backlog AGENT-WEB-AUTH:
 > login window is now a headed Camoufox window opened by the agent tool `open_login_window`
 > (`dpc_agent/tools/browser.py`), and what it produces is not only cookies but an **approval**
 > recorded beside them. See the amendment below.
+>
+> **Amended again 2026-09-11 (third).** The popup is still gone. `open_login_window` is gone
+> too, and so is the approval: login is the ordinary visible Camoufox window,
+> `browse_page(keep_open=true)`, opened with whatever the vault holds. The diagram's shape
+> survives with the second and third boxes merged — the agent opens a window, the person signs
+> in there, the cookies are saved by the ordinary writeback, and no approval is recorded.
+> *Amendment 2026-09-11 (third)* §2.
 
 ```
 Agent: "I need access to example.com. Open login window?"
@@ -103,6 +115,13 @@ Agent: browse_page(url="https://example.com/my/orders", use_auth="example.com")
 > `web_auth.save_cookies` call, and an ordinary browser close routes through it, so it says
 > when the bytes were written and never when a human logged in — board
 > `THE-VAULT-STAMPS-A-FRESH-LOGIN-EVERY-TIME-THE-BROWSER-CLOSES`.
+>
+> **Void since 2026-09-11 (third).** There is no third field. A jar is exactly
+> `{cookies, authenticated_at, last_used_at}` again, and `web_auth.save_cookies` says in its
+> own docstring why nothing there tries to establish after the fact that a person logged in:
+> a jar cannot answer that question, because a site hands guest cookies to any anonymous
+> visitor. The sentence about `authenticated_at` still stands and is still the reason it
+> could never have been the approval. See *Amendment 2026-09-11 (third)* §4 below.
 
 **Encryption:** Windows DPAPI via `keyring` crate (Rust-side) / `keyring` library (Python-side). Key derived from OS user account, no additional password prompt. Trade-off: same-user attacker can decrypt. Acceptable for Alpha. Master password option deferred to Phase 2.
 
@@ -233,6 +252,14 @@ else:
 > `dpc_agent/tools/browser.py`). `fetch_json` still has no `use_auth` parameter; the code says
 > so at that gate, and says that if it ever gains one the check is to be hoisted into a shared
 > helper rather than copied.
+>
+> **Void since 2026-09-11 (third).** `is_approved` does not exist, and the token
+> `auth_denied:no_approved_login` appears nowhere in the tree. What `browse_page` checks now
+> is `resolve_etld1` (unchanged, still refusing with `auth_denied:not_a_domain`) and, on the
+> **headless path only**, `web_auth.has_session` — refused with `auth_denied:no_session`.
+> That second check is about capability, not permission: it refuses a background fetch that
+> would download a login page into a window nobody can see. The note about `fetch_json` still
+> holds. See *Amendment 2026-09-11 (third)* §§2 and 4 below.
 
 **`permissions: "read_only"`** is the only value for MVP. WRITE permission is explicitly out of scope. Agent tools cannot perform POST/PUT/DELETE with auth cookies.
 
@@ -267,7 +294,7 @@ When cookies are expired (checked against `expires` timestamp):
 ## Implementation Phases
 
 ### Phase 1 (MVP)
-1. ~~Rust: `open_login_window` Tauri command (cross-platform via Tauri native cookies API, since 2.9.5)~~ — **deleted in `c2cfab07`** (`web_auth.rs`, 192 lines, whole file); the name survives as a **Python agent tool** with a different body, not a Tauri command
+1. ~~Rust: `open_login_window` Tauri command (cross-platform via Tauri native cookies API, since 2.9.5)~~ — **deleted in `c2cfab07`** (`web_auth.rs`, 192 lines, whole file); the name survived for one day as a **Python agent tool** with a different body, not a Tauri command, and was deleted in turn on 2026-09-11 (*Amendment (third)* §4). No tool called `open_login_window` exists
 2. Rust: DPAPI-encrypted credential vault read/write
 3. Python: `web_auth.py` module — vault access, cookie resolution, eTLD+1 matching
 4. Python: `browser.py` extension — `use_auth` parameter, Camoufox-with-cookies routing
@@ -357,6 +384,13 @@ the "domain not authorized" of §6 and an intermediate `auth_denied:no_vault_jar
 for part of 2026-09-11 and is already gone — the board entry that opened this amendment still
 names that intermediate token.
 
+> **Void since 2026-09-11 (third), except check 1.** Check 2 is withdrawn with the whole
+> approval mechanism. Check 3 is withdrawn too, and that is the part a reader comparing the
+> amendments would otherwise miss: the per-request headless prompt is **not** "unchanged" any
+> more, its three audit statuses are gone from the tree, and the two commands that carried the
+> answer are deleted. Check 1 stands exactly as written. *Amendment 2026-09-11 (third)* §§4
+> and 5 below.
+
 ### 2. Logging in and spending a login are two different operations
 
 A new agent tool `open_login_window(domain, timeout_sec)` opens a **headed** Camoufox window
@@ -386,6 +420,14 @@ in the tree.
 > `commit_login_cookies` → `save_cookies(approved_via=…)`, reached only after the person
 > answers. What guards the rule is that the *ordinary* writeback still passes no `approved_via`.
 > See the second amendment below, §2.
+>
+> **Void since 2026-09-11 (third).** `open_login_window` is gone as a tool and as a function,
+> together with `capture_login_cookies`, `commit_login_cookies`, `record_approval` and the
+> `approved_via` argument. Login is back where ADR-029 put it in the first place: the ordinary
+> visible window, `browse_page(keep_open=true)`, opened with whatever the vault holds. The
+> split this section argues for was the right repair of a wrong premise; the premise was that
+> a cookie could be made to prove a person acted. *Amendment 2026-09-11 (third)* §§1 and 2
+> below.
 
 ### 3. The route gate now constrains the destination, not only the initiator
 
@@ -411,6 +453,12 @@ The file was called `web_cdn_observed.json` until 2026-09-11, when the word went
 only the backlog's observation shelf ([GLOSSARY.md](../GLOSSARY.md)). `web_auth` reads the old
 name when the new one is absent or unreadable and folds it into the new file on the next write,
 so a record a human was meant to promote from survives the rename; the old file is never deleted.
+
+> **Narrowed 2026-09-11 (third).** Every mechanism in this section is intact and none of it
+> was reversed, but it now governs the **headless path only**: `_domain_route_gate` continues
+> every request for a headed session before it reaches either the allowlist or the manifest.
+> A visible window therefore produces no CDN refusals at all. *Amendment 2026-09-11 (third)*
+> §§2 and 3 below.
 
 ### 4. Why the whitelist could not be the gate
 
@@ -451,6 +499,12 @@ was made is that entry's question, not this section's answer.
   > `_ask_human_to_approve` and writes nothing on any answer but yes, and the reply comes back
   > over `web_auth_approve_headless` / `web_auth_reject_headless`. The channel is finished; the
   > function named here is not the one that writes. Second amendment below, §2.
+  > **Void since 2026-09-11 (third).** The channel that was finished has been removed, dialog
+  > and commands and all. The clean-profile premise this bullet disowned was replaced by a
+  > human answer, and the human answer failed in its turn on 2026-09-11 at 09:43 — the window
+  > timed out on a two-factor screen, the person answered yes about a sign-in they had begun,
+  > and the approval landed on a jar with no session in it, replacing one that worked.
+  > *Amendment 2026-09-11 (third)* §1, steps 5 to 7.
 - ~~**`browser_state.json` is a second store of logins that no approval governs.** It holds the
   cookies of every site the session's scope covered, is rewritten after every navigate and at
   close, and is plaintext — `chmod 0600` runs under `if os.name == "posix"` only, so on Windows
@@ -532,10 +586,207 @@ caller. It had one at `974309a9`; the parallel task's uncommitted edit replaced 
 read. Which function performs the write was moving while this was written. That a human answer,
 and only a human answer, is what grants is the part that is settled and the part worth reading.
 
+> **Void since 2026-09-11 (third).** Nothing grants any more, so the question of which function
+> writes the grant has lost its subject. `web_auth_approve_headless` and
+> `web_auth_reject_headless` are deleted from `service.py` and from the `local_api.py`
+> allowlist; `WebAuthApprovalDialog.svelte` and `services/webAuthApproval.ts` are deleted from
+> the UI. *Amendment 2026-09-11 (third)* §4.
+
 ### 3. Not checked here
 
 The suite caveat in §5's third bullet is unchanged: nothing in either amendment should be read as
 "verified by tests". Neither reading exercised a live login.
+
+---
+
+## Amendment 2026-09-11 (third) — the approval is withdrawn; the visible window is the act
+
+**Mike's call, 2026-09-11.** The two amendments above record a gate built, repaired and
+rebuilt across two days. This one records its removal and the return to the model ADR-029
+accepted on 2026-05-24: the agent opens a browser window, the person is at it, and what they
+do there is the act. Both earlier amendments stay exactly as written and each superseded
+passage carries a forward pointer — three reversals in two days is precisely the history these
+records exist to keep, and an amendment edited in place stops being a record of what was
+believed when.
+
+The same citation caution as before, and for the same reason: the code was read in the
+**uncommitted** working tree of 2026-09-11, minutes after it landed, and is cited **by symbol,
+not by line**. Line numbers taken in this file today have been wrong within the hour.
+
+### 1. How the design got here, in order
+
+Each step was reasonable against the one before it. That is why the end state had to be
+reached before it could be judged, and why the arc belongs in the record rather than only its
+last frame.
+
+1. **A real defect, and the repair stands.** `browser_state.json` in the agent's sandbox had
+   accumulated 230 cookies across 55 domains, a live session token among them, put there by
+   nobody's decision. One identity store — the vault — was the correct answer and is **not**
+   reversed here. It is what *Amendment (second reading)* §1 records. *Reported from that
+   reading.*
+2. With the vault the only store, the question became what puts things into it. "A human
+   login" was the right answer. The project then went one step further and tried to **prove**
+   that a human had acted.
+3. To make that proof possible, login moved into a **separate window with a clean profile**,
+   so that "a cookie appeared" could mean "a person acted" (*Amendment* §2).
+4. **A live run falsified it.** The site hands guest cookies to any anonymous visitor, so the
+   clean window proved nothing (*Amendment* §5, first bullet). *Reported from that run.*
+5. A question went to the person instead — "did you finish signing in?" — and an `approved`
+   block in the vault became the condition of access, `browse_page(use_auth=…)` refusing
+   without it even with a person at the screen (*Amendment (second reading)* §2).
+6. **That failed too**, 2026-09-11 at 09:43. The window's budget expired while the person was
+   on the two-factor code screen. They answered yes, honestly, about a sign-in they had begun;
+   an approval was recorded over a jar holding no session, and it **replaced a working one**.
+   The audit reads `closed_by: "timeout"`, url
+   `x.com/i/jf/onboarding/web#/s/two_factor_code/…`, `baseline_cookies 7 → 9`, new names
+   `cf_clearance` and `g_state`. *Reported from that run, not reproduced here.*
+7. **The repair everyone had agreed on died on a measurement.** The identity heuristic —
+   `httponly` plus a value of eight characters or more — counted Cloudflare's `cf_clearance`
+   (426 characters) and `__cf_bm` as identity, so the worthless jar scored two marks. The
+   signal was not weak, it was wrong, and it is wrong on any site behind that CDN. *Reported
+   from that measurement, not re-run here.*
+
+What the sequence settles is not whether each step was sound but what the gate was worth. A
+silent, wrong gate is worse than no gate: it refused a person who was at the keyboard and
+admitted a jar with nothing in it. The site's own login form is the alternative, and it is
+loud and self-correcting — a person who did not sign in meets it immediately.
+
+### 2. The model that replaces it
+
+```
+agent goes to a site
+  ├─ visible (headed) window, starting with whatever cookies the vault holds
+  │     page shows content      → the agent works
+  │     page shows a login form → the agent says so in the chat; the person
+  │                               signs in by hand and replies in the chat;
+  │                               the agent continues
+  │     no gate, no question, no approval
+  └─ headless / background fetch
+        vault cookies, route gate and per-site CDN manifest apply
+        no stored session → refused in words
+```
+
+The branch is taken on **what the page showed**, never on whether the vault holds cookies.
+That second signal is the one that misled every step of §1: a jar of guest cookies over a dead
+session answers "yes, there are cookies" and means nothing.
+
+### 3. The price of the ungated visible window, and whose decision it is
+
+**This is the owner's product decision with its cost stated. It is not a security property
+this project derived, and it must not be read as one.** The distinction is load-bearing
+because this record has already once put "a human is watching" where a gate belongs;
+*Amendment* §1 said the opposite in its own words — "a human watching a browser window is
+evidence that something is happening, not consent that it should" — and that sentence was
+right about consent. What has changed is the owner's judgement about which failure is worse,
+not a discovery that watching is a control.
+
+What the split login window bought was not its cleanliness but its **poverty**: it lived in
+its own registry, no `browser_*` tool could reach it, and it held no stored login. Merging the
+windows gives the visible window four properties at once:
+
+- **ungated** — `_domain_route_gate` continues every request when `self._headed`, and
+  `_check_domain`, the pre-navigation layer, returns early for the same case;
+- **driveable by the agent** — it is an ordinary entry in `_active_browser_sessions`, so
+  `browser_click`, `browser_fill` and `browser_navigate` all operate on it;
+- **readable by the agent** — `get_page_html` and `a11y_snapshot` return whatever is on
+  screen, the person's own signed-in pages included;
+- **carrying the person's cookies** — `_inject_vault_cookies` loads the vault jar for the
+  session's scope when it opens.
+
+What limits it is narrower than a gate, and is written here as exactly that: the firewall over
+which agents may use the browser tools at all, a person watching a window they can close, and
+the audit. None of the three refuses a request.
+
+Two things do still hold and are mechanisms rather than circumstances, which is why they are
+listed apart from the paragraph above:
+
+- **the write side stays scoped.** `_scope_cookies_by_etld1` files only cookies matching the
+  session's own `_etld1s`, so a window that walks to an identity provider stores nothing for
+  it (`test_an_ungated_window_still_stores_only_its_own_site`);
+- **scope cannot widen through session reuse.** `_session_scope_matches` compares the
+  requested scope with the live one by equality in both directions, and `_get_or_create_session`
+  closes and replaces a mis-scoped session rather than serving it. *Read in the code here; not
+  measured.*
+
+Also recorded because a cost is not only technical: the visible window no longer starts clean,
+so a person who is already signed in is not asked to sign in again. That is the other half of
+what merging bought.
+
+### 4. What the code does now
+
+**Gone.** `web_auth.identity_marks`, `_identity_changed`, `record_approval`, `get_approval`,
+`is_approved`, `APPROVAL_VIA_LOGIN_WINDOW` and the vault's `approved` / `approved_identity`
+fields; the agent tool `open_login_window` with its `_login_windows` registry,
+`capture_login_cookies`, `commit_login_cookies` and the `approved_via` argument;
+`_ask_human_to_approve`, `get_pending_auth_approvals` and `get_login_windows` in `browser.py`;
+`web_auth_approve_headless` and `web_auth_reject_headless` in `service.py` and on the
+`local_api.ALLOWED_COMMANDS` allowlist; `WebAuthApprovalDialog.svelte` and
+`services/webAuthApproval.ts` in the UI. A stored jar is exactly
+`{cookies, authenticated_at, last_used_at}`, asserted as an absence by
+`test_no_approval_survives_anywhere_in_the_vault` — including that no unread field survives on
+disk, because a field written today and read again tomorrow is a half-restored mechanism.
+
+**Renamed, because the old name overclaimed.** `web_auth.revoke` is now
+`web_auth.forget_cookies`, and the UI command `web_auth_revoke_domain` is now
+`web_auth_forget_cookies`; the panel heading reads "Stored Web Cookies" and the button reads
+"Forget". Deleting our copy of a jar never signed anybody out of anything, and the answer now
+says so — "still signed in … sign out there if that is what you meant" — with a test that
+refuses any wording readable as a logout. The capability is worth keeping under an honest
+name: it is the only way to take a login away from an agent without touching the account.
+
+**New.**
+
+- A headed session installs no gate. `_domain_route_gate` continues the request and records it
+  as `visible_window_passthrough` — deliberately not named a passthrough *through* a gate,
+  since nothing was enforced. `_check_domain` returns early for the same case; two layers
+  disagreeing is how a hole hides.
+- A headless `use_auth` browse with no live session is refused in words before anything opens:
+  `web_auth.has_session` (a pure read — it does not stamp `last_used_at`, and an all-expired
+  jar answers no), audit status `auth_denied:no_session`, and a message that names
+  `keep_open=true` as the way a person can act. `keep_open=True` is exempt because that **is**
+  the visible window.
+- When a visible page shows a login form — `_page_wants_a_login`, decided on the page's own
+  markup — the tool appends `_login_needed_notice`: the words the agent is to say in the chat,
+  and an instruction to stop and wait for the person's reply. There is no push channel from a
+  tool into a conversation, so the string has to name who acts next. Audited as
+  `login_page_shown`.
+
+**Kept, and verified here.** `browser_state.json` neither read nor written — `_open` passes no
+`storage_state` for any session and a file left on disk is inert
+(`test_no_session_loads_a_saved_browser_state`); the vendored Public Suffix List behind
+`resolve_etld1`, still returning `None` rather than its input; the route gate's destination
+check and the per-site CDN manifest, now on the headless path only (§3 of the first amendment,
+narrowed in place); the audit carrying `initiator`, `dest_host`, `method` and `resource_type`,
+with one first-seen row per decision, one summary row per repeat, and size rotation
+(`WEB_AUDIT_MAX_BYTES`, `WEB_AUDIT_KEEP`).
+
+### 5. The Task 008 per-request headless prompt went with it
+
+*Amendment* §1 lists three checks and calls the third — "headless additionally asks a person,
+per request", the ADR-029 Task 008 gate, audit statuses `headless_approved` /
+`headless_rejected` / `headless_no_ui` — unchanged. It is not unchanged. Those three statuses
+appear nowhere in the tree, and the two commands that carried the answer are deleted from
+`service.py` and from the allowlist. The headless path now asks nobody anything: it is gated
+by `has_session` and by the route gate, and both are refusals in code rather than questions to
+a person.
+
+This is a real reduction in what a person is consulted about, and it is stated in its own
+section rather than folded into §4 so that a reader comparing the amendments cannot carry
+§1's check 3 forward as current.
+
+### 6. Not settled here
+
+- **No live run, and no test run.** This amendment is a reading of code and of the suite that
+  landed beside it. Nothing here was exercised against a real site, and the suite was not
+  executed in this pass.
+- **The suite caveat still applies.** *Amendment* §5's third bullet — four deliberate
+  breakages out of fourteen left the earlier suite green, board
+  `THE-NEW-WEB-AUTH-TESTS-SURVIVE-THE-DELETION-OF-WHAT-THEY-ARE-NAMED-FOR` — is about tests
+  that have since been deleted. Nothing has re-established that their replacements go red when
+  they should.
+- `LIST-AUTH-DOMAINS-REPORTS-ON-A-STORE-THAT-NO-LONGER-RECEIVES-LOGINS` is untouched.
+- Whether an ungated visible window is the right trade is the owner's call and is recorded as
+  one (§3). It is not a question this record answers, and no measurement in it bears on it.
 
 ---
 
