@@ -7,7 +7,8 @@ vault blob:
 
   - keyring stores a per-agent Fernet key under SERVICE:{agent_id}
   - the vault blob (JSON) is encrypted with that key and written to
-    `~/.dpc/agents/{agent_id}/web_credentials.enc`
+    `~/.dpc/web_credentials/{agent_id}.enc` — node level, outside every
+    agent's sandbox; see `_vault_path` for why it is not in the sandbox
 
 The two libraries together form the encryption layer; neither alone is
 sufficient — keyring does not encrypt files, cryptography has no native
@@ -26,6 +27,7 @@ import ipaddress
 import json
 import logging
 import os
+import re
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -211,9 +213,100 @@ def resolve_etld1(domain: str) -> str | None:
     return ".".join(labels[n - suffix_len - 1:])
 
 
+# Mirrors `dpc_agent.utils.AGENT_ID_RE`; not imported, because reaching that
+# module executes the whole `dpc_agent` package, which imports back into here.
+_AGENT_ID_RE = re.compile(r"^[A-Za-z0-9_-]+$")
+
+VAULT_DIRNAME = "web_credentials"
+
+
+def _dpc_home() -> Path:
+    return Path(os.environ.get("DPC_HOME", Path.home() / ".dpc"))
+
+
+def _agent_dir(agent_id: str) -> Path:
+    """The agent's *sandbox* root. What belongs here is what the agent is
+    meant to be able to read about itself — its audit log, its record of
+    refused CDN hosts. Its cookies do not, which is why `_vault_path` no
+    longer resolves through this."""
+    return _dpc_home() / "agents" / agent_id
+
+
 def _vault_path(agent_id: str) -> Path:
-    home = Path(os.environ.get("DPC_HOME", Path.home() / ".dpc"))
-    return home / "agents" / agent_id / "web_credentials.enc"
+    """Node level, outside every agent's sandbox, for the reason
+    `cdn_manifest_path` is: an agent that can reach its own permission has
+    none.
+
+    Inside the sandbox, which is where this sat, a relative
+    `read_file("web_credentials.enc")` resolved onto the vault through
+    `ToolContext.repo_path`, and `write_file`/`delete_file` on that name were
+    legal writes — the agent could copy its own jar out, replace it, or
+    destroy it. A deny-list on the name would not close that: it is one
+    rename from being wrong, and it would have to be repeated in every tool
+    that resolves a path.
+
+    The agent id has to be a single safe path segment, because at node level
+    a `..` in it reaches the identity files.
+    """
+    if not agent_id or not _AGENT_ID_RE.match(agent_id):
+        raise ValueError(
+            f"{agent_id!r} is not an agent id (letters, digits, underscore, "
+            f"hyphen) — refusing to build a vault path from it"
+        )
+    return _dpc_home() / VAULT_DIRNAME / f"{agent_id}.enc"
+
+
+def _legacy_vault_path(agent_id: str) -> Path:
+    """Where the vault sat while it was inside the sandbox. Read once and
+    moved out of; never written to."""
+    return _agent_dir(agent_id) / "web_credentials.enc"
+
+
+def _migrate_legacy_vault(agent_id: str) -> Path:
+    """Move an in-sandbox vault to the node-level path, once. Returns that
+    path either way, so callers use this in place of `_vault_path`.
+
+    A move, not a copy: a copy left behind is the hole still open. The whole
+    blob travels, so the `previous` generation inside it travels too.
+
+    A failure before the unlink raises: swallowed, it reads to every caller as
+    "no stored session", and the next `save_cookies` would write a fresh vault
+    over a login nobody asked to lose. A failure of the unlink does not — the
+    jar is safe at both paths by then, and refusing the read would cost a
+    working session to punish a file the OS would not let go of. It is logged,
+    and retried on the next call.
+    """
+    new = _vault_path(agent_id)
+    old = _legacy_vault_path(agent_id)
+    if not old.exists():
+        return new
+    log = logging.getLogger(__name__)
+    if not new.exists():
+        # The old file stays the only copy until the new one is in place.
+        blob = old.read_bytes()
+        new.parent.mkdir(parents=True, exist_ok=True)
+        tmp = new.with_name(new.name + ".tmp")
+        tmp.write_bytes(blob)
+        os.replace(tmp, new)
+        log.info(
+            "web credential vault for agent=%s moved out of its sandbox: "
+            "%s -> %s (%d bytes)", agent_id, old, new, len(blob),
+        )
+    try:
+        old.unlink()
+    except OSError as exc:
+        log.error(
+            "web credential vault for agent=%s is in place at %s, but the copy "
+            "inside the agent's sandbox could not be removed (%s) — the agent "
+            "can still read %s until it goes; retrying on next access",
+            agent_id, new, exc, old,
+        )
+    else:
+        log.info(
+            "web credential vault for agent=%s: the in-sandbox copy at %s is "
+            "gone", agent_id, old,
+        )
+    return new
 
 
 def _get_or_create_key(agent_id: str) -> bytes:
@@ -230,7 +323,7 @@ def _load_vault(agent_id: str) -> dict[str, Any]:
     """Decrypt + parse the vault blob. Returns empty schema if absent or
     if the on-disk ciphertext cannot be decrypted with the current key
     (e.g. keyring entry was wiped — start fresh rather than crash)."""
-    path = _vault_path(agent_id)
+    path = _migrate_legacy_vault(agent_id)
     if not path.exists():
         return {"domains": {}}
     key = _get_or_create_key(agent_id)
@@ -243,7 +336,9 @@ def _load_vault(agent_id: str) -> dict[str, Any]:
 
 
 def _save_vault(agent_id: str, vault: dict[str, Any]) -> None:
-    path = _vault_path(agent_id)
+    # Migrate here too: a save that skipped it would land at the new path and
+    # leave the in-sandbox jar behind for good.
+    path = _migrate_legacy_vault(agent_id)
     path.parent.mkdir(parents=True, exist_ok=True)
     key = _get_or_create_key(agent_id)
     fernet = Fernet(key)
@@ -473,7 +568,7 @@ def audit_path(agent_id: str) -> Path:
     """`~/.dpc/agents/{agent_id}/web_audit.jsonl` — the one place both
     audit writers resolve, so rotation cannot apply to one and not the
     other."""
-    return _vault_path(agent_id).parent / "web_audit.jsonl"
+    return _agent_dir(agent_id) / "web_audit.jsonl"
 
 
 def _rotate_audit_if_needed(path: Path) -> None:
@@ -613,17 +708,16 @@ _cdn_manifest_cache: tuple[tuple[str, float, int], dict[str, frozenset[str]]] | 
 
 
 def cdn_manifest_path() -> Path:
-    home = Path(os.environ.get("DPC_HOME", Path.home() / ".dpc"))
-    return home / CDN_MANIFEST_FILENAME
+    return _dpc_home() / CDN_MANIFEST_FILENAME
 
 
 def cdn_refusals_path(agent_id: str) -> Path:
-    return _vault_path(agent_id).parent / CDN_REFUSALS_FILENAME
+    return _agent_dir(agent_id) / CDN_REFUSALS_FILENAME
 
 
 def cdn_refusals_legacy_path(agent_id: str) -> Path:
     """Where the same record lived before the rename. Never written to."""
-    return _vault_path(agent_id).parent / CDN_REFUSALS_LEGACY_FILENAME
+    return _agent_dir(agent_id) / CDN_REFUSALS_LEGACY_FILENAME
 
 
 def _normalise_manifest(raw: Any) -> dict[str, frozenset[str]]:

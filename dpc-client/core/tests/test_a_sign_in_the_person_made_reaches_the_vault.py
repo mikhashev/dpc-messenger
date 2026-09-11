@@ -135,7 +135,11 @@ def _to_playwright(cookies):
 
 
 def _vault_bytes(home) -> bytes:
-    path = home / "agents" / AGENT / "web_credentials.enc"
+    # Ask the module where the vault is. Hardcoding the path here would let
+    # this test stay green through a move that broke production.
+    from dpc_client_core import web_auth
+
+    path = web_auth._vault_path(AGENT)
     return path.read_bytes() if path.exists() else b""
 
 

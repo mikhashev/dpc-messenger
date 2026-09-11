@@ -281,7 +281,7 @@ def test_vault_file_not_plaintext(vault_home, sample_cookies):
     from dpc_client_core import web_auth
 
     web_auth.save_cookies("agent_a", f"{TEST_DOMAIN}", sample_cookies)
-    vault_file = vault_home / "agents" / "agent_a" / "web_credentials.enc"
+    vault_file = web_auth._vault_path("agent_a")
     assert vault_file.exists()
     raw = vault_file.read_bytes()
     # plaintext markers from sample_cookies must not appear in ciphertext
