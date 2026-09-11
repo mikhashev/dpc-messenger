@@ -10,20 +10,57 @@
      *
      * Mirrors ShellApprovalDialog, the other gate of this shape.
      */
-    import { pendingWebAuthApprovals } from "$lib/services/webAuthApproval";
+    import {
+        pendingWebAuthApprovals,
+        closeWebAuthApproval,
+        dismissWebAuthApproval,
+    } from "$lib/services/webAuthApproval";
     import { sendCommand } from "$lib/coreService";
 
     const MAX_VISIBLE_CARDS = 3;
 
-    async function approve(requestId: string) {
-        pendingWebAuthApprovals.update(list => list.filter(r => r.request_id !== requestId));
-        await sendCommand("web_auth_approve_headless", { request_id: requestId });
+    /** Requests whose answer is in flight — the card cannot be clicked twice,
+     *  and does not disappear before the backend has taken the answer. */
+    let answering: string[] = [];
+
+    async function answer(requestId: string, command: string) {
+        if (answering.includes(requestId)) return;
+        answering = [...answering, requestId];
+        try {
+            const result = await sendCommand(command, { request_id: requestId });
+            if (result === false) {
+                closeWebAuthApproval(
+                    requestId,
+                    "The backend is not connected, so this answer never " +
+                        "reached it. Nothing was shared.",
+                );
+            } else if (result?.status === "error") {
+                // The wait was already over when the click landed: the backend
+                // has forgotten the id and has told the agent no. Removing the
+                // card here would read as «allowed».
+                closeWebAuthApproval(
+                    requestId,
+                    "This request had already run out when the click " +
+                        "arrived, so the backend refused it on your behalf. " +
+                        "Nothing was shared.",
+                );
+            } else {
+                dismissWebAuthApproval(requestId);
+            }
+        } catch (e) {
+            closeWebAuthApproval(
+                requestId,
+                `This answer did not reach the backend (${e}). Nothing was shared.`,
+            );
+        } finally {
+            answering = answering.filter((id) => id !== requestId);
+        }
     }
 
-    async function reject(requestId: string) {
-        pendingWebAuthApprovals.update(list => list.filter(r => r.request_id !== requestId));
-        await sendCommand("web_auth_reject_headless", { request_id: requestId });
-    }
+    const approve = (requestId: string) =>
+        answer(requestId, "web_auth_approve_headless");
+    const reject = (requestId: string) =>
+        answer(requestId, "web_auth_reject_headless");
 
     $: visibleApprovals = $pendingWebAuthApprovals.slice(0, MAX_VISIBLE_CARDS);
     $: hiddenCount = Math.max(0, $pendingWebAuthApprovals.length - MAX_VISIBLE_CARDS);
@@ -35,13 +72,19 @@
             <div class="hidden-count">+{hiddenCount} more pending...</div>
         {/if}
         {#each visibleApprovals as request (request.request_id)}
-            <div class="webauth-approval-card">
+            <div class="webauth-approval-card" class:is-closed={request.closed}>
                 <div class="approval-header">
-                    <span class="approval-icon">🔑</span>
+                    <span class="approval-icon">{request.closed ? "⌛" : "🔑"}</span>
                     <span class="approval-title">
-                        {request.kind === "login_window"
-                            ? "Confirm Login"
-                            : "Headless Login Access"}
+                        {#if request.closed}
+                            {request.kind === "login_window"
+                                ? "Login confirmation expired"
+                                : "Headless access request expired"}
+                        {:else}
+                            {request.kind === "login_window"
+                                ? "Confirm Login"
+                                : "Headless Login Access"}
+                        {/if}
                     </span>
                 </div>
                 <!-- At full contrast and on its own line: approving a headless
@@ -73,14 +116,39 @@
                         <code>{request.evidence.new_cookie_names.join(", ")}</code>
                     </div>
                 {/if}
-                <div class="approval-actions">
-                    <button class="btn-approve" on:click={() => approve(request.request_id)}>
-                        ✓ Allow once
-                    </button>
-                    <button class="btn-reject" on:click={() => reject(request.request_id)}>
-                        ✕ Deny
-                    </button>
-                </div>
+                <!-- Once the backend has stopped waiting, the only honest
+                     control left is one that closes the notice. An Allow
+                     button here resolves to nothing and reads as a grant. -->
+                {#if request.closed}
+                    <div class="approval-closed">{request.closed}</div>
+                    <div class="approval-actions">
+                        <button
+                            class="btn-dismiss"
+                            on:click={() => dismissWebAuthApproval(request.request_id)}
+                        >
+                            Dismiss
+                        </button>
+                    </div>
+                {:else}
+                    <div class="approval-actions">
+                        <button
+                            class="btn-approve"
+                            disabled={answering.includes(request.request_id)}
+                            on:click={() => approve(request.request_id)}
+                        >
+                            {answering.includes(request.request_id)
+                                ? "Sending..."
+                                : "✓ Allow once"}
+                        </button>
+                        <button
+                            class="btn-reject"
+                            disabled={answering.includes(request.request_id)}
+                            on:click={() => reject(request.request_id)}
+                        >
+                            ✕ Deny
+                        </button>
+                    </div>
+                {/if}
             </div>
         {/each}
     </div>
@@ -193,7 +261,7 @@
         gap: 8px;
     }
 
-    .btn-approve, .btn-reject {
+    .btn-approve, .btn-reject, .btn-dismiss {
         padding: 6px 12px;
         border: none;
         border-radius: 4px;
@@ -212,6 +280,35 @@
         color: white;
     }
 
-    .btn-approve:hover { opacity: 0.9; }
-    .btn-reject:hover { opacity: 0.9; }
+    .btn-dismiss {
+        background: var(--bg-tertiary, #11111b);
+        color: var(--text-primary, #cdd6f4);
+        border: 1px solid var(--border-color, #45475a);
+    }
+
+    .btn-approve:hover:not(:disabled),
+    .btn-reject:hover:not(:disabled),
+    .btn-dismiss:hover { opacity: 0.9; }
+
+    .btn-approve:disabled,
+    .btn-reject:disabled {
+        opacity: 0.5;
+        cursor: default;
+    }
+
+    /* An expired card is a notice, not a question: the warning border it
+       wore while it wanted an answer would keep asking for one. */
+    .webauth-approval-card.is-closed {
+        border-color: var(--border-color, #45475a);
+    }
+
+    .webauth-approval-card.is-closed .approval-title {
+        color: var(--text-secondary, #a6adc8);
+    }
+
+    .approval-closed {
+        font-size: 0.85em;
+        color: var(--text-secondary, #a6adc8);
+        margin-bottom: 12px;
+    }
 </style>

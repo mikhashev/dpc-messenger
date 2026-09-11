@@ -899,8 +899,11 @@ export async function connectToCoreService() {
                 // its 120s wait — 19 of them, none approved.
                 else if (message.event === "web_auth_headless_approval_request") {
                     console.log("Web auth headless approval request:", message.payload);
-                    const { pendingWebAuthApprovals } = await import("$lib/services/webAuthApproval");
-                    pendingWebAuthApprovals.update((list: any[]) => [...list, message.payload]);
+                    // Tracked rather than pushed: the backend sends nothing when
+                    // its own wait runs out, so the card's deadline is armed here
+                    // from the request's timeout_sec.
+                    const { trackWebAuthApproval } = await import("$lib/services/webAuthApproval");
+                    trackWebAuthApproval(message.payload);
                 }
 
                 // Whisper model loading events (v0.13.3+ model pre-loading)
