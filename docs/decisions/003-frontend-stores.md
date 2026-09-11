@@ -12,7 +12,7 @@ in comments but not enforced by TypeScript.
 
 ## Decision
 
-### Store Strategy: Hybrid (Арх recommendation)
+### Store Strategy: Hybrid (Ark recommendation)
 
 **Global stores** (in `coreService.ts`): ONLY truly cross-panel state
 - `connectionStatus` — peer connected/disconnected

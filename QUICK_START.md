@@ -286,7 +286,7 @@ every command in it fails.
 
 The usual cause on Windows is OneDrive: turning "Back up your Documents
 folder" on or off swaps `C:\Users\<you>\Documents` for
-`C:\Users\<you>\OneDrive\Documents` (localised — `Документы`, `Dokumente`, …)
+`C:\Users\<you>\OneDrive\Documents` (localised — `Dokumente`, `Documentos`, …)
 and back. Packages installed on one side of that switch point at a path that
 no longer exists. Only the commands installed *before* the switch break, which
 is why the failure looks arbitrary.

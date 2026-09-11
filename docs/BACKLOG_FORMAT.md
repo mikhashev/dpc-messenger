@@ -363,7 +363,7 @@ them has a known false-positive shape, so they point rather than gate:
   and an axis token from §4a with no row is a warning too, because the board files work
   under a word nobody has written down where a reader would look. The glossary points at
   its sources and never defines on its own; a row without a link is not a row. Added
-  2026-09-05, on Mike's «нам нужен документ с глоссарием по проекту». The walk itself
+  2026-09-05, on Mike's call that the project needs a glossary document. The walk itself
   is `tools/backlog/glossary_check.py`, and the client suite runs it too
   (`tests/test_the_glossary_points_at_headings_that_exist.py`): this check needs
   `backlog.md`, which no clone has, so a moved heading was visible only where the

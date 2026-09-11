@@ -63,8 +63,8 @@ default to (ii).
 
 - **D1 — sender never loses their own content.** A sent message must persist locally
   and show in the sender's UI regardless of peer connectivity.
-- **D2 — dictation is a first-class, always-available option** (Mike [S227]: "даже
-  если есть ≥1 другая подключённая нода, должна быть опция голосовой ввод в input").
+- **D2 — dictation is a first-class, always-available option** (Mike's call [S227]: even
+  when ≥1 other node is connected, the input must still offer voice input).
 - **D3 — input mode must be stable**, not flip with transient online/offline state of
   a peer (Ark: store-and-forward is a separate feature, not a reason to change mode).
 - **D4 — reuse what exists.** Dictation-to-input is already implemented; the work is
@@ -88,8 +88,8 @@ a separate future feature.
 
 **Delivery phasing (Mike, S227):** ship per attachment type, not all at once —
 **(1) voice first**, **(2) images next**, **(3) files deferred** (large files need
-separate size/chunking design before applying local-first echo — "там может быть
-размер ого-го"). The Part A mechanism is identical for all three; only the rollout is
+separate size/chunking design before applying local-first echo — the sizes involved
+can be enormous). The Part A mechanism is identical for all three; only the rollout is
 staged.
 
 ### Part B — Voice input modality routing (voice only)

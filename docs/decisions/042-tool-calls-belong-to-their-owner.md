@@ -10,7 +10,7 @@ informed: [Ark]
 depends_on: [ADR-036]
 related: [ADR-023, ADR-031, ADR-036]
 supersedes: []
-session: "DPC Project, 2026-09-07 — Mike: «tool calls не должны уезжать в группы … чужих tool calls агентов я видеть не должен ни в истории ни в чате, каждый видит только свои»"
+session: "DPC Project, 2026-09-07 — Mike's call: tool calls must not travel into groups; nobody sees another agent's tool calls, in history or in chat — each sees only its own"
 ---
 
 # ADR-042 — An agent's tool calls belong to the node that ran them

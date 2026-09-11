@@ -253,8 +253,8 @@ asking anyone, and the creator retains a veto by being entitled to remove.
 
 ## Open Questions
 
-- **Q1 — closed (Mike, 2026-08-06): refuse.** *"Отвергать. Пусть все, кто кроме
-  нас пользуется, переезжает на новый код. А я таких не знаю."* Refusal must be
+- **Q1 — closed (Mike's call, 2026-08-06): refuse.** Anyone outside this team still
+  running the old code migrates to the new one, and he knows of no such user. Refusal must be
   legible rather than silent (@Ark): the sending node is told its change was not
   applied and why, otherwise its owner sees local success while the rest of the
   group never moved, and the divergence surfaces only at the next comparison.

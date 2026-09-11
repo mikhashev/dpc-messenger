@@ -16,7 +16,7 @@ session: "DPC Project #82–#136, 2026-08-31 — Mike's colleague wants Qwen3.8-
 # ADR-041: Serve outside tools an OpenAI-compatible surface from inside the DPC client, gated by a proved peer key rather than by an API key — and give every model call one usage row on the node that ran it
 
 > **Status: accepted, 2026-08-31** — Mike, after three internal review rounds and
-> two independent adversarial reviews: «ADR принимаю». The work is filed as the
+> two independent adversarial reviews, accepted it. The work is filed as the
 > epic `AN-OPENAI-COMPATIBLE-SURFACE-IS-THE-PRODUCTS-FIRST-OUTWARD-FACING-DOOR`
 > with six children in the shipping order of D4, and the two production defects
 > the reviews turned up are filed separately because they do not wait on this.
@@ -42,8 +42,8 @@ the OpenAI API from inside DPC and let the request travel our own P2P path
 (Ark, #85, at Mike's asking).
 
 Mike then added the requirement that shapes the ledger: usage must be countable
-afterwards — «сколько usage и т.д. для аналитики», «если в дальнейшем кто то
-захочет монетизировать такой шаринг» (#87–#89); that API-backed models should
+afterwards — how much usage and so on, for analytics, and against the day somebody
+wants to monetise this kind of sharing (#87–#89); that API-backed models should
 be shareable the same way (#102); that money must be counted when a paid
 provider is shared (#111); and that **what is shared may not be shared onward**
 (#121).
@@ -278,8 +278,8 @@ over a connection on which the peer's key has been proved:
 This is a **stronger and narrower decision than the one it replaces**: it
 restricts all peer compute, not gateway traffic, and it changes today's
 behaviour for any peer reached over WebRTC. That is deliberate. Mike removed the
-Hub from the trust path (#110) — «Хаб планировали выпиливать, так что пофиг на
-него» — and ROADMAP §211 says the same in writing («Hub becomes optional
+Hub from the trust path (#110) — the Hub was already planned for removal, so it
+does not matter — and ROADMAP §211 says the same in writing («Hub becomes optional
 bootstrap, not architecture center»); *no board entry planning the Hub's removal
 was found.*
 
@@ -356,7 +356,7 @@ cannot be one field.
 
 *(**Amendment, 2026-09-10 — the owner's tariff is the guest's money column set,
 the wire carries the tariff and not the host's cost, and a row freezes its
-currency.** Mike, #95 («даю добро» on `tariff`, `free_nodes` with `free_groups`)
+currency.** Mike, #95 (his go-ahead on `tariff`, `free_nodes` with `free_groups`)
 and #110, after the consensus the three agents reached in #68–#109. The owner of
 a shared model sets a price for it, so «attribution, not price» becomes two
 column sets rather than one. `cost_usd` stays what the call cost the host — a
@@ -432,7 +432,7 @@ static key. `stream: true` is honoured with the whole answer in one SSE chunk
 followed by `[DONE]`, because `LLMManager.query` has no streaming form (M1) and
 bypassing it would lose the counts a usage row is made of; that narrowing is
 recorded here rather than in a chat message, as Zcode asked in review. Mike
-decided (#68, «обе формы») that the gateway also speaks the Anthropic Messages
+decided (#68 — both forms) that the gateway also speaks the Anthropic Messages
 form — `POST /v1/messages`, what Claude Code speaks — as a step of its own
 between 3 and 4, over the same listener, key, lists, quota and row writer: it
 answers with one text block and one `text_delta`, and tools sent by the client

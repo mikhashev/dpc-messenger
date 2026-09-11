@@ -294,8 +294,9 @@ persistent scheduler, or one that can wait on a subprocess with
 **Behavior each fire (1:1 agent chat):**
 
 1. Run `uv run python cc_agent_bridge.py --once --last 10 --full --conversation-id <agent>`.
-2. Scan the output for mentions of your tag (`@<tag>`, plus `@СС` in
-   Cyrillic when the tag is `CC`) from anyone who isn't you.
+2. Scan the output for mentions of your tag (`@<tag>`, plus the visually
+   identical Cyrillic spelling — `@` followed by two U+0421 — when the tag
+   is `CC`) from anyone who isn't you.
 3. If there is an unanswered direct question, respond via
    `uv run python cc_agent_bridge.py --send "..." --conversation-id <agent>`.
    Keep responses in markdown.

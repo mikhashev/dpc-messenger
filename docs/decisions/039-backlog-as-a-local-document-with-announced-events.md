@@ -286,8 +286,8 @@ would end that.
 
 ## Amendment 2026-09-05 — the axis vocabulary is declared in VISION and read from there
 
-**Status of this amendment: proposed.** Drafted by CC_linux on Mike's «давай как поправку к
-ADR-039» (2026-09-05); nothing below is implemented until Mike accepts it. The form — an
+**Status of this amendment: proposed.** Drafted by CC_linux after Mike asked for it as an
+amendment to ADR-039 (2026-09-05); nothing below is implemented until Mike accepts it. The form — an
 amendment rather than ADR-042 — is Mike's call of the same day.
 
 ### What is closed and what is not
@@ -299,8 +299,8 @@ in the tool — `AXES` at `tools/backlog/build.py:97`, read in fifteen places �
 the vocabulary is *about* is read by nothing. Measured 2026-09-01
 (`THE-FOUR-LAYERS-ARE-JOINED-PAIRWISE-AND-THERE-IS-NO-PROCESS`): `grep VISION build.py` is
 empty, VISION cites no ADR, ROADMAP cites VISION zero times; upward the links exist (the
-board cites ROADMAP 17 times and VISION 28), downward they are a person remembering. Mike,
-2026-09-01: «надо придумать механизм и формализовать в протоколе 13».
+board cites ROADMAP 17 times and VISION 28), downward they are a person remembering. A
+mechanism has to be devised and formalised in Protocol 13 (Mike's call, 2026-09-01).
 
 Four of the five axes already have a paragraph in VISION's *Direction* section — *from
 personal to collective*, *from passive to collaborative*, *from local to networked*, *from one
@@ -332,7 +332,8 @@ the loop the format standard added because the project «cannot be honest withou
 4. **Prose and block are not machine-compared.** A reader can compare them because the block
    quotes the vector phrase verbatim; drift between the paragraph and the record stays a
    review matter, exactly as И2's own prose does. Writing a prose checker here would promise
-   what «ни одно утверждение нельзя опровергнуть кодом» already says cannot be checked.
+   what the rule's own text — no claim there can be refuted by code — already says cannot be
+   checked.
    (This answers the second open question.)
 5. **Whether VISION promises `honesty` is Mike's decision, taken when the block is written.**
    Either the block gains a fifth record and VISION gains one sentence promising it, or the

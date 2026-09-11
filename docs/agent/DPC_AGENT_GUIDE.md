@@ -530,8 +530,9 @@ Paths follow the file-tool rules: relative resolves inside the sandbox, absolute
 requires extended-path access in the firewall (write access too when
 `output_path` is absolute).
 
-Known upstream quirk: on non-speech stretches Whisper invents filler — subtitle
-credits (`Субтитры создавал …`) and repeated `АПЛОДИСМЕНТЫ`. Measured on a 30-min
+Known upstream quirk: on non-speech stretches Whisper invents Russian-language
+filler — a subtitle-credit line (*Subtitry sozdaval …*, "Subtitles created by …")
+and a repeated all-caps *APLODISMENTY* ("APPLAUSE"). Measured on a 30-min
 two-person recording: three such blocks, all **mid-file at conversational pauses**,
 with the head and tail clean. So it is not confined to a leading silence — treat
 these as artifacts anywhere they appear.

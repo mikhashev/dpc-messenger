@@ -26,9 +26,9 @@ session: S49
 > still gated on Q1–Q2 — and now on Q5, which review promoted from a question to a
 > precondition.
 >
-> **Numbers in this document.** Mike, 2026-08-01: *«а нахуя вообще такие числа в ADR, они у
-> нас сейчас такие — данных подгрузили в граф, и поменялись»*. He is right, and the rule that
-> follows from it is:
+> **Numbers in this document.** Mike's call, 2026-08-01: numbers like these do not belong in
+> an ADR at all, because they are only what they happen to be today — load more data into the
+> graph and they change. He is right, and the rule that follows from it is:
 >
 > - **Evidence for the decision stays, frozen and dated.** It is what makes the decision
 >   auditable, and it is never edited afterwards — a correction goes beside it, not over it.
@@ -151,7 +151,7 @@ worth adopting reads from this layer.
 **Repair the access layer first (T0), then add EvoLib's three bookkeeping shapes — merge
 proposals, weight transfer, outcome-conditioned credit. Reject EvoLib's estimators.**
 
-The hint modality stays (Mike, 2026-07-31: *«хинт-модальность нужна»*). The alternative —
+The hint modality stays (Mike's call, 2026-07-31: the hint modality is needed). The alternative —
 injecting chunk text directly and dropping the read step — was considered and rejected; the
 decision is to make hints work, not to replace them.
 

@@ -1101,8 +1101,9 @@ message is public and permanent while a chat line is neither: on 2026-08-28 ten
 of the 432 commits on `dev` were found to carry somebody's words from the team
 room, the oldest three weeks old, and the messages had to be rewritten. Write
 the reason in English and attribute the decision — «Mike's call, 2026-08-28» —
-rather than transcribing the sentence; the verbatim line belongs in the backlog
-entry or the ADR. Deliberate exception: `git commit --no-verify`.
+rather than transcribing the sentence; the verbatim line stays in the working
+chat, and what lands in a tracked document is the decision with its attribution.
+Deliberate exception: `git commit --no-verify`.
 
 The check is `tools/git-hooks/commit_msg_check.py`; its tests run in the client
 suite (`tests/test_a_commit_message_carries_no_quoted_chat.py`), because

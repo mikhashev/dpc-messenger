@@ -227,8 +227,8 @@ Qwen3.8-27B as a GGUF chosen per node, not a format.
   three *downloads* of upstream builds, not three builds; a build only if a needed flag or patch is
   missing upstream (none identified). Never hard-code Ollama's install layout: `binary_path` in
   configuration with auto-discovery as a fallback.
-  *(**Amendment, 2026-08-23 — the pin moves to `b10566`, and stops being ours to guess.** Mike:
-  «Да, давай пересядем». On 2026-08-21 upstream began publishing `vX.Y.Z` releases beside the
+  *(**Amendment, 2026-08-23 — the pin moves to `b10566`, and stops being ours to guess.**
+  Mike's call: switch over. On 2026-08-21 upstream began publishing `vX.Y.Z` releases beside the
   `b[NUM]` ones and stated which is for whom: `vX.Y.Z` is «stable, slower release cadence,
   recommended for downstream distribution», `b[NUM]` is «bleeding edge … recommended for developers».
   We are downstream and had been sitting on a nightly tag chosen by hand.
@@ -463,8 +463,8 @@ confirmed independently by Ark and by CC on the logs). Four defects, each closed
   (`ollama_provider.py:69`). Anything that runs longer than the requester's ceiling and shorter than the
   host's is abandoned mid-flight while the host keeps generating for nobody — the wire edition of
   `A-TIMED-OUT-VISION-CALL-KEEPS-GENERATING-AND-THE-NEXT-ONE-PAYS-FOR-IT`. **Fix: 1200 s on all three
-  doors** — the host's budget plus overhead (Mike, 2026-08-18: «900 +300… с учётом того как долго может
-  работать vision»), and the UI door gains a configurable value at the same time.
+  doors** — the host's budget plus overhead (Mike's call, 2026-08-18: 900 + 300, given how long a
+  vision call can run), and the UI door gains a configurable value at the same time.
 
 A semaphore on the shared alias belongs here too. Everything else — the full queue with priorities and
 a remote-share cap — is **D4-β** and stays in Stage 2.
