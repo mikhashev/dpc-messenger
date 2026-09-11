@@ -495,3 +495,19 @@ def test_the_login_notice_does_not_promise_that_nothing_was_stored(vault_home):
     assert "saved automatically as they make it" not in notice
     assert "saved as they go" in notice
     assert "STOP and wait" in notice
+
+
+def test_the_tool_description_makes_the_same_promise_as_the_code(vault_home):
+    """The notice above was corrected and the description beside it was not,
+    so the same sentence went on being true in one place and false in the
+    other — the third time in two days that this one claim outlived the
+    behaviour it described. The model plans from this text every round, so it
+    is policed like the notice rather than trusted to keep up."""
+    from dpc_client_core.dpc_agent.tools.browser import get_tools
+
+    browse = next(t for t in get_tools() if t.name == "browse_page")
+    description = browse.schema["description"]
+
+    assert "stores nothing" not in description
+    assert "leaves the stored session alone" not in description
+    assert "saved as it goes" in description
