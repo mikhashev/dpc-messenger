@@ -350,6 +350,32 @@ def test_no_session_loads_a_saved_browser_state(vault_home, monkeypatch):
         assert ctx.added in ([], [[]]), kwargs
 
 
+def test_only_a_visible_window_is_free_of_the_fixed_viewport(
+    vault_home, monkeypatch,
+):
+    """Maximising the window used to move nothing: Playwright pins a
+    1280x720 viewport unless `no_viewport` is passed, so on a 3840x2160
+    screen at 150 % scaling the page rendered into a ~1920x1080 rectangle in
+    the top-left corner and the rest of the frame stayed blank.
+
+    Both sides are asserted, because passing the flag everywhere would fix
+    the window and silently unfix the measurement: `browser_screenshot` and
+    the page snapshots are only comparable between runs while a headless
+    page keeps one size."""
+    visible_ctx = _StubContext()
+    _ab, visible_seen = _open_browser(
+        monkeypatch, visible_ctx, domains=[TEST_DOMAIN], headed=True,
+    )
+    assert visible_seen[0].get("no_viewport") is True
+
+    for kwargs in ({"domains": [TEST_DOMAIN]},
+                   {"domains": [TEST_DOMAIN], "headed": False},
+                   {"domains": [], "anonymous": True}):
+        blind_ctx = _StubContext()
+        _ab, blind_seen = _open_browser(monkeypatch, blind_ctx, **kwargs)
+        assert "no_viewport" not in blind_seen[0], kwargs
+
+
 # ── where an ungated window went ────────────────────────────────────────
 
 

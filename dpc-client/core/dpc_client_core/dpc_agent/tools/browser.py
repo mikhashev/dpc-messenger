@@ -1717,7 +1717,18 @@ class AuthBrowser:
         # ever collected across every site. A session's identity is exactly
         # the vault jar for its own scope, and a clean-start session has
         # none at all.
-        self._context = self._browser.new_context()
+        #
+        # `no_viewport` for a visible window only. Playwright pins a fixed
+        # 1280x720 viewport unless told otherwise, so maximising the window
+        # moved nothing: the page kept rendering into that rectangle in the
+        # top-left corner and the rest of the frame stayed blank. A visible
+        # window belongs to a person who resizes it, so the page has to
+        # follow the frame; a headless one belongs to a measurement —
+        # `browser_screenshot` and the page snapshots — which is only
+        # comparable between runs while the page size cannot move.
+        self._context = self._browser.new_context(
+            **({"no_viewport": True} if self._headed else {})
+        )
         self._install_domain_route_handler()
 
         # skip_missing=True keeps the open path tolerant of a scope whose
