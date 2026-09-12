@@ -864,6 +864,18 @@ async def sweep_closed_windows() -> int:
     return released
 
 
+def _session_idle_seconds(session, now: float) -> float:
+    """Seconds since anything used this session, by either clock.
+
+    A visible window is opened so a person can sign in by hand, and while
+    they do the agent is by construction silent — so its own traffic counts
+    as use. A window whose page has gone quiet still ages out, which is the
+    case the idle sweep exists for.
+    """
+    page_event = getattr(session, "_last_page_event", 0.0) or 0.0
+    return now - max(session._last_activity, page_event)
+
+
 async def cleanup_idle_browser_sessions() -> int:
     """Close browser sessions idle longer than IDLE_TIMEOUT_SECONDS.
 
@@ -877,17 +889,27 @@ async def cleanup_idle_browser_sessions() -> int:
         (_fetch_sessions, "fetch browser"),
     ):
         for agent_id, session in list(registry.items()):
-            idle = now - session._last_activity
-            if idle > IDLE_TIMEOUT_SECONDS:
-                log.info(
-                    "Closing idle %s for %s (idle %.0fs)", label, agent_id, idle
-                )
-                try:
-                    await _run_in_session(session, "close")
-                except Exception as e:
-                    log.warning("Error closing idle %s %s: %s", label, agent_id, e)
-                registry.pop(agent_id, None)
-                closed += 1
+            idle = _session_idle_seconds(session, now)
+            if idle <= IDLE_TIMEOUT_SECONDS:
+                continue
+            page_event = getattr(session, "_last_page_event", 0.0) or 0.0
+            # Which clock ran out, and on what window: without it a closed
+            # session leaves nobody able to say why it was closed.
+            log.info(
+                "Closing idle %s for %s (idle %.0fs; last agent call %.0fs ago;"
+                " last page event %s; headed=%s; url=%s)",
+                label, agent_id, idle,
+                now - session._last_activity,
+                ("%.0fs ago" % (now - page_event)) if page_event else "never",
+                getattr(session, "_headed", False),
+                getattr(session, "_last_known_url", "") or "-",
+            )
+            try:
+                await _run_in_session(session, "close")
+            except Exception as e:
+                log.warning("Error closing idle %s %s: %s", label, agent_id, e)
+            registry.pop(agent_id, None)
+            closed += 1
     return closed
 
 
@@ -1525,6 +1547,15 @@ class AuthBrowser:
         self._snapshot_serial: int = 0
         self._executor: Optional["_PinnedThread"] = None
         self._last_activity: float = time.monotonic()
+        # When the window itself last did something. Kept apart from
+        # `_last_activity`, which means "the agent called us" and is what
+        # the window probe's `_touch=False` contract is written about; two
+        # clocks also let the reaper name the one that ran out. 0.0 means
+        # no page event yet, and is in the past of any monotonic reading.
+        self._last_page_event: float = 0.0
+        # Where this session was sent, as a plain string: the idle reaper
+        # cannot read `self._page.url` from its own thread.
+        self._last_known_url: str = ""
         # PIDs of the Camoufox/Firefox subprocess tree spawned by this
         # browser, captured at launch. Used only as a last-resort kill when
         # close() times out at shutdown (dead Playwright driver) — otherwise
@@ -1958,7 +1989,16 @@ class AuthBrowser:
             url = request.url
         except Exception:
             return
-        if self._open_scope or not url.startswith(("http://", "https://")):
+        if not url.startswith(("http://", "https://")):
+            return
+        # A person filling in a sign-in form is use, with the agent silent
+        # throughout — and what counts as use is a different question from
+        # what the scope filter below decides to audit. Stamped late rather
+        # than at the request: the sync dispatcher runs only while a thread
+        # is inside a Playwright call, which for a parked window is the
+        # `sweep_closed_windows` probe.
+        self._last_page_event = time.monotonic()
+        if self._open_scope:
             return
         try:
             self._note_gate_event(
@@ -2388,6 +2428,7 @@ class AuthBrowser:
             )
             raise
         status = response.status if response is not None else None
+        self._last_known_url = url
         self._wait_for_content_stable()
         snapshot_text = ""
         snapshot_audit: dict[str, Any] = {"from_url": from_url}
