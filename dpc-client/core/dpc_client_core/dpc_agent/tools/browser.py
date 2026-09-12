@@ -2041,14 +2041,13 @@ class AuthBrowser:
                 pass
             return
 
-        if not self._etld1s:
-            self._on_domain_blocked(url, _url_host(url))
-            try:
-                route.abort()
-            except Exception:
-                pass
-            return
-
+        # An unresolved scope used to abort here, before the request was
+        # read. It reached the same refusal either way — the loop below
+        # cannot match an empty set and `_frame_site` cannot be found in
+        # one — so the only thing the early exit bought was an audit row
+        # with no method, kind or initiator on it. Falsifying the suite on
+        # 2026-09-13 found nothing that could tell the two paths apart,
+        # which is what an equivalent mutant looks like. Mike's call.
         host = _url_host(url)
         for allowed in self._etld1s:
             if _domain_matches(url, allowed):

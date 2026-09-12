@@ -634,11 +634,25 @@ def test_route_gate_fail_closed_when_a_requested_scope_resolves_to_nothing(vault
 
     ab = AuthBrowser(agent_id="agent_a", domains=["com"])
     assert ab._etld1s == set()
-    route = _FakeRoute(f"https://{TEST_DOMAIN}/my")
+    # Method and kind are stated rather than left to the double's defaults:
+    # the row below has to prove it was read from this request, and a value
+    # that happens to be the default proves nothing.
+    route = _FakeRoute(f"https://{TEST_DOMAIN}/my", method="POST",
+                       resource_type="xhr")
     ab._domain_route_gate(route)
     assert route.aborted is True
     assert route.continued is False
     assert ab._domain_blocks == 1
+
+    # The refusal is one row, and it says what was refused. An earlier exit
+    # aborted before reading the request and logged neither the method nor
+    # the kind, so a scope typo and an exfiltration attempt left the same
+    # line; nothing in the suite could tell those two paths apart.
+    rows = [r for r in _gate_audit(vault_home)
+            if r.get("action") == "domain_blocked"]
+    assert len(rows) == 1
+    assert rows[0]["method"] == "POST"
+    assert rows[0]["resource_type"] == "xhr"
 
 
 def test_route_gate_allows_non_http_schemes(vault_home):
