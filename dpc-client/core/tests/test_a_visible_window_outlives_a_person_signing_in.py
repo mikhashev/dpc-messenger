@@ -11,6 +11,7 @@ nothing at all is doing is still collected.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import time
 import types
@@ -28,6 +29,17 @@ def _request(url: str, *, method: str = "GET", resource_type: str = "xhr"):
         url=url, method=method, resource_type=resource_type,
         is_navigation_request=lambda: False, frame=None,
     )
+
+
+def _visible_passthrough_rows(home, agent_id: str) -> list[dict]:
+    """The trail rows a visible window leaves in that agent's audit log."""
+    path = home / "agents" / agent_id / "web_audit.jsonl"
+    if not path.exists():
+        return []
+    rows = [json.loads(line) for line
+            in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    return [r for r in rows if r.get("action")
+            == B.AuthBrowser.GATE_ACTION_VISIBLE_PASSTHROUGH]
 
 
 class _Page:
@@ -74,10 +86,14 @@ def _reap(session, agent_id: str) -> tuple[int, list]:
     return n, closed_marks
 
 
-def test_a_visible_window_survives_a_person_signing_in():
+def test_a_visible_window_survives_a_person_signing_in(vault_home):  # noqa: F811
     """The falsifier for the bug: no agent call for longer than the
     threshold, but the page is making requests — which is what a person
-    typing into a login form looks like from this side."""
+    typing into a login form looks like from this side.
+
+    Takes `vault_home` though it never reads it: `_note_visible_request`
+    appends an audit row, and without a redirected home that row lands in
+    the operator's own ~/.dpc."""
     ab = _headed_session("agent_signing_in")
     _stale(ab)
     ab._note_visible_request(_request("https://accounts.example/2fa/poll"))
@@ -117,7 +133,7 @@ def test_a_page_event_ages_out_like_an_agent_call():
     assert marks == [True]
 
 
-def test_a_page_request_is_not_recorded_as_an_agent_call():
+def test_a_page_request_is_not_recorded_as_an_agent_call(vault_home):  # noqa: F811
     """Two clocks, not one: the window probe's `_touch=False` contract is
     written about `_last_activity`, and folding page traffic into it would
     leave nobody able to say which of the two went quiet."""
@@ -131,16 +147,19 @@ def test_a_page_request_is_not_recorded_as_an_agent_call():
     assert ab._last_page_event > agent_clock
 
 
-def test_a_page_event_is_noted_even_where_nothing_is_audited():
+def test_a_page_event_is_noted_even_where_nothing_is_audited(vault_home):  # noqa: F811
     """An unscoped session audits no passthrough rows at all. Whether the
     window is in use is a different question from what gets written down,
-    so the stamp must survive the audit filter."""
+    so the stamp must survive the audit filter — and the filter has to hold
+    in the other direction too, or a session that asked for no scope starts
+    writing down every address the person visited in their own window."""
     ab = _headed_session("agent_open_scope")
     assert ab._open_scope is True
 
     ab._note_visible_request(_request("https://anywhere.example/ping"))
 
     assert ab._last_page_event > 0.0
+    assert _visible_passthrough_rows(vault_home, "agent_open_scope") == []
 
 
 def test_the_reaper_says_which_clock_ran_out(caplog):

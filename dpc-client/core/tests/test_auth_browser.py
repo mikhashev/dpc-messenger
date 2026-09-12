@@ -318,7 +318,13 @@ class _FakeRoute:
     handler rather than the branch its name claims.
 
     Defaults are a top-level navigation, which is what `navigate()`
-    produces; `_FakeSubresourceRoute` flips them to a page asset."""
+    produces; `_FakeSubresourceRoute` flips them to a page asset.
+
+    A real navigation raises both halves of the gate's `_is_nav` at once —
+    the flag and the `document` kind — so a route built from these defaults
+    can never say which half refused it, and a test that means to pin one
+    of them must set the other to a non-navigation value by hand (see the
+    two `_blocked_on_its_..._alone` tests below)."""
 
     def __init__(self, url: str, *, method="GET", resource_type="document",
                  nav=True, frame_url=None):
@@ -505,11 +511,65 @@ def test_route_gate_still_blocks_navigation_to_a_foreign_host(vault_home):
     assert ab._domain_blocks == 1
 
 
-def test_route_gate_blocks_post_subresource_even_from_an_allowed_frame(vault_home):
-    """POST never passes: the passthrough may let static in, but must not
-    become a channel for data to leave."""
+def test_a_navigation_to_a_manifest_named_host_is_blocked_on_its_flag_alone(
+    vault_home,
+):
+    """`_is_nav` is a disjunction, and a route that raises both halves at
+    once cannot say which one refused the request: delete either and the
+    other still answers. Here only the navigation flag is raised — the kind
+    is a script — and the destination is a host the site's manifest names,
+    so the flag is the single clause left that can refuse it."""
     from dpc_client_core.dpc_agent.tools.browser import AuthBrowser
 
+    _seed_manifest(vault_home, TEST_DOMAIN, ["cdn-static.foreign-cdn.net"])
+    ab = AuthBrowser(agent_id="agent_a", domains=[f"{TEST_DOMAIN}"])
+    route = _FakeSubresourceRoute(
+        "https://cdn-static.foreign-cdn.net/main.7313c867.js",
+        method="GET",
+        resource_type="script",
+        nav=True,
+        frame_url=f"https://{TEST_DOMAIN}/home",
+    )
+    ab._domain_route_gate(route)
+    assert route.aborted is True
+    assert route.continued is False
+    assert ab._domain_blocks == 1
+
+
+def test_a_document_request_to_a_manifest_named_host_is_blocked_on_its_kind_alone(
+    vault_home,
+):
+    """The other half of the same disjunction, on its own: a document
+    request Playwright did not mark as a navigation still carries the
+    current frame, so it must not ride the manifest in as a subresource."""
+    from dpc_client_core.dpc_agent.tools.browser import AuthBrowser
+
+    _seed_manifest(vault_home, TEST_DOMAIN, ["cdn-static.foreign-cdn.net"])
+    ab = AuthBrowser(agent_id="agent_a", domains=[f"{TEST_DOMAIN}"])
+    route = _FakeSubresourceRoute(
+        "https://cdn-static.foreign-cdn.net/frame.html",
+        method="GET",
+        resource_type="document",
+        nav=False,
+        frame_url=f"https://{TEST_DOMAIN}/home",
+    )
+    ab._domain_route_gate(route)
+    assert route.aborted is True
+    assert route.continued is False
+    assert ab._domain_blocks == 1
+
+
+def test_route_gate_blocks_post_subresource_even_from_an_allowed_frame(vault_home):
+    """POST never passes: the passthrough may let static in, but must not
+    become a channel for data to leave.
+
+    The destination is a host this site's manifest names, so the method is
+    the only clause left that can refuse it. Pointing the POST at a host
+    outside the manifest instead would let the unlisted branch abort it and
+    say nothing at all about the method."""
+    from dpc_client_core.dpc_agent.tools.browser import AuthBrowser
+
+    _seed_manifest(vault_home, TEST_DOMAIN, ["collector.foreign-cdn.net"])
     ab = AuthBrowser(agent_id="agent_a", domains=[f"{TEST_DOMAIN}"])
     route = _FakeSubresourceRoute(
         "https://collector.foreign-cdn.net/collect",
@@ -526,9 +586,14 @@ def test_route_gate_blocks_post_subresource_even_from_an_allowed_frame(vault_hom
 def test_route_gate_blocks_a_foreign_subresource_from_a_foreign_frame(vault_home):
     """Initiator must be inside the allowlist: third-party scripts embedded
     by the CDN itself get no free ride — the allowed page's assets pass,
-    not everything the loaded asset wants to pull next."""
+    not everything the loaded asset wants to pull next.
+
+    The destination is a host the *allowed* site's manifest names, so the
+    initiating frame is the only clause left that can refuse it: a manifest
+    entitles the site it was written for, never whichever frame asks."""
     from dpc_client_core.dpc_agent.tools.browser import AuthBrowser
 
+    _seed_manifest(vault_home, TEST_DOMAIN, ["tracker.foreign-cdn.net"])
     ab = AuthBrowser(agent_id="agent_a", domains=[f"{TEST_DOMAIN}"])
     route = _FakeSubresourceRoute(
         "https://tracker.foreign-cdn.net/pixel.gif",
