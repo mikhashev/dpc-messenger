@@ -132,6 +132,28 @@ MODEL_CONTEXT_WINDOWS = {
     "default": 4096
 }
 
+def flatten_messages(messages: List[Dict[str, Any]], system: Any = "") -> str:
+    """The Anthropic-shaped conversation as the one prompt string a provider
+    whose only entry point is a prompt can be given.
+
+    The two existing pieces, composed rather than reimplemented: the
+    providers' `system`-and-blocks converter, then the agent adapter's
+    role-marker rendering. The imports are deferred because
+    `dpc_agent.llm_adapter` names `LLMManager`.
+    """
+    from .dpc_agent.llm_adapter import messages_to_prompt
+    from .providers.ollama_provider import OllamaProvider
+
+    return messages_to_prompt(OllamaProvider._anthropic_to_openai_messages(system, messages))
+
+
+def _tool_use_block(call: Any) -> Dict[str, Any]:
+    """One returned tool call as an Anthropic `tool_use` block. Providers hand
+    these back as `SimpleNamespace(id, name, input)`; a mapping is read too."""
+    read = (lambda key: call.get(key)) if isinstance(call, dict) else (lambda key: getattr(call, key, None))
+    return {"type": "tool_use", "id": read("id"), "name": read("name"), "input": read("input") or {}}
+
+
 class LLMManager:
     """
     Manages all configured AI providers.
@@ -711,6 +733,122 @@ class LLMManager:
                 "vision_used": bool(images),  # Indicate if vision API was used
                 "thinking": thinking_content,  # Thinking/reasoning content (if any)
                 "thinking_tokens": thinking_tokens,  # Tokens used for thinking
+            }
+        return response
+
+    async def query_messages(
+        self,
+        messages: List[Dict[str, Any]],
+        *,
+        system: Any = "",
+        tools: Optional[List[Dict[str, Any]]] = None,
+        on_chunk: Optional[Callable] = None,
+        conversation_id: Optional[str] = None,
+        provider_alias: str | None = None,
+        return_metadata: bool = False,
+    ):
+        """A conversation, optional tools and an optional chunk callback in;
+        `query(return_metadata=True)`'s dict plus five keys out.
+
+        Beside `query`, not instead of it: `query` takes a flat prompt, so a
+        caller above it must flatten `messages`, and a provider that streams
+        or calls tools natively is unreachable from there. `messages` is the
+        Anthropic Messages shape `generate_with_tools` already accepts, which
+        is also the only provider entry point taking the list un-flattened.
+        `finish_reason` stays in the vocabulary the providers report it in.
+        """
+        if not isinstance(messages, list) or not messages:
+            raise ValueError("query_messages needs a non-empty list of messages.")
+
+        alias_to_use = provider_alias or self.default_provider
+        if not alias_to_use:
+            raise ValueError("No provider specified and no default provider is set.")
+        if alias_to_use not in self.providers:
+            raise ValueError(f"Provider '{alias_to_use}' is not configured or failed to load.")
+        provider = self.providers[alias_to_use]
+
+        # Rendered on every route, not only the ones that send it: the counts
+        # below are then `query`'s counts over `query`'s prompt, so a usage row
+        # built from this dict is the row the conversation left before.
+        prompt_text = flatten_messages(messages, system)
+
+        tool_calls: List[Dict[str, Any]] = []
+        path_usage: Dict[str, Any] = {}
+        if tools:
+            if not hasattr(provider, "generate_with_tools"):
+                raise ValueError(
+                    f"Provider '{alias_to_use}' (model: {provider.model}) has no native "
+                    f"tool-calling path, and {len(tools)} tool(s) were asked for. Use an "
+                    "alias whose provider implements generate_with_tools."
+                )
+            logger.info("Routing tool query to provider '%s' with model '%s' (%d tools)",
+                        alias_to_use, provider.model, len(tools))
+            raw = await provider.generate_with_tools(
+                messages, tools, system=system, on_chunk=on_chunk, conversation_id=conversation_id,
+            ) or {}
+            response = raw.get("content") or ""
+            tool_calls = [_tool_use_block(call) for call in raw.get("tool_calls_raw") or []]
+            path_usage = raw.get("usage") or {}
+            streamed, flattened, tools_used = False, False, True
+        elif on_chunk is not None and hasattr(provider, "generate_response_stream"):
+            logger.info("Routing streaming query to provider '%s' with model '%s'",
+                        alias_to_use, provider.model)
+            response = await provider.generate_response_stream(prompt_text, on_chunk, conversation_id)
+            streamed, flattened, tools_used = True, True, False
+        else:
+            logger.info("Routing query to provider '%s' with model '%s'", alias_to_use, provider.model)
+            response = await provider.generate_response(prompt_text)
+            streamed, flattened, tools_used = False, True, False
+            if on_chunk is not None:
+                logger.info("Provider '%s' has no generate_response_stream: the answer is "
+                            "delivered whole and 'streamed' says so", alias_to_use)
+                await on_chunk(response, conversation_id)
+
+        # None means the provider reported nothing, and stays None: a constant
+        # here is what leaves a tool round indistinguishable from a finished
+        # sentence, which is the defect this door exists to end.
+        finish_reason = (provider.get_last_usage() or {}).get("finish_reason")
+        if finish_reason is None:
+            finish_reason = path_usage.get("finish_reason")
+
+        # The rule `query` applies, including the part that matters: the
+        # reasoning-token count is the one the vendor reported, never one
+        # recomputed from the text. The two copies must move together.
+        thinking_content = None
+        thinking_tokens = None
+        if provider.supports_thinking():
+            if hasattr(provider, 'get_last_thinking'):
+                thinking_content = provider.get_last_thinking()
+            if not thinking_content:
+                response, thinking_content = parse_thinking_tags(response)
+            if thinking_content:
+                reported = (provider.get_last_usage() or {}).get("reasoning_tokens")
+                if isinstance(reported, int) and reported > 0:
+                    thinking_tokens = reported
+                else:
+                    thinking_tokens = self.count_tokens(thinking_content, provider.model)
+
+        if return_metadata:
+            prompt_tokens = self.count_tokens(prompt_text, provider.model)
+            response_tokens = self.count_tokens(response, provider.model)
+            return {
+                # `query`'s ten keys, because a usage row is built from them.
+                "response": response,
+                "provider": alias_to_use,
+                "model": provider.model,
+                "tokens_used": prompt_tokens + response_tokens,
+                "prompt_tokens": prompt_tokens,
+                "response_tokens": response_tokens,
+                "model_max_tokens": self.get_context_window(provider.model),
+                "vision_used": False,  # images stay on `query`; this door carries none
+                "thinking": thinking_content,
+                "thinking_tokens": thinking_tokens,
+                # ... and what the provider was given, did, and stopped on.
+                "streamed": streamed,
+                "flattened": flattened,
+                "tools_used": tools_used,
+                "tool_calls": tool_calls,
+                "finish_reason": finish_reason,
             }
         return response
 

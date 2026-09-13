@@ -8,11 +8,11 @@ differs is only the wire: the key may arrive as `x-api-key` as well as
 `message` object, the stream is the six Messages events, and an error is the
 Anthropic envelope `{"type": "error", "error": {"type", "message"}}`.
 
-The conversation reaches the provider through the one converter the
-providers already use (`OllamaProvider._anthropic_to_openai_messages`) and
-the adapter's `messages_to_prompt`, so the flattened prompt is the one the
-OpenAI route would have produced for the same turns. Tools are accepted and
-ignored (ADR-041 M1): the answer is always a text block with `end_turn`.
+The conversation reaches the provider layer un-flattened, through
+`LLMManager.query_messages`, and `flatten_messages` is what the same turns
+render as for the OpenAI route and for a provider that takes only a prompt.
+Tools are accepted and ignored by this HTTP shape (ADR-041 M1): the answer is
+a text block, and its `stop_reason` is the one the provider reported.
 
 The stand-in service, the running listener and the key are the ones the
 OpenAI-shape test file builds; the listener is a real `aiohttp` `TCPSite` on
@@ -25,6 +25,7 @@ from datetime import datetime, timezone
 import aiohttp
 import pytest
 
+from dpc_client_core.llm_manager import flatten_messages
 from dpc_client_core.node_ledger import NodeLedger
 from tests.test_the_gateway_serves_only_the_two_lists_on_loopback import (
     ANSWER,
@@ -109,12 +110,17 @@ async def test_a_messages_request_on_a_local_alias_is_messages_shaped_and_leaves
         assert (row["prompt_tokens"], row["completion_tokens"]) == (12, 5)
         assert body["id"] == "msg_" + row["request_id"]
 
-        # The same conversation through the OpenAI route flattens to the same prompt.
+        # The turns reach the provider layer as turns, with the system beside them.
         assert service.calls[0]["alias"] == LOCAL
-        assert service.calls[0]["prompt"] == OPENAI_PROMPT
+        assert service.calls[0]["messages"] == [{"role": "user", "content": "hi"}]
+        assert service.calls[0]["system"] == SYSTEM
+        assert "prompt" not in service.calls[0], "the Messages route flattened the conversation"
+
+        # The OpenAI route still flattens, and to what the same turns render as.
         status, _ = await _request(server, "POST", "/v1/chat/completions", key=_key(tmp_path), body=_chat(LOCAL))
         assert status == 200
-        assert service.calls[1]["prompt"] == service.calls[0]["prompt"]
+        assert service.calls[1]["prompt"] == OPENAI_PROMPT
+        assert flatten_messages(service.calls[0]["messages"], service.calls[0]["system"]) == OPENAI_PROMPT
 
 
 # --- (2) two header forms, one key -------------------------------------------------
@@ -271,9 +277,14 @@ async def test_tools_and_a_tool_result_in_the_history_are_answered_with_text_and
         assert answer["stop_reason"] == "end_turn"
         assert len(list(ledger.rows())) == 1
 
-        # The provider saw the converter's rendering of every block, tool result included.
+        # Every block reaches the door as it was sent — the `tool_use` the answer
+        # cannot yet carry back is at least not destroyed on the way in.
         (call,) = service.calls
-        prompt = call["prompt"]
+        assert call["messages"] == body["messages"]
+        assert call["messages"][1]["content"][1]["type"] == "tool_use"
+
+        # And what a provider taking only a prompt would be given still holds them.
+        prompt = flatten_messages(call["messages"], call["system"])
         assert prompt.startswith(f"[SYSTEM]\n{SYSTEM}\n\n[USER]\nread a.txt\n\n[ASSISTANT]\nreading\n")
         assert "read_file" in prompt
         assert "[TOOL RESULT:" in prompt and "the file says hi" in prompt
@@ -311,11 +322,11 @@ async def test_a_body_without_model_or_messages_or_text_is_400_invalid_request_e
                 assert _anthropic_error(await resp.text())["type"] == "invalid_request_error"
 
 
-# --- (7) system as a string and as blocks flatten alike --------------------------------
+# --- (7) system travels as it was sent, and renders alike either way --------------------
 
 
 @pytest.mark.asyncio
-async def test_a_block_list_system_and_a_string_system_flatten_to_the_same_prompt(tmp_path):
+async def test_a_block_list_system_and_a_string_system_reach_the_door_as_they_were_sent(tmp_path):
     service = _service(tmp_path, BOTH_LISTS)
     async with _running(tmp_path, service) as (server, _):
         key = _key(tmp_path)
@@ -324,6 +335,27 @@ async def test_a_block_list_system_and_a_string_system_flatten_to_the_same_promp
         assert (await _post_messages(server, _messages(LOCAL, system=SYSTEM), key=key))[0] == 200
         assert (await _post_messages(server, _messages(LOCAL, system=blocks), key=key))[0] == 200
         assert (await _post_messages(server, _messages(LOCAL, system=None), key=key))[0] == 200
-        prompts = [c["prompt"] for c in service.calls]
-        assert prompts[0] == prompts[1] == OPENAI_PROMPT
-        assert prompts[2] == "[USER]\nhi"
+        systems = [c["system"] for c in service.calls]
+        assert systems == [SYSTEM, blocks, None], "the gateway rewrote the system prompt on the way"
+        rendered = [flatten_messages(c["messages"], c["system"]) for c in service.calls]
+        assert rendered[0] == rendered[1] == OPENAI_PROMPT
+        assert rendered[2] == "[USER]\nhi"
+
+
+# --- (8) the stop reason the provider reported, not a constant --------------------------
+
+
+@pytest.mark.asyncio
+async def test_the_stop_reason_is_the_providers_own_and_end_turn_only_when_none_was_reported(tmp_path):
+    async with _running(tmp_path, _service(tmp_path, BOTH_LISTS, finish_reason="length")) as (server, _):
+        status, text = await _post_messages(server, _messages(LOCAL), key=_key(tmp_path))
+        assert status == 200, text
+        assert json.loads(text)["stop_reason"] == "max_tokens"
+
+    async with _running(tmp_path, _service(tmp_path, BOTH_LISTS, finish_reason="content_filter")) as (server, _):
+        status, text = await _post_messages(server, _messages(LOCAL), key=_key(tmp_path))
+        assert json.loads(text)["stop_reason"] == "content_filter", "an unmapped word was folded away"
+
+    async with _running(tmp_path, _service(tmp_path, BOTH_LISTS)) as (server, _):
+        status, text = await _post_messages(server, _messages(LOCAL), key=_key(tmp_path))
+        assert json.loads(text)["stop_reason"] == "end_turn"

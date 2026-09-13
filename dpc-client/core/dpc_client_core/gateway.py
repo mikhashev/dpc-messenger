@@ -7,7 +7,7 @@ What it may ask for is exactly the two serving lists in `privacy_rules.json`
 (D5): `compute.serving_local`, whose scarce resource is the card, and
 `compute.serving_vendor`, whose scarce resource is money and which is
 therefore refused past its per-caller daily ceiling. Every completion is one
-`LLMManager.query` and one usage row with `caller_kind="gateway"` on this
+call on `LLMManager` and one usage row with `caller_kind="gateway"` on this
 node's ledger (D3).
 
 Two layers, on purpose. `Gateway` is the internal one — alias, serving
@@ -16,10 +16,12 @@ class, quota or card, one call, one row — and knows nothing about HTTP.
 Host check, parsing and rendering — in two wire shapes: the OpenAI one and,
 over the same `Gateway`, listener, key, lists, quota and row writer, the
 Anthropic Messages one (D4 amendment). Two narrowings are named rather than
-discovered (M1): a stream in either shape is the whole answer in one chunk
-or one `text_delta`, because `LLMManager.query` has no streaming form; and
-`tools` in a Messages request are accepted and ignored — the answer is a
-text block with `stop_reason: "end_turn"`, never a `tool_use` block.
+discovered (M1): a stream in either shape is still the whole answer in one
+chunk or one `text_delta`, and `tools` in a Messages request are accepted and
+ignored — the answer is a text block, never a `tool_use` block. Both are HTTP
+layer, not manager layer, since `LLMManager.query_messages`: the Messages
+route hands that door the turns un-flattened and prints the stop reason it
+reports, while `/v1/chat/completions` still flattens through `query`.
 
 A third kind of name, `remote:<node_id>:<alias>`, is a connected peer's
 alias as that peer serves it to this node (D4 step 4): `/v1/models` lists
@@ -55,11 +57,8 @@ from aiohttp import web
 from .dpc_agent.llm_adapter import messages_to_prompt
 from .dpc_agent.pricing import compute_cost_usd, get_billing_model
 from .firewall import ServingLists
+from .llm_manager import flatten_messages
 from .node_ledger import NodeLedger, default_ledger, usage_row
-# The one Anthropic-to-OpenAI message converter this module reuses (a
-# staticmethod, called without an instance): the providers already carry it,
-# and a fourth copy here would drift from the three that exist.
-from .providers.ollama_provider import OllamaProvider
 
 if TYPE_CHECKING:
     from .service import CoreService
@@ -146,6 +145,9 @@ class Completion:
     duration_s: float
     billing: str
     cost_usd: Optional[float]
+    # What the provider said it stopped on, in its own OpenAI vocabulary, or
+    # None when it said nothing; each shape converts on its way to the wire.
+    finish_reason: Optional[str] = None
 
 
 def parse_remote_name(name: str) -> Optional[Tuple[str, str]]:
@@ -231,7 +233,20 @@ class Gateway:
             return None
         return getattr(connection, "connection_type", "unknown")
 
-    async def complete(self, alias: str, prompt: str, *, request_id: Optional[str] = None) -> Completion:
+    async def complete(
+        self,
+        alias: str,
+        prompt: str,
+        *,
+        messages: Optional[List[Dict[str, Any]]] = None,
+        system: Any = "",
+        request_id: Optional[str] = None,
+    ) -> Completion:
+        """One call on one alias. `messages` is the conversation un-flattened,
+        for the shapes that have one: the local route then goes through
+        `LLMManager.query_messages` and the providers see the turns. The peer
+        route takes `prompt` either way — REMOTE_INFERENCE_REQUEST carries a
+        prompt and no message array."""
         remote = parse_remote_name(alias)
         if remote is not None:
             return await self._complete_via_peer(alias, *remote, prompt)
@@ -265,7 +280,8 @@ class Gateway:
                     "insufficient_quota",
                 )
             # Money bounds a vendor alias, not the card: no queue.
-            return await self._call(alias, owner, prompt, ledger, caller, request_id)
+            return await self._call(alias, owner, prompt, ledger, caller, request_id,
+                                    messages=messages, system=system)
 
         timeout = float(self._core.settings.get_remote_inference_timeout())
         try:
@@ -278,7 +294,8 @@ class Gateway:
                 "card_busy",
             )
         try:
-            return await self._call(alias, owner, prompt, ledger, caller, request_id)
+            return await self._call(alias, owner, prompt, ledger, caller, request_id,
+                                    messages=messages, system=system)
         finally:
             self._inference_lock.release()
 
@@ -290,12 +307,20 @@ class Gateway:
         ledger: NodeLedger,
         caller: str,
         request_id: Optional[str],
+        *,
+        messages: Optional[List[Dict[str, Any]]] = None,
+        system: Any = "",
     ) -> Completion:
         # Clocked after any wait: the price depends on the hour the call is made (D3).
         started_at = datetime.now(timezone.utc)
         clock = time.monotonic()
         try:
-            result = await self._core.llm_manager.query(prompt, provider_alias=alias, return_metadata=True)
+            if messages is None:
+                result = await self._core.llm_manager.query(prompt, provider_alias=alias, return_metadata=True)
+            else:
+                result = await self._core.llm_manager.query_messages(
+                    messages, system=system, provider_alias=alias, return_metadata=True,
+                )
         except Exception as e:
             logger.warning("Gateway call on '%s' failed: %s", alias, e)
             raise GatewayError(502, f"provider '{alias}' failed: {e}", "upstream_error")
@@ -337,6 +362,7 @@ class Gateway:
             prompt_tokens=prompt_tokens, completion_tokens=completion_tokens,
             thinking_tokens=result.get("thinking_tokens"),
             started_at=started_at, duration_s=duration_s, billing=billing, cost_usd=cost_usd,
+            finish_reason=result.get("finish_reason"),
         )
 
     async def _complete_via_peer(self, name: str, peer_id: str, remote_alias: str, prompt: str) -> Completion:
@@ -470,7 +496,7 @@ def _chat_completion_json(completion: Completion) -> Dict[str, Any]:
         "choices": [{
             "index": 0,
             "message": {"role": "assistant", "content": completion.text},
-            "finish_reason": "stop",
+            "finish_reason": completion.finish_reason or "stop",
         }],
         "usage": _usage(completion),
     }
@@ -485,7 +511,7 @@ def _chat_completion_chunk_json(completion: Completion) -> Dict[str, Any]:
         "choices": [{
             "index": 0,
             "delta": {"role": "assistant", "content": completion.text},
-            "finish_reason": "stop",
+            "finish_reason": completion.finish_reason or "stop",
         }],
         "usage": _usage(completion),
     }
@@ -703,7 +729,10 @@ class GatewayServer:
         alias = body.get("model")
         if not isinstance(alias, str) or not alias:
             raise GatewayError(400, "'model' must name a provider alias this node serves", "invalid_request_error")
-        prompt = messages_to_prompt(_anthropic_messages(body))
+        system, messages = _anthropic_request(body)
+        # Rendered here only for the peer route, which sends a prompt, and for
+        # the emptiness test below; the local route is handed the turns.
+        prompt = flatten_messages(messages, system)
         if not prompt:
             raise GatewayError(400, "no message carries text", "invalid_request_error")
         # `max_tokens` is required by the Messages API and read by nobody here:
@@ -711,7 +740,7 @@ class GatewayServer:
         # the alias's own configuration on this node, as on the OpenAI route.
         # `tools` and `tool_choice` are accepted and ignored (ADR-041 M1): the
         # answer is a text block, never a `tool_use` block.
-        completion = await self.gateway.complete(alias, prompt)
+        completion = await self.gateway.complete(alias, prompt, messages=messages, system=system)
         if body.get("stream"):
             return await self._stream_messages(request, completion)
         return web.json_response(_message_json(completion))
@@ -748,6 +777,25 @@ def _anthropic_error(status: int, message: str, code: str = "") -> web.Response:
     return web.json_response(body, status=status)
 
 
+# The provider's OpenAI word in the Anthropic vocabulary. An unmapped word
+# travels as it is rather than being folded into `end_turn`.
+_STOP_REASONS = {
+    "stop": "end_turn",
+    "length": "max_tokens",
+    "tool_calls": "tool_use",
+    "function_call": "tool_use",
+}
+
+
+def _stop_reason(completion: Completion) -> str:
+    """What the Messages shape prints. `end_turn` for a provider that reported
+    nothing is the constant this route printed before the reason existed — the
+    wire has no word for «unreported»."""
+    if completion.finish_reason is None:
+        return "end_turn"
+    return _STOP_REASONS.get(completion.finish_reason, completion.finish_reason)
+
+
 def _anthropic_usage(completion: Completion) -> Dict[str, int]:
     return {"input_tokens": completion.prompt_tokens or 0, "output_tokens": completion.completion_tokens or 0}
 
@@ -760,7 +808,7 @@ def _message_json(completion: Completion) -> Dict[str, Any]:
         "role": "assistant",
         "model": completion.alias,
         "content": [{"type": "text", "text": completion.text}],
-        "stop_reason": "end_turn",
+        "stop_reason": _stop_reason(completion),
         "stop_sequence": None,
         "usage": _anthropic_usage(completion),
     }
@@ -790,7 +838,7 @@ def _content_block_stop() -> Dict[str, Any]:
 def _message_delta(completion: Completion) -> Dict[str, Any]:
     return {
         "type": "message_delta",
-        "delta": {"stop_reason": "end_turn", "stop_sequence": None},
+        "delta": {"stop_reason": _stop_reason(completion), "stop_sequence": None},
         "usage": {"output_tokens": completion.completion_tokens or 0},
     }
 
@@ -804,16 +852,10 @@ def _sse_event(event: Dict[str, Any]) -> bytes:
     return f"event: {event['type']}\ndata: {json.dumps(event)}\n\n".encode("utf-8")
 
 
-def _anthropic_messages(body: Dict[str, Any]) -> List[Dict[str, Any]]:
-    """The request's `system` and `messages` as the OpenAI-shaped list the
-    adapter flattens, or a 400 saying what is wrong with them.
-
-    Only the shape is checked here. The conversion — a string or block-list
-    `system` to one system turn, text blocks to text, `tool_use` to the
-    assistant's tool calls, `tool_result` to a tool turn, an `image` block to
-    nothing — is the providers' own converter, so the flattened prompt is the
-    one the OpenAI route produces for the same conversation.
-    """
+def _anthropic_request(body: Dict[str, Any]) -> Tuple[Any, List[Dict[str, Any]]]:
+    """The request's `system` and `messages` as they stand, or a 400 saying
+    what is wrong with them. Shape only: the turns travel to the provider
+    un-flattened, and whoever cannot take them that way renders them."""
     system = body.get("system")
     if system is not None and not isinstance(system, (str, list)):
         raise GatewayError(400, "'system' must be a string or an array of text blocks", "invalid_request_error")
@@ -832,4 +874,4 @@ def _anthropic_messages(body: Dict[str, Any]) -> List[Dict[str, Any]]:
             raise GatewayError(
                 400, "each message's 'content' must be a string or an array of blocks", "invalid_request_error",
             )
-    return OllamaProvider._anthropic_to_openai_messages(system, messages)
+    return system, messages

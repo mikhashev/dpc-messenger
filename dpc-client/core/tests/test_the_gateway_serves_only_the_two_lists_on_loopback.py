@@ -58,18 +58,17 @@ def _providers():
     }
 
 
-def _service(tmp_path: Path, compute: dict, *, providers=None, fail=None):
+def _service(tmp_path: Path, compute: dict, *, providers=None, fail=None, finish_reason=None):
     """A stand-in for CoreService with only what the gateway reads: a real
-    firewall over a rules file in tmp_path, a fake registry and query."""
+    firewall over a rules file in tmp_path, a fake registry, and both doors on
+    `LLMManager` — `query` for the OpenAI route, `query_messages` for the
+    Messages one, each recording what it was actually given."""
     rules = tmp_path / "privacy_rules.json"
     rules.write_text(json.dumps({"compute": compute}), encoding="utf-8")
     providers = _providers() if providers is None else providers
     calls = []
 
-    async def query(prompt, provider_alias=None, return_metadata=False, **kwargs):
-        calls.append({"prompt": prompt, "alias": provider_alias, "kwargs": kwargs})
-        if fail is not None:
-            raise fail
+    def _metadata(provider_alias):
         provider = providers[provider_alias]
         return {
             "response": ANSWER, "provider": provider_alias, "model": provider.model,
@@ -78,9 +77,24 @@ def _service(tmp_path: Path, compute: dict, *, providers=None, fail=None):
             "thinking": None, "thinking_tokens": None,
         }
 
+    async def query(prompt, provider_alias=None, return_metadata=False, **kwargs):
+        calls.append({"prompt": prompt, "alias": provider_alias, "kwargs": kwargs})
+        if fail is not None:
+            raise fail
+        return _metadata(provider_alias)
+
+    async def query_messages(messages, *, system="", provider_alias=None,
+                             return_metadata=False, **kwargs):
+        calls.append({"messages": messages, "system": system, "alias": provider_alias, "kwargs": kwargs})
+        if fail is not None:
+            raise fail
+        return dict(_metadata(provider_alias), streamed=False, flattened=False,
+                    tools_used=False, tool_calls=[], finish_reason=finish_reason)
+
     return types.SimpleNamespace(
         firewall=ContextFirewall(rules),
-        llm_manager=types.SimpleNamespace(providers=providers, query=query),
+        llm_manager=types.SimpleNamespace(providers=providers, query=query,
+                                          query_messages=query_messages),
         p2p_manager=types.SimpleNamespace(node_id=NODE_ID),
         settings=types.SimpleNamespace(get_remote_inference_timeout=lambda: INFERENCE_TIMEOUT_S),
         calls=calls,
