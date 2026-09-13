@@ -82,9 +82,48 @@ Wire representation (example):
 
 #### HELLO
 
-Sent immediately after connection establishment to identify the remote peer.
+Identifies the remote peer. What is sent, and how it is answered, differs by tier:
 
-**Format:**
+- **Direct TLS** (IPv4/IPv6, `p2p_manager.py`): the listener sends **HELLO_CHALLENGE**
+  first; the dialling side answers with an authenticated HELLO that proves it holds the
+  private key behind the `node_id` it claims; the listener answers **HELLO_ACK**. The
+  connection is not used for anything else before this three-message exchange completes.
+- **Hub WebRTC**: identity is already established through Hub signalling before the data
+  channel opens, so HELLO here is a lighter, unauthenticated, post-connection message
+  carrying only `node_id` and `name` — a display-name exchange, read by the router's
+  `HelloHandler` (`message_handlers/hello_handler.py`), which reads `name` only. No
+  challenge, no certificate, no HELLO_ACK.
+- Volunteer relay and gossip store-and-forward carry no HELLO of their own; whatever
+  identity a relayed or gossiped frame claims was established by the tier that opened
+  the underlying connection, not re-proved per message.
+
+**HELLO_CHALLENGE** (direct TLS only, sent by the listener before it reads a HELLO):
+```json
+{
+  "command": "HELLO_CHALLENGE",
+  "payload": {
+    "nonce": "base64-encoded 32 random bytes"
+  }
+}
+```
+- `nonce` (string, required): Base64-encoded 32-byte random challenge. The dialling side
+  signs it (RSA-PSS, SHA-256, MGF1) with the private key behind its claimed `node_id` and
+  returns the signature in HELLO's `nonce_signature`.
+
+**Format (direct TLS — answering a HELLO_CHALLENGE):**
+```json
+{
+  "command": "HELLO",
+  "payload": {
+    "node_id": "dpc-node-[32 hex characters]",
+    "name": "Alice",
+    "cert_pem": "-----BEGIN CERTIFICATE-----\n...\n-----END CERTIFICATE-----\n",
+    "nonce_signature": "base64-encoded RSA-PSS signature over the challenge nonce"
+  }
+}
+```
+
+**Format (Hub WebRTC — no preceding challenge):**
 ```json
 {
   "command": "HELLO",
@@ -98,8 +137,34 @@ Sent immediately after connection establishment to identify the remote peer.
 **Fields:**
 - `node_id` (string, required): Cryptographic node identifier (format: `dpc-node-[32 hex characters]`)
 - `name` (string, optional): Human-readable display name
+- `cert_pem` (string, required on direct TLS): PEM-encoded X.509 certificate for `node_id`.
+  A direct-TLS HELLO lacking it is rejected — "sent HELLO without cert_pem or
+  nonce_signature — rejecting (peer may be running an outdated version)"
+  (`p2p_manager.py`, `_handle_direct_connection`)
+- `nonce_signature` (string, required on direct TLS): Base64-encoded RSA-PSS(SHA-256)
+  signature over the `nonce` from HELLO_CHALLENGE, made with the private key behind
+  `cert_pem`. The listener's `_verify_hello_identity` checks three things before
+  accepting the connection: the certificate's CN matches `node_id`; the certificate's
+  public key hashes to `node_id` (`generate_node_id`); the signature verifies against the
+  certificate's public key. Any failure closes the connection.
 
-**Response:** None (connection is bidirectional; both peers send HELLO)
+**HELLO_ACK** (direct TLS only — top-level frame, no `payload` wrapper):
+```json
+{
+  "command": "HELLO_ACK",
+  "status": "OK",
+  "name": "Bob",
+  "node_id": "dpc-node-[32 hex characters]"
+}
+```
+- `status` (string, required): `"OK"`
+- `name` (string, optional): The listener's own display name
+- `node_id` (string, required): The listener's own `node_id`. The dialling side checks it
+  against the `node_id` it dialled; a mismatch is treated as a possible MITM and the
+  connection is dropped.
+
+**Response:** Hub WebRTC — none, fire-and-forget. Direct TLS — HELLO_CHALLENGE precedes
+HELLO and HELLO_ACK follows it; the connection is not usable before HELLO_ACK.
 
 ---
 
@@ -135,9 +200,23 @@ Requests the peer's personal context data (subject to firewall rules).
 **Format:**
 ```json
 {
-  "command": "REQUEST_CONTEXT"
+  "command": "REQUEST_CONTEXT",
+  "payload": {
+    "request_id": "550e8400-e29b-41d4-a716-446655440000",
+    "query": "what GPU do you have",
+    "requestor_id": "dpc-node-alice-123"
+  }
 }
 ```
+
+**Fields:**
+- `request_id` (string, required): Correlates the response to this request; the requester
+  resolves a pending future by it (`context_coordinator.py`, `request_context`)
+- `query` (string, optional): Free-text query the receiver's firewall may use when
+  filtering what it shares
+- `requestor_id` (string, sent, read by nothing): The requester's own `node_id`. Sent on
+  every REQUEST_CONTEXT but not consulted by the handler or the firewall — the
+  transport-level sender identity is what is actually used to filter and to reply.
 
 **Response:** CONTEXT_RESPONSE message
 
@@ -152,22 +231,30 @@ Sends personal context data in response to REQUEST_CONTEXT or proactively.
 {
   "command": "CONTEXT_RESPONSE",
   "payload": {
-    "profile": {
-      "name": "Alice",
-      "description": "AI researcher",
-      "values": ["privacy", "transparency"]
+    "request_id": "550e8400-e29b-41d4-a716-446655440000",
+    "context": {
+      "profile": {
+        "name": "Alice",
+        "description": "AI researcher",
+        "values": ["privacy", "transparency"]
+      },
+      "knowledge": {
+        "topics": [...]
+      }
     },
-    "knowledge": {
-      "topics": [...]
-    }
+    "query": "what GPU do you have"
   }
 }
 ```
 
 **Fields:**
-- `payload` (object, required): Filtered personal context (structure defined by Personal Context Model v2.0)
+- `request_id` (string, required): Echoes the request's `request_id`; the requester
+  resolves its pending future by this value
+- `context` (object, required): Filtered personal context (structure defined by Personal
+  Context Model v2.0) — carried under `context`, **not** sent as the payload itself
+- `query` (string, optional): Echoes the request's `query`
 
-**Note:** The actual data sent is filtered by the sender's firewall rules (see `~/.dpc/privacy_rules.json`).
+**Note:** The actual data sent is filtered by the sender's firewall rules (see `~/.dpc/privacy_rules.json`). A payload shaped like the context itself (as shown in earlier revisions of this document) is not what ships: the context is wrapped under `context`, and a peer sending the unwrapped shape fails deserialisation on receipt (`PersonalContext.from_dict` raises on `None`).
 
 ---
 
@@ -188,7 +275,6 @@ Requests the peer to execute an AI inference query using their local compute res
     "provider": "ollama",     // Optional
     "images": [               // Optional: vision queries (v0.12.0+)
       {
-        "path": "screenshot.png",
         "base64": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUg...",
         "mime_type": "image/png"
       }
@@ -203,8 +289,7 @@ Requests the peer to execute an AI inference query using their local compute res
 - `prompt` (string, required): AI query text
 - `model` (string, optional): Specific model to use
 - `provider` (string, optional): AI provider (ollama, openai, anthropic)
-- `images` (array, optional): Image objects for vision queries (v0.12.0+). Peer must support vision (`supports_vision: true` in PROVIDERS_RESPONSE).
-  - `path` (string, optional): Original filename
+- `images` (array, optional): Image objects for vision queries (v0.12.0+). Peer must support vision (`supports_vision: true` in PROVIDERS_RESPONSE). Reduced to exactly two fields before it travels (`_image_for_the_wire`, `dpc_protocol/protocol.py`) — a `path` field on the sender's side never reaches the wire, deliberately: it names a location on the sender's own filesystem, unreachable and possibly misleading on the receiver's.
   - `base64` (string, required): Base64-encoded image data (data URL format)
   - `mime_type` (string, required): MIME type (e.g., image/png, image/jpeg)
 - `reasoning_effort` (string, optional, v1.7+): How deeply the guest wants the model to think, one word of the shared scale `off`, `low`, `medium`, `high`, `max`. A request, not an instruction: the host may lower it to what it is willing to spend, and answers with the word it served in `served_effort`. Absent means the guest did not choose, and the host answers at its own default — which is not the same as `off`. A word the host does not recognise is not guessed at: the host answers at its own default and `served_effort` is absent.
@@ -227,6 +312,8 @@ Returns the result of a remote inference request.
     "request_id": "550e8400-e29b-41d4-a716-446655440000",
     "status": "success",
     "response": "The capital of France is Paris.",
+    "model": "llama3.1:70b",
+    "provider": "ollama",
     "tokens_used": 156,
     "prompt_tokens": 12,
     "response_tokens": 144,
@@ -261,6 +348,12 @@ Returns the result of a remote inference request.
 - `request_id` (string, required): Matches request UUID
 - `status` (string, required): `"success"`
 - `response` (string, required): AI-generated response text
+- `model` (string, optional): The model that produced the response — sent since v0.12.0
+  (`dpc_protocol/protocol.py`, `create_remote_inference_response`), listed here for the
+  first time
+- `provider` (string, optional): The provider type that served the response — sent since
+  v0.12.0, listed here for the first time; the requester's own usage row copies `model`
+  from this field
 - `tokens_used` (integer, optional): Total tokens consumed
 - `prompt_tokens` (integer, optional): Tokens in prompt
 - `response_tokens` (integer, optional): Tokens in response
@@ -557,7 +650,12 @@ Casts a vote on a knowledge commit proposal.
     "vote": "approve",
     "comment": "Looks good, captures our discussion well",
     "timestamp": "2025-12-05T10:15:00Z",
-    "is_required_dissent": false
+    "is_required_dissent": false,
+    "conversation_id": "conv-xyz789",
+    "vote_hash": "sha256:...",
+    "signature": "base64-encoded RSA-PSS signature",
+    "signer_node_id": "dpc-node-alice",
+    "vote_preimage_version": "vote-v1"
   }
 }
 ```
@@ -569,6 +667,13 @@ Casts a vote on a knowledge commit proposal.
 - `comment` (string, optional; **required for `"abstain"`**): Comment/feedback. An abstention blocks the commit, so it must say why it could not be judged
 - `timestamp` (string, required): ISO 8601 timestamp of vote
 - `is_required_dissent` (boolean, required): True if voter is assigned devil's advocate
+- `conversation_id` (string, sent): The proposal's conversation, carried so a receiver can
+  relay or verify the vote without already holding the proposal (`consensus_manager.py`,
+  `cast_vote`)
+- `vote_hash`, `signature`, `signer_node_id`, `vote_preimage_version` (sent, optional):
+  Signature over the vote's content, added by `sign_vote()` (`signing.py`) alongside the
+  message signing of §4.1. Absent when this node holds no signing key, in which case the
+  receiver treats the vote as unsigned/legacy — see the same rule under VOTE_NEW_SESSION.
 
 **Response:** KNOWLEDGE_COMMIT_RESULT (when all votes collected or deadline reached)
 
@@ -676,9 +781,18 @@ Requests peer's device/hardware information (GPU, RAM, OS, dev tools).
 **Format:**
 ```json
 {
-  "command": "REQUEST_DEVICE_CONTEXT"
+  "command": "REQUEST_DEVICE_CONTEXT",
+  "payload": {
+    "request_id": "550e8400-e29b-41d4-a716-446655440000",
+    "requestor_id": "dpc-node-alice-123"
+  }
 }
 ```
+
+**Fields:**
+- `request_id` (string, required): Correlates the response to this request
+- `requestor_id` (string, sent, read by nothing): The requester's own `node_id`, same as
+  on REQUEST_CONTEXT — sent but not consulted (`context_coordinator.py`, `request_device_context`)
 
 **Response:** DEVICE_CONTEXT_RESPONSE message
 
@@ -695,19 +809,38 @@ Returns device context (subject to firewall rules).
 {
   "command": "DEVICE_CONTEXT_RESPONSE",
   "payload": {
-    "hardware": {
-      "gpu": {"model": "RTX 3060", "vram_gb": 12},
-      "ram_gb": 24
-    },
-    "software": {
-      "os": {"family": "Windows", "version": "10"}
+    "request_id": "550e8400-e29b-41d4-a716-446655440000",
+    "device_context": {
+      "hardware": {
+        "gpu": {"model": "RTX 3060", "vram_gb": 12},
+        "ram_gb": 24
+      },
+      "software": {
+        "os": {"family": "Windows", "version": "10"}
+      }
     }
   }
 }
 ```
 
+**Error Format** (sender has no device context to offer):
+```json
+{
+  "command": "DEVICE_CONTEXT_RESPONSE",
+  "payload": {
+    "request_id": "550e8400-e29b-41d4-a716-446655440000",
+    "device_context": {},
+    "error": "Device context not available"
+  }
+}
+```
+
 **Fields:**
-- `payload` (object, required): Filtered device context (structure defined by device_context.json schema v1.1)
+- `request_id` (string, required): Echoes the request's `request_id`
+- `device_context` (object, required): Filtered device context (structure defined by
+  device_context.json schema v1.1), carried under `device_context` — **not** sent as the
+  payload itself; `{}` on the error path
+- `error` (string, optional): Present only when the sender has no device context to offer
 
 **Note:** Privacy-sensitive. Firewall rules control which hardware/software details are shared.
 
@@ -725,8 +858,7 @@ Broadcasts when personal context changes, invalidates peer caches.
   "command": "CONTEXT_UPDATED",
   "payload": {
     "node_id": "dpc-node-alice123",
-    "context_hash": "a1b2c3d4...",
-    "timestamp": "2025-12-11T10:30:00Z"
+    "context_hash": "a1b2c3d4..."
   }
 }
 ```
@@ -734,7 +866,9 @@ Broadcasts when personal context changes, invalidates peer caches.
 **Fields:**
 - `node_id` (string, required): Node that updated their context
 - `context_hash` (string, required): SHA256 hash of new context for cache invalidation
-- `timestamp` (string, required): ISO 8601 timestamp of update
+- `timestamp`: not sent by any implementation in this tree and not read by the handler
+  (`knowledge_service.py`, the broadcast; `knowledge_handler.py`, the receiver) — dropped
+  from the wire format rather than left as a required field nothing carries
 
 **Use Case:** Phase 7 peer cache invalidation - notifies peers when context changes so they can refresh cached data.
 
@@ -804,7 +938,9 @@ Epidemic message routing for store-and-forward delivery with end-to-end encrypti
 - `source` (string, required): Original sender node ID
 - `destination` (string, required): Target recipient node ID
 - `payload` (object, required): Message content
-  - `encrypted` (string, required): Base64-encoded RSA-OAEP encrypted payload (E2E encryption)
+  - `encrypted` (string, required): Base64-encoded hybrid AES-256-GCM + RSA-OAEP encrypted
+    payload (E2E encryption) — not pure RSA-OAEP; RSA alone caps the payload at roughly
+    190 bytes, which a message this size regularly exceeds
 - `hops` (integer, required): Current hop count (increments at each forward)
 - `max_hops` (integer, required): Maximum allowed hops (default: 5)
 - `ttl` (integer, required): Time-to-live in seconds (default: 86400 = 24 hours)
@@ -825,10 +961,16 @@ Receiver performs these checks in order:
 6. **Forward**: Otherwise, forward to N=3 random connected peers (epidemic fanout)
 
 **Security (End-to-End Encryption):**
-- Payload encrypted with recipient's RSA public key (OAEP padding)
+- Payload encrypted for the recipient with hybrid encryption: a random AES-256 key
+  encrypts the payload (AES-GCM, which also authenticates it), and that AES key is then
+  encrypted with the recipient's RSA public key (OAEP padding) — `encrypted` carries the
+  wrapped key, nonce, ciphertext and authentication tag concatenated into one blob
+  (`dpc_protocol/crypto.py`, `encrypt_with_public_key_hybrid`)
 - Only sender and recipient can decrypt message content
 - Intermediate hops see only: source, destination, TTL, hop count, encrypted blob
 - Intermediate hops **cannot** decrypt message content (privacy-preserving)
+- Forward secrecy: a fresh AES key is generated per message, so recovering one message's
+  key does not expose any other
 
 **Use Case:**
 - Last-resort fallback when all direct connections fail (Priority 6)
@@ -1002,13 +1144,21 @@ Cancels an in-progress or pending file transfer.
 
 **Fields:**
 - `transfer_id` (string, required): Transfer identifier
-- `reason` (string, required): Cancellation reason
-  - `user_cancelled` - User manually cancelled
-  - `timeout` - Transfer timed out
+- `reason` (string, required): Cancellation reason. The set below is what senders in
+  this tree actually emit (`managers/file_transfer_manager.py`;
+  `message_handlers/file_offer_handler.py`); it replaces an earlier list that mixed in
+  three values nothing sends (`timeout`, `permission_denied`, `size_limit_exceeded` — a
+  rejected size is folded into `firewall_denied` instead) and omitted two the code does
+  send.
+  - `user_cancelled` - User manually cancelled (`cancel_transfer`'s default)
+  - `firewall_denied` - Receiver's firewall rejected the offer, including a transfer
+    over the receiver's size limit (`file_offer_handler.py`)
   - `hash_mismatch` - SHA256 verification failed
   - `chunk_verification_failed` - Chunk CRC32 verification failed after max retries (v0.11.1+)
-  - `permission_denied` - Firewall rejected transfer
-  - `size_limit_exceeded` - File exceeds peer's size limit
+  - `missing_chunks` - Reassembly timed out with chunks still missing
+  - `send_error` - Error occurred while sending
+  - The handler's own docstring (`file_cancel_handler.py`) additionally lists `timeout`
+    among the reasons it expects; no sender in this tree produces it
 
 **Behavior:**
 - Both sender and receiver can send FILE_CANCEL
@@ -1290,10 +1440,7 @@ Forwards an encrypted message through an established relay session.
     "from": "dpc-node-sender-123",
     "to": "dpc-node-receiver-456",
     "session_id": "550e8400-e29b-41d4-a716-446655440000",
-    "message": {
-      "command": "SEND_TEXT",
-      "payload": {"text": "Hello via relay!"}
-    }
+    "data": "base64-encoded AES-GCM+RSA-OAEP encrypted blob"
   }
 }
 ```
@@ -1302,7 +1449,11 @@ Forwards an encrypted message through an established relay session.
 - `from` (string, required): Sender node ID (must match connection identity)
 - `to` (string, required): Receiver node ID
 - `session_id` (string, required): Active relay session identifier
-- `message` (object, required): Encrypted DPTP message to forward (any command type)
+- `data` (string, required): The inner DPTP message (any command type), hybrid-encrypted
+  for `to` and base64-encoded — an opaque blob to the relay, **not** the plaintext
+  `message` object shown in earlier revisions of this document. The handler refuses
+  anything that is not a non-empty string (`relay_message_handler.py`;
+  `relayed_connection.py`).
 
 **Behavior:**
 - Relay verifies sender matches connection identity
@@ -1458,8 +1609,9 @@ Proposes ending current conversation and starting fresh session.
   "payload": {
     "proposal_id": "prop-abc123",
     "conversation_id": "conv-xyz789",
-    "proposer_node_id": "dpc-node-alice-123",
-    "timestamp": "2025-12-25T10:30:00Z"
+    "initiator_node_id": "dpc-node-alice-123",
+    "timestamp": "2025-12-25T10:30:00Z",
+    "participants": ["dpc-node-alice-123", "dpc-node-bob-456"]
   }
 }
 ```
@@ -1467,8 +1619,13 @@ Proposes ending current conversation and starting fresh session.
 **Fields:**
 - `proposal_id` (string, required): Unique proposal identifier
 - `conversation_id` (string, required): Conversation to reset
-- `proposer_node_id` (string, required): Node ID of proposer
+- `initiator_node_id` (string, required): Node ID of the proposer — the field carrying
+  this name on the wire has always been `initiator_node_id`, never `proposer_node_id`
+  (`session_manager.py`, `_broadcast_proposal`)
 - `timestamp` (string, required): ISO 8601 timestamp of proposal
+- `participants` (array, required): Every node the proposal names, including the
+  initiator; a receiver builds its local voting session from this list
+  (`session_manager.py`, `handle_proposal_message`)
 
 **Response:** VOTE_NEW_SESSION from each participant
 
@@ -1486,18 +1643,37 @@ Casts a vote on a session reset proposal.
   "command": "VOTE_NEW_SESSION",
   "payload": {
     "proposal_id": "prop-abc123",
+    "vote": true,
     "voter_node_id": "dpc-node-bob-456",
-    "vote": "approve",
-    "timestamp": "2025-12-25T10:31:00Z"
+    "conversation_id": "conv-xyz789",
+    "timestamp": "2025-12-25T10:31:00Z",
+    "vote_hash": "sha256:...",
+    "signature": "base64-encoded RSA-PSS signature",
+    "signer_node_id": "dpc-node-bob-456",
+    "vote_preimage_version": "vote-v1"
   }
 }
 ```
 
 **Fields:**
 - `proposal_id` (string, required): Proposal being voted on
+- `vote` (boolean, required): `true` = approve, `false` = reject — a boolean on the wire,
+  not the `"approve"`/`"reject"` string shown in earlier revisions of this document
+  (`service.py`, `vote_new_session`). The signature preimage below is computed over this
+  boolean.
 - `voter_node_id` (string, required): Node ID of voter
-- `vote` (string, required): Vote choice - `"approve"` | `"reject"`
+- `conversation_id` (string, sent): The proposal's conversation, carried so the vote can
+  be relayed and matched without the receiver already holding the proposal
 - `timestamp` (string, required): ISO 8601 timestamp of vote
+- `vote_hash`, `signature`, `signer_node_id`, `vote_preimage_version` (sent, optional):
+  Signature over the vote's content, added by `sign_vote()` (`signing.py`) alongside the
+  message signing of §4.1. **A vote relayed through an intermediate node (star topology)
+  without a signature this receiver can verify is not counted toward the tally**: only
+  the `verified` and `legacy` (directly-connected, unsigned) verdicts are counted; a
+  `legacy_relayed` verdict (unsigned and second-hand) is passed on for a
+  better-positioned node to check, not tallied here
+  (`message_handlers/__init__.py`, `_authenticate_voter`; `session_handler.py`,
+  `VoteNewSessionHandler`).
 
 **Response:** NEW_SESSION_RESULT (when all votes collected)
 
@@ -1513,23 +1689,34 @@ Notifies all participants of voting outcome.
   "command": "NEW_SESSION_RESULT",
   "payload": {
     "proposal_id": "prop-abc123",
-    "status": "approved",
-    "votes": [
-      {"node_id": "dpc-node-alice-123", "vote": "approve"},
-      {"node_id": "dpc-node-bob-456", "vote": "approve"}
-    ],
-    "timestamp": "2025-12-25T10:32:00Z"
+    "conversation_id": "conv-xyz789",
+    "result": "approved",
+    "clear_history": true,
+    "timestamp": "2025-12-25T10:32:00Z",
+    "vote_tally": {
+      "approve": 2,
+      "reject": 0,
+      "total": 2
+    }
   }
 }
 ```
 
 **Fields:**
 - `proposal_id` (string, required): Proposal identifier
-- `status` (string, required): Result - `"approved"` | `"rejected"`
-- `votes` (array, required): All participant votes
-  - `node_id` (string): Voter's node ID
-  - `vote` (string): Vote choice
+- `conversation_id` (string, required): Names the conversation the result applies to; the
+  receiver refuses a result whose `conversation_id` does not match the local session it
+  holds for `proposal_id` (`session_handler.py`, `NewSessionResultHandler._refuse_reason`)
+- `result` (string, required): `"approved"` | `"rejected"` — **not** `status`, and there
+  is no `votes[]` array on the wire; a receiver acts only on `result` and `clear_history`
+- `clear_history` (boolean, required): Whether the receiver should clear its local
+  history for `conversation_id`. History is cleared only when `result == "approved"`
+  **and** `clear_history` is true (`session_handler.py:218`) — a spec-conformant frame
+  built to the field names above is refused or is a no-op, since the code neither sends
+  nor reads `status`/`votes`
 - `timestamp` (string, required): ISO 8601 timestamp of finalization
+- `vote_tally` (object, required): `approve`, `reject`, `total` vote counts
+  (`session_manager.py`, `_finalize_proposal`)
 
 **Behavior:**
 - **Unanimous approval required**: All participants must vote "approve"
@@ -1554,6 +1741,7 @@ Requests conversation history from peer.
   "command": "REQUEST_CHAT_HISTORY",
   "payload": {
     "conversation_id": "conv-xyz789",
+    "request_id": "550e8400-e29b-41d4-a716-446655440000",
     "since_timestamp": "2025-12-25T10:00:00Z"
   }
 }
@@ -1561,7 +1749,11 @@ Requests conversation history from peer.
 
 **Fields:**
 - `conversation_id` (string, required): Conversation ID to sync
-- `since_timestamp` (string, optional): Only return messages after this timestamp (ISO 8601)
+- `request_id` (string, sent): Correlates the response to this request; the response
+  carries it back so the receiver can tell a solicited history from an unsolicited one
+  (`chat_history_handlers.py`)
+- `since_timestamp` (string, optional): Only return messages after this timestamp (ISO
+  8601) — documented, never sent, never read by any handler in this tree
 
 **Response:** CHAT_HISTORY_RESPONSE
 
@@ -1577,16 +1769,25 @@ Returns conversation history to requesting peer.
   "command": "CHAT_HISTORY_RESPONSE",
   "payload": {
     "conversation_id": "conv-xyz789",
+    "request_id": "550e8400-e29b-41d4-a716-446655440000",
+    "total_count": 2,
     "messages": [
       {
+        "id": "msg-abc123",
         "role": "user",
-        "text": "Hello!",
+        "content": "Hello!",
         "timestamp": "2025-12-25T10:15:00Z",
-        "sender_node_id": "dpc-node-alice-123"
+        "sender_node_id": "dpc-node-alice-123",
+        "sender_name": "Alice",
+        "sender_type": "human",
+        "content_hash": "sha256:...",
+        "signature": "base64-encoded RSA-PSS signature",
+        "signer_node_id": "dpc-node-alice-123",
+        "preimage_version": "dptp-msg-v2"
       },
       {
         "role": "assistant",
-        "text": "Hi there!",
+        "content": "Hi there!",
         "timestamp": "2025-12-25T10:15:05Z"
       }
     ]
@@ -1596,11 +1797,32 @@ Returns conversation history to requesting peer.
 
 **Fields:**
 - `conversation_id` (string, required): Conversation ID
-- `messages` (array, required): List of message objects
+- `request_id` (string, sent): Echoes REQUEST_CHAT_HISTORY's `request_id`; on the build
+  read for this pass the receiver claims a response by this value, so a response missing
+  it is not matched to any pending request
+- `total_count` (integer, sent): Number of messages in `messages`
+  (`chat_history_handlers.py`)
+- `messages` (array, required): List of message objects, as produced by
+  `conversation_monitor.export_history()` and consumed by `import_history()`
   - `role` (string, required): `"user"` | `"assistant"`
-  - `text` (string, required): Message content
-  - `timestamp` (string, required): ISO 8601 timestamp
+  - `content` (string, required): Message content — the row's field is `content`, **not**
+    `text` as shown in earlier revisions of this document (`conversation_monitor.py`,
+    `export_history`/`import_history`)
+  - `timestamp` (string, optional): ISO 8601 timestamp — omitted when the local record
+    has none, rather than backfilled, because the signature fields below are computed
+    over it
   - `sender_node_id` (string, optional): Sender node ID (for user messages)
+  - `id` (string, optional): The sender's local message id, carried so a receiver's
+    history merge can deduplicate
+  - `attachments` (array, optional): File/voice attachment references, when present
+  - `sender_name` (string, optional): Sender's display name
+  - `sender_type` (string, optional): Sender's kind (e.g. human, agent)
+  - `agent_owner` (string, optional): Owning node when the sender is an agent
+  - `isAgent` (boolean, optional): Whether the sender is an agent
+  - `content_hash`, `signature`, `signer_node_id`, `preimage_version`,
+    `tool_calls_digest` (string, optional): Message-signing fields (§4.1/§4.2), sent
+    together and only when the record's `preimage_version` is the current or a legacy
+    one this node still recomputes; absent otherwise
 
 **Use Cases:**
 - **Automatic sync on reconnect**: Restore conversation after temporary disconnection
@@ -2140,6 +2362,61 @@ DPTP is designed to be extensible. New commands can be added by:
 ## 9. Changelog
 
 ### v1.7 (September 2026)
+- **Conformance pass, 2026-09-14** — the sections below were rewritten to match what the
+  implementation has sent and read all along; none of this is new wire behaviour, all of
+  it is documentation catching up (`audit/dptp-conformance-2026-09-13.md`). Sections whose
+  drift traces to a dated code change name that commit; the rest is long-standing and
+  carries none:
+  - **§3.1 HELLO** — documents the direct-TLS handshake as it has always run:
+    HELLO_CHALLENGE, `cert_pem` + `nonce_signature` on HELLO, HELLO_ACK; and the lighter,
+    unauthenticated HELLO the Hub WebRTC tier sends instead. A HELLO built to the previous
+    revision of this section is refused by a direct-TLS listener
+  - **§3.3/§3.8 REQUEST_CONTEXT, CONTEXT_RESPONSE, REQUEST_DEVICE_CONTEXT,
+    DEVICE_CONTEXT_RESPONSE** — documents the `{request_id, context|device_context, ...}`
+    wrapping both responses have always used (a payload shaped like the context itself
+    fails deserialisation), and the `requestor_id` field both requests send and no reader
+    consults
+  - **§3.7 VOTE_KNOWLEDGE_COMMIT, §3.15 PROPOSE_NEW_SESSION / VOTE_NEW_SESSION /
+    NEW_SESSION_RESULT** — documents the vote-signing fields (`vote_hash`, `signature`,
+    `signer_node_id`, `vote_preimage_version`, `conversation_id`) both vote commands
+    carry and the rule that an unsigned relayed vote is not counted; renames
+    `proposer_node_id` to the `initiator_node_id` the wire has always used; types
+    VOTE_NEW_SESSION's `vote` as the boolean it is, not a string; and replaces
+    NEW_SESSION_RESULT's `status`/`votes[]` with the `result`/`clear_history`/
+    `vote_tally`/`conversation_id` shape the code sends and the only shape the handler
+    acts on
+  - **§3.13 RELAY_MESSAGE** — the field is `data`, an opaque base64 string, not the
+    `message` object the previous revision of this section named; a spec-conformant
+    sender following the old text is refused by the handler
+  - **§3.16 REQUEST_CHAT_HISTORY, CHAT_HISTORY_RESPONSE** — the response row field is
+    `content`, not `text`; adds the row's `id`, `attachments`, `sender_name`,
+    `sender_type`, `agent_owner`, `isAgent` and the message-signing fields
+    (`content_hash`, `signature`, `signer_node_id`, `preimage_version`,
+    `tool_calls_digest`) that §4.1/§4.2 define but this section never listed; adds
+    `request_id` on the request and `request_id`/`total_count` on the response
+  - **§3.5 PROVIDERS_RESPONSE** — `reasoning_words`, `reasoning_default`, the
+    `context_window: null` semantics and required `supports_voice` were added to the
+    spec body in `f5eccf4d` (2026-09-09) and are named in this changelog for the first
+    time
+  - **§3.7 KNOWLEDGE_COMMIT_RESULT** — the `"abstain"` vote value and `vote_tally.abstain`
+    / `.participants` were added to the spec body in `6522de1e` (2026-09-07) and are
+    named in this changelog for the first time
+  - **§3.4 REMOTE_INFERENCE_REQUEST** — `images[].path` is removed from the request
+    example and field list; the sender stopped putting it on the wire in `75d8b851`
+    (2026-09-09) and the text was not updated with it
+  - **§3.4 REMOTE_INFERENCE_RESPONSE** — `model` and `provider` are added to the success
+    field list; both have shipped since v0.12.0 (older than this changelog's per-entry
+    granularity) and are named here for the first time. The requester's own usage row
+    copies `model` from this field
+  - **§3.9 CONTEXT_UPDATED** — `timestamp` is dropped from the format: no implementation
+    in this tree has ever sent it, and the handler never reads it
+  - **§3.11 FILE_CANCEL** — the `reason` enum is replaced with the set senders in this
+    tree actually emit (adds `firewall_denied`, `missing_chunks`, `send_error`; drops
+    `timeout`, `permission_denied`, `size_limit_exceeded`, none of which any sender here
+    produces)
+  - **§3.10 GOSSIP_MESSAGE** — the encryption prose is corrected to hybrid AES-256-GCM +
+    RSA-OAEP; the field shape and forwarding behaviour were already correct and are
+    unchanged (hybrid encryption has been the implementation since v0.10.2)
 - **§3.4 REMOTE_INFERENCE_RESPONSE** — the tariff fields replace `cost_usd`:
   optional `tariff_in`, `tariff_out`, `tariff_currency`, `tariff_at` and
   `tariff_amount`, sent as one group or not at all, carry the owner's price for
