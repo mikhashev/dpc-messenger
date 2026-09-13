@@ -463,6 +463,7 @@ class KnowledgeService:
             auto_detect=False,
             instruction_set_name=instruction_set_name or self.instruction_set.default,
             display_name=display_name,
+            p2p_manager=self.p2p_manager,
         )
 
         # Load persisted history from disk — only for group chats
@@ -1393,6 +1394,22 @@ Respond in JSON format:
                 proposed_by=self.p2p_manager.node_id,
                 initiated_by=initiated_by,
             )
+
+            # THE-COLD-FALLBACK-HIDES-A-D2-REFUSAL-BEHIND-A-SUCCESSFUL-EXTRACTION:
+            # the monitor's retry is the right call — extraction still ran — but
+            # a peer's refusal must reach the UI, not just the extraction's
+            # success. Read once and cleared, same pattern as last_consolidation.
+            refusal = getattr(monitor, "last_compute_refusal", None)
+            monitor.last_compute_refusal = None
+            if refusal:
+                logger.info(
+                    "Knowledge extraction for %s fell back from %s to '%s': %s",
+                    conversation_id, refusal.get("node_id"),
+                    refusal.get("fallback_alias"), refusal.get("reason"),
+                )
+                await self.local_api.broadcast_event(
+                    "knowledge_extraction_fallback", refusal,
+                )
 
             if proposal:
                 logger.info("Knowledge proposal generated for %s", conversation_id)

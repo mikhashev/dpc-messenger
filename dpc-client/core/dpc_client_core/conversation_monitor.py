@@ -19,6 +19,7 @@ from dpc_protocol.pcm_core import PersonalContext, KnowledgeEntry, KnowledgeSour
 
 from . import knowledge_routing
 from . import conversation_paths
+from .p2p_manager import peer_proof
 
 
 def chain_hash_for(message: Dict[str, Any], prev_hash: str) -> str:
@@ -393,6 +394,7 @@ class ConversationMonitor:
         auto_detect: bool = False,  # Legacy parameter, always False (CLEAN-4: auto-detection removed)
         instruction_set_name: str = "general",  # NEW: Which instruction set to use for this conversation
         display_name: str = None,  # Human-readable name appended to folder (e.g. "Work", "Mike MacOS")
+        p2p_manager = None,  # Optional P2PManager, for peer_proof() before retrying a fallback on a peer
     ):
         """Initialize conversation monitor
 
@@ -407,6 +409,12 @@ class ConversationMonitor:
             auto_detect: Legacy parameter, always False. Messages are buffered for manual extraction only (CLEAN-4).
             instruction_set_name: Key of the instruction set to use for AI queries in this conversation (default: "general")
             display_name: Optional human-readable label appended to the conversation folder name for easy navigation
+            p2p_manager: Optional P2PManager. When given, a local-inference
+                         failure is not retried on a peer that is not on a
+                         proved connection (THE-COLD-FALLBACK-HIDES-A-D2-REFUSAL).
+                         When None, that check is skipped and the retry behaves
+                         as it always did — the monitor cannot fake a check it
+                         has no way to make.
         """
         self.conversation_id = conversation_id
         self.display_name = display_name
@@ -417,6 +425,13 @@ class ConversationMonitor:
         self.ai_query_func = ai_query_func  # Enables both local and remote inference
         self.auto_detect = auto_detect  # Controls automatic detection vs manual-only
         self.instruction_set_name = instruction_set_name  # NEW: Track instruction set for this conversation
+        self.p2p_manager = p2p_manager  # For peer_proof() — may be None, see __init__ docstring
+
+        # What the last knowledge-extraction fallback did, for the caller to
+        # announce (KnowledgeService reads this after generate_commit_proposal()
+        # the same way it reads last_consolidation). None when the extraction's
+        # primary call succeeded outright, or never ran.
+        self.last_compute_refusal: Optional[Dict[str, Any]] = None
 
         # Message buffer
         self.message_buffer: List[Message] = []  # Cleared after each extraction (for incremental auto-detect)
@@ -638,6 +653,52 @@ class ConversationMonitor:
                 getattr(self.llm_manager, "providers", None) or {}, configured)
         except knowledge_routing.NoKnowledgeProvider:
             return None
+
+    def _check_peer_proof(self, peer_id: str) -> tuple[Optional[bool], Optional[str]]:
+        """Whether `peer_id`'s P2P connection is proved, via the p2p_manager
+        this monitor was built with.
+
+        `(None, None)` both when there is no connection to read (see
+        `p2p_manager.peer_proof`) and when this monitor has no p2p_manager at
+        all — the two are not the same thing, but callers must treat both the
+        same way: "cannot tell", never "proved False". Only an explicit
+        `False` licenses skipping a retry.
+        """
+        if self.p2p_manager is None:
+            return None, None
+        return peer_proof(getattr(self.p2p_manager, "peers", None), peer_id)
+
+    def _note_compute_fallback(
+        self,
+        *,
+        node_id: Optional[str],
+        requested_alias: Optional[str],
+        reason: str,
+        fallback_alias: str,
+    ) -> None:
+        """Record that a compute call was refused and knowledge extraction
+        proceeded anyway on `fallback_alias` — the retry is the right call
+        (extraction keeps working), but the refusal must not become invisible
+        just because the retry succeeded.
+
+        Read by KnowledgeService after generate_commit_proposal() returns
+        (same pattern as `last_consolidation`) and turned into an event for
+        the UI. One helper, called from both `_calculate_knowledge_score` and
+        `_generate_commit_proposal`, so a third copy of this block cannot
+        silently drift from the other two (THE-COLD-FALLBACK-HIDES-A-D2-REFUSAL).
+        """
+        self.last_compute_refusal = {
+            "conversation_id": self.conversation_id,
+            "node_id": node_id,
+            "requested_alias": requested_alias,
+            "reason": reason,
+            "fallback_alias": fallback_alias,
+        }
+        logger.info(
+            "Monitor %s: knowledge extraction fell back from %s (%s) to '%s' — "
+            "the extraction still ran, but the refusal is not silent",
+            self.conversation_id, node_id or "peer", reason, fallback_alias,
+        )
 
     def _infer_inference_settings(self) -> tuple[str | None, str | None, str | None]:
         """Who extracts this conversation, as a chain — see `knowledge_routing`.
@@ -1139,25 +1200,46 @@ DO NOT include any text before or after the JSON. DO NOT use markdown code block
                                 provider=local_retry
                             )
                             response = result["response"]
+                            # The retry is right — extraction still ran — but a
+                            # peer's refusal (D2) must not read back as a plain
+                            # success with nothing saying the peer refused.
+                            self._note_compute_fallback(
+                                node_id=compute_host,
+                                requested_alias=provider,
+                                reason=str(primary_error),
+                                fallback_alias=local_retry,
+                            )
                             primary_error = None  # Success! Clear error
                         except Exception as local_error:
                             logger.error("Local inference fallback also failed: %s", local_error)
 
-                    # Case 2: Local failed (or wasn't configured), try remote as fallback for peer conversations
+                    # Case 2: Local failed (or wasn't configured), try remote as fallback for peer conversations.
+                    # Skip the peer entirely when it is known not to be on a proved
+                    # connection — the host now refuses an unproved tier (D2), so
+                    # dialling it only spends a round trip on a call that was
+                    # always going to be refused, logged as a misleading ERROR.
                     elif not compute_host and self.conversation_id.startswith("dpc-node-"):
-                        logger.warning("Local inference failed, trying remote inference as fallback: %s", primary_error)
-                        fallback_attempted = True
-                        try:
-                            result = await self.ai_query_func(
-                                prompt=prompt,
-                                compute_host=self.conversation_id,  # Try peer compute
-                                model=self.last_model,
-                                provider=None
+                        proved, tier = self._check_peer_proof(self.conversation_id)
+                        if proved is False:
+                            logger.info(
+                                "Not retrying peer %s for knowledge extraction — connection "
+                                "is not proved (tier=%s), the host would refuse it: %s",
+                                self.conversation_id, tier, primary_error,
                             )
-                            response = result["response"]
-                            primary_error = None  # Success! Clear error
-                        except Exception as remote_error:
-                            logger.error("Remote inference fallback also failed: %s", remote_error)
+                        else:
+                            logger.warning("Local inference failed, trying remote inference as fallback: %s", primary_error)
+                            fallback_attempted = True
+                            try:
+                                result = await self.ai_query_func(
+                                    prompt=prompt,
+                                    compute_host=self.conversation_id,  # Try peer compute
+                                    model=self.last_model,
+                                    provider=None
+                                )
+                                response = result["response"]
+                                primary_error = None  # Success! Clear error
+                            except Exception as remote_error:
+                                logger.error("Remote inference fallback also failed: %s", remote_error)
 
                     # If no fallback attempted or both failed, raise original error
                     if primary_error:
@@ -1472,27 +1554,46 @@ PARTICIPANTS' CULTURAL CONTEXTS:
                                 provider=local_retry
                             )
                             response = inference_result["response"]
+                            # Same shape as _calculate_knowledge_score's copy of this
+                            # block — a papered-over peer refusal must not go silent
+                            # here either (THE-COLD-FALLBACK-HIDES-A-D2-REFUSAL).
+                            self._note_compute_fallback(
+                                node_id=compute_host,
+                                requested_alias=provider,
+                                reason=str(primary_error),
+                                fallback_alias=local_retry,
+                            )
                             primary_error = None  # Success! Clear error
                         except Exception as local_error:
                             logger.error("Local inference fallback also failed: %s", local_error)
 
                     # Case 2: Local failed (or wasn't configured), try remote as fallback
-                    # Works for peer conversations (dpc-node-) and group conversations (last_compute_host set)
+                    # Works for peer conversations (dpc-node-) and group conversations (last_compute_host set).
+                    # Skipped when the target is known not to be on a proved
+                    # connection — see the matching comment in _calculate_knowledge_score.
                     elif not compute_host and (self.conversation_id.startswith("dpc-node-") or self.last_compute_host):
                         remote_host = self.last_compute_host or self.conversation_id
-                        logger.warning("Local inference failed, trying remote compute %s as fallback: %s", remote_host[:20], primary_error)
-                        fallback_attempted = True
-                        try:
-                            inference_result = await self.ai_query_func(
-                                prompt=prompt,
-                                compute_host=remote_host,
-                                model=self.last_model,
-                                provider=None
+                        proved, tier = self._check_peer_proof(remote_host)
+                        if proved is False:
+                            logger.info(
+                                "Not retrying %s for knowledge extraction — connection is not "
+                                "proved (tier=%s), the host would refuse it: %s",
+                                remote_host[:20], tier, primary_error,
                             )
-                            response = inference_result["response"]
-                            primary_error = None  # Success! Clear error
-                        except Exception as remote_error:
-                            logger.error("Remote inference fallback also failed: %s", remote_error)
+                        else:
+                            logger.warning("Local inference failed, trying remote compute %s as fallback: %s", remote_host[:20], primary_error)
+                            fallback_attempted = True
+                            try:
+                                inference_result = await self.ai_query_func(
+                                    prompt=prompt,
+                                    compute_host=remote_host,
+                                    model=self.last_model,
+                                    provider=None
+                                )
+                                response = inference_result["response"]
+                                primary_error = None  # Success! Clear error
+                            except Exception as remote_error:
+                                logger.error("Remote inference fallback also failed: %s", remote_error)
 
                     # If no fallback attempted or both failed, raise original error
                     if primary_error:
