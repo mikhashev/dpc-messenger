@@ -13,6 +13,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 import websockets
 
+from .firewall import SERVING_LOCAL_KEY, onward_sharing_refusal
 from .node_ledger import NodeLedger, default_ledger, usage_row
 
 logger = logging.getLogger(__name__)
@@ -232,10 +233,22 @@ class P2PCoordinator:
         alias's configured effort exists at run time — there is no separate
         table of configs to consult.
         """
+        config = self._provider_config(alias)
+        return config.get("reasoning_effort") if config else None
+
+    def _provider_config(self, alias: str) -> Optional[Dict[str, Any]]:
+        """The providers.json entry of a loaded alias, or None when the alias
+        is not loaded or its provider keeps no dict there."""
         manager = getattr(self.service, "llm_manager", None)
         provider = (getattr(manager, "providers", None) or {}).get(alias)
         config = getattr(provider, "config", None)
-        return config.get("reasoning_effort") if isinstance(config, dict) else None
+        return config if isinstance(config, dict) else None
+
+    def _provider_type(self, alias: str) -> Optional[str]:
+        """The provider `type` of a loaded alias — what `gateway.provider_types`
+        reads for every alias, read here for the one the door serves."""
+        config = self._provider_config(alias)
+        return config.get("type") if config else None
 
     def _record_peer_call(
         self,
@@ -326,6 +339,24 @@ class P2PCoordinator:
             error_response = create_remote_inference_response(
                 request_id=request_id,
                 error="This node shares no compute: no serving alias is configured",
+            )
+            try:
+                await self.p2p_manager.send_message_to_peer(peer_id, error_response)
+            except Exception as e:
+                logger.error("Error sending inference error response to %s: %s", peer_id, e, exc_info=True)
+            return
+
+        # What is shared is not shared onward (ADR-041 D7 part 1). The gateway
+        # classifies its lists against the registry on every request; the rules
+        # loader cannot, because no registry exists when they are parsed, so
+        # this door asks the same predicate here, before the router and before
+        # any usage row: an alias that is somebody else's model is not served.
+        refusal = onward_sharing_refusal(SERVING_LOCAL_KEY, serving_alias, self._provider_type(serving_alias))
+        if refusal:
+            logger.warning("Peer inference refused for %s: %s", peer_id, refusal)
+            error_response = create_remote_inference_response(
+                request_id=request_id,
+                error=f"This node cannot serve '{serving_alias}' to a peer: {refusal}",
             )
             try:
                 await self.p2p_manager.send_message_to_peer(peer_id, error_response)

@@ -161,6 +161,24 @@ class AppliedTariff:
     at: date
 
 
+def onward_sharing_refusal(key: str, alias: str, provider_type: Optional[str]) -> Optional[str]:
+    """Why `alias` may be served from neither door, or None (ADR-041 D7 part 1).
+
+    A `remote_peer` or `dpc_agent` alias is somebody else's model: sharing is
+    a permission between two nodes and does not travel, so what is shared is
+    not shared onward. One predicate and one sentence for the gateway
+    (`ContextFirewall.classify_serving_lists`) and the P2P door
+    (`P2PCoordinator.handle_inference_request`), because the door has no
+    registry when the rules are parsed and must ask at request time.
+    """
+    if provider_type in UNSERVABLE_PROVIDER_TYPES:
+        return (
+            f"compute.{key} names '{alias}', whose provider type is {provider_type}: somebody "
+            "else's model may not be shared onward (ADR-041 D7)"
+        )
+    return None
+
+
 @dataclass(frozen=True)
 class ServingLists:
     """The two lists after classification: what the doors may serve."""
@@ -503,11 +521,9 @@ class ContextFirewall:
                 provider_type = provider_types.get(alias)
                 if provider_type is None:
                     continue
-                if provider_type in UNSERVABLE_PROVIDER_TYPES:
-                    raise ValueError(
-                        f"compute.{key} names '{alias}', whose provider type is {provider_type}: somebody "
-                        "else's model may not be shared onward (ADR-041 D7)"
-                    )
+                refusal = onward_sharing_refusal(key, alias, provider_type)
+                if refusal:
+                    raise ValueError(refusal)
                 if provider_type in allowed:
                     continue
                 if provider_type in LOCAL_PROVIDER_TYPES | VENDOR_PROVIDER_TYPES:

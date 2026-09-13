@@ -9,11 +9,14 @@ request_inference_from_peer.
 from __future__ import annotations
 
 import asyncio
+import logging
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from dpc_client_core.node_ledger import NodeLedger
 from dpc_client_core.p2p_coordinator import P2PCoordinator
 
 
@@ -121,6 +124,69 @@ async def test_a_node_that_designates_no_alias_serves_nobody():
     svc.llm_manager.query.assert_not_called()
     msg = svc.p2p_manager.send_message_to_peer.call_args[0][1]
     assert "serving alias" in msg["payload"]["error"]
+
+
+def _designate(svc, alias: str, provider_type: str):
+    """The host designates `alias`, and the registry knows its provider type.
+
+    `make_coordinator` leaves `llm_manager.providers` a MagicMock, whose
+    `config` is not a dict, so the door reads no type there. These tests need
+    the type read, because the type is what is under test.
+    """
+    svc.firewall.compute_serving_alias = alias
+    svc.llm_manager.providers = {alias: SimpleNamespace(config={"type": provider_type})}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("provider_type", ["remote_peer", "dpc_agent"])
+async def test_the_peer_door_refuses_to_serve_an_alias_that_is_itself_remote(tmp_path, caplog, provider_type):
+    """ADR-041 D7 part 1 on the P2P door: what is shared is not shared onward.
+
+    The gateway has refused a `remote_peer` / `dpc_agent` serving alias since
+    `1ebe8441`; this door read `serving_local[0]` and served it without a look
+    at its type, so B could designate A's model and C would reach A through
+    B under B's name. Refused before the router, with no usage row: nothing
+    ran.
+    """
+    coord, svc = make_coordinator()
+    coord._ledger = NodeLedger(tmp_path / "ledger")
+    svc.firewall.can_request_inference.return_value = True
+    _designate(svc, "relay", provider_type)
+    svc.llm_manager.query = AsyncMock(return_value={"response": "ok", "model": "m"})
+
+    with caplog.at_level(logging.WARNING, logger="dpc_client_core.p2p_coordinator"):
+        await coord.handle_inference_request("peer-1", "req-1", "hello")
+
+    svc.llm_manager.query.assert_not_called()
+    msg = svc.p2p_manager.send_message_to_peer.call_args[0][1]
+    error = msg["payload"]["error"]
+    assert "relay" in error and provider_type in error
+    assert "shared onward" in error and "ADR-041 D7" in error
+    assert list(coord._ledger.rows()) == []
+    warned = [r for r in caplog.records if r.levelno == logging.WARNING and "shared onward" in r.getMessage()]
+    assert len(warned) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("provider_type", ["ollama", "llamacpp_server"])
+async def test_a_local_alias_whose_type_is_known_is_still_served_and_written_down(tmp_path, provider_type):
+    """The regression guard for the check above: a card type passes it."""
+    coord, svc = make_coordinator()
+    coord._ledger = NodeLedger(tmp_path / "ledger")
+    svc.firewall.can_request_inference.return_value = True
+    _designate(svc, "ollama_local", provider_type)
+    svc.llm_manager.query = AsyncMock(return_value={
+        "response": "ok", "model": "gemma3:27b", "prompt_tokens": 12, "response_tokens": 3,
+    })
+
+    await coord.handle_inference_request("peer-1", "req-1", "hello")
+
+    svc.llm_manager.query.assert_called_once()
+    assert svc.llm_manager.query.call_args[1]["provider_alias"] == "ollama_local"
+    msg = svc.p2p_manager.send_message_to_peer.call_args[0][1]
+    assert msg["payload"].get("error") is None and msg["payload"]["response"] == "ok"
+    (row,) = list(coord._ledger.rows())
+    assert row["alias"] == "ollama_local" and row["caller"] == "peer-1" and row["request_id"] == "req-1"
 
 
 @pytest.mark.asyncio
