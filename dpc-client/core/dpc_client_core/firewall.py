@@ -1395,7 +1395,7 @@ class ContextFirewall:
                     "personal": ["personal.json", "hobbies.json"]
                 },
                 "compute": {
-                    "_comment": "Compute sharing settings - Allow peers to run AI inference on your GPU/CPU",
+                    "_comment": "Compute sharing settings - Allow peers to run AI inference on your GPU/CPU. enabled governs BOTH doors: the peer door and the loopback gateway on 127.0.0.1 that serves your own IDE and CLI tools. With enabled false nothing is served on either, whatever serving_local and serving_vendor name; the gateway also needs [gateway] enabled = true in config.ini, so it is open only when both are on.",
                     "enabled": False,
                     "allow_groups": [],
                     "allow_nodes": [],

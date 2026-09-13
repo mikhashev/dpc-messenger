@@ -10,6 +10,15 @@ therefore refused past its per-caller daily ceiling. Every completion is one
 call on `LLMManager` and one usage row with `caller_kind="gateway"` on this
 node's ledger (D3).
 
+Two switches stand on this door and the table between them is AND (Mike's
+call, 2026-09-13): it serves only while `compute.enabled` in
+`privacy_rules.json` and `[gateway] enabled` in `config.ini` are both true.
+One word governs both of this node's doors — `compute.enabled` off shuts the
+peer door as it always has and this one as well, so a node that has stopped
+sharing compute has stopped, whichever side the request arrives from — while
+`[gateway] enabled` shuts this door alone, which is what the owner's own
+tools need.
+
 Two layers, on purpose. `Gateway` is the internal one — alias, serving
 class, quota or card, one call, one row — and knows nothing about HTTP.
 `GatewayServer` is the HTTP surface over it — the listener, the key, the
@@ -221,6 +230,31 @@ class Gateway:
             for alias, provider in providers.items()
         }
 
+    def compute_sharing_on(self) -> bool:
+        """Whether `compute.enabled` is true right now (Mike's call, 2026-09-13).
+
+        One flag governs both doors: the peer one, where `can_request_inference`
+        has always read it, and this one. Two switches stand on the gateway and
+        the table between them is AND — it serves only while `compute.enabled`
+        and `[gateway] enabled` are both true; `[gateway] enabled` never touches
+        the peer door. Asked of the live firewall on every request, never copied
+        at start: the rules reload on save, and a door holding a copy would keep
+        serving for the rest of the session after the owner turned sharing off.
+        """
+        return bool(getattr(self._core.firewall, "compute_enabled", False))
+
+    def refuse_unless_compute_sharing(self, alias: str) -> None:
+        """The one place the shut door is said, for all three routes."""
+        if self.compute_sharing_on():
+            return
+        raise GatewayError(
+            404,
+            f"model '{alias}' is not served: compute.enabled is false in privacy_rules.json, and it "
+            "closes both of this node's doors — the peer door and this loopback gateway, which serves "
+            "only while compute.enabled and [gateway] enabled are both true",
+            "compute_sharing_disabled",
+        )
+
     def serving_lists(self) -> ServingLists:
         """The two lists, classified against the live registry every time so a
         firewall reload is honoured; a list the firewall refuses is a
@@ -273,6 +307,9 @@ class Gateway:
         a prompt, no message array and no tools (ADR-041 D4, M1) — so tools on
         it are refused here, and the answer comes back whole: `on_chunk` is
         never called on that route and the shape layer sends what it got."""
+        # Before the name is even resolved: with sharing off nothing is served,
+        # and on the peer route nothing leaves this machine either.
+        self.refuse_unless_compute_sharing(alias)
         remote = parse_remote_name(alias)
         if remote is not None:
             if tools:
@@ -968,6 +1005,10 @@ class GatewayServer:
             return error(503, f"the gateway's serving lists are refused: {e}", "serving_lists_refused")
 
     async def _models(self, request: web.Request) -> web.Response:
+        if not self.gateway.compute_sharing_on():
+            # The same flag that refuses a completion empties the menu: a shut
+            # door lists nothing rather than advertise what it would refuse.
+            return web.json_response({"object": "list", "data": []})
         lists = self.gateway.serving_lists()
         data = [
             {"id": alias, "object": "model", "created": 0, "owned_by": owner}

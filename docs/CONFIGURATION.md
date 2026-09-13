@@ -200,6 +200,21 @@ are advisory and the file inherits the ACL of your home directory, as `.ws_token
 The Anthropic form's clients send the same key as `x-api-key: <key>` instead; both
 header forms open every route.
 
+**Two switches, one door.** `[gateway] enabled` above is not the only one: `compute.enabled`
+in `privacy_rules.json` governs **both** of this node's doors — the peer door it has always
+governed, and this loopback gateway (Mike's call, 2026-09-13). The table between them is AND:
+
+| `compute.enabled` | `[gateway] enabled` | The door |
+|---|---|---|
+| `true` | `true` | **Open.** `/v1/models` lists the two serving lists and each proved peer's menu; completions are served |
+| `true` | `false` | **Shut.** No listener at all; the peer door stays open |
+| `false` | `true` | **Shut.** The listener runs, `/v1/models` answers an empty list, and a completion — local, vendor or `remote:` — is `404` naming `compute.enabled`; the peer door is shut too |
+| `false` | `false` | **Shut.** Neither door serves anything |
+
+The flag is read from the live firewall on every request, so turning sharing off in the UI
+(or editing `privacy_rules.json` and reloading) closes the gateway on the next request
+without restarting the client — and turning it back on reopens it the same way.
+
 **What it serves.** Only the aliases in the two serving lists of `privacy_rules.json`;
 an alias outside them is `404`, and the gateway never falls back to `default_provider`:
 
@@ -452,7 +467,7 @@ An empty default means the key is written blank and the feature stays off until 
 
 | Key | Default | Notes |
 |---|---|---|
-| `enabled` | `false` | Serve /v1/models and /v1/chat/completions to local tools (ADR-041) |
+| `enabled` | `false` | Serve /v1/models and /v1/chat/completions to local tools (ADR-041). Needs `compute.enabled` in `privacy_rules.json` too: the door is open only when both are true |
 | `port` | `9997` | 9998 is the file server, 9999 the local API |
 | `host` | `127.0.0.1` | Not configurable: any other value is refused at start (ADR-041 D1) |
 

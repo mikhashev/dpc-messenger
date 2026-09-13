@@ -360,7 +360,9 @@ async def test_the_peer_route_waits_on_no_local_card_and_needs_no_local_list(tmp
     and empty local serving lists neither block nor bound a peer call."""
     lock = asyncio.Semaphore(1)
     await lock.acquire()  # a peer is on this node's card
-    service = _peer_service(tmp_path, compute={"enabled": False})
+    # Sharing is on — `compute.enabled` governs the gateway too since
+    # 2026-09-13 — and the two local lists are empty.
+    service = _peer_service(tmp_path, compute={"enabled": True})
     try:
         async with _running(tmp_path, service, inference_lock=lock) as (server, ledger):
             status, text = await _request(server, "GET", "/v1/models", key=_key(tmp_path))

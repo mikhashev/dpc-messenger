@@ -99,7 +99,7 @@
   },
 
   "compute": {
-    "_comment": "Remote Inference Permissions - Controls who can use your local AI models. This does NOT share hardware access, only API access to run AI models on your device.",
+    "_comment": "Remote Inference Permissions - Controls who can use your local AI models. This does NOT share hardware access, only API access to run AI models on your device. 'enabled' governs BOTH doors: the peer door and the loopback gateway on 127.0.0.1 that serves your own IDE and CLI tools. With it false nothing is served on either; the gateway also needs [gateway] enabled = true in config.ini, so it is open only when both are on.",
     "enabled": false,
     "allow_nodes": ["dpc-node-alice-123"],
     "allow_groups": ["trusted_developers"],

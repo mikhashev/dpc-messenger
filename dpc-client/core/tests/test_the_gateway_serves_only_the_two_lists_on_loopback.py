@@ -64,14 +64,28 @@ def _providers():
     }
 
 
+def _write_rules(tmp_path: Path, compute: dict) -> Path:
+    """The rules file every stand-in here writes, and the one a reload re-reads.
+
+    `compute.enabled` governs both doors (Mike's call, 2026-09-13): a node
+    with the flag off serves nothing, on the gateway or to a peer. A fixture
+    that names serving lists is a node that shares, so the flag is on unless
+    the test says otherwise — the tests that mean «off» say `enabled: False`.
+    """
+    compute = dict(compute)
+    compute.setdefault("enabled", True)
+    rules = tmp_path / "privacy_rules.json"
+    rules.write_text(json.dumps({"compute": compute}), encoding="utf-8")
+    return rules
+
+
 def _service(tmp_path: Path, compute: dict, *, providers=None, fail=None, finish_reason=None):
     """A stand-in for CoreService with only what the gateway reads: a real
     firewall over a rules file in tmp_path, a fake registry, and both doors on
     `LLMManager` — `query_messages`, which both HTTP shapes go through, and
     `query`, kept so a route that fell back to it would be seen — each
     recording what it was actually given."""
-    rules = tmp_path / "privacy_rules.json"
-    rules.write_text(json.dumps({"compute": compute}), encoding="utf-8")
+    rules = _write_rules(tmp_path, compute)
     providers = _providers() if providers is None else providers
     calls = []
 

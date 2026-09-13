@@ -43,6 +43,7 @@ from tests.test_the_gateway_serves_only_the_two_lists_on_loopback import (
     _key,
     _request,
     _running,
+    _write_rules,
 )
 from tests.test_the_gateway_speaks_the_anthropic_messages_form_over_the_same_door import (
     _anthropic_error,
@@ -84,8 +85,7 @@ def _tool_service(tmp_path, compute=BOTH_LISTS, *, text=ANSWER, tool_calls=(), c
     """A stand-in with both doors and a scripted `query_messages`: it hands
     `chunks` (or the whole text) to `on_chunk` when one is given, then returns
     the manager's dict with the scripted tool calls and stop reason."""
-    rules = tmp_path / "privacy_rules.json"
-    rules.write_text(json.dumps({"compute": compute}), encoding="utf-8")
+    rules = _write_rules(tmp_path, compute)
     providers = {
         LOCAL: _ToolProvider("ollama", "qwen3:8b"),
         VENDOR: _ToolProvider("deepseek", "deepseek-v4-flash"),
