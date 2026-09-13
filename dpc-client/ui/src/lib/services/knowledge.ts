@@ -9,6 +9,7 @@ import type {
     ContextUpdatedEvent,
     TokenWarningEvent,
     ExtractionFailureEvent,
+    KnowledgeExtractionFallbackEvent,
 } from '$lib/types';
 
 // Personal context (loaded on connect) — bound to ContextViewer's local PersonalContext type
@@ -38,6 +39,12 @@ export const knowledgeVoteStatus = writable<{
 
 // Knowledge extraction failure (Phase 4)
 export const extractionFailure = writable<ExtractionFailureEvent | null>(null);
+
+// A peer refused a knowledge-extraction inference request and extraction
+// retried on the cold local alias instead — the retry succeeded, so this is
+// not a failure, but the refusal must still reach the UI (sibling of
+// extractionFailure above; see knowledge_extraction_fallback in coreService.ts).
+export const extractionFallback = writable<KnowledgeExtractionFallbackEvent | null>(null);
 
 // Token limit warning (Phase 2)
 export const tokenWarning = writable<TokenWarningEvent | null>(null);

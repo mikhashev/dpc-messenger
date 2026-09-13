@@ -56,6 +56,7 @@ import type {
     ContextUpdatedEvent,
     TokenWarningEvent,
     ExtractionFailureEvent,
+    KnowledgeExtractionFallbackEvent,
     KnowledgeCommitResultEvent,
     AIResponseWithImageEvent,
 } from '$lib/types';
@@ -111,6 +112,7 @@ export type {
     ContextUpdatedEvent,
     TokenWarningEvent,
     ExtractionFailureEvent,
+    KnowledgeExtractionFallbackEvent,
     KnowledgeCommitResultEvent,
     AIResponseWithImageEvent,
 };
@@ -128,7 +130,7 @@ import { voiceOfferReceived, voiceTranscriptionReceived, voiceTranscriptionCompl
 import { groupChats, groupTextReceived, groupFileReceived, groupInviteReceived, groupUpdated, groupMemberLeft, groupDeleted, groupHistorySynced, groupAccessDenied, groupMessageDeleted, tokenUsageUpdated } from './services/groups';
 import { agentsList, agentCreated, agentUpdated, agentDeleted, agentProfiles, agentProgress, agentProgressClear, agentLiveTools, agentTextChunk, agentChatMessage, userMessageConfirmed, sleepStateChanged, sleepProgress, sleepAgentStates } from './services/agents';
 import { telegramEnabled, telegramConnected, telegramStatus, telegramError, telegramLinkedChats, telegramMessages, telegramMessageReceived, telegramVoiceReceived, telegramImageReceived, telegramFileReceived, agentTelegramLinked, agentTelegramUnlinked, agentHistoryUpdated } from './services/telegram';
-import { personalContext, contextUpdated, peerContextUpdated, knowledgeCommitProposal, knowledgeCommitResult, knowledgeVoteStatus, extractionFailure, tokenWarning, integrityWarnings, votingConversationId } from './services/knowledge';
+import { personalContext, contextUpdated, peerContextUpdated, knowledgeCommitProposal, knowledgeCommitResult, knowledgeVoteStatus, extractionFailure, extractionFallback, tokenWarning, integrityWarnings, votingConversationId } from './services/knowledge';
 import { historyRestored, newSessionProposal, newSessionResult, conversationReset, conversationSettings, conversationSettingsChanged, conversationDeleted } from './services/session';
 
 // Re-export all service stores for backward compatibility.
@@ -142,7 +144,7 @@ export { voiceOfferReceived, voiceTranscriptionReceived, voiceTranscriptionCompl
 export { groupChats, groupTextReceived, groupFileReceived, groupInviteReceived, groupUpdated, groupMemberLeft, groupDeleted, groupHistorySynced, groupAccessDenied, groupMessageDeleted, tokenUsageUpdated };
 export { agentsList, agentCreated, agentUpdated, agentDeleted, agentProfiles, agentProgress, agentProgressClear, agentLiveTools, agentTextChunk, agentChatMessage, userMessageConfirmed, sleepStateChanged, sleepProgress, sleepAgentStates };
 export { telegramEnabled, telegramConnected, telegramStatus, telegramError, telegramLinkedChats, telegramMessages, telegramMessageReceived, telegramVoiceReceived, telegramImageReceived, telegramFileReceived, agentTelegramLinked, agentTelegramUnlinked, agentHistoryUpdated };
-export { personalContext, contextUpdated, peerContextUpdated, knowledgeCommitProposal, knowledgeCommitResult, knowledgeVoteStatus, extractionFailure, tokenWarning, integrityWarnings, votingConversationId };
+export { personalContext, contextUpdated, peerContextUpdated, knowledgeCommitProposal, knowledgeCommitResult, knowledgeVoteStatus, extractionFailure, extractionFallback, tokenWarning, integrityWarnings, votingConversationId };
 export { historyRestored, newSessionProposal, newSessionResult, conversationReset, conversationSettings, conversationSettingsChanged, conversationDeleted };
 
 // Track currently active chat to prevent unread badges on open chats
@@ -472,6 +474,14 @@ export async function connectToCoreService() {
                 else if (message.event === "knowledge_extraction_failed") {
                     console.error("Knowledge extraction failed:", message.payload);
                     extractionFailure.set(message.payload);
+                }
+                // A peer refused a knowledge-extraction inference request and
+                // extraction retried on the cold local alias instead — the
+                // retry succeeded, but the refusal must not go silent
+                // (knowledge_service.py, THE-COLD-FALLBACK-HIDES-A-D2-REFUSAL).
+                else if (message.event === "knowledge_extraction_fallback") {
+                    console.warn("Knowledge extraction fell back after a peer refusal:", message.payload);
+                    extractionFallback.set(message.payload);
                 }
                 // Phase 7: Handle personal context update (for status indicators)
                 else if (message.event === "personal_context_updated") {

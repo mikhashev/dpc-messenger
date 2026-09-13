@@ -8,11 +8,13 @@
     knowledgeCommitResult,
     tokenWarning,
     extractionFailure,
+    extractionFallback,
     contextUpdated,
     peerContextUpdated,
     tokenUsageUpdated,
   } from '$lib/coreService';
   import { showNotificationIfBackground } from '$lib/notificationService';
+  import { formatExtractionFallbackMessage } from '$lib/utils/extractionFallbackMessage';
 
   // ---------------------------------------------------------------------------
   // Props
@@ -22,6 +24,7 @@
     onUpdateTokenUsage,
     onShowTokenWarning,
     onShowExtractionFailure,
+    onShowExtractionFallback,
     onShowCommitResult,
     onCloseCommitDialog,
     onUpdateContextHash,
@@ -31,6 +34,7 @@
     onUpdateTokenUsage: (conversationId: string, usage: { used: number; limit: number; historyTokens?: number; tokensAfterLastResponse?: number; tokensAfterLastResponseAt?: string | null; contextAgent?: string; contextAgents?: Array<{name: string, tokens: number, limit: number, percent: number}> | null }) => void;
     onShowTokenWarning: (message: string) => void;
     onShowExtractionFailure: (message: string, conversationId: string | null) => void;
+    onShowExtractionFallback: (message: string, conversationId: string | null) => void;
     onShowCommitResult: (message: string, type: 'info' | 'error' | 'warning', result: any) => void;
     onCloseCommitDialog: () => void;
     onUpdateContextHash: (hash: string) => void;
@@ -103,6 +107,19 @@
       onShowExtractionFailure(
         message || `Knowledge extraction failed for ${conversation_id}: ${reason}`,
         conversation_id ?? null
+      );
+    }
+  });
+
+  // Handle knowledge extraction fallback: a peer refused an inference
+  // request and extraction retried on the cold local alias instead. The
+  // retry succeeded, so this is not a failure toast, but the refusal must
+  // still reach the UI (THE-COLD-FALLBACK-HIDES-A-D2-REFUSAL).
+  $effect(() => {
+    if ($extractionFallback) {
+      onShowExtractionFallback(
+        formatExtractionFallbackMessage($extractionFallback),
+        $extractionFallback.conversation_id ?? null
       );
     }
   });

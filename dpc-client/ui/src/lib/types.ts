@@ -552,6 +552,21 @@ export interface ExtractionFailureEvent {
     error?: string;              // legacy; no emitter in knowledge_service.py sends it
 }
 
+// Emitted when a peer refused a knowledge-extraction inference request (D2)
+// and the extraction was retried on the node's own cold local alias instead.
+// dpc-client/core/dpc_client_core/knowledge_service.py ~:1391, payload is
+// ConversationMonitor.last_compute_refusal (conversation_monitor.py
+// _note_compute_fallback). Sibling of ExtractionFailureEvent above, but this
+// one is a fallback that *succeeded* — the peer's refusal must not go silent
+// just because extraction still ran (THE-COLD-FALLBACK-HIDES-A-D2-REFUSAL).
+export interface KnowledgeExtractionFallbackEvent {
+    conversation_id: string | null;
+    node_id: string | null;         // the peer that refused, if known
+    requested_alias: string | null; // provider/alias that was asked for
+    reason: string;                 // free-text error from the refusal (str(primary_error))
+    fallback_alias: string;         // local alias extraction actually ran on
+}
+
 export interface KnowledgeCommitResultEvent {
     proposal_id: string;
     status: 'approved' | 'rejected' | 'revision_needed';

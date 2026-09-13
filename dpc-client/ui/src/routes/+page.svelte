@@ -6,7 +6,7 @@
   import { providerToRemember } from '$lib/utils/rememberedProvider';
   import { voteStatusAppliesTo } from '$lib/utils/voteStatusIdentity';
   import { writable } from "svelte/store";
-  import { connectionStatus, nodeStatus, sendCommand, resetReconnection, connectToCoreService, knowledgeCommitProposal, knowledgeVoteStatus, personalContext, tokenWarning, extractionFailure, availableProviders, peerProviders, unreadMessageCounts, resetUnreadCount, setActiveChat, newSessionProposal, proposeNewSession, voteNewSession, defaultProviders, providersList, groupChats, listAgents, agentsList, sleepStateChanged, sleepProgress, sleepAgentStates, tokenUsageUpdated, setGroupReasoningEffort, updateAgentConfig } from "$lib/coreService";
+  import { connectionStatus, nodeStatus, sendCommand, resetReconnection, connectToCoreService, knowledgeCommitProposal, knowledgeVoteStatus, personalContext, tokenWarning, extractionFailure, extractionFallback, availableProviders, peerProviders, unreadMessageCounts, resetUnreadCount, setActiveChat, newSessionProposal, proposeNewSession, voteNewSession, defaultProviders, providersList, groupChats, listAgents, agentsList, sleepStateChanged, sleepProgress, sleepAgentStates, tokenUsageUpdated, setGroupReasoningEffort, updateAgentConfig } from "$lib/coreService";
   import { confirmAsync } from "$lib/utils/dialog";
   import { mapBackendMessage } from "$lib/utils/messageMapper";
   import KnowledgeCommitDialog from "$lib/components/KnowledgeCommitDialog.svelte";
@@ -180,6 +180,10 @@
   // Knowledge extraction failure state (Phase 4)
   let showExtractionFailure = $state(false);
   let extractionFailureMessage = $state("");
+
+  // Knowledge extraction fallback state: peer refused, extraction retried locally
+  let showExtractionFallback = $state(false);
+  let extractionFallbackMessage = $state("");
 
   // Knowledge commit result notification state
   let showCommitResultToast = $state(false);
@@ -1535,6 +1539,20 @@
   />
 {/if}
 
+<!-- Knowledge Extraction Fallback Toast (peer refused, retried locally) -->
+{#if showExtractionFallback}
+  <Toast
+    message={extractionFallbackMessage}
+    type="warning"
+    duration={8000}
+    dismissible={true}
+    onDismiss={() => {
+      showExtractionFallback = false;
+      extractionFallback.set(null);
+    }}
+  />
+{/if}
+
 <!-- Knowledge Commit Result Toast -->
 {#if showCommitResultToast}
   <Toast
@@ -1654,6 +1672,10 @@
         (!conversationId || $knowledgeCommitProposal.conversation_id === conversationId)) {
       closeCommitDialog();
     }
+  }}
+  onShowExtractionFallback={(message, conversationId) => {
+    showExtractionFallback = true;
+    extractionFallbackMessage = message;
   }}
   onShowCommitResult={(message, type, result) => {
     commitResultMessage = message;
