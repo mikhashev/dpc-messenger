@@ -998,11 +998,25 @@ def truncate_for_log(s: str, max_chars: int = 4000) -> str:
 
 
 def clip_text(text: str, max_chars: int) -> str:
-    """Clip text to max_chars, keeping start and end with truncation marker."""
+    """Clip text to max_chars, keeping start and end; the marker names the loss.
+
+    The dropped count is derived from what is kept, not from ``max_chars``: the
+    ``max(200, ...)`` floor lets the two halves be wider than ``max_chars`` and,
+    for a short text, overlap and cover it whole — then nothing is dropped and
+    the text is returned unchanged.
+    """
     if max_chars <= 0 or len(text) <= max_chars:
         return text
     half = max(200, max_chars // 2)
-    return text[:half] + "\n...(truncated)...\n" + text[-half:]
+    dropped = len(text) - 2 * half
+    if dropped <= 0:
+        return text
+    marker = (
+        f"\n\n[!] MIDDLE OMITTED: {dropped} of {len(text)} characters are missing here. "
+        f"You are seeing the first {half} characters and the last {half}, "
+        f"not the whole text.\n\n"
+    )
+    return text[:half] + marker + text[-half:]
 
 
 def short(s: Any, n: int = 120) -> str:

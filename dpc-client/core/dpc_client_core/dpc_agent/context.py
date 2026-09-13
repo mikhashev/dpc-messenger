@@ -228,7 +228,17 @@ def _build_memory_sections(memory: Memory) -> List[str]:
     sections = []
 
     scratchpad_raw = memory.load_scratchpad()
-    sections.append("## Scratchpad\n\n" + clip_text(scratchpad_raw, 90000))
+    scratchpad_shown = clip_text(scratchpad_raw, 90000)
+    scratchpad_section = "## Scratchpad\n\n" + scratchpad_shown
+    if scratchpad_shown != scratchpad_raw:
+        scratchpad_section += (
+            "\n\n> **This scratchpad is incomplete.** Only its first and last part are "
+            f"above; the middle is missing. The whole file is {len(scratchpad_raw)} "
+            f"characters at {memory.scratchpad_path()}. A question about what lies "
+            "between the two ends cannot be answered from this section — read the file "
+            "directly (read_file, with offset/limit)."
+        )
+    sections.append(scratchpad_section)
 
     # Morning brief injection (ADR-014 Sleep Consolidation)
     try:
