@@ -260,9 +260,10 @@ class P2PCoordinator:
         model: Optional[str],
         started_at: datetime,
         duration_s: float,
+        served_effort: Optional[str] = None,
     ) -> tuple[float, str]:
         """Price a served call once, at the moment it was made, and write its
-        usage row under the peer's name (ADR-041 D3).
+        usage row under the peer's name (ADR-041 D3), naming the effort it ran at.
 
         Returns `(cost_usd, billing)`, which also travel to the peer as the
         informational tail of the response — attribution, not a price it owes. A row
@@ -292,6 +293,7 @@ class P2PCoordinator:
                 thinking_tokens=result.get("thinking_tokens"),
                 counts_source="ours",
                 output_includes_thinking=result.get("output_includes_thinking", "unknown"),
+                served_effort=served_effort,
                 started_at=started_at,
                 duration_s=duration_s,
                 billing=billing,
@@ -387,7 +389,7 @@ class P2PCoordinator:
             cost_usd, billing = self._record_peer_call(
                 peer_id=peer_id, request_id=request_id, serving_alias=serving_alias,
                 result=result, model=actual_model, started_at=started_at,
-                duration_s=duration_s,
+                duration_s=duration_s, served_effort=served_effort,
             )
             # The usage row above is the record of this call (ADR-041 D3): a
             # peer's request belongs to no agent, so no events.jsonl carries it,
@@ -419,6 +421,9 @@ class P2PCoordinator:
                 cost_usd=cost_usd,
                 billing=billing,
                 output_includes_thinking=result.get("output_includes_thinking"),
+                # The word after the clamp, or None: the guest's only way to
+                # check the depth it paid for against the depth it asked for.
+                served_effort=served_effort,
             )
             await self.p2p_manager.send_message_to_peer(peer_id, success_response)
             logger.debug("Sent inference result to %s", peer_id)

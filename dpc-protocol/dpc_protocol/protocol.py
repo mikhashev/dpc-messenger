@@ -99,8 +99,13 @@ def create_remote_inference_response(
     cost_usd: float = None,
     billing: str = None,
     output_includes_thinking: str = None,
+    served_effort: str = None,
 ) -> Dict[str, Any]:
     """Creates a remote inference response message with optional token, model, and thinking metadata.
+
+    `served_effort` is the effort word the host ran at after clamping the
+    request's `reasoning_effort` (DPTP v1.7); absent means no effort control
+    was applied, which is not `off`. Never on an error.
 
     `cost_usd` is what the call cost the serving node, priced by it at the
     time of the call, and `billing` is the billing model that price came
@@ -141,6 +146,8 @@ def create_remote_inference_response(
             payload["billing"] = billing
         if output_includes_thinking is not None:
             payload["output_includes_thinking"] = output_includes_thinking
+        if served_effort is not None:
+            payload["served_effort"] = served_effort
     else:
         payload["error"] = error or "Unknown error"
         payload["status"] = "error"

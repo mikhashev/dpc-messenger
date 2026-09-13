@@ -85,6 +85,9 @@ class RemoteInferenceResponseHandler(MessageHandler):
             output_includes_thinking = stated_output_includes_thinking(
                 output_includes_thinking, peer=sender_node_id, log=self.logger,
             )
+        # The effort the host actually ran at, after its clamp (v1.7). Absent
+        # means the host applied no effort control, which is not `off`.
+        served_effort = payload.get("served_effort")
 
         if request_id in self.service._pending_inference_requests:
             future = self.service._pending_inference_requests[request_id]
@@ -110,6 +113,8 @@ class RemoteInferenceResponseHandler(MessageHandler):
                         result_data["billing"] = billing
                     if output_includes_thinking is not None:
                         result_data["output_includes_thinking"] = output_includes_thinking
+                    if served_effort is not None:
+                        result_data["served_effort"] = served_effort
                     future.set_result(result_data)
                 else:
                     future.set_exception(RuntimeError(error or "Remote inference failed"))

@@ -8,7 +8,11 @@ kept by the node, not by the caller. A row says who called (`caller`,
 numbers those are (`counts_source`), whether `completion_tokens` already holds
 the reasoning (`output_includes_thinking`: `includes` | `excludes` | `unknown`,
 set where the count was made; a row written before the column reads as
-`unknown`) and what it cost (`billing`, `cost_usd`) —
+`unknown`), at which reasoning effort the call actually ran (`served_effort`:
+one word of the shared scale off/low/medium/high/max, the host's word after its
+clamp — on the host's own row from the clamp, on the requester's row from the
+wire; None means no effort control was applied, which is not `off`, and a row
+written before the column reads as None) and what it cost (`billing`, `cost_usd`) —
 priced at `started_at` by the node that made the call and never re-priced,
 which is the invariant `dpc_agent/pricing.py` states for itself. A null
 `cost_usd` is a call nobody priced; a zero is a price.
@@ -116,6 +120,7 @@ def usage_row(
     tariff_currency: Optional[str] = None,
     tariff_at: Any = None,
     output_includes_thinking: str = "unknown",
+    served_effort: Optional[str] = None,
 ) -> Dict[str, Any]:
     """One row in D3's column order.
 
@@ -141,6 +146,8 @@ def usage_row(
             raise ValueError(f"{name}={value!r} is not one of {allowed}")
     if started_at.tzinfo is None:
         raise ValueError("started_at must carry a timezone; the row is priced by the UTC hour")
+    if served_effort is not None and not isinstance(served_effort, str):
+        raise ValueError(f"served_effort={served_effort!r} is not a word of the effort scale")
     row: Dict[str, Any] = {
         "request_id": str(request_id),
         "caller": caller,
@@ -153,6 +160,7 @@ def usage_row(
         "thinking_tokens": _count(thinking_tokens),
         "counts_source": counts_source,
         "output_includes_thinking": output_includes_thinking,
+        "served_effort": served_effort,
         "started_at": started_at.astimezone(timezone.utc).isoformat(),
         "duration_s": round(float(duration_s), 3),
         "billing": billing,
@@ -312,6 +320,7 @@ class NodeLedger:
                             continue
                         if isinstance(row, dict):
                             row.setdefault("output_includes_thinking", "unknown")
+                            row.setdefault("served_effort", None)
                             yield row
             except FileNotFoundError:
                 continue

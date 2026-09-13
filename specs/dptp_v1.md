@@ -193,10 +193,7 @@ Requests the peer to execute an AI inference query using their local compute res
         "mime_type": "image/png"
       }
     ],
-    "thinking": {             // Optional: thinking mode configuration
-      "enabled": true,
-      "budget_tokens": 10000  // For Claude Extended Thinking
-    }
+    "reasoning_effort": "low" // Optional: how deeply the guest wants the model to think (v1.7+)
   }
 }
 ```
@@ -210,9 +207,7 @@ Requests the peer to execute an AI inference query using their local compute res
   - `path` (string, optional): Original filename
   - `base64` (string, required): Base64-encoded image data (data URL format)
   - `mime_type` (string, required): MIME type (e.g., image/png, image/jpeg)
-- `thinking` (object, optional): Thinking mode configuration
-  - `enabled` (boolean): Enable extended thinking/reasoning
-  - `budget_tokens` (integer): Token budget for thinking (Claude Extended Thinking)
+- `reasoning_effort` (string, optional, v1.7+): How deeply the guest wants the model to think, one word of the shared scale `off`, `low`, `medium`, `high`, `max`. A request, not an instruction: the host may lower it to what it is willing to spend, and answers with the word it served in `served_effort`. Absent means the guest did not choose, and the host answers at its own default — which is not the same as `off`. A word the host does not recognise is not guessed at: the host answers at its own default and `served_effort` is absent.
 
 **Response:** REMOTE_INFERENCE_RESPONSE message
 
@@ -240,7 +235,8 @@ Returns the result of a remote inference request.
     "thinking_tokens": 50,
     "output_includes_thinking": "excludes",
     "cost_usd": 0.0041,
-    "billing": "pay_per_use"
+    "billing": "pay_per_use",
+    "served_effort": "low"
   }
 }
 ```
@@ -270,6 +266,7 @@ Returns the result of a remote inference request.
 - `output_includes_thinking` (string, optional, v1.7+): Whether `response_tokens` already has `thinking_tokens` inside it — `includes`, `excludes` or `unknown` — as the node that produced the count knows it, so the requester can check the arithmetic on the numbers beside it rather than assume a convention. Absent from an older host, which the requester reads as `unknown`. Never sent on an error.
 - `cost_usd` (number, optional, v1.7+): What the call cost the serving node, in USD, priced by that node at the moment of the call and never re-derived (ADR-041 D3). Absent when the host did not count it. Informational to the requester: it attributes a cost, it does not bill one.
 - `billing` (string, optional, v1.7+): The billing model the host priced the call under, `pay_per_use` or `subscription`, so the requester's own usage row copies the host's answer instead of guessing one from the model's name. Absent when the host did not say. Never sent on an error, like `cost_usd`.
+- `served_effort` (string, optional, v1.7+): The reasoning effort the host actually ran the call at, one word of the same scale as the request's `reasoning_effort`, after the host clamped the request to its own cap. This is the guest's only way to check the depth it paid for against the depth it asked for; the host's usage row and the guest's carry the same word under the same `request_id`. Absent means the host applied no effort control and answered at its own default — not the same as `off`. Never sent on an error.
 
 **Fields (Error):**
 - `request_id` (string, required): Matches request UUID
@@ -2143,6 +2140,17 @@ DPTP is designed to be extensible. New commands can be added by:
   (`includes` | `excludes` | `unknown`): whether `response_tokens` already
   contains `thinking_tokens`, stated by the node that counted. Added
   2026-09-13 while v1.7 is unreleased, beside the fields it qualifies
+- **§3.4 REMOTE_INFERENCE_REQUEST** — optional `reasoning_effort`: one word of
+  the shared scale `off`/`low`/`medium`/`high`/`max`, which the host may lower
+  to its own cap; absent means the guest did not choose. Shipped in the
+  implementation on 2026-09-08 (`1f240f17`) and listed here only now
+- **§3.4 REMOTE_INFERENCE_RESPONSE** — optional `served_effort`: the word the
+  host actually ran at after its clamp, so the guest can check the depth it
+  paid for; absent means no effort control was applied. Added 2026-09-14
+- **§3.4 REMOTE_INFERENCE_REQUEST** — the `thinking {enabled, budget_tokens}`
+  object of v1.4 is removed from the text: never emitted or read by any
+  implementation since it was written. `reasoning_effort` is the channel it
+  described
 - **§2 Payload Format** — the frame cap is stated: 64 MiB per payload, refused
   before it is read rather than allocated, and refused at the sender too
   (ADR-041 D8). Was «Unlimited (implementation may impose limits)»; the

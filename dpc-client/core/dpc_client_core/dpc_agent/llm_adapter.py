@@ -352,6 +352,9 @@ class DpcLlmAdapter:
                 counts_source=facts.get("counts_source", "ours"),
                 # Set by whoever made the count: the provider's usage dict or the wire.
                 output_includes_thinking=usage.get("output_includes_thinking", "unknown"),
+                # On the peer route, the host's word after its clamp, copied from
+                # the wire; the local routes do not set it yet.
+                served_effort=usage.get("served_effort"),
                 started_at=started_at,
                 duration_s=duration_s,
                 # Priced by the route; on the peer route both are the host's copy
@@ -1086,6 +1089,11 @@ class DpcLlmAdapter:
             # The host priced the call, or nobody did; this node does not (D3).
             if _peer.get("cost_usd") is not None:
                 usage["cost"] = _peer["cost_usd"]
+            # The effort the host actually served, after its clamp (DPTP v1.7):
+            # the only place this node can learn what depth it paid for. Set
+            # whether or not the host counted, so the row carries it either way.
+            if _peer.get("served_effort") is not None:
+                usage["served_effort"] = _peer["served_effort"]
 
             return response_msg, usage
 

@@ -117,7 +117,7 @@ def test_every_column_of_d3_is_present_in_its_order():
     assert list(row) == [
         "request_id", "caller", "caller_kind", "alias", "model", "route",
         "prompt_tokens", "completion_tokens", "thinking_tokens", "counts_source",
-        "output_includes_thinking", "started_at", "duration_s", "billing", "cost_usd",
+        "output_includes_thinking", "served_effort", "started_at", "duration_s", "billing", "cost_usd",
         "task_id", "conversation_id",
     ]
     assert row["started_at"] == "2026-09-01T00:00:01+00:00"
@@ -222,7 +222,7 @@ def test_the_tariff_columns_travel_as_one_group_or_not_at_all(tmp_path):
     assert list(priced) == [
         "request_id", "caller", "caller_kind", "alias", "model", "route",
         "prompt_tokens", "completion_tokens", "thinking_tokens", "counts_source",
-        "output_includes_thinking", "started_at", "duration_s", "billing", "cost_usd",
+        "output_includes_thinking", "served_effort", "started_at", "duration_s", "billing", "cost_usd",
         "tariff_in", "tariff_out", "tariff_currency", "tariff_at", "task_id",
     ]
     assert (priced["tariff_in"], priced["tariff_out"]) == (20.0, 60.0)
