@@ -405,18 +405,14 @@ class ConsensusManager:
             if self.on_commit_rejected:
                 await self.on_commit_rejected(proposal, votes)
 
-            result_payload = {
-                "proposal_id": proposal.proposal_id,
-                "topic": proposal.topic,
-                "summary": proposal.summary,
-                "status": "timeout",
-                "vote_tally": {
-                    "approve": 0, "reject": 0, "request_changes": 0,
-                    "total": 0, "threshold": self.consensus_threshold,
-                    "approval_rate": 0
-                },
-                "votes": [],
-            }
+            # Same helper the main path uses below, so this payload cannot drift
+            # from the fields spec §3.7 requires (timestamp, vote_tally.abstain,
+            # vote_tally.participants) the way it did before.
+            result_payload = self._build_result_payload(
+                proposal, "timeout", votes,
+                approve_count=0, reject_count=0, change_count=0, abstain_count=0,
+                total_votes=0, participant_count=participant_count, approval_rate=0,
+            )
             if self.on_result_broadcast:
                 await self.on_result_broadcast(result_payload, proposal.participants)
             return
@@ -500,11 +496,51 @@ class ConsensusManager:
                 await self.on_commit_revision_needed(proposal, votes)
 
         # Prepare result notification payload
-        result_payload = {
+        result_payload = self._build_result_payload(
+            proposal, session.status, votes,  # "approved", "rejected", "revision_needed", "timeout"
+            approve_count=approve_count, reject_count=reject_count, change_count=change_count,
+            abstain_count=abstain_count, total_votes=total_votes,
+            participant_count=participant_count, approval_rate=approval_rate,
+            commit_id=commit.commit_id if session.status == "approved" else None,
+        )
+
+        # Fire result_broadcast callback — recipient filtering (self vs remote)
+        # happens inside the callback. Log reflects callback invocation, not
+        # delivery: callback may emit zero P2P sends for solo-vote conversations.
+        if self.on_result_broadcast:
+            await self.on_result_broadcast(result_payload, proposal.participants)
+            logger.debug(
+                "result_broadcast callback fired for proposal %s (participants=%d)",
+                proposal.proposal_id, len(proposal.participants),
+            )
+
+    def _build_result_payload(
+        self,
+        proposal: KnowledgeCommitProposal,
+        status: str,
+        votes: Dict[str, CommitVote],
+        *,
+        approve_count: int,
+        reject_count: int,
+        change_count: int,
+        abstain_count: int,
+        total_votes: int,
+        participant_count: int,
+        approval_rate: float,
+        commit_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Build the KNOWLEDGE_COMMIT_RESULT payload (spec §3.7).
+
+        The no-vote timeout path and the normal finalize path both call this,
+        so the timeout payload cannot drift from the fields the main path
+        carries — `timestamp`, `vote_tally.abstain`, `vote_tally.participants` —
+        the way it used to (THE-SPEC-REQUIRES-A-TIMESTAMP-NOBODY-SENDS...).
+        """
+        return {
             "proposal_id": proposal.proposal_id,
             "topic": proposal.topic,
             "summary": proposal.summary,
-            "status": session.status,  # "approved", "rejected", "revision_needed", "timeout"
+            "status": status,  # "approved", "rejected", "revision_needed", "timeout"
             "vote_tally": {
                 "approve": approve_count,
                 "reject": reject_count,
@@ -524,22 +560,9 @@ class ConsensusManager:
                     "timestamp": v.timestamp
                 } for v in votes.values()
             ],
-            "timestamp": datetime.now(timezone.utc).isoformat()
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            **({"commit_id": commit_id} if commit_id is not None else {}),
         }
-
-        # Add commit_id if approved
-        if session.status == "approved":
-            result_payload["commit_id"] = commit.commit_id
-
-        # Fire result_broadcast callback — recipient filtering (self vs remote)
-        # happens inside the callback. Log reflects callback invocation, not
-        # delivery: callback may emit zero P2P sends for solo-vote conversations.
-        if self.on_result_broadcast:
-            await self.on_result_broadcast(result_payload, proposal.participants)
-            logger.debug(
-                "result_broadcast callback fired for proposal %s (participants=%d)",
-                proposal.proposal_id, len(proposal.participants),
-            )
 
     async def _apply_commit(
         self,
