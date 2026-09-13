@@ -29,6 +29,7 @@ _BACKEND_OWNED_PROFILE_KEYS = frozenset()
 
 from .__version__ import __version__
 from .firewall import ContextFirewall
+from . import node_ledger
 from .hub_client import HubClient
 from .p2p_manager import P2PManager
 from .llm_manager import LLMManager, PROVIDER_MAP
@@ -4143,6 +4144,18 @@ class CoreService:
             }
         except Exception as e:
             logger.error("Error reading firewall rules: %s", e, exc_info=True)
+            return {"status": "error", "message": str(e)}
+
+    async def get_usage_summary(self, since: str = None, until: str = None) -> Dict[str, Any]:
+        """The node ledger's rows folded by caller, alias and month
+        (`node_ledger.summarize`) — the ledger's first reader beyond
+        `spent_today`, board entry A-LEDGER-NOBODY-READS-IS-NOT-YET-AN-
+        INSTRUMENT. `since`/`until` are optional ISO datetime bounds."""
+        try:
+            ledger = node_ledger.default_ledger()
+            summary = node_ledger.summarize(ledger.rows(), since=since, until=until)
+            return {"status": "success", **summary}
+        except ValueError as e:
             return {"status": "error", "message": str(e)}
 
     async def save_firewall_rules(self, rules_dict: Dict[str, Any]) -> Dict[str, Any]:

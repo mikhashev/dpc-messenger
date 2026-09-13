@@ -387,6 +387,109 @@ class NodeLedger:
         return total
 
 
+def _parse_started_at(value: Any) -> datetime:
+    """An ISO-8601 datetime, timezone-aware; raises ValueError naming `value`
+    otherwise, so a malformed `since`/`until` reaches the API as a refusal."""
+    if not isinstance(value, str) or not value:
+        raise ValueError(f"expected an ISO-8601 datetime string, got {value!r}")
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        raise ValueError(f"{value!r} is not an ISO-8601 datetime")
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed
+
+
+def _new_group_entry() -> Dict[str, Any]:
+    return {
+        "row_count": 0,
+        "prompt_tokens": 0,
+        "completion_tokens": 0,
+        "thinking_tokens": 0,
+        "cost_usd": 0.0,
+        "unpriced": 0,
+        "peer_proved": {"true": 0, "false": 0, "none": 0},
+        "output_includes_thinking": {"includes": 0, "excludes": 0, "unknown": 0},
+    }
+
+
+def _fold(bucket: Dict[str, Any], key: Any, row: Dict[str, Any]) -> None:
+    # A missing group key lands under "none", matching how JSON renders a
+    # None dict key, so a direct call and a round trip agree. cost_usd is
+    # added as the row carries it (D3: never re-priced); a null adds to
+    # unpriced instead.
+    group_key = str(key) if key is not None else "none"
+    entry = bucket.setdefault(group_key, _new_group_entry())
+    entry["row_count"] += 1
+    entry["prompt_tokens"] += row.get("prompt_tokens") or 0
+    entry["completion_tokens"] += row.get("completion_tokens") or 0
+    entry["thinking_tokens"] += row.get("thinking_tokens") or 0
+    cost = row.get("cost_usd")
+    if cost is None:
+        entry["unpriced"] += 1
+    else:
+        entry["cost_usd"] += float(cost)
+    proved = row.get("peer_proved")
+    proved_key = "true" if proved is True else "false" if proved is False else "none"
+    entry["peer_proved"][proved_key] += 1
+    includes = row.get("output_includes_thinking")
+    if includes not in OUTPUT_INCLUDES_THINKING:
+        includes = "unknown"
+    entry["output_includes_thinking"][includes] += 1
+
+
+def summarize(
+    rows: Iterator[Dict[str, Any]], *, since: Optional[str] = None, until: Optional[str] = None
+) -> Dict[str, Any]:
+    """The ledger's first reader (A-LEDGER-NOBODY-READS-IS-NOT-YET-AN-
+    INSTRUMENT): rows folded by `caller`, by `alias` and by month of
+    `started_at`. Pure — takes whatever `NodeLedger.rows()` yields and
+    touches no disk. Does not compute `tariff_amount` (D3, 2026-09-13
+    amendment): that column does not exist on any row yet, and deriving an
+    amount from `tariff_in`/`tariff_out` here would be the re-derivation D3
+    forbids for `cost_usd`. `since`/`until` are ISO datetimes compared as
+    datetimes, both bounds inclusive; a row whose `started_at` will not
+    parse is excluded from a windowed summary.
+    """
+    since_dt = _parse_started_at(since) if since is not None else None
+    until_dt = _parse_started_at(until) if until is not None else None
+
+    by_caller: Dict[str, Any] = {}
+    by_alias: Dict[str, Any] = {}
+    by_month: Dict[str, Any] = {}
+    row_count = 0
+
+    for row in rows:
+        started_at = row.get("started_at")
+        try:
+            moment = _parse_started_at(started_at) if started_at else None
+        except ValueError:
+            moment = None
+        if since_dt is not None or until_dt is not None:
+            if moment is None:
+                continue
+            if since_dt is not None and moment < since_dt:
+                continue
+            if until_dt is not None and moment > until_dt:
+                continue
+
+        row_count += 1
+        month = str(started_at)[:7] if started_at else "none"
+        _fold(by_caller, row.get("caller"), row)
+        _fold(by_alias, row.get("alias"), row)
+        _fold(by_month, month, row)
+
+    return {
+        "row_count": row_count,
+        "since": since,
+        "until": until,
+        "by_caller": by_caller,
+        "by_alias": by_alias,
+        "by_month": by_month,
+    }
+
+
 def default_ledger() -> NodeLedger:
     """The node's own ledger, resolved when asked so a moved home is honoured."""
     return NodeLedger(ledger_dir())

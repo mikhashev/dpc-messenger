@@ -99,6 +99,8 @@ ALLOWED_COMMANDS: frozenset = frozenset({
     "ai_assisted_instruction_creation_remote",
     # Firewall
     "get_firewall_rules",
+    # Node ledger (A-LEDGER-NOBODY-READS-IS-NOT-YET-AN-INSTRUMENT)
+    "get_usage_summary",
     "save_firewall_rules",
     "list_all_tools",
     "get_cc_config",
